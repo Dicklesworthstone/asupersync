@@ -1265,7 +1265,9 @@ mod tests {
                     match call {
                         0 => {
                             first_started_tx.send(()).expect("first started signal");
-                            complete_first_rx.recv().expect("wait for completion signal");
+                            complete_first_rx
+                                .recv()
+                                .expect("wait for completion signal");
                             Ok(socket_set(&["10.0.0.1:80"]))
                         }
                         1 => Ok(socket_set(&["10.0.0.2:80"])),
@@ -1276,38 +1278,53 @@ mod tests {
 
         // Start first resolution in background
         let discovery_clone = Arc::clone(&discovery);
-        let first_worker = thread::spawn(move || {
-            discovery_clone.poll_discover()
-        });
+        let first_worker = thread::spawn(move || discovery_clone.poll_discover());
 
         // Wait for first resolution to start
-        first_started_rx.recv_timeout(Duration::from_secs(1))
+        first_started_rx
+            .recv_timeout(Duration::from_secs(1))
             .expect("first resolution should start");
 
         // While first resolution is in-flight, capture current endpoint state
         let endpoints_during_inflight = discovery.endpoints();
-        assert!(endpoints_during_inflight.is_empty(),
-            "Endpoints should be empty while resolution is in-flight");
+        assert!(
+            endpoints_during_inflight.is_empty(),
+            "Endpoints should be empty while resolution is in-flight"
+        );
 
         // Start second resolution which should complete first
         let discovery_clone2 = Arc::clone(&discovery);
-        let second_result = thread::spawn(move || {
-            discovery_clone2.poll_discover()
-        }).join().expect("second resolution should complete").expect("second should succeed");
+        let second_result = thread::spawn(move || discovery_clone2.poll_discover())
+            .join()
+            .expect("second resolution should complete")
+            .expect("second should succeed");
 
         // GT1: Second resolution should win due to generation ordering
-        assert_eq!(second_result, vec![Change::Insert("10.0.0.2:80".parse().unwrap())]);
+        assert_eq!(
+            second_result,
+            vec![Change::Insert("10.0.0.2:80".parse().unwrap())]
+        );
         assert_eq!(discovery.endpoints(), vec!["10.0.0.2:80".parse().unwrap()]);
 
         // Complete first resolution
-        complete_first_tx.send(()).expect("complete first resolution");
-        let first_result = first_worker.join().expect("first worker").expect("first should succeed");
+        complete_first_tx
+            .send(())
+            .expect("complete first resolution");
+        let first_result = first_worker
+            .join()
+            .expect("first worker")
+            .expect("first should succeed");
 
         // GT1: First resolution should be ignored due to stale generation
-        assert!(first_result.is_empty(),
-            "Stale resolution should not produce changes");
-        assert_eq!(discovery.endpoints(), vec!["10.0.0.2:80".parse().unwrap()],
-            "Endpoints should remain from second (newer) resolution");
+        assert!(
+            first_result.is_empty(),
+            "Stale resolution should not produce changes"
+        );
+        assert_eq!(
+            discovery.endpoints(),
+            vec!["10.0.0.2:80".parse().unwrap()],
+            "Endpoints should remain from second (newer) resolution"
+        );
 
         crate::test_complete!("golden_test_dns_refresh_vs_inflight_request_ordering");
     }
@@ -1352,10 +1369,13 @@ mod tests {
 
         // GT2: All changes applied atomically
         let endpoints2 = discovery.endpoints();
-        assert_eq!(endpoints2, vec![
-            "10.0.0.2:80".parse().unwrap(),
-            "10.0.0.3:80".parse().unwrap(),
-        ]);
+        assert_eq!(
+            endpoints2,
+            vec![
+                "10.0.0.2:80".parse().unwrap(),
+                "10.0.0.3:80".parse().unwrap(),
+            ]
+        );
 
         // Third poll: another atomic change
         let changes3 = discovery.poll_discover().unwrap();
@@ -1365,10 +1385,13 @@ mod tests {
 
         // GT2: Final state reflects complete atomic transition
         let endpoints3 = discovery.endpoints();
-        assert_eq!(endpoints3, vec![
-            "10.0.0.1:80".parse().unwrap(),
-            "10.0.0.3:80".parse().unwrap(),
-        ]);
+        assert_eq!(
+            endpoints3,
+            vec![
+                "10.0.0.1:80".parse().unwrap(),
+                "10.0.0.3:80".parse().unwrap(),
+            ]
+        );
 
         crate::test_complete!("golden_test_endpoint_add_remove_atomicity");
     }
@@ -1395,20 +1418,22 @@ mod tests {
         ));
 
         // Perform multiple concurrent resolutions
-        let workers: Vec<_> = (0..5).map(|i| {
-            let discovery_clone = Arc::clone(&discovery);
-            let generations_clone = Arc::clone(&generations);
-            thread::spawn(move || {
-                let result = discovery_clone.poll_discover().unwrap();
+        let workers: Vec<_> = (0..5)
+            .map(|i| {
+                let discovery_clone = Arc::clone(&discovery);
+                let generations_clone = Arc::clone(&generations);
+                thread::spawn(move || {
+                    let result = discovery_clone.poll_discover().unwrap();
 
-                // Record generation order (approximated by successful resolution order)
-                if !result.is_empty() {
-                    generations_clone.lock().unwrap().push(i);
-                }
+                    // Record generation order (approximated by successful resolution order)
+                    if !result.is_empty() {
+                        generations_clone.lock().unwrap().push(i);
+                    }
 
-                result
+                    result
+                })
             })
-        }).collect();
+            .collect();
 
         // Collect all results
         let mut results = Vec::new();
@@ -1420,8 +1445,11 @@ mod tests {
         }
 
         // GT3: Only one resolution should succeed (highest generation wins)
-        assert_eq!(results.len(), 1,
-            "Only one concurrent resolution should produce changes due to generation ordering");
+        assert_eq!(
+            results.len(),
+            1,
+            "Only one concurrent resolution should produce changes due to generation ordering"
+        );
 
         // Verify that subsequent resolutions get higher generations by testing sequentially
         let mut last_resolve_count = discovery.resolve_count();
@@ -1432,8 +1460,11 @@ mod tests {
             let current_count = discovery.resolve_count();
 
             // GT3: Resolve count should be strictly increasing (monotonic)
-            assert!(current_count > last_resolve_count,
-                "Generation {} should be higher than previous", i);
+            assert!(
+                current_count > last_resolve_count,
+                "Generation {} should be higher than previous",
+                i
+            );
             last_resolve_count = current_count;
         }
 
@@ -1461,8 +1492,12 @@ mod tests {
                     match call {
                         0 => Ok(socket_set(&["10.0.0.1:80"])),
                         1 => {
-                            resolution_started_tx.send(()).expect("signal resolution start");
-                            continue_resolution_rx.recv().expect("wait for continue signal");
+                            resolution_started_tx
+                                .send(())
+                                .expect("signal resolution start");
+                            continue_resolution_rx
+                                .recv()
+                                .expect("wait for continue signal");
                             Ok(socket_set(&["10.0.0.2:80", "10.0.0.3:80"]))
                         }
                         _ => panic!("unexpected call {}", call),
@@ -1472,55 +1507,66 @@ mod tests {
 
         // Establish initial state
         let initial_changes = discovery.poll_discover().unwrap();
-        assert_eq!(initial_changes, vec![Change::Insert("10.0.0.1:80".parse().unwrap())]);
+        assert_eq!(
+            initial_changes,
+            vec![Change::Insert("10.0.0.1:80".parse().unwrap())]
+        );
 
         // Start background resolution
         let discovery_clone = Arc::clone(&discovery);
-        let background_worker = thread::spawn(move || {
-            discovery_clone.poll_discover()
-        });
+        let background_worker = thread::spawn(move || discovery_clone.poll_discover());
 
         // Wait for background resolution to start
-        resolution_started_rx.recv_timeout(Duration::from_secs(1))
+        resolution_started_rx
+            .recv_timeout(Duration::from_secs(1))
             .expect("background resolution should start");
 
         // Perform many concurrent endpoint lookups while resolution is in progress
-        let lookup_workers: Vec<_> = (0..10).map(|_| {
-            let discovery_clone = Arc::clone(&discovery);
-            thread::spawn(move || {
-                // GT4: Each lookup should return consistent snapshot
-                let endpoints = discovery_clone.endpoints();
+        let lookup_workers: Vec<_> = (0..10)
+            .map(|_| {
+                let discovery_clone = Arc::clone(&discovery);
+                thread::spawn(move || {
+                    // GT4: Each lookup should return consistent snapshot
+                    let endpoints = discovery_clone.endpoints();
 
-                // Verify consistency: should be either old state or new state, never mixed
-                if endpoints.len() == 1 {
-                    assert_eq!(endpoints, vec!["10.0.0.1:80".parse().unwrap()]);
-                } else if endpoints.len() == 2 {
-                    assert_eq!(endpoints, vec![
-                        "10.0.0.2:80".parse().unwrap(),
-                        "10.0.0.3:80".parse().unwrap(),
-                    ]);
-                } else {
-                    panic!("Inconsistent endpoint count: {}", endpoints.len());
-                }
+                    // Verify consistency: should be either old state or new state, never mixed
+                    if endpoints.len() == 1 {
+                        assert_eq!(endpoints, vec!["10.0.0.1:80".parse().unwrap()]);
+                    } else if endpoints.len() == 2 {
+                        assert_eq!(
+                            endpoints,
+                            vec![
+                                "10.0.0.2:80".parse().unwrap(),
+                                "10.0.0.3:80".parse().unwrap(),
+                            ]
+                        );
+                    } else {
+                        panic!("Inconsistent endpoint count: {}", endpoints.len());
+                    }
 
-                endpoints.len()
+                    endpoints.len()
+                })
             })
-        }).collect();
+            .collect();
 
         // Allow some lookups to run, then complete the resolution
         thread::sleep(Duration::from_millis(10));
         continue_resolution_tx.send(()).expect("signal continue");
 
         // Wait for background resolution to complete
-        let background_result = background_worker.join()
+        let background_result = background_worker
+            .join()
             .expect("background worker should complete")
             .expect("background resolution should succeed");
 
-        assert_eq!(background_result, vec![
-            Change::Insert("10.0.0.2:80".parse().unwrap()),
-            Change::Insert("10.0.0.3:80".parse().unwrap()),
-            Change::Remove("10.0.0.1:80".parse().unwrap()),
-        ]);
+        assert_eq!(
+            background_result,
+            vec![
+                Change::Insert("10.0.0.2:80".parse().unwrap()),
+                Change::Insert("10.0.0.3:80".parse().unwrap()),
+                Change::Remove("10.0.0.1:80".parse().unwrap()),
+            ]
+        );
 
         // Collect lookup results
         let mut old_state_count = 0;
@@ -1536,14 +1582,19 @@ mod tests {
         }
 
         // GT4: All lookups should have seen consistent state
-        assert!(old_state_count > 0 || new_state_count > 0,
-            "Should have observed at least one consistent state");
+        assert!(
+            old_state_count > 0 || new_state_count > 0,
+            "Should have observed at least one consistent state"
+        );
 
         // Final state should be the new state
-        assert_eq!(discovery.endpoints(), vec![
-            "10.0.0.2:80".parse().unwrap(),
-            "10.0.0.3:80".parse().unwrap(),
-        ]);
+        assert_eq!(
+            discovery.endpoints(),
+            vec![
+                "10.0.0.2:80".parse().unwrap(),
+                "10.0.0.3:80".parse().unwrap(),
+            ]
+        );
 
         crate::test_complete!("golden_test_race_free_endpoint_lookup");
     }
@@ -1584,18 +1635,21 @@ mod tests {
         ));
 
         // Start multiple concurrent workers that should trigger the same resolution
-        let workers: Vec<_> = (0..5).map(|i| {
-            let discovery_clone = Arc::clone(&discovery);
-            let worker_count_clone = Arc::clone(&worker_count);
-            thread::spawn(move || {
-                worker_count_clone.fetch_add(1, Ordering::SeqCst);
-                thread::sleep(Duration::from_millis(1)); // Slight stagger
-                discovery_clone.poll_discover()
+        let workers: Vec<_> = (0..5)
+            .map(|i| {
+                let discovery_clone = Arc::clone(&discovery);
+                let worker_count_clone = Arc::clone(&worker_count);
+                thread::spawn(move || {
+                    worker_count_clone.fetch_add(1, Ordering::SeqCst);
+                    thread::sleep(Duration::from_millis(1)); // Slight stagger
+                    discovery_clone.poll_discover()
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all to be ready and first resolution to start
-        all_started_rx.recv_timeout(Duration::from_secs(1))
+        all_started_rx
+            .recv_timeout(Duration::from_secs(1))
             .expect("all workers should be ready");
 
         // Allow resolution to complete
@@ -1622,14 +1676,20 @@ mod tests {
 
         // GT5: Only one resolution should have occurred despite multiple concurrent requests
         let total_resolutions = resolution_count.load(Ordering::SeqCst);
-        assert_eq!(total_resolutions, 1,
-            "Concurrent refreshes should be coalesced into single resolution");
+        assert_eq!(
+            total_resolutions, 1,
+            "Concurrent refreshes should be coalesced into single resolution"
+        );
 
         // GT5: Only one worker should get the changes, others get empty results
-        assert_eq!(successful_results, 1,
-            "Only one worker should receive changes");
-        assert_eq!(empty_results, 4,
-            "Other workers should receive empty results due to coalescing");
+        assert_eq!(
+            successful_results, 1,
+            "Only one worker should receive changes"
+        );
+        assert_eq!(
+            empty_results, 4,
+            "Other workers should receive empty results due to coalescing"
+        );
 
         // Verify final state
         assert_eq!(discovery.resolve_count(), 1);

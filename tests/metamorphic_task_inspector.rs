@@ -32,23 +32,15 @@ fn mr1_snapshot_completeness() -> TestResult {
     let region = runtime.state.create_root_region(Budget::INFINITE);
 
     // Create some tasks
-    let (_task1, _) = runtime.state.create_task(
-        region,
-        Budget::INFINITE,
-        async {
-            // Simple task that completes quickly
-            42
-        },
-    )?;
+    let (_task1, _) = runtime.state.create_task(region, Budget::INFINITE, async {
+        // Simple task that completes quickly
+        42
+    })?;
 
-    let (_task2, _) = runtime.state.create_task(
-        region,
-        Budget::INFINITE,
-        async {
-            // Another simple task that completes quickly
-            84
-        },
-    )?;
+    let (_task2, _) = runtime.state.create_task(region, Budget::INFINITE, async {
+        // Another simple task that completes quickly
+        84
+    })?;
 
     // Run tasks to completion for deterministic state
     runtime.run_until_quiescent();
@@ -75,8 +67,7 @@ fn mr1_snapshot_completeness() -> TestResult {
     );
 
     assert_eq!(
-        snapshot.summary.total_tasks,
-        manual_task_count,
+        snapshot.summary.total_tasks, manual_task_count,
         "Snapshot completeness violated: total_tasks != manual count"
     );
 
@@ -95,22 +86,14 @@ fn mr2_cancellation_state_consistency() -> TestResult {
     let waiter_cx = cancel_cx.clone();
 
     // Create some tasks that respect cancellation
-    let (_task1, _) = state.create_task(
-        region,
-        Budget::INFINITE,
-        async move {
-            // Simple task that checks cancellation status
-            let _cancelled = waiter_cx.is_cancel_requested();
-        },
-    )?;
+    let (_task1, _) = state.create_task(region, Budget::INFINITE, async move {
+        // Simple task that checks cancellation status
+        let _cancelled = waiter_cx.is_cancel_requested();
+    })?;
 
-    let (_task2, _) = state.create_task(
-        region,
-        Budget::INFINITE,
-        async {
-            // Another task
-        },
-    )?;
+    let (_task2, _) = state.create_task(region, Budget::INFINITE, async {
+        // Another task
+    })?;
 
     let inspector = TaskInspector::new(Arc::new(state), None);
 
@@ -133,8 +116,7 @@ fn mr2_cancellation_state_consistency() -> TestResult {
 
     // Additional invariant: total tasks should remain the same
     assert_eq!(
-        snapshot1.summary.total_tasks,
-        snapshot2.summary.total_tasks,
+        snapshot1.summary.total_tasks, snapshot2.summary.total_tasks,
         "Task count changed during cancellation"
     );
 
@@ -151,13 +133,9 @@ fn mr3_concurrent_snapshots_commutativity() -> TestResult {
     let region = state.create_root_region(Budget::INFINITE);
 
     // Create a stable task state
-    let (_task, _) = state.create_task(
-        region,
-        Budget::INFINITE,
-        async {
-            // Simple task
-        },
-    )?;
+    let (_task, _) = state.create_task(region, Budget::INFINITE, async {
+        // Simple task
+    })?;
 
     let inspector = TaskInspector::new(Arc::new(state), None);
 
@@ -167,20 +145,17 @@ fn mr3_concurrent_snapshots_commutativity() -> TestResult {
 
     // MR: snapshots taken at same time have same content (ignoring timestamps)
     assert_eq!(
-        snapshot1.summary.total_tasks,
-        snapshot2.summary.total_tasks,
+        snapshot1.summary.total_tasks, snapshot2.summary.total_tasks,
         "Concurrent snapshots have different task counts"
     );
 
     assert_eq!(
-        snapshot1.summary.running,
-        snapshot2.summary.running,
+        snapshot1.summary.running, snapshot2.summary.running,
         "Concurrent snapshots have different running counts"
     );
 
     assert_eq!(
-        snapshot1.summary.completed,
-        snapshot2.summary.completed,
+        snapshot1.summary.completed, snapshot2.summary.completed,
         "Concurrent snapshots have different completed counts"
     );
 
@@ -207,21 +182,13 @@ fn mr4_wire_format_round_trip() -> TestResult {
     let region = state.create_root_region(Budget::INFINITE);
 
     // Create diverse task states
-    let (_task1, _) = state.create_task(
-        region,
-        Budget::INFINITE,
-        async {
-            // A running task
-        },
-    )?;
+    let (_task1, _) = state.create_task(region, Budget::INFINITE, async {
+        // A running task
+    })?;
 
-    let (_task2, _) = state.create_task(
-        region,
-        Budget::INFINITE,
-        async {
-            // This will complete quickly
-        },
-    )?;
+    let (_task2, _) = state.create_task(region, Budget::INFINITE, async {
+        // This will complete quickly
+    })?;
 
     let inspector = TaskInspector::new(Arc::new(state), None);
     let snapshot = inspector.wire_snapshot();
@@ -249,21 +216,13 @@ fn mr5_summary_consistency() -> TestResult {
     let region = state.create_root_region(Budget::INFINITE);
 
     // Spawn tasks in different states
-    let (_task1, _) = state.create_task(
-        region,
-        Budget::INFINITE,
-        async {
-            // First task
-        },
-    )?;
+    let (_task1, _) = state.create_task(region, Budget::INFINITE, async {
+        // First task
+    })?;
 
-    let (_task2, _) = state.create_task(
-        region,
-        Budget::INFINITE,
-        async {
-            // Second task
-        },
-    )?;
+    let (_task2, _) = state.create_task(region, Budget::INFINITE, async {
+        // Second task
+    })?;
 
     let inspector = TaskInspector::new(Arc::new(state), None);
 
@@ -272,26 +231,22 @@ fn mr5_summary_consistency() -> TestResult {
 
     // MR: Summary consistency across different API calls
     assert_eq!(
-        snapshot.summary.total_tasks,
-        summary.total_tasks,
+        snapshot.summary.total_tasks, summary.total_tasks,
         "Summary total_tasks mismatch between snapshot and summary"
     );
 
     assert_eq!(
-        snapshot.summary.running,
-        summary.running,
+        snapshot.summary.running, summary.running,
         "Summary running mismatch between snapshot and summary"
     );
 
     assert_eq!(
-        snapshot.summary.completed,
-        summary.completed,
+        snapshot.summary.completed, summary.completed,
         "Summary completed mismatch between snapshot and summary"
     );
 
     assert_eq!(
-        snapshot.summary.cancelling,
-        summary.cancelling,
+        snapshot.summary.cancelling, summary.cancelling,
         "Summary cancelling mismatch between snapshot and summary"
     );
 
@@ -308,21 +263,13 @@ fn mr6_task_count_conservation() -> TestResult {
     let region = state.create_root_region(Budget::INFINITE);
 
     // Spawn various tasks
-    let (_task1, _) = state.create_task(
-        region,
-        Budget::INFINITE,
-        async {
-            // First task
-        },
-    )?;
+    let (_task1, _) = state.create_task(region, Budget::INFINITE, async {
+        // First task
+    })?;
 
-    let (_task2, _) = state.create_task(
-        region,
-        Budget::INFINITE,
-        async {
-            // This completes immediately
-        },
-    )?;
+    let (_task2, _) = state.create_task(region, Budget::INFINITE, async {
+        // This completes immediately
+    })?;
 
     let inspector = TaskInspector::new(Arc::new(state), None);
 
@@ -368,13 +315,9 @@ fn mr7_schema_version_consistency() -> TestResult {
     // Test with state that has tasks
     let mut state2 = RuntimeState::new();
     let region = state2.create_root_region(Budget::INFINITE);
-    let (_task, _) = state2.create_task(
-        region,
-        Budget::INFINITE,
-        async {
-            // Task for schema consistency test
-        },
-    )?;
+    let (_task, _) = state2.create_task(region, Budget::INFINITE, async {
+        // Task for schema consistency test
+    })?;
 
     let inspector2 = TaskInspector::new(Arc::new(state2), None);
     let snapshot2 = inspector2.wire_snapshot();
@@ -391,8 +334,7 @@ fn mr7_schema_version_consistency() -> TestResult {
     );
 
     assert_eq!(
-        snapshot1.schema_version,
-        snapshot2.schema_version,
+        snapshot1.schema_version, snapshot2.schema_version,
         "Schema versions differ between snapshots"
     );
 

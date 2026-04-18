@@ -516,8 +516,8 @@ impl EpochConsistencyTracker {
                 if duration_ns > self.config.slow_transition_threshold_ns {
                     let violation = EpochConsistencyViolation::SlowTransition {
                         module,
-                        from_epoch: record.current_epoch.prev().unwrap_or(EpochId::GENESIS),
-                        to_epoch: record.current_epoch,
+                        from_epoch: record.current_epoch,
+                        to_epoch: record.current_epoch.next(),
                         started_at: transition_start,
                         detected_at: now,
                         duration_ns,
@@ -827,9 +827,9 @@ impl EpochConsistencyTracker {
         );
 
         // Log per-module state
-        for (&_module, _record) in records.iter() {
+        for (&module, record) in records.iter() {
             debug!(
-                module_id = %_module,
+                module_id = %module,
                 current_epoch = %record.current_epoch,
                 transition_count = record.transition_count,
                 last_transition_time_ns = record.last_transition_time.as_nanos(),

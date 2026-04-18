@@ -36,7 +36,7 @@
 
 #[cfg(target_os = "linux")]
 mod linux_tests {
-    use asupersync::runtime::reactor::{EpollReactor, Interest, Reactor, Events, Token};
+    use asupersync::runtime::reactor::{EpollReactor, Events, Interest, Reactor, Token};
     use asupersync::test_utils::init_test_logging;
     use std::io::{self, Read, Write};
     use std::os::unix::net::UnixStream;
@@ -63,26 +63,30 @@ mod linux_tests {
 
         let reactor = EpollReactor::new().expect("Failed to create reactor");
 
-        let (mut read_sock, mut write_sock) = UnixStream::pair()
-            .expect("Failed to create socket pair");
+        let (mut read_sock, mut write_sock) =
+            UnixStream::pair().expect("Failed to create socket pair");
 
-        read_sock.set_nonblocking(true)
+        read_sock
+            .set_nonblocking(true)
             .expect("Failed to set nonblocking");
 
         let token = Token::new(1001);
 
         // Register with edge-triggered mode
-        reactor.register(&read_sock, token, Interest::READABLE.with_edge_triggered())
+        reactor
+            .register(&read_sock, token, Interest::READABLE.with_edge_triggered())
             .expect("Failed to register");
 
         // Write first batch of data
-        write_sock.write_all(b"first_data")
+        write_sock
+            .write_all(b"first_data")
             .expect("First write failed");
 
         let mut events = Events::with_capacity(64);
 
         // First poll should return exactly one event
-        let count1 = reactor.poll(&mut events, Some(Duration::from_millis(100)))
+        let count1 = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
             .expect("First poll failed");
         assert_eq!(count1, 1, "Expected 1 event on first poll");
 
@@ -94,7 +98,10 @@ mod linux_tests {
                 break;
             }
         }
-        assert!(found_first, "First event has wrong token or is not readable");
+        assert!(
+            found_first,
+            "First event has wrong token or is not readable"
+        );
 
         // Read only part of the data (socket still has data)
         let mut buf = [0u8; 5];
@@ -104,30 +111,39 @@ mod linux_tests {
 
         // Second poll should return NO events (data still in socket but no state change)
         events.clear();
-        let count2 = reactor.poll(&mut events, Some(Duration::from_millis(50)))
+        let count2 = reactor
+            .poll(&mut events, Some(Duration::from_millis(50)))
             .expect("Second poll failed");
-        assert_eq!(count2, 0, "Expected 0 events on second poll (no state change)");
+        assert_eq!(
+            count2, 0,
+            "Expected 0 events on second poll (no state change)"
+        );
 
         // Drain remaining data from socket
         let mut drain_buf = [0u8; 16];
         loop {
             match read_sock.read(&mut drain_buf) {
                 Ok(0) => break,
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) => panic!("Drain read failed: {}", e),
             }
         }
 
         // Write new data (state transition: empty -> has data)
-        write_sock.write_all(b"second_data")
+        write_sock
+            .write_all(b"second_data")
             .expect("Second write failed");
 
         // Third poll should return exactly one event for the new state transition
         events.clear();
-        let count3 = reactor.poll(&mut events, Some(Duration::from_millis(100)))
+        let count3 = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
             .expect("Third poll failed");
-        assert_eq!(count3, 1, "Expected 1 event on third poll (new state transition)");
+        assert_eq!(
+            count3, 1,
+            "Expected 1 event on third poll (new state transition)"
+        );
 
         reactor.deregister(token).expect("Deregister failed");
         asupersync::test_complete!("et_fires_once_per_state_transition");
@@ -149,33 +165,36 @@ mod linux_tests {
 
         let reactor = EpollReactor::new().expect("Failed to create reactor");
 
-        let (mut read_sock, mut write_sock) = UnixStream::pair()
-            .expect("Failed to create socket pair");
+        let (mut read_sock, mut write_sock) =
+            UnixStream::pair().expect("Failed to create socket pair");
 
-        read_sock.set_nonblocking(true)
+        read_sock
+            .set_nonblocking(true)
             .expect("Failed to set nonblocking");
 
         let token = Token::new(1002);
 
-        reactor.register(&read_sock, token, Interest::READABLE.with_edge_triggered())
+        reactor
+            .register(&read_sock, token, Interest::READABLE.with_edge_triggered())
             .expect("Failed to register");
 
         // Write substantial data (more than one read will consume)
         let large_data = "x".repeat(8192);
-        write_sock.write_all(large_data.as_bytes())
+        write_sock
+            .write_all(large_data.as_bytes())
             .expect("Write large data failed");
 
         let mut events = Events::with_capacity(64);
 
         // First poll gets the initial event
-        let count1 = reactor.poll(&mut events, Some(Duration::from_millis(100)))
+        let count1 = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
             .expect("First poll failed");
         assert_eq!(count1, 1, "Expected 1 initial event");
 
         // Do a small partial read (much less than what's available)
         let mut small_buf = [0u8; 100];
-        let read_count = read_sock.read(&mut small_buf)
-            .expect("Partial read failed");
+        let read_count = read_sock.read(&mut small_buf).expect("Partial read failed");
         assert_eq!(read_count, 100, "Expected partial read of 100 bytes");
 
         // Verify data is still available for reading
@@ -184,16 +203,17 @@ mod linux_tests {
             Ok(0) => panic!("No more data available after partial read (unexpected EOF)"),
             Ok(_) => {
                 // Good - data is still available
-            },
+            }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 panic!("Socket would block after partial read (unexpected)")
-            },
+            }
             Err(e) => panic!("Peek read failed: {}", e),
         }
 
         // Poll again - should get no new events (data available but no state change)
         events.clear();
-        let count2 = reactor.poll(&mut events, Some(Duration::from_millis(50)))
+        let count2 = reactor
+            .poll(&mut events, Some(Duration::from_millis(50)))
             .expect("Second poll failed");
         assert_eq!(count2, 0, "Expected 0 events after partial read");
 
@@ -210,8 +230,11 @@ mod linux_tests {
         }
 
         // Verify we drained approximately the right amount
-        assert!(total_drained >= 8000 && total_drained <= 8300,
-            "Unexpected drain amount: {} (expected ~8192)", total_drained);
+        assert!(
+            total_drained >= 8000 && total_drained <= 8300,
+            "Unexpected drain amount: {} (expected ~8192)",
+            total_drained
+        );
 
         reactor.deregister(token).expect("Deregister failed");
         asupersync::test_complete!("partial_reads_leave_socket_armed");
@@ -234,26 +257,34 @@ mod linux_tests {
 
         let reactor = EpollReactor::new().expect("Failed to create reactor");
 
-        let (mut read_sock, mut write_sock) = UnixStream::pair()
-            .expect("Failed to create socket pair");
+        let (mut read_sock, mut write_sock) =
+            UnixStream::pair().expect("Failed to create socket pair");
 
-        read_sock.set_nonblocking(true)
+        read_sock
+            .set_nonblocking(true)
             .expect("Failed to set nonblocking");
 
         let token = Token::new(1003);
 
         // Register with ONESHOT (edge-triggered + oneshot)
-        reactor.register(&read_sock, token, Interest::READABLE.with_edge_triggered().with_oneshot())
+        reactor
+            .register(
+                &read_sock,
+                token,
+                Interest::READABLE.with_edge_triggered().with_oneshot(),
+            )
             .expect("Failed to register");
 
         // Write data to trigger the oneshot event
-        write_sock.write_all(b"oneshot_trigger")
+        write_sock
+            .write_all(b"oneshot_trigger")
             .expect("Write trigger data failed");
 
         let mut events = Events::with_capacity(64);
 
         // First poll should get exactly one event
-        let count1 = reactor.poll(&mut events, Some(Duration::from_millis(100)))
+        let count1 = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
             .expect("First poll failed");
         assert_eq!(count1, 1, "Expected 1 oneshot event");
 
@@ -265,7 +296,10 @@ mod linux_tests {
                 break;
             }
         }
-        assert!(found_oneshot, "Oneshot event has wrong token or is not readable");
+        assert!(
+            found_oneshot,
+            "Oneshot event has wrong token or is not readable"
+        );
 
         // Read some data but leave data in the socket
         let mut buf = [0u8; 7];
@@ -274,22 +308,29 @@ mod linux_tests {
         assert_eq!(&buf, b"oneshot", "Wrong data read");
 
         // Write more data - should NOT trigger new events (oneshot is disarmed)
-        write_sock.write_all(b"_more_data")
+        write_sock
+            .write_all(b"_more_data")
             .expect("Write more data failed");
 
         // Second poll should get NO events (oneshot is disarmed)
         events.clear();
-        let count2 = reactor.poll(&mut events, Some(Duration::from_millis(100)))
+        let count2 = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
             .expect("Second poll failed");
         assert_eq!(count2, 0, "Expected 0 events after oneshot disarm");
 
         // Re-arm the oneshot by modifying interest
-        reactor.modify(token, Interest::READABLE.with_edge_triggered().with_oneshot())
+        reactor
+            .modify(
+                token,
+                Interest::READABLE.with_edge_triggered().with_oneshot(),
+            )
             .expect("Failed to re-arm oneshot");
 
         // Third poll should now get the event (re-armed and data is available)
         events.clear();
-        let count3 = reactor.poll(&mut events, Some(Duration::from_millis(100)))
+        let count3 = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
             .expect("Third poll after re-arm failed");
         assert_eq!(count3, 1, "Expected 1 event after re-arm");
 
@@ -318,16 +359,17 @@ mod linux_tests {
         let reactor1 = EpollReactor::new().expect("Failed to create reactor1");
         let reactor2 = EpollReactor::new().expect("Failed to create reactor2");
 
-        let (read_sock, mut write_sock) = UnixStream::pair()
-            .expect("Failed to create socket pair");
+        let (read_sock, mut write_sock) = UnixStream::pair().expect("Failed to create socket pair");
 
-        read_sock.set_nonblocking(true)
+        read_sock
+            .set_nonblocking(true)
             .expect("Failed to set nonblocking");
 
         let token1 = Token::new(1004);
 
         // Register the same fd in both reactors with regular (non-exclusive) mode first
-        reactor1.register(&read_sock, token1, Interest::READABLE.with_edge_triggered())
+        reactor1
+            .register(&read_sock, token1, Interest::READABLE.with_edge_triggered())
             .expect("Failed to register reactor1");
 
         // Note: In a real scenario with EPOLLEXCLUSIVE, we would register the same fd
@@ -338,24 +380,32 @@ mod linux_tests {
         // and document the EPOLLEXCLUSIVE behavior requirement.
 
         // Write data to trigger events
-        write_sock.write_all(b"exclusive_test")
+        write_sock
+            .write_all(b"exclusive_test")
             .expect("Write test data failed");
 
         let mut events1 = Events::with_capacity(64);
         let mut events2 = Events::with_capacity(64);
 
         // Poll from first reactor
-        let count1 = reactor1.poll(&mut events1, Some(Duration::from_millis(100)))
+        let count1 = reactor1
+            .poll(&mut events1, Some(Duration::from_millis(100)))
             .expect("Reactor1 poll failed");
         assert_eq!(count1, 1, "Expected 1 event from reactor1");
 
         // Poll from second reactor (should get no events since same fd can't be in two epoll sets)
-        let count2 = reactor2.poll(&mut events2, Some(Duration::from_millis(50)))
+        let count2 = reactor2
+            .poll(&mut events2, Some(Duration::from_millis(50)))
             .unwrap_or(0); // Expected - can't register same fd in two epoll instances
 
-        assert_eq!(count2, 0, "Expected 0 events from reactor2 (fd already registered)");
+        assert_eq!(
+            count2, 0,
+            "Expected 0 events from reactor2 (fd already registered)"
+        );
 
-        reactor1.deregister(token1).expect("Deregister reactor1 failed");
+        reactor1
+            .deregister(token1)
+            .expect("Deregister reactor1 failed");
         asupersync::test_complete!("epollexclusive_serializes_wakeups");
     }
 
@@ -376,40 +426,43 @@ mod linux_tests {
         let reactor = EpollReactor::new().expect("Failed to create reactor");
 
         // Create two socket pairs for LT and ET testing
-        let (mut lt_read, mut lt_write) = UnixStream::pair()
-            .expect("Failed to create LT socket pair");
+        let (mut lt_read, mut lt_write) =
+            UnixStream::pair().expect("Failed to create LT socket pair");
 
-        let (mut et_read, mut et_write) = UnixStream::pair()
-            .expect("Failed to create ET socket pair");
+        let (mut et_read, mut et_write) =
+            UnixStream::pair().expect("Failed to create ET socket pair");
 
-        lt_read.set_nonblocking(true)
+        lt_read
+            .set_nonblocking(true)
             .expect("Failed to set LT nonblocking");
 
-        et_read.set_nonblocking(true)
+        et_read
+            .set_nonblocking(true)
             .expect("Failed to set ET nonblocking");
 
         let lt_token = Token::new(1005);
         let et_token = Token::new(2005);
 
         // Register LT socket with level-triggered (default behavior - no EPOLLET flag)
-        reactor.register(&lt_read, lt_token, Interest::READABLE)
+        reactor
+            .register(&lt_read, lt_token, Interest::READABLE)
             .expect("Failed to register LT socket");
 
         // Register ET socket with edge-triggered
-        reactor.register(&et_read, et_token, Interest::READABLE.with_edge_triggered())
+        reactor
+            .register(&et_read, et_token, Interest::READABLE.with_edge_triggered())
             .expect("Failed to register ET socket");
 
         // Write data to both sockets
-        lt_write.write_all(b"level_data")
-            .expect("LT write failed");
+        lt_write.write_all(b"level_data").expect("LT write failed");
 
-        et_write.write_all(b"edge_data")
-            .expect("ET write failed");
+        et_write.write_all(b"edge_data").expect("ET write failed");
 
         let mut events = Events::with_capacity(64);
 
         // First poll should get both events
-        let count1 = reactor.poll(&mut events, Some(Duration::from_millis(100)))
+        let count1 = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
             .expect("First poll failed");
         assert_eq!(count1, 2, "Expected 2 events (LT+ET)");
 
@@ -423,7 +476,12 @@ mod linux_tests {
                 found_et = true;
             }
         }
-        assert!(found_lt && found_et, "Missing events: LT found={}, ET found={}", found_lt, found_et);
+        assert!(
+            found_lt && found_et,
+            "Missing events: LT found={}, ET found={}",
+            found_lt,
+            found_et
+        );
 
         // Read partial data from both (leaving data in buffers)
         let mut lt_buf = [0u8; 5];
@@ -439,7 +497,8 @@ mod linux_tests {
 
         // Second poll: LT should fire again (data remains), ET should not (no state change)
         events.clear();
-        let count2 = reactor.poll(&mut events, Some(Duration::from_millis(100)))
+        let count2 = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
             .expect("Second poll failed");
         assert_eq!(count2, 1, "Expected 1 event (LT only) on second poll");
 
@@ -474,22 +533,28 @@ mod linux_tests {
 
         let reactor = EpollReactor::new().expect("Failed to create reactor");
 
-        let (mut read_sock, write_sock) = UnixStream::pair()
-            .expect("Failed to create socket pair");
+        let (mut read_sock, write_sock) = UnixStream::pair().expect("Failed to create socket pair");
 
-        read_sock.set_nonblocking(true)
+        read_sock
+            .set_nonblocking(true)
             .expect("Failed to set nonblocking");
 
         let token = Token::new(1006);
 
         // Register with HUP interest to detect EPOLLRDHUP
-        reactor.register(&read_sock, token, Interest::READABLE.add(Interest::HUP).with_edge_triggered())
+        reactor
+            .register(
+                &read_sock,
+                token,
+                Interest::READABLE.add(Interest::HUP).with_edge_triggered(),
+            )
             .expect("Failed to register with HUP interest");
 
         let mut events = Events::with_capacity(64);
 
         // Initial state - no events
-        let count_initial = reactor.poll(&mut events, Some(Duration::from_millis(50)))
+        let count_initial = reactor
+            .poll(&mut events, Some(Duration::from_millis(50)))
             .expect("Initial poll failed");
         assert_eq!(count_initial, 0, "Expected 0 initial events");
 
@@ -500,7 +565,8 @@ mod linux_tests {
 
         // Poll should detect the close condition
         events.clear();
-        let count_after_close = reactor.poll(&mut events, Some(Duration::from_millis(100)))
+        let count_after_close = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
             .expect("Poll after close failed");
         assert!(count_after_close > 0, "Expected close event, got 0 events");
 
@@ -521,22 +587,28 @@ mod linux_tests {
             }
         }
 
-        assert!(found_close_event, "No close event found for registered token");
+        assert!(
+            found_close_event,
+            "No close event found for registered token"
+        );
 
         // For Unix domain sockets, the close is typically signaled as readable (EOF)
         // rather than HUP. TCP sockets would more likely show EPOLLRDHUP.
-        assert!(has_readable || has_hup, "Close event has neither READABLE nor HUP flags");
+        assert!(
+            has_readable || has_hup,
+            "Close event has neither READABLE nor HUP flags"
+        );
 
         // Verify that attempting to read returns EOF (0 bytes)
         let mut buf = [0u8; 1];
         match read_sock.read(&mut buf) {
             Ok(0) => {
                 // Good - EOF detected
-            },
+            }
             Ok(n) => panic!("Expected EOF (0 bytes), got {} bytes", n),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 panic!("Unexpected WouldBlock on closed connection")
-            },
+            }
             Err(e) => panic!("Read after close failed: {}", e),
         }
 
@@ -547,7 +619,10 @@ mod linux_tests {
         } else {
             "READABLE flag detected (EOF)"
         };
-        println!("✅ Peer close detected via {} and confirmed by EOF read", event_description);
+        println!(
+            "✅ Peer close detected via {} and confirmed by EOF read",
+            event_description
+        );
 
         asupersync::test_complete!("epollrdhup_signals_half_close");
     }

@@ -527,8 +527,9 @@ impl CancelCorrectnessOracle {
             }
 
             // Check for skipped finalization
-            if current_state.current_phase == CancelPhase::Cancelling
-                && new_witness.phase == CancelPhase::Completed
+            if new_witness.phase == CancelPhase::Completed
+                && current_state.current_phase != CancelPhase::Finalizing
+                && current_state.current_phase != CancelPhase::Completed
             {
                 let violation = CancelCorrectnessViolation::MissedFinalization {
                     task_id: current_state.task_id,
@@ -1078,3 +1079,4 @@ mod tests {
         assert_eq!(snapshot.witness_history_len, 2);
     }
 }
+

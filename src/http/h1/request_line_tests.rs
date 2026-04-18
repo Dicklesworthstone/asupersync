@@ -27,7 +27,12 @@ mod request_line_regression_tests {
             let mut buf = BytesMut::from(*request);
 
             let result = codec.decode(&mut buf);
-            assert!(result.is_ok(), "Failed to parse standard request {}: {:?}", i, request);
+            assert!(
+                result.is_ok(),
+                "Failed to parse standard request {}: {:?}",
+                i,
+                request
+            );
         }
     }
 
@@ -45,7 +50,11 @@ mod request_line_regression_tests {
             let mut buf = BytesMut::from(request);
 
             let result = codec.decode(&mut buf);
-            assert!(result.is_ok(), "Failed to parse extension method: {}", request);
+            assert!(
+                result.is_ok(),
+                "Failed to parse extension method: {}",
+                request
+            );
         }
     }
 
@@ -67,10 +76,18 @@ mod request_line_regression_tests {
             let result = codec.decode(&mut buf);
             if i < 2 {
                 // Multiple spaces should be handled by slow path
-                assert!(result.is_ok(), "Failed to parse request with extra spaces: {}", request);
+                assert!(
+                    result.is_ok(),
+                    "Failed to parse request with extra spaces: {}",
+                    request
+                );
             } else {
                 // Tab characters should be rejected
-                assert!(result.is_err(), "Tab characters should be rejected: {}", request);
+                assert!(
+                    result.is_err(),
+                    "Tab characters should be rejected: {}",
+                    request
+                );
             }
         }
     }
@@ -78,16 +95,13 @@ mod request_line_regression_tests {
     /// Test HTTP version validation
     #[test]
     fn request_line_version_validation() {
-        let valid_cases = vec![
-            "GET /test HTTP/1.0\r\n\r\n",
-            "GET /test HTTP/1.1\r\n\r\n",
-        ];
+        let valid_cases = vec!["GET /test HTTP/1.0\r\n\r\n", "GET /test HTTP/1.1\r\n\r\n"];
 
         let invalid_cases = vec![
             "GET /test HTTP/2.0\r\n\r\n",
             "GET /test http/1.1\r\n\r\n", // lowercase
             "GET /test HTTP/1.2\r\n\r\n",
-            "GET /test HTTP\r\n\r\n", // missing version
+            "GET /test HTTP\r\n\r\n",       // missing version
             "GET /test HTTP/1.1.0\r\n\r\n", // too detailed
         ];
 
@@ -96,7 +110,11 @@ mod request_line_regression_tests {
             let mut buf = BytesMut::from(request);
 
             let result = codec.decode(&mut buf);
-            assert!(result.is_ok(), "Valid version should be accepted: {}", request);
+            assert!(
+                result.is_ok(),
+                "Valid version should be accepted: {}",
+                request
+            );
         }
 
         for request in invalid_cases {
@@ -104,7 +122,11 @@ mod request_line_regression_tests {
             let mut buf = BytesMut::from(request);
 
             let result = codec.decode(&mut buf);
-            assert!(result.is_err(), "Invalid version should be rejected: {}", request);
+            assert!(
+                result.is_err(),
+                "Invalid version should be rejected: {}",
+                request
+            );
         }
     }
 
@@ -119,7 +141,10 @@ mod request_line_regression_tests {
         let mut buf_ok = BytesMut::from(request_ok.as_str());
 
         let result = codec.decode(&mut buf_ok);
-        assert!(result.is_ok(), "Request under length limit should be accepted");
+        assert!(
+            result.is_ok(),
+            "Request under length limit should be accepted"
+        );
 
         // Create a request line over the limit
         let very_long_path = "a".repeat(9000);
@@ -155,9 +180,17 @@ mod request_line_regression_tests {
 
             let result = codec.decode(&mut buf);
             if should_succeed {
-                assert!(result.is_ok(), "Request should parse successfully: {:?}", request);
+                assert!(
+                    result.is_ok(),
+                    "Request should parse successfully: {:?}",
+                    request
+                );
             } else {
-                assert!(result.is_err(), "Request should fail to parse: {:?}", request);
+                assert!(
+                    result.is_err(),
+                    "Request should fail to parse: {:?}",
+                    request
+                );
             }
         }
     }
@@ -181,7 +214,11 @@ mod request_line_regression_tests {
             let mut buf = BytesMut::from(request);
 
             let result = codec.decode(&mut buf);
-            assert!(result.is_err(), "Invalid bytes should be rejected: {:?}", request.escape_debug());
+            assert!(
+                result.is_err(),
+                "Invalid bytes should be rejected: {:?}",
+                request.escape_debug()
+            );
         }
     }
 
@@ -201,7 +238,11 @@ mod request_line_regression_tests {
             // The codec should parse percent-encoded paths as-is
             // (decoding happens at higher layers)
             let result = codec.decode(&mut buf);
-            assert!(result.is_ok(), "Percent-encoded path should parse: {}", request);
+            assert!(
+                result.is_ok(),
+                "Percent-encoded path should parse: {}",
+                request
+            );
         }
     }
 
@@ -226,7 +267,11 @@ mod request_line_regression_tests {
             let mut buf = BytesMut::from(request);
 
             let result = codec.decode(&mut buf);
-            assert!(result.is_err(), "Malformed request should be rejected: {:?}", request);
+            assert!(
+                result.is_err(),
+                "Malformed request should be rejected: {:?}",
+                request
+            );
         }
     }
 
@@ -246,6 +291,9 @@ mod request_line_regression_tests {
         let mut buf = BytesMut::from(request_line.as_str());
 
         let result = codec.decode(&mut buf);
-        assert!(result.is_ok(), "Request line exactly at limit should be accepted");
+        assert!(
+            result.is_ok(),
+            "Request line exactly at limit should be accepted"
+        );
     }
 }

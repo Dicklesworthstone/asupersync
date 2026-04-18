@@ -42,10 +42,10 @@ impl HalfCloseGoldenTester {
         // Server should observe EOF on read
         let mut buf = [0u8; 64];
         let server_eof = match server.read(&mut buf) {
-            Ok(0) => true,  // EOF indicates FIN received
-            Ok(_) => false, // Still receiving data
+            Ok(0) => true,                                        // EOF indicates FIN received
+            Ok(_) => false,                                       // Still receiving data
             Err(e) if e.kind() == ErrorKind::WouldBlock => false, // No data yet
-            Err(_) => false, // Other error
+            Err(_) => false,                                      // Other error
         };
 
         // Client can still read (half-duplex)
@@ -82,10 +82,10 @@ impl HalfCloseGoldenTester {
         // Client should not receive any data after shutdown(Read)
         let mut buf = [0u8; 64];
         let _client_reads_data = match client.read(&mut buf) {
-            Ok(0) => false,   // EOF is expected behavior
-            Ok(_) => true,    // Should NOT receive data
+            Ok(0) => false,                                       // EOF is expected behavior
+            Ok(_) => true,                                        // Should NOT receive data
             Err(e) if e.kind() == ErrorKind::WouldBlock => false, // No data (good)
-            Err(_) => false,  // Error (acceptable)
+            Err(_) => false,                                      // Error (acceptable)
         };
 
         // Client can still write (half-duplex)
@@ -119,15 +119,16 @@ impl HalfCloseGoldenTester {
         let server2_eof = server2.read(&mut buf).is_ok_and(|n| n == 0);
 
         // Both should behave identically
-        let behaviors_match = (server1_eof == server2_eof) &&
-                             client1_write_err && client1_read_err;
+        let behaviors_match = (server1_eof == server2_eof) && client1_write_err && client1_read_err;
 
         Ok(HalfCloseResult {
             operation: "shutdown_both".to_string(),
             peer_observes_eof: server1_eof,
             local_can_read: false,
             local_can_write: false,
-            error: if behaviors_match { None } else {
+            error: if behaviors_match {
+                None
+            } else {
                 Some("shutdown(Both) behavior differs from close()".to_string())
             },
         })
@@ -146,22 +147,22 @@ impl HalfCloseGoldenTester {
         // Client should observe EOF when trying to read
         let mut buf = [0u8; 64];
         let client_observes_eof = match client.read(&mut buf) {
-            Ok(0) => true,    // EOF observed
-            Ok(_) => false,   // Still receiving data
+            Ok(0) => true,  // EOF observed
+            Ok(_) => false, // Still receiving data
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 // Data not available yet, try again briefly
                 std::thread::sleep(Duration::from_millis(1));
                 client.read(&mut buf).is_ok_and(|n| n == 0)
             }
-            Err(_) => false,  // Error
+            Err(_) => false, // Error
         };
 
         // Client can still write back to peer
         let client_can_write = client.write(b"ack").is_ok();
 
         // Peer can still read client's response
-        let server_can_read = server.read(&mut buf).is_ok() ||
-            matches!(server.read(&mut buf), Err(ref e) if e.kind() == ErrorKind::WouldBlock);
+        let server_can_read = server.read(&mut buf).is_ok()
+            || matches!(server.read(&mut buf), Err(ref e) if e.kind() == ErrorKind::WouldBlock);
 
         Ok(HalfCloseResult {
             operation: "peer_half_close".to_string(),
@@ -173,7 +174,12 @@ impl HalfCloseGoldenTester {
     }
 
     /// Assert golden result for half-close behavior.
-    fn assert_half_close_golden(&self, result: &HalfCloseResult, test_name: &str, expected_golden: &str) {
+    fn assert_half_close_golden(
+        &self,
+        result: &HalfCloseResult,
+        test_name: &str,
+        expected_golden: &str,
+    ) {
         let actual_golden = result.to_golden_string();
 
         if self.update_golden {
@@ -248,14 +254,15 @@ mod tests {
         init_test("test_shutdown_write_golden");
         let tester = HalfCloseGoldenTester::new();
 
-        let result = tester.test_shutdown_write_sends_fin("shutdown_write")
+        let result = tester
+            .test_shutdown_write_sends_fin("shutdown_write")
             .expect("shutdown write test should succeed");
 
         // Golden: shutdown(Write) should prevent local writes, allow reads, trigger peer EOF
         tester.assert_half_close_golden(
             &result,
             "shutdown_write",
-            "op:shutdown_write,eof:true,read:true,write:false,err:none"
+            "op:shutdown_write,eof:true,read:true,write:false,err:none",
         );
 
         crate::test_complete!("test_shutdown_write_golden");
@@ -266,14 +273,15 @@ mod tests {
         init_test("test_shutdown_read_golden");
         let tester = HalfCloseGoldenTester::new();
 
-        let result = tester.test_shutdown_read_discards_data("shutdown_read")
+        let result = tester
+            .test_shutdown_read_discards_data("shutdown_read")
             .expect("shutdown read test should succeed");
 
         // Golden: shutdown(Read) should discard reads, allow writes, no peer EOF
         tester.assert_half_close_golden(
             &result,
             "shutdown_read",
-            "op:shutdown_read,eof:false,read:false,write:true,err:none"
+            "op:shutdown_read,eof:false,read:false,write:true,err:none",
         );
 
         crate::test_complete!("test_shutdown_read_golden");
@@ -284,14 +292,15 @@ mod tests {
         init_test("test_shutdown_both_golden");
         let tester = HalfCloseGoldenTester::new();
 
-        let result = tester.test_shutdown_both_equals_close("shutdown_both")
+        let result = tester
+            .test_shutdown_both_equals_close("shutdown_both")
             .expect("shutdown both test should succeed");
 
         // Golden: shutdown(Both) should behave identically to close()
         tester.assert_half_close_golden(
             &result,
             "shutdown_both",
-            "op:shutdown_both,eof:true,read:false,write:false,err:none"
+            "op:shutdown_both,eof:true,read:false,write:false,err:none",
         );
 
         crate::test_complete!("test_shutdown_both_golden");
@@ -302,14 +311,15 @@ mod tests {
         init_test("test_peer_half_close_eof_golden");
         let tester = HalfCloseGoldenTester::new();
 
-        let result = tester.test_peer_initiated_half_close_eof("peer_half_close")
+        let result = tester
+            .test_peer_initiated_half_close_eof("peer_half_close")
             .expect("peer half close test should succeed");
 
         // Golden: peer shutdown(Write) should be observable as EOF on local read
         tester.assert_half_close_golden(
             &result,
             "peer_half_close",
-            "op:peer_half_close,eof:true,read:true,write:true,err:none"
+            "op:peer_half_close,eof:true,read:true,write:true,err:none",
         );
 
         crate::test_complete!("test_peer_half_close_eof_golden");

@@ -2327,24 +2327,24 @@ mod tests {
                 let task_seed = rng.next_u64();
                 // This would normally spawn tasks using the runtime's spawn mechanisms
                 // For testing, we'll create trace events that represent fork/join operations
-                runtime.trace().record_event(
-                    &crate::trace::TraceEvent::user_trace(
+                runtime
+                    .trace()
+                    .record_event(&crate::trace::TraceEvent::user_trace(
                         i as u64,
                         runtime.time(),
                         format!("fork_task_{}", i),
-                    )
-                );
+                    ));
             }
 
             // Simulate join phase
             for i in 0..task_count {
-                runtime.trace().record_event(
-                    &crate::trace::TraceEvent::user_trace(
+                runtime
+                    .trace()
+                    .record_event(&crate::trace::TraceEvent::user_trace(
                         (task_count + i) as u64,
                         runtime.time(),
                         format!("join_task_{}", i),
-                    )
-                );
+                    ));
             }
         }
     }
@@ -2394,8 +2394,7 @@ mod tests {
 
             // MR: Certificate hashes should match between original and replayed execution
             assert_eq!(
-                original_certificate,
-                replay_certificate,
+                original_certificate, replay_certificate,
                 "Checkpoint {} replay diverged in certificate hash",
                 checkpoint_idx
             );
@@ -2403,10 +2402,8 @@ mod tests {
             // MR: The portion of the trace after the checkpoint should match
             // when both executions reach the same logical point
             if replay_trace.len() >= original_trace.len() {
-                for (i, (orig_event, replay_event)) in original_trace
-                    .iter()
-                    .zip(replay_trace.iter())
-                    .enumerate()
+                for (i, (orig_event, replay_event)) in
+                    original_trace.iter().zip(replay_trace.iter()).enumerate()
                 {
                     if i >= checkpoint_idx {
                         assert!(
@@ -2463,14 +2460,12 @@ mod tests {
         // MR: All executions should produce identical results
         for (run_idx, (trace, certificate, steps)) in executions.iter().enumerate().skip(1) {
             assert_eq!(
-                executions[0].1,
-                *certificate,
+                executions[0].1, *certificate,
                 "Run {} has different certificate than run 0",
                 run_idx
             );
             assert_eq!(
-                executions[0].2,
-                *steps,
+                executions[0].2, *steps,
                 "Run {} has different step count than run 0",
                 run_idx
             );
@@ -2535,21 +2530,21 @@ mod tests {
             for i in 0..config.task_count {
                 if rng.next_u64() % 4 == 0 {
                     // 25% chance of panic
-                    runtime.trace().record_event(
-                        &crate::trace::TraceEvent::user_trace(
+                    runtime
+                        .trace()
+                        .record_event(&crate::trace::TraceEvent::user_trace(
                             i as u64,
                             runtime.time(),
                             format!("panic_task_{}", i),
-                        )
-                    );
+                        ));
                 } else {
-                    runtime.trace().record_event(
-                        &crate::trace::TraceEvent::user_trace(
+                    runtime
+                        .trace()
+                        .record_event(&crate::trace::TraceEvent::user_trace(
                             i as u64,
                             runtime.time(),
                             format!("normal_task_{}", i),
-                        )
-                    );
+                        ));
                 }
             }
         };
@@ -2630,13 +2625,13 @@ mod tests {
             for region_id in 0..region_count {
                 for task_id in 0..config.task_count / region_count {
                     let event_id = region_id * 1000 + task_id;
-                    runtime.trace().record_event(
-                        &crate::trace::TraceEvent::user_trace(
+                    runtime
+                        .trace()
+                        .record_event(&crate::trace::TraceEvent::user_trace(
                             event_id as u64,
                             runtime.time(),
                             format!("region_{}_task_{}", region_id, task_id),
-                        )
-                    );
+                        ));
                 }
             }
         };
@@ -2669,7 +2664,10 @@ mod tests {
                 if event.data.contains("region_") {
                     if let Some(region_start) = event.data.find("region_") {
                         if let Some(region_end) = event.data[region_start + 7..].find('_') {
-                            if let Ok(region_id) = event.data[region_start + 7..region_start + 7 + region_end].parse::<u32>() {
+                            if let Ok(region_id) = event.data
+                                [region_start + 7..region_start + 7 + region_end]
+                                .parse::<u32>()
+                            {
                                 region_events.entry(region_id).or_default().push(event);
                             }
                         }
@@ -2704,11 +2702,13 @@ mod tests {
             let (name2, trace2) = &context_traces[i];
 
             // Extract logical ordering (ignoring precise timing)
-            let logical_order1: Vec<_> = trace1.iter()
+            let logical_order1: Vec<_> = trace1
+                .iter()
                 .filter(|e| e.data.contains("region_"))
                 .map(|e| &e.data)
                 .collect();
-            let logical_order2: Vec<_> = trace2.iter()
+            let logical_order2: Vec<_> = trace2
+                .iter()
                 .filter(|e| e.data.contains("region_"))
                 .map(|e| &e.data)
                 .collect();
@@ -2749,13 +2749,13 @@ mod tests {
                     _ => "join",
                 };
 
-                runtime.trace().record_event(
-                    &crate::trace::TraceEvent::user_trace(
+                runtime
+                    .trace()
+                    .record_event(&crate::trace::TraceEvent::user_trace(
                         i as u64,
                         runtime.time(),
                         format!("{}_{}", event_type, i),
-                    )
-                );
+                    ));
             }
         };
 
@@ -2779,14 +2779,12 @@ mod tests {
         // MR: All runs should produce identical results
         for (run_idx, trace, certificate, steps) in &run_results[1..] {
             assert_eq!(
-                run_results[0].2,
-                *certificate,
+                run_results[0].2, *certificate,
                 "Run {} certificate differs from run 0",
                 run_idx
             );
             assert_eq!(
-                run_results[0].3,
-                *steps,
+                run_results[0].3, *steps,
                 "Run {} step count differs from run 0",
                 run_idx
             );
@@ -2810,8 +2808,7 @@ mod tests {
         let different_certificate = different_seed_runtime.certificate().hash();
 
         assert_ne!(
-            run_results[0].2,
-            different_certificate,
+            run_results[0].2, different_certificate,
             "Different seed should produce different certificate"
         );
 
@@ -2854,13 +2851,13 @@ mod tests {
                 // Fork phase
                 for task_id in 0..tasks_per_region {
                     let event_id = region_id * 1000 + task_id;
-                    runtime.trace().record_event(
-                        &crate::trace::TraceEvent::user_trace(
+                    runtime
+                        .trace()
+                        .record_event(&crate::trace::TraceEvent::user_trace(
                             event_id as u64,
                             runtime.time(),
                             format!("fork_region_{}_task_{}", region_id, task_id),
-                        )
-                    );
+                        ));
                 }
 
                 // Work phase (with occasional panics)
@@ -2871,25 +2868,25 @@ mod tests {
                     } else {
                         "work"
                     };
-                    runtime.trace().record_event(
-                        &crate::trace::TraceEvent::user_trace(
+                    runtime
+                        .trace()
+                        .record_event(&crate::trace::TraceEvent::user_trace(
                             event_id as u64,
                             runtime.time(),
                             format!("{}_region_{}_task_{}", event_type, region_id, task_id),
-                        )
-                    );
+                        ));
                 }
 
                 // Join phase
                 for task_id in 0..tasks_per_region {
                     let event_id = region_id * 1000 + task_id + 200;
-                    runtime.trace().record_event(
-                        &crate::trace::TraceEvent::user_trace(
+                    runtime
+                        .trace()
+                        .record_event(&crate::trace::TraceEvent::user_trace(
                             event_id as u64,
                             runtime.time(),
                             format!("join_region_{}_task_{}", region_id, task_id),
-                        )
-                    );
+                        ));
                 }
             }
         };
@@ -2923,20 +2920,16 @@ mod tests {
             assert!(
                 validation.matched,
                 "Seed {} composite replay failed: {:?}",
-                test_seed,
-                validation.divergence
+                test_seed, validation.divergence
             );
         }
 
         // MR: Multi-seed validation should show consistent determinism
-        let multi_validation = validate_replay_multi(&test_seeds, config.worker_count, composite_scenario);
+        let multi_validation =
+            validate_replay_multi(&test_seeds, config.worker_count, composite_scenario);
 
         for (i, validation) in multi_validation.iter().enumerate() {
-            assert!(
-                validation.matched,
-                "Multi-seed run {} failed validation",
-                i
-            );
+            assert!(validation.matched, "Multi-seed run {} failed validation", i);
         }
 
         crate::test_complete!("metamorphic_composite_replay_invariants");

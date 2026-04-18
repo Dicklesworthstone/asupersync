@@ -33,8 +33,7 @@
 //! scenarios to verify invariants hold across all execution paths.
 
 use crate::combinator::bulkhead::{
-    Bulkhead, BulkheadError, BulkheadMetrics, BulkheadPermit, BulkheadPolicy,
-    BulkheadPolicyBuilder,
+    Bulkhead, BulkheadError, BulkheadMetrics, BulkheadPermit, BulkheadPolicy, BulkheadPolicyBuilder,
 };
 use crate::types::{Budget, RegionId, TaskId, Time};
 use crate::util::{ArenaIndex, DetRng};
@@ -194,17 +193,20 @@ impl GlobalBulkheadState {
 
     /// Get stats for a specific bulkhead
     fn bulkhead_stats(&self, name: &str) -> BulkheadStats {
-        let processed = self.processed_per_bulkhead
+        let processed = self
+            .processed_per_bulkhead
             .lock()
             .get(name)
             .map(|v| v.len())
             .unwrap_or(0);
-        let rejected = self.rejected_per_bulkhead
+        let rejected = self
+            .rejected_per_bulkhead
             .lock()
             .get(name)
             .map(|v| v.len())
             .unwrap_or(0);
-        let cancelled = self.cancelled_per_bulkhead
+        let cancelled = self
+            .cancelled_per_bulkhead
             .lock()
             .get(name)
             .map(|v| v.len())
@@ -316,7 +318,9 @@ fn mr1_isolation_invariant(
                         global_state.record_processed(bulkhead_name, work_unit.id);
 
                         // Verify this work is processed on the correct bulkhead
-                        if !bulkhead_name.contains(&format!("_{}", work_unit.id % bulkhead_count as u64)) {
+                        if !bulkhead_name
+                            .contains(&format!("_{}", work_unit.id % bulkhead_count as u64))
+                        {
                             // This is actually expected for uniform distribution
                             // The contamination check is about work being executed on wrong bulkhead
                             // during permit acquisition, which shouldn't happen
@@ -440,11 +444,7 @@ fn mr2_rejection_accuracy(
 ///
 /// Cancel of outer scope cancels all bulkhead in-flight operations.
 /// Verifies that cancellation protocol works correctly with bulkheads.
-fn mr3_cancel_propagation(
-    worker_count: u32,
-    in_flight_count: u32,
-    seed: u64,
-) -> bool {
+fn mr3_cancel_propagation(worker_count: u32, in_flight_count: u32, seed: u64) -> bool {
     let global_state = GlobalBulkheadState::new();
 
     let policy = BulkheadPolicy {
@@ -587,10 +587,8 @@ fn mr4_metrics_accuracy(
     let permit_balance = global_acquisitions == global_releases; // All released
     let final_permits_correct = final_metrics.active_permits == 0; // All released
 
-    let accuracy_maintained = executed_matches
-        && rejected_matches
-        && permit_balance
-        && final_permits_correct;
+    let accuracy_maintained =
+        executed_matches && rejected_matches && permit_balance && final_permits_correct;
 
     crate::assert_with_log!(
         accuracy_maintained,
@@ -656,9 +654,7 @@ fn run_deterministic_sequence(
                 permits.push(permit);
                 OperationResult::Acquired { weight }
             }
-            None => {
-                OperationResult::Rejected { weight }
-            }
+            None => OperationResult::Rejected { weight },
         };
         results.push(op_result);
 
@@ -794,7 +790,12 @@ mod tests {
         let seed = 12345;
 
         // Test all MRs in sequence
-        assert!(mr1_isolation_invariant(bulkhead_count, workers_per_bulkhead, total_work, seed));
+        assert!(mr1_isolation_invariant(
+            bulkhead_count,
+            workers_per_bulkhead,
+            total_work,
+            seed
+        ));
         assert!(mr2_rejection_accuracy(4, 8, 20, seed));
         assert!(mr3_cancel_propagation(6, 10, seed));
         assert!(mr4_metrics_accuracy(5, 20, 3, seed));

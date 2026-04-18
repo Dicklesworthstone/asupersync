@@ -26,8 +26,8 @@ use crate::util::{DetEntropy, DetRng};
 use parking_lot::Mutex;
 use proptest::prelude::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Configuration for barrier metamorphic tests.
@@ -244,7 +244,9 @@ async fn execute_barrier_work_unit(
     if config.inject_spurious_wakeups {
         let mut rng = DetRng::from_seed(config.seed.wrapping_add(id as u64));
         if rng.gen_bool(0.1) {
-            global_state.spurious_wakeups_injected.store(true, Ordering::SeqCst);
+            global_state
+                .spurious_wakeups_injected
+                .store(true, Ordering::SeqCst);
             crate::cx::yield_now().await;
         }
     }
@@ -466,10 +468,8 @@ fn mr3_drop_cleanup_correctness(
                             );
                         }
                         Err(_) => {
-                            fresh_global_state_clone.record_result(
-                                fresh_work_unit.id,
-                                BarrierWorkResult::Cancelled,
-                            );
+                            fresh_global_state_clone
+                                .record_result(fresh_work_unit.id, BarrierWorkResult::Cancelled);
                         }
                     }
                 })
@@ -536,7 +536,8 @@ fn mr5_leader_election_determinism(
 
     // Run the scenario multiple times and collect leader IDs
     for _ in 0..3 {
-        let summary = execute_barrier_scenario_with_leader_tracking(config.clone(), work_units.clone())?;
+        let summary =
+            execute_barrier_scenario_with_leader_tracking(config.clone(), work_units.clone())?;
         leader_ids.push(summary);
     }
 
@@ -634,29 +635,31 @@ fn execute_barrier_scenario_with_leader_tracking(
 /// Strategy for generating barrier test configurations.
 fn barrier_config_strategy() -> impl Strategy<Value = BarrierTestConfig> {
     (
-        1..=8_usize,           // parties
-        any::<bool>(),         // inject_spurious_wakeups
-        0.0..0.3_f64,         // cancel_probability
-        0.0..0.2_f64,         // drop_probability
-        any::<u64>(),         // seed
+        1..=8_usize,   // parties
+        any::<bool>(), // inject_spurious_wakeups
+        0.0..0.3_f64,  // cancel_probability
+        0.0..0.2_f64,  // drop_probability
+        any::<u64>(),  // seed
     )
-        .prop_map(|(parties, spurious, cancel_prob, drop_prob, seed)| BarrierTestConfig {
-            parties,
-            inject_spurious_wakeups: spurious,
-            cancel_probability: cancel_prob,
-            drop_probability: drop_prob,
-            seed,
-        })
+        .prop_map(
+            |(parties, spurious, cancel_prob, drop_prob, seed)| BarrierTestConfig {
+                parties,
+                inject_spurious_wakeups: spurious,
+                cancel_probability: cancel_prob,
+                drop_probability: drop_prob,
+                seed,
+            },
+        )
 }
 
 /// Strategy for generating work units.
 fn work_units_strategy(max_units: usize) -> impl Strategy<Value = Vec<BarrierWorkUnit>> {
     prop::collection::vec(
         (
-            any::<usize>(),      // id
-            any::<bool>(),       // should_cancel
-            any::<bool>(),       // should_drop
-            0..50_u64,          // start_delay_ms
+            any::<usize>(), // id
+            any::<bool>(),  // should_cancel
+            any::<bool>(),  // should_drop
+            0..50_u64,      // start_delay_ms
         ),
         1..=max_units,
     )
@@ -721,10 +724,7 @@ mod tests {
         init_test("mr2_spurious_wakeup_preservation_basic");
 
         let config = BarrierTestConfig::basic(2, 123);
-        let work_units = vec![
-            BarrierWorkUnit::new(0),
-            BarrierWorkUnit::new(1),
-        ];
+        let work_units = vec![BarrierWorkUnit::new(0), BarrierWorkUnit::new(1)];
 
         let result = mr2_spurious_wakeup_preservation(config, work_units);
         crate::assert_with_log!(
@@ -766,10 +766,7 @@ mod tests {
         init_test("mr4_deterministic_replay_basic");
 
         let config = BarrierTestConfig::basic(2, 789);
-        let work_units = vec![
-            BarrierWorkUnit::new(0),
-            BarrierWorkUnit::new(1),
-        ];
+        let work_units = vec![BarrierWorkUnit::new(0), BarrierWorkUnit::new(1)];
 
         let result = mr4_deterministic_replay(config, work_units);
         crate::assert_with_log!(

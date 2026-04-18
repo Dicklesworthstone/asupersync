@@ -1680,9 +1680,9 @@ mod tests {
         let _ = Pin::new(&mut sleep2).poll(&mut task_cx);
 
         // Reset once vs reset twice to same deadline
-        sleep1.reset(reset_deadline);  // Single reset
-        sleep2.reset(reset_deadline);  // Double reset (first)
-        sleep2.reset(reset_deadline);  // Double reset (second)
+        sleep1.reset(reset_deadline); // Single reset
+        sleep2.reset(reset_deadline); // Double reset (first)
+        sleep2.reset(reset_deadline); // Double reset (second)
 
         // Both should behave identically
         crate::assert_with_log!(

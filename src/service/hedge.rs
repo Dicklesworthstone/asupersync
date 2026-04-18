@@ -1442,12 +1442,18 @@ mod tests {
         let original_stats = execute_request_sequence(&requests);
         let shuffled_stats = execute_request_sequence(&shuffled);
 
-        assert_eq!(original_stats.total, shuffled_stats.total,
-            "Total requests should be invariant under permutation");
-        assert_eq!(original_stats.hedged, shuffled_stats.hedged,
-            "Hedged requests should be invariant under permutation");
-        assert_eq!(original_stats.hedge_wins, shuffled_stats.hedge_wins,
-            "Hedge wins should be invariant under permutation");
+        assert_eq!(
+            original_stats.total, shuffled_stats.total,
+            "Total requests should be invariant under permutation"
+        );
+        assert_eq!(
+            original_stats.hedged, shuffled_stats.hedged,
+            "Hedged requests should be invariant under permutation"
+        );
+        assert_eq!(
+            original_stats.hedge_wins, shuffled_stats.hedge_wins,
+            "Hedge wins should be invariant under permutation"
+        );
 
         crate::test_complete!("metamorphic_request_permutation_invariance");
     }
@@ -1467,8 +1473,10 @@ mod tests {
         let base_hedge_rate = test_delay_scenario(&fast_plans, base_delay);
         let scaled_hedge_rate = test_delay_scenario(&fast_plans, scaled_delay);
 
-        assert!((base_hedge_rate - scaled_hedge_rate).abs() < f64::EPSILON,
-            "Fast requests should have same hedge rate regardless of delay scaling");
+        assert!(
+            (base_hedge_rate - scaled_hedge_rate).abs() < f64::EPSILON,
+            "Fast requests should have same hedge rate regardless of delay scaling"
+        );
 
         crate::test_complete!("metamorphic_delay_scaling_preserves_relationships");
     }
@@ -1501,10 +1509,15 @@ mod tests {
         set_test_time(5);
         let result = Pin::new(&mut future).poll(&mut cx);
 
-        assert!(matches!(result, Poll::Ready(Ok(42))),
-            "Fast request should return original service result");
-        assert_eq!(hedge.hedged_requests(), 0,
-            "No hedge should be dispatched for fast requests");
+        assert!(
+            matches!(result, Poll::Ready(Ok(42))),
+            "Fast request should return original service result"
+        );
+        assert_eq!(
+            hedge.hedged_requests(),
+            0,
+            "No hedge should be dispatched for fast requests"
+        );
 
         crate::test_complete!("metamorphic_service_equivalence_fast_requests");
     }
@@ -1520,20 +1533,14 @@ mod tests {
         let calls2 = Arc::new(AtomicUsize::new(0));
 
         let mut hedge1 = Hedge::new(
-            TimedService::new(
-                vec![TimedPlan::ok_at(20, 11)],
-                Arc::clone(&calls1),
-            ),
+            TimedService::new(vec![TimedPlan::ok_at(20, 11)], Arc::clone(&calls1)),
             HedgeConfig::new(Duration::from_nanos(10))
                 .max_pending(2)
                 .with_time_getter(test_time),
         );
 
         let mut hedge2 = Hedge::new(
-            TimedService::new(
-                vec![TimedPlan::ok_at(25, 22)],
-                Arc::clone(&calls2),
-            ),
+            TimedService::new(vec![TimedPlan::ok_at(25, 22)], Arc::clone(&calls2)),
             HedgeConfig::new(Duration::from_nanos(10))
                 .max_pending(2)
                 .with_time_getter(test_time),
@@ -1559,8 +1566,10 @@ mod tests {
         // future2 should still complete normally
         set_test_time(25);
         let result2 = Pin::new(&mut future2).poll(&mut cx);
-        assert!(matches!(result2, Poll::Ready(Ok(22))),
-            "Independent request should complete despite other cancellation");
+        assert!(
+            matches!(result2, Poll::Ready(Ok(22))),
+            "Independent request should complete despite other cancellation"
+        );
 
         crate::test_complete!("metamorphic_parallel_cancellation_independence");
     }
@@ -1573,7 +1582,7 @@ mod tests {
 
         // Test various scenarios
         let scenarios = vec![
-            vec![TimedPlan::ok_at(5, 1)], // Fast, no hedge
+            vec![TimedPlan::ok_at(5, 1)],                           // Fast, no hedge
             vec![TimedPlan::ok_at(30, 1), TimedPlan::ok_at(15, 2)], // Hedge wins
             vec![TimedPlan::ok_at(15, 1), TimedPlan::ok_at(30, 2)], // Primary wins
             vec![TimedPlan::err_at(30, "fail"), TimedPlan::ok_at(15, 2)], // Hedge rescues
@@ -1582,15 +1591,27 @@ mod tests {
         for (i, plans) in scenarios.iter().enumerate() {
             let stats = test_delay_scenario_with_stats(plans, Duration::from_nanos(10));
 
-            assert!(stats.hedge_wins <= stats.hedged,
+            assert!(
+                stats.hedge_wins <= stats.hedged,
                 "Scenario {}: hedge wins ({}) cannot exceed hedged requests ({})",
-                i, stats.hedge_wins, stats.hedged);
-            assert!(stats.hedged <= stats.total,
+                i,
+                stats.hedge_wins,
+                stats.hedged
+            );
+            assert!(
+                stats.hedged <= stats.total,
                 "Scenario {}: hedged requests ({}) cannot exceed total requests ({})",
-                i, stats.hedged, stats.total);
-            assert!(stats.hedge_wins <= stats.total,
+                i,
+                stats.hedged,
+                stats.total
+            );
+            assert!(
+                stats.hedge_wins <= stats.total,
                 "Scenario {}: hedge wins ({}) cannot exceed total requests ({})",
-                i, stats.hedge_wins, stats.total);
+                i,
+                stats.hedge_wins,
+                stats.total
+            );
         }
 
         crate::test_complete!("metamorphic_statistics_consistency");
@@ -1605,21 +1626,30 @@ mod tests {
         let instant_plans = vec![TimedPlan::ok_at(0, 99)]; // Instant completion
 
         // Test with different hedge configurations
-        let short_delay_stats = test_delay_scenario_with_stats(&instant_plans, Duration::from_nanos(1));
-        let long_delay_stats = test_delay_scenario_with_stats(&instant_plans, Duration::from_nanos(1000));
-        let zero_pending_stats = test_delay_scenario_with_max_pending(&instant_plans, Duration::from_nanos(10), 0);
+        let short_delay_stats =
+            test_delay_scenario_with_stats(&instant_plans, Duration::from_nanos(1));
+        let long_delay_stats =
+            test_delay_scenario_with_stats(&instant_plans, Duration::from_nanos(1000));
+        let zero_pending_stats =
+            test_delay_scenario_with_max_pending(&instant_plans, Duration::from_nanos(10), 0);
 
         // All should have same results for instant completion
         assert_eq!(short_delay_stats.total, 1);
         assert_eq!(long_delay_stats.total, 1);
         assert_eq!(zero_pending_stats.total, 1);
 
-        assert_eq!(short_delay_stats.hedged, 0,
-            "Instant completion should never trigger hedge");
-        assert_eq!(long_delay_stats.hedged, 0,
-            "Instant completion should never trigger hedge");
-        assert_eq!(zero_pending_stats.hedged, 0,
-            "Instant completion should never trigger hedge");
+        assert_eq!(
+            short_delay_stats.hedged, 0,
+            "Instant completion should never trigger hedge"
+        );
+        assert_eq!(
+            long_delay_stats.hedged, 0,
+            "Instant completion should never trigger hedge"
+        );
+        assert_eq!(
+            zero_pending_stats.hedged, 0,
+            "Instant completion should never trigger hedge"
+        );
 
         crate::test_complete!("metamorphic_instant_completion_equivalence");
     }
@@ -1662,10 +1692,15 @@ mod tests {
         assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
         let final_calls = calls.load(Ordering::SeqCst);
 
-        assert_eq!(hedge_calls, initial_calls + 1,
-            "Hedge dispatch should create exactly one additional call");
-        assert_eq!(final_calls, hedge_calls,
-            "Re-polling should not create additional calls");
+        assert_eq!(
+            hedge_calls,
+            initial_calls + 1,
+            "Hedge dispatch should create exactly one additional call"
+        );
+        assert_eq!(
+            final_calls, hedge_calls,
+            "Re-polling should not create additional calls"
+        );
 
         crate::test_complete!("metamorphic_hedge_dispatch_idempotence");
     }
@@ -1713,14 +1748,22 @@ mod tests {
 
     fn test_delay_scenario(plans: &[TimedPlan], delay: Duration) -> f64 {
         let stats = test_delay_scenario_with_stats(plans, delay);
-        if stats.total == 0 { 0.0 } else { stats.hedged as f64 / stats.total as f64 }
+        if stats.total == 0 {
+            0.0
+        } else {
+            stats.hedged as f64 / stats.total as f64
+        }
     }
 
     fn test_delay_scenario_with_stats(plans: &[TimedPlan], delay: Duration) -> TestHedgeStats {
         test_delay_scenario_with_max_pending(plans, delay, 1)
     }
 
-    fn test_delay_scenario_with_max_pending(plans: &[TimedPlan], delay: Duration, max_pending: u32) -> TestHedgeStats {
+    fn test_delay_scenario_with_max_pending(
+        plans: &[TimedPlan],
+        delay: Duration,
+        max_pending: u32,
+    ) -> TestHedgeStats {
         set_test_time(0);
         let calls = Arc::new(AtomicUsize::new(0));
         let mut hedge = Hedge::new(

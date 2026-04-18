@@ -4,12 +4,12 @@
 //! according to a configurable [`Policy`].
 
 use super::{Layer, Service};
+use crate::util::entropy::EntropySource;
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use crate::util::entropy::EntropySource;
 
 /// Cooperative budget for immediately completed retry attempts in a single
 /// outer poll.
@@ -561,8 +561,13 @@ impl<Request> ExponentialBackoff<Request> {
         match self.jitter {
             JitterStrategy::Full => {
                 // Full jitter: random(0, base_delay * 2^attempt)
-                let max_delay = self.base_delay_ms
-                    .saturating_mul(1_u64.checked_shl(self.current_attempt as u32).unwrap_or(u64::MAX))
+                let max_delay = self
+                    .base_delay_ms
+                    .saturating_mul(
+                        1_u64
+                            .checked_shl(self.current_attempt as u32)
+                            .unwrap_or(u64::MAX),
+                    )
                     .min(self.max_delay_ms);
                 if max_delay == 0 {
                     0
@@ -572,8 +577,13 @@ impl<Request> ExponentialBackoff<Request> {
             }
             JitterStrategy::Equal => {
                 // Equal jitter: base/2 + random(0, base/2) where base = base_delay * 2^attempt
-                let base_delay = self.base_delay_ms
-                    .saturating_mul(1_u64.checked_shl(self.current_attempt as u32).unwrap_or(u64::MAX))
+                let base_delay = self
+                    .base_delay_ms
+                    .saturating_mul(
+                        1_u64
+                            .checked_shl(self.current_attempt as u32)
+                            .unwrap_or(u64::MAX),
+                    )
                     .min(self.max_delay_ms);
                 let half_delay = base_delay / 2;
                 let jitter = if half_delay == 0 {
@@ -725,7 +735,8 @@ impl<Request: Clone + 'static, Res, E> Policy<Request, Res, E> for SmartRetry<Re
                     backoff: new_backoff,
                     classification,
                 }
-            }) as Pin<Box<dyn Future<Output = Self> + Send + 'static>>)
+            })
+                as Pin<Box<dyn Future<Output = Self> + Send + 'static>>)
         } else {
             None
         }
@@ -1208,11 +1219,11 @@ mod tests {
 
         // Golden values (deterministic due to DetEntropy)
         let expected = vec![
-            (0, 93),    // random(0, 100)
-            (1, 124),   // random(0, 200)
-            (2, 344),   // random(0, 400)
-            (3, 372),   // random(0, 800)
-            (4, 822),   // random(0, 1600)
+            (0, 93),  // random(0, 100)
+            (1, 124), // random(0, 200)
+            (2, 344), // random(0, 400)
+            (3, 372), // random(0, 800)
+            (4, 822), // random(0, 1600)
         ];
 
         for ((attempt, delay), (exp_attempt, exp_delay)) in delays.iter().zip(expected.iter()) {
@@ -1251,11 +1262,11 @@ mod tests {
 
         // Golden values: base/2 + random(0, base/2) where base = 100 * 2^attempt
         let expected = vec![
-            (0, 96),    // 50 + random(0, 50) = 50 + 46 = 96
-            (1, 162),   // 100 + random(0, 100) = 100 + 62 = 162
-            (2, 372),   // 200 + random(0, 200) = 200 + 172 = 372
-            (3, 586),   // 400 + random(0, 400) = 400 + 186 = 586
-            (4, 1211),  // 800 + random(0, 800) = 800 + 411 = 1211
+            (0, 96),   // 50 + random(0, 50) = 50 + 46 = 96
+            (1, 162),  // 100 + random(0, 100) = 100 + 62 = 162
+            (2, 372),  // 200 + random(0, 200) = 200 + 172 = 372
+            (3, 586),  // 400 + random(0, 400) = 400 + 186 = 586
+            (4, 1211), // 800 + random(0, 800) = 800 + 411 = 1211
         ];
 
         for ((attempt, delay), (exp_attempt, exp_delay)) in delays.iter().zip(expected.iter()) {
@@ -1296,11 +1307,11 @@ mod tests {
 
         // Golden values: random(base_delay, last_delay * 3)
         let expected = vec![
-            (0, 186),   // random(100, 300) = 186
-            (1, 390),   // random(100, 558) = 390
-            (2, 571),   // random(100, 1170) = 571
-            (3, 857),   // random(100, 1713) = 857
-            (4, 1186),  // random(100, 2571) = 1186
+            (0, 186),  // random(100, 300) = 186
+            (1, 390),  // random(100, 558) = 390
+            (2, 571),  // random(100, 1170) = 571
+            (3, 857),  // random(100, 1713) = 857
+            (4, 1186), // random(100, 2571) = 1186
         ];
 
         for ((attempt, delay), (exp_attempt, exp_delay)) in delays.iter().zip(expected.iter()) {
@@ -1339,15 +1350,17 @@ mod tests {
 
         // Golden values: should retry for attempts 0, 1, 2 (max_retries=3), then stop
         let expected = vec![
-            (0, true),   // First retry (attempt 0 → 1)
-            (1, true),   // Second retry (attempt 1 → 2)
-            (2, true),   // Third retry (attempt 2 → 3)
-            (3, false),  // Fourth attempt - should not retry (3 >= max_retries)
-            (4, false),  // Fifth attempt - should not retry
-            (5, false),  // Sixth attempt - should not retry
+            (0, true),  // First retry (attempt 0 → 1)
+            (1, true),  // Second retry (attempt 1 → 2)
+            (2, true),  // Third retry (attempt 2 → 3)
+            (3, false), // Fourth attempt - should not retry (3 >= max_retries)
+            (4, false), // Fifth attempt - should not retry
+            (5, false), // Sixth attempt - should not retry
         ];
 
-        for ((attempt, should_retry), (exp_attempt, exp_should_retry)) in retry_results.iter().zip(expected.iter()) {
+        for ((attempt, should_retry), (exp_attempt, exp_should_retry)) in
+            retry_results.iter().zip(expected.iter())
+        {
             crate::assert_with_log!(
                 attempt == exp_attempt && should_retry == exp_should_retry,
                 format!("max retries attempt {}", attempt),
@@ -1364,8 +1377,18 @@ mod tests {
     fn golden_request_classification() {
         init_test("golden_request_classification");
 
-        let idempotent_policy = SmartRetry::<i32>::new(3, 100, JitterStrategy::Full, RequestClassification::Idempotent);
-        let non_idempotent_policy = SmartRetry::<i32>::new(3, 100, JitterStrategy::Full, RequestClassification::NonIdempotent);
+        let idempotent_policy = SmartRetry::<i32>::new(
+            3,
+            100,
+            JitterStrategy::Full,
+            RequestClassification::Idempotent,
+        );
+        let non_idempotent_policy = SmartRetry::<i32>::new(
+            3,
+            100,
+            JitterStrategy::Full,
+            RequestClassification::NonIdempotent,
+        );
 
         // Test classification properties
         let mut results = Vec::new();
@@ -1374,10 +1397,22 @@ mod tests {
         let error_result: Result<&i32, &&str> = Err(&"error");
         let success_result: Result<&i32, &&str> = Ok(&42);
 
-        results.push(("idempotent_error", idempotent_policy.retry(&42, error_result).is_some()));
-        results.push(("idempotent_success", idempotent_policy.retry(&42, success_result).is_some()));
-        results.push(("non_idempotent_error", non_idempotent_policy.retry(&42, error_result).is_some()));
-        results.push(("non_idempotent_success", non_idempotent_policy.retry(&42, success_result).is_some()));
+        results.push((
+            "idempotent_error",
+            idempotent_policy.retry(&42, error_result).is_some(),
+        ));
+        results.push((
+            "idempotent_success",
+            idempotent_policy.retry(&42, success_result).is_some(),
+        ));
+        results.push((
+            "non_idempotent_error",
+            non_idempotent_policy.retry(&42, error_result).is_some(),
+        ));
+        results.push((
+            "non_idempotent_success",
+            non_idempotent_policy.retry(&42, success_result).is_some(),
+        ));
 
         // Golden values
         let expected = vec![
@@ -1443,8 +1478,8 @@ mod tests {
         let decorrelated_delay = decorrelated_policy.calculate_delay();
 
         // Golden values for attempt 3 with base_delay 100
-        let expected_full = 372;      // random(0, 800)
-        let expected_equal = 586;     // 400 + random(0, 400)
+        let expected_full = 372; // random(0, 800)
+        let expected_equal = 586; // 400 + random(0, 400)
         let expected_decorrelated = 1356; // random(100, 2400)
 
         crate::assert_with_log!(

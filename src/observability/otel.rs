@@ -1625,12 +1625,12 @@ pub mod span_semantics {
     //! ```
 
     use opentelemetry::trace::{
-        SpanId, TraceId, TraceFlags, SpanKind, Status, StatusCode,
-        TraceState, SpanContext, SpanBuilder, Tracer
+        SpanBuilder, SpanContext, SpanId, SpanKind, Status, StatusCode, TraceFlags, TraceId,
+        TraceState, Tracer,
     };
     use opentelemetry::{KeyValue, global};
     use std::collections::HashMap;
-    use std::time::{SystemTime, Duration};
+    use std::time::{Duration, SystemTime};
 
     /// Configuration for span semantics conformance testing.
     #[derive(Debug, Clone)]
@@ -1844,7 +1844,8 @@ pub mod span_semantics {
     }
 
     /// Run comprehensive span semantics conformance tests.
-    pub fn run_span_conformance_tests() -> Result<SpanConformanceResult, Box<dyn std::error::Error>> {
+    pub fn run_span_conformance_tests() -> Result<SpanConformanceResult, Box<dyn std::error::Error>>
+    {
         let config = SpanConformanceConfig::default();
         run_span_conformance_tests_with_config(&config)
     }
@@ -1903,18 +1904,27 @@ pub mod span_semantics {
 
             // Span should be ended after calling end()
             if !span.is_ended() {
-                result.record_failure("span_lifecycle_end", "Span should be ended after end() call");
+                result.record_failure(
+                    "span_lifecycle_end",
+                    "Span should be ended after end() call",
+                );
                 return;
             }
 
             // End time should be after start time
             if let Some(duration) = span.duration() {
                 if duration.is_zero() && span.end_time.unwrap() < start_time {
-                    result.record_failure("span_lifecycle_duration", "End time should be >= start time");
+                    result.record_failure(
+                        "span_lifecycle_duration",
+                        "End time should be >= start time",
+                    );
                     return;
                 }
             } else {
-                result.record_failure("span_lifecycle_duration", "Ended span should have calculable duration");
+                result.record_failure(
+                    "span_lifecycle_duration",
+                    "Ended span should have calculable duration",
+                );
                 return;
             }
 
@@ -1932,7 +1942,10 @@ pub mod span_semantics {
             span.end();
 
             if span.end_time != first_end_time {
-                result.record_failure("span_lifecycle_idempotent", "Multiple end() calls should be idempotent");
+                result.record_failure(
+                    "span_lifecycle_idempotent",
+                    "Multiple end() calls should be idempotent",
+                );
                 return;
             }
 
@@ -1949,24 +1962,36 @@ pub mod span_semantics {
 
             // Child should have same trace ID as parent
             if child.context.trace_id() != parent.context.trace_id() {
-                result.record_failure("span_hierarchy_trace_id", "Child span should have same trace ID as parent");
+                result.record_failure(
+                    "span_hierarchy_trace_id",
+                    "Child span should have same trace ID as parent",
+                );
                 return;
             }
 
             // Child should have different span ID from parent
             if child.context.span_id() == parent.context.span_id() {
-                result.record_failure("span_hierarchy_span_id", "Child span should have different span ID from parent");
+                result.record_failure(
+                    "span_hierarchy_span_id",
+                    "Child span should have different span ID from parent",
+                );
                 return;
             }
 
             // Child should reference parent context
             if child.parent_context.is_none() {
-                result.record_failure("span_hierarchy_parent_context", "Child span should have parent context");
+                result.record_failure(
+                    "span_hierarchy_parent_context",
+                    "Child span should have parent context",
+                );
                 return;
             }
 
             if child.parent_context.unwrap() != parent.context {
-                result.record_failure("span_hierarchy_parent_reference", "Child span should reference correct parent context");
+                result.record_failure(
+                    "span_hierarchy_parent_reference",
+                    "Child span should reference correct parent context",
+                );
                 return;
             }
 
@@ -1980,9 +2005,13 @@ pub mod span_semantics {
             let child = parent.new_child("child", SpanKind::Internal);
 
             // All spans should share same trace ID
-            if child.context.trace_id() != grandparent.context.trace_id() ||
-               parent.context.trace_id() != grandparent.context.trace_id() {
-                result.record_failure("span_hierarchy_multi_level", "All spans in hierarchy should share trace ID");
+            if child.context.trace_id() != grandparent.context.trace_id()
+                || parent.context.trace_id() != grandparent.context.trace_id()
+            {
+                result.record_failure(
+                    "span_hierarchy_multi_level",
+                    "All spans in hierarchy should share trace ID",
+                );
                 return;
             }
 
@@ -2018,7 +2047,10 @@ pub mod span_semantics {
             span.set_attribute("test.key", "new_value");
 
             if span.attributes.get("test.key") != Some(&"new_value".to_string()) {
-                result.record_failure("span_attributes_overwrite", "Attribute should be overwritten");
+                result.record_failure(
+                    "span_attributes_overwrite",
+                    "Attribute should be overwritten",
+                );
                 return;
             }
 
@@ -2079,7 +2111,10 @@ pub mod span_semantics {
 
             // Events should be in chronological order
             if span.events[0].timestamp > span.events[1].timestamp {
-                result.record_failure("span_events_ordering", "Events should be in chronological order");
+                result.record_failure(
+                    "span_events_ordering",
+                    "Events should be in chronological order",
+                );
                 return;
             }
 
@@ -2117,7 +2152,9 @@ pub mod span_semantics {
         // Test 5.2: Setting status
         {
             let mut span = TestSpan::new("test_span", SpanKind::Internal);
-            span.set_status(Status::Error { description: "Something went wrong".into() });
+            span.set_status(Status::Error {
+                description: "Something went wrong".into(),
+            });
 
             if let Status::Error { description } = &span.status {
                 if description != "Something went wrong" {
@@ -2136,10 +2173,15 @@ pub mod span_semantics {
         {
             let mut span = TestSpan::new("test_span", SpanKind::Internal);
             span.set_status(Status::Ok);
-            span.set_status(Status::Error { description: "Error occurred".into() });
+            span.set_status(Status::Error {
+                description: "Error occurred".into(),
+            });
 
             if !matches!(span.status, Status::Error { .. }) {
-                result.record_failure("span_status_precedence", "Error status should take precedence");
+                result.record_failure(
+                    "span_status_precedence",
+                    "Error status should take precedence",
+                );
                 return;
             }
 
@@ -2155,7 +2197,10 @@ pub mod span_semantics {
             let span2 = TestSpan::new("span2", SpanKind::Internal);
 
             if span1.context.span_id() == span2.context.span_id() {
-                result.record_failure("span_context_unique_ids", "Different spans should have different span IDs");
+                result.record_failure(
+                    "span_context_unique_ids",
+                    "Different spans should have different span IDs",
+                );
                 return;
             }
 
@@ -2169,7 +2214,10 @@ pub mod span_semantics {
 
             // Trace ID should not be zero (invalid)
             if trace_id == TraceId::INVALID {
-                result.record_failure("span_context_trace_id", "Trace ID should not be invalid/zero");
+                result.record_failure(
+                    "span_context_trace_id",
+                    "Trace ID should not be invalid/zero",
+                );
                 return;
             }
 
@@ -2212,8 +2260,12 @@ pub mod span_semantics {
             let child = parent.new_child("child", SpanKind::Internal);
 
             // Child should inherit sampling decision from parent
-            if parent.context.trace_flags().is_sampled() != child.context.trace_flags().is_sampled() {
-                result.record_failure("span_sampling_inheritance", "Child should inherit parent sampling decision");
+            if parent.context.trace_flags().is_sampled() != child.context.trace_flags().is_sampled()
+            {
+                result.record_failure(
+                    "span_sampling_inheritance",
+                    "Child should inherit parent sampling decision",
+                );
                 return;
             }
 
@@ -2222,7 +2274,10 @@ pub mod span_semantics {
     }
 
     /// Test context propagation semantics.
-    fn test_context_propagation(result: &mut SpanConformanceResult, _config: &SpanConformanceConfig) {
+    fn test_context_propagation(
+        result: &mut SpanConformanceResult,
+        _config: &SpanConformanceConfig,
+    ) {
         // Test 8.1: Context propagation across service boundaries
         {
             // Simulate extracting context from incoming request
@@ -2239,20 +2294,26 @@ pub mod span_semantics {
             // Create child span from incoming context
             let child_span_id = SpanId::from_u64(0xfedcba9876543210);
             let child_context = SpanContext::new(
-                trace_id, // Same trace ID
-                child_span_id, // New span ID
+                trace_id,            // Same trace ID
+                child_span_id,       // New span ID
                 TraceFlags::SAMPLED, // Inherit sampling
                 false,
                 TraceState::default(),
             );
 
             if child_context.trace_id() != incoming_context.trace_id() {
-                result.record_failure("context_propagation_trace_id", "Trace ID should be preserved across boundaries");
+                result.record_failure(
+                    "context_propagation_trace_id",
+                    "Trace ID should be preserved across boundaries",
+                );
                 return;
             }
 
             if child_context.trace_flags() != incoming_context.trace_flags() {
-                result.record_failure("context_propagation_flags", "Trace flags should be preserved");
+                result.record_failure(
+                    "context_propagation_flags",
+                    "Trace flags should be preserved",
+                );
                 return;
             }
 
@@ -2352,8 +2413,11 @@ pub mod span_semantics {
             }
 
             // For basic functionality, we expect high success rate
-            assert!(result.success_rate() >= 80.0,
-                "Expected at least 80% success rate, got {:.1}%", result.success_rate());
+            assert!(
+                result.success_rate() >= 80.0,
+                "Expected at least 80% success rate, got {:.1}%",
+                result.success_rate()
+            );
         }
     }
 }
@@ -2385,7 +2449,8 @@ pub mod span_semantics {
     }
 
     /// Placeholder function when tracing is disabled.
-    pub fn run_span_conformance_tests() -> Result<SpanConformanceResult, Box<dyn std::error::Error>> {
+    pub fn run_span_conformance_tests() -> Result<SpanConformanceResult, Box<dyn std::error::Error>>
+    {
         Err("OpenTelemetry span semantics testing requires 'tracing-integration' feature".into())
     }
 }

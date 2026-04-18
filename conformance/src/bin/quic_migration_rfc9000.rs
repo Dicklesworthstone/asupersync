@@ -77,12 +77,15 @@ impl MockPathValidator {
         let challenge_id = *counter;
 
         let mut pending = self.pending_challenges.lock().unwrap();
-        pending.insert(challenge_id, PathChallenge {
-            id: challenge_id,
-            path: new_path,
-            sent_at: Instant::now(),
-            data: generate_challenge_data(challenge_id),
-        });
+        pending.insert(
+            challenge_id,
+            PathChallenge {
+                id: challenge_id,
+                path: new_path,
+                sent_at: Instant::now(),
+                data: generate_challenge_data(challenge_id),
+            },
+        );
 
         challenge_id
     }
@@ -245,7 +248,7 @@ impl AmplificationTracker {
         let sent = *self.sent_bytes.lock().unwrap();
 
         if received == 0 {
-            sent > 1200  // Initial packet limit
+            sent > 1200 // Initial packet limit
         } else {
             sent > received * self.amplification_limit
         }
@@ -324,10 +327,18 @@ pub enum RequirementLevel {
 pub struct PathChallengeResponseTest;
 
 impl ConformanceTest for PathChallengeResponseTest {
-    fn name(&self) -> &str { "path_challenge_response_validation" }
-    fn rfc_section(&self) -> &str { "RFC 9000 §9.1" }
-    fn description(&self) -> &str { "PATH_CHALLENGE/PATH_RESPONSE round-trip validates new path" }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "path_challenge_response_validation"
+    }
+    fn rfc_section(&self) -> &str {
+        "RFC 9000 §9.1"
+    }
+    fn description(&self) -> &str {
+        "PATH_CHALLENGE/PATH_RESPONSE round-trip validates new path"
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, harness: &mut QuicMigrationConformanceHarness) -> MigrationTestResult {
         let new_path = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 443);
@@ -344,7 +355,9 @@ impl ConformanceTest for PathChallengeResponseTest {
 
         // Simulate PATH_RESPONSE with correct data
         let challenge_data = generate_challenge_data(challenge_id);
-        let validation_success = harness.path_validator.process_path_response(challenge_id, &challenge_data);
+        let validation_success = harness
+            .path_validator
+            .process_path_response(challenge_id, &challenge_data);
 
         if !validation_success {
             return MigrationTestResult::Fail {
@@ -374,10 +387,18 @@ impl ConformanceTest for PathChallengeResponseTest {
 pub struct ConnectionIdRetirementTest;
 
 impl ConformanceTest for ConnectionIdRetirementTest {
-    fn name(&self) -> &str { "connection_id_retirement" }
-    fn rfc_section(&self) -> &str { "RFC 9000 §9.5" }
-    fn description(&self) -> &str { "Old Connection IDs are properly retired during migration" }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "connection_id_retirement"
+    }
+    fn rfc_section(&self) -> &str {
+        "RFC 9000 §9.5"
+    }
+    fn description(&self) -> &str {
+        "Old Connection IDs are properly retired during migration"
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, harness: &mut QuicMigrationConformanceHarness) -> MigrationTestResult {
         // Issue initial connection ID
@@ -394,7 +415,9 @@ impl ConformanceTest for ConnectionIdRetirementTest {
         }
 
         // Retire old connection ID
-        let retirement_success = harness.connection_id_manager.retire_connection_id(old_conn_id.sequence);
+        let retirement_success = harness
+            .connection_id_manager
+            .retire_connection_id(old_conn_id.sequence);
 
         if !retirement_success {
             return MigrationTestResult::Fail {
@@ -403,7 +426,10 @@ impl ConformanceTest for ConnectionIdRetirementTest {
         }
 
         // Verify retirement state
-        if !harness.connection_id_manager.is_retired(old_conn_id.sequence) {
+        if !harness
+            .connection_id_manager
+            .is_retired(old_conn_id.sequence)
+        {
             return MigrationTestResult::Fail {
                 reason: "Retired connection ID not marked as retired".to_string(),
             };
@@ -431,10 +457,18 @@ impl ConformanceTest for ConnectionIdRetirementTest {
 pub struct AntiAmplificationTest;
 
 impl ConformanceTest for AntiAmplificationTest {
-    fn name(&self) -> &str { "anti_amplification_limits" }
-    fn rfc_section(&self) -> &str { "RFC 9000 §8.1" }
-    fn description(&self) -> &str { "Anti-amplification limits enforced during migration (3x received)" }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "anti_amplification_limits"
+    }
+    fn rfc_section(&self) -> &str {
+        "RFC 9000 §8.1"
+    }
+    fn description(&self) -> &str {
+        "Anti-amplification limits enforced during migration (3x received)"
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, harness: &mut QuicMigrationConformanceHarness) -> MigrationTestResult {
         // Reset tracking
@@ -495,10 +529,18 @@ impl ConformanceTest for AntiAmplificationTest {
 pub struct NatRebindingTest;
 
 impl ConformanceTest for NatRebindingTest {
-    fn name(&self) -> &str { "nat_rebinding_tolerance" }
-    fn rfc_section(&self) -> &str { "RFC 9000 §9.6" }
-    fn description(&self) -> &str { "NAT rebinding tolerated without explicit migration" }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn name(&self) -> &str {
+        "nat_rebinding_tolerance"
+    }
+    fn rfc_section(&self) -> &str {
+        "RFC 9000 §9.6"
+    }
+    fn description(&self) -> &str {
+        "NAT rebinding tolerated without explicit migration"
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self, harness: &mut QuicMigrationConformanceHarness) -> MigrationTestResult {
         let original_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 12345);
@@ -510,7 +552,9 @@ impl ConformanceTest for NatRebindingTest {
         // Original address should be considered validated (pre-existing)
         let challenge_id = harness.path_validator.send_path_challenge(original_addr);
         let challenge_data = generate_challenge_data(challenge_id);
-        harness.path_validator.process_path_response(challenge_id, &challenge_data);
+        harness
+            .path_validator
+            .process_path_response(challenge_id, &challenge_data);
 
         if !harness.path_validator.is_path_validated(original_addr) {
             return MigrationTestResult::Fail {
@@ -536,7 +580,8 @@ impl ConformanceTest for NatRebindingTest {
 
         if final_challenge_count != initial_challenge_count {
             return MigrationTestResult::Fail {
-                reason: "NAT rebinding should not automatically trigger path validation".to_string(),
+                reason: "NAT rebinding should not automatically trigger path validation"
+                    .to_string(),
             };
         }
 
@@ -551,16 +596,27 @@ impl ConformanceTest for NatRebindingTest {
 pub struct DisabledMigrationTest;
 
 impl ConformanceTest for DisabledMigrationTest {
-    fn name(&self) -> &str { "disable_active_migration_parameter" }
-    fn rfc_section(&self) -> &str { "RFC 9000 §18.2" }
-    fn description(&self) -> &str { "Migration disabled when disable_active_migration transport parameter set" }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "disable_active_migration_parameter"
+    }
+    fn rfc_section(&self) -> &str {
+        "RFC 9000 §18.2"
+    }
+    fn description(&self) -> &str {
+        "Migration disabled when disable_active_migration transport parameter set"
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, harness: &mut QuicMigrationConformanceHarness) -> MigrationTestResult {
         // Configure transport parameters to disable migration
         harness.transport_params.disable_active_migration = true;
 
-        let new_path = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 443);
+        let new_path = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            443,
+        );
 
         // Attempt to initiate migration when disabled
         // This should fail or be ignored
@@ -596,7 +652,6 @@ impl ConformanceTest for DisabledMigrationTest {
                     reason: "disable_active_migration flag not properly set".to_string(),
                 };
             }
-
         } else {
             return MigrationTestResult::Fail {
                 reason: "Test setup failed: disable_active_migration not set".to_string(),
@@ -679,15 +734,15 @@ fn main() {
         match result {
             MigrationTestResult::Pass => {
                 pass_count += 1;
-            },
+            }
             MigrationTestResult::Fail { reason } => {
                 fail_count += 1;
                 println!("FAILED: {} - {}", test_name, reason);
-            },
+            }
             MigrationTestResult::Skip { reason } => {
                 skip_count += 1;
                 println!("SKIPPED: {} - {}", test_name, reason);
-            },
+            }
         }
     }
 
@@ -764,13 +819,13 @@ mod tests {
         // All tests should pass
         for (test_name, result) in &results {
             match result {
-                MigrationTestResult::Pass => {},
+                MigrationTestResult::Pass => {}
                 MigrationTestResult::Fail { reason } => {
                     panic!("Test {} failed: {}", test_name, reason);
-                },
+                }
                 MigrationTestResult::Skip { reason } => {
                     println!("Test {} skipped: {}", test_name, reason);
-                },
+                }
             }
         }
 
@@ -790,8 +845,14 @@ mod tests {
         let wrong_data = [0xFF; 8];
         let validation_success = validator.process_path_response(challenge_id, &wrong_data);
 
-        assert!(!validation_success, "Path validation should fail with incorrect response data");
-        assert!(!validator.is_path_validated(new_path), "Path should not be validated with wrong response");
+        assert!(
+            !validation_success,
+            "Path validation should fail with incorrect response data"
+        );
+        assert!(
+            !validator.is_path_validated(new_path),
+            "Path should not be validated with wrong response"
+        );
     }
 
     /// Test amplification tracking edge cases
@@ -820,10 +881,16 @@ mod tests {
 
         // Retire non-existent connection ID
         let retirement_success = manager.retire_connection_id(999);
-        assert!(!retirement_success, "Should not be able to retire non-existent connection ID");
+        assert!(
+            !retirement_success,
+            "Should not be able to retire non-existent connection ID"
+        );
 
         // Check non-retired ID
-        assert!(!manager.is_retired(999), "Non-existent ID should not be marked as retired");
+        assert!(
+            !manager.is_retired(999),
+            "Non-existent ID should not be marked as retired"
+        );
 
         // Initial counts
         assert_eq!(manager.active_count(), 0);

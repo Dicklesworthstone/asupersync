@@ -1549,10 +1549,12 @@ mod tests {
         for offset_ns in [0, 100, 1000, 10000, 100000] {
             let shifted_events: Vec<MarkingEvent> = base_events
                 .iter()
-                .map(|event| MarkingEvent::new(
-                    Time::from_nanos(event.time.as_nanos() + offset_ns),
-                    event.kind.clone(),
-                ))
+                .map(|event| {
+                    MarkingEvent::new(
+                        Time::from_nanos(event.time.as_nanos() + offset_ns),
+                        event.kind.clone(),
+                    )
+                })
                 .collect();
 
             let mut checker1 = ContractChecker::new();
@@ -1565,22 +1567,26 @@ mod tests {
             assert_eq!(
                 result1.contract_status.exhaustive_resolution,
                 result2.contract_status.exhaustive_resolution,
-                "Temporal shift by {} changed ExhaustiveResolution satisfaction", offset_ns
+                "Temporal shift by {} changed ExhaustiveResolution satisfaction",
+                offset_ns
             );
             assert_eq!(
                 result1.contract_status.no_partial_commit,
                 result2.contract_status.no_partial_commit,
-                "Temporal shift by {} changed NoPartialCommit satisfaction", offset_ns
+                "Temporal shift by {} changed NoPartialCommit satisfaction",
+                offset_ns
             );
             assert_eq!(
                 result1.contract_status.region_closure_safety,
                 result2.contract_status.region_closure_safety,
-                "Temporal shift by {} changed RegionClosureSafety satisfaction", offset_ns
+                "Temporal shift by {} changed RegionClosureSafety satisfaction",
+                offset_ns
             );
             assert_eq!(
                 result1.violations.len(),
                 result2.violations.len(),
-                "Temporal shift by {} changed violation count", offset_ns
+                "Temporal shift by {} changed violation count",
+                offset_ns
             );
         }
 
@@ -1625,18 +1631,21 @@ mod tests {
             let kind_specific_trace: Vec<MarkingEvent> = base_trace
                 .iter()
                 .map(|event| match &event.kind {
-                    MarkingEventKind::Reserve { obligation, task, region, .. } => {
-                        reserve(event.time.as_nanos(), *obligation, kind, *task, *region)
-                    }
-                    MarkingEventKind::Commit { obligation, region, .. } => {
-                        commit(event.time.as_nanos(), *obligation, *region, kind)
-                    }
-                    MarkingEventKind::Abort { obligation, region, .. } => {
-                        abort(event.time.as_nanos(), *obligation, *region, kind)
-                    }
-                    MarkingEventKind::Leak { obligation, region, .. } => {
-                        leak(event.time.as_nanos(), *obligation, *region, kind)
-                    }
+                    MarkingEventKind::Reserve {
+                        obligation,
+                        task,
+                        region,
+                        ..
+                    } => reserve(event.time.as_nanos(), *obligation, kind, *task, *region),
+                    MarkingEventKind::Commit {
+                        obligation, region, ..
+                    } => commit(event.time.as_nanos(), *obligation, *region, kind),
+                    MarkingEventKind::Abort {
+                        obligation, region, ..
+                    } => abort(event.time.as_nanos(), *obligation, *region, kind),
+                    MarkingEventKind::Leak {
+                        obligation, region, ..
+                    } => leak(event.time.as_nanos(), *obligation, *region, kind),
                     MarkingEventKind::RegionClose { region } => {
                         close(event.time.as_nanos(), *region)
                     }
@@ -1654,19 +1663,22 @@ mod tests {
                 results[0].is_clean(),
                 results[i].is_clean(),
                 "Kind {} produced different clean status than kind {}",
-                kinds[0], kinds[i]
+                kinds[0],
+                kinds[i]
             );
             assert_eq!(
                 results[0].violations.len(),
                 results[i].violations.len(),
                 "Kind {} produced different violation count than kind {}",
-                kinds[0], kinds[i]
+                kinds[0],
+                kinds[i]
             );
             assert_eq!(
                 results[0].contract_status.exhaustive_resolution,
                 results[i].contract_status.exhaustive_resolution,
                 "Kind {} produced different ExhaustiveResolution status than kind {}",
-                kinds[0], kinds[i]
+                kinds[0],
+                kinds[i]
             );
         }
 
@@ -1726,10 +1738,14 @@ mod tests {
         );
 
         // Check that violations specific to region 0 obligations are preserved
-        let region0_violations1: Vec<_> = result1.violations.iter()
+        let region0_violations1: Vec<_> = result1
+            .violations
+            .iter()
             .filter(|v| v.region == Some(r(0)))
             .collect();
-        let region0_violations2: Vec<_> = result2.violations.iter()
+        let region0_violations2: Vec<_> = result2
+            .violations
+            .iter()
             .filter(|v| v.region == Some(r(0)))
             .collect();
 
@@ -1744,18 +1760,27 @@ mod tests {
             let shifted_region1_trace: Vec<MarkingEvent> = region1_trace
                 .iter()
                 .map(|event| match &event.kind {
-                    MarkingEventKind::Reserve { obligation, kind, task, .. } => {
-                        reserve(event.time.as_nanos(), *obligation, *kind, *task, r(region_offset))
-                    }
-                    MarkingEventKind::Commit { obligation, kind, .. } => {
-                        commit(event.time.as_nanos(), *obligation, r(region_offset), *kind)
-                    }
-                    MarkingEventKind::Abort { obligation, kind, .. } => {
-                        abort(event.time.as_nanos(), *obligation, r(region_offset), *kind)
-                    }
-                    MarkingEventKind::Leak { obligation, kind, .. } => {
-                        leak(event.time.as_nanos(), *obligation, r(region_offset), *kind)
-                    }
+                    MarkingEventKind::Reserve {
+                        obligation,
+                        kind,
+                        task,
+                        ..
+                    } => reserve(
+                        event.time.as_nanos(),
+                        *obligation,
+                        *kind,
+                        *task,
+                        r(region_offset),
+                    ),
+                    MarkingEventKind::Commit {
+                        obligation, kind, ..
+                    } => commit(event.time.as_nanos(), *obligation, r(region_offset), *kind),
+                    MarkingEventKind::Abort {
+                        obligation, kind, ..
+                    } => abort(event.time.as_nanos(), *obligation, r(region_offset), *kind),
+                    MarkingEventKind::Leak {
+                        obligation, kind, ..
+                    } => leak(event.time.as_nanos(), *obligation, r(region_offset), *kind),
                     MarkingEventKind::RegionClose { .. } => {
                         close(event.time.as_nanos(), r(region_offset))
                     }
@@ -1770,7 +1795,9 @@ mod tests {
             let result3 = checker3.check(&test_combined);
 
             // Region 0 results should remain consistent
-            let region0_violations3: Vec<_> = result3.violations.iter()
+            let region0_violations3: Vec<_> = result3
+                .violations
+                .iter()
                 .filter(|v| v.region == Some(r(0)))
                 .collect();
 
@@ -1834,9 +1861,9 @@ mod tests {
             for event in &reordered_trace {
                 match &event.kind {
                     MarkingEventKind::Reserve { .. } => reserves.push(event.clone()),
-                    MarkingEventKind::Commit { .. } | MarkingEventKind::Abort { .. } | MarkingEventKind::Leak { .. } => {
-                        resolutions.push(event.clone())
-                    }
+                    MarkingEventKind::Commit { .. }
+                    | MarkingEventKind::Abort { .. }
+                    | MarkingEventKind::Leak { .. } => resolutions.push(event.clone()),
                     MarkingEventKind::RegionClose { .. } => closes.push(event.clone()),
                 }
             }
@@ -1859,22 +1886,26 @@ mod tests {
             assert_eq!(
                 result_original.is_clean(),
                 result_reordered.is_clean(),
-                "Iteration {}: Reordering changed clean status", test_iteration
+                "Iteration {}: Reordering changed clean status",
+                test_iteration
             );
             assert_eq!(
                 result_original.contract_status.exhaustive_resolution,
                 result_reordered.contract_status.exhaustive_resolution,
-                "Iteration {}: Reordering changed ExhaustiveResolution", test_iteration
+                "Iteration {}: Reordering changed ExhaustiveResolution",
+                test_iteration
             );
             assert_eq!(
                 result_original.contract_status.no_partial_commit,
                 result_reordered.contract_status.no_partial_commit,
-                "Iteration {}: Reordering changed NoPartialCommit", test_iteration
+                "Iteration {}: Reordering changed NoPartialCommit",
+                test_iteration
             );
             assert_eq!(
                 result_original.violations.len(),
                 result_reordered.violations.len(),
-                "Iteration {}: Reordering changed violation count", test_iteration
+                "Iteration {}: Reordering changed violation count",
+                test_iteration
             );
         }
 
@@ -1918,14 +1949,22 @@ mod tests {
             let mut events = Vec::new();
 
             // Reserve all obligations
-            for (i, &(obligation_id, kind, task_id, region_id)) in base_obligations.iter().enumerate() {
-                events.push(reserve(i as u64 * 10, obligation_id, kind, task_id, region_id));
+            for (i, &(obligation_id, kind, task_id, region_id)) in
+                base_obligations.iter().enumerate()
+            {
+                events.push(reserve(
+                    i as u64 * 10,
+                    obligation_id,
+                    kind,
+                    task_id,
+                    region_id,
+                ));
             }
 
             // Apply different resolution patterns
             for (i, (&(obligation_id, kind, _, region_id), &resolution)) in
-                base_obligations.iter().zip(resolutions.iter()).enumerate() {
-
+                base_obligations.iter().zip(resolutions.iter()).enumerate()
+            {
                 let resolve_time = (base_obligations.len() as u64 * 10) + (i as u64 * 10);
                 match resolution {
                     "commit" => events.push(commit(resolve_time, obligation_id, region_id, kind)),
@@ -1956,7 +1995,8 @@ mod tests {
                 result1.contract_status.exhaustive_resolution,
                 result2.contract_status.exhaustive_resolution,
                 "Resolution variant {} differs from variant {} on ExhaustiveResolution",
-                variant2, variant1
+                variant2,
+                variant1
             );
 
             // NoPartialCommit should be satisfied (no double resolutions)
@@ -1964,7 +2004,8 @@ mod tests {
                 result1.contract_status.no_partial_commit,
                 result2.contract_status.no_partial_commit,
                 "Resolution variant {} differs from variant {} on NoPartialCommit",
-                variant2, variant1
+                variant2,
+                variant1
             );
 
             // RegionClosureSafety should be satisfied (all resolved before close)
@@ -1972,7 +2013,8 @@ mod tests {
                 result1.contract_status.region_closure_safety,
                 result2.contract_status.region_closure_safety,
                 "Resolution variant {} differs from variant {} on RegionClosureSafety",
-                variant2, variant1
+                variant2,
+                variant1
             );
         }
 
@@ -2022,9 +2064,9 @@ mod tests {
         };
 
         // Generate multiple adversarial traces
-        let trace_variants = (0..5).map(|_| {
-            generate_dialectica_trace(&config, &mut rng)
-        }).collect::<Vec<_>>();
+        let trace_variants = (0..5)
+            .map(|_| generate_dialectica_trace(&config, &mut rng))
+            .collect::<Vec<_>>();
 
         for (i, trace) in trace_variants.iter().enumerate() {
             let mut checker = ContractChecker::new();
@@ -2038,22 +2080,26 @@ mod tests {
             // The trace generator should produce valid traces, so basic contracts should hold
             assert!(
                 result.contract_status.exhaustive_resolution,
-                "Adversarial trace {} failed ExhaustiveResolution", i
+                "Adversarial trace {} failed ExhaustiveResolution",
+                i
             );
             assert!(
                 result.contract_status.no_partial_commit,
-                "Adversarial trace {} failed NoPartialCommit", i
+                "Adversarial trace {} failed NoPartialCommit",
+                i
             );
             assert!(
                 result.contract_status.region_closure_safety,
-                "Adversarial trace {} failed RegionClosureSafety", i
+                "Adversarial trace {} failed RegionClosureSafety",
+                i
             );
 
             // Verify that all events were processed
             assert_eq!(
                 result.events_checked,
                 trace.len(),
-                "Adversarial trace {}: events_checked mismatch", i
+                "Adversarial trace {}: events_checked mismatch",
+                i
             );
 
             // Check for contract uniformity across obligation kinds
@@ -2068,8 +2114,10 @@ mod tests {
                 // Adversarial traces should not introduce contract-specific violations
                 // if the generator produces valid sequences
                 if !violations_for_contract.is_empty() {
-                    println!("Adversarial trace {} has violations for {:?}: {:?}",
-                            i, contract, violations_for_contract);
+                    println!(
+                        "Adversarial trace {} has violations for {:?}: {:?}",
+                        i, contract, violations_for_contract
+                    );
                 }
             }
         }
@@ -2115,21 +2163,53 @@ mod tests {
             .map(|event| {
                 let new_time = Time::from_nanos(event.time.as_nanos() + 1000);
                 match &event.kind {
-                    MarkingEventKind::Reserve { obligation, task, region, .. } => {
+                    MarkingEventKind::Reserve {
+                        obligation,
+                        task,
+                        region,
+                        ..
+                    } => {
                         let new_region = if *obligation == o(1) { r(2) } else { *region };
-                        reserve(new_time.as_nanos(), *obligation, ObligationKind::IoOp, *task, new_region)
+                        reserve(
+                            new_time.as_nanos(),
+                            *obligation,
+                            ObligationKind::IoOp,
+                            *task,
+                            new_region,
+                        )
                     }
-                    MarkingEventKind::Commit { obligation, region, .. } => {
+                    MarkingEventKind::Commit {
+                        obligation, region, ..
+                    } => {
                         let new_region = if *obligation == o(1) { r(2) } else { *region };
-                        commit(new_time.as_nanos(), *obligation, new_region, ObligationKind::IoOp)
+                        commit(
+                            new_time.as_nanos(),
+                            *obligation,
+                            new_region,
+                            ObligationKind::IoOp,
+                        )
                     }
-                    MarkingEventKind::Abort { obligation, region, .. } => {
+                    MarkingEventKind::Abort {
+                        obligation, region, ..
+                    } => {
                         let new_region = if *obligation == o(1) { r(2) } else { *region };
-                        abort(new_time.as_nanos(), *obligation, new_region, ObligationKind::IoOp)
+                        abort(
+                            new_time.as_nanos(),
+                            *obligation,
+                            new_region,
+                            ObligationKind::IoOp,
+                        )
                     }
-                    MarkingEventKind::Leak { obligation, region, .. } => {
+                    MarkingEventKind::Leak {
+                        obligation, region, ..
+                    } => {
                         let new_region = if *obligation == o(1) { r(2) } else { *region };
-                        leak(new_time.as_nanos(), *obligation, new_region, ObligationKind::IoOp)
+                        leak(
+                            new_time.as_nanos(),
+                            *obligation,
+                            new_region,
+                            ObligationKind::IoOp,
+                        )
                     }
                     MarkingEventKind::RegionClose { region } => {
                         let new_region = if *region == r(1) { r(2) } else { *region };
@@ -2160,7 +2240,9 @@ mod tests {
         );
         assert_eq!(
             result_base.contract_status.kind_uniform_state_machine,
-            result_transformed.contract_status.kind_uniform_state_machine,
+            result_transformed
+                .contract_status
+                .kind_uniform_state_machine,
             "Composite transformation changed KindUniformStateMachine"
         );
 

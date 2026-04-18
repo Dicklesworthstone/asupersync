@@ -67,11 +67,19 @@ fn test_continuation_required_after_nonfinal_text() {
 
     let frame2 = decoder.decode(&mut buf).unwrap().unwrap();
     assert!(!frame2.fin, "Middle fragment must have FIN=false");
-    assert_eq!(frame2.opcode, Opcode::Continuation, "Middle fragment must be Continuation");
+    assert_eq!(
+        frame2.opcode,
+        Opcode::Continuation,
+        "Middle fragment must be Continuation"
+    );
 
     let frame3 = decoder.decode(&mut buf).unwrap().unwrap();
     assert!(frame3.fin, "Final fragment must have FIN=true");
-    assert_eq!(frame3.opcode, Opcode::Continuation, "Final fragment must be Continuation");
+    assert_eq!(
+        frame3.opcode,
+        Opcode::Continuation,
+        "Final fragment must be Continuation"
+    );
 }
 
 /// Test continuation frame requirement after non-final binary frames.
@@ -103,11 +111,19 @@ fn test_continuation_required_after_nonfinal_binary() {
 
     let frame1 = decoder.decode(&mut buf).unwrap().unwrap();
     assert!(!frame1.fin, "First binary fragment must have FIN=false");
-    assert_eq!(frame1.opcode, Opcode::Binary, "First fragment must be Binary");
+    assert_eq!(
+        frame1.opcode,
+        Opcode::Binary,
+        "First fragment must be Binary"
+    );
 
     let frame2 = decoder.decode(&mut buf).unwrap().unwrap();
     assert!(frame2.fin, "Final fragment must have FIN=true");
-    assert_eq!(frame2.opcode, Opcode::Continuation, "Final fragment must be Continuation");
+    assert_eq!(
+        frame2.opcode,
+        Opcode::Continuation,
+        "Final fragment must be Continuation"
+    );
 }
 
 /// Test that control frames cannot be fragmented.
@@ -266,15 +282,27 @@ fn test_fragment_opcode_sequence() {
 
     // Verify opcode sequence
     let frame1 = decoder.decode(&mut buf).unwrap().unwrap();
-    assert_eq!(frame1.opcode, Opcode::Text, "First fragment must be Text opcode");
+    assert_eq!(
+        frame1.opcode,
+        Opcode::Text,
+        "First fragment must be Text opcode"
+    );
     assert!(!frame1.fin);
 
     let frame2 = decoder.decode(&mut buf).unwrap().unwrap();
-    assert_eq!(frame2.opcode, Opcode::Continuation, "Middle fragment must be Continuation");
+    assert_eq!(
+        frame2.opcode,
+        Opcode::Continuation,
+        "Middle fragment must be Continuation"
+    );
     assert!(!frame2.fin);
 
     let frame3 = decoder.decode(&mut buf).unwrap().unwrap();
-    assert_eq!(frame3.opcode, Opcode::Continuation, "Final fragment must be Continuation");
+    assert_eq!(
+        frame3.opcode,
+        Opcode::Continuation,
+        "Final fragment must be Continuation"
+    );
     assert!(frame3.fin);
 
     // Test binary fragmentation sequence: Binary -> Continuation
@@ -297,11 +325,19 @@ fn test_fragment_opcode_sequence() {
     encoder.encode(binary_final, &mut buf).unwrap();
 
     let frame1 = decoder.decode(&mut buf).unwrap().unwrap();
-    assert_eq!(frame1.opcode, Opcode::Binary, "First fragment must be Binary opcode");
+    assert_eq!(
+        frame1.opcode,
+        Opcode::Binary,
+        "First fragment must be Binary opcode"
+    );
     assert!(!frame1.fin);
 
     let frame2 = decoder.decode(&mut buf).unwrap().unwrap();
-    assert_eq!(frame2.opcode, Opcode::Continuation, "Final fragment must be Continuation");
+    assert_eq!(
+        frame2.opcode,
+        Opcode::Continuation,
+        "Final fragment must be Continuation"
+    );
     assert!(frame2.fin);
 }
 

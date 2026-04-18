@@ -8617,16 +8617,19 @@ mod tests {
                 format!(
                     "test:{},regions:[{}],finalizers:[{}],budget_exhausted:{},cancel_order:[{}],close_time:{}",
                     self.test_name,
-                    self.region_close_order.iter()
+                    self.region_close_order
+                        .iter()
                         .map(|r| format!("{}", r.as_u64()))
                         .collect::<Vec<_>>()
                         .join(","),
-                    self.finalizer_run_order.iter()
+                    self.finalizer_run_order
+                        .iter()
                         .map(|f| f.to_string())
                         .collect::<Vec<_>>()
                         .join(","),
                     self.budget_exhausted,
-                    self.cancel_propagation_order.iter()
+                    self.cancel_propagation_order
+                        .iter()
                         .map(|r| format!("{}", r.as_u64()))
                         .collect::<Vec<_>>()
                         .join(","),
@@ -8649,9 +8652,15 @@ mod tests {
             let root_id = runtime.create_root_region("root").unwrap();
 
             // Create nested region structure: root -> parent -> child1, child2
-            let parent_id = runtime.create_child_region(root_id, "parent", RegionLimits::default()).unwrap();
-            let child1_id = runtime.create_child_region(parent_id, "child1", RegionLimits::default()).unwrap();
-            let child2_id = runtime.create_child_region(parent_id, "child2", RegionLimits::default()).unwrap();
+            let parent_id = runtime
+                .create_child_region(root_id, "parent", RegionLimits::default())
+                .unwrap();
+            let child1_id = runtime
+                .create_child_region(parent_id, "child1", RegionLimits::default())
+                .unwrap();
+            let child2_id = runtime
+                .create_child_region(parent_id, "child2", RegionLimits::default())
+                .unwrap();
 
             let mut close_order = Vec::new();
 
@@ -8661,7 +8670,10 @@ mod tests {
 
             // Parent should be in Draining state, not Closed
             let parent_region = runtime.regions.get(parent_id.arena_index()).unwrap();
-            assert!(!matches!(parent_region.state(), crate::record::region::RegionState::Closed));
+            assert!(!matches!(
+                parent_region.state(),
+                crate::record::region::RegionState::Closed
+            ));
 
             // Close child1
             runtime.cancel_request(child1_id, CancelReason::ExplicitCancel);
@@ -8707,9 +8719,16 @@ mod tests {
             assert_golden_quiescence_state(
                 &result,
                 "region_close_waits_for_children",
-                &format!("test:region_close_waits_for_children,regions:[{},{},{}],finalizers:[],budget_exhausted:false,cancel_order:[{},{},{},{}],close_time:0",
-                    child1_id.as_u64(), child2_id.as_u64(), parent_id.as_u64(),
-                    parent_id.as_u64(), child1_id.as_u64(), child2_id.as_u64(), root_id.as_u64())
+                &format!(
+                    "test:region_close_waits_for_children,regions:[{},{},{}],finalizers:[],budget_exhausted:false,cancel_order:[{},{},{},{}],close_time:0",
+                    child1_id.as_u64(),
+                    child2_id.as_u64(),
+                    parent_id.as_u64(),
+                    parent_id.as_u64(),
+                    child1_id.as_u64(),
+                    child2_id.as_u64(),
+                    root_id.as_u64()
+                ),
             );
 
             crate::test_complete!("golden_region_close_waits_for_children");
@@ -8728,7 +8747,9 @@ mod tests {
             let mut runtime = RuntimeState::new(runtime_instance, None);
             let root_id = runtime.create_root_region("root").unwrap();
 
-            let region_id = runtime.create_child_region(root_id, "test_region", RegionLimits::default()).unwrap();
+            let region_id = runtime
+                .create_child_region(root_id, "test_region", RegionLimits::default())
+                .unwrap();
 
             // Register multiple sync finalizers
             let finalizer1 = Finalizer::Sync(Box::new(|| {}));
@@ -8771,10 +8792,16 @@ mod tests {
             assert_golden_quiescence_state(
                 &result,
                 "finalizer_ordering_deterministic",
-                &format!("test:finalizer_ordering_deterministic,regions:[{},{}],finalizers:[{},{},{}],budget_exhausted:false,cancel_order:[{},{}],close_time:0",
-                    region_id.as_u64(), root_id.as_u64(),
-                    id3, id2, id1,
-                    region_id.as_u64(), root_id.as_u64())
+                &format!(
+                    "test:finalizer_ordering_deterministic,regions:[{},{}],finalizers:[{},{},{}],budget_exhausted:false,cancel_order:[{},{}],close_time:0",
+                    region_id.as_u64(),
+                    root_id.as_u64(),
+                    id3,
+                    id2,
+                    id1,
+                    region_id.as_u64(),
+                    root_id.as_u64()
+                ),
             );
 
             crate::test_complete!("golden_finalizer_ordering_deterministic");
@@ -8793,7 +8820,9 @@ mod tests {
             let mut runtime = RuntimeState::new(runtime_instance, None);
             let root_id = runtime.create_root_region("root").unwrap();
 
-            let region_id = runtime.create_child_region(root_id, "budget_test", RegionLimits::default()).unwrap();
+            let region_id = runtime
+                .create_child_region(root_id, "budget_test", RegionLimits::default())
+                .unwrap();
 
             // Create a finalizer that simulates budget exhaustion
             let budget_exhausted = Arc::new(Mutex::new(false));
@@ -8828,9 +8857,13 @@ mod tests {
             assert_golden_quiescence_state(
                 &result,
                 "budget_exhaustion_during_close",
-                &format!("test:budget_exhaustion_during_close,regions:[{},{}],finalizers:[],budget_exhausted:true,cancel_order:[{},{}],close_time:0",
-                    region_id.as_u64(), root_id.as_u64(),
-                    region_id.as_u64(), root_id.as_u64())
+                &format!(
+                    "test:budget_exhaustion_during_close,regions:[{},{}],finalizers:[],budget_exhausted:true,cancel_order:[{},{}],close_time:0",
+                    region_id.as_u64(),
+                    root_id.as_u64(),
+                    region_id.as_u64(),
+                    root_id.as_u64()
+                ),
             );
 
             crate::test_complete!("golden_budget_exhaustion_during_close");
@@ -8850,9 +8883,15 @@ mod tests {
             let root_id = runtime.create_root_region("root").unwrap();
 
             // Create a dependency chain: root -> A -> B -> C
-            let region_a = runtime.create_child_region(root_id, "region_a", RegionLimits::default()).unwrap();
-            let region_b = runtime.create_child_region(region_a, "region_b", RegionLimits::default()).unwrap();
-            let region_c = runtime.create_child_region(region_b, "region_c", RegionLimits::default()).unwrap();
+            let region_a = runtime
+                .create_child_region(root_id, "region_a", RegionLimits::default())
+                .unwrap();
+            let region_b = runtime
+                .create_child_region(region_a, "region_b", RegionLimits::default())
+                .unwrap();
+            let region_c = runtime
+                .create_child_region(region_b, "region_c", RegionLimits::default())
+                .unwrap();
 
             let mut propagation_order = Vec::new();
 
@@ -8889,9 +8928,17 @@ mod tests {
             assert_golden_quiescence_state(
                 &result,
                 "cancel_propagation_order",
-                &format!("test:cancel_propagation_order,regions:[{},{},{},{}],finalizers:[],budget_exhausted:false,cancel_order:[{},{},{},{}],close_time:0",
-                    region_c.as_u64(), region_b.as_u64(), region_a.as_u64(), root_id.as_u64(),
-                    root_id.as_u64(), region_a.as_u64(), region_b.as_u64(), region_c.as_u64())
+                &format!(
+                    "test:cancel_propagation_order,regions:[{},{},{},{}],finalizers:[],budget_exhausted:false,cancel_order:[{},{},{},{}],close_time:0",
+                    region_c.as_u64(),
+                    region_b.as_u64(),
+                    region_a.as_u64(),
+                    root_id.as_u64(),
+                    root_id.as_u64(),
+                    region_a.as_u64(),
+                    region_b.as_u64(),
+                    region_c.as_u64()
+                ),
             );
 
             crate::test_complete!("golden_cancel_propagation_order_matches_dependencies");
@@ -8919,13 +8966,15 @@ mod tests {
             assert_golden_quiescence_state(
                 &result1,
                 "replay_identical",
-                &format!("test:replay_identical,regions:[{},{}],finalizers:[{},{}],budget_exhausted:false,cancel_order:[{},{}],close_time:0",
+                &format!(
+                    "test:replay_identical,regions:[{},{}],finalizers:[{},{}],budget_exhausted:false,cancel_order:[{},{}],close_time:0",
                     result1.region_close_order[0].as_u64(),
                     result1.region_close_order[1].as_u64(),
                     result1.finalizer_run_order[0],
                     result1.finalizer_run_order[1],
                     result1.cancel_propagation_order[0].as_u64(),
-                    result1.cancel_propagation_order[1].as_u64())
+                    result1.cancel_propagation_order[1].as_u64()
+                ),
             );
 
             crate::test_complete!("golden_replay_identical_under_lab_runtime");
@@ -8936,7 +8985,9 @@ mod tests {
             let mut runtime = RuntimeState::new(runtime_instance, None);
             let root_id = runtime.create_root_region("root").unwrap();
 
-            let region_id = runtime.create_child_region(root_id, "deterministic", RegionLimits::default()).unwrap();
+            let region_id = runtime
+                .create_child_region(root_id, "deterministic", RegionLimits::default())
+                .unwrap();
 
             let mut trace = Vec::new();
 
@@ -8996,17 +9047,27 @@ mod tests {
             let root_id = runtime.create_root_region("root").unwrap();
 
             // Complex hierarchy: root -> parent -> child1, child2 -> grandchild
-            let parent_id = runtime.create_child_region(root_id, "parent", RegionLimits::default()).unwrap();
-            let child1_id = runtime.create_child_region(parent_id, "child1", RegionLimits::default()).unwrap();
-            let child2_id = runtime.create_child_region(parent_id, "child2", RegionLimits::default()).unwrap();
-            let grandchild_id = runtime.create_child_region(child1_id, "grandchild", RegionLimits::default()).unwrap();
+            let parent_id = runtime
+                .create_child_region(root_id, "parent", RegionLimits::default())
+                .unwrap();
+            let child1_id = runtime
+                .create_child_region(parent_id, "child1", RegionLimits::default())
+                .unwrap();
+            let child2_id = runtime
+                .create_child_region(parent_id, "child2", RegionLimits::default())
+                .unwrap();
+            let grandchild_id = runtime
+                .create_child_region(child1_id, "grandchild", RegionLimits::default())
+                .unwrap();
 
             // Register finalizers in different regions
             let finalizer1 = Finalizer::Sync(Box::new(|| {}));
             let finalizer2 = Finalizer::Sync(Box::new(|| {}));
 
             let fin_id1 = runtime.register_finalizer(child2_id, finalizer1).unwrap();
-            let fin_id2 = runtime.register_finalizer(grandchild_id, finalizer2).unwrap();
+            let fin_id2 = runtime
+                .register_finalizer(grandchild_id, finalizer2)
+                .unwrap();
 
             let mut close_order = Vec::new();
             let mut cancel_order = Vec::new();
@@ -9059,7 +9120,7 @@ mod tests {
                 &result,
                 "composite_quiescence",
                 // Expected is complex due to the hierarchy - just verify structure
-                "test:composite_quiescence,regions:[COMPLEX_HIERARCHY],finalizers:[LIFO_ORDER],budget_exhausted:false,cancel_order:[ROOT_FIRST],close_time:0"
+                "test:composite_quiescence,regions:[COMPLEX_HIERARCHY],finalizers:[LIFO_ORDER],budget_exhausted:false,cancel_order:[ROOT_FIRST],close_time:0",
             );
 
             crate::test_complete!("golden_composite_quiescence_properties");
@@ -9076,8 +9137,14 @@ mod tests {
 
             // For complex hierarchies, just verify key properties rather than exact strings
             if expected_pattern.contains("COMPLEX_HIERARCHY") {
-                assert!(!actual.region_close_order.is_empty(), "Should have closed regions");
-                assert!(!actual.cancel_propagation_order.is_empty(), "Should have cancel propagation");
+                assert!(
+                    !actual.region_close_order.is_empty(),
+                    "Should have closed regions"
+                );
+                assert!(
+                    !actual.cancel_propagation_order.is_empty(),
+                    "Should have cancel propagation"
+                );
             } else {
                 assert_eq!(
                     actual_golden, expected_pattern,

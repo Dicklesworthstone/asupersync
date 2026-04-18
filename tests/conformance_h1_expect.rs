@@ -17,7 +17,9 @@ mod tests {
             .build();
 
         // Verify request has Expect header
-        let expect_header = req.headers.iter()
+        let expect_header = req
+            .headers
+            .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("expect"))
             .map(|(_, value)| value);
         assert_eq!(expect_header, Some(&"100-continue".to_string()));
@@ -33,7 +35,9 @@ mod tests {
             ("Host".to_string(), "example.com".to_string()),
             ("Expect".to_string(), "custom-extension".to_string()),
         ];
-        let unknown_expect = req.headers.iter()
+        let unknown_expect = req
+            .headers
+            .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("expect"))
             .map(|(_, value)| value);
         assert_eq!(unknown_expect, Some(&"custom-extension".to_string()));
@@ -71,10 +75,13 @@ mod tests {
             .build();
 
         // Verify both headers are present
-        let has_expect = req.headers.iter().any(|(name, value)|
-            name.eq_ignore_ascii_case("expect") && value.contains("100-continue"));
-        let has_if_none_match = req.headers.iter().any(|(name, value)|
-            name.eq_ignore_ascii_case("if-none-match"));
+        let has_expect = req.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("expect") && value.contains("100-continue")
+        });
+        let has_if_none_match = req
+            .headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("if-none-match"));
 
         assert!(has_expect, "Request should have Expect: 100-continue");
         assert!(has_if_none_match, "Request should have If-None-Match");
@@ -96,7 +103,11 @@ mod tests {
                 .build();
 
             // These methods commonly use Expect: 100-continue
-            assert!(req.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("expect")));
+            assert!(
+                req.headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("expect"))
+            );
         }
 
         // GET typically doesn't have a body, so Expect: 100-continue is unusual
@@ -104,7 +115,10 @@ mod tests {
             .header("Host", "example.com")
             .build();
 
-        let has_expect = get_req.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("expect"));
+        let has_expect = get_req
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("expect"));
         assert!(!has_expect, "GET requests typically don't use Expect");
     }
 
@@ -117,7 +131,9 @@ mod tests {
             .header("Content-Length", "50")
             .build();
 
-        let expect_value = req.headers.iter()
+        let expect_value = req
+            .headers
+            .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("expect"))
             .map(|(_, value)| value)
             .unwrap();

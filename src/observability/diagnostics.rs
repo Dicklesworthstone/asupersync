@@ -2900,9 +2900,27 @@ mod tests {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(100)));
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
 
-        let ob1 = insert_obligation(&mut state, child1, task1, ObligationKind::Ack, Time::from_millis(10));
-        let ob3 = insert_obligation(&mut state, child3, task3, ObligationKind::Lease, Time::from_millis(30));
-        let ob2 = insert_obligation(&mut state, child2, task2, ObligationKind::SendPermit, Time::from_millis(20));
+        let ob1 = insert_obligation(
+            &mut state,
+            child1,
+            task1,
+            ObligationKind::Ack,
+            Time::from_millis(10),
+        );
+        let ob3 = insert_obligation(
+            &mut state,
+            child3,
+            task3,
+            ObligationKind::Lease,
+            Time::from_millis(30),
+        );
+        let ob2 = insert_obligation(
+            &mut state,
+            child2,
+            task2,
+            ObligationKind::SendPermit,
+            Time::from_millis(20),
+        );
 
         let diagnostics = Diagnostics::new(Arc::new(state));
 
@@ -2962,7 +2980,9 @@ mod tests {
             );
         }
 
-        crate::test_complete!("introspection_conf_002_deterministic_ordering_of_diagnostic_results");
+        crate::test_complete!(
+            "introspection_conf_002_deterministic_ordering_of_diagnostic_results"
+        );
     }
 
     #[test]
@@ -2976,7 +2996,13 @@ mod tests {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(500)));
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
 
-        let ob_id = insert_obligation(&mut state, root, task_id, ObligationKind::Ack, Time::from_millis(100));
+        let ob_id = insert_obligation(
+            &mut state,
+            root,
+            task_id,
+            ObligationKind::Ack,
+            Time::from_millis(100),
+        );
 
         let diagnostics = Diagnostics::new(Arc::new(state));
 
@@ -3085,10 +3111,14 @@ mod tests {
         // Create tasks in different scheduler states
         let running_task = insert_task(&mut state, root, TaskState::Running);
         let completed_task = insert_task(&mut state, root, TaskState::Completed(Outcome::Ok(())));
-        let cancel_task = insert_task(&mut state, root, TaskState::CancelRequested {
-            reason: CancelReason::user("test"),
-            cleanup_budget: Budget::with_deadline_ns(100_000_000), // 100ms in ns
-        });
+        let cancel_task = insert_task(
+            &mut state,
+            root,
+            TaskState::CancelRequested {
+                reason: CancelReason::user("test"),
+                cleanup_budget: Budget::with_deadline_ns(100_000_000), // 100ms in ns
+            },
+        );
 
         // Configure scheduler-visible state
         let running_task_record = state.task_mut(running_task).expect("running task");
@@ -3102,10 +3132,16 @@ mod tests {
         // Verify scheduler state accuracy in task diagnostics
         let running_explanation = diagnostics.explain_task_blocked(running_task);
         crate::assert_with_log!(
-            matches!(running_explanation.block_reason, BlockReason::AwaitingSchedule),
+            matches!(
+                running_explanation.block_reason,
+                BlockReason::AwaitingSchedule
+            ),
             "running task shows awaiting schedule",
             true,
-            matches!(running_explanation.block_reason, BlockReason::AwaitingSchedule)
+            matches!(
+                running_explanation.block_reason,
+                BlockReason::AwaitingSchedule
+            )
         );
 
         let completed_explanation = diagnostics.explain_task_blocked(completed_task);
@@ -3137,7 +3173,11 @@ mod tests {
 
         for reason in &region_explanation.reasons {
             match reason {
-                Reason::TaskRunning { task_id, poll_count, .. } if *task_id == running_task => {
+                Reason::TaskRunning {
+                    task_id,
+                    poll_count,
+                    ..
+                } if *task_id == running_task => {
                     found_running = true;
                     crate::assert_with_log!(
                         *poll_count == 5,
@@ -3153,7 +3193,12 @@ mod tests {
             }
         }
 
-        crate::assert_with_log!(found_running, "found running task reason", true, found_running);
+        crate::assert_with_log!(
+            found_running,
+            "found running task reason",
+            true,
+            found_running
+        );
         crate::assert_with_log!(found_cancel, "found cancel task reason", true, found_cancel);
 
         // Completed tasks should not appear as blocking reasons
@@ -3178,7 +3223,13 @@ mod tests {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(300)));
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
 
-        let ob_id = insert_obligation(&mut state, root, task_id, ObligationKind::SendPermit, Time::from_millis(50));
+        let ob_id = insert_obligation(
+            &mut state,
+            root,
+            task_id,
+            ObligationKind::SendPermit,
+            Time::from_millis(50),
+        );
 
         let diagnostics = Diagnostics::new(Arc::new(state));
 
@@ -3214,7 +3265,12 @@ mod tests {
         // Verify obligation appears in both region and obligation leak diagnostics
         let mut obligation_in_region_reasons = false;
         for reason in &region_explanation.reasons {
-            if let Reason::ObligationHeld { obligation_id: id, holder_task, .. } = reason {
+            if let Reason::ObligationHeld {
+                obligation_id: id,
+                holder_task,
+                ..
+            } = reason
+            {
                 if *id == ob_id && *holder_task == task_id {
                     obligation_in_region_reasons = true;
                     break;
@@ -3235,9 +3291,9 @@ mod tests {
             !leaked_obligations.is_empty()
         );
 
-        let found_leak = leaked_obligations.iter().any(|leak| {
-            leak.obligation_id == ob_id && leak.holder_task == Some(task_id)
-        });
+        let found_leak = leaked_obligations
+            .iter()
+            .any(|leak| leak.obligation_id == ob_id && leak.holder_task == Some(task_id));
         crate::assert_with_log!(
             found_leak,
             "leak detection finds same obligation",
@@ -3271,7 +3327,13 @@ mod tests {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(1000)));
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)));
 
-        let ob_id = insert_obligation(&mut state, root, task_id, ObligationKind::Ack, Time::from_millis(100));
+        let ob_id = insert_obligation(
+            &mut state,
+            root,
+            task_id,
+            ObligationKind::Ack,
+            Time::from_millis(100),
+        );
 
         let diagnostics = Diagnostics::new(Arc::new(state));
 
@@ -3321,7 +3383,10 @@ mod tests {
         let region_explanation = diagnostics.explain_region_open(root);
         let mut obligation_reason_found = false;
         for reason in &region_explanation.reasons {
-            if let Reason::ObligationHeld { obligation_id: id, .. } = reason {
+            if let Reason::ObligationHeld {
+                obligation_id: id, ..
+            } = reason
+            {
                 if *id == ob_id {
                     obligation_reason_found = true;
                     break;
@@ -3355,11 +3420,29 @@ mod tests {
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
 
         // Create genuine leaks and non-leaks
-        let leak1 = insert_obligation(&mut state, child1, task1, ObligationKind::Ack, Time::from_millis(100));
-        let leak2 = insert_obligation(&mut state, child2, task2, ObligationKind::SendPermit, Time::from_millis(200));
+        let leak1 = insert_obligation(
+            &mut state,
+            child1,
+            task1,
+            ObligationKind::Ack,
+            Time::from_millis(100),
+        );
+        let leak2 = insert_obligation(
+            &mut state,
+            child2,
+            task2,
+            ObligationKind::SendPermit,
+            Time::from_millis(200),
+        );
 
         // This should NOT be considered leaked (completed task)
-        let _non_leak = insert_obligation(&mut state, root, completed_task, ObligationKind::Lease, Time::from_millis(300));
+        let _non_leak = insert_obligation(
+            &mut state,
+            root,
+            completed_task,
+            ObligationKind::Lease,
+            Time::from_millis(300),
+        );
 
         let diagnostics = Diagnostics::new(Arc::new(state));
 
@@ -3367,12 +3450,7 @@ mod tests {
         let leaks = diagnostics.find_leaked_obligations();
 
         // Should detect exactly 2 leaks (not the completed task's obligation)
-        crate::assert_with_log!(
-            leaks.len() == 2,
-            "accurate leak count",
-            2usize,
-            leaks.len()
-        );
+        crate::assert_with_log!(leaks.len() == 2, "accurate leak count", 2usize, leaks.len());
 
         // Verify leak details
         let leak_ids: Vec<ObligationId> = leaks.iter().map(|l| l.obligation_id).collect();
@@ -3421,12 +3499,7 @@ mod tests {
                     );
                 }
                 _ => {
-                    crate::assert_with_log!(
-                        false,
-                        "unexpected leak detected",
-                        true,
-                        false
-                    );
+                    crate::assert_with_log!(false, "unexpected leak detected", true, false);
                 }
             }
         }
@@ -3558,16 +3631,26 @@ mod tests {
         let health2 = diagnostics.analyze_structural_health();
 
         let health_deterministic = match (&health1.classification, &health2.classification) {
-            (crate::observability::spectral_health::HealthClassification::Healthy { .. },
-             crate::observability::spectral_health::HealthClassification::Healthy { .. }) => true,
-            (crate::observability::spectral_health::HealthClassification::Deadlocked,
-             crate::observability::spectral_health::HealthClassification::Deadlocked) => true,
-            (crate::observability::spectral_health::HealthClassification::Degraded { .. },
-             crate::observability::spectral_health::HealthClassification::Degraded { .. }) => true,
-            (crate::observability::spectral_health::HealthClassification::Critical { .. },
-             crate::observability::spectral_health::HealthClassification::Critical { .. }) => true,
-            (crate::observability::spectral_health::HealthClassification::Fragmented { .. },
-             crate::observability::spectral_health::HealthClassification::Fragmented { .. }) => true,
+            (
+                crate::observability::spectral_health::HealthClassification::Healthy { .. },
+                crate::observability::spectral_health::HealthClassification::Healthy { .. },
+            ) => true,
+            (
+                crate::observability::spectral_health::HealthClassification::Deadlocked,
+                crate::observability::spectral_health::HealthClassification::Deadlocked,
+            ) => true,
+            (
+                crate::observability::spectral_health::HealthClassification::Degraded { .. },
+                crate::observability::spectral_health::HealthClassification::Degraded { .. },
+            ) => true,
+            (
+                crate::observability::spectral_health::HealthClassification::Critical { .. },
+                crate::observability::spectral_health::HealthClassification::Critical { .. },
+            ) => true,
+            (
+                crate::observability::spectral_health::HealthClassification::Fragmented { .. },
+                crate::observability::spectral_health::HealthClassification::Fragmented { .. },
+            ) => true,
             _ => false,
         };
         crate::assert_with_log!(
@@ -3589,16 +3672,32 @@ mod tests {
 
         // Create runtime state with various tasks and obligations
         let task1 = insert_task(&mut state, root, TaskState::Running);
-        let task2 = insert_task(&mut state, root, TaskState::CancelRequested {
-            reason: CancelReason::user("test"),
-            cleanup_budget: Budget::with_deadline_ns(100_000_000), // 100ms in ns
-        });
+        let task2 = insert_task(
+            &mut state,
+            root,
+            TaskState::CancelRequested {
+                reason: CancelReason::user("test"),
+                cleanup_budget: Budget::with_deadline_ns(100_000_000), // 100ms in ns
+            },
+        );
 
         let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(1000)));
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
 
-        let ob1 = insert_obligation(&mut state, root, task1, ObligationKind::Ack, Time::from_millis(100));
-        let ob2 = insert_obligation(&mut state, root, task2, ObligationKind::Lease, Time::from_millis(200));
+        let ob1 = insert_obligation(
+            &mut state,
+            root,
+            task1,
+            ObligationKind::Ack,
+            Time::from_millis(100),
+        );
+        let ob2 = insert_obligation(
+            &mut state,
+            root,
+            task2,
+            ObligationKind::Lease,
+            Time::from_millis(200),
+        );
 
         let diagnostics = Diagnostics::new(Arc::new(state));
 
@@ -3629,7 +3728,10 @@ mod tests {
             verify_explanation.reasons.len()
         );
 
-        let task1_reason_match = match (&baseline_task1_explanation.block_reason, &verify_task1_explanation.block_reason) {
+        let task1_reason_match = match (
+            &baseline_task1_explanation.block_reason,
+            &verify_task1_explanation.block_reason,
+        ) {
             (BlockReason::AwaitingSchedule, BlockReason::AwaitingSchedule) => true,
             (BlockReason::NotStarted, BlockReason::NotStarted) => true,
             (a, b) => format!("{:?}", a) == format!("{:?}", b),
@@ -3642,8 +3744,14 @@ mod tests {
         );
 
         let task2_cancel_match = matches!(
-            (&baseline_task2_explanation.block_reason, &verify_task2_explanation.block_reason),
-            (BlockReason::CancelRequested { .. }, BlockReason::CancelRequested { .. })
+            (
+                &baseline_task2_explanation.block_reason,
+                &verify_task2_explanation.block_reason
+            ),
+            (
+                BlockReason::CancelRequested { .. },
+                BlockReason::CancelRequested { .. }
+            )
         );
         crate::assert_with_log!(
             task2_cancel_match,
@@ -3667,17 +3775,30 @@ mod tests {
             deadlock_severity_match
         );
 
-        let health_class_match = match (&baseline_health.classification, &verify_health.classification) {
-            (crate::observability::spectral_health::HealthClassification::Healthy { .. },
-             crate::observability::spectral_health::HealthClassification::Healthy { .. }) => true,
-            (crate::observability::spectral_health::HealthClassification::Deadlocked,
-             crate::observability::spectral_health::HealthClassification::Deadlocked) => true,
-            (crate::observability::spectral_health::HealthClassification::Degraded { .. },
-             crate::observability::spectral_health::HealthClassification::Degraded { .. }) => true,
-            (crate::observability::spectral_health::HealthClassification::Critical { .. },
-             crate::observability::spectral_health::HealthClassification::Critical { .. }) => true,
-            (crate::observability::spectral_health::HealthClassification::Fragmented { .. },
-             crate::observability::spectral_health::HealthClassification::Fragmented { .. }) => true,
+        let health_class_match = match (
+            &baseline_health.classification,
+            &verify_health.classification,
+        ) {
+            (
+                crate::observability::spectral_health::HealthClassification::Healthy { .. },
+                crate::observability::spectral_health::HealthClassification::Healthy { .. },
+            ) => true,
+            (
+                crate::observability::spectral_health::HealthClassification::Deadlocked,
+                crate::observability::spectral_health::HealthClassification::Deadlocked,
+            ) => true,
+            (
+                crate::observability::spectral_health::HealthClassification::Degraded { .. },
+                crate::observability::spectral_health::HealthClassification::Degraded { .. },
+            ) => true,
+            (
+                crate::observability::spectral_health::HealthClassification::Critical { .. },
+                crate::observability::spectral_health::HealthClassification::Critical { .. },
+            ) => true,
+            (
+                crate::observability::spectral_health::HealthClassification::Fragmented { .. },
+                crate::observability::spectral_health::HealthClassification::Fragmented { .. },
+            ) => true,
             _ => false,
         };
         crate::assert_with_log!(
@@ -3719,19 +3840,31 @@ mod tests {
         let empty_root = RegionId::new_for_test(999, 0);
         let empty_explanation = empty_diagnostics.explain_region_open(empty_root);
         crate::assert_with_log!(
-            matches!(empty_explanation.reasons.first(), Some(Reason::RegionNotFound)),
+            matches!(
+                empty_explanation.reasons.first(),
+                Some(Reason::RegionNotFound)
+            ),
             "empty runtime handles missing region",
             true,
-            matches!(empty_explanation.reasons.first(), Some(Reason::RegionNotFound))
+            matches!(
+                empty_explanation.reasons.first(),
+                Some(Reason::RegionNotFound)
+            )
         );
 
         let empty_task = TaskId::new_for_test(999, 0);
         let empty_task_explanation = empty_diagnostics.explain_task_blocked(empty_task);
         crate::assert_with_log!(
-            matches!(empty_task_explanation.block_reason, BlockReason::TaskNotFound),
+            matches!(
+                empty_task_explanation.block_reason,
+                BlockReason::TaskNotFound
+            ),
             "empty runtime handles missing task",
             true,
-            matches!(empty_task_explanation.block_reason, BlockReason::TaskNotFound)
+            matches!(
+                empty_task_explanation.block_reason,
+                BlockReason::TaskNotFound
+            )
         );
 
         let empty_leaks = empty_diagnostics.find_leaked_obligations();
@@ -3770,11 +3903,19 @@ mod tests {
         let complex_child2 = insert_child_region(&mut complex_state, complex_root);
 
         let _complex_task1 = insert_task(&mut complex_state, complex_child1, TaskState::Running);
-        let _complex_task2 = insert_task(&mut complex_state, complex_child2, TaskState::Completed(Outcome::Ok(())));
-        let complex_task3 = insert_task(&mut complex_state, complex_root, TaskState::CancelRequested {
-            reason: CancelReason::user("cleanup"),
-            cleanup_budget: Budget::with_deadline_ns(200_000_000), // 200ms in ns
-        });
+        let _complex_task2 = insert_task(
+            &mut complex_state,
+            complex_child2,
+            TaskState::Completed(Outcome::Ok(())),
+        );
+        let complex_task3 = insert_task(
+            &mut complex_state,
+            complex_root,
+            TaskState::CancelRequested {
+                reason: CancelReason::user("cleanup"),
+                cleanup_budget: Budget::with_deadline_ns(200_000_000), // 200ms in ns
+            },
+        );
 
         let complex_diagnostics = Diagnostics::new(Arc::new(complex_state));
 
@@ -3805,7 +3946,13 @@ mod tests {
 
         let virtual_clock = Arc::new(VirtualClock::starting_at(Time::from_millis(5000)));
         timer_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(virtual_clock));
-        let _timer_obligation = insert_obligation(&mut timer_state, timer_root, timer_task, ObligationKind::Ack, Time::from_millis(1000));
+        let _timer_obligation = insert_obligation(
+            &mut timer_state,
+            timer_root,
+            timer_task,
+            ObligationKind::Ack,
+            Time::from_millis(1000),
+        );
 
         let timer_diagnostics = Diagnostics::new(Arc::new(timer_state));
         let timer_leaks = timer_diagnostics.find_leaked_obligations();
@@ -3854,11 +4001,11 @@ mod tests {
             // Verify health classification is valid (structural analysis completed)
             let valid_classification = matches!(
                 health.classification,
-                crate::observability::spectral_health::HealthClassification::Healthy { .. } |
-                crate::observability::spectral_health::HealthClassification::Degraded { .. } |
-                crate::observability::spectral_health::HealthClassification::Deadlocked |
-                crate::observability::spectral_health::HealthClassification::Critical { .. } |
-                crate::observability::spectral_health::HealthClassification::Fragmented { .. }
+                crate::observability::spectral_health::HealthClassification::Healthy { .. }
+                    | crate::observability::spectral_health::HealthClassification::Degraded { .. }
+                    | crate::observability::spectral_health::HealthClassification::Deadlocked
+                    | crate::observability::spectral_health::HealthClassification::Critical { .. }
+                    | crate::observability::spectral_health::HealthClassification::Fragmented { .. }
             );
             crate::assert_with_log!(
                 valid_classification,

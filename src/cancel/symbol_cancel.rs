@@ -2039,9 +2039,18 @@ mod tests {
         assert_eq!(child1c.is_cancelled(), child2c.is_cancelled());
 
         // All children should have same reason kind
-        assert_eq!(child1a.reason().unwrap().kind, child2a.reason().unwrap().kind);
-        assert_eq!(child1b.reason().unwrap().kind, child2b.reason().unwrap().kind);
-        assert_eq!(child1c.reason().unwrap().kind, child2c.reason().unwrap().kind);
+        assert_eq!(
+            child1a.reason().unwrap().kind,
+            child2a.reason().unwrap().kind
+        );
+        assert_eq!(
+            child1b.reason().unwrap().kind,
+            child2b.reason().unwrap().kind
+        );
+        assert_eq!(
+            child1c.reason().unwrap().kind,
+            child2c.reason().unwrap().kind
+        );
     }
 
     /// META-CANCEL-003: Reason Monotonicity Property
@@ -2053,10 +2062,7 @@ mod tests {
         let token = SymbolCancelToken::new(ObjectId::new_for_test(20), &mut rng);
 
         // Create sequence of reasons with different severities
-        let weak_reasons = vec![
-            CancelReason::user("weak1"),
-            CancelReason::user("weak2"),
-        ];
+        let weak_reasons = vec![CancelReason::user("weak1"), CancelReason::user("weak2")];
         let strong_reasons = vec![
             CancelReason::timeout(),
             CancelReason::new(CancelKind::Shutdown),
@@ -2081,9 +2087,9 @@ mod tests {
         // Monotonicity: strength never decreases
         assert!(matches!(
             (after_weak, after_strong),
-            (CancelKind::User, CancelKind::Shutdown) |
-            (CancelKind::Timeout, CancelKind::Shutdown) |
-            (CancelKind::Shutdown, CancelKind::Shutdown)
+            (CancelKind::User, CancelKind::Shutdown)
+                | (CancelKind::Timeout, CancelKind::Shutdown)
+                | (CancelKind::Shutdown, CancelKind::Shutdown)
         ));
     }
 
@@ -2147,7 +2153,10 @@ mod tests {
 
         // Additional cancellation attempts should not trigger more notifications (listeners drained)
         let before_second = notification_count.load(Ordering::SeqCst);
-        token.cancel(&CancelReason::new(CancelKind::Shutdown), Time::from_millis(5000));
+        token.cancel(
+            &CancelReason::new(CancelKind::Shutdown),
+            Time::from_millis(5000),
+        );
         let after_second = notification_count.load(Ordering::SeqCst);
 
         assert_eq!(before_second, after_second); // No additional notifications
@@ -2177,10 +2186,16 @@ mod tests {
 
         // Metamorphic relation: only first should succeed, rest should be None (duplicate)
         assert!(results[0].is_some(), "first message should be processed");
-        assert!(results[1..].iter().all(|r| r.is_none()), "subsequent messages should be duplicates");
+        assert!(
+            results[1..].iter().all(|r| r.is_none()),
+            "subsequent messages should be duplicates"
+        );
 
         let metrics = broadcaster.metrics();
-        assert_eq!(metrics.received, 1, "only one message should be counted as received");
+        assert_eq!(
+            metrics.received, 1,
+            "only one message should be counted as received"
+        );
         assert_eq!(metrics.duplicates, 4, "four duplicates should be detected");
     }
 
@@ -2219,10 +2234,23 @@ mod tests {
         assert!(nested_l3.is_cancelled());
 
         // All derived cancellations should have ParentCancelled reason
-        assert!(flat_children.iter().all(|child| child.reason().unwrap().kind == CancelKind::ParentCancelled));
-        assert_eq!(nested_l1.reason().unwrap().kind, CancelKind::ParentCancelled);
-        assert_eq!(nested_l2.reason().unwrap().kind, CancelKind::ParentCancelled);
-        assert_eq!(nested_l3.reason().unwrap().kind, CancelKind::ParentCancelled);
+        assert!(
+            flat_children
+                .iter()
+                .all(|child| child.reason().unwrap().kind == CancelKind::ParentCancelled)
+        );
+        assert_eq!(
+            nested_l1.reason().unwrap().kind,
+            CancelKind::ParentCancelled
+        );
+        assert_eq!(
+            nested_l2.reason().unwrap().kind,
+            CancelKind::ParentCancelled
+        );
+        assert_eq!(
+            nested_l3.reason().unwrap().kind,
+            CancelKind::ParentCancelled
+        );
     }
 
     /// META-CANCEL-008: Cleanup Coordinator Independence Property
@@ -2261,8 +2289,14 @@ mod tests {
         let independent_result1 = coord1.cleanup(obj1, None);
 
         // Metamorphic relation: obj1 cleanup should be identical regardless of obj2 presence
-        assert_eq!(combined_result1.symbols_cleaned, independent_result1.symbols_cleaned);
-        assert_eq!(combined_result1.bytes_freed, independent_result1.bytes_freed);
+        assert_eq!(
+            combined_result1.symbols_cleaned,
+            independent_result1.symbols_cleaned
+        );
+        assert_eq!(
+            combined_result1.bytes_freed,
+            independent_result1.bytes_freed
+        );
         assert_eq!(combined_result1.completed, independent_result1.completed);
 
         // obj2 should be unaffected in combined coordinator

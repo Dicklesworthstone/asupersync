@@ -1443,7 +1443,6 @@ mod tests {
 
     #[test]
     fn metamorphic_commit_abort_sequence_reversal() {
-
         // Forward saga: Reserve -> Send -> Commit
         let forward_plan = SagaPlan::new(
             "forward_saga",
@@ -1480,9 +1479,9 @@ mod tests {
 
         // Execute compensation saga
         let mut compensation_step_exec = FixedExecutor::new(vec![
-            LatticeState::Aborted,   // abort_commit
-            LatticeState::Reserved,  // undo_send
-            LatticeState::Unknown,   // release_reserve
+            LatticeState::Aborted,  // abort_commit
+            LatticeState::Reserved, // undo_send
+            LatticeState::Unknown,  // release_reserve
         ]);
         let compensation_result = executor.execute(&compensation_exec, &mut compensation_step_exec);
 
@@ -1490,7 +1489,8 @@ mod tests {
         assert!(
             forward_result.is_clean() && compensation_result.is_clean(),
             "forward saga and compensation saga both executable: forward_clean={}, compensation_clean={}",
-            forward_result.is_clean(), compensation_result.is_clean()
+            forward_result.is_clean(),
+            compensation_result.is_clean()
         );
 
         // Metamorphic relation: step counts should match
@@ -1504,7 +1504,6 @@ mod tests {
 
     #[test]
     fn metamorphic_partial_compensation_consistency() {
-
         // Create a saga that partially executes then needs compensation
         let saga_plan = SagaPlan::new(
             "partial_saga",
@@ -1546,10 +1545,8 @@ mod tests {
             ],
         );
         let compensation_exec = SagaExecutionPlan::from_plan(&compensation_plan);
-        let mut compensation_step_exec = FixedExecutor::new(vec![
-            LatticeState::Unknown,
-            LatticeState::Aborted,
-        ]);
+        let mut compensation_step_exec =
+            FixedExecutor::new(vec![LatticeState::Unknown, LatticeState::Aborted]);
         let compensation_result = executor.execute(&compensation_exec, &mut compensation_step_exec);
 
         // Metamorphic relation: partial + compensation should yield consistent state
@@ -1565,7 +1562,8 @@ mod tests {
 
         // Metamorphic relation: compensation should complete without conflicts
         assert_ne!(
-            compensation_result.final_state, LatticeState::Conflict,
+            compensation_result.final_state,
+            LatticeState::Conflict,
             "compensation avoids conflicts: got {:?}",
             compensation_result.final_state
         );
@@ -1575,7 +1573,6 @@ mod tests {
 
     #[test]
     fn metamorphic_abort_mid_commit_obligation_stability() {
-
         // Create a saga with mixed operations that could be aborted mid-execution
         let saga_plan = SagaPlan::new(
             "abortable_saga",
@@ -1612,7 +1609,8 @@ mod tests {
         assert!(
             normal_result.is_clean() && aborted_result.is_clean(),
             "both normal and aborted executions are clean: normal={}, aborted={}",
-            normal_result.is_clean(), aborted_result.is_clean()
+            normal_result.is_clean(),
+            aborted_result.is_clean()
         );
 
         // Metamorphic relation: step counts should be identical
@@ -1624,8 +1622,8 @@ mod tests {
         // Metamorphic relation: aborted execution should not result in Conflict
         // (indicating proper obligation cleanup)
         assert!(
-            aborted_result.final_state == LatticeState::Aborted ||
-            aborted_result.final_state == LatticeState::Committed,
+            aborted_result.final_state == LatticeState::Aborted
+                || aborted_result.final_state == LatticeState::Committed,
             "abort mid-commit produces clean state: expected Aborted or Committed, got {:?}",
             aborted_result.final_state
         );
@@ -1635,7 +1633,6 @@ mod tests {
 
     #[test]
     fn metamorphic_concurrent_saga_serialization() {
-
         // Define shared operations that both sagas might use
         let shared_resource_ops = vec![
             SagaStep::new(SagaOpKind::Acquire, "shared_lease"),
@@ -1710,18 +1707,22 @@ mod tests {
         assert!(
             a_first_result.is_clean() && b_second_result.is_clean(),
             "A→B execution order completes cleanly: a_clean={}, b_clean={}",
-            a_first_result.is_clean(), b_second_result.is_clean()
+            a_first_result.is_clean(),
+            b_second_result.is_clean()
         );
 
         assert!(
             b_first_result.is_clean() && a_second_result.is_clean(),
             "B→A execution order completes cleanly: b_clean={}, a_clean={}",
-            b_first_result.is_clean(), a_second_result.is_clean()
+            b_first_result.is_clean(),
+            a_second_result.is_clean()
         );
 
         // Metamorphic relation: final states should be consistent regardless of order
-        let order1_combined = Lattice::join(&a_first_result.final_state, &b_second_result.final_state);
-        let order2_combined = Lattice::join(&b_first_result.final_state, &a_second_result.final_state);
+        let order1_combined =
+            Lattice::join(&a_first_result.final_state, &b_second_result.final_state);
+        let order2_combined =
+            Lattice::join(&b_first_result.final_state, &a_second_result.final_state);
 
         assert_eq!(
             order1_combined, order2_combined,
@@ -1733,7 +1734,6 @@ mod tests {
 
     #[test]
     fn metamorphic_saga_determinism_under_replay() {
-
         // Create a saga with various operation types
         let test_saga = SagaPlan::new(
             "deterministic_saga",

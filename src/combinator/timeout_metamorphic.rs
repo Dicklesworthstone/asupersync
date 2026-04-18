@@ -25,8 +25,8 @@ use crate::types::{CancelReason, Time};
 use futures::future;
 use std::future::{Future, ready};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -67,7 +67,13 @@ impl TimeoutTestConfig {
     }
 
     /// Creates configuration with external cancellation.
-    pub fn with_cancellation(outer_ms: u64, inner_ms: u64, operation_ms: u64, cancel_delay: u64, seed: u64) -> Self {
+    pub fn with_cancellation(
+        outer_ms: u64,
+        inner_ms: u64,
+        operation_ms: u64,
+        cancel_delay: u64,
+        seed: u64,
+    ) -> Self {
         Self {
             outer_timeout_ms: outer_ms,
             inner_timeout_ms: inner_ms,
@@ -145,7 +151,9 @@ impl TestOperation {
     fn cancel(&self, reason: CancelReason) {
         self.cancelled.store(true, Ordering::SeqCst);
         *self.cancel_reason.lock() = Some(reason);
-        self.global_state.operation_cancelled.fetch_add(1, Ordering::SeqCst);
+        self.global_state
+            .operation_cancelled
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     /// Check if this operation should complete now.
@@ -175,7 +183,11 @@ impl Future for TestOperation {
 
         // Check for cancellation
         if this.cancelled.load(Ordering::SeqCst) {
-            let reason = this.cancel_reason.lock().take().unwrap_or(CancelReason::unknown());
+            let reason = this
+                .cancel_reason
+                .lock()
+                .take()
+                .unwrap_or(CancelReason::unknown());
             return Poll::Ready(Err("cancelled"));
         }
 
@@ -186,7 +198,9 @@ impl Future for TestOperation {
         // Check if enough time has elapsed
         if let Some(cx) = Cx::current() {
             if this.should_complete(cx.now()) {
-                this.global_state.operation_completed.fetch_add(1, Ordering::SeqCst);
+                this.global_state
+                    .operation_completed
+                    .fetch_add(1, Ordering::SeqCst);
                 return Poll::Ready(Ok(this.id as i32));
             }
         }
@@ -294,7 +308,9 @@ mod metamorphic_timeout_nesting {
             (10, 5, 50, 5),       // Very short timeouts
         ];
 
-        for (i, (outer_ms, inner_ms, operation_ms, expected_timeout_ms)) in test_cases.into_iter().enumerate() {
+        for (i, (outer_ms, inner_ms, operation_ms, expected_timeout_ms)) in
+            test_cases.into_iter().enumerate()
+        {
             let config = TimeoutTestConfig::basic(outer_ms, inner_ms, operation_ms, i as u64);
 
             // Test nested timeout: timeout(outer, timeout(inner, operation))
@@ -303,37 +319,48 @@ mod metamorphic_timeout_nesting {
 
                 let now = Cx::current().map(|cx| cx.now()).unwrap_or(Time::ZERO);
                 let inner_timeout = timeout(now, Duration::from_millis(inner_ms), operation);
-                let nested_result = timeout(now, Duration::from_millis(outer_ms), inner_timeout).await;
+                let nested_result =
+                    timeout(now, Duration::from_millis(outer_ms), inner_timeout).await;
 
                 match nested_result {
                     Ok(Ok(Ok(_))) => {
                         // Operation completed
-                        global_state.operation_completed.fetch_add(1, Ordering::SeqCst);
+                        global_state
+                            .operation_completed
+                            .fetch_add(1, Ordering::SeqCst);
                     }
                     Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
                         // Timeout occurred
-                        global_state.timeouts_detected.fetch_add(1, Ordering::SeqCst);
+                        global_state
+                            .timeouts_detected
+                            .fetch_add(1, Ordering::SeqCst);
                     }
                 }
             });
 
             // Test single timeout: timeout(min(outer, inner), operation)
             let min_timeout = outer_ms.min(inner_ms);
-            let single_config = TimeoutTestConfig::basic(min_timeout, min_timeout, operation_ms, i as u64);
+            let single_config =
+                TimeoutTestConfig::basic(min_timeout, min_timeout, operation_ms, i as u64);
             let single_summary = run_timeout_test(&single_config, |global_state| async move {
                 let operation = TestOperation::new(2, operation_ms, Arc::clone(&global_state));
 
                 let now = Cx::current().map(|cx| cx.now()).unwrap_or(Time::ZERO);
-                let single_result = timeout(now, Duration::from_millis(min_timeout), operation).await;
+                let single_result =
+                    timeout(now, Duration::from_millis(min_timeout), operation).await;
 
                 match single_result {
                     Ok(Ok(_)) => {
                         // Operation completed
-                        global_state.operation_completed.fetch_add(1, Ordering::SeqCst);
+                        global_state
+                            .operation_completed
+                            .fetch_add(1, Ordering::SeqCst);
                     }
                     Ok(Err(_)) | Err(_) => {
                         // Timeout occurred
-                        global_state.timeouts_detected.fetch_add(1, Ordering::SeqCst);
+                        global_state
+                            .timeouts_detected
+                            .fetch_add(1, Ordering::SeqCst);
                     }
                 }
             });
@@ -341,20 +368,36 @@ mod metamorphic_timeout_nesting {
             // Verify metamorphic relation: both should have same completion/timeout outcome
             if operation_ms < expected_timeout_ms {
                 // Operation should complete in both cases
-                assert!(nested_summary.operation_completed > 0,
+                assert!(
+                    nested_summary.operation_completed > 0,
                     "Case {}: Nested timeout should complete when operation_ms({}) < timeout_ms({})",
-                    i, operation_ms, expected_timeout_ms);
-                assert!(single_summary.operation_completed > 0,
+                    i,
+                    operation_ms,
+                    expected_timeout_ms
+                );
+                assert!(
+                    single_summary.operation_completed > 0,
                     "Case {}: Single timeout should complete when operation_ms({}) < timeout_ms({})",
-                    i, operation_ms, expected_timeout_ms);
+                    i,
+                    operation_ms,
+                    expected_timeout_ms
+                );
             } else {
                 // Timeout should occur in both cases
-                assert!(nested_summary.timeouts_detected > 0 || nested_summary.operation_completed > 0,
+                assert!(
+                    nested_summary.timeouts_detected > 0 || nested_summary.operation_completed > 0,
                     "Case {}: Nested timeout should timeout or complete when operation_ms({}) >= timeout_ms({})",
-                    i, operation_ms, expected_timeout_ms);
-                assert!(single_summary.timeouts_detected > 0 || single_summary.operation_completed > 0,
+                    i,
+                    operation_ms,
+                    expected_timeout_ms
+                );
+                assert!(
+                    single_summary.timeouts_detected > 0 || single_summary.operation_completed > 0,
                     "Case {}: Single timeout should timeout or complete when operation_ms({}) >= timeout_ms({})",
-                    i, operation_ms, expected_timeout_ms);
+                    i,
+                    operation_ms,
+                    expected_timeout_ms
+                );
             }
         }
     }
@@ -362,8 +405,8 @@ mod metamorphic_timeout_nesting {
     /// Property-based test for timeout nesting algebra with random configurations.
     #[test]
     fn test_timeout_nesting_property() {
-        use proptest::test_runner::TestRunner;
         use proptest::strategy::Strategy;
+        use proptest::test_runner::TestRunner;
 
         let strategy = (1u64..=100, 1u64..=100, 1u64..=200, 0u64..1000);
         let mut runner = TestRunner::default();
@@ -429,14 +472,20 @@ mod metamorphic_cancel_timeout_precedence {
     fn test_cancel_before_timeout_precedence() {
         let test_cases = vec![
             // (timeout_ms, cancel_delay_ms, operation_ms)
-            (100, 20, 200),  // Cancel well before timeout
-            (100, 90, 200),  // Cancel just before timeout
-            (100, 50, 200),  // Cancel mid-way to timeout
-            (50, 10, 200),   // Cancel early with short timeout
+            (100, 20, 200), // Cancel well before timeout
+            (100, 90, 200), // Cancel just before timeout
+            (100, 50, 200), // Cancel mid-way to timeout
+            (50, 10, 200),  // Cancel early with short timeout
         ];
 
         for (i, (timeout_ms, cancel_delay_ms, operation_ms)) in test_cases.into_iter().enumerate() {
-            let config = TimeoutTestConfig::with_cancellation(timeout_ms, timeout_ms, operation_ms, cancel_delay_ms, i as u64);
+            let config = TimeoutTestConfig::with_cancellation(
+                timeout_ms,
+                timeout_ms,
+                operation_ms,
+                cancel_delay_ms,
+                i as u64,
+            );
 
             let summary = run_timeout_test(&config, |global_state| async move {
                 let operation = TestOperation::new(1, operation_ms, Arc::clone(&global_state));
@@ -448,38 +497,46 @@ mod metamorphic_cancel_timeout_precedence {
                     let timeout_future = timeout(now, Duration::from_millis(timeout_ms), operation);
 
                     // Use Scope to enable cancellation testing
-                    let result = Scope::new().run(|scope| async move {
-                        // Schedule cancellation after delay
-                        if cancel_delay_ms > 0 {
-                            scope.spawn(async move {
-                                // Simulate delay before cancellation
-                                let mut polls = 0;
-                                while polls < cancel_delay_ms {
-                                    // Simple busy wait to simulate delay
-                                    polls += 1;
-                                }
-                                // Cancellation would be triggered here in real scenario
-                            });
-                        }
+                    let result = Scope::new()
+                        .run(|scope| async move {
+                            // Schedule cancellation after delay
+                            if cancel_delay_ms > 0 {
+                                scope.spawn(async move {
+                                    // Simulate delay before cancellation
+                                    let mut polls = 0;
+                                    while polls < cancel_delay_ms {
+                                        // Simple busy wait to simulate delay
+                                        polls += 1;
+                                    }
+                                    // Cancellation would be triggered here in real scenario
+                                });
+                            }
 
-                        // Wait for timeout or completion
-                        match timeout_future.await {
-                            Ok(Ok(_)) => {
-                                global_state.operation_completed.fetch_add(1, Ordering::SeqCst);
-                                "completed"
+                            // Wait for timeout or completion
+                            match timeout_future.await {
+                                Ok(Ok(_)) => {
+                                    global_state
+                                        .operation_completed
+                                        .fetch_add(1, Ordering::SeqCst);
+                                    "completed"
+                                }
+                                Ok(Err(_)) => {
+                                    // This represents cancellation by the operation
+                                    global_state
+                                        .external_cancels_detected
+                                        .fetch_add(1, Ordering::SeqCst);
+                                    "cancelled"
+                                }
+                                Err(_) => {
+                                    // This represents timeout
+                                    global_state
+                                        .timeouts_detected
+                                        .fetch_add(1, Ordering::SeqCst);
+                                    "timeout"
+                                }
                             }
-                            Ok(Err(_)) => {
-                                // This represents cancellation by the operation
-                                global_state.external_cancels_detected.fetch_add(1, Ordering::SeqCst);
-                                "cancelled"
-                            }
-                            Err(_) => {
-                                // This represents timeout
-                                global_state.timeouts_detected.fetch_add(1, Ordering::SeqCst);
-                                "timeout"
-                            }
-                        }
-                    }).await;
+                        })
+                        .await;
 
                     // In this test, we're verifying the precedence conceptually
                     // The actual implementation would require integration with the
@@ -492,10 +549,10 @@ mod metamorphic_cancel_timeout_precedence {
             if cancel_delay_ms < timeout_ms {
                 // We expect cancellation to take precedence, though the exact
                 // implementation depends on the cancellation mechanism
-                let total_outcomes = summary.operation_completed +
-                                   summary.operation_cancelled +
-                                   summary.timeouts_detected +
-                                   summary.external_cancels_detected;
+                let total_outcomes = summary.operation_completed
+                    + summary.operation_cancelled
+                    + summary.timeouts_detected
+                    + summary.external_cancels_detected;
                 assert!(total_outcomes > 0, "Case {}: Some outcome should occur", i);
             }
         }
@@ -513,9 +570,9 @@ mod metamorphic_no_double_cancel {
 
         let summary = run_timeout_test(&config, |global_state| async move {
             // Create multiple overlapping timeout operations
-            let operations: Vec<_> = (0..3).map(|i| {
-                TestOperation::new(i, 200, Arc::clone(&global_state))
-            }).collect();
+            let operations: Vec<_> = (0..3)
+                .map(|i| TestOperation::new(i, 200, Arc::clone(&global_state)))
+                .collect();
 
             if let Some(cx) = Cx::current() {
                 let now = cx.now();
@@ -532,20 +589,33 @@ mod metamorphic_no_double_cancel {
                 let outcomes = [&results.0, &results.1, &results.2];
                 for outcome in outcomes {
                     match outcome {
-                        Ok(Ok(_)) => global_state.operation_completed.fetch_add(1, Ordering::SeqCst),
-                        Ok(Err(_)) => global_state.operation_cancelled.fetch_add(1, Ordering::SeqCst),
-                        Err(_) => global_state.timeouts_detected.fetch_add(1, Ordering::SeqCst),
+                        Ok(Ok(_)) => global_state
+                            .operation_completed
+                            .fetch_add(1, Ordering::SeqCst),
+                        Ok(Err(_)) => global_state
+                            .operation_cancelled
+                            .fetch_add(1, Ordering::SeqCst),
+                        Err(_) => global_state
+                            .timeouts_detected
+                            .fetch_add(1, Ordering::SeqCst),
                     };
                 }
             }
         });
 
         // Verify no double-cancellation was detected
-        assert!(!summary.double_cancel_detected, "No double-cancellation should occur with overlapping timeouts");
+        assert!(
+            !summary.double_cancel_detected,
+            "No double-cancellation should occur with overlapping timeouts"
+        );
 
         // Verify that we got reasonable outcomes
-        let total_outcomes = summary.operation_completed + summary.operation_cancelled + summary.timeouts_detected;
-        assert!(total_outcomes >= 3, "Should have outcomes for all 3 operations");
+        let total_outcomes =
+            summary.operation_completed + summary.operation_cancelled + summary.timeouts_detected;
+        assert!(
+            total_outcomes >= 3,
+            "Should have outcomes for all 3 operations"
+        );
     }
 }
 
@@ -570,28 +640,35 @@ mod metamorphic_zero_duration_rejection {
                 match result {
                     Ok(Ok(_)) => {
                         // Should not complete with zero timeout
-                        global_state.operation_completed.fetch_add(1, Ordering::SeqCst);
+                        global_state
+                            .operation_completed
+                            .fetch_add(1, Ordering::SeqCst);
                     }
                     Ok(Err(_)) | Err(_) => {
                         // Should timeout immediately
-                        global_state.timeouts_detected.fetch_add(1, Ordering::SeqCst);
+                        global_state
+                            .timeouts_detected
+                            .fetch_add(1, Ordering::SeqCst);
                     }
                 }
             }
         });
 
         // Zero duration should cause immediate timeout
-        assert!(summary.timeouts_detected > 0, "Zero-duration timeout should reject immediately");
-        assert_eq!(summary.operation_completed, 0, "Operation should not complete with zero timeout");
+        assert!(
+            summary.timeouts_detected > 0,
+            "Zero-duration timeout should reject immediately"
+        );
+        assert_eq!(
+            summary.operation_completed, 0,
+            "Operation should not complete with zero timeout"
+        );
     }
 
     #[test]
     fn test_zero_vs_minimal_duration_consistency() {
         // Test that zero duration and very small duration behave consistently
-        let test_cases = vec![
-            (0, "zero"),
-            (1, "minimal"),
-        ];
+        let test_cases = vec![(0, "zero"), (1, "minimal")];
 
         for (duration_ms, description) in test_cases {
             let config = TimeoutTestConfig::basic(duration_ms, duration_ms, 100, 456);
@@ -604,15 +681,22 @@ mod metamorphic_zero_duration_rejection {
                     let result = timeout(now, Duration::from_millis(duration_ms), operation).await;
 
                     match result {
-                        Ok(Ok(_)) => global_state.operation_completed.fetch_add(1, Ordering::SeqCst),
-                        Ok(Err(_)) | Err(_) => global_state.timeouts_detected.fetch_add(1, Ordering::SeqCst),
+                        Ok(Ok(_)) => global_state
+                            .operation_completed
+                            .fetch_add(1, Ordering::SeqCst),
+                        Ok(Err(_)) | Err(_) => global_state
+                            .timeouts_detected
+                            .fetch_add(1, Ordering::SeqCst),
                     }
                 }
             });
 
             // Both zero and minimal duration should timeout for long operations
-            assert!(summary.timeouts_detected > 0,
-                "{} duration should cause timeout for operations longer than timeout", description);
+            assert!(
+                summary.timeouts_detected > 0,
+                "{} duration should cause timeout for operations longer than timeout",
+                description
+            );
         }
     }
 }
@@ -644,8 +728,12 @@ mod metamorphic_deterministic_replay {
                     let result = timeout(now, Duration::from_millis(50), inner_timeout).await;
 
                     match result {
-                        Ok(Ok(Ok(_))) => global_state.operation_completed.fetch_add(1, Ordering::SeqCst),
-                        _ => global_state.timeouts_detected.fetch_add(1, Ordering::SeqCst),
+                        Ok(Ok(Ok(_))) => global_state
+                            .operation_completed
+                            .fetch_add(1, Ordering::SeqCst),
+                        _ => global_state
+                            .timeouts_detected
+                            .fetch_add(1, Ordering::SeqCst),
                     }
                 }
             });
@@ -656,12 +744,21 @@ mod metamorphic_deterministic_replay {
         // Verify all runs produced the same result
         let first_summary = &summaries[0];
         for (i, summary) in summaries.iter().enumerate().skip(1) {
-            assert_eq!(first_summary.operation_completed, summary.operation_completed,
-                "Run {} operation_completed differs from first run", i);
-            assert_eq!(first_summary.timeouts_detected, summary.timeouts_detected,
-                "Run {} timeouts_detected differs from first run", i);
-            assert_eq!(first_summary.total_polls, summary.total_polls,
-                "Run {} total_polls differs from first run", i);
+            assert_eq!(
+                first_summary.operation_completed, summary.operation_completed,
+                "Run {} operation_completed differs from first run",
+                i
+            );
+            assert_eq!(
+                first_summary.timeouts_detected, summary.timeouts_detected,
+                "Run {} timeouts_detected differs from first run",
+                i
+            );
+            assert_eq!(
+                first_summary.total_polls, summary.total_polls,
+                "Run {} total_polls differs from first run",
+                i
+            );
         }
     }
 
@@ -684,8 +781,12 @@ mod metamorphic_deterministic_replay {
                     let result = timeout(now, Duration::from_millis(45), inner_timeout).await;
 
                     match result {
-                        Ok(Ok(Ok(_))) => global_state.operation_completed.fetch_add(1, Ordering::SeqCst),
-                        _ => global_state.timeouts_detected.fetch_add(1, Ordering::SeqCst),
+                        Ok(Ok(Ok(_))) => global_state
+                            .operation_completed
+                            .fetch_add(1, Ordering::SeqCst),
+                        _ => global_state
+                            .timeouts_detected
+                            .fetch_add(1, Ordering::SeqCst),
                     }
                 }
             });
@@ -728,21 +829,30 @@ mod metamorphic_integration {
                 let result = outer_timeout.await;
 
                 match result {
-                    Ok(Ok(Ok(_))) => global_state.operation_completed.fetch_add(1, Ordering::SeqCst),
-                    Ok(Ok(Err(_))) => global_state.external_cancels_detected.fetch_add(1, Ordering::SeqCst),
-                    Ok(Err(_)) | Err(_) => global_state.timeouts_detected.fetch_add(1, Ordering::SeqCst),
+                    Ok(Ok(Ok(_))) => global_state
+                        .operation_completed
+                        .fetch_add(1, Ordering::SeqCst),
+                    Ok(Ok(Err(_))) => global_state
+                        .external_cancels_detected
+                        .fetch_add(1, Ordering::SeqCst),
+                    Ok(Err(_)) | Err(_) => global_state
+                        .timeouts_detected
+                        .fetch_add(1, Ordering::SeqCst),
                 }
             }
         });
 
         // Verify that some outcome occurred
-        let total_outcomes = summary.operation_completed +
-                           summary.external_cancels_detected +
-                           summary.timeouts_detected;
+        let total_outcomes = summary.operation_completed
+            + summary.external_cancels_detected
+            + summary.timeouts_detected;
         assert!(total_outcomes > 0, "Some timeout outcome should occur");
 
         // Verify no double-cancellation detected
-        assert!(!summary.double_cancel_detected, "No double-cancellation should occur in comprehensive test");
+        assert!(
+            !summary.double_cancel_detected,
+            "No double-cancellation should occur in comprehensive test"
+        );
     }
 }
 

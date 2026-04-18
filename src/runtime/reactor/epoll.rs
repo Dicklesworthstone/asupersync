@@ -1566,7 +1566,12 @@ mod tests {
         let count = reactor
             .poll(&mut events, Some(Duration::from_millis(50)))
             .expect("second poll failed");
-        crate::assert_with_log!(count == 0, "second poll no events (oneshot silence)", 0usize, count);
+        crate::assert_with_log!(
+            count == 0,
+            "second poll no events (oneshot silence)",
+            0usize,
+            count
+        );
 
         // Re-arm by modifying interest
         reactor
@@ -1578,7 +1583,12 @@ mod tests {
         let count = reactor
             .poll(&mut events, Some(Duration::from_millis(100)))
             .expect("third poll failed");
-        crate::assert_with_log!(count >= 1, "third poll has events after re-arm", true, count >= 1);
+        crate::assert_with_log!(
+            count >= 1,
+            "third poll has events after re-arm",
+            true,
+            count >= 1
+        );
 
         let mut found_after_rearm = false;
         for event in &events {
@@ -1587,7 +1597,12 @@ mod tests {
                 break;
             }
         }
-        crate::assert_with_log!(found_after_rearm, "third poll found readable after re-arm", true, found_after_rearm);
+        crate::assert_with_log!(
+            found_after_rearm,
+            "third poll found readable after re-arm",
+            true,
+            found_after_rearm
+        );
 
         reactor.deregister(token).expect("deregister failed");
         crate::test_complete!("oneshot_fire_then_silence_until_rearm");
@@ -1605,9 +1620,7 @@ mod tests {
 
         let token = Token::new(102);
         // Register with complex interest: READABLE + PRIORITY + ONESHOT
-        let complex_interest = Interest::READABLE
-            .add(Interest::PRIORITY)
-            .with_oneshot();
+        let complex_interest = Interest::READABLE.add(Interest::PRIORITY).with_oneshot();
         reactor
             .register(&read_sock, token, complex_interest)
             .expect("register with complex oneshot interest failed");
@@ -1762,7 +1775,12 @@ mod tests {
                 break;
             }
         }
-        crate::assert_with_log!(found_writable, "initial writable event", true, found_writable);
+        crate::assert_with_log!(
+            found_writable,
+            "initial writable event",
+            true,
+            found_writable
+        );
 
         // After oneshot fires, no more events until re-arm
         events.clear();
@@ -1792,7 +1810,12 @@ mod tests {
                 break;
             }
         }
-        crate::assert_with_log!(found_readable, "readable event after re-arm", true, found_readable);
+        crate::assert_with_log!(
+            found_readable,
+            "readable event after re-arm",
+            true,
+            found_readable
+        );
 
         reactor.deregister(token).expect("deregister failed");
         crate::test_complete!("oneshot_auto_rearm_on_specific_events");

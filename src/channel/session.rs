@@ -859,7 +859,8 @@ mod tests {
             drop(rx); // Disconnect
 
             if let Err(mpsc::SendError::Disconnected(returned_value)) =
-                block_on(tx.send(&cx, original_value)) {
+                block_on(tx.send(&cx, original_value))
+            {
                 crate::assert_with_log!(
                     returned_value == original_value,
                     "MPSC error value preservation",
@@ -875,7 +876,8 @@ mod tests {
             drop(rx); // Disconnect
 
             if let Err(oneshot::SendError::Disconnected(returned_value)) =
-                tx.send(&cx, original_value) {
+                tx.send(&cx, original_value)
+            {
                 crate::assert_with_log!(
                     returned_value == original_value,
                     "Oneshot error value preservation",
@@ -946,7 +948,12 @@ mod tests {
             !tx1.is_closed() && !tx2.is_closed() && !tx3.is_closed(),
             "all clones open before receiver drop",
             "all false",
-            format!("tx1: {}, tx2: {}, tx3: {}", tx1.is_closed(), tx2.is_closed(), tx3.is_closed())
+            format!(
+                "tx1: {}, tx2: {}, tx3: {}",
+                tx1.is_closed(),
+                tx2.is_closed(),
+                tx3.is_closed()
+            )
         );
 
         drop(rx);
@@ -956,14 +963,29 @@ mod tests {
             tx1.is_closed() && tx2.is_closed() && tx3.is_closed(),
             "all clones closed after receiver drop",
             "all true",
-            format!("tx1: {}, tx2: {}, tx3: {}", tx1.is_closed(), tx2.is_closed(), tx3.is_closed())
+            format!(
+                "tx1: {}, tx2: {}, tx3: {}",
+                tx1.is_closed(),
+                tx2.is_closed(),
+                tx3.is_closed()
+            )
         );
 
         // Oneshot case (no clone, but test sender state)
         let (tx, rx) = tracked_oneshot::<i32>();
-        crate::assert_with_log!(!tx.is_closed(), "oneshot open before drop", false, tx.is_closed());
+        crate::assert_with_log!(
+            !tx.is_closed(),
+            "oneshot open before drop",
+            false,
+            tx.is_closed()
+        );
         drop(rx);
-        crate::assert_with_log!(tx.is_closed(), "oneshot closed after drop", true, tx.is_closed());
+        crate::assert_with_log!(
+            tx.is_closed(),
+            "oneshot closed after drop",
+            true,
+            tx.is_closed()
+        );
 
         crate::test_complete!("meta_receiver_state_symmetry");
     }
@@ -982,10 +1004,12 @@ mod tests {
         let mut aborted_proofs = 0;
 
         // Reserve 5 permits
-        let permits: Vec<_> = (0..5).map(|i| {
-            reserved_permits += 1;
-            block_on(tx.reserve(&cx)).expect(&format!("reserve {i}"))
-        }).collect();
+        let permits: Vec<_> = (0..5)
+            .map(|i| {
+                reserved_permits += 1;
+                block_on(tx.reserve(&cx)).expect(&format!("reserve {i}"))
+            })
+            .collect();
 
         // Commit 3, abort 2
         for (i, permit) in permits.into_iter().enumerate() {
@@ -1299,8 +1323,8 @@ mod tests {
         let operations = vec![
             ("reserve", 0),
             ("reserve", 1),
-            ("send", 0),    // send on permit 0
-            ("abort", 1),   // abort permit 1
+            ("send", 0),  // send on permit 0
+            ("abort", 1), // abort permit 1
             ("reserve", 2),
             ("send", 2),
         ];
@@ -1320,7 +1344,9 @@ mod tests {
                     "send" => {
                         if let Some(Some(permit)) = permits.get_mut(*permit_idx) {
                             let taken_permit = permit.take().expect("permit available for send");
-                            let _proof = taken_permit.send((run, *permit_idx)).expect("deterministic send");
+                            let _proof = taken_permit
+                                .send((run, *permit_idx))
+                                .expect("deterministic send");
                         }
                     }
                     "abort" => {

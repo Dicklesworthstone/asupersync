@@ -21,10 +21,10 @@
 
 use crate::lab::{LabConfig, LabRuntime};
 use crate::sync::OnceCell;
-use std::future::{ready, Future, pending};
+use std::future::{Future, pending, ready};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Configuration for OnceCell metamorphic tests.
@@ -167,7 +167,10 @@ impl Future for TestInitializer {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Simulate slow initialization by requiring multiple polls
         if self.slow_init {
-            let op_count = self.global_state.operation_counter.fetch_add(1, Ordering::SeqCst);
+            let op_count = self
+                .global_state
+                .operation_counter
+                .fetch_add(1, Ordering::SeqCst);
             if op_count % 3 != 0 {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
@@ -195,11 +198,15 @@ impl TestReader {
     /// Read value from OnceCell and record result.
     async fn read_value(&self, cell: &OnceCell<u32>) -> Option<u32> {
         if let Some(&value) = cell.get() {
-            self.global_state.readers_with_values.fetch_add(1, Ordering::SeqCst);
+            self.global_state
+                .readers_with_values
+                .fetch_add(1, Ordering::SeqCst);
             self.global_state.record_observed_value(value);
             Some(value)
         } else {
-            self.global_state.readers_with_none.fetch_add(1, Ordering::SeqCst);
+            self.global_state
+                .readers_with_none
+                .fetch_add(1, Ordering::SeqCst);
             None
         }
     }
@@ -245,14 +252,20 @@ mod metamorphic_initialization_idempotence {
 
             // Verify exactly one initialization succeeded
             assert_eq!(global_state.successful_inits.load(Ordering::SeqCst), 1);
-            assert_eq!(global_state.failed_inits.load(Ordering::SeqCst), config.init_values.len() - 1);
+            assert_eq!(
+                global_state.failed_inits.load(Ordering::SeqCst),
+                config.init_values.len() - 1
+            );
 
             // Verify cell is initialized with one of the expected values
             assert!(cell.is_initialized());
             let final_value = cell.get().expect("cell should be initialized");
-            assert!(config.init_values.contains(final_value),
+            assert!(
+                config.init_values.contains(final_value),
                 "Final value {} should be one of the attempted values: {:?}",
-                final_value, config.init_values);
+                final_value,
+                config.init_values
+            );
         });
 
         // Verify summary shows convergence
@@ -263,33 +276,39 @@ mod metamorphic_initialization_idempotence {
     /// Property-based test for initialization idempotence with random configurations.
     #[test]
     fn test_init_idempotence_property() {
-        use proptest::test_runner::TestRunner;
         use proptest::strategy::Strategy;
+        use proptest::test_runner::TestRunner;
 
         let strategy = (1usize..=8, 1u32..=1000, 0u64..1000);
         let mut runner = TestRunner::default();
 
-        runner.run(&strategy, |(num_initializers, base_value, seed)| {
-            let values: Vec<u32> = (0..num_initializers).map(|i| base_value + i as u32).collect();
-            let config = OnceCellTestConfig::basic(num_initializers, values.clone(), seed);
+        runner
+            .run(&strategy, |(num_initializers, base_value, seed)| {
+                let values: Vec<u32> = (0..num_initializers)
+                    .map(|i| base_value + i as u32)
+                    .collect();
+                let config = OnceCellTestConfig::basic(num_initializers, values.clone(), seed);
 
-            let summary = run_once_cell_test(&config, |global_state| async move {
-                let cell = Arc::new(OnceCell::new());
+                let summary = run_once_cell_test(&config, |global_state| async move {
+                    let cell = Arc::new(OnceCell::new());
 
-                // Try get_or_init with different functions sequentially
-                for (i, &value) in values.iter().enumerate() {
-                    let result = cell.get_or_init(|| async { value }).await;
-                    global_state.record_observed_value(*result);
-                }
-            });
+                    // Try get_or_init with different functions sequentially
+                    for (i, &value) in values.iter().enumerate() {
+                        let result = cell.get_or_init(|| async { value }).await;
+                        global_state.record_observed_value(*result);
+                    }
+                });
 
-            // All initializers should observe the same final value
-            assert_eq!(summary.unique_values_observed, 1,
-                "Expected exactly one unique value, got {} unique values",
-                summary.unique_values_observed);
+                // All initializers should observe the same final value
+                assert_eq!(
+                    summary.unique_values_observed, 1,
+                    "Expected exactly one unique value, got {} unique values",
+                    summary.unique_values_observed
+                );
 
-            Ok(())
-        }).unwrap();
+                Ok(())
+            })
+            .unwrap();
     }
 }
 
@@ -339,7 +358,10 @@ mod metamorphic_set_get_equivalence {
             let result = cell.get_or_init(|| async { 200 }).await;
 
             global_state.record_observed_value(*result);
-            assert_eq!(*result, 100, "get_or_init after set should return the set value");
+            assert_eq!(
+                *result, 100,
+                "get_or_init after set should return the set value"
+            );
         });
 
         // Should observe only the original set value
@@ -356,8 +378,7 @@ mod metamorphic_concurrent_convergence {
     /// Test concurrent readers and initializers converge to consistent state.
     #[test]
     fn test_concurrent_readers_and_initializers() {
-        let config = OnceCellTestConfig::basic(3, vec![1, 2, 3], 22222)
-            .with_readers(5);
+        let config = OnceCellTestConfig::basic(3, vec![1, 2, 3], 22222).with_readers(5);
 
         let summary = run_once_cell_test(&config, |global_state| async move {
             let cell = Arc::new(OnceCell::new());
@@ -376,9 +397,11 @@ mod metamorphic_concurrent_convergence {
         });
 
         // All operations should converge to a single value
-        assert_eq!(summary.unique_values_observed, 1,
+        assert_eq!(
+            summary.unique_values_observed, 1,
             "Expected convergence to single value, got {} unique values",
-            summary.unique_values_observed);
+            summary.unique_values_observed
+        );
 
         // Total readers should equal successful + unsuccessful reads
         assert_eq!(
@@ -398,8 +421,7 @@ mod metamorphic_cancellation_restart {
     /// Test that cancelled initialization allows fresh restart.
     #[test]
     fn test_cancelled_init_allows_restart() {
-        let config = OnceCellTestConfig::basic(2, vec![50, 60], 33333)
-            .with_cancellation();
+        let config = OnceCellTestConfig::basic(2, vec![50, 60], 33333).with_cancellation();
 
         let summary = run_once_cell_test(&config, |global_state| async move {
             let cell = Arc::new(OnceCell::new());
@@ -420,7 +442,10 @@ mod metamorphic_cancellation_restart {
 
             // If set succeeded, verify we can't reinitialize
             if cell.is_initialized() {
-                assert!(cell.set(60).is_err(), "Should not be able to set again after initialization");
+                assert!(
+                    cell.set(60).is_err(),
+                    "Should not be able to set again after initialization"
+                );
                 let final_value = cell.get().expect("Should have value after successful set");
                 assert_eq!(*final_value, 50, "Should retain original value");
             } else {
@@ -452,11 +477,17 @@ mod metamorphic_state_monotonicity {
 
             // Initially uninitialized
             assert!(!cell.is_initialized(), "Cell should start uninitialized");
-            assert!(cell.get().is_none(), "get() should return None when uninitialized");
+            assert!(
+                cell.get().is_none(),
+                "get() should return None when uninitialized"
+            );
 
             // After initialization, should be initialized
             let result = cell.get_or_init(|| async { 77 }).await;
-            assert!(cell.is_initialized(), "Cell should be initialized after get_or_init");
+            assert!(
+                cell.is_initialized(),
+                "Cell should be initialized after get_or_init"
+            );
             assert_eq!(*result, 77);
 
             // Multiple get() calls should return the same value
@@ -464,7 +495,10 @@ mod metamorphic_state_monotonicity {
             assert_eq!(cell.get(), Some(&77));
 
             // set() should fail on already initialized cell
-            assert!(cell.set(99).is_err(), "set() should fail on initialized cell");
+            assert!(
+                cell.set(99).is_err(),
+                "set() should fail on initialized cell"
+            );
 
             // Cell should still have original value
             assert_eq!(cell.get(), Some(&77));
@@ -492,8 +526,14 @@ mod metamorphic_value_immutability {
             let ref3 = cell.get().expect("cell should be initialized");
 
             // All references should be identical (same memory address)
-            assert!(std::ptr::eq(ref1, ref2), "References should point to same memory");
-            assert!(std::ptr::eq(ref2, ref3), "References should point to same memory");
+            assert!(
+                std::ptr::eq(ref1, ref2),
+                "References should point to same memory"
+            );
+            assert!(
+                std::ptr::eq(ref2, ref3),
+                "References should point to same memory"
+            );
             assert_eq!(*ref1, 88);
             assert_eq!(*ref2, 88);
             assert_eq!(*ref3, 88);
@@ -503,8 +543,7 @@ mod metamorphic_value_immutability {
     /// Test value immutability across concurrent access.
     #[test]
     fn test_concurrent_value_immutability() {
-        let config = OnceCellTestConfig::basic(1, vec![99], 66666)
-            .with_readers(10);
+        let config = OnceCellTestConfig::basic(1, vec![99], 66666).with_readers(10);
 
         let summary = run_once_cell_test(&config, |global_state| async move {
             let cell = Arc::new(OnceCell::with_value(99));
@@ -561,8 +600,10 @@ mod comprehensive_once_cell_metamorphic_tests {
         });
 
         // Verify convergence and consistency
-        assert_eq!(summary.unique_values_observed, 1,
-            "All operations should converge to single value");
+        assert_eq!(
+            summary.unique_values_observed, 1,
+            "All operations should converge to single value"
+        );
 
         // MR6: All successful readers should have seen the same value
         if summary.readers_with_values > 0 {

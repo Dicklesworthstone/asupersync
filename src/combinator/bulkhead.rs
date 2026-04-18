@@ -1747,10 +1747,16 @@ mod tests {
         // 2. Verify critical service unaffected by batch overflow
         assert_eq!(bh_critical.available(), 2);
         let crit_p1 = bh_critical.try_acquire(1);
-        assert!(crit_p1.is_some(), "critical service should be unaffected by batch overflow");
+        assert!(
+            crit_p1.is_some(),
+            "critical service should be unaffected by batch overflow"
+        );
 
         let crit_p2 = bh_critical.try_acquire(1);
-        assert!(crit_p2.is_some(), "critical service should maintain full capacity");
+        assert!(
+            crit_p2.is_some(),
+            "critical service should maintain full capacity"
+        );
 
         // 3. Verify overflow metrics isolated
         let batch_metrics = bh_batch.metrics();
@@ -1812,7 +1818,10 @@ mod tests {
 
         // Should work normally despite other overflows
         let p1 = third_service.try_acquire(3);
-        assert!(p1.is_some(), "unaffected service should work during other overflows");
+        assert!(
+            p1.is_some(),
+            "unaffected service should work during other overflows"
+        );
         assert_eq!(third_service.available(), 2);
     }
 
@@ -1854,16 +1863,26 @@ mod tests {
         let _granted = bh_overloaded.process_queue(now);
 
         // 4. Verify stable service unaffected by recovery
-        assert_eq!(bh_stable.available(), 1, "stable service should be unaffected by recovery");
+        assert_eq!(
+            bh_stable.available(),
+            1,
+            "stable service should be unaffected by recovery"
+        );
         assert_eq!(bh_stable.metrics().active_permits, 1);
         assert_eq!(bh_stable.metrics().queue_depth, 1);
 
         // 5. Both services should work independently after recovery
         let new_stable = bh_stable.try_acquire(1);
-        assert!(new_stable.is_some(), "stable service should remain functional");
+        assert!(
+            new_stable.is_some(),
+            "stable service should remain functional"
+        );
 
         let overloaded_available = bh_overloaded.available();
-        assert_eq!(overloaded_available, 0, "overloaded service should have granted queued request");
+        assert_eq!(
+            overloaded_available, 0,
+            "overloaded service should have granted queued request"
+        );
     }
 
     #[test]
@@ -1898,7 +1917,10 @@ mod tests {
 
         // 2. Light service should work normally with weighted permits
         let light_p1 = bh_light.try_acquire(3);
-        assert!(light_p1.is_some(), "light service should work despite heavy overflow");
+        assert!(
+            light_p1.is_some(),
+            "light service should work despite heavy overflow"
+        );
         assert_eq!(bh_light.available(), 2);
 
         let _light_q1 = bh_light.enqueue(2, now).unwrap();
@@ -1946,20 +1968,32 @@ mod tests {
 
         // 3. Verify fast bulkhead timed out
         let fast_result = bh_fast.check_entry(fast_q1, later);
-        assert!(matches!(fast_result, Err(BulkheadError::QueueTimeout { .. })));
+        assert!(matches!(
+            fast_result,
+            Err(BulkheadError::QueueTimeout { .. })
+        ));
         assert_eq!(bh_fast.metrics().total_timeout, 1);
 
         // 4. Verify slow bulkhead unaffected by fast timeout
         let slow_result = bh_slow.check_entry(slow_q1, later);
-        assert!(matches!(slow_result, Ok(None)), "slow bulkhead should still be waiting");
+        assert!(
+            matches!(slow_result, Ok(None)),
+            "slow bulkhead should still be waiting"
+        );
         assert_eq!(bh_slow.metrics().total_timeout, 0);
         assert_eq!(bh_slow.metrics().queue_depth, 1);
 
         // 5. Verify independent queue recovery
         let fast_can_enqueue = bh_fast.enqueue(1, later);
-        assert!(fast_can_enqueue.is_ok(), "fast bulkhead should recover queue capacity after timeout");
+        assert!(
+            fast_can_enqueue.is_ok(),
+            "fast bulkhead should recover queue capacity after timeout"
+        );
 
         let slow_metrics = bh_slow.metrics();
-        assert_eq!(slow_metrics.queue_depth, 1, "slow bulkhead queue unchanged by fast timeout");
+        assert_eq!(
+            slow_metrics.queue_depth, 1,
+            "slow bulkhead queue unchanged by fast timeout"
+        );
     }
 }

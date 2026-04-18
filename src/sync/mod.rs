@@ -34,12 +34,12 @@ mod mutex;
 mod notify;
 
 mod once_cell;
+#[cfg(test)]
+mod once_cell_metamorphic;
 mod pool;
 mod rwlock;
 #[cfg(test)]
 mod rwlock_lost_wakeup_test;
-#[cfg(test)]
-mod once_cell_metamorphic;
 pub mod semaphore;
 
 pub use barrier::{Barrier, BarrierWaitError, BarrierWaitResult};
@@ -60,8 +60,8 @@ pub use rwlock::{
 pub use semaphore::{
     AcquireError, OwnedSemaphorePermit, Semaphore, SemaphorePermit, TryAcquireError,
 };
+#[cfg(test)]
+mod barrier_metamorphic;
 mod mutex_deadlock_test;
 #[cfg(test)]
 mod mutex_metamorphic;
-#[cfg(test)]
-mod barrier_metamorphic;

@@ -28,7 +28,7 @@
 //! explore different execution interleavings and verify invariants hold across
 //! all possible schedules.
 
-use crate::combinator::race::{race2_outcomes, RaceWinner};
+use crate::combinator::race::{RaceWinner, race2_outcomes};
 use crate::cx::{Cx, Scope};
 use crate::runtime::RuntimeState;
 use crate::types::cancel::CancelReason;
@@ -38,7 +38,7 @@ use proptest::prelude::*;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -71,7 +71,12 @@ struct TestFuture {
 }
 
 impl TestFuture {
-    fn new(id: u32, value: i32, polls_to_complete: u32, global_state: Arc<GlobalTestState>) -> Self {
+    fn new(
+        id: u32,
+        value: i32,
+        polls_to_complete: u32,
+        global_state: Arc<GlobalTestState>,
+    ) -> Self {
         Self {
             id,
             value,
@@ -141,7 +146,8 @@ impl Future for TestFuture {
         // Simulate work by counting down polls
         let remaining = this.polls_to_complete.load(Ordering::SeqCst);
         if remaining > 0 {
-            this.polls_to_complete.store(remaining - 1, Ordering::SeqCst);
+            this.polls_to_complete
+                .store(remaining - 1, Ordering::SeqCst);
             Poll::Pending
         } else {
             // Complete successfully
@@ -211,7 +217,8 @@ impl GlobalTestState {
     fn get_undrained_losers(&self) -> Vec<u32> {
         let cancelled = self.cancelled_futures.lock();
         let drained = self.drained_futures.lock();
-        cancelled.iter()
+        cancelled
+            .iter()
             .filter(|&&id| !drained.contains(&id))
             .copied()
             .collect()
@@ -302,7 +309,11 @@ fn mr1_loser_drain_completeness(
     // Create test futures - winner completes quickly, losers take longer
     let mut futures = Vec::new();
     for i in 0..branch_count {
-        let polls = if i == winner_index { 1 } else { loser_poll_counts[i % loser_poll_counts.len()] };
+        let polls = if i == winner_index {
+            1
+        } else {
+            loser_poll_counts[i % loser_poll_counts.len()]
+        };
         let future = TestFuture::new(i as u32, (i * 10) as i32, polls, global_state.clone());
         futures.push(future);
     }
@@ -390,7 +401,12 @@ fn mr2_panic_isolation(
     // Create test futures - some losers panic during drain
     let mut futures = Vec::new();
     for i in 0..branch_count {
-        let mut future = TestFuture::new(i as u32, (i * 10) as i32, if i == winner_index { 1 } else { 5 }, global_state.clone());
+        let mut future = TestFuture::new(
+            i as u32,
+            (i * 10) as i32,
+            if i == winner_index { 1 } else { 5 },
+            global_state.clone(),
+        );
         if panic_loser_indices.contains(&i) {
             future = future.with_drain_panic();
         }
@@ -470,11 +486,7 @@ fn mr2_panic_isolation(
 /// **MR3: Branch Outcome Consistency**
 ///
 /// Race with N branches where winner is branch-k leaves all other N-1 in Cancelled outcome.
-fn mr3_branch_outcome_consistency(
-    branch_count: usize,
-    winner_index: usize,
-    seed: u64,
-) -> bool {
+fn mr3_branch_outcome_consistency(branch_count: usize, winner_index: usize, seed: u64) -> bool {
     let global_state = GlobalTestState::new();
 
     // Create N test futures
@@ -484,7 +496,7 @@ fn mr3_branch_outcome_consistency(
             i as u32,
             (i * 10) as i32,
             if i == winner_index { 1 } else { 10 }, // Winner completes quickly
-            global_state.clone()
+            global_state.clone(),
         );
         futures.push(future);
     }
@@ -511,7 +523,8 @@ fn mr3_branch_outcome_consistency(
                             for (j, other) in futures.iter().enumerate() {
                                 if j != i {
                                     other.cancel(CancelReason::race_loser());
-                                    outcomes[j] = Some(Outcome::Cancelled(CancelReason::race_loser()));
+                                    outcomes[j] =
+                                        Some(Outcome::Cancelled(CancelReason::race_loser()));
                                 }
                             }
                         }
@@ -617,15 +630,18 @@ fn mr4_cancel_propagation_consistency(
     }
 
     // **MR4 Verification**: All outcomes should be Cancelled (unless completed before cancellation)
-    let cancelled_count = outcomes.iter()
+    let cancelled_count = outcomes
+        .iter()
         .filter(|outcome| matches!(outcome, Some(Outcome::Cancelled(_))))
         .count();
-    let completed_count = outcomes.iter()
+    let completed_count = outcomes
+        .iter()
         .filter(|outcome| matches!(outcome, Some(Outcome::Ok(_))))
         .count();
 
     // If race was cancelled mid-flight, most/all futures should be cancelled
-    let propagation_correct = cancelled_count > 0 && (cancelled_count + completed_count == branch_count);
+    let propagation_correct =
+        cancelled_count > 0 && (cancelled_count + completed_count == branch_count);
 
     crate::assert_with_log!(
         propagation_correct,
@@ -733,7 +749,8 @@ mod tests {
         let mut futures = Vec::new();
         for i in 0..branch_count {
             let polls = if i == winner_index { 2 } else { 8 + i as u32 };
-            let mut future = TestFuture::new(i as u32, (i * 100) as i32, polls, global_state.clone());
+            let mut future =
+                TestFuture::new(i as u32, (i * 100) as i32, polls, global_state.clone());
 
             // Make one loser panic during drain
             if i == 3 {
@@ -744,9 +761,23 @@ mod tests {
         }
 
         // Test all MRs in sequence
-        assert!(mr1_loser_drain_completeness(branch_count, winner_index, vec![8, 9, 10], seed));
-        assert!(mr2_panic_isolation(branch_count, winner_index, vec![3], seed));
-        assert!(mr3_branch_outcome_consistency(branch_count, winner_index, seed));
+        assert!(mr1_loser_drain_completeness(
+            branch_count,
+            winner_index,
+            vec![8, 9, 10],
+            seed
+        ));
+        assert!(mr2_panic_isolation(
+            branch_count,
+            winner_index,
+            vec![3],
+            seed
+        ));
+        assert!(mr3_branch_outcome_consistency(
+            branch_count,
+            winner_index,
+            seed
+        ));
         assert!(mr4_cancel_propagation_consistency(branch_count, 5, seed));
     }
 

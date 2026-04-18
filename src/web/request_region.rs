@@ -748,7 +748,10 @@ mod tests {
                 for i in 0..10 {
                     if ctx.cx().is_cancel_requested() {
                         cancel_observed_clone.store(true, Ordering::SeqCst);
-                        return Response::new(StatusCode::CLIENT_CLOSED_REQUEST, b"cancelled".to_vec());
+                        return Response::new(
+                            StatusCode::CLIENT_CLOSED_REQUEST,
+                            b"cancelled".to_vec(),
+                        );
                     }
                     // Simulate work that might take multiple ticks
                     std::thread::sleep(Duration::from_millis(1));
@@ -757,8 +760,10 @@ mod tests {
             });
 
             // MR1: Cancel should be observed within reasonable time
-            assert!(cancel_observed.load(Ordering::SeqCst) || outcome.is_cancelled(),
-                "Client disconnect should trigger observable cancellation");
+            assert!(
+                cancel_observed.load(Ordering::SeqCst) || outcome.is_cancelled(),
+                "Client disconnect should trigger observable cancellation"
+            );
         }
 
         /// MR2: All pending downstream futures receive cancellation
@@ -798,8 +803,10 @@ mod tests {
             });
 
             // MR2: Spawned tasks should observe cancellation
-            assert!(task_cancelled.load(Ordering::SeqCst) || outcome.is_cancelled(),
-                "Spawned tasks should receive cancellation signal");
+            assert!(
+                task_cancelled.load(Ordering::SeqCst) || outcome.is_cancelled(),
+                "Spawned tasks should receive cancellation signal"
+            );
         }
 
         /// MR3: No obligation leaks after disconnect
@@ -847,8 +854,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
 
             // MR3: Obligations should be cleaned up after cancellation
-            assert!(obligation_cleaned.load(Ordering::SeqCst),
-                "Obligations must be cleaned up when request is cancelled");
+            assert!(
+                obligation_cleaned.load(Ordering::SeqCst),
+                "Obligations must be cleaned up when request is cancelled"
+            );
         }
 
         /// MR4: Partial response flushed atomically
@@ -871,7 +880,10 @@ mod tests {
                 for i in 0..10 {
                     if ctx.cx().is_cancel_requested() {
                         // If cancelled, return what we have or a cancellation response
-                        return Response::new(StatusCode::CLIENT_CLOSED_REQUEST, b"cancelled".to_vec());
+                        return Response::new(
+                            StatusCode::CLIENT_CLOSED_REQUEST,
+                            b"cancelled".to_vec(),
+                        );
                     }
 
                     // Simulate response building
@@ -893,10 +905,14 @@ mod tests {
 
             // MR4: Response should be either complete or properly cancelled
             match outcome {
-                RegionOutcome::Ok(_) => assert!(response_complete.load(Ordering::SeqCst),
-                    "Complete response should only be returned if fully built"),
-                RegionOutcome::Cancelled => assert!(!response_complete.load(Ordering::SeqCst),
-                    "Cancelled response should not complete response building"),
+                RegionOutcome::Ok(_) => assert!(
+                    response_complete.load(Ordering::SeqCst),
+                    "Complete response should only be returned if fully built"
+                ),
+                RegionOutcome::Cancelled => assert!(
+                    !response_complete.load(Ordering::SeqCst),
+                    "Cancelled response should not complete response building"
+                ),
                 _ => panic!("Unexpected outcome: {:?}", outcome),
             }
         }
@@ -912,8 +928,10 @@ mod tests {
 
             // First request with ID "req-123"
             let mut req1 = test_request("POST", "/idempotent");
-            req1.headers.insert("x-request-id".to_string(), "req-123".to_string());
-            req1.headers.insert("x-idempotency-key".to_string(), "key-123".to_string());
+            req1.headers
+                .insert("x-request-id".to_string(), "req-123".to_string());
+            req1.headers
+                .insert("x-idempotency-key".to_string(), "key-123".to_string());
 
             let region1 = RequestRegion::new(&cx, req1);
             let counter_clone1 = Arc::clone(&request_counter);
@@ -934,8 +952,10 @@ mod tests {
 
             // Second request with same ID (reconnect/retry)
             let mut req2 = test_request("POST", "/idempotent");
-            req2.headers.insert("x-request-id".to_string(), "req-123".to_string());
-            req2.headers.insert("x-idempotency-key".to_string(), "key-123".to_string());
+            req2.headers
+                .insert("x-request-id".to_string(), "req-123".to_string());
+            req2.headers
+                .insert("x-idempotency-key".to_string(), "key-123".to_string());
 
             let region2 = RequestRegion::new(&cx, req2);
             let counter_clone2 = Arc::clone(&request_counter);
@@ -962,12 +982,17 @@ mod tests {
 
             // MR5: Both requests should succeed, but operation should only happen once
             assert!(outcome1.is_ok(), "First request should succeed");
-            assert!(outcome2.is_ok(), "Second request (reconnect) should succeed");
+            assert!(
+                outcome2.is_ok(),
+                "Second request (reconnect) should succeed"
+            );
 
             // The key invariant: idempotent operations should only execute once
             let final_count = request_counter.load(Ordering::SeqCst);
-            assert_eq!(final_count, 1,
-                "Idempotent operation should only execute once despite multiple requests");
+            assert_eq!(
+                final_count, 1,
+                "Idempotent operation should only execute once despite multiple requests"
+            );
         }
 
         /// Composite MR: Disconnect during concurrent operations
@@ -1023,16 +1048,24 @@ mod tests {
 
             // Composite invariants:
             // 1. All tasks should have started
-            assert_eq!(task_count.load(Ordering::SeqCst), 3,
-                "All spawned tasks should have started");
+            assert_eq!(
+                task_count.load(Ordering::SeqCst),
+                3,
+                "All spawned tasks should have started"
+            );
 
             // 2. All tasks should have cleaned up
-            assert_eq!(cleanup_count.load(Ordering::SeqCst), 3,
-                "All tasks should have performed cleanup");
+            assert_eq!(
+                cleanup_count.load(Ordering::SeqCst),
+                3,
+                "All tasks should have performed cleanup"
+            );
 
             // 3. Request should be cancelled
-            assert!(outcome.is_cancelled(),
-                "Request should be marked as cancelled");
+            assert!(
+                outcome.is_cancelled(),
+                "Request should be marked as cancelled"
+            );
         }
 
         struct CleanupGuard {

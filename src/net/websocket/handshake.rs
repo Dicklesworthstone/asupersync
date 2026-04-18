@@ -1459,7 +1459,7 @@ Connection: Upgrade\n\
         let valid_keys = vec![
             "dGhlIHNhbXBsZSBub25jZQ==", // RFC 6455 example
             "AQIDBAUGBwgJCgsMDQ4PEA==", // Sequential bytes 0x01-0x10
-            "////////////////////", // All 0xFF bytes
+            "////////////////////",     // All 0xFF bytes
             "AAAAAAAAAAAAAAAAAAAAAA==", // All zero bytes
             "MTIzNDU2Nzg5YWJjZGVmZw==", // "1234567890abcdefg" (16 bytes)
         ];
@@ -1479,16 +1479,25 @@ Connection: Upgrade\n\
                 .expect(&format!("Failed to parse request {}", i));
 
             let result = server.accept(&request);
-            assert!(result.is_ok(),
+            assert!(
+                result.is_ok(),
                 "Valid 16-byte key #{} should be accepted: '{}', error: {:?}",
-                i, key, result.unwrap_err());
+                i,
+                key,
+                result.unwrap_err()
+            );
 
             // Verify the decoded key is exactly 16 bytes
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(key)
                 .expect("Key should decode properly");
-            assert_eq!(decoded.len(), 16,
-                "Key #{} should decode to exactly 16 bytes: '{}'", i, key);
+            assert_eq!(
+                decoded.len(),
+                16,
+                "Key #{} should decode to exactly 16 bytes: '{}'",
+                i,
+                key
+            );
         }
 
         // Invalid keys (should fail with InvalidKey error)
@@ -1520,12 +1529,20 @@ Connection: Upgrade\n\
                 .expect(&format!("Failed to parse request for {}", description));
 
             let result = server.accept(&request);
-            assert!(result.is_err(),
-                "Invalid key should be rejected: {} ({})", key, description);
+            assert!(
+                result.is_err(),
+                "Invalid key should be rejected: {} ({})",
+                key,
+                description
+            );
 
             if let Err(error) = result {
-                assert!(matches!(error, HandshakeError::InvalidKey),
-                    "Should fail with InvalidKey error for {}: got {:?}", description, error);
+                assert!(
+                    matches!(error, HandshakeError::InvalidKey),
+                    "Should fail with InvalidKey error for {}: got {:?}",
+                    description,
+                    error
+                );
             }
         }
     }
@@ -1540,20 +1557,27 @@ Connection: Upgrade\n\
         let expected_accept = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 
         let actual_accept = compute_accept_key(client_key);
-        assert_eq!(actual_accept, expected_accept,
-            "RFC 6455 test vector must match exactly");
+        assert_eq!(
+            actual_accept, expected_accept,
+            "RFC 6455 test vector must match exactly"
+        );
 
         // Verify the computation step by step
         let concatenated = format!("{}{}", client_key, WS_GUID);
-        assert_eq!(concatenated, "dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+        assert_eq!(
+            concatenated,
+            "dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        );
 
         let mut hasher = Sha1::new();
         hasher.update(concatenated.as_bytes());
         let hash = hasher.finalize();
 
         let manual_accept = base64::engine::general_purpose::STANDARD.encode(hash);
-        assert_eq!(manual_accept, expected_accept,
-            "Manual computation should match library computation");
+        assert_eq!(
+            manual_accept, expected_accept,
+            "Manual computation should match library computation"
+        );
 
         // Test additional known vectors to ensure consistency
         let test_vectors = vec![
@@ -1564,14 +1588,18 @@ Connection: Upgrade\n\
 
         for (key, expected) in test_vectors {
             let computed = compute_accept_key(key);
-            assert_eq!(computed, expected,
+            assert_eq!(
+                computed, expected,
                 "Accept key computation failed for test vector: key={}, expected={}, got={}",
-                key, expected, computed);
+                key, expected, computed
+            );
 
             // Verify computation is deterministic (same result every time)
             let computed_again = compute_accept_key(key);
-            assert_eq!(computed, computed_again,
-                "Accept key computation should be deterministic");
+            assert_eq!(
+                computed, computed_again,
+                "Accept key computation should be deterministic"
+            );
         }
 
         // Verify GUID constant is exactly per RFC 6455
@@ -1585,8 +1613,10 @@ Connection: Upgrade\n\
         let hash_wrong = hasher_wrong.finalize();
         let wrong_accept = base64::engine::general_purpose::STANDARD.encode(hash_wrong);
 
-        assert_ne!(wrong_accept, expected_accept,
-            "Wrong GUID should produce different result");
+        assert_ne!(
+            wrong_accept, expected_accept,
+            "Wrong GUID should produce different result"
+        );
     }
 
     /// Golden Test #3: Key reuse detection across multiple connections
@@ -1610,10 +1640,11 @@ Connection: Upgrade\n\
             reused_key
         );
 
-        let request1 = HttpRequest::parse(request1_data.as_bytes())
-            .expect("First request should parse");
+        let request1 =
+            HttpRequest::parse(request1_data.as_bytes()).expect("First request should parse");
 
-        let accept1 = server.accept(&request1)
+        let accept1 = server
+            .accept(&request1)
             .expect("First connection should be accepted");
 
         // Second connection with the same key (different path)
@@ -1628,15 +1659,18 @@ Connection: Upgrade\n\
             reused_key
         );
 
-        let request2 = HttpRequest::parse(request2_data.as_bytes())
-            .expect("Second request should parse");
+        let request2 =
+            HttpRequest::parse(request2_data.as_bytes()).expect("Second request should parse");
 
-        let accept2 = server.accept(&request2)
+        let accept2 = server
+            .accept(&request2)
             .expect("Second connection should be accepted");
 
         // Verify both connections produce the same accept key (deterministic)
-        assert_eq!(accept1.accept_key, accept2.accept_key,
-            "Same client key should always produce same accept key");
+        assert_eq!(
+            accept1.accept_key, accept2.accept_key,
+            "Same client key should always produce same accept key"
+        );
 
         // Verify the accept key matches RFC test vector
         assert_eq!(accept1.accept_key, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
@@ -1656,11 +1690,15 @@ Connection: Upgrade\n\
             let request = HttpRequest::parse(request_data.as_bytes())
                 .expect(&format!("Request {} should parse", i));
 
-            let accept = server.accept(&request)
+            let accept = server
+                .accept(&request)
                 .expect(&format!("Connection {} should be accepted", i));
 
-            assert_eq!(accept.accept_key, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
-                "Connection {} should have consistent accept key", i);
+            assert_eq!(
+                accept.accept_key, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
+                "Connection {} should have consistent accept key",
+                i
+            );
         }
 
         // Test that different keys produce different accept values
@@ -1685,7 +1723,8 @@ Connection: Upgrade\n\
             let request = HttpRequest::parse(request_data.as_bytes())
                 .expect(&format!("Request for key {} should parse", i));
 
-            let accept = server.accept(&request)
+            let accept = server
+                .accept(&request)
                 .expect(&format!("Connection for key {} should be accepted", i));
 
             accept_keys.push(accept.accept_key.clone());
@@ -1694,9 +1733,11 @@ Connection: Upgrade\n\
         // Verify all accept keys are different
         for i in 0..accept_keys.len() {
             for j in (i + 1)..accept_keys.len() {
-                assert_ne!(accept_keys[i], accept_keys[j],
+                assert_ne!(
+                    accept_keys[i], accept_keys[j],
                     "Accept keys {} and {} should be different: '{}' vs '{}'",
-                    i, j, accept_keys[i], accept_keys[j]);
+                    i, j, accept_keys[i], accept_keys[j]
+                );
             }
         }
     }
@@ -1724,16 +1765,19 @@ Connection: Upgrade\n\
         let request = HttpRequest::parse(request_data.as_bytes())
             .expect("Multiple protocol request should parse");
 
-        let accept = server.accept(&request)
+        let accept = server
+            .accept(&request)
             .expect("Multiple protocol negotiation should succeed");
 
         // Server should select first matching protocol from client list
-        assert_eq!(accept.protocol, Some("superchat".to_string()),
-            "Should select first matching protocol from client preference order");
+        assert_eq!(
+            accept.protocol,
+            Some("superchat".to_string()),
+            "Should select first matching protocol from client preference order"
+        );
 
         // Test case 2: Client requests protocols server doesn't support
-        let server_limited = ServerHandshake::new()
-            .protocol("private-protocol");
+        let server_limited = ServerHandshake::new().protocol("private-protocol");
 
         let request_data = "GET /test HTTP/1.1\r\n\
             Host: localhost\r\n\
@@ -1747,17 +1791,18 @@ Connection: Upgrade\n\
             .expect("Unsupported protocol request should parse");
 
         let result = server_limited.accept(&request);
-        assert!(result.is_err(),
-            "Should reject when no protocols match");
+        assert!(result.is_err(), "Should reject when no protocols match");
 
         if let Err(error) = result {
-            assert!(matches!(error, HandshakeError::ProtocolMismatch { .. }),
-                "Should fail with ProtocolMismatch error: {:?}", error);
+            assert!(
+                matches!(error, HandshakeError::ProtocolMismatch { .. }),
+                "Should fail with ProtocolMismatch error: {:?}",
+                error
+            );
         }
 
         // Test case 3: Single protocol negotiation
-        let server_single = ServerHandshake::new()
-            .protocol("websocket-chat");
+        let server_single = ServerHandshake::new().protocol("websocket-chat");
 
         let request_data = "GET /test HTTP/1.1\r\n\
             Host: localhost\r\n\
@@ -1770,11 +1815,15 @@ Connection: Upgrade\n\
         let request = HttpRequest::parse(request_data.as_bytes())
             .expect("Single protocol request should parse");
 
-        let accept = server_single.accept(&request)
+        let accept = server_single
+            .accept(&request)
             .expect("Single protocol negotiation should succeed");
 
-        assert_eq!(accept.protocol, Some("websocket-chat".to_string()),
-            "Should accept exact protocol match");
+        assert_eq!(
+            accept.protocol,
+            Some("websocket-chat".to_string()),
+            "Should accept exact protocol match"
+        );
 
         // Test case 4: No protocol requested, server has protocols
         let request_data = "GET /test HTTP/1.1\r\n\
@@ -1784,22 +1833,25 @@ Connection: Upgrade\n\
             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
             Sec-WebSocket-Version: 13\r\n\r\n";
 
-        let request = HttpRequest::parse(request_data.as_bytes())
-            .expect("No protocol request should parse");
+        let request =
+            HttpRequest::parse(request_data.as_bytes()).expect("No protocol request should parse");
 
-        let accept = server.accept(&request)
+        let accept = server
+            .accept(&request)
             .expect("Should accept connection without protocol when client doesn't request any");
 
-        assert_eq!(accept.protocol, None,
-            "Should not select protocol when client doesn't request any");
+        assert_eq!(
+            accept.protocol, None,
+            "Should not select protocol when client doesn't request any"
+        );
 
         // Test case 5: Protocol list parsing edge cases
         let protocol_test_cases = vec![
             ("chat", "chat"),
-            ("chat, superchat", "chat"), // First in list
-            ("  chat  ,  superchat  ", "chat"), // Whitespace handling
+            ("chat, superchat", "chat"),          // First in list
+            ("  chat  ,  superchat  ", "chat"),   // Whitespace handling
             ("superchat,chat,echo", "superchat"), // No spaces
-            ("unknown, chat, unknown2", "chat"), // Mixed known/unknown
+            ("unknown, chat, unknown2", "chat"),  // Mixed known/unknown
         ];
 
         let server_chat = ServerHandshake::new().protocol("chat");
@@ -1816,14 +1868,23 @@ Connection: Upgrade\n\
                 protocol_header
             );
 
-            let request = HttpRequest::parse(request_data.as_bytes())
-                .expect(&format!("Protocol header '{}' should parse", protocol_header));
+            let request = HttpRequest::parse(request_data.as_bytes()).expect(&format!(
+                "Protocol header '{}' should parse",
+                protocol_header
+            ));
 
-            let accept = server_chat.accept(&request)
-                .expect(&format!("Protocol negotiation should succeed for '{}'", protocol_header));
+            let accept = server_chat.accept(&request).expect(&format!(
+                "Protocol negotiation should succeed for '{}'",
+                protocol_header
+            ));
 
-            assert_eq!(accept.protocol, Some(expected.to_string()),
-                "Protocol header '{}' should select '{}'", protocol_header, expected);
+            assert_eq!(
+                accept.protocol,
+                Some(expected.to_string()),
+                "Protocol header '{}' should select '{}'",
+                protocol_header,
+                expected
+            );
         }
 
         // Test case 6: Case sensitivity (protocols are case-sensitive per RFC)
@@ -1837,12 +1898,14 @@ Connection: Upgrade\n\
             Sec-WebSocket-Version: 13\r\n\
             Sec-WebSocket-Protocol: chat\r\n\r\n"; // lowercase
 
-        let request = HttpRequest::parse(request_data.as_bytes())
-            .expect("Case test request should parse");
+        let request =
+            HttpRequest::parse(request_data.as_bytes()).expect("Case test request should parse");
 
         let result = server_case.accept(&request);
-        assert!(result.is_err(),
-            "Protocol matching should be case-sensitive: 'Chat' != 'chat'");
+        assert!(
+            result.is_err(),
+            "Protocol matching should be case-sensitive: 'Chat' != 'chat'"
+        );
     }
 
     /// Golden Test #5: RFC 6455 compliant status codes and error conditions
@@ -1859,18 +1922,21 @@ Connection: Upgrade\n\
             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
             Sec-WebSocket-Version: 13\r\n\r\n";
 
-        let request = HttpRequest::parse(valid_request_data.as_bytes())
-            .expect("Valid request should parse");
+        let request =
+            HttpRequest::parse(valid_request_data.as_bytes()).expect("Valid request should parse");
 
-        let accept = server.accept(&request)
+        let accept = server
+            .accept(&request)
             .expect("Valid request should be accepted");
 
         let response_bytes = accept.response_bytes();
         let response_str = String::from_utf8_lossy(&response_bytes);
 
         // Verify 101 status code in response
-        assert!(response_str.starts_with("HTTP/1.1 101 Switching Protocols"),
-            "Successful handshake should return 101 Switching Protocols");
+        assert!(
+            response_str.starts_with("HTTP/1.1 101 Switching Protocols"),
+            "Successful handshake should return 101 Switching Protocols"
+        );
 
         // Test case 2: Missing required headers trigger appropriate errors
         let missing_header_tests = vec![
@@ -1878,22 +1944,22 @@ Connection: Upgrade\n\
             (
                 "GET /test HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\r\n",
                 "MissingHeader",
-                "Missing Connection header"
+                "Missing Connection header",
             ),
             (
                 "GET /test HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\n\r\n",
                 "MissingHeader",
-                "Missing Upgrade header"
+                "Missing Upgrade header",
             ),
             (
                 "GET /test HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
                 "MissingHeader",
-                "Missing Sec-WebSocket-Key header"
+                "Missing Sec-WebSocket-Key header",
             ),
             (
                 "GET /test HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
                 "MissingHeader",
-                "Missing Sec-WebSocket-Version header"
+                "Missing Sec-WebSocket-Version header",
             ),
         ];
 
@@ -1902,13 +1968,17 @@ Connection: Upgrade\n\
                 .expect(&format!("Request should parse: {}", description));
 
             let result = server.accept(&request);
-            assert!(result.is_err(),
-                "Should reject request: {}", description);
+            assert!(result.is_err(), "Should reject request: {}", description);
 
             let error = result.unwrap_err();
             let error_str = format!("{:?}", error);
-            assert!(error_str.contains(expected_error),
-                "Should fail with {}: {} - got {:?}", expected_error, description, error);
+            assert!(
+                error_str.contains(expected_error),
+                "Should fail with {}: {} - got {:?}",
+                expected_error,
+                description,
+                error
+            );
         }
 
         // Test case 3: Invalid WebSocket version
@@ -1923,12 +1993,14 @@ Connection: Upgrade\n\
             .expect("Invalid version request should parse");
 
         let result = server.accept(&request);
-        assert!(result.is_err(),
-            "Should reject invalid WebSocket version");
+        assert!(result.is_err(), "Should reject invalid WebSocket version");
 
         if let Err(error) = result {
-            assert!(matches!(error, HandshakeError::UnsupportedVersion(_)),
-                "Should fail with UnsupportedVersion error: {:?}", error);
+            assert!(
+                matches!(error, HandshakeError::UnsupportedVersion(_)),
+                "Should fail with UnsupportedVersion error: {:?}",
+                error
+            );
         }
 
         // Test case 4: Client validation of server response status codes
@@ -1957,17 +2029,25 @@ Connection: Upgrade\n\
                 status_code, status_text
             );
 
-            let response = HttpResponse::parse(response_data.as_bytes())
-                .expect(&format!("Response with status {} should parse", status_code));
+            let response = HttpResponse::parse(response_data.as_bytes()).expect(&format!(
+                "Response with status {} should parse",
+                status_code
+            ));
 
             let result = handshake.validate_response(&response);
-            assert!(result.is_err(),
-                "Should reject response with status code {}", status_code);
+            assert!(
+                result.is_err(),
+                "Should reject response with status code {}",
+                status_code
+            );
 
             if let Err(error) = result {
-                assert!(matches!(error, HandshakeError::NotSwitchingProtocols(_)),
+                assert!(
+                    matches!(error, HandshakeError::NotSwitchingProtocols(_)),
                     "Should fail with NotSwitchingProtocols for status {}: {:?}",
-                    status_code, error);
+                    status_code,
+                    error
+                );
             }
         }
 
@@ -1977,26 +2057,37 @@ Connection: Upgrade\n\
         let response_str = String::from_utf8_lossy(&response_bytes);
 
         // Check all required response headers are present
-        assert!(response_str.contains("Upgrade: websocket"),
-            "Response should contain Upgrade header");
-        assert!(response_str.contains("Connection: Upgrade"),
-            "Response should contain Connection header");
-        assert!(response_str.contains("Sec-WebSocket-Accept: "),
-            "Response should contain Sec-WebSocket-Accept header");
+        assert!(
+            response_str.contains("Upgrade: websocket"),
+            "Response should contain Upgrade header"
+        );
+        assert!(
+            response_str.contains("Connection: Upgrade"),
+            "Response should contain Connection header"
+        );
+        assert!(
+            response_str.contains("Sec-WebSocket-Accept: "),
+            "Response should contain Sec-WebSocket-Accept header"
+        );
 
         // Verify response ends with CRLF CRLF
-        assert!(response_str.ends_with("\r\n\r\n"),
-            "Response should end with CRLF CRLF");
+        assert!(
+            response_str.ends_with("\r\n\r\n"),
+            "Response should end with CRLF CRLF"
+        );
 
         // Verify no extra headers are added by default
         let line_count = response_str.lines().count();
-        assert!(line_count <= 6,
-            "Response should not have extra headers: {}", response_str);
+        assert!(
+            line_count <= 6,
+            "Response should not have extra headers: {}",
+            response_str
+        );
 
         // Test case 6: Malformed request handling
         let malformed_requests = vec![
             b"NOT HTTP\r\n\r\n",
-            b"GET /test\r\n\r\n", // Missing HTTP version
+            b"GET /test\r\n\r\n",          // Missing HTTP version
             b"GET /test HTTP/1.0\r\n\r\n", // Wrong HTTP version should still work
             b"",
         ];
@@ -2008,13 +2099,15 @@ Connection: Upgrade\n\
                 if let Ok(request) = result {
                     let server_result = server.accept(&request);
                     // Should either fail to parse or fail validation
-                    assert!(server_result.is_err(),
-                        "Malformed request {} should be rejected", i);
+                    assert!(
+                        server_result.is_err(),
+                        "Malformed request {} should be rejected",
+                        i
+                    );
                 }
             } else {
                 // Completely empty request should fail to parse
-                assert!(result.is_err(),
-                    "Empty request should fail to parse");
+                assert!(result.is_err(), "Empty request should fail to parse");
             }
         }
     }
@@ -2033,7 +2126,7 @@ Connection: Upgrade\n\
 
         let server = ServerHandshake::new()
             .protocol("echo")
-            .protocol("chat")  // Different order than client
+            .protocol("chat") // Different order than client
             .extension("permessage-deflate");
 
         // Generate client request
@@ -2050,15 +2143,19 @@ Connection: Upgrade\n\
         assert!(request_str.contains("Sec-WebSocket-Protocol: chat, echo"));
 
         // Parse and validate on server side
-        let request = HttpRequest::parse(&request_bytes)
-            .expect("Client request should parse on server");
+        let request =
+            HttpRequest::parse(&request_bytes).expect("Client request should parse on server");
 
-        let accept = server.accept(&request)
+        let accept = server
+            .accept(&request)
             .expect("Server should accept valid client request");
 
         // Verify protocol negotiation (server should pick first match from client list)
-        assert_eq!(accept.protocol, Some("chat".to_string()),
-            "Server should select first client protocol it supports");
+        assert_eq!(
+            accept.protocol,
+            Some("chat".to_string()),
+            "Server should select first client protocol it supports"
+        );
 
         // Generate server response
         let response_bytes = accept.response_bytes();
@@ -2070,22 +2167,29 @@ Connection: Upgrade\n\
         assert!(response_str.contains("Sec-WebSocket-Protocol: chat"));
 
         // Validate response on client side
-        let response = HttpResponse::parse(&response_bytes)
-            .expect("Server response should parse on client");
+        let response =
+            HttpResponse::parse(&response_bytes).expect("Server response should parse on client");
 
         let validation_result = client.validate_response(&response);
-        assert!(validation_result.is_ok(),
-            "Client should validate server response: {:?}", validation_result.unwrap_err());
+        assert!(
+            validation_result.is_ok(),
+            "Client should validate server response: {:?}",
+            validation_result.unwrap_err()
+        );
 
         // Verify key computation is correct
         let expected_accept = compute_accept_key(&client.key);
-        assert_eq!(accept.accept_key, expected_accept,
-            "Server accept key should match computed value");
+        assert_eq!(
+            accept.accept_key, expected_accept,
+            "Server accept key should match computed value"
+        );
 
         // Test extension negotiation
         if !accept.extensions.is_empty() {
-            assert!(response_str.contains("Sec-WebSocket-Extensions:"),
-                "Response should include extension header when extensions are negotiated");
+            assert!(
+                response_str.contains("Sec-WebSocket-Extensions:"),
+                "Response should include extension header when extensions are negotiated"
+            );
         }
     }
 }

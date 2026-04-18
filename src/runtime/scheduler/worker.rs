@@ -1615,7 +1615,11 @@ mod tests {
             assert!(
                 deviation <= max_deviation,
                 "Worker {} steal count {} deviates {} from expected {} (max deviation {})",
-                worker_id, actual, deviation, expected_per_worker, max_deviation
+                worker_id,
+                actual,
+                deviation,
+                expected_per_worker,
+                max_deviation
             );
         }
     }
@@ -1667,7 +1671,9 @@ mod tests {
         assert!(
             heavy_ratio >= 0.6,
             "Heavily loaded worker chosen {}/{} times ({}%), expected >= 60%",
-            heavy_chosen, total, heavy_ratio * 100.0
+            heavy_chosen,
+            total,
+            heavy_ratio * 100.0
         );
     }
 
@@ -1699,7 +1705,10 @@ mod tests {
             // Refresh any empty queues
             for (i, q) in queues.iter().enumerate() {
                 if q.len() == 0 {
-                    q.push(TaskId::new_for_test(i as u32 + attempt as u32 * NUM_WORKERS as u32, 0));
+                    q.push(TaskId::new_for_test(
+                        i as u32 + attempt as u32 * NUM_WORKERS as u32,
+                        0,
+                    ));
                 }
             }
 
@@ -1721,7 +1730,9 @@ mod tests {
             visited_workers.len(),
             NUM_WORKERS,
             MAX_ATTEMPTS,
-            (0..NUM_WORKERS).filter(|w| !visited_workers.contains(w)).collect::<Vec<_>>()
+            (0..NUM_WORKERS)
+                .filter(|w| !visited_workers.contains(w))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1744,10 +1755,7 @@ mod tests {
         // Populate all queues
         for (worker_id, q) in queues.iter().enumerate() {
             for task_id in 0..4 {
-                q.push(TaskId::new_for_test(
-                    (worker_id * 100 + task_id) as u32,
-                    0
-                ));
+                q.push(TaskId::new_for_test((worker_id * 100 + task_id) as u32, 0));
             }
         }
 
@@ -1770,7 +1778,7 @@ mod tests {
                         for task_id in 0..2 {
                             q.push(TaskId::new_for_test(
                                 (worker_id * 100 + task_id + 50) as u32,
-                                0
+                                0,
                             ));
                         }
                     }
@@ -1803,8 +1811,12 @@ mod tests {
                 assert!(
                     deviation <= max_deviation,
                     "Worker {} stealing from worker {}: {} steals vs {} expected (deviation {} > {})",
-                    stealer_worker, target_worker, actual, expected_per_target,
-                    deviation, max_deviation
+                    stealer_worker,
+                    target_worker,
+                    actual,
+                    expected_per_target,
+                    deviation,
+                    max_deviation
                 );
             }
         }
@@ -1862,7 +1874,7 @@ mod tests {
                     for task_idx in 0..load {
                         q.push(TaskId::new_for_test(
                             (worker_id * 1000 + task_idx + trial * 10) as u32,
-                            0
+                            0,
                         ));
                     }
                 }
@@ -1879,7 +1891,8 @@ mod tests {
             let total_steals: usize = steal_counts.values().sum();
 
             // Property 1: Non-zero workers should all be selectable
-            let non_zero_workers: Vec<_> = scenario.loads
+            let non_zero_workers: Vec<_> = scenario
+                .loads
                 .iter()
                 .enumerate()
                 .filter(|(_, &load)| load > 0)
@@ -1891,14 +1904,17 @@ mod tests {
                 assert!(
                     *count > 0,
                     "Scenario '{}': Worker {} with load {} was never selected",
-                    scenario.name, worker_id, scenario.loads[worker_id]
+                    scenario.name,
+                    worker_id,
+                    scenario.loads[worker_id]
                 );
             }
 
             // Property 2: Heavily loaded workers should be preferred
             if scenario.loads.iter().any(|&load| load > 5) {
                 let max_load = *scenario.loads.iter().max().unwrap();
-                let max_workers: Vec<_> = scenario.loads
+                let max_workers: Vec<_> = scenario
+                    .loads
                     .iter()
                     .enumerate()
                     .filter(|(_, &load)| load == max_load)
@@ -1916,7 +1932,9 @@ mod tests {
                 assert!(
                     max_worker_ratio >= expected_min_ratio,
                     "Scenario '{}': Heavily loaded workers got {:.1}% steals, expected >= {:.1}%",
-                    scenario.name, max_worker_ratio * 100.0, expected_min_ratio * 100.0
+                    scenario.name,
+                    max_worker_ratio * 100.0,
+                    expected_min_ratio * 100.0
                 );
             }
         }
@@ -1953,7 +1971,7 @@ mod tests {
                     for task_idx in 0..2 {
                         q.push(TaskId::new_for_test(
                             (worker_id * 100 + task_idx + trial * 10) as u32,
-                            0
+                            0,
                         ));
                     }
                 }
@@ -1989,7 +2007,9 @@ mod tests {
             worker_visits.len(),
             NUM_WORKERS,
             "Deterministic stealing visited only {}/{} workers: {:?}",
-            worker_visits.len(), NUM_WORKERS, worker_visits.keys().collect::<Vec<_>>()
+            worker_visits.len(),
+            NUM_WORKERS,
+            worker_visits.keys().collect::<Vec<_>>()
         );
 
         // Property 3: No single worker dominance in deterministic case
@@ -2000,7 +2020,9 @@ mod tests {
         assert!(
             dominance_ratio <= 0.7,
             "Deterministic stealing shows dominance: worker visited {}/{} times ({:.1}%)",
-            max_visits, total_visits, dominance_ratio * 100.0
+            max_visits,
+            total_visits,
+            dominance_ratio * 100.0
         );
     }
 }

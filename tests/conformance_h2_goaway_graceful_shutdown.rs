@@ -234,7 +234,6 @@ fn test_goaway_multiple_frames_decreasing_stream_id() {
 
         // Check if a second GOAWAY was actually queued (implementation may prevent multiple GOAWAYs)
         if let Some(second_goaway) = second_goaway_opt {
-
             if let Frame::GoAway(second) = second_goaway {
                 // For testing, we manually set a lower value to test the concept
                 // In real implementation, this would be based on actual processing state
@@ -478,7 +477,7 @@ fn test_goaway_error_conditions() {
 /// Helper function to initialize a connection to Open state
 /// This simulates the settings exchange that normally happens during connection setup
 fn initialize_connection(connection: &mut Connection) {
-    use asupersync::http::h2::frame::{Frame, SettingsFrame, Setting};
+    use asupersync::http::h2::frame::{Frame, Setting, SettingsFrame};
 
     // Queue initial settings
     connection.queue_initial_settings();

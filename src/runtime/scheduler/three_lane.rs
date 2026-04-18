@@ -8260,18 +8260,14 @@ mod tests {
         let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 16);
 
         // Create many ready tasks to saturate P2 lane
-        let ready_tasks: Vec<TaskId> = (0..50)
-            .map(|i| TaskId::new_for_test(i, 0))
-            .collect();
+        let ready_tasks: Vec<TaskId> = (0..50).map(|i| TaskId::new_for_test(i, 0)).collect();
 
         for &task_id in &ready_tasks {
             scheduler.inject_ready(task_id, 100);
         }
 
         // Inject cancel tasks at various points during ready consumption
-        let cancel_tasks: Vec<TaskId> = (100..110)
-            .map(|i| TaskId::new_for_test(i, 0))
-            .collect();
+        let cancel_tasks: Vec<TaskId> = (100..110).map(|i| TaskId::new_for_test(i, 0)).collect();
 
         let workers = scheduler.take_workers();
         let worker = &workers[0];
@@ -8294,13 +8290,17 @@ mod tests {
             assert!(
                 cancel_tasks.contains(&task_id),
                 "task {} should be from cancel lane, got {:?}",
-                i, task_id
+                i,
+                task_id
             );
         }
 
         // Verify cancel lane is now empty and ready lane resumes
         let after_cancel = worker.next_task();
-        assert!(after_cancel.is_some(), "should get ready task after cancel drain");
+        assert!(
+            after_cancel.is_some(),
+            "should get ready task after cancel drain"
+        );
         let task_id = after_cancel.unwrap();
         assert!(
             ready_tasks.contains(&task_id),
@@ -8327,18 +8327,14 @@ mod tests {
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
         // Create ready tasks to fill P2 lane
-        let ready_tasks: Vec<TaskId> = (0..20)
-            .map(|i| TaskId::new_for_test(i, 0))
-            .collect();
+        let ready_tasks: Vec<TaskId> = (0..20).map(|i| TaskId::new_for_test(i, 0)).collect();
 
         for &task_id in &ready_tasks {
             scheduler.inject_ready(task_id, 100);
         }
 
         // Create timed tasks that will become due at t=1500
-        let timed_tasks: Vec<TaskId> = (50..55)
-            .map(|i| TaskId::new_for_test(i, 0))
-            .collect();
+        let timed_tasks: Vec<TaskId> = (50..55).map(|i| TaskId::new_for_test(i, 0)).collect();
 
         for &task_id in &timed_tasks {
             scheduler.inject_timed(task_id, Time::from_nanos(1500), 200);
@@ -8407,9 +8403,7 @@ mod tests {
             Time::from_nanos(1950), // deadline 4 - latest
         ];
 
-        let task_ids: Vec<TaskId> = (10..14)
-            .map(|i| TaskId::new_for_test(i, 0))
-            .collect();
+        let task_ids: Vec<TaskId> = (10..14).map(|i| TaskId::new_for_test(i, 0)).collect();
 
         // Inject in non-EDF order to test scheduler's EDF sorting
         for (i, &task_id) in task_ids.iter().enumerate() {
@@ -8442,7 +8436,10 @@ mod tests {
 
         // Timed lane should now be empty
         let after_timed = worker.next_task();
-        assert!(after_timed.is_none(), "timed lane should be empty after EDF drain");
+        assert!(
+            after_timed.is_none(),
+            "timed lane should be empty after EDF drain"
+        );
     }
 
     /// CONFORMANCE: Cancel-promotion moves task to front of lane.
@@ -8455,9 +8452,8 @@ mod tests {
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
         // Fill cancel lane with existing cancel tasks
-        let existing_cancel_tasks: Vec<TaskId> = (0..5)
-            .map(|i| TaskId::new_for_test(i, 0))
-            .collect();
+        let existing_cancel_tasks: Vec<TaskId> =
+            (0..5).map(|i| TaskId::new_for_test(i, 0)).collect();
 
         for &task_id in &existing_cancel_tasks {
             scheduler.inject_cancel(task_id, 0);
@@ -8494,7 +8490,8 @@ mod tests {
         assert!(
             dispatched_tasks.contains(&ready_task),
             "promoted task {:?} should be dispatched from cancel lane, got: {:?}",
-            ready_task, dispatched_tasks
+            ready_task,
+            dispatched_tasks
         );
 
         // Verify all cancel tasks were dispatched before any ready tasks
@@ -8516,18 +8513,14 @@ mod tests {
         let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, cancel_limit);
 
         // Add ready tasks
-        let ready_tasks: Vec<TaskId> = (0..10)
-            .map(|i| TaskId::new_for_test(i, 0))
-            .collect();
+        let ready_tasks: Vec<TaskId> = (0..10).map(|i| TaskId::new_for_test(i, 0)).collect();
 
         for &task_id in &ready_tasks {
             scheduler.inject_ready(task_id, 100);
         }
 
         // Add many cancel tasks (more than the fairness limit)
-        let cancel_tasks: Vec<TaskId> = (100..120)
-            .map(|i| TaskId::new_for_test(i, 0))
-            .collect();
+        let cancel_tasks: Vec<TaskId> = (100..120).map(|i| TaskId::new_for_test(i, 0)).collect();
 
         for &task_id in &cancel_tasks {
             scheduler.inject_cancel(task_id, 0);
@@ -8568,7 +8561,8 @@ mod tests {
         assert!(
             ready_dispatches > 0,
             "Ready lane should not starve under cancel pressure. Cancel: {}, Ready: {}",
-            cancel_dispatches, ready_dispatches
+            cancel_dispatches,
+            ready_dispatches
         );
 
         assert!(
@@ -8656,7 +8650,8 @@ mod tests {
         assert!(
             max_observed_ready_queue < task_burst_size,
             "Queue should not grow unboundedly: max observed = {}, burst size = {}",
-            max_observed_ready_queue, task_burst_size
+            max_observed_ready_queue,
+            task_burst_size
         );
 
         // Drain some tasks and verify queue reduces
@@ -8675,7 +8670,8 @@ mod tests {
             assert!(
                 final_queue_size < max_observed_ready_queue,
                 "Queue should reduce after task consumption: final={}, max={}",
-                final_queue_size, max_observed_ready_queue
+                final_queue_size,
+                max_observed_ready_queue
             );
         }
     }
@@ -8705,20 +8701,31 @@ mod tests {
         }
 
         // Check convergence: weights should stabilize (change < 5% in last epochs)
-        assert!(weight_history.len() >= 2, "Need at least 2 weight snapshots");
+        assert!(
+            weight_history.len() >= 2,
+            "Need at least 2 weight snapshots"
+        );
         let second_last = &weight_history[weight_history.len() - 2];
         let last = &weight_history[weight_history.len() - 1];
 
         for i in 0..5 {
             let change_ratio = (last[i] - second_last[i]).abs() / second_last[i];
-            assert!(change_ratio < 0.05,
+            assert!(
+                change_ratio < 0.05,
                 "Weight for arm {} should stabilize: change ratio {:.4} >= 0.05",
-                i, change_ratio);
+                i,
+                change_ratio
+            );
         }
 
         // Arm 2 should have highest weight (being rewarded more)
-        let best_arm = (0..5).max_by(|&a, &b| last[a].partial_cmp(&last[b]).unwrap()).unwrap();
-        assert_eq!(best_arm, 2, "Arm 2 should have highest weight after convergence");
+        let best_arm = (0..5)
+            .max_by(|&a, &b| last[a].partial_cmp(&last[b]).unwrap())
+            .unwrap();
+        assert_eq!(
+            best_arm, 2,
+            "Arm 2 should have highest weight after convergence"
+        );
 
         // Weight distribution should be meaningful (not uniform)
         let weight_variance = {
@@ -8726,7 +8733,10 @@ mod tests {
             let variance: f64 = last.iter().map(|&w| (w - mean).powi(2)).sum::<f64>() / 5.0;
             variance
         };
-        assert!(weight_variance > 0.01, "Weights should not be uniform after convergence");
+        assert!(
+            weight_variance > 0.01,
+            "Weights should not be uniform after convergence"
+        );
     }
 
     #[test]
@@ -8756,21 +8766,29 @@ mod tests {
         }
 
         // Check convergence: penalty should stabilize
-        assert!(penalty_history.len() >= 3, "Need at least 3 penalty snapshots");
+        assert!(
+            penalty_history.len() >= 3,
+            "Need at least 3 penalty snapshots"
+        );
         let recent = &penalty_history[penalty_history.len() - 3..];
 
         let penalty_variance = {
             let mean: f64 = recent.iter().sum::<f64>() / recent.len() as f64;
             recent.iter().map(|&p| (p - mean).powi(2)).sum::<f64>() / recent.len() as f64
         };
-        assert!(penalty_variance < 0.01,
+        assert!(
+            penalty_variance < 0.01,
             "Cancel-streak penalty should converge: variance {:.6} >= 0.01",
-            penalty_variance);
+            penalty_variance
+        );
 
         // Penalty should be within reasonable bounds [0.0, 2.0]
         for &penalty in recent {
-            assert!(penalty >= 0.0 && penalty <= 2.0,
-                "Penalty {:.4} should be in bounds [0.0, 2.0]", penalty);
+            assert!(
+                penalty >= 0.0 && penalty <= 2.0,
+                "Penalty {:.4} should be in bounds [0.0, 2.0]",
+                penalty
+            );
         }
     }
 
@@ -8802,29 +8820,36 @@ mod tests {
 
         // Verify threshold stays within valid arm values
         for &threshold in &threshold_history {
-            assert!(ADAPTIVE_STREAK_ARMS.contains(&threshold),
+            assert!(
+                ADAPTIVE_STREAK_ARMS.contains(&threshold),
                 "Threshold {} should be one of the valid arms {:?}",
-                threshold, ADAPTIVE_STREAK_ARMS);
+                threshold,
+                ADAPTIVE_STREAK_ARMS
+            );
         }
 
         // Verify some adaptation occurred (not stuck at initial value)
-        let adaptation_occurred = threshold_history.iter()
-            .any(|&t| t != initial_threshold);
-        assert!(adaptation_occurred,
+        let adaptation_occurred = threshold_history.iter().any(|&t| t != initial_threshold);
+        assert!(
+            adaptation_occurred,
             "Threshold should adapt from initial value {} during varied workload",
-            initial_threshold);
+            initial_threshold
+        );
 
         // Verify bounded exploration (shouldn't constantly jump between extremes)
-        let extreme_jumps = threshold_history.windows(2)
+        let extreme_jumps = threshold_history
+            .windows(2)
             .filter(|window| {
                 let diff = (window[1] as i32 - window[0] as i32).abs();
                 diff > 24 // Jump from 4 to 32+ or similar large change
             })
             .count();
         let jump_ratio = extreme_jumps as f64 / (threshold_history.len() - 1) as f64;
-        assert!(jump_ratio < 0.3,
+        assert!(
+            jump_ratio < 0.3,
             "Too many extreme threshold jumps: {:.2}% >= 30%",
-            jump_ratio * 100.0);
+            jump_ratio * 100.0
+        );
     }
 
     #[test]
@@ -8837,7 +8862,10 @@ mod tests {
         // Setup initial EXP3 state
         for worker in &workers {
             let initial_weights: [f64; 5] = worker.adaptive_cancel_policy.weights;
-            assert_eq!(initial_weights, [1.0; 5], "Initial weights should be uniform");
+            assert_eq!(
+                initial_weights, [1.0; 5],
+                "Initial weights should be uniform"
+            );
         }
 
         // Simulate concurrent cancel events on both workers
@@ -8860,32 +8888,45 @@ mod tests {
         }
 
         // Verify both workers processed events
-        assert!(total_processed[0] > 0 && total_processed[1] > 0,
+        assert!(
+            total_processed[0] > 0 && total_processed[1] > 0,
             "Both workers should process cancel events: [{}, {}]",
-            total_processed[0], total_processed[1]);
+            total_processed[0],
+            total_processed[1]
+        );
 
         // Verify weight updates are reasonable (no explosive growth)
         for (worker_idx, worker) in workers.iter().enumerate() {
             let final_weights: [f64; 5] = worker.adaptive_cancel_policy.weights;
             for (arm_idx, &weight) in final_weights.iter().enumerate() {
-                assert!(weight >= 1e-30 && weight <= 1e30,
+                assert!(
+                    weight >= 1e-30 && weight <= 1e30,
                     "Worker {} arm {} weight {:.2e} out of bounds [1e-30, 1e30]",
-                    worker_idx, arm_idx, weight);
+                    worker_idx,
+                    arm_idx,
+                    weight
+                );
             }
 
             // Total weight magnitude should be reasonable
             let weight_sum: f64 = final_weights.iter().sum();
-            assert!(weight_sum > 1e-10 && weight_sum < 1e20,
+            assert!(
+                weight_sum > 1e-10 && weight_sum < 1e20,
                 "Worker {} total weight sum {:.2e} unreasonable",
-                worker_idx, weight_sum);
+                worker_idx,
+                weight_sum
+            );
         }
 
         // Verify e-process bounds (should not drift to infinity)
         for (worker_idx, worker) in workers.iter().enumerate() {
             let e_process = worker.adaptive_cancel_policy.e_process_log;
-            assert!(e_process.is_finite() && e_process.abs() < 100.0,
+            assert!(
+                e_process.is_finite() && e_process.abs() < 100.0,
                 "Worker {} e-process log {:.4} should be finite and bounded",
-                worker_idx, e_process);
+                worker_idx,
+                e_process
+            );
         }
     }
 
@@ -8951,28 +8992,38 @@ mod tests {
         assert_eq!(trace_a.len(), trace_b.len(), "Trace lengths should match");
 
         for (step, (state_a, state_b)) in trace_a.iter().zip(trace_b.iter()).enumerate() {
-            assert_eq!(state_a.0, state_b.0,
+            assert_eq!(
+                state_a.0, state_b.0,
                 "Step {}: Selected arm should be deterministic: {} vs {}",
-                step, state_a.0, state_b.0);
-            assert_eq!(state_a.1, state_b.1,
+                step, state_a.0, state_b.0
+            );
+            assert_eq!(
+                state_a.1, state_b.1,
                 "Step {}: Epoch count should be deterministic: {} vs {}",
-                step, state_a.1, state_b.1);
-            assert_eq!(state_a.2, state_b.2,
+                step, state_a.1, state_b.1
+            );
+            assert_eq!(
+                state_a.2, state_b.2,
                 "Step {}: Steps in epoch should be deterministic: {} vs {}",
-                step, state_a.2, state_b.2);
+                step, state_a.2, state_b.2
+            );
 
             // Weights should be identical (floating-point exact)
             for arm in 0..5 {
-                assert_eq!(state_a.3[arm], state_b.3[arm],
+                assert_eq!(
+                    state_a.3[arm], state_b.3[arm],
                     "Step {}: Weight[{}] should be deterministic: {:.6} vs {:.6}",
-                    step, arm, state_a.3[arm], state_b.3[arm]);
+                    step, arm, state_a.3[arm], state_b.3[arm]
+                );
             }
 
             // Probabilities should be identical (floating-point exact)
             for arm in 0..5 {
-                assert_eq!(state_a.4[arm], state_b.4[arm],
+                assert_eq!(
+                    state_a.4[arm], state_b.4[arm],
                     "Step {}: Prob[{}] should be deterministic: {:.6} vs {:.6}",
-                    step, arm, state_a.4[arm], state_b.4[arm]);
+                    step, arm, state_a.4[arm], state_b.4[arm]
+                );
             }
         }
     }

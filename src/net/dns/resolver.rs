@@ -2989,7 +2989,10 @@ mod tests {
             let hostaliases_exists = std::fs::metadata(&hostaliases_path).is_ok();
             crate::assert_with_log!(
                 true, // Always pass - documents behavior
-                &format!("HOSTALIASES configured: {} (exists: {})", hostaliases_path, hostaliases_exists),
+                &format!(
+                    "HOSTALIASES configured: {} (exists: {})",
+                    hostaliases_path, hostaliases_exists
+                ),
                 true,
                 true
             );
@@ -3012,13 +3015,21 @@ mod tests {
         // Document the HOSTALIASES environment variable behavior
         crate::assert_with_log!(
             true, // Always pass - this documents expected behavior
-            &format!("HOSTALIASES environment variable support documented (currently set: {})", has_hostaliases),
+            &format!(
+                "HOSTALIASES environment variable support documented (currently set: {})",
+                has_hostaliases
+            ),
             true,
             true
         );
 
-        println!("HOSTALIASES conformance: System resolver should honor HOSTALIASES for unqualified names");
-        println!("Current HOSTALIASES setting: {:?}", std::env::var("HOSTALIASES"));
+        println!(
+            "HOSTALIASES conformance: System resolver should honor HOSTALIASES for unqualified names"
+        );
+        println!(
+            "Current HOSTALIASES setting: {:?}",
+            std::env::var("HOSTALIASES")
+        );
 
         crate::test_complete!("conformance_hostaliases_environment_support");
     }
@@ -3095,9 +3106,8 @@ mod tests {
         for i in 0..5 {
             let resolver_clone = Arc::clone(&resolver);
             let handle = std::thread::spawn(move || {
-                let result = future::block_on(async {
-                    resolver_clone.lookup_ip("localhost").await
-                });
+                let result =
+                    future::block_on(async { resolver_clone.lookup_ip("localhost").await });
                 (i, result)
             });
             handles.push(handle);
@@ -3110,10 +3120,10 @@ mod tests {
                 Ok((i, Ok(_addrs))) => {
                     success_count += 1;
                     println!("Thread {i} resolved localhost successfully");
-                },
+                }
                 Ok((i, Err(e))) => {
                     println!("Thread {i} failed: {e:?}");
-                },
+                }
                 Err(e) => {
                     println!("Thread panicked: {e:?}");
                 }
@@ -3135,10 +3145,8 @@ mod tests {
             let fut3 = resolver.lookup_ip("localhost");
 
             // Run concurrently
-            let ((r1, r2), r3) = futures_lite::future::zip(
-                futures_lite::future::zip(fut1, fut2),
-                fut3
-            ).await;
+            let ((r1, r2), r3) =
+                futures_lite::future::zip(futures_lite::future::zip(fut1, fut2), fut3).await;
 
             (r1.is_ok(), r2.is_ok(), r3.is_ok())
         });
@@ -3219,7 +3227,7 @@ mod tests {
                         true,
                         all_ipv6
                     );
-                },
+                }
                 Err(_) => {
                     // ip6-localhost may not be configured on all systems
                     println!("ip6-localhost not available (system-dependent)");

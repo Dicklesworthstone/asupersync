@@ -2018,12 +2018,12 @@ pub mod backpressure_metamorphic {
     use crate::cx::{Cx, Scope};
     use crate::lab::{LabConfig, LabRuntime};
     use crate::types::{Budget, CancelReason, Outcome, Time};
-    use crate::util::{DetRng, DetEntropy};
+    use crate::util::{DetEntropy, DetRng};
     use proptest::prelude::*;
     use std::collections::{HashMap, VecDeque};
-    use std::future::{ready, pending};
-    use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
+    use std::future::{pending, ready};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     /// Configuration for MPSC backpressure metamorphic tests.
@@ -2050,27 +2050,38 @@ pub mod backpressure_metamorphic {
     /// Generate valid backpressure test configurations.
     fn backpressure_config_strategy() -> impl Strategy<Value = BackpressureTestConfig> {
         (
-            1..=16usize,                    // capacity
-            1..=8usize,                     // sender_count
-            1..=20usize,                    // messages_per_sender
-            any::<bool>(),                  // inject_cancellation
-            0.0..=1.0f64,                   // cancel_probability
-            any::<u64>(),                   // seed
-            any::<bool>(),                  // use_eviction
-            any::<bool>(),                  // drop_receiver_early
-        ).prop_map(|(capacity, sender_count, messages_per_sender, inject_cancellation,
-                     cancel_probability, seed, use_eviction, drop_receiver_early)| {
-            BackpressureTestConfig {
-                capacity,
-                sender_count,
-                messages_per_sender,
-                inject_cancellation,
-                cancel_probability,
-                seed,
-                use_eviction,
-                drop_receiver_early,
-            }
-        })
+            1..=16usize,   // capacity
+            1..=8usize,    // sender_count
+            1..=20usize,   // messages_per_sender
+            any::<bool>(), // inject_cancellation
+            0.0..=1.0f64,  // cancel_probability
+            any::<u64>(),  // seed
+            any::<bool>(), // use_eviction
+            any::<bool>(), // drop_receiver_early
+        )
+            .prop_map(
+                |(
+                    capacity,
+                    sender_count,
+                    messages_per_sender,
+                    inject_cancellation,
+                    cancel_probability,
+                    seed,
+                    use_eviction,
+                    drop_receiver_early,
+                )| {
+                    BackpressureTestConfig {
+                        capacity,
+                        sender_count,
+                        messages_per_sender,
+                        inject_cancellation,
+                        cancel_probability,
+                        seed,
+                        use_eviction,
+                        drop_receiver_early,
+                    }
+                },
+            )
     }
 
     /// Helper to observe channel internal state.
@@ -2090,64 +2101,71 @@ pub mod backpressure_metamorphic {
     /// This must hold at all times regardless of backpressure state.
     #[test]
     fn mr1_capacity_conservation_invariant() {
-        use proptest::test_runner::TestRunner;
         use proptest::strategy::Strategy;
+        use proptest::test_runner::TestRunner;
 
         let mut runner = TestRunner::default();
-        runner.run(&backpressure_config_strategy(), |config| {
-        let lab = LabRuntime::new(LabConfig::new(config.seed));
-        let result = lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
-            let (sender, mut receiver) = channel::<u32>(config.capacity);
+        runner
+            .run(&backpressure_config_strategy(), |config| {
+                let lab = LabRuntime::new(LabConfig::new(config.seed));
+                let result =
+                    lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
+                        let (sender, mut receiver) = channel::<u32>(config.capacity);
 
-            // Baseline: empty channel should conserve capacity
-            let (queued, reserved, available, _) = observe_channel_state(&sender);
-            assert_eq!(
-                queued + reserved + available,
-                config.capacity,
-                "Empty channel capacity conservation failed"
-            );
+                        // Baseline: empty channel should conserve capacity
+                        let (queued, reserved, available, _) = observe_channel_state(&sender);
+                        assert_eq!(
+                            queued + reserved + available,
+                            config.capacity,
+                            "Empty channel capacity conservation failed"
+                        );
 
-            // Fill channel progressively and verify conservation at each step
-            let mut sent_count = 0;
-            let target_fills = std::cmp::min(config.capacity * 2, 50);
+                        // Fill channel progressively and verify conservation at each step
+                        let mut sent_count = 0;
+                        let target_fills = std::cmp::min(config.capacity * 2, 50);
 
-            for i in 0..target_fills {
-                // Try to send
-                match sender.try_send(i as u32) {
-                    Ok(()) => {
-                        sent_count += 1;
-                    },
-                    Err(SendError::Full(_)) => {
-                        // Channel full - capacity should still be conserved
-                    },
-                    _ => panic!("Unexpected send error"),
-                }
+                        for i in 0..target_fills {
+                            // Try to send
+                            match sender.try_send(i as u32) {
+                                Ok(()) => {
+                                    sent_count += 1;
+                                }
+                                Err(SendError::Full(_)) => {
+                                    // Channel full - capacity should still be conserved
+                                }
+                                _ => panic!("Unexpected send error"),
+                            }
 
-                let (queued, reserved, available, _) = observe_channel_state(&sender);
-                assert_eq!(
-                    queued + reserved + available,
-                    config.capacity,
-                    "Capacity conservation failed at step {} (sent: {})", i, sent_count
-                );
+                            let (queued, reserved, available, _) = observe_channel_state(&sender);
+                            assert_eq!(
+                                queued + reserved + available,
+                                config.capacity,
+                                "Capacity conservation failed at step {} (sent: {})",
+                                i,
+                                sent_count
+                            );
 
-                // Occasionally receive to create capacity
-                if i % 3 == 0 && queued > 0 {
-                    let _ = receiver.try_recv();
-                    let (queued_after, reserved_after, available_after, _) = observe_channel_state(&sender);
-                    assert_eq!(
-                        queued_after + reserved_after + available_after,
-                        config.capacity,
-                        "Capacity conservation failed after recv at step {}", i
-                    );
-                }
-            }
+                            // Occasionally receive to create capacity
+                            if i % 3 == 0 && queued > 0 {
+                                let _ = receiver.try_recv();
+                                let (queued_after, reserved_after, available_after, _) =
+                                    observe_channel_state(&sender);
+                                assert_eq!(
+                                    queued_after + reserved_after + available_after,
+                                    config.capacity,
+                                    "Capacity conservation failed after recv at step {}",
+                                    i
+                                );
+                            }
+                        }
 
-            Ok(())
-        });
+                        Ok(())
+                    });
 
-        result.expect("MR1 capacity conservation test failed");
-            Ok(())
-        }).expect("Property test failed");
+                result.expect("MR1 capacity conservation test failed");
+                Ok(())
+            })
+            .expect("Property test failed");
     }
 
     /// MR2: FIFO Ordering Preservation
@@ -2156,8 +2174,8 @@ pub mod backpressure_metamorphic {
     /// Even with blocking, eviction, or cancellation, FIFO ordering must be preserved.
     #[test]
     fn mr2_fifo_ordering_preservation() {
-        use proptest::test_runner::TestRunner;
         use proptest::strategy::Strategy;
+        use proptest::test_runner::TestRunner;
 
         let mut runner = TestRunner::default();
         runner.run(&backpressure_config_strategy(), |config| {
@@ -2229,69 +2247,72 @@ pub mod backpressure_metamorphic {
     /// Both paths should have identical observable effects.
     #[test]
     fn mr3_reserve_send_equivalence() {
-        use proptest::test_runner::TestRunner;
         use proptest::strategy::Strategy;
+        use proptest::test_runner::TestRunner;
 
         let mut runner = TestRunner::default();
-        runner.run(&backpressure_config_strategy(), |config| {
-        let lab = LabRuntime::new(LabConfig::new(config.seed));
-        let result = lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
-            // Path 1: reserve then send
-            let (sender1, mut receiver1) = channel::<u32>(config.capacity);
-            let received1 = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        runner
+            .run(&backpressure_config_strategy(), |config| {
+                let lab = LabRuntime::new(LabConfig::new(config.seed));
+                let result =
+                    lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
+                        // Path 1: reserve then send
+                        let (sender1, mut receiver1) = channel::<u32>(config.capacity);
+                        let received1 = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
-            let recv1_ref = Arc::clone(&received1);
-            let recv1_handle = scope.spawn_task(async move {
-                while let Ok(value) = receiver1.recv(&cx).await {
-                    recv1_ref.lock().push(value);
-                }
+                        let recv1_ref = Arc::clone(&received1);
+                        let recv1_handle = scope.spawn_task(async move {
+                            while let Ok(value) = receiver1.recv(&cx).await {
+                                recv1_ref.lock().push(value);
+                            }
+                            Ok(())
+                        });
+
+                        // Send via reserve/send
+                        for i in 0..std::cmp::min(config.messages_per_sender, config.capacity) {
+                            if let Ok(permit) = sender1.try_reserve() {
+                                permit.send(i as u32);
+                            }
+                        }
+                        drop(sender1);
+                        let _ = recv1_handle.await;
+
+                        // Path 2: direct send
+                        let (sender2, mut receiver2) = channel::<u32>(config.capacity);
+                        let received2 = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+                        let recv2_ref = Arc::clone(&received2);
+                        let recv2_handle = scope.spawn_task(async move {
+                            while let Ok(value) = receiver2.recv(&cx).await {
+                                recv2_ref.lock().push(value);
+                            }
+                            Ok(())
+                        });
+
+                        // Send via try_send
+                        for i in 0..std::cmp::min(config.messages_per_sender, config.capacity) {
+                            let _ = sender2.try_send(i as u32);
+                        }
+                        drop(sender2);
+                        let _ = recv2_handle.await;
+
+                        // Results should be equivalent
+                        let result1 = received1.lock().clone();
+                        let result2 = received2.lock().clone();
+
+                        assert_eq!(
+                            result1, result2,
+                            "Reserve-send vs direct send produced different results: {:?} vs {:?}",
+                            result1, result2
+                        );
+
+                        Ok(())
+                    });
+
+                result.expect("MR3 reserve-send equivalence test failed");
                 Ok(())
-            });
-
-            // Send via reserve/send
-            for i in 0..std::cmp::min(config.messages_per_sender, config.capacity) {
-                if let Ok(permit) = sender1.try_reserve() {
-                    permit.send(i as u32);
-                }
-            }
-            drop(sender1);
-            let _ = recv1_handle.await;
-
-            // Path 2: direct send
-            let (sender2, mut receiver2) = channel::<u32>(config.capacity);
-            let received2 = Arc::new(parking_lot::Mutex::new(Vec::new()));
-
-            let recv2_ref = Arc::clone(&received2);
-            let recv2_handle = scope.spawn_task(async move {
-                while let Ok(value) = receiver2.recv(&cx).await {
-                    recv2_ref.lock().push(value);
-                }
-                Ok(())
-            });
-
-            // Send via try_send
-            for i in 0..std::cmp::min(config.messages_per_sender, config.capacity) {
-                let _ = sender2.try_send(i as u32);
-            }
-            drop(sender2);
-            let _ = recv2_handle.await;
-
-            // Results should be equivalent
-            let result1 = received1.lock().clone();
-            let result2 = received2.lock().clone();
-
-            assert_eq!(
-                result1, result2,
-                "Reserve-send vs direct send produced different results: {:?} vs {:?}",
-                result1, result2
-            );
-
-            Ok(())
-        });
-
-        result.expect("MR3 reserve-send equivalence test failed");
-            Ok(())
-        }).expect("Property test failed");
+            })
+            .expect("Property test failed");
     }
 
     /// MR4: Cancellation Idempotence
@@ -2300,67 +2321,71 @@ pub mod backpressure_metamorphic {
     /// Capacity conservation must hold even with cancellation.
     #[test]
     fn mr4_cancellation_idempotence() {
-        use proptest::test_runner::TestRunner;
         use proptest::strategy::Strategy;
+        use proptest::test_runner::TestRunner;
 
         let mut runner = TestRunner::default();
-        runner.run(&backpressure_config_strategy(), |config| {
-        if !config.inject_cancellation || config.cancel_probability < 0.1 {
-            return Ok(()); // Skip if cancellation not meaningful
-        }
+        runner
+            .run(&backpressure_config_strategy(), |config| {
+                if !config.inject_cancellation || config.cancel_probability < 0.1 {
+                    return Ok(()); // Skip if cancellation not meaningful
+                }
 
-        let lab = LabRuntime::new(LabConfig::new(config.seed));
-        let result = lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
-            let (sender, _receiver) = channel::<u32>(config.capacity);
+                let lab = LabRuntime::new(LabConfig::new(config.seed));
+                let result =
+                    lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
+                        let (sender, _receiver) = channel::<u32>(config.capacity);
 
-            // Fill channel to force reserves to block
-            for i in 0..config.capacity {
-                sender.try_send(i as u32).expect("Fill channel");
-            }
+                        // Fill channel to force reserves to block
+                        for i in 0..config.capacity {
+                            sender.try_send(i as u32).expect("Fill channel");
+                        }
 
-            let initial_state = observe_channel_state(&sender);
+                        let initial_state = observe_channel_state(&sender);
 
-            // Create multiple reserves that will block
-            let mut reserve_handles = Vec::new();
-            for i in 0..config.sender_count {
-                let sender_clone = sender.clone();
-                let handle = scope.spawn_task(async move {
-                    match sender_clone.reserve(&cx).await {
-                        Ok(permit) => {
-                            permit.send(i as u32);
-                            Ok(true) // Successfully sent
-                        },
-                        Err(SendError::Cancelled(_)) => Ok(false), // Cancelled
-                        Err(_) => Ok(false), // Other error
-                    }
-                });
-                reserve_handles.push(handle);
-            }
+                        // Create multiple reserves that will block
+                        let mut reserve_handles = Vec::new();
+                        for i in 0..config.sender_count {
+                            let sender_clone = sender.clone();
+                            let handle = scope.spawn_task(async move {
+                                match sender_clone.reserve(&cx).await {
+                                    Ok(permit) => {
+                                        permit.send(i as u32);
+                                        Ok(true) // Successfully sent
+                                    }
+                                    Err(SendError::Cancelled(_)) => Ok(false), // Cancelled
+                                    Err(_) => Ok(false),                       // Other error
+                                }
+                            });
+                            reserve_handles.push(handle);
+                        }
 
-            // Cancel some operations
-            scope.cancel(CancelReason::explicit("test cancellation"));
+                        // Cancel some operations
+                        scope.cancel(CancelReason::explicit("test cancellation"));
 
-            // Collect results
-            for handle in reserve_handles {
-                let _ = handle.await; // Ignore individual results
-            }
+                        // Collect results
+                        for handle in reserve_handles {
+                            let _ = handle.await; // Ignore individual results
+                        }
 
-            let final_state = observe_channel_state(&sender);
+                        let final_state = observe_channel_state(&sender);
 
-            // Capacity conservation must hold despite cancellation
-            assert_eq!(
-                initial_state.0 + initial_state.1 + initial_state.2,
-                final_state.0 + final_state.1 + final_state.2,
-                "Cancellation leaked capacity: initial {:?} vs final {:?}",
-                initial_state, final_state
-            );
+                        // Capacity conservation must hold despite cancellation
+                        assert_eq!(
+                            initial_state.0 + initial_state.1 + initial_state.2,
+                            final_state.0 + final_state.1 + final_state.2,
+                            "Cancellation leaked capacity: initial {:?} vs final {:?}",
+                            initial_state,
+                            final_state
+                        );
 
-            Ok(())
-        });
+                        Ok(())
+                    });
 
-        result.expect("MR4 cancellation idempotence test failed");
-            Ok(())
-        }).expect("Property test failed");
+                result.expect("MR4 cancellation idempotence test failed");
+                Ok(())
+            })
+            .expect("Property test failed");
     }
 
     /// MR5: Eviction Policy Correctness
@@ -2368,59 +2393,63 @@ pub mod backpressure_metamorphic {
     /// Property: send_evict_oldest removes oldest message while preserving FIFO for remaining.
     #[test]
     fn mr5_eviction_policy_correctness() {
-        use proptest::test_runner::TestRunner;
         use proptest::strategy::Strategy;
+        use proptest::test_runner::TestRunner;
 
         let mut runner = TestRunner::default();
-        runner.run(&backpressure_config_strategy(), |config| {
-        if !config.use_eviction || config.capacity < 2 {
-            return Ok(()); // Skip if eviction not meaningful
-        }
+        runner
+            .run(&backpressure_config_strategy(), |config| {
+                if !config.use_eviction || config.capacity < 2 {
+                    return Ok(()); // Skip if eviction not meaningful
+                }
 
-        let lab = LabRuntime::new(LabConfig::new(config.seed));
-        let result = lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
-            let (sender, mut receiver) = channel::<u32>(config.capacity);
+                let lab = LabRuntime::new(LabConfig::new(config.seed));
+                let result =
+                    lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
+                        let (sender, mut receiver) = channel::<u32>(config.capacity);
 
-            // Fill channel completely
-            for i in 0..config.capacity {
-                sender.try_send(i as u32).expect("Fill channel");
-            }
+                        // Fill channel completely
+                        for i in 0..config.capacity {
+                            sender.try_send(i as u32).expect("Fill channel");
+                        }
 
-            // Record initial queue state
-            let initial_messages: Vec<u32> = (0..config.capacity).map(|i| i as u32).collect();
+                        // Record initial queue state
+                        let initial_messages: Vec<u32> =
+                            (0..config.capacity).map(|i| i as u32).collect();
 
-            // Evict oldest with new message
-            let new_value = 999u32;
-            match sender.send_evict_oldest(new_value) {
-                Ok(Some(evicted)) => {
-                    assert_eq!(evicted, 0u32, "Oldest message should be evicted");
-                },
-                Ok(None) => panic!("Expected eviction but none occurred"),
-                Err(_) => panic!("Eviction failed unexpectedly"),
-            }
+                        // Evict oldest with new message
+                        let new_value = 999u32;
+                        match sender.send_evict_oldest(new_value) {
+                            Ok(Some(evicted)) => {
+                                assert_eq!(evicted, 0u32, "Oldest message should be evicted");
+                            }
+                            Ok(None) => panic!("Expected eviction but none occurred"),
+                            Err(_) => panic!("Eviction failed unexpectedly"),
+                        }
 
-            // Receive all and verify order
-            let mut received = Vec::new();
-            while let Ok(value) = receiver.try_recv() {
-                received.push(value);
-            }
+                        // Receive all and verify order
+                        let mut received = Vec::new();
+                        while let Ok(value) = receiver.try_recv() {
+                            received.push(value);
+                        }
 
-            // Expected: [1, 2, ..., capacity-1, 999]
-            let mut expected = initial_messages[1..].to_vec();
-            expected.push(new_value);
+                        // Expected: [1, 2, ..., capacity-1, 999]
+                        let mut expected = initial_messages[1..].to_vec();
+                        expected.push(new_value);
 
-            assert_eq!(
-                received, expected,
-                "Eviction didn't preserve FIFO order: got {:?}, expected {:?}",
-                received, expected
-            );
+                        assert_eq!(
+                            received, expected,
+                            "Eviction didn't preserve FIFO order: got {:?}, expected {:?}",
+                            received, expected
+                        );
 
-            Ok(())
-        });
+                        Ok(())
+                    });
 
-        result.expect("MR5 eviction policy test failed");
-            Ok(())
-        }).expect("Property test failed");
+                result.expect("MR5 eviction policy test failed");
+                Ok(())
+            })
+            .expect("Property test failed");
     }
 
     /// MR6: Receiver Drain Correctness
@@ -2428,75 +2457,78 @@ pub mod backpressure_metamorphic {
     /// Property: Dropping receiver unblocks all pending sends with Disconnected.
     #[test]
     fn mr6_receiver_drain_correctness() {
-        use proptest::test_runner::TestRunner;
         use proptest::strategy::Strategy;
+        use proptest::test_runner::TestRunner;
 
         let mut runner = TestRunner::default();
-        runner.run(&backpressure_config_strategy(), |config| {
-        let lab = LabRuntime::new(LabConfig::new(config.seed));
-        let result = lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
-            let (sender, receiver) = channel::<u32>(config.capacity);
+        runner
+            .run(&backpressure_config_strategy(), |config| {
+                let lab = LabRuntime::new(LabConfig::new(config.seed));
+                let result =
+                    lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
+                        let (sender, receiver) = channel::<u32>(config.capacity);
 
-            // Fill channel
-            for i in 0..config.capacity {
-                sender.try_send(i as u32).expect("Fill channel");
-            }
+                        // Fill channel
+                        for i in 0..config.capacity {
+                            sender.try_send(i as u32).expect("Fill channel");
+                        }
 
-            // Start multiple blocking reserves
-            let disconnected_count = Arc::new(AtomicUsize::new(0));
-            let mut reserve_handles = Vec::new();
+                        // Start multiple blocking reserves
+                        let disconnected_count = Arc::new(AtomicUsize::new(0));
+                        let mut reserve_handles = Vec::new();
 
-            for i in 0..config.sender_count {
-                let sender_clone = sender.clone();
-                let counter_clone = Arc::clone(&disconnected_count);
-                let handle = scope.spawn_task(async move {
-                    match sender_clone.reserve(&cx).await {
-                        Err(SendError::Disconnected(_)) => {
-                            counter_clone.fetch_add(1, Ordering::SeqCst);
-                        },
-                        _ => {},
-                    }
-                    Ok(())
-                });
-                reserve_handles.push(handle);
-            }
+                        for i in 0..config.sender_count {
+                            let sender_clone = sender.clone();
+                            let counter_clone = Arc::clone(&disconnected_count);
+                            let handle = scope.spawn_task(async move {
+                                match sender_clone.reserve(&cx).await {
+                                    Err(SendError::Disconnected(_)) => {
+                                        counter_clone.fetch_add(1, Ordering::SeqCst);
+                                    }
+                                    _ => {}
+                                }
+                                Ok(())
+                            });
+                            reserve_handles.push(handle);
+                        }
 
-            // Let reserves queue up
-            crate::runtime::yield_now().await;
+                        // Let reserves queue up
+                        crate::runtime::yield_now().await;
 
-            // Verify reserves are queued
-            let queued_before = observe_channel_state(&sender).3;
-            assert!(queued_before > 0, "No reserves queued");
+                        // Verify reserves are queued
+                        let queued_before = observe_channel_state(&sender).3;
+                        assert!(queued_before > 0, "No reserves queued");
 
-            // Drop receiver - should unblock all pending reserves
-            drop(receiver);
+                        // Drop receiver - should unblock all pending reserves
+                        drop(receiver);
 
-            // Wait for all reserves to complete
-            for handle in reserve_handles {
-                let _ = handle.await;
-            }
+                        // Wait for all reserves to complete
+                        for handle in reserve_handles {
+                            let _ = handle.await;
+                        }
 
-            // All queued senders should have been disconnected
-            let disconnected = disconnected_count.load(Ordering::SeqCst);
-            assert!(
-                disconnected > 0,
-                "No senders received Disconnected after receiver drop"
-            );
+                        // All queued senders should have been disconnected
+                        let disconnected = disconnected_count.load(Ordering::SeqCst);
+                        assert!(
+                            disconnected > 0,
+                            "No senders received Disconnected after receiver drop"
+                        );
 
-            // No waiters should remain
-            let queued_after = observe_channel_state(&sender).3;
-            assert_eq!(
-                queued_after, 0,
-                "Waiters remain queued after receiver drop: {}",
-                queued_after
-            );
+                        // No waiters should remain
+                        let queued_after = observe_channel_state(&sender).3;
+                        assert_eq!(
+                            queued_after, 0,
+                            "Waiters remain queued after receiver drop: {}",
+                            queued_after
+                        );
 
-            Ok(())
-        });
+                        Ok(())
+                    });
 
-        result.expect("MR6 receiver drain test failed");
-            Ok(())
-        }).expect("Property test failed");
+                result.expect("MR6 receiver drain test failed");
+                Ok(())
+            })
+            .expect("Property test failed");
     }
 
     /// Composite metamorphic test: All relations together
@@ -2504,92 +2536,101 @@ pub mod backpressure_metamorphic {
     /// Tests multiple properties in combination to catch interaction bugs.
     #[test]
     fn composite_backpressure_properties() {
-        use proptest::test_runner::TestRunner;
         use proptest::strategy::Strategy;
+        use proptest::test_runner::TestRunner;
 
         let mut runner = TestRunner::default();
-        runner.run(&backpressure_config_strategy(), |config| {
-        let lab = LabRuntime::new(LabConfig::new(config.seed));
-        let result = lab.spawn_test_scope(Budget::with_millis(10000), move |cx, scope| async move {
-            let (sender, mut receiver) = channel::<u32>(config.capacity);
-            let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
-            let sent_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        runner
+            .run(&backpressure_config_strategy(), |config| {
+                let lab = LabRuntime::new(LabConfig::new(config.seed));
+                let result =
+                    lab.spawn_test_scope(Budget::with_millis(10000), move |cx, scope| async move {
+                        let (sender, mut receiver) = channel::<u32>(config.capacity);
+                        let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
+                        let sent_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
-            // MR1 + MR2: Capacity conservation + FIFO under mixed load
-            let recv_ref = Arc::clone(&received_messages);
-            let recv_handle = scope.spawn_task(async move {
-                while let Ok(value) = receiver.recv(&cx).await {
-                    recv_ref.lock().push(value);
-                }
+                        // MR1 + MR2: Capacity conservation + FIFO under mixed load
+                        let recv_ref = Arc::clone(&received_messages);
+                        let recv_handle = scope.spawn_task(async move {
+                            while let Ok(value) = receiver.recv(&cx).await {
+                                recv_ref.lock().push(value);
+                            }
+                            Ok(())
+                        });
+
+                        // Multiple senders with different patterns
+                        let mut send_handles = Vec::new();
+                        for sender_id in 0..config.sender_count {
+                            let sender_clone = sender.clone();
+                            let sent_ref = Arc::clone(&sent_messages);
+                            let handle = scope.spawn_task(async move {
+                                for i in 0..config.messages_per_sender {
+                                    let value = (sender_id * 1000 + i) as u32;
+                                    match sender_clone.send(&cx, value).await {
+                                        Ok(()) => {
+                                            sent_ref.lock().push((sender_id, value));
+                                        }
+                                        Err(_) => break,
+                                    }
+
+                                    // MR1: Check capacity conservation
+                                    let (queued, reserved, available, _) =
+                                        observe_channel_state(&sender_clone);
+                                    assert_eq!(
+                                        queued + reserved + available,
+                                        config.capacity,
+                                        "Capacity conservation violated during concurrent sends"
+                                    );
+                                }
+                                Ok(())
+                            });
+                            send_handles.push(handle);
+                        }
+
+                        // Complete all sends
+                        for handle in send_handles {
+                            let _ = handle.await;
+                        }
+                        drop(sender);
+
+                        let _ = recv_handle.await;
+
+                        // MR2: Verify ordering within each sender
+                        let sent = sent_messages.lock().clone();
+                        let received = received_messages.lock().clone();
+
+                        // Group by sender and verify each sender's messages are in order
+                        let mut sender_sequences: HashMap<usize, Vec<u32>> = HashMap::new();
+                        for (sender_id, value) in sent {
+                            sender_sequences
+                                .entry(sender_id)
+                                .or_insert_with(Vec::new)
+                                .push(value);
+                        }
+
+                        for value in received {
+                            if let Some(sender_id) = value.checked_div(1000) {
+                                if let Some(sequence) =
+                                    sender_sequences.get_mut(&(sender_id as usize))
+                                {
+                                    if let Some(expected) = sequence.first() {
+                                        assert_eq!(
+                                            value, *expected,
+                                            "FIFO violation for sender {}: expected {}, got {}",
+                                            sender_id, expected, value
+                                        );
+                                        sequence.remove(0);
+                                    }
+                                }
+                            }
+                        }
+
+                        Ok(())
+                    });
+
+                result.expect("Composite backpressure properties test failed");
                 Ok(())
-            });
-
-            // Multiple senders with different patterns
-            let mut send_handles = Vec::new();
-            for sender_id in 0..config.sender_count {
-                let sender_clone = sender.clone();
-                let sent_ref = Arc::clone(&sent_messages);
-                let handle = scope.spawn_task(async move {
-                    for i in 0..config.messages_per_sender {
-                        let value = (sender_id * 1000 + i) as u32;
-                        match sender_clone.send(&cx, value).await {
-                            Ok(()) => {
-                                sent_ref.lock().push((sender_id, value));
-                            },
-                            Err(_) => break,
-                        }
-
-                        // MR1: Check capacity conservation
-                        let (queued, reserved, available, _) = observe_channel_state(&sender_clone);
-                        assert_eq!(
-                            queued + reserved + available,
-                            config.capacity,
-                            "Capacity conservation violated during concurrent sends"
-                        );
-                    }
-                    Ok(())
-                });
-                send_handles.push(handle);
-            }
-
-            // Complete all sends
-            for handle in send_handles {
-                let _ = handle.await;
-            }
-            drop(sender);
-
-            let _ = recv_handle.await;
-
-            // MR2: Verify ordering within each sender
-            let sent = sent_messages.lock().clone();
-            let received = received_messages.lock().clone();
-
-            // Group by sender and verify each sender's messages are in order
-            let mut sender_sequences: HashMap<usize, Vec<u32>> = HashMap::new();
-            for (sender_id, value) in sent {
-                sender_sequences.entry(sender_id).or_insert_with(Vec::new).push(value);
-            }
-
-            for value in received {
-                if let Some(sender_id) = value.checked_div(1000) {
-                    if let Some(sequence) = sender_sequences.get_mut(&(sender_id as usize)) {
-                        if let Some(expected) = sequence.first() {
-                            assert_eq!(
-                                value, *expected,
-                                "FIFO violation for sender {}: expected {}, got {}",
-                                sender_id, expected, value
-                            );
-                            sequence.remove(0);
-                        }
-                    }
-                }
-            }
-
-            Ok(())
-        });
-
-        result.expect("Composite backpressure properties test failed");
-            Ok(())
-        }).expect("Property test failed");
+            })
+            .expect("Property test failed");
     }
 }

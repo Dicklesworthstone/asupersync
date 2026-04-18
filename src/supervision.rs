@@ -8495,7 +8495,7 @@ mod tests {
             }
         }
 
-        fn choose<T>(&mut self, items: &[T]) -> &T {
+        fn choose<'a, T>(&mut self, items: &'a [T]) -> &'a T {
             let idx = self.gen_range(0..items.len());
             &items[idx]
         }
@@ -8508,8 +8508,8 @@ mod tests {
         }
     }
 
-    /// Mock start function for testing
-    fn noop_start(_ctx: &crate::cx::Cx, _name: &str) -> Result<TaskId, SpawnError> {
+    /// Mock start function for metamorphic testing
+    fn noop_start_metamorphic(_ctx: &crate::cx::Cx, _name: &str) -> Result<TaskId, SpawnError> {
         // Return a dummy TaskId for testing
         use crate::util::ArenaIndex;
         let arena_idx = ArenaIndex::new(42, 0);
@@ -8539,18 +8539,16 @@ mod tests {
         restart_policy: RestartPolicy,
         rng: &mut crate::util::det_rng::DetRng,
     ) -> SupervisorBuilder {
-        let mut builder = SupervisorBuilder::new(name)
-            .with_restart_policy(restart_policy);
+        let mut builder = SupervisorBuilder::new(name).with_restart_policy(restart_policy);
 
         for i in 0..child_count {
             let child_name = format!("child_{}", i);
-            let restart_config = RestartConfig::new(3, Duration::from_mins(1))
-                .with_backoff(BackoffStrategy::Fixed(Duration::from_millis(
-                    rng.gen_range(10..100) as u64,
-                )));
+            let restart_config = RestartConfig::new(3, Duration::from_mins(1)).with_backoff(
+                BackoffStrategy::Fixed(Duration::from_millis(rng.gen_range(10..100) as u64)),
+            );
 
             builder = builder.child(
-                ChildSpec::new(&child_name, noop_start)
+                ChildSpec::new(&child_name, noop_start_metamorphic)
                     .with_restart(SupervisionStrategy::Restart(restart_config)),
             );
         }
@@ -8681,22 +8679,28 @@ mod tests {
             let supervisor = SupervisorBuilder::new("budget_test")
                 .with_restart_policy(restart_policy)
                 .child(
-                    ChildSpec::new("child_0", noop_start)
-                        .with_restart(SupervisionStrategy::Restart(
-                            RestartConfig::new(config.max_restarts, config.restart_window)
+                    ChildSpec::new("child_0", noop_start_metamorphic).with_restart(
+                        SupervisionStrategy::Restart(RestartConfig::new(
+                            config.max_restarts,
+                            config.restart_window,
                         )),
+                    ),
                 )
                 .child(
-                    ChildSpec::new("child_1", noop_start)
-                        .with_restart(SupervisionStrategy::Restart(
-                            RestartConfig::new(config.max_restarts, config.restart_window)
+                    ChildSpec::new("child_1", noop_start_metamorphic).with_restart(
+                        SupervisionStrategy::Restart(RestartConfig::new(
+                            config.max_restarts,
+                            config.restart_window,
                         )),
+                    ),
                 )
                 .child(
-                    ChildSpec::new("child_2", noop_start)
-                        .with_restart(SupervisionStrategy::Restart(
-                            RestartConfig::new(config.max_restarts, config.restart_window)
+                    ChildSpec::new("child_2", noop_start_metamorphic).with_restart(
+                        SupervisionStrategy::Restart(RestartConfig::new(
+                            config.max_restarts,
+                            config.restart_window,
                         )),
+                    ),
                 )
                 .compile()
                 .unwrap();
@@ -8762,33 +8766,30 @@ mod tests {
 
         let supervisor = SupervisorBuilder::new("isolation_test")
             .with_restart_policy(RestartPolicy::OneForOne)
-            .child(
-                ChildSpec::new("child_a", noop_start)
-                    .with_restart(SupervisionStrategy::Restart(
-                        RestartConfig::new(3, Duration::from_mins(1))
-                    )),
-            )
-            .child(
-                ChildSpec::new("child_b", noop_start)
-                    .with_restart(SupervisionStrategy::Restart(
-                        RestartConfig::new(3, Duration::from_mins(1))
-                    )),
-            )
-            .child(
-                ChildSpec::new("child_c", noop_start)
-                    .with_restart(SupervisionStrategy::Restart(
-                        RestartConfig::new(3, Duration::from_mins(1))
-                    )),
-            )
+            .child(ChildSpec::new("child_a", noop_start).with_restart(
+                SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_mins(1))),
+            ))
+            .child(ChildSpec::new("child_b", noop_start).with_restart(
+                SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_mins(1))),
+            ))
+            .child(ChildSpec::new("child_c", noop_start).with_restart(
+                SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_mins(1))),
+            ))
             .compile()
             .unwrap();
 
         let err_outcome: Outcome<(), ()> = Outcome::Err(());
 
         // Test baseline plans for each child individually
-        let plan_a = supervisor.restart_plan_for_failure("child_a", &err_outcome).unwrap();
-        let plan_b = supervisor.restart_plan_for_failure("child_b", &err_outcome).unwrap();
-        let plan_c = supervisor.restart_plan_for_failure("child_c", &err_outcome).unwrap();
+        let plan_a = supervisor
+            .restart_plan_for_failure("child_a", &err_outcome)
+            .unwrap();
+        let plan_b = supervisor
+            .restart_plan_for_failure("child_b", &err_outcome)
+            .unwrap();
+        let plan_c = supervisor
+            .restart_plan_for_failure("child_c", &err_outcome)
+            .unwrap();
 
         // Under OneForOne, each plan should be isolated
         assert_eq!(plan_a.cancel_order.len(), 1);
@@ -8845,34 +8846,23 @@ mod tests {
             ..SupervisionMetamorphicConfig::default()
         };
 
-        let supervisor = SupervisorBuilder::new("commutativity_test")
-            .with_restart_policy(RestartPolicy::OneForAll)
-            .child(
-                ChildSpec::new("alpha", noop_start)
-                    .with_restart(SupervisionStrategy::Restart(
-                        RestartConfig::new(3, Duration::from_mins(1))
-                    )),
-            )
-            .child(
-                ChildSpec::new("beta", noop_start)
-                    .with_restart(SupervisionStrategy::Restart(
-                        RestartConfig::new(3, Duration::from_mins(1))
-                    )),
-            )
-            .child(
-                ChildSpec::new("gamma", noop_start)
-                    .with_restart(SupervisionStrategy::Restart(
-                        RestartConfig::new(3, Duration::from_mins(1))
-                    )),
-            )
-            .child(
-                ChildSpec::new("delta", noop_start)
-                    .with_restart(SupervisionStrategy::Restart(
-                        RestartConfig::new(3, Duration::from_mins(1))
-                    )),
-            )
-            .compile()
-            .unwrap();
+        let supervisor =
+            SupervisorBuilder::new("commutativity_test")
+                .with_restart_policy(RestartPolicy::OneForAll)
+                .child(ChildSpec::new("alpha", noop_start).with_restart(
+                    SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_mins(1))),
+                ))
+                .child(ChildSpec::new("beta", noop_start).with_restart(
+                    SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_mins(1))),
+                ))
+                .child(ChildSpec::new("gamma", noop_start).with_restart(
+                    SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_mins(1))),
+                ))
+                .child(ChildSpec::new("delta", noop_start).with_restart(
+                    SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_mins(1))),
+                ))
+                .compile()
+                .unwrap();
 
         let err_outcome: Outcome<(), ()> = Outcome::Err(());
         let child_names = ["alpha", "beta", "gamma", "delta"];
@@ -8890,8 +8880,7 @@ mod tests {
         // (same children to cancel/restart, just different triggering failure)
         for i in 1..plans.len() {
             assert_eq!(
-                plans[0].policy,
-                plans[i].policy,
+                plans[0].policy, plans[i].policy,
                 "Plan {} has different policy than plan 0",
                 i
             );
@@ -8983,7 +8972,8 @@ mod tests {
 
                     for i in 0..child_count {
                         let child_name = format!("child_{}", i);
-                        let plan_result = supervisor.restart_plan_for_failure(&child_name, &err_outcome);
+                        let plan_result =
+                            supervisor.restart_plan_for_failure(&child_name, &err_outcome);
 
                         match plan_result {
                             Some(plan) => {
@@ -9040,18 +9030,12 @@ mod tests {
 
                 let supervisor = SupervisorBuilder::new("determinism_test")
                     .with_restart_policy(RestartPolicy::OneForOne)
-                    .child(
-                        ChildSpec::new("service_a", noop_start)
-                            .with_restart(SupervisionStrategy::Restart(
-                                RestartConfig::new(3, Duration::from_mins(1))
-                            )),
-                    )
-                    .child(
-                        ChildSpec::new("service_b", noop_start)
-                            .with_restart(SupervisionStrategy::Restart(
-                                RestartConfig::new(3, Duration::from_mins(1))
-                            )),
-                    )
+                    .child(ChildSpec::new("service_a", noop_start).with_restart(
+                        SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_mins(1))),
+                    ))
+                    .child(ChildSpec::new("service_b", noop_start).with_restart(
+                        SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_mins(1))),
+                    ))
                     .compile()
                     .unwrap();
 
@@ -9061,7 +9045,9 @@ mod tests {
                 let services = ["service_a", "service_b"];
                 for _ in 0..10 {
                     let chosen_service = rng.choose(&services);
-                    if let Some(plan) = supervisor.restart_plan_for_failure(chosen_service, &err_outcome) {
+                    if let Some(plan) =
+                        supervisor.restart_plan_for_failure(chosen_service, &err_outcome)
+                    {
                         plan_summaries.push(format!(
                             "fail:{} policy:{:?} cancel:{} restart:{}",
                             chosen_service,
@@ -9086,7 +9072,10 @@ mod tests {
         }
 
         // Results should be non-empty (sanity check)
-        assert!(!results[0].is_empty(), "Should have generated some supervision plans");
+        assert!(
+            !results[0].is_empty(),
+            "Should have generated some supervision plans"
+        );
 
         crate::test_complete!("metamorphic_lab_runtime_replay_determinism");
     }
@@ -9119,30 +9108,28 @@ mod tests {
         let supervisor = SupervisorBuilder::new("composite_test")
             .with_restart_policy(RestartPolicy::OneForOne)
             .child(
-                ChildSpec::new("primary", noop_start)
-                    .with_restart(SupervisionStrategy::Restart(
-                        RestartConfig::new(config.max_restarts, config.restart_window)
-                            .with_escalation(EscalationPolicy::Escalate)
-                            .with_backoff(BackoffStrategy::Exponential {
-                                initial: Duration::from_millis(100),
-                                max: Duration::from_secs(5),
-                                multiplier: 2.0,
-                            }),
-                    )),
+                ChildSpec::new("primary", noop_start).with_restart(SupervisionStrategy::Restart(
+                    RestartConfig::new(config.max_restarts, config.restart_window)
+                        .with_escalation(EscalationPolicy::Escalate)
+                        .with_backoff(BackoffStrategy::Exponential {
+                            initial: Duration::from_millis(100),
+                            max: Duration::from_secs(5),
+                            multiplier: 2.0,
+                        }),
+                )),
             )
             .child(
-                ChildSpec::new("secondary", noop_start)
-                    .with_restart(SupervisionStrategy::Restart(
-                        RestartConfig::new(config.max_restarts, config.restart_window)
-                            .with_escalation(EscalationPolicy::Stop)
-                    )),
+                ChildSpec::new("secondary", noop_start).with_restart(SupervisionStrategy::Restart(
+                    RestartConfig::new(config.max_restarts, config.restart_window)
+                        .with_escalation(EscalationPolicy::Stop),
+                )),
             )
-            .child(
-                ChildSpec::new("tertiary", noop_start)
-                    .with_restart(SupervisionStrategy::Restart(
-                        RestartConfig::new(config.max_restarts, config.restart_window)
-                    )),
-            )
+            .child(ChildSpec::new("tertiary", noop_start).with_restart(
+                SupervisionStrategy::Restart(RestartConfig::new(
+                    config.max_restarts,
+                    config.restart_window,
+                )),
+            ))
             .compile()
             .unwrap();
 

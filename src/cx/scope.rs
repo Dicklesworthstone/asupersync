@@ -2560,18 +2560,22 @@ mod tests {
         let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
 
         // Task must exist and be trackable
-        let task_record = state.task(handle.task_id())
+        let task_record = state
+            .task(handle.task_id())
             .expect("spawned task must have a record");
 
         // Task must belong to the spawning region
-        assert_eq!(task_record.owner, region,
-            "spawned task must be owned by the spawning region");
+        assert_eq!(
+            task_record.owner, region,
+            "spawned task must be owned by the spawning region"
+        );
 
         // Region must track the task
-        let region_record = state.region(region)
-            .expect("spawning region must exist");
-        assert!(region_record.task_ids().contains(&handle.task_id()),
-            "spawning region must track the spawned task");
+        let region_record = state.region(region).expect("spawning region must exist");
+        assert!(
+            region_record.task_ids().contains(&handle.task_id()),
+            "spawning region must track the spawned task"
+        );
     }
 
     #[test]
@@ -2584,12 +2588,15 @@ mod tests {
 
         // This should compile - Send + 'static data
         let send_data = String::from("test");
-        let (handle, _stored) = scope.spawn(&mut state, &cx, move |_| async move {
-            send_data.len() // Uses Send + 'static String
-        }).unwrap();
+        let (handle, _stored) = scope
+            .spawn(&mut state, &cx, move |_| async move {
+                send_data.len() // Uses Send + 'static String
+            })
+            .unwrap();
 
         // Task record should reflect Send bounds
-        let task_record = state.task(handle.task_id())
+        let task_record = state
+            .task(handle.task_id())
             .expect("Send task must have a record");
         assert_eq!(task_record.owner, region);
 
@@ -2620,12 +2627,16 @@ mod tests {
 
         // Before task completion, join should be pending
         let mut join_fut = std::pin::pin!(handle.join(&cx));
-        assert!(join_fut.as_mut().poll(&mut poll_cx).is_pending(),
-            "join must be pending before task completion");
+        assert!(
+            join_fut.as_mut().poll(&mut poll_cx).is_pending(),
+            "join must be pending before task completion"
+        );
 
         // Complete the task
-        assert!(stored.poll(&mut poll_cx).is_ready(),
-            "test task must complete in one poll");
+        assert!(
+            stored.poll(&mut poll_cx).is_ready(),
+            "test task must complete in one poll"
+        );
 
         // After task completion, join should return the result
         match join_fut.as_mut().poll(&mut poll_cx) {
@@ -2665,16 +2676,19 @@ mod tests {
                     .expect("spawn in child region must succeed");
 
                 // Verify task ownership invariants
-                let task_record = state.task(handle.task_id())
+                let task_record = state
+                    .task(handle.task_id())
                     .expect("child task must have a record");
                 let child_owns = task_record.owner == child_region;
                 let parent_owns = task_record.owner == parent_region;
 
                 // Verify region tracking invariants
-                let parent_tracks = state.region(parent_region)
+                let parent_tracks = state
+                    .region(parent_region)
                     .map(|r| r.task_ids().contains(&handle.task_id()))
                     .unwrap_or(false);
-                let child_tracks = state.region(child_region)
+                let child_tracks = state
+                    .region(child_region)
                     .map(|r| r.task_ids().contains(&handle.task_id()))
                     .unwrap_or(false);
 
@@ -2688,17 +2702,29 @@ mod tests {
                     let _ = state.task_completed(handle.task_id());
                 }
 
-                std::future::ready(Outcome::Ok((child_owns, parent_owns, child_tracks, parent_tracks)))
+                std::future::ready(Outcome::Ok((
+                    child_owns,
+                    parent_owns,
+                    child_tracks,
+                    parent_tracks,
+                )))
             },
-        )).expect("child region must complete");
+        ))
+        .expect("child region must complete");
 
         let (child_owns, parent_owns, child_tracks, parent_tracks) = match outcome {
             Outcome::Ok(tuple) => tuple,
             other => panic!("expected Ok(ownership_data), got {other:?}"),
         };
 
-        assert!(child_owns, "task spawned in child region must be owned by child");
-        assert!(!parent_owns, "task spawned in child region must NOT be owned by parent");
+        assert!(
+            child_owns,
+            "task spawned in child region must be owned by child"
+        );
+        assert!(
+            !parent_owns,
+            "task spawned in child region must NOT be owned by parent"
+        );
         assert!(child_tracks, "child region must track its spawned tasks");
         assert!(!parent_tracks, "parent region must NOT track child's tasks");
     }
@@ -2729,36 +2755,47 @@ mod tests {
             .with_registry_handle(Some(registry_handle))
             .with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("test-node")));
 
-        let mut handle = scope.spawn_registered(&mut state, &parent_cx, move |child_cx| async move {
-            // Verify registry inheritance
-            let child_registry = child_cx.registry_handle()
-                .expect("child must inherit registry capability");
-            let same_registry = Arc::ptr_eq(&child_registry.as_arc(), &parent_registry_arc);
+        let mut handle = scope
+            .spawn_registered(&mut state, &parent_cx, move |child_cx| async move {
+                // Verify registry inheritance
+                let child_registry = child_cx
+                    .registry_handle()
+                    .expect("child must inherit registry capability");
+                let same_registry = Arc::ptr_eq(&child_registry.as_arc(), &parent_registry_arc);
 
-            // Verify remote capability inheritance
-            let child_remote = child_cx.remote()
-                .expect("child must inherit remote capability");
-            let node_name = child_remote.local_node().as_str().to_owned();
+                // Verify remote capability inheritance
+                let child_remote = child_cx
+                    .remote()
+                    .expect("child must inherit remote capability");
+                let node_name = child_remote.local_node().as_str().to_owned();
 
-            // Verify timer capability inheritance (if parent has it)
-            let has_timer = child_cx.has_timer();
+                // Verify timer capability inheritance (if parent has it)
+                let has_timer = child_cx.has_timer();
 
-            (same_registry, node_name, has_timer)
-        }).unwrap();
+                (same_registry, node_name, has_timer)
+            })
+            .unwrap();
 
         // Complete the task and verify results
         let waker = Waker::from(Arc::new(NoopWaker));
         let mut poll_cx = Context::from_waker(&waker);
 
-        let stored = state.get_stored_future(handle.task_id())
+        let stored = state
+            .get_stored_future(handle.task_id())
             .expect("spawn_registered must store the task");
         assert!(stored.poll(&mut poll_cx).is_ready());
 
         let mut join_fut = std::pin::pin!(handle.join(&parent_cx));
         match join_fut.as_mut().poll(&mut poll_cx) {
             std::task::Poll::Ready(Ok((same_registry, node_name, has_timer))) => {
-                assert!(same_registry, "child must inherit exact same registry instance");
-                assert_eq!(node_name, "test-node", "child must inherit remote capability");
+                assert!(
+                    same_registry,
+                    "child must inherit exact same registry instance"
+                );
+                assert_eq!(
+                    node_name, "test-node",
+                    "child must inherit remote capability"
+                );
                 // Timer inheritance depends on runtime setup, but should be consistent
             }
             other => panic!("capability inheritance test failed: {other:?}"),
@@ -2781,14 +2818,16 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (mut handle, mut stored) = scope.spawn(&mut state, &cx, |cx| async move {
-            // Check cancellation status and respond accordingly
-            if cx.checkpoint().is_err() {
-                "cancelled"
-            } else {
-                "completed"
-            }
-        }).unwrap();
+        let (mut handle, mut stored) = scope
+            .spawn(&mut state, &cx, |cx| async move {
+                // Check cancellation status and respond accordingly
+                if cx.checkpoint().is_err() {
+                    "cancelled"
+                } else {
+                    "completed"
+                }
+            })
+            .unwrap();
 
         // Abort the task before it runs
         handle.abort();
@@ -2797,15 +2836,19 @@ mod tests {
         let mut poll_cx = Context::from_waker(&waker);
 
         // Task should complete and see the cancellation
-        assert!(stored.poll(&mut poll_cx).is_ready(),
-            "cancelled task must still complete");
+        assert!(
+            stored.poll(&mut poll_cx).is_ready(),
+            "cancelled task must still complete"
+        );
 
         // Join should return the cancellation-aware result
         let mut join_fut = std::pin::pin!(handle.join(&cx));
         match join_fut.as_mut().poll(&mut poll_cx) {
             std::task::Poll::Ready(Ok(result)) => {
-                assert_eq!(result, "cancelled",
-                    "cancelled task must observe cancellation via checkpoint()");
+                assert_eq!(
+                    result, "cancelled",
+                    "cancelled task must observe cancellation via checkpoint()"
+                );
             }
             other => panic!("cancelled task join failed: {other:?}"),
         }
@@ -2841,7 +2884,7 @@ mod tests {
                     type Output = ();
                     fn poll(
                         mut self: std::pin::Pin<&mut Self>,
-                        cx: &mut std::task::Context<'_>
+                        cx: &mut std::task::Context<'_>,
                     ) -> std::task::Poll<()> {
                         if self.0 {
                             std::task::Poll::Ready(())
@@ -2874,8 +2917,10 @@ mod tests {
         let mut race_fut = std::pin::pin!(scope.race_all(&cx, handles));
 
         // Race should be pending initially (waiting for loser drain)
-        assert!(race_fut.as_mut().poll(&mut poll_cx).is_pending(),
-            "race must wait for loser to be drained");
+        assert!(
+            race_fut.as_mut().poll(&mut poll_cx).is_pending(),
+            "race must wait for loser to be drained"
+        );
 
         // Drive loser to first yield (it's now pending, but abort signal propagates)
         assert!(loser_stored.poll(&mut poll_cx).is_pending());
@@ -2913,21 +2958,27 @@ mod tests {
                 // Don't spawn any tasks - region should be empty
                 std::future::ready(Outcome::Ok("empty_region_completed"))
             },
-        )).expect("empty child region must complete");
+        ))
+        .expect("empty child region must complete");
 
         match outcome {
             Outcome::Ok(result) => {
-                assert_eq!(result, "empty_region_completed",
-                    "empty region must reach quiescence immediately");
+                assert_eq!(
+                    result, "empty_region_completed",
+                    "empty region must reach quiescence immediately"
+                );
             }
             other => panic!("empty region must complete successfully: {other:?}"),
         }
 
         // Child region should be cleaned up (no longer in parent's child list)
-        let parent_record = state.region(parent_region)
+        let parent_record = state
+            .region(parent_region)
             .expect("parent region must exist");
-        assert!(parent_record.child_ids().is_empty(),
-            "completed child region must be removed from parent");
+        assert!(
+            parent_record.child_ids().is_empty(),
+            "completed child region must be removed from parent"
+        );
     }
 
     #[test]
@@ -2939,20 +2990,26 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         // Close the region
-        let region_record = state.region_mut(region)
-            .expect("region must exist");
+        let region_record = state.region_mut(region).expect("region must exist");
         region_record.begin_close(None);
 
         // Attempt to spawn should fail
         let spawn_result = scope.spawn(&mut state, &cx, |_| async { 42 });
 
-        assert!(matches!(spawn_result, Err(SpawnError::RegionClosed(_))),
-            "spawning into closed region must fail with RegionClosed error");
+        assert!(
+            matches!(spawn_result, Err(SpawnError::RegionClosed(_))),
+            "spawning into closed region must fail with RegionClosed error"
+        );
 
         // State should remain consistent (no orphaned tasks)
-        assert!(state.tasks_is_empty() ||
-                state.region(region).map(|r| r.task_ids().is_empty()).unwrap_or(true),
-            "failed spawn must not create orphaned tasks");
+        assert!(
+            state.tasks_is_empty()
+                || state
+                    .region(region)
+                    .map(|r| r.task_ids().is_empty())
+                    .unwrap_or(true),
+            "failed spawn must not create orphaned tasks"
+        );
     }
 
     #[test]
@@ -2993,12 +3050,21 @@ mod tests {
                 assert_eq!(results.len(), 3, "join_all must return all results");
 
                 // Results must be in the same order as handles
-                assert_eq!(results[0].as_ref().unwrap(), &100,
-                    "first task result must be preserved");
-                assert_eq!(results[1].as_ref().unwrap(), &200,
-                    "second task result must be preserved");
-                assert_eq!(results[2].as_ref().unwrap(), &300,
-                    "third task result must be preserved");
+                assert_eq!(
+                    results[0].as_ref().unwrap(),
+                    &100,
+                    "first task result must be preserved"
+                );
+                assert_eq!(
+                    results[1].as_ref().unwrap(),
+                    &200,
+                    "second task result must be preserved"
+                );
+                assert_eq!(
+                    results[2].as_ref().unwrap(),
+                    &300,
+                    "third task result must be preserved"
+                );
             }
             other => panic!("join_all must complete with all results: {other:?}"),
         }
@@ -3021,9 +3087,11 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         // Spawn a task that panics with a specific message
-        let (mut handle, mut stored) = scope.spawn(&mut state, &cx, |_| async {
-            std::panic::panic_any("test_panic_message");
-        }).unwrap();
+        let (mut handle, mut stored) = scope
+            .spawn(&mut state, &cx, |_| async {
+                std::panic::panic_any("test_panic_message");
+            })
+            .unwrap();
 
         let waker = Waker::from(Arc::new(NoopWaker));
         let mut poll_cx = Context::from_waker(&waker);
@@ -3040,8 +3108,11 @@ mod tests {
         let mut join_fut = std::pin::pin!(handle.join(&cx));
         match join_fut.as_mut().poll(&mut poll_cx) {
             Poll::Ready(Err(JoinError::Panicked(payload))) => {
-                assert_eq!(payload.message(), "test_panic_message",
-                    "join must preserve panic payload message");
+                assert_eq!(
+                    payload.message(),
+                    "test_panic_message",
+                    "join must preserve panic payload message"
+                );
             }
             other => panic!("join of panicked task must return JoinError::Panicked: {other:?}"),
         }

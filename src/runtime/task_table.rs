@@ -403,10 +403,10 @@ mod tests {
 
     mod conformance_lock_ordering {
         use super::*;
-        use crate::runtime::{ShardedState, ShardGuard};
-        use crate::observability::metrics::NoOpMetrics;
         use crate::observability::ObservabilityConfig;
+        use crate::observability::metrics::NoOpMetrics;
         use crate::runtime::config::RuntimeConfig;
+        use crate::runtime::{ShardGuard, ShardedState};
         use crate::trace::TraceBufferHandle;
         use std::sync::{Arc, Barrier};
         use std::thread;
@@ -424,7 +424,8 @@ mod tests {
         fn test_task_table_operations_preserve_lock_order() {
             // Test 1: Verify task table operations through ShardGuard maintain lock ordering
             let trace = TraceBufferHandle::new(1024);
-            let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> = Arc::new(NoOpMetrics);
+            let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> =
+                Arc::new(NoOpMetrics);
             let shards = ShardedState::new(trace, metrics, test_config());
 
             // Test single shard operations (Tasks only)
@@ -448,7 +449,11 @@ mod tests {
             {
                 use crate::runtime::sharded_state::lock_order;
 
-                assert_eq!(lock_order::held_count(), 0, "No locks should be held after guard drop");
+                assert_eq!(
+                    lock_order::held_count(),
+                    0,
+                    "No locks should be held after guard drop"
+                );
 
                 // Test proper ordering B→A→C (Regions→Tasks→Obligations)
                 let guard = ShardGuard::for_task_completed(&shards);
@@ -469,7 +474,8 @@ mod tests {
             use std::sync::Barrier;
 
             let trace = TraceBufferHandle::new(1024);
-            let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> = Arc::new(NoOpMetrics);
+            let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> =
+                Arc::new(NoOpMetrics);
             let shards = Arc::new(ShardedState::new(trace, metrics, test_config()));
             let barrier = Arc::new(Barrier::new(4));
 
@@ -487,7 +493,10 @@ mod tests {
                                     // Tasks-only operations (hotpath polling)
                                     let mut guard = ShardGuard::tasks_only(&shards);
                                     let tasks = guard.tasks.as_mut().unwrap();
-                                    let owner = RegionId::from_arena(ArenaIndex::new(thread_id as u32 + 1, 0));
+                                    let owner = RegionId::from_arena(ArenaIndex::new(
+                                        thread_id as u32 + 1,
+                                        0,
+                                    ));
                                     let record = make_task_record(owner);
                                     let idx = tasks.insert_task(record);
                                     if i % 10 == 9 {
@@ -500,7 +509,10 @@ mod tests {
                                     // Spawn operations (B→A)
                                     let mut guard = ShardGuard::for_spawn(&shards);
                                     if let Some(tasks) = guard.tasks.as_mut() {
-                                        let owner = RegionId::from_arena(ArenaIndex::new(thread_id as u32 + 1, 0));
+                                        let owner = RegionId::from_arena(ArenaIndex::new(
+                                            thread_id as u32 + 1,
+                                            0,
+                                        ));
                                         let record = make_task_record(owner);
                                         let _ = tasks.insert_task(record);
                                     }
@@ -509,7 +521,10 @@ mod tests {
                                     // Task completion operations (B→A→C)
                                     let mut guard = ShardGuard::for_task_completed(&shards);
                                     if let Some(tasks) = guard.tasks.as_mut() {
-                                        let owner = RegionId::from_arena(ArenaIndex::new(thread_id as u32 + 1, 0));
+                                        let owner = RegionId::from_arena(ArenaIndex::new(
+                                            thread_id as u32 + 1,
+                                            0,
+                                        ));
                                         let record = make_task_record(owner);
                                         let idx = tasks.insert_task(record);
                                         let task_id = TaskId::from_arena(idx);
@@ -521,7 +536,8 @@ mod tests {
                                     let mut guard = ShardGuard::for_cancel(&shards);
                                     if let Some(tasks) = guard.tasks.as_mut() {
                                         // Lookup operations to simulate cancel processing
-                                        let task_id = TaskId::from_arena(ArenaIndex::new(i % 100, 0));
+                                        let task_id =
+                                            TaskId::from_arena(ArenaIndex::new(i % 100, 0));
                                         let _ = tasks.task(task_id);
                                     }
                                 }
@@ -533,7 +549,9 @@ mod tests {
                 .collect();
 
             for handle in handles {
-                handle.join().expect("Thread should not panic - no lock order violations");
+                handle
+                    .join()
+                    .expect("Thread should not panic - no lock order violations");
             }
         }
 
@@ -541,7 +559,8 @@ mod tests {
         fn test_task_table_reallocation_safety() {
             // Test 3: Table growth and shrinking should be safe under concurrent access
             let trace = TraceBufferHandle::new(1024);
-            let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> = Arc::new(NoOpMetrics);
+            let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> =
+                Arc::new(NoOpMetrics);
             let shards = Arc::new(ShardedState::new(trace, metrics, test_config()));
             let barrier = Arc::new(Barrier::new(3));
 
@@ -581,7 +600,8 @@ mod tests {
 
                                     // Find a task to remove (iterate through possible indices)
                                     for idx_val in 0..200 {
-                                        let task_id = TaskId::from_arena(ArenaIndex::new(idx_val, 0));
+                                        let task_id =
+                                            TaskId::from_arena(ArenaIndex::new(idx_val, 0));
                                         if tasks.remove_task(task_id).is_some() {
                                             break; // Successfully removed one
                                         }
@@ -600,12 +620,16 @@ mod tests {
 
                                     // Try to lookup various task IDs
                                     for idx_val in (i * 10)..((i + 1) * 10) {
-                                        let task_id = TaskId::from_arena(ArenaIndex::new(idx_val % 200, 0));
+                                        let task_id =
+                                            TaskId::from_arena(ArenaIndex::new(idx_val % 200, 0));
                                         let _ = tasks.task(task_id); // May or may not exist
                                     }
 
                                     // Verify table integrity during concurrent access
-                                    assert!(tasks.live_task_count() < 1000, "Table growth should be reasonable");
+                                    assert!(
+                                        tasks.live_task_count() < 1000,
+                                        "Table growth should be reasonable"
+                                    );
 
                                     if i % 30 == 0 {
                                         thread::sleep(Duration::from_micros(1));
@@ -619,7 +643,9 @@ mod tests {
                 .collect();
 
             for handle in handles {
-                handle.join().expect("Reallocation safety test should not panic");
+                handle
+                    .join()
+                    .expect("Reallocation safety test should not panic");
             }
 
             // Final verification: table should be in a consistent state
@@ -642,8 +668,8 @@ mod tests {
         #[should_panic(expected = "lock order violation")]
         fn test_lock_order_violation_detection() {
             // Test 4: Verify that incorrect lock ordering is detected and panics
-            use crate::runtime::sharded_state::lock_order;
             use crate::runtime::sharded_state::LockShard;
+            use crate::runtime::sharded_state::lock_order;
 
             // Simulate acquiring locks in wrong order (Tasks before Regions)
             // This should panic in debug builds due to lock order violation
@@ -658,8 +684,8 @@ mod tests {
         #[test]
         fn test_proper_lock_order_sequences() {
             // Test 5: Verify that correct lock ordering sequences work properly
-            use crate::runtime::sharded_state::lock_order;
             use crate::runtime::sharded_state::LockShard;
+            use crate::runtime::sharded_state::lock_order;
 
             // Test valid sequence: B→A→C (Regions→Tasks→Obligations)
             lock_order::before_lock(LockShard::Regions);
@@ -693,7 +719,8 @@ mod tests {
         fn test_task_table_arena_operations_thread_safety() {
             // Test 6: Arena operations should be thread-safe under proper locking
             let trace = TraceBufferHandle::new(1024);
-            let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> = Arc::new(NoOpMetrics);
+            let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> =
+                Arc::new(NoOpMetrics);
             let shards = Arc::new(ShardedState::new(trace, metrics, test_config()));
             let barrier = Arc::new(Barrier::new(4));
 
@@ -716,7 +743,8 @@ mod tests {
                             let mut guard = ShardGuard::for_spawn(&shards);
                             let tasks = guard.tasks.as_mut().unwrap();
 
-                            let owner = RegionId::from_arena(ArenaIndex::new(thread_id as u32 + 1, 0));
+                            let owner =
+                                RegionId::from_arena(ArenaIndex::new(thread_id as u32 + 1, 0));
                             let record = make_task_record(owner);
                             let idx = tasks.insert_task(record);
                             let task_id = TaskId::from_arena(idx);
@@ -745,7 +773,9 @@ mod tests {
                 .collect();
 
             for handle in handles {
-                handle.join().expect("Arena operations should be thread-safe");
+                handle
+                    .join()
+                    .expect("Arena operations should be thread-safe");
             }
 
             // Final verification: all created tasks should be accessible
@@ -753,7 +783,11 @@ mod tests {
             let final_tasks = final_guard.tasks.as_ref().unwrap();
 
             let created_task_list = created_tasks.lock().unwrap();
-            assert_eq!(created_task_list.len(), 100, "Should have created 100 tasks total");
+            assert_eq!(
+                created_task_list.len(),
+                100,
+                "Should have created 100 tasks total"
+            );
 
             for &task_id in created_task_list.iter() {
                 assert!(

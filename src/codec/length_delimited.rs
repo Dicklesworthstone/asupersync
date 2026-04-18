@@ -260,9 +260,8 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
             io::Error::new(io::ErrorKind::InvalidData, "length adjustment exceeds i64")
         })?;
 
-        let frame_len_i64 = i64::try_from(frame_len).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "frame length exceeds i64")
-        })?;
+        let frame_len_i64 = i64::try_from(frame_len)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame length exceeds i64"))?;
 
         let adjusted_len = frame_len_i64
             .checked_sub(adjustment)
@@ -747,7 +746,10 @@ mod tests {
     }
 
     /// Generate test configurations for metamorphic testing
-    fn generate_test_configs(rng: &mut crate::util::det_rng::DetRng, count: usize) -> Vec<MetamorphicTestConfig> {
+    fn generate_test_configs(
+        rng: &mut crate::util::det_rng::DetRng,
+        count: usize,
+    ) -> Vec<MetamorphicTestConfig> {
         (0..count)
             .map(|_| MetamorphicTestConfig {
                 length_field_offset: rng.gen_range(0..3),
@@ -785,22 +787,24 @@ mod tests {
 
                     // Encode payload
                     let mut encoded = BytesMut::new();
-                    if encoder.encode(original_payload.clone(), &mut encoded).is_ok() {
+                    if encoder
+                        .encode(original_payload.clone(), &mut encoded)
+                        .is_ok()
+                    {
                         // Decode the encoded data
                         let decoded_frame = decoder.decode(&mut encoded).unwrap();
 
                         if let Some(frame) = decoded_frame {
                             // The frame should contain the original payload
                             // Note: The frame might include header bytes if num_skip < header_len
-                            let header_len = config.length_field_offset + config.length_field_length;
+                            let header_len =
+                                config.length_field_offset + config.length_field_length;
                             if config.num_skip >= header_len {
                                 // Full header skipped, frame should be just the payload
                                 assert_eq!(
-                                    frame,
-                                    original_payload,
+                                    frame, original_payload,
                                     "Round-trip failed for config {:?}, size {}",
-                                    config,
-                                    size
+                                    config, size
                                 );
                             } else {
                                 // Partial header retained, payload should be at the end
@@ -851,7 +855,10 @@ mod tests {
 
             // Decoder 1: Process partial data first, then complete
             let result1_partial = decoder1.decode(&mut part1).unwrap();
-            assert!(result1_partial.is_none(), "Partial frame should return None");
+            assert!(
+                result1_partial.is_none(),
+                "Partial frame should return None"
+            );
 
             let mut remaining = part2;
             let result1_complete = decoder1.decode(&mut remaining).unwrap();
@@ -900,19 +907,30 @@ mod tests {
                 let encode_result = encoder.encode(payload, &mut encoded);
 
                 if size > max_len {
-                    assert!(encode_result.is_err(),
+                    assert!(
+                        encode_result.is_err(),
                         "Encoder should reject frame size {} > max_len {}",
-                        size, max_len);
-                    assert_eq!(encode_result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+                        size,
+                        max_len
+                    );
+                    assert_eq!(
+                        encode_result.unwrap_err().kind(),
+                        io::ErrorKind::InvalidData
+                    );
                 } else {
-                    assert!(encode_result.is_ok(),
+                    assert!(
+                        encode_result.is_ok(),
                         "Encoder should accept frame size {} <= max_len {}",
-                        size, max_len);
+                        size,
+                        max_len
+                    );
 
                     // If encoding succeeded, decoding should too
                     let decode_result = decoder.decode(&mut encoded);
-                    assert!(decode_result.is_ok(),
-                        "Decoder should accept frame that encoder produced");
+                    assert!(
+                        decode_result.is_ok(),
+                        "Decoder should accept frame that encoder produced"
+                    );
                 }
             }
 
@@ -926,8 +944,10 @@ mod tests {
             let decode_result = decoder_direct.decode(&mut crafted_frame);
 
             // Decoder should reject this during header parsing
-            assert!(decode_result.is_err(),
-                "Decoder should reject oversized frame length in header");
+            assert!(
+                decode_result.is_err(),
+                "Decoder should reject oversized frame length in header"
+            );
         }
     }
 
@@ -979,9 +999,14 @@ mod tests {
             );
 
             // But the length fields should be byte-swapped versions of each other
-            let be_len = u32::from_be_bytes([be_encoded[0], be_encoded[1], be_encoded[2], be_encoded[3]]);
-            let le_len = u32::from_le_bytes([le_encoded[0], le_encoded[1], le_encoded[2], le_encoded[3]]);
-            assert_eq!(be_len, le_len, "Length values should be equal when interpreted correctly");
+            let be_len =
+                u32::from_be_bytes([be_encoded[0], be_encoded[1], be_encoded[2], be_encoded[3]]);
+            let le_len =
+                u32::from_le_bytes([le_encoded[0], le_encoded[1], le_encoded[2], le_encoded[3]]);
+            assert_eq!(
+                be_len, le_len,
+                "Length values should be equal when interpreted correctly"
+            );
         }
 
         // Decoders should extract the same payload regardless of byte order
@@ -993,7 +1018,11 @@ mod tests {
 
         // Extract just the payload from both results
         let header_len = base_config.length_field_offset + base_config.length_field_length;
-        let payload_start = if base_config.num_skip >= header_len { 0 } else { header_len - base_config.num_skip };
+        let payload_start = if base_config.num_skip >= header_len {
+            0
+        } else {
+            header_len - base_config.num_skip
+        };
 
         assert_eq!(
             &be_decoded[payload_start..],
@@ -1055,7 +1084,10 @@ mod tests {
         }
 
         // Results should be non-empty (basic sanity check)
-        assert!(!results[0].is_empty(), "Should have processed some frames successfully");
+        assert!(
+            !results[0].is_empty(),
+            "Should have processed some frames successfully"
+        );
     }
 
     // ================================================================================
@@ -1091,7 +1123,11 @@ mod tests {
             if let Ok(Some(frame)) = decoder.decode(&mut accumulated) {
                 // Extract payload from frame
                 let header_len = config.length_field_offset + config.length_field_length;
-                let payload_start = if config.num_skip >= header_len { 0 } else { header_len - config.num_skip };
+                let payload_start = if config.num_skip >= header_len {
+                    0
+                } else {
+                    header_len - config.num_skip
+                };
 
                 assert_eq!(
                     &frame[payload_start..],
@@ -1122,8 +1158,15 @@ mod tests {
         // Variations that should be compatible
         let configs = vec![
             base_config.clone(),
-            MetamorphicTestConfig { big_endian: false, ..base_config.clone() },
-            MetamorphicTestConfig { length_field_offset: 2, num_skip: 6, ..base_config.clone() },
+            MetamorphicTestConfig {
+                big_endian: false,
+                ..base_config.clone()
+            },
+            MetamorphicTestConfig {
+                length_field_offset: 2,
+                num_skip: 6,
+                ..base_config.clone()
+            },
         ];
 
         let payload = generate_test_payload(&mut rng, 30);
@@ -1140,7 +1183,11 @@ mod tests {
 
             // Verify the payload is preserved
             let header_len = config.length_field_offset + config.length_field_length;
-            let payload_start = if config.num_skip >= header_len { 0 } else { header_len - config.num_skip };
+            let payload_start = if config.num_skip >= header_len {
+                0
+            } else {
+                header_len - config.num_skip
+            };
 
             assert_eq!(
                 &decoded[payload_start..],

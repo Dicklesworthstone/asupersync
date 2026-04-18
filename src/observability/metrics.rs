@@ -738,7 +738,10 @@ mod tests {
         pub fn new(config: OtelExporterConfig) -> Self {
             let mut resource_attrs = BTreeMap::new();
             resource_attrs.insert("service.name".to_string(), "asupersync".to_string());
-            resource_attrs.insert("service.version".to_string(), env!("CARGO_PKG_VERSION").to_string());
+            resource_attrs.insert(
+                "service.version".to_string(),
+                env!("CARGO_PKG_VERSION").to_string(),
+            );
 
             Self {
                 config,
@@ -912,15 +915,21 @@ mod tests {
         let mut metrics = Metrics::new();
         metrics.counter("http_requests_total").add(100);
         metrics.gauge("memory_usage_bytes").set(1024);
-        metrics.histogram("request_duration_seconds", vec![0.1, 0.5, 1.0]).observe(0.25);
+        metrics
+            .histogram("request_duration_seconds", vec![0.1, 0.5, 1.0])
+            .observe(0.25);
 
-        let request = exporter.build_request(&metrics).expect("build_request failed");
+        let request = exporter
+            .build_request(&metrics)
+            .expect("build_request failed");
 
         // Verify metric descriptor structure
         assert_eq!(request.metrics.len(), 3);
 
         // Check counter descriptor
-        let counter_metric = request.metrics.iter()
+        let counter_metric = request
+            .metrics
+            .iter()
             .find(|m| m.descriptor.name == "http_requests_total")
             .expect("counter metric not found");
         assert!(!counter_metric.descriptor.name.is_empty());
@@ -928,13 +937,17 @@ mod tests {
         assert_eq!(counter_metric.descriptor.unit, "1");
 
         // Check gauge descriptor
-        let gauge_metric = request.metrics.iter()
+        let gauge_metric = request
+            .metrics
+            .iter()
             .find(|m| m.descriptor.name == "memory_usage_bytes")
             .expect("gauge metric not found");
         assert!(gauge_metric.descriptor.description.contains("Gauge"));
 
         // Check histogram descriptor
-        let hist_metric = request.metrics.iter()
+        let hist_metric = request
+            .metrics
+            .iter()
             .find(|m| m.descriptor.name == "request_duration_seconds")
             .expect("histogram metric not found");
         assert_eq!(hist_metric.descriptor.unit, "s");
@@ -950,7 +963,9 @@ mod tests {
         let mut metrics = Metrics::new();
         metrics.counter("test_counter").add(42);
 
-        let request = exporter.build_request(&metrics).expect("build_request failed");
+        let request = exporter
+            .build_request(&metrics)
+            .expect("build_request failed");
         let metric = &request.metrics[0];
         let data_point = &metric.data_points[0];
 
@@ -993,10 +1008,14 @@ mod tests {
         hist.observe(0.5);
         hist.observe(2.0);
 
-        let request = exporter.build_request(&metrics).expect("build_request failed");
+        let request = exporter
+            .build_request(&metrics)
+            .expect("build_request failed");
 
         // Verify counter semantics
-        let counter_metric = request.metrics.iter()
+        let counter_metric = request
+            .metrics
+            .iter()
             .find(|m| m.descriptor.name == "requests")
             .expect("counter not found");
         if let OtelValue::Counter(value) = counter_metric.data_points[0].value {
@@ -1004,7 +1023,9 @@ mod tests {
         }
 
         // Verify gauge semantics
-        let gauge_metric = request.metrics.iter()
+        let gauge_metric = request
+            .metrics
+            .iter()
             .find(|m| m.descriptor.name == "cpu_usage")
             .expect("gauge not found");
         if let OtelValue::Gauge(value) = gauge_metric.data_points[0].value {
@@ -1012,10 +1033,17 @@ mod tests {
         }
 
         // Verify histogram semantics
-        let hist_metric = request.metrics.iter()
+        let hist_metric = request
+            .metrics
+            .iter()
             .find(|m| m.descriptor.name == "latencies")
             .expect("histogram not found");
-        if let OtelValue::Histogram { count, sum, buckets } = &hist_metric.data_points[0].value {
+        if let OtelValue::Histogram {
+            count,
+            sum,
+            buckets,
+        } = &hist_metric.data_points[0].value
+        {
             assert_eq!(*count, 3); // Total observations
             assert!(*sum > 2.5); // Sum of all values
             assert!(!buckets.is_empty()); // Bucket distribution
@@ -1038,10 +1066,14 @@ mod tests {
         for i in 0..5 {
             metrics.counter(&format!("counter_{i}")).add(i as u64 * 10);
             metrics.gauge(&format!("gauge_{i}")).set(i as i64);
-            metrics.histogram(&format!("hist_{i}"), vec![1.0, 10.0]).observe(i as f64);
+            metrics
+                .histogram(&format!("hist_{i}"), vec![1.0, 10.0])
+                .observe(i as f64);
         }
 
-        let request = exporter.build_request(&metrics).expect("build_request failed");
+        let request = exporter
+            .build_request(&metrics)
+            .expect("build_request failed");
 
         // Verify all metrics are in single request
         assert_eq!(request.metrics.len(), 15); // 5 * 3 types
@@ -1050,13 +1082,19 @@ mod tests {
         assert!(!request.resource.attributes.is_empty());
 
         // Verify batch contains metrics of different types
-        let counter_count = request.metrics.iter()
+        let counter_count = request
+            .metrics
+            .iter()
             .filter(|m| m.descriptor.name.starts_with("counter_"))
             .count();
-        let gauge_count = request.metrics.iter()
+        let gauge_count = request
+            .metrics
+            .iter()
             .filter(|m| m.descriptor.name.starts_with("gauge_"))
             .count();
-        let hist_count = request.metrics.iter()
+        let hist_count = request
+            .metrics
+            .iter()
             .filter(|m| m.descriptor.name.starts_with("hist_"))
             .count();
 
@@ -1139,16 +1177,23 @@ mod tests {
         let hist = metrics.histogram("response_times", vec![0.1, 0.5, 1.0, 5.0]);
 
         // Observe values across different buckets
-        hist.observe(0.05);  // bucket 0 (<=0.1)
-        hist.observe(0.3);   // bucket 1 (<=0.5)
-        hist.observe(0.8);   // bucket 2 (<=1.0)
-        hist.observe(2.0);   // bucket 3 (<=5.0)
-        hist.observe(10.0);  // bucket 4 (+Inf)
+        hist.observe(0.05); // bucket 0 (<=0.1)
+        hist.observe(0.3); // bucket 1 (<=0.5)
+        hist.observe(0.8); // bucket 2 (<=1.0)
+        hist.observe(2.0); // bucket 3 (<=5.0)
+        hist.observe(10.0); // bucket 4 (+Inf)
 
-        let request = exporter.build_request(&metrics).expect("build_request failed");
+        let request = exporter
+            .build_request(&metrics)
+            .expect("build_request failed");
         let hist_metric = &request.metrics[0];
 
-        if let OtelValue::Histogram { count, sum, buckets } = &hist_metric.data_points[0].value {
+        if let OtelValue::Histogram {
+            count,
+            sum,
+            buckets,
+        } = &hist_metric.data_points[0].value
+        {
             assert_eq!(*count, 5);
             assert!((*sum - 13.15).abs() < 0.01); // 0.05+0.3+0.8+2.0+10.0
 
@@ -1157,9 +1202,12 @@ mod tests {
 
             // Verify cumulative property: each bucket >= previous
             for i in 1..buckets.len() {
-                assert!(buckets[i].1 >= buckets[i-1].1,
+                assert!(
+                    buckets[i].1 >= buckets[i - 1].1,
                     "Bucket {i} count {} should be >= previous bucket count {}",
-                    buckets[i].1, buckets[i-1].1);
+                    buckets[i].1,
+                    buckets[i - 1].1
+                );
             }
 
             // Verify final bucket has all observations

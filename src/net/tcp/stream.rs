@@ -2083,7 +2083,9 @@ mod tests {
 
         // Test enabling SO_KEEPALIVE with interval
         let keepalive_interval = Duration::from_secs(30);
-        stream.set_keepalive(Some(keepalive_interval)).expect("set keepalive enabled");
+        stream
+            .set_keepalive(Some(keepalive_interval))
+            .expect("set keepalive enabled");
 
         let mut keepalive_val: libc::c_int = 0;
         let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
@@ -2132,7 +2134,9 @@ mod tests {
 
         // Test setting specific keepalive interval (Linux-specific)
         let keepalive_interval = Duration::from_secs(60);
-        stream.set_keepalive(Some(keepalive_interval)).expect("set keepalive with interval");
+        stream
+            .set_keepalive(Some(keepalive_interval))
+            .expect("set keepalive with interval");
 
         // Verify TCP_KEEPIDLE parameter on Linux
         let mut keepidle_val: libc::c_int = 0;
@@ -2164,11 +2168,9 @@ mod tests {
         });
 
         // Test TcpStreamBuilder with nodelay enabled
-        let stream = futures_lite::future::block_on(
-            TcpStreamBuilder::new(addr)
-                .nodelay(true)
-                .connect()
-        ).expect("connect with nodelay");
+        let stream =
+            futures_lite::future::block_on(TcpStreamBuilder::new(addr).nodelay(true).connect())
+                .expect("connect with nodelay");
 
         handle.join().expect("join accept thread");
 
@@ -2208,8 +2210,9 @@ mod tests {
         let stream = futures_lite::future::block_on(
             TcpStreamBuilder::new(addr)
                 .keepalive(Some(keepalive_duration))
-                .connect()
-        ).expect("connect with keepalive");
+                .connect(),
+        )
+        .expect("connect with keepalive");
 
         handle.join().expect("join accept thread");
 
@@ -2228,7 +2231,10 @@ mod tests {
             )
         };
         assert_eq!(result, 0, "getsockopt SO_KEEPALIVE should succeed");
-        assert_eq!(keepalive_val, 1, "SO_KEEPALIVE should be enabled via builder");
+        assert_eq!(
+            keepalive_val, 1,
+            "SO_KEEPALIVE should be enabled via builder"
+        );
     }
 
     #[cfg(all(not(target_arch = "wasm32"), unix))]
@@ -2249,8 +2255,9 @@ mod tests {
             TcpStreamBuilder::new(addr)
                 .nodelay(true)
                 .keepalive(Some(Duration::from_secs(120)))
-                .connect()
-        ).expect("connect with both options");
+                .connect(),
+        )
+        .expect("connect with both options");
 
         handle.join().expect("join accept thread");
 

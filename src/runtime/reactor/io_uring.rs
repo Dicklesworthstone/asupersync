@@ -124,9 +124,7 @@ mod imp {
                 ));
             }
 
-            let available = (0..buffer_count)
-                .map(RegisteredBufferId)
-                .collect();
+            let available = (0..buffer_count).map(RegisteredBufferId).collect();
 
             Ok(Self {
                 available,
@@ -539,7 +537,11 @@ mod imp {
         /// - Kernel version is insufficient
         /// - Buffer registration fails
         /// - Invalid parameters
-        pub fn register_buffer_pool(&self, buffer_count: u16, buffer_size: usize) -> io::Result<()> {
+        pub fn register_buffer_pool(
+            &self,
+            buffer_count: u16,
+            buffer_size: usize,
+        ) -> io::Result<()> {
             // Check kernel version compatibility
             if !self.is_buffer_registration_supported()? {
                 return Err(io::Error::new(
@@ -560,9 +562,7 @@ mod imp {
             let pool = RegisteredBufferPool::new(buffer_count, buffer_size)?;
 
             // Allocate physical buffers
-            let buffers: Vec<Vec<u8>> = (0..buffer_count)
-                .map(|_| vec![0u8; buffer_size])
-                .collect();
+            let buffers: Vec<Vec<u8>> = (0..buffer_count).map(|_| vec![0u8; buffer_size]).collect();
 
             // Prepare io_vecs for kernel registration
             let io_vecs: Vec<libc::iovec> = buffers
@@ -864,7 +864,10 @@ mod imp {
                 buffer_count as usize,
                 "all buffers should be initially available"
             );
-            assert!(!reactor.is_buffer_pool_exhausted(), "pool should not be exhausted initially");
+            assert!(
+                !reactor.is_buffer_pool_exhausted(),
+                "pool should not be exhausted initially"
+            );
 
             // Test duplicate registration fails
             let err = reactor
@@ -908,20 +911,37 @@ mod imp {
             }
 
             // Verify pool is exhausted
-            assert!(reactor.is_buffer_pool_exhausted(), "pool should be exhausted");
-            assert_eq!(reactor.available_buffer_count(), 0, "no buffers should be available");
+            assert!(
+                reactor.is_buffer_pool_exhausted(),
+                "pool should be exhausted"
+            );
+            assert_eq!(
+                reactor.available_buffer_count(),
+                0,
+                "no buffers should be available"
+            );
 
             // Test allocation from exhausted pool
             let exhausted_alloc = reactor.allocate_buffer();
-            assert!(exhausted_alloc.is_none(), "allocation from exhausted pool should return None");
+            assert!(
+                exhausted_alloc.is_none(),
+                "allocation from exhausted pool should return None"
+            );
 
             // Return one buffer and verify allocation works again
             reactor
                 .return_buffer(allocated_buffers[0])
                 .expect("buffer return should succeed");
 
-            assert!(!reactor.is_buffer_pool_exhausted(), "pool should not be exhausted after return");
-            assert_eq!(reactor.available_buffer_count(), 1, "one buffer should be available");
+            assert!(
+                !reactor.is_buffer_pool_exhausted(),
+                "pool should not be exhausted after return"
+            );
+            assert_eq!(
+                reactor.available_buffer_count(),
+                1,
+                "one buffer should be available"
+            );
 
             let realloc = reactor.allocate_buffer();
             assert!(realloc.is_some(), "allocation after return should succeed");
@@ -1026,7 +1046,11 @@ mod imp {
                 allocated_buffers.push(buffer_id);
             }
 
-            assert_eq!(reactor.available_buffer_count(), 16, "half the buffers should be allocated");
+            assert_eq!(
+                reactor.available_buffer_count(),
+                16,
+                "half the buffers should be allocated"
+            );
 
             // Phase 2: Interleaved returns and allocations (simulating concurrent I/O)
             for i in 0..8 {
@@ -1046,7 +1070,8 @@ mod imp {
 
             // Verify pool integrity after concurrent operations
             assert_eq!(
-                reactor.available_buffer_count() + (allocated_buffers.len() - returned_buffers.len()),
+                reactor.available_buffer_count()
+                    + (allocated_buffers.len() - returned_buffers.len()),
                 buffer_count as usize,
                 "total buffer count should remain consistent"
             );
@@ -1108,9 +1133,11 @@ mod imp {
                 .expect("unregistration should succeed");
 
             // Test operations on unregistered pool
-            let err = reactor
-                .allocate_buffer();
-            assert!(err.is_none(), "allocation without registered pool should return None");
+            let err = reactor.allocate_buffer();
+            assert!(
+                err.is_none(),
+                "allocation without registered pool should return None"
+            );
 
             let invalid_buffer = RegisteredBufferId(0);
             let err = reactor

@@ -5,20 +5,13 @@
 //! on metamorphic relations that must hold regardless of specific inputs
 //! or operation ordering.
 
-use asupersync::channel::session::{
-    TrackedOneshotPermit, TrackedOneshotSender, TrackedPermit, tracked_channel,
-};
+use asupersync::channel::session::{TrackedOneshotSender, TrackedSender, tracked_channel};
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::cx::Cx;
 use asupersync::obligation::graded::{AbortedProof, CommittedProof, SendPermit};
 use asupersync::runtime::builder::RuntimeBuilder;
-use asupersync::runtime::scheduler::RuntimeStats;
-use asupersync::types::budget::Budget;
 use proptest::prelude::*;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use tokio::time::timeout;
 
 /// Test operations on session channels
 #[derive(Debug, Clone)]
@@ -41,22 +34,33 @@ enum SessionOperation {
     DirectSendOneshot { channel_id: u8, value: i32 },
 }
 
-/// Results of operations for tracking invariants
-#[derive(Debug, Clone)]
-enum OperationResult {
-    PermitReserved { permit_id: u8 },
-    SendCommitted(CommittedProof<SendPermit>),
-    OperationAborted(AbortedProof<SendPermit>),
-    ChannelError(String),
-    PermitNotFound,
+fn create_operation(kind: u8, channel_id: u8, value: i32) -> SessionOperation {
+    match kind % 8 {
+        0 => SessionOperation::ReserveMpsc { channel_id },
+        1 => SessionOperation::SendMpsc {
+            permit_id: channel_id,
+            value,
+        },
+        2 => SessionOperation::AbortMpsc {
+            permit_id: channel_id,
+        },
+        3 => SessionOperation::DirectSendMpsc { channel_id, value },
+        4 => SessionOperation::ReserveOneshot { channel_id },
+        5 => SessionOperation::SendOneshot {
+            permit_id: channel_id,
+            value,
+        },
+        6 => SessionOperation::AbortOneshot {
+            permit_id: channel_id,
+        },
+        _ => SessionOperation::DirectSendOneshot { channel_id, value },
+    }
 }
 
 /// State for tracking session channel operations
 struct SessionState {
     mpsc_channels: HashMap<u8, (TrackedSender<i32>, mpsc::Receiver<i32>)>,
     oneshot_senders: HashMap<u8, TrackedOneshotSender<i32>>,
-    mpsc_permits: HashMap<u8, TrackedPermit<'static, i32>>, // Note: lifetime issues in real use
-    oneshot_permits: HashMap<u8, TrackedOneshotPermit<i32>>,
     committed_proofs: Vec<CommittedProof<SendPermit>>,
     aborted_proofs: Vec<AbortedProof<SendPermit>>,
     operations_performed: Vec<SessionOperation>,
@@ -69,8 +73,6 @@ impl SessionState {
         Self {
             mpsc_channels: HashMap::new(),
             oneshot_senders: HashMap::new(),
-            mpsc_permits: HashMap::new(),
-            oneshot_permits: HashMap::new(),
             committed_proofs: Vec::new(),
             aborted_proofs: Vec::new(),
             operations_performed: Vec::new(),
@@ -101,7 +103,8 @@ impl SessionState {
 /// Every reserved permit must be consumed, producing exactly one proof.
 /// permits_reserved = committed_proofs + aborted_proofs
 fn mr_obligation_conservation() {
-    proptest!(|(operations: Vec<SessionOperation>)| {
+    proptest!(|(raw_ops: Vec<(u8, u8, i32)>)| {
+        let operations: Vec<_> = raw_ops.into_iter().map(|(k, c, v)| create_operation(k, c, v)).collect();
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
@@ -111,7 +114,7 @@ fn mr_obligation_conservation() {
             state.add_mpsc_channel(0, 10);
             state.add_mpsc_channel(1, 5);
 
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
             let mut permits_reserved = 0u32;
             let mut proofs_generated = 0u32;
 
@@ -148,7 +151,8 @@ fn mr_obligation_conservation() {
             // For direct sends, each successful send creates one proof
             // In practice, this would need to track actual permit reservations
             prop_assert_eq!(permits_reserved, 0); // Simplified for this test
-        }).expect("async block failed");
+            Ok(())
+        })?;
     });
 }
 
@@ -161,14 +165,14 @@ fn mr_obligation_conservation() {
 /// If a channel is closed, all subsequent operations should reflect this.
 /// Channel state should be monotonic: open → closed, never closed → open.
 fn mr_channel_state_consistency() {
-    proptest!(|(operations: Vec<SessionOperation>)| {
+    proptest!(|(raw_ops: Vec<(u8, u8, i32)>)| {
+        let operations: Vec<_> = raw_ops.into_iter().map(|(k, c, v)| create_operation(k, c, v)).collect();
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
             let (sender, receiver) = tracked_channel::<i32>(5);
-            let cx = Cx::root();
 
-            let initial_closed = sender.is_closed();
+            let _initial_closed = sender.is_closed();
 
             // Drop receiver to close the channel
             drop(receiver);
@@ -187,7 +191,8 @@ fn mr_channel_state_consistency() {
                     Err(_) => {}, // Expected
                 }
             }
-        }).expect("async block failed");
+            Ok(())
+        })?;
     });
 }
 
@@ -204,7 +209,7 @@ fn mr_proof_type_preservation() {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
 
             for value in values.iter().take(10) {
                 // Test MPSC send proof type
@@ -243,7 +248,8 @@ fn mr_proof_type_preservation() {
                 let proof = permit.abort();
                 let _: AbortedProof<SendPermit> = proof;
             }
-        }).expect("async block failed");
+            Ok(())
+        })?;
     });
 }
 
@@ -263,7 +269,7 @@ fn mr_operation_commutativity() {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
 
             // Create two independent channels
             let (sender_a, receiver_a) = tracked_channel(10);
@@ -316,7 +322,8 @@ fn mr_operation_commutativity() {
 
             drop(receiver_a2);
             drop(receiver_b2);
-        }).expect("async block failed");
+            Ok(())
+        })?;
     });
 }
 
@@ -333,7 +340,7 @@ fn mr_error_propagation_preservation() {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
 
             for value in values.iter().take(5) {
                 // Test with disconnected MPSC
@@ -362,7 +369,8 @@ fn mr_error_propagation_preservation() {
                     _ => prop_assert!(false, "Expected Disconnected error"),
                 }
             }
-        }).expect("async block failed");
+            Ok(())
+        })?;
     });
 }
 
@@ -379,7 +387,7 @@ fn mr_permit_lifecycle_invariant() {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
 
             for value in values.iter().take(5) {
                 // Test MPSC permit lifecycle
@@ -405,7 +413,8 @@ fn mr_permit_lifecycle_invariant() {
                 let _proof = permit.abort(); // Consume via abort
                 // permit is now consumed and cannot be used again
             }
-        }).expect("async block failed");
+            Ok(())
+        })?;
     });
 }
 
@@ -421,7 +430,7 @@ fn mr_channel_capacity_consistency() {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
             let capacity = 3;
             let (sender, _receiver) = tracked_channel::<i32>(capacity);
 
@@ -440,7 +449,8 @@ fn mr_channel_capacity_consistency() {
             // The exact behavior depends on backpressure handling
             prop_assert!(successful_sends <= send_count);
             prop_assert_eq!(successful_sends + failed_sends, send_count);
-        }).expect("async block failed");
+            Ok(())
+        })?;
     });
 }
 
@@ -456,7 +466,7 @@ fn mr_proof_uniqueness() {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
             let mut proofs = Vec::new();
 
             for value in values.iter().take(10) {
@@ -473,7 +483,8 @@ fn mr_proof_uniqueness() {
 
             // Each proof in the vector is unique (by move semantics)
             prop_assert_eq!(proofs.len(), values.iter().take(10).count());
-        }).expect("async block failed");
+            Ok(())
+        })?;
     });
 }
 
@@ -490,7 +501,7 @@ fn mr_session_type_safety() {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
             let (sender, _receiver) = tracked_channel(10);
 
             // Valid protocol: reserve → send
@@ -514,7 +525,8 @@ fn mr_session_type_safety() {
 
             // All valid protocols should work without panics
             prop_assert!(true); // If we reach here, no protocol violation occurred
-        }).expect("async block failed");
+            Ok(())
+        })?;
     });
 }
 
@@ -531,7 +543,7 @@ fn mr_temporal_consistency() {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
 
             // Execute operations in original order
             let (sender1, receiver1) = tracked_channel(20);
@@ -564,7 +576,8 @@ fn mr_temporal_consistency() {
             let success2 = results2.iter().filter(|&&s| s == "committed").count();
 
             prop_assert_eq!(success1, success2);
-        }).expect("async block failed");
+            Ok(())
+        })?;
     });
 }
 
@@ -626,7 +639,3 @@ mod tests {
         mr_temporal_consistency();
     }
 }
-
-// Note: Some lifetime issues in the above code would need to be resolved
-// in a real implementation, but the metamorphic relations themselves are sound.
-use asupersync::channel::session::TrackedSender;

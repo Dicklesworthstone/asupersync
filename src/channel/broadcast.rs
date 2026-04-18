@@ -1916,7 +1916,10 @@ mod tests {
                 for (i, sequence) in sequences.iter().enumerate() {
                     crate::assert_with_log!(
                         sequence == first_sequence,
-                        format!("order preservation rx{} vs rx0 ({}rx, {}msg)", i, num_receivers, num_messages),
+                        format!(
+                            "order preservation rx{} vs rx0 ({}rx, {}msg)",
+                            i, num_receivers, num_messages
+                        ),
                         first_sequence.clone(),
                         sequence.clone()
                     );
@@ -1925,7 +1928,10 @@ mod tests {
                 // Verify order matches send order
                 crate::assert_with_log!(
                     first_sequence == &messages,
-                    format!("order matches send order ({}rx, {}msg)", num_receivers, num_messages),
+                    format!(
+                        "order matches send order ({}rx, {}msg)",
+                        num_receivers, num_messages
+                    ),
                     messages,
                     first_sequence.clone()
                 );
@@ -1987,7 +1993,10 @@ mod tests {
                     let expected = (start_msg + i) as i32;
                     crate::assert_with_log!(
                         received == expected,
-                        format!("post-lag message {} (cap={}, overrun={})", i, capacity, overrun),
+                        format!(
+                            "post-lag message {} (cap={}, overrun={})",
+                            i, capacity, overrun
+                        ),
                         expected,
                         received
                     );
@@ -2042,14 +2051,20 @@ mod tests {
 
                 crate::assert_with_log!(
                     early_sequence == expected_early,
-                    format!("early receiver sees all (split={}/{})", split_point, total_messages),
+                    format!(
+                        "early receiver sees all (split={}/{})",
+                        split_point, total_messages
+                    ),
                     expected_early,
                     early_sequence
                 );
 
                 crate::assert_with_log!(
                     late_sequence == expected_late,
-                    format!("late receiver sees subset (split={}/{})", split_point, total_messages),
+                    format!(
+                        "late receiver sees subset (split={}/{})",
+                        split_point, total_messages
+                    ),
                     expected_late,
                     late_sequence
                 );
@@ -2058,7 +2073,10 @@ mod tests {
                 let early_suffix = &early_sequence[split_point..];
                 crate::assert_with_log!(
                     late_sequence == early_suffix,
-                    format!("late sequence is suffix of early (split={}/{})", split_point, total_messages),
+                    format!(
+                        "late sequence is suffix of early (split={}/{})",
+                        split_point, total_messages
+                    ),
                     early_suffix.to_vec(),
                     late_sequence
                 );
@@ -2120,7 +2138,10 @@ mod tests {
                     let result = block_on(rx.recv(&cx));
                     crate::assert_with_log!(
                         matches!(result, Err(RecvError::Closed)),
-                        format!("receiver {} closed ({} senders, {} receivers)", i, num_senders, num_receivers),
+                        format!(
+                            "receiver {} closed ({} senders, {} receivers)",
+                            i, num_senders, num_receivers
+                        ),
                         true,
                         matches!(result, Err(RecvError::Closed))
                     );
@@ -2244,12 +2265,7 @@ mod tests {
         // 2. Lag behavior: Slow receiver gets lag error
         let slow_lag_result = block_on(rx_slow.recv(&cx));
         let got_lag = matches!(slow_lag_result, Err(RecvError::Lagged(_)));
-        crate::assert_with_log!(
-            got_lag,
-            "composite: slow receiver lagged",
-            true,
-            got_lag
-        );
+        crate::assert_with_log!(got_lag, "composite: slow receiver lagged", true, got_lag);
 
         // 3. Close propagation: All receivers eventually get closed
         let mid_close_result = loop {

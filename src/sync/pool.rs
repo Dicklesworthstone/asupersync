@@ -4482,8 +4482,8 @@ mod tests {
 
         // Perform sequence of acquire/release pairs
         for i in 0..10 {
-            let resource = futures_lite::future::block_on(pool.acquire(&cx))
-                .expect("acquire should succeed");
+            let resource =
+                futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire should succeed");
 
             match i % 3 {
                 0 => resource.return_to_pool(),
@@ -4629,7 +4629,9 @@ mod tests {
         // Verify first release message received
         let msg1 = rx.recv().expect("first return message");
         match msg1 {
-            PoolReturn::Return { resource: value, .. } => {
+            PoolReturn::Return {
+                resource: value, ..
+            } => {
                 crate::assert_with_log!(value == 42, "first release value", 42u8, value);
             }
             PoolReturn::Discard { .. } => unreachable!("expected return"),
@@ -4728,7 +4730,7 @@ mod tests {
         // Concurrent acquisitions should serialize properly without race conditions
         let pool = std::sync::Arc::new(GenericPool::new(
             simple_factory,
-            PoolConfig::with_max_size(2) // Small pool to force contention
+            PoolConfig::with_max_size(2), // Small pool to force contention
         ));
 
         // Test concurrent acquisition with limited pool size

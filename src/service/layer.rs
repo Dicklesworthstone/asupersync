@@ -655,7 +655,6 @@ mod tests {
         }
     }
 
-
     /// Helper to execute a service call and get the result
     fn execute_service_call<S>(mut service: S, request: u32) -> S::Response
     where
@@ -667,7 +666,7 @@ mod tests {
 
         // Ensure service is ready
         match service.poll_ready(&mut cx) {
-            Poll::Ready(Ok(())) => {},
+            Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(_)) => panic!("Service failed to become ready"),
             Poll::Pending => panic!("Service not immediately ready"),
         }
@@ -694,12 +693,18 @@ mod tests {
         // Test associativity: (A ∘ B) ∘ C = A ∘ (B ∘ C)
         for &test_value in &config.test_values {
             // Left-associative: Stack(Stack(A, B), C)
-            let left_stack = Stack::new(Stack::new(layer_a.clone(), layer_b.clone()), layer_c.clone());
+            let left_stack = Stack::new(
+                Stack::new(layer_a.clone(), layer_b.clone()),
+                layer_c.clone(),
+            );
             let left_service = left_stack.layer(EchoService);
             let left_result = execute_service_call(left_service, test_value);
 
             // Right-associative: Stack(A, Stack(B, C))
-            let right_stack = Stack::new(layer_a.clone(), Stack::new(layer_b.clone(), layer_c.clone()));
+            let right_stack = Stack::new(
+                layer_a.clone(),
+                Stack::new(layer_b.clone(), layer_c.clone()),
+            );
             let right_service = right_stack.layer(EchoService);
             let right_result = execute_service_call(right_service, test_value);
 
@@ -775,7 +780,7 @@ mod tests {
             // Stack composition should produce the same result
             let stack = Stack::new(
                 Stack::new(add_10.clone(), multiply_3.clone()),
-                add_5.clone()
+                add_5.clone(),
             );
             let service = stack.layer(EchoService);
             let result = execute_service_call(service, test_value);
@@ -789,7 +794,7 @@ mod tests {
             // Alternative composition structure should yield same result
             let alt_stack = Stack::new(
                 add_10.clone(),
-                Stack::new(multiply_3.clone(), add_5.clone())
+                Stack::new(multiply_3.clone(), add_5.clone()),
             );
             let alt_service = alt_stack.layer(EchoService);
             let alt_result = execute_service_call(alt_service, test_value);
@@ -863,23 +868,28 @@ mod tests {
             // Build deep composition in multiple ways
 
             // Left-nested: (((L1, L2), L3), L4)
-            let left_nested = layers.iter().cloned().reduce(|acc, layer| {
-                Stack::new(acc, layer)
-            }).unwrap();
+            let left_nested = layers
+                .iter()
+                .cloned()
+                .reduce(|acc, layer| Stack::new(acc, layer))
+                .unwrap();
             let left_service = left_nested.layer(EchoService);
             let left_result = execute_service_call(left_service, test_value);
 
             // Right-nested: (L1, (L2, (L3, L4)))
-            let right_nested = layers.iter().rev().cloned().reduce(|acc, layer| {
-                Stack::new(layer, acc)
-            }).unwrap();
+            let right_nested = layers
+                .iter()
+                .rev()
+                .cloned()
+                .reduce(|acc, layer| Stack::new(layer, acc))
+                .unwrap();
             let right_service = right_nested.layer(EchoService);
             let right_result = execute_service_call(right_service, test_value);
 
             // Balanced: ((L1, L2), (L3, L4))
             let balanced = Stack::new(
                 Stack::new(layers[0].clone(), layers[1].clone()),
-                Stack::new(layers[2].clone(), layers[3].clone())
+                Stack::new(layers[2].clone(), layers[3].clone()),
             );
             let balanced_service = balanced.layer(EchoService);
             let balanced_result = execute_service_call(balanced_service, test_value);
@@ -918,8 +928,20 @@ mod tests {
 
         // Test different composition structures
         let compositions = vec![
-            ("left_assoc", Stack::new(Stack::new(layer_a.clone(), layer_b.clone()), layer_c.clone())),
-            ("right_assoc", Stack::new(layer_a.clone(), Stack::new(layer_b.clone(), layer_c.clone()))),
+            (
+                "left_assoc",
+                Stack::new(
+                    Stack::new(layer_a.clone(), layer_b.clone()),
+                    layer_c.clone(),
+                ),
+            ),
+            (
+                "right_assoc",
+                Stack::new(
+                    layer_a.clone(),
+                    Stack::new(layer_b.clone(), layer_c.clone()),
+                ),
+            ),
         ];
 
         for (name, composition) in compositions {
@@ -934,7 +956,8 @@ mod tests {
                 application_order,
                 vec![1, 2, 3],
                 "Composition {} has wrong application order: {:?}",
-                name, application_order
+                name,
+                application_order
             );
         }
     }
@@ -1008,12 +1031,18 @@ mod tests {
             let result = service.poll_ready(&mut cx);
             match result {
                 Poll::Ready(Err(TestError(msg))) => {
-                    assert!(msg.contains("failable layer error"),
+                    assert!(
+                        msg.contains("failable layer error"),
                         "Composition {} should propagate failable layer error, got: {}",
-                        i, msg);
+                        i,
+                        msg
+                    );
                 }
                 other => {
-                    panic!("Composition {} should have failed poll_ready, got: {:?}", i, other);
+                    panic!(
+                        "Composition {} should have failed poll_ready, got: {:?}",
+                        i, other
+                    );
                 }
             }
         }
@@ -1036,14 +1065,16 @@ mod tests {
             Box::new(AddLayer::new(3, 3)),
             Box::new(AddLayer::new(4, 4)),
             Box::new(MultiplyLayer::new(1, 5)), // Multiply by 1 (identity)
-            Box::new(AddLayer::new(0, 6)), // Add 0 (identity)
+            Box::new(AddLayer::new(0, 6)),      // Add 0 (identity)
         ];
 
         for &test_value in &config.test_values {
             // Build composition by folding layers
-            let composition = layers.iter().cloned().reduce(|acc, layer| {
-                Box::new(Stack::new(acc, layer))
-            }).unwrap();
+            let composition = layers
+                .iter()
+                .cloned()
+                .reduce(|acc, layer| Box::new(Stack::new(acc, layer)))
+                .unwrap();
 
             let service = composition.layer(EchoService);
             let result = execute_service_call(service, test_value);
@@ -1060,9 +1091,10 @@ mod tests {
             let mut reversed_layers = layers.clone();
             reversed_layers.reverse();
 
-            let reversed_composition = reversed_layers.into_iter().reduce(|acc, layer| {
-                Box::new(Stack::new(acc, layer))
-            }).unwrap();
+            let reversed_composition = reversed_layers
+                .into_iter()
+                .reduce(|acc, layer| Box::new(Stack::new(acc, layer)))
+                .unwrap();
 
             let reversed_service = reversed_composition.layer(EchoService);
             let reversed_result = execute_service_call(reversed_service, test_value);

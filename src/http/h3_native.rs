@@ -3484,7 +3484,9 @@ mod tests {
         /// Record early data sent.
         pub fn record_early_data_sent(&mut self, bytes: u64) -> Result<(), H3NativeError> {
             if !self.is_early_data_allowed() {
-                return Err(H3NativeError::StreamProtocol("0-RTT not allowed in current state"));
+                return Err(H3NativeError::StreamProtocol(
+                    "0-RTT not allowed in current state",
+                ));
             }
             if !self.can_send_early_data(bytes) {
                 return Err(H3NativeError::StreamProtocol("early data limit exceeded"));
@@ -3501,31 +3503,35 @@ mod tests {
 
             match frame {
                 // DATA and HEADERS are allowed in early data for requests
-                H3Frame::Data { .. } | H3Frame::Headers { .. } if self.allow_early_requests => Ok(()),
+                H3Frame::Data { .. } | H3Frame::Headers { .. } if self.allow_early_requests => {
+                    Ok(())
+                }
 
                 // SETTINGS may or may not be allowed based on policy
                 H3Frame::Settings(_) if self.allow_early_settings => Ok(()),
 
                 // Control frames that should wait for handshake completion
-                H3Frame::Settings(_) if !self.allow_early_settings => {
-                    Err(H3NativeError::StreamProtocol("SETTINGS frame not allowed in 0-RTT"))
-                }
+                H3Frame::Settings(_) if !self.allow_early_settings => Err(
+                    H3NativeError::StreamProtocol("SETTINGS frame not allowed in 0-RTT"),
+                ),
 
                 // Frames that must never be sent in 0-RTT
-                H3Frame::Goaway(_) | H3Frame::MaxPushId(_) => {
-                    Err(H3NativeError::StreamProtocol("control frame not allowed in 0-RTT"))
-                }
+                H3Frame::Goaway(_) | H3Frame::MaxPushId(_) => Err(H3NativeError::StreamProtocol(
+                    "control frame not allowed in 0-RTT",
+                )),
 
                 // PUSH_PROMISE should not be sent in early data
-                H3Frame::PushPromise { .. } => {
-                    Err(H3NativeError::StreamProtocol("PUSH_PROMISE not allowed in 0-RTT"))
-                }
+                H3Frame::PushPromise { .. } => Err(H3NativeError::StreamProtocol(
+                    "PUSH_PROMISE not allowed in 0-RTT",
+                )),
 
                 // Other frames follow default policy
-                _ => if self.allow_early_requests {
-                    Ok(())
-                } else {
-                    Err(H3NativeError::StreamProtocol("frame not allowed in 0-RTT"))
+                _ => {
+                    if self.allow_early_requests {
+                        Ok(())
+                    } else {
+                        Err(H3NativeError::StreamProtocol("frame not allowed in 0-RTT"))
+                    }
                 }
             }
         }
@@ -3565,12 +3571,16 @@ mod tests {
 
         // Can send within limit
         assert!(config.can_send_early_data(500));
-        config.record_early_data_sent(500).expect("record early data");
+        config
+            .record_early_data_sent(500)
+            .expect("record early data");
         assert_eq!(config.early_data_sent, 500);
 
         // Can send up to limit
         assert!(config.can_send_early_data(500));
-        config.record_early_data_sent(500).expect("record remaining");
+        config
+            .record_early_data_sent(500)
+            .expect("record remaining");
         assert_eq!(config.early_data_sent, 1000);
 
         // Cannot exceed limit
@@ -3589,11 +3599,19 @@ mod tests {
         };
 
         // DATA and HEADERS should be allowed for requests
-        let data_frame = H3Frame::Data { payload: vec![1, 2, 3] };
-        config.validate_early_frame(&data_frame).expect("DATA allowed");
+        let data_frame = H3Frame::Data {
+            payload: vec![1, 2, 3],
+        };
+        config
+            .validate_early_frame(&data_frame)
+            .expect("DATA allowed");
 
-        let headers_frame = H3Frame::Headers { field_block: vec![4, 5, 6] };
-        config.validate_early_frame(&headers_frame).expect("HEADERS allowed");
+        let headers_frame = H3Frame::Headers {
+            field_block: vec![4, 5, 6],
+        };
+        config
+            .validate_early_frame(&headers_frame)
+            .expect("HEADERS allowed");
     }
 
     #[test]
@@ -3607,22 +3625,30 @@ mod tests {
 
         // Control frames should be rejected
         let settings_frame = H3Frame::Settings(H3Settings::default());
-        let err = config.validate_early_frame(&settings_frame).expect_err("SETTINGS rejected");
+        let err = config
+            .validate_early_frame(&settings_frame)
+            .expect_err("SETTINGS rejected");
         assert!(matches!(err, H3NativeError::StreamProtocol(_)));
 
         let goaway_frame = H3Frame::Goaway(123);
-        let err = config.validate_early_frame(&goaway_frame).expect_err("GOAWAY rejected");
+        let err = config
+            .validate_early_frame(&goaway_frame)
+            .expect_err("GOAWAY rejected");
         assert!(matches!(err, H3NativeError::StreamProtocol(_)));
 
         let max_push_frame = H3Frame::MaxPushId(456);
-        let err = config.validate_early_frame(&max_push_frame).expect_err("MAX_PUSH_ID rejected");
+        let err = config
+            .validate_early_frame(&max_push_frame)
+            .expect_err("MAX_PUSH_ID rejected");
         assert!(matches!(err, H3NativeError::StreamProtocol(_)));
 
         let push_promise_frame = H3Frame::PushPromise {
             push_id: 789,
             field_block: vec![7, 8, 9],
         };
-        let err = config.validate_early_frame(&push_promise_frame).expect_err("PUSH_PROMISE rejected");
+        let err = config
+            .validate_early_frame(&push_promise_frame)
+            .expect_err("PUSH_PROMISE rejected");
         assert!(matches!(err, H3NativeError::StreamProtocol(_)));
     }
 
@@ -3636,11 +3662,15 @@ mod tests {
 
         // SETTINGS allowed when policy permits
         let settings_frame = H3Frame::Settings(H3Settings::default());
-        config.validate_early_frame(&settings_frame).expect("SETTINGS allowed with policy");
+        config
+            .validate_early_frame(&settings_frame)
+            .expect("SETTINGS allowed with policy");
 
         // SETTINGS rejected when policy forbids
         config.allow_early_settings = false;
-        let err = config.validate_early_frame(&settings_frame).expect_err("SETTINGS rejected by policy");
+        let err = config
+            .validate_early_frame(&settings_frame)
+            .expect_err("SETTINGS rejected by policy");
         assert!(matches!(err, H3NativeError::StreamProtocol(_)));
     }
 
@@ -3653,12 +3683,20 @@ mod tests {
         };
 
         // DATA and HEADERS rejected when requests not allowed
-        let data_frame = H3Frame::Data { payload: vec![1, 2, 3] };
-        let err = config.validate_early_frame(&data_frame).expect_err("DATA rejected by policy");
+        let data_frame = H3Frame::Data {
+            payload: vec![1, 2, 3],
+        };
+        let err = config
+            .validate_early_frame(&data_frame)
+            .expect_err("DATA rejected by policy");
         assert!(matches!(err, H3NativeError::StreamProtocol(_)));
 
-        let headers_frame = H3Frame::Headers { field_block: vec![4, 5, 6] };
-        let err = config.validate_early_frame(&headers_frame).expect_err("HEADERS rejected by policy");
+        let headers_frame = H3Frame::Headers {
+            field_block: vec![4, 5, 6],
+        };
+        let err = config
+            .validate_early_frame(&headers_frame)
+            .expect_err("HEADERS rejected by policy");
         assert!(matches!(err, H3NativeError::StreamProtocol(_)));
     }
 
@@ -3673,13 +3711,21 @@ mod tests {
 
         // All frames allowed after handshake completion
         let settings_frame = H3Frame::Settings(H3Settings::default());
-        config.validate_early_frame(&settings_frame).expect("SETTINGS allowed after handshake");
+        config
+            .validate_early_frame(&settings_frame)
+            .expect("SETTINGS allowed after handshake");
 
         let goaway_frame = H3Frame::Goaway(123);
-        config.validate_early_frame(&goaway_frame).expect("GOAWAY allowed after handshake");
+        config
+            .validate_early_frame(&goaway_frame)
+            .expect("GOAWAY allowed after handshake");
 
-        let data_frame = H3Frame::Data { payload: vec![1, 2, 3] };
-        config.validate_early_frame(&data_frame).expect("DATA allowed after handshake");
+        let data_frame = H3Frame::Data {
+            payload: vec![1, 2, 3],
+        };
+        config
+            .validate_early_frame(&data_frame)
+            .expect("DATA allowed after handshake");
     }
 
     #[test]
@@ -3697,11 +3743,15 @@ mod tests {
         };
 
         // First connection can send early data
-        config1.record_early_data_sent(500).expect("config1 early data");
+        config1
+            .record_early_data_sent(500)
+            .expect("config1 early data");
         assert_eq!(config1.early_data_sent, 500);
 
         // Second connection (replayed) cannot send early data
-        let err = config2.record_early_data_sent(500).expect_err("config2 should reject");
+        let err = config2
+            .record_early_data_sent(500)
+            .expect_err("config2 should reject");
         assert!(matches!(err, H3NativeError::StreamProtocol(_)));
         assert_eq!(config2.early_data_sent, 0);
     }
@@ -3842,8 +3892,11 @@ mod tests {
         }
 
         fn reference_entry(&mut self, insertion_id: u64) -> bool {
-            if let Some(entry) = self.entries.iter_mut()
-                .find(|e| e.insertion_order == insertion_id) {
+            if let Some(entry) = self
+                .entries
+                .iter_mut()
+                .find(|e| e.insertion_order == insertion_id)
+            {
                 entry.add_reference();
                 true
             } else {
@@ -3852,8 +3905,11 @@ mod tests {
         }
 
         fn unreference_entry(&mut self, insertion_id: u64) -> bool {
-            if let Some(entry) = self.entries.iter_mut()
-                .find(|e| e.insertion_order == insertion_id) {
+            if let Some(entry) = self
+                .entries
+                .iter_mut()
+                .find(|e| e.insertion_order == insertion_id)
+            {
                 entry.remove_reference();
                 true
             } else {
@@ -3889,12 +3945,17 @@ mod tests {
         assert_eq!(table.len(), 3);
 
         // Insert a large entry that requires eviction
-        let id4 = table.insert("large-header".into(), "very-large-value-that-forces-eviction".into()).unwrap();
+        let id4 = table
+            .insert(
+                "large-header".into(),
+                "very-large-value-that-forces-eviction".into(),
+            )
+            .unwrap();
 
         // First entry (oldest, LRU) should have been evicted
         assert!(table.len() < 4);
         assert!(!table.reference_entry(id1)); // id1 should be gone
-        assert!(table.reference_entry(id2));  // id2+ should still exist
+        assert!(table.reference_entry(id2)); // id2+ should still exist
         assert!(table.reference_entry(id3));
         assert!(table.reference_entry(id4));
     }
@@ -3905,15 +3966,23 @@ mod tests {
 
         let mut table = QpackDynamicTable::new(150);
 
-        let id1 = table.insert("ref-header".into(), "ref-value".into()).unwrap();
-        let id2 = table.insert("temp-header".into(), "temp-value".into()).unwrap();
+        let id1 = table
+            .insert("ref-header".into(), "ref-value".into())
+            .unwrap();
+        let id2 = table
+            .insert("temp-header".into(), "temp-value".into())
+            .unwrap();
 
         // Reference the first entry
         assert!(table.reference_entry(id1));
 
         // Insert entries that would normally evict both
-        let _id3 = table.insert("push-header-1".into(), "push-value-1".into()).unwrap();
-        let _id4 = table.insert("push-header-2".into(), "push-value-2".into()).unwrap();
+        let _id3 = table
+            .insert("push-header-1".into(), "push-value-1".into())
+            .unwrap();
+        let _id4 = table
+            .insert("push-header-2".into(), "push-value-2".into())
+            .unwrap();
 
         // Referenced entry should be protected, unreferenced should be evicted
         assert!(table.reference_entry(id1)); // Still referenced and present
@@ -3962,7 +4031,7 @@ mod tests {
         // Try to insert entry larger than total capacity
         let result = table.insert(
             "oversized-header-name".into(),
-            "oversized-header-value-that-exceeds-table-capacity".into()
+            "oversized-header-value-that-exceeds-table-capacity".into(),
         );
         assert!(result.is_err());
     }
@@ -3991,10 +4060,14 @@ mod tests {
         assert!(table.evicted_count > 0);
 
         // Verify LRU ordering - early entries should be evicted first
-        let first_half_present = insertion_ids.iter().take(10)
+        let first_half_present = insertion_ids
+            .iter()
+            .take(10)
             .filter(|&&id| table.reference_entry(id))
             .count();
-        let second_half_present = insertion_ids.iter().skip(10)
+        let second_half_present = insertion_ids
+            .iter()
+            .skip(10)
             .filter(|&&id| table.reference_entry(id))
             .count();
 
@@ -4008,7 +4081,9 @@ mod tests {
 
         let mut table = QpackDynamicTable::new(300);
 
-        let id1 = table.insert("lifecycle".into(), "test-entry".into()).unwrap();
+        let id1 = table
+            .insert("lifecycle".into(), "test-entry".into())
+            .unwrap();
 
         // Add multiple references
         assert!(table.reference_entry(id1));
@@ -4032,7 +4107,7 @@ mod tests {
         // Now should be evictable
         let large_entry_result = table.insert(
             "force-eviction".into(),
-            "large-value-to-trigger-eviction-of-unreferenced-entries".into()
+            "large-value-to-trigger-eviction-of-unreferenced-entries".into(),
         );
         assert!(large_entry_result.is_ok());
 
@@ -4057,13 +4132,15 @@ mod tests {
         assert!(table.size() <= small_capacity);
 
         // Scenario 2: Mix of sizes with references
-        let medium_id = table.insert("medium-header".into(), "medium-value".into()).unwrap();
+        let medium_id = table
+            .insert("medium-header".into(), "medium-value".into())
+            .unwrap();
         assert!(table.reference_entry(medium_id));
 
         // Scenario 3: Sudden large insertion
         let large_result = table.insert(
             "emergency-large".into(),
-            "large-emergency-header-value".into()
+            "large-emergency-header-value".into(),
         );
         assert!(large_result.is_ok());
 
@@ -4072,14 +4149,15 @@ mod tests {
         assert!(table.size() <= small_capacity);
 
         // Scenario 4: Capacity exhaustion with all entries referenced
-        table.entries.iter().for_each(|entry| {
+        let ids: Vec<_> = table.entries.iter().map(|e| e.insertion_order).collect();
+        ids.into_iter().for_each(|id| {
             // Try to reference all remaining entries
-            let _ = table.reference_entry(entry.insertion_order);
+            let _ = table.reference_entry(id);
         });
 
         let impossible_result = table.insert(
             "impossible".into(),
-            "this-should-fail-due-to-references".into()
+            "this-should-fail-due-to-references".into(),
         );
         // Should fail when no entries can be evicted
         assert!(impossible_result.is_err());
@@ -4112,8 +4190,12 @@ mod tests {
         let large_name = "eviction-trigger";
         let large_value = "large-value-that-forces-eviction";
 
-        let _final1 = table1.insert(large_name.into(), large_value.into()).unwrap();
-        let _final2 = table2.insert(large_name.into(), large_value.into()).unwrap();
+        let _final1 = table1
+            .insert(large_name.into(), large_value.into())
+            .unwrap();
+        let _final2 = table2
+            .insert(large_name.into(), large_value.into())
+            .unwrap();
 
         // Both tables should have identical state after eviction
         assert_eq!(table1.len(), table2.len());

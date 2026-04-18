@@ -607,7 +607,10 @@ mod tests {
     #[test]
     fn interest_modes() {
         init_test("interest_modes");
-        let interest = Interest::READABLE.with_oneshot().with_edge_triggered().with_dispatch();
+        let interest = Interest::READABLE
+            .with_oneshot()
+            .with_edge_triggered()
+            .with_dispatch();
         crate::assert_with_log!(
             interest.is_readable(),
             "modes keep readable",

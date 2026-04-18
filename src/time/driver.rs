@@ -1977,7 +1977,11 @@ mod tests {
         let tolerance = Duration::from_millis(10); // 10ms tolerance for wall clock
         crate::assert_with_log!(
             elapsed <= short_duration + tolerance,
-            &format!("timer precision within tolerance: {:?} <= {:?}", elapsed, short_duration + tolerance),
+            &format!(
+                "timer precision within tolerance: {:?} <= {:?}",
+                elapsed,
+                short_duration + tolerance
+            ),
             true,
             elapsed <= short_duration + tolerance
         );
@@ -2029,8 +2033,10 @@ mod tests {
 
             crate::assert_with_log!(
                 actual_fired == expected_fired,
-                &format!("virtual time advance fired correct number: {} at {:?}",
-                        actual_fired, advance_duration),
+                &format!(
+                    "virtual time advance fired correct number: {} at {:?}",
+                    actual_fired, advance_duration
+                ),
                 expected_fired,
                 actual_fired
             );
@@ -2050,7 +2056,9 @@ mod tests {
         let handle = TimerDriverHandle::new(driver);
 
         const TIMER_COUNT: usize = 1000;
-        let counters: Vec<_> = (0..TIMER_COUNT).map(|_| Arc::new(AtomicU64::new(0))).collect();
+        let counters: Vec<_> = (0..TIMER_COUNT)
+            .map(|_| Arc::new(AtomicU64::new(0)))
+            .collect();
 
         // Register many timers concurrently
         let mut timer_ids = Vec::new();
@@ -2071,7 +2079,8 @@ mod tests {
         virtual_clock.advance(Duration::from_millis(200));
         handle.poll_expired();
 
-        let fired_count = counters.iter()
+        let fired_count = counters
+            .iter()
             .map(|c| if c.load(Ordering::SeqCst) > 0 { 1 } else { 0 })
             .sum::<usize>();
 
@@ -2105,8 +2114,16 @@ mod tests {
         let counter = Arc::new(AtomicU64::new(0));
 
         // Register timer and immediately cancel
-        let timer_id = handle.sleep(Duration::from_millis(100), waker_that_increments(counter.clone()));
-        crate::assert_with_log!(handle.pending_count() == 1, "timer registered", 1usize, handle.pending_count());
+        let timer_id = handle.sleep(
+            Duration::from_millis(100),
+            waker_that_increments(counter.clone()),
+        );
+        crate::assert_with_log!(
+            handle.pending_count() == 1,
+            "timer registered",
+            1usize,
+            handle.pending_count()
+        );
 
         let cancelled = handle.cancel(timer_id);
         crate::assert_with_log!(cancelled, "timer cancelled", true, cancelled);
@@ -2166,8 +2183,10 @@ mod tests {
             // Time should never go backward
             crate::assert_with_log!(
                 current_time >= last_time,
-                &format!("monotonic time: {:?} >= {:?} at sample {sample_ms}",
-                        current_time, last_time),
+                &format!(
+                    "monotonic time: {:?} >= {:?} at sample {sample_ms}",
+                    current_time, last_time
+                ),
                 true,
                 current_time >= last_time
             );
@@ -2176,7 +2195,10 @@ mod tests {
         }
 
         // Register a timer and verify it works with browser clock
-        let timer_id = handle.sleep(Duration::from_millis(5), waker_that_increments(counter.clone()));
+        let timer_id = handle.sleep(
+            Duration::from_millis(5),
+            waker_that_increments(counter.clone()),
+        );
 
         // Advance browser clock
         browser_clock.observe_host_time(50.0);

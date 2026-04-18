@@ -5962,7 +5962,8 @@ mod tests {
             // Test 1: Single chunk with complete rows
             let full_chunk = build_copy_data_message(&test_data.text_format);
             assert_eq!(full_chunk[0], b'd');
-            let chunk_length = u32::from_be_bytes([full_chunk[1], full_chunk[2], full_chunk[3], full_chunk[4]]);
+            let chunk_length =
+                u32::from_be_bytes([full_chunk[1], full_chunk[2], full_chunk[3], full_chunk[4]]);
             assert_eq!(chunk_length, test_data.text_format.len() as u32);
 
             // Test 2: Multiple chunks with row boundaries
@@ -5995,7 +5996,10 @@ mod tests {
             // Verify binary signature in the data
             let data_start = 5; // After message type and length
             let signature = &binary_chunk[data_start..data_start + 11];
-            assert_eq!(signature, b"PGCOPY\n\xFF\r\n\0", "Binary format signature mismatch");
+            assert_eq!(
+                signature, b"PGCOPY\n\xFF\r\n\0",
+                "Binary format signature mismatch"
+            );
 
             // Verify flags field
             let flags_start = data_start + 11;
@@ -6003,7 +6007,7 @@ mod tests {
                 binary_chunk[flags_start],
                 binary_chunk[flags_start + 1],
                 binary_chunk[flags_start + 2],
-                binary_chunk[flags_start + 3]
+                binary_chunk[flags_start + 3],
             ]);
             assert_eq!(flags, 0, "Flags should be 0 for standard binary format");
         }
@@ -6017,7 +6021,12 @@ mod tests {
             assert_eq!(copy_done_msg[0], b'c'); // CopyDone type
 
             // Verify length is 0 (no payload)
-            let length = u32::from_be_bytes([copy_done_msg[1], copy_done_msg[2], copy_done_msg[3], copy_done_msg[4]]);
+            let length = u32::from_be_bytes([
+                copy_done_msg[1],
+                copy_done_msg[2],
+                copy_done_msg[3],
+                copy_done_msg[4],
+            ]);
             assert_eq!(length, 0, "CopyDone should have no payload");
 
             // Test flush semantics: CopyDone should trigger immediate processing
@@ -6039,7 +6048,7 @@ mod tests {
                 "Constraint violation",
                 "Connection lost during COPY",
                 "Buffer overflow",
-                "",  // Empty error message
+                "", // Empty error message
             ];
 
             for error_msg in &error_messages {
@@ -6049,14 +6058,27 @@ mod tests {
                 assert_eq!(copy_fail_msg[0], b'f'); // CopyFail type
 
                 // Verify length includes null terminator
-                let length = u32::from_be_bytes([copy_fail_msg[1], copy_fail_msg[2], copy_fail_msg[3], copy_fail_msg[4]]);
-                assert_eq!(length, error_msg.len() as u32 + 1, "Length should include null terminator");
+                let length = u32::from_be_bytes([
+                    copy_fail_msg[1],
+                    copy_fail_msg[2],
+                    copy_fail_msg[3],
+                    copy_fail_msg[4],
+                ]);
+                assert_eq!(
+                    length,
+                    error_msg.len() as u32 + 1,
+                    "Length should include null terminator"
+                );
 
                 // Verify message content and null termination
                 let payload = &copy_fail_msg[5..];
                 assert_eq!(payload.len(), error_msg.len() + 1);
                 assert_eq!(&payload[..error_msg.len()], error_msg.as_bytes());
-                assert_eq!(payload[payload.len() - 1], 0, "Message should be null-terminated");
+                assert_eq!(
+                    payload[payload.len() - 1],
+                    0,
+                    "Message should be null-terminated"
+                );
 
                 // Test error propagation: verify the error can be extracted
                 let extracted_error = std::str::from_utf8(&payload[..payload.len() - 1]).unwrap();
@@ -6146,7 +6168,11 @@ mod tests {
 
             for test_case in &test_cases {
                 // Verify OID constant is correct
-                assert!(test_case.oid > 0, "OID for {} should be positive", test_case.type_name);
+                assert!(
+                    test_case.oid > 0,
+                    "OID for {} should be positive",
+                    test_case.type_name
+                );
 
                 // Test binary format encoding
                 assert_eq!(
@@ -6170,45 +6196,60 @@ mod tests {
                 // Test binary roundtrip for numeric types
                 match test_case.type_name {
                     "INT2" => {
-                        let decoded = i16::from_be_bytes([test_case.sample_binary_data[0], test_case.sample_binary_data[1]]);
+                        let decoded = i16::from_be_bytes([
+                            test_case.sample_binary_data[0],
+                            test_case.sample_binary_data[1],
+                        ]);
                         assert_eq!(decoded, 42);
-                    },
+                    }
                     "INT4" => {
                         let bytes = [
-                            test_case.sample_binary_data[0], test_case.sample_binary_data[1],
-                            test_case.sample_binary_data[2], test_case.sample_binary_data[3]
+                            test_case.sample_binary_data[0],
+                            test_case.sample_binary_data[1],
+                            test_case.sample_binary_data[2],
+                            test_case.sample_binary_data[3],
                         ];
                         let decoded = i32::from_be_bytes(bytes);
                         assert_eq!(decoded, 12345);
-                    },
+                    }
                     "INT8" => {
                         let bytes = [
-                            test_case.sample_binary_data[0], test_case.sample_binary_data[1],
-                            test_case.sample_binary_data[2], test_case.sample_binary_data[3],
-                            test_case.sample_binary_data[4], test_case.sample_binary_data[5],
-                            test_case.sample_binary_data[6], test_case.sample_binary_data[7]
+                            test_case.sample_binary_data[0],
+                            test_case.sample_binary_data[1],
+                            test_case.sample_binary_data[2],
+                            test_case.sample_binary_data[3],
+                            test_case.sample_binary_data[4],
+                            test_case.sample_binary_data[5],
+                            test_case.sample_binary_data[6],
+                            test_case.sample_binary_data[7],
                         ];
                         let decoded = i64::from_be_bytes(bytes);
                         assert_eq!(decoded, 123456789);
-                    },
+                    }
                     "FLOAT4" => {
                         let bytes = [
-                            test_case.sample_binary_data[0], test_case.sample_binary_data[1],
-                            test_case.sample_binary_data[2], test_case.sample_binary_data[3]
+                            test_case.sample_binary_data[0],
+                            test_case.sample_binary_data[1],
+                            test_case.sample_binary_data[2],
+                            test_case.sample_binary_data[3],
                         ];
                         let decoded = f32::from_be_bytes(bytes);
                         assert!((decoded - 3.14).abs() < f32::EPSILON);
-                    },
+                    }
                     "FLOAT8" => {
                         let bytes = [
-                            test_case.sample_binary_data[0], test_case.sample_binary_data[1],
-                            test_case.sample_binary_data[2], test_case.sample_binary_data[3],
-                            test_case.sample_binary_data[4], test_case.sample_binary_data[5],
-                            test_case.sample_binary_data[6], test_case.sample_binary_data[7]
+                            test_case.sample_binary_data[0],
+                            test_case.sample_binary_data[1],
+                            test_case.sample_binary_data[2],
+                            test_case.sample_binary_data[3],
+                            test_case.sample_binary_data[4],
+                            test_case.sample_binary_data[5],
+                            test_case.sample_binary_data[6],
+                            test_case.sample_binary_data[7],
                         ];
                         let decoded = f64::from_be_bytes(bytes);
                         assert!((decoded - 2.718281828).abs() < f64::EPSILON);
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -6233,7 +6274,8 @@ mod tests {
             // Test empty COPY data
             let empty_data = build_copy_data_message(&[]);
             assert_eq!(empty_data[0], b'd');
-            let length = u32::from_be_bytes([empty_data[1], empty_data[2], empty_data[3], empty_data[4]]);
+            let length =
+                u32::from_be_bytes([empty_data[1], empty_data[2], empty_data[3], empty_data[4]]);
             assert_eq!(length, 0);
 
             // Test maximum single chunk size (64MB limit mentioned in code)
@@ -6241,7 +6283,12 @@ mod tests {
             let large_data = vec![b'x'; max_chunk_size];
             let large_chunk = build_copy_data_message(&large_data);
             assert_eq!(large_chunk[0], b'd');
-            let chunk_length = u32::from_be_bytes([large_chunk[1], large_chunk[2], large_chunk[3], large_chunk[4]]);
+            let chunk_length = u32::from_be_bytes([
+                large_chunk[1],
+                large_chunk[2],
+                large_chunk[3],
+                large_chunk[4],
+            ]);
             assert_eq!(chunk_length, max_chunk_size as u32);
 
             // Test null values in binary format
@@ -6264,7 +6311,12 @@ mod tests {
             let long_fail_msg = build_copy_fail_message(&long_error);
             assert_eq!(long_fail_msg[0], b'f');
 
-            let length = u32::from_be_bytes([long_fail_msg[1], long_fail_msg[2], long_fail_msg[3], long_fail_msg[4]]);
+            let length = u32::from_be_bytes([
+                long_fail_msg[1],
+                long_fail_msg[2],
+                long_fail_msg[3],
+                long_fail_msg[4],
+            ]);
             assert_eq!(length, long_error.len() as u32 + 1); // +1 for null terminator
 
             // Test error message with embedded nulls (should be escaped or rejected)

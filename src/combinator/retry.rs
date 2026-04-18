@@ -1446,7 +1446,11 @@ mod tests {
             assert_golden_token_refill_rate(refill_rate, &bucket, time_2_9s);
         }
 
-        fn assert_golden_token_refill_rate(expected_rate: f64, bucket: &RetryTokenBucket, _now: Time) {
+        fn assert_golden_token_refill_rate(
+            expected_rate: f64,
+            bucket: &RetryTokenBucket,
+            _now: Time,
+        ) {
             const EPSILON: f64 = 0.001;
             let actual_rate = bucket.refill_rate();
             assert!(
@@ -1544,7 +1548,9 @@ mod tests {
             assert!(
                 diff <= tolerance,
                 "Golden retry-after signal mismatch: expected {:?}, got {:?}, diff {:?}",
-                expected, actual, diff
+                expected,
+                actual,
+                diff
             );
         }
 
@@ -1578,7 +1584,8 @@ mod tests {
             for cost in operations {
                 assert!(
                     bucket.try_consume(cost, test_time_baseline()),
-                    "Should be able to consume {} tokens atomically", cost
+                    "Should be able to consume {} tokens atomically",
+                    cost
                 );
             }
             assert_eq!(bucket.available_tokens(), 0);
@@ -1589,7 +1596,8 @@ mod tests {
         fn assert_golden_atomic_consumption(bucket: &RetryTokenBucket) {
             // All tokens should be consumed (demonstrating atomic behavior)
             assert_eq!(
-                bucket.available_tokens(), 0,
+                bucket.available_tokens(),
+                0,
                 "Golden atomic consumption: all tokens should be consumed atomically"
             );
         }

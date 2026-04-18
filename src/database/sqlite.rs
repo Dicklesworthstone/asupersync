@@ -1730,8 +1730,8 @@ mod tests {
     #[cfg(feature = "sqlite")]
     mod pragma_journal_mode_conformance {
         use super::*;
-        use std::path::PathBuf;
         use std::fs;
+        use std::path::PathBuf;
         use tempfile::TempDir;
 
         /// Test data and utilities for journal mode conformance testing.
@@ -1745,10 +1745,7 @@ mod tests {
                 let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
                 let db_path = temp_dir.path().join("test.db");
 
-                Self {
-                    temp_dir,
-                    db_path,
-                }
+                Self { temp_dir, db_path }
             }
 
             fn get_db_path(&self) -> &Path {
@@ -1770,32 +1767,46 @@ mod tests {
                     other => panic!("Failed to query journal_mode: {other:?}"),
                 };
 
-                rows[0].get_idx(0).unwrap().as_string().unwrap_or_else(|| {
-                    panic!("journal_mode should return a string")
-                })
+                rows[0]
+                    .get_idx(0)
+                    .unwrap()
+                    .as_string()
+                    .unwrap_or_else(|| panic!("journal_mode should return a string"))
             }
 
             /// Helper to set journal mode and return the result.
-            async fn set_journal_mode(conn: &SqliteConnection, cx: &Cx, mode: &str) -> Outcome<String, SqliteError> {
+            async fn set_journal_mode(
+                conn: &SqliteConnection,
+                cx: &Cx,
+                mode: &str,
+            ) -> Outcome<String, SqliteError> {
                 let sql = format!("PRAGMA journal_mode = {}", mode);
                 let rows = conn.query(cx, &sql, &[]).await?;
 
-                Ok(rows[0].get_idx(0).unwrap().as_string().unwrap_or_else(|| {
-                    panic!("journal_mode pragma should return a string")
-                }))
+                Ok(rows[0]
+                    .get_idx(0)
+                    .unwrap()
+                    .as_string()
+                    .unwrap_or_else(|| panic!("journal_mode pragma should return a string")))
             }
 
             /// Create test table and insert test data.
             async fn setup_test_data(conn: &SqliteConnection, cx: &Cx) {
-                match conn.execute_batch(cx, "
+                match conn
+                    .execute_batch(
+                        cx,
+                        "
                     CREATE TABLE test_data (
                         id INTEGER PRIMARY KEY,
                         value TEXT,
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                     );
                     INSERT INTO test_data (value) VALUES ('test1'), ('test2'), ('test3');
-                ").await {
-                    Outcome::Ok(()) => {},
+                ",
+                    )
+                    .await
+                {
+                    Outcome::Ok(()) => {}
                     other => panic!("Failed to create test data: {other:?}"),
                 }
             }
@@ -1825,33 +1836,59 @@ mod tests {
 
                 // Verify initial journal mode is DELETE
                 let initial_mode = JournalModeTestData::get_journal_mode(&conn, &cx).await;
-                assert_eq!(initial_mode.to_lowercase(), "delete", "Should start in DELETE mode");
+                assert_eq!(
+                    initial_mode.to_lowercase(),
+                    "delete",
+                    "Should start in DELETE mode"
+                );
 
                 // Setup test data in DELETE mode
                 JournalModeTestData::setup_test_data(&conn, &cx).await;
                 JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
 
                 // Transition to WAL mode
-                let wal_result = match JournalModeTestData::set_journal_mode(&conn, &cx, "WAL").await {
-                    Outcome::Ok(mode) => mode,
-                    other => panic!("Failed to set WAL mode: {other:?}"),
-                };
-                assert_eq!(wal_result.to_lowercase(), "wal", "Should transition to WAL mode");
+                let wal_result =
+                    match JournalModeTestData::set_journal_mode(&conn, &cx, "WAL").await {
+                        Outcome::Ok(mode) => mode,
+                        other => panic!("Failed to set WAL mode: {other:?}"),
+                    };
+                assert_eq!(
+                    wal_result.to_lowercase(),
+                    "wal",
+                    "Should transition to WAL mode"
+                );
 
                 // Verify journal mode changed
                 let current_mode = JournalModeTestData::get_journal_mode(&conn, &cx).await;
-                assert_eq!(current_mode.to_lowercase(), "wal", "Journal mode should be WAL");
+                assert_eq!(
+                    current_mode.to_lowercase(),
+                    "wal",
+                    "Journal mode should be WAL"
+                );
 
                 // Verify WAL files are created
-                assert!(test_data.get_wal_path().exists(), "WAL file should be created");
-                assert!(test_data.get_shm_path().exists(), "SHM file should be created");
+                assert!(
+                    test_data.get_wal_path().exists(),
+                    "WAL file should be created"
+                );
+                assert!(
+                    test_data.get_shm_path().exists(),
+                    "SHM file should be created"
+                );
 
                 // Verify data integrity after transition
                 JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
 
                 // Insert additional data in WAL mode
-                match conn.execute(&cx, "INSERT INTO test_data (value) VALUES (?)", &["wal_data"]).await {
-                    Outcome::Ok(_) => {},
+                match conn
+                    .execute(
+                        &cx,
+                        "INSERT INTO test_data (value) VALUES (?)",
+                        &["wal_data"],
+                    )
+                    .await
+                {
+                    Outcome::Ok(_) => {}
                     other => panic!("Failed to insert WAL data: {other:?}"),
                 };
 
@@ -1874,7 +1911,7 @@ mod tests {
 
                 // Start with WAL mode
                 match JournalModeTestData::set_journal_mode(&conn, &cx, "WAL").await {
-                    Outcome::Ok(_) => {},
+                    Outcome::Ok(_) => {}
                     other => panic!("Failed to set WAL mode: {other:?}"),
                 };
 
@@ -1886,15 +1923,24 @@ mod tests {
                 assert!(test_data.get_wal_path().exists(), "WAL file should exist");
 
                 // Transition to TRUNCATE mode
-                let truncate_result = match JournalModeTestData::set_journal_mode(&conn, &cx, "TRUNCATE").await {
-                    Outcome::Ok(mode) => mode,
-                    other => panic!("Failed to set TRUNCATE mode: {other:?}"),
-                };
-                assert_eq!(truncate_result.to_lowercase(), "truncate", "Should transition to TRUNCATE mode");
+                let truncate_result =
+                    match JournalModeTestData::set_journal_mode(&conn, &cx, "TRUNCATE").await {
+                        Outcome::Ok(mode) => mode,
+                        other => panic!("Failed to set TRUNCATE mode: {other:?}"),
+                    };
+                assert_eq!(
+                    truncate_result.to_lowercase(),
+                    "truncate",
+                    "Should transition to TRUNCATE mode"
+                );
 
                 // Verify journal mode changed
                 let current_mode = JournalModeTestData::get_journal_mode(&conn, &cx).await;
-                assert_eq!(current_mode.to_lowercase(), "truncate", "Journal mode should be TRUNCATE");
+                assert_eq!(
+                    current_mode.to_lowercase(),
+                    "truncate",
+                    "Journal mode should be TRUNCATE"
+                );
 
                 // WAL files should be cleaned up after successful transition
                 // Note: Files might still exist briefly due to cleanup timing
@@ -1903,8 +1949,15 @@ mod tests {
                 JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
 
                 // Test TRUNCATE mode behavior - inserts should work
-                match conn.execute(&cx, "INSERT INTO test_data (value) VALUES (?)", &["truncate_data"]).await {
-                    Outcome::Ok(_) => {},
+                match conn
+                    .execute(
+                        &cx,
+                        "INSERT INTO test_data (value) VALUES (?)",
+                        &["truncate_data"],
+                    )
+                    .await
+                {
+                    Outcome::Ok(_) => {}
                     other => panic!("Failed to insert TRUNCATE data: {other:?}"),
                 };
 
@@ -1924,23 +1977,34 @@ mod tests {
                 };
 
                 // Set MEMORY journal mode
-                let memory_result = match JournalModeTestData::set_journal_mode(&conn, &cx, "MEMORY").await {
-                    Outcome::Ok(mode) => mode,
-                    other => panic!("Failed to set MEMORY mode: {other:?}"),
-                };
-                assert_eq!(memory_result.to_lowercase(), "memory", "Should be in MEMORY mode");
+                let memory_result =
+                    match JournalModeTestData::set_journal_mode(&conn, &cx, "MEMORY").await {
+                        Outcome::Ok(mode) => mode,
+                        other => panic!("Failed to set MEMORY mode: {other:?}"),
+                    };
+                assert_eq!(
+                    memory_result.to_lowercase(),
+                    "memory",
+                    "Should be in MEMORY mode"
+                );
 
                 // Setup test data
                 JournalModeTestData::setup_test_data(&conn, &cx).await;
                 JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
 
                 // Begin transaction and modify data
-                match conn.execute_batch(&cx, "
+                match conn
+                    .execute_batch(
+                        &cx,
+                        "
                     BEGIN TRANSACTION;
                     INSERT INTO test_data (value) VALUES ('memory_test');
                     UPDATE test_data SET value = 'modified' WHERE id = 1;
-                ").await {
-                    Outcome::Ok(()) => {},
+                ",
+                    )
+                    .await
+                {
+                    Outcome::Ok(()) => {}
                     other => panic!("Failed to begin transaction: {other:?}"),
                 };
 
@@ -1954,11 +2018,21 @@ mod tests {
                 };
 
                 // Verify database is empty (persistence loss)
-                let tables_result = new_conn.query(&cx, "SELECT name FROM sqlite_master WHERE type='table'", &[]).await;
+                let tables_result = new_conn
+                    .query(
+                        &cx,
+                        "SELECT name FROM sqlite_master WHERE type='table'",
+                        &[],
+                    )
+                    .await;
                 match tables_result {
                     Outcome::Ok(rows) => {
-                        assert_eq!(rows.len(), 0, "In-memory database should have no persistent tables");
-                    },
+                        assert_eq!(
+                            rows.len(),
+                            0,
+                            "In-memory database should have no persistent tables"
+                        );
+                    }
                     other => panic!("Failed to query sqlite_master: {other:?}"),
                 }
 
@@ -1977,21 +2051,28 @@ mod tests {
                 };
 
                 // Set OFF journal mode (disables atomicity)
-                let off_result = match JournalModeTestData::set_journal_mode(&conn, &cx, "OFF").await {
-                    Outcome::Ok(mode) => mode,
-                    other => panic!("Failed to set OFF mode: {other:?}"),
-                };
+                let off_result =
+                    match JournalModeTestData::set_journal_mode(&conn, &cx, "OFF").await {
+                        Outcome::Ok(mode) => mode,
+                        other => panic!("Failed to set OFF mode: {other:?}"),
+                    };
                 assert_eq!(off_result.to_lowercase(), "off", "Should be in OFF mode");
 
                 // Create test table
-                match conn.execute_batch(&cx, "
+                match conn
+                    .execute_batch(
+                        &cx,
+                        "
                     CREATE TABLE atomicity_test (
                         id INTEGER PRIMARY KEY,
                         step INTEGER,
                         data TEXT
                     );
-                ").await {
-                    Outcome::Ok(()) => {},
+                ",
+                    )
+                    .await
+                {
+                    Outcome::Ok(()) => {}
                     other => panic!("Failed to create table: {other:?}"),
                 };
 
@@ -2001,29 +2082,46 @@ mod tests {
 
                 // Begin explicit transaction
                 match conn.execute(&cx, "BEGIN TRANSACTION", &[]).await {
-                    Outcome::Ok(_) => {},
+                    Outcome::Ok(_) => {}
                     other => panic!("Failed to begin transaction: {other:?}"),
                 };
 
                 // Insert test data
-                match conn.execute(&cx, "INSERT INTO atomicity_test (step, data) VALUES (1, 'step1')", &[]).await {
-                    Outcome::Ok(_) => {},
+                match conn
+                    .execute(
+                        &cx,
+                        "INSERT INTO atomicity_test (step, data) VALUES (1, 'step1')",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(_) => {}
                     other => panic!("Failed to insert step1: {other:?}"),
                 };
 
-                match conn.execute(&cx, "INSERT INTO atomicity_test (step, data) VALUES (2, 'step2')", &[]).await {
-                    Outcome::Ok(_) => {},
+                match conn
+                    .execute(
+                        &cx,
+                        "INSERT INTO atomicity_test (step, data) VALUES (2, 'step2')",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(_) => {}
                     other => panic!("Failed to insert step2: {other:?}"),
                 };
 
                 // Commit transaction
                 match conn.execute(&cx, "COMMIT", &[]).await {
-                    Outcome::Ok(_) => {},
+                    Outcome::Ok(_) => {}
                     other => panic!("Failed to commit: {other:?}"),
                 };
 
                 // Verify data was written
-                let rows = match conn.query(&cx, "SELECT COUNT(*) FROM atomicity_test", &[]).await {
+                let rows = match conn
+                    .query(&cx, "SELECT COUNT(*) FROM atomicity_test", &[])
+                    .await
+                {
                     Outcome::Ok(rows) => rows,
                     other => panic!("Failed to count rows: {other:?}"),
                 };
@@ -2033,12 +2131,13 @@ mod tests {
 
                 // Verify OFF mode characteristics:
                 // - No rollback journal files should be created
-                let journal_files = fs::read_dir(test_data.temp_dir.path()).unwrap()
+                let journal_files = fs::read_dir(test_data.temp_dir.path())
+                    .unwrap()
                     .filter_map(|entry| entry.ok())
                     .filter(|entry| {
-                        entry.path().extension().map_or(false, |ext|
+                        entry.path().extension().map_or(false, |ext| {
                             ext == "journal" || ext == "wal" || ext == "shm"
-                        )
+                        })
                     })
                     .count();
 
@@ -2079,18 +2178,22 @@ mod tests {
                             );
 
                             // Verify fallback is a known valid mode
-                            let valid_modes = ["delete", "truncate", "persist", "memory", "wal", "off"];
+                            let valid_modes =
+                                ["delete", "truncate", "persist", "memory", "wal", "off"];
                             assert!(
                                 valid_modes.contains(&returned_mode.to_lowercase().as_str()),
                                 "Fallback should be a valid journal mode, got: {}",
                                 returned_mode
                             );
-                        },
+                        }
                         Outcome::Err(_) => {
                             // Some invalid modes might cause SQLite to return an error
                             // This is also acceptable behavior
-                        },
-                        other => panic!("Unexpected outcome for invalid mode {}: {other:?}", invalid_mode),
+                        }
+                        other => panic!(
+                            "Unexpected outcome for invalid mode {}: {other:?}",
+                            invalid_mode
+                        ),
                     }
 
                     // Verify database is still functional after invalid mode attempt
@@ -2123,7 +2226,7 @@ mod tests {
 
                     // Set WAL mode
                     match JournalModeTestData::set_journal_mode(&conn, &cx, "WAL").await {
-                        Outcome::Ok(_) => {},
+                        Outcome::Ok(_) => {}
                         other => panic!("Failed to set WAL mode: {other:?}"),
                     };
 
@@ -2168,7 +2271,7 @@ mod tests {
                 };
 
                 match JournalModeTestData::set_journal_mode(&conn, &cx, "WAL").await {
-                    Outcome::Ok(_) => {},
+                    Outcome::Ok(_) => {}
                     other => panic!("Failed to set WAL mode: {other:?}"),
                 };
 
@@ -2185,8 +2288,15 @@ mod tests {
                 JournalModeTestData::verify_test_data(&reader_conn, &cx, 3).await;
 
                 // Writer can insert while reader exists
-                match conn.execute(&cx, "INSERT INTO test_data (value) VALUES (?)", &["concurrent_write"]).await {
-                    Outcome::Ok(_) => {},
+                match conn
+                    .execute(
+                        &cx,
+                        "INSERT INTO test_data (value) VALUES (?)",
+                        &["concurrent_write"],
+                    )
+                    .await
+                {
+                    Outcome::Ok(_) => {}
                     other => panic!("Failed concurrent write: {other:?}"),
                 };
 
@@ -2227,7 +2337,7 @@ mod tests {
                                 input_mode,
                                 expected_mode
                             );
-                        },
+                        }
                         other => panic!("Failed to set mode {}: {other:?}", input_mode),
                     }
                 }
@@ -2235,7 +2345,10 @@ mod tests {
                 // Test querying journal mode multiple times
                 for _ in 0..5 {
                     let mode = JournalModeTestData::get_journal_mode(&conn, &cx).await;
-                    assert!(!mode.is_empty(), "Journal mode query should always return a value");
+                    assert!(
+                        !mode.is_empty(),
+                        "Journal mode query should always return a value"
+                    );
                 }
 
                 // Test setting journal mode to current mode (should be no-op)
@@ -2247,7 +2360,7 @@ mod tests {
                             current_mode.to_lowercase(),
                             "Setting to current mode should be no-op"
                         );
-                    },
+                    }
                     other => panic!("Failed to set to current mode: {other:?}"),
                 }
 

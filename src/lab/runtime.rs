@@ -5438,7 +5438,9 @@ mod tests {
             seq2.len()
         );
 
-        for (i, ((run1, count1, hash1), (run2, count2, hash2))) in seq1.iter().zip(seq2.iter()).enumerate() {
+        for (i, ((run1, count1, hash1), (run2, count2, hash2))) in
+            seq1.iter().zip(seq2.iter()).enumerate()
+        {
             crate::assert_with_log!(
                 count1 == count2,
                 &format!("decision count should be identical at point {}", i),
@@ -5519,9 +5521,7 @@ mod tests {
     fn conformance_panic_semantics_deterministic() {
         init_test("conformance_panic_semantics_deterministic");
 
-        let config = LabConfig::new(333)
-            .worker_count(3)
-            .panic_on_leak(false); // Allow test to complete despite intentional panic
+        let config = LabConfig::new(333).worker_count(3).panic_on_leak(false); // Allow test to complete despite intentional panic
 
         crate::lab::assert_deterministic(config, |runtime| {
             let root = runtime.state.create_root_region(Budget::INFINITE);
@@ -5614,7 +5614,7 @@ mod tests {
                                         sum = sum.wrapping_add(k);
                                     }
                                     sum
-                                },
+                                }
                                 _ => crate::cx::yield_now().await,
                             };
                         }

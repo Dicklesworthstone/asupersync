@@ -84,12 +84,12 @@ fn test_huffman_canonical_table_roundtrip_sequences() {
         "XMLHttpRequest",
         "/api/v1/users/123",
         "Bearer eyJhbGciOiJIUzI1NiJ9",
-        "", // empty string
-        "a", // single character
-        "0123456789", // digits
+        "",                           // empty string
+        "a",                          // single character
+        "0123456789",                 // digits
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ", // uppercase
         "abcdefghijklmnopqrstuvwxyz", // lowercase
-        "!@#$%^&*()[]{}",  // special characters
+        "!@#$%^&*()[]{}",             // special characters
     ];
 
     for input in &test_sequences {
@@ -104,7 +104,11 @@ fn test_huffman_canonical_table_roundtrip_sequences() {
         let decoded_headers = decoder.decode(&mut encoded_bytes).unwrap();
 
         assert_eq!(decoded_headers.len(), 1);
-        assert_eq!(decoded_headers[0].value, *input, "roundtrip failed for: {:?}", input);
+        assert_eq!(
+            decoded_headers[0].value, *input,
+            "roundtrip failed for: {:?}",
+            input
+        );
     }
 }
 
@@ -136,7 +140,10 @@ fn test_huffman_eos_symbol_rejection() {
 
     // This should fail because EOS symbol appears in the decoded stream
     let result = decoder.decode(&mut bytes);
-    assert!(result.is_err(), "EOS symbol should be rejected but decode succeeded");
+    assert!(
+        result.is_err(),
+        "EOS symbol should be rejected but decode succeeded"
+    );
 }
 
 /// Test shorter EOS patterns that might appear in padding
@@ -180,10 +187,10 @@ fn test_huffman_eos_symbol_in_various_contexts() {
 fn test_huffman_partial_byte_padding_valid() {
     // Test padding with 1-7 bits of all 1s (valid padding per RFC 7541)
     let test_inputs = vec![
-        "a",    // Single character that requires padding
-        "ab",   // Two characters
-        "abc",  // Three characters
-        "www",  // Another test case
+        "a",   // Single character that requires padding
+        "ab",  // Two characters
+        "abc", // Three characters
+        "www", // Another test case
     ];
 
     for input in &test_inputs {
@@ -212,7 +219,12 @@ fn test_huffman_partial_byte_padding_valid() {
         encoder2.encode(&[Header::new("test", *input)], &mut encoded2);
 
         // The encoding should be deterministic
-        assert_eq!(encoded_len, encoded2.len(), "encoding should be deterministic for: {}", input);
+        assert_eq!(
+            encoded_len,
+            encoded2.len(),
+            "encoding should be deterministic for: {}",
+            input
+        );
     }
 }
 
@@ -281,7 +293,11 @@ fn test_huffman_invalid_sequences_rejected() {
 
         let result = decoder.decode(&mut bytes);
         // These should all fail
-        assert!(result.is_err(), "invalid sequence should be rejected: {:?}", invalid_seq);
+        assert!(
+            result.is_err(),
+            "invalid sequence should be rejected: {:?}",
+            invalid_seq
+        );
     }
 }
 
@@ -301,12 +317,15 @@ fn test_static_table_size_accounting() {
     let mut encoded = BytesMut::new();
 
     // Use indexed headers from static table (should not use dynamic space)
-    encoder.encode(&[
-        Header::new(":method", "GET"),      // Static table index 2
-        Header::new(":scheme", "https"),    // Static table index 7
-        Header::new(":status", "200"),      // Static table index 8
-        Header::new("cache-control", "no-cache"), // Static index 24, literal value
-    ], &mut encoded);
+    encoder.encode(
+        &[
+            Header::new(":method", "GET"),            // Static table index 2
+            Header::new(":scheme", "https"),          // Static table index 7
+            Header::new(":status", "200"),            // Static table index 8
+            Header::new("cache-control", "no-cache"), // Static index 24, literal value
+        ],
+        &mut encoded,
+    );
 
     let mut encoded_bytes = encoded.freeze();
     let decoded_headers = decoder.decode(&mut encoded_bytes).unwrap();
@@ -324,9 +343,12 @@ fn test_static_table_size_accounting() {
 
     // Now add a new header that SHOULD use dynamic table space
     let mut encoded2 = BytesMut::new();
-    encoder.encode(&[
-        Header::new("custom-header", "custom-value"), // New header, should use dynamic table
-    ], &mut encoded2);
+    encoder.encode(
+        &[
+            Header::new("custom-header", "custom-value"), // New header, should use dynamic table
+        ],
+        &mut encoded2,
+    );
 
     let mut encoded_bytes2 = encoded2.freeze();
     let decoded_headers2 = decoder.decode(&mut encoded_bytes2).unwrap();
@@ -345,10 +367,13 @@ fn test_dynamic_table_with_huffman() {
 
     // Add entries to dynamic table with Huffman encoding
     let mut encoded = BytesMut::new();
-    encoder.encode(&[
-        Header::new("x-custom-1", "value1"),
-        Header::new("x-custom-2", "value2"),
-    ], &mut encoded);
+    encoder.encode(
+        &[
+            Header::new("x-custom-1", "value1"),
+            Header::new("x-custom-2", "value2"),
+        ],
+        &mut encoded,
+    );
 
     let mut encoded_bytes = encoded.freeze();
     let decoded_headers = decoder.decode(&mut encoded_bytes).unwrap();
@@ -359,9 +384,12 @@ fn test_dynamic_table_with_huffman() {
 
     // Now reference the dynamic table entries
     let mut encoded2 = BytesMut::new();
-    encoder.encode(&[
-        Header::new("x-custom-1", "value1"), // Should match dynamic entry
-    ], &mut encoded2);
+    encoder.encode(
+        &[
+            Header::new("x-custom-1", "value1"), // Should match dynamic entry
+        ],
+        &mut encoded2,
+    );
 
     let mut encoded_bytes2 = encoded2.freeze();
     let decoded_headers2 = decoder.decode(&mut encoded_bytes2).unwrap();
@@ -397,7 +425,11 @@ fn test_huffman_padding_edge_cases() {
         let decoded_headers = decoder.decode(&mut encoded_bytes).unwrap();
 
         assert_eq!(decoded_headers.len(), 1);
-        assert_eq!(decoded_headers[0].value, input, "failed for {}: {}", description, input);
+        assert_eq!(
+            decoded_headers[0].value, input,
+            "failed for {}: {}",
+            description, input
+        );
     }
 }
 

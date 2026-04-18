@@ -70,13 +70,13 @@
 
 use proptest::prelude::*;
 use std::future::Future;
-use std::task::{Context, Poll, Waker};
 use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 
-use asupersync::runtime::task_handle::{JoinError, TaskHandle};
 use asupersync::channel::oneshot;
 use asupersync::cx::Cx;
-use asupersync::types::{Budget, CancelReason, CancelKind, PanicPayload, TaskId};
+use asupersync::runtime::task_handle::{JoinError, TaskHandle};
+use asupersync::types::{Budget, CancelKind, CancelReason, PanicPayload, TaskId};
 use asupersync::util::ArenaIndex;
 
 // Test utilities
@@ -355,12 +355,16 @@ fn mr3_drop_abort_consistency_pending() {
     };
 
     // MR3: Drop abort should behave like explicit abort for pending tasks
-    assert_eq!(explicit_cancel_requested, drop_cancel_requested,
-        "Cancel request state should match between explicit abort and drop abort");
+    assert_eq!(
+        explicit_cancel_requested, drop_cancel_requested,
+        "Cancel request state should match between explicit abort and drop abort"
+    );
 
     // Both should set cancel reasons (may differ in message but both should exist)
-    assert!(explicit_reason.is_some() && drop_reason.is_some(),
-        "Both explicit abort and drop abort should set cancel reasons");
+    assert!(
+        explicit_reason.is_some() && drop_reason.is_some(),
+        "Both explicit abort and drop abort should set cancel reasons"
+    );
 }
 
 #[test]
@@ -380,8 +384,14 @@ fn mr3_drop_abort_no_effect_when_ready() {
     };
 
     // MR3: Drop abort should have no effect when result is already ready
-    assert!(!cancel_requested, "Drop abort should not trigger when result is ready");
-    assert!(cancel_reason.is_none(), "Drop abort should not set cancel reason when result is ready");
+    assert!(
+        !cancel_requested,
+        "Drop abort should not trigger when result is ready"
+    );
+    assert!(
+        cancel_reason.is_none(),
+        "Drop abort should not set cancel reason when result is ready"
+    );
 }
 
 #[test]
@@ -402,7 +412,10 @@ fn mr3_defused_drop_no_abort() {
 
     // MR3: Defused drop should never trigger abort
     assert!(!cancel_requested, "Defused drop should not trigger abort");
-    assert!(cancel_reason.is_none(), "Defused drop should not set cancel reason");
+    assert!(
+        cancel_reason.is_none(),
+        "Defused drop should not set cancel reason"
+    );
 }
 
 // ============================================================================
@@ -518,7 +531,10 @@ fn mr6_join_future_drop_safety_pending() {
     };
 
     // MR6: Drop of pending join future should trigger abort
-    assert!(cancel_state, "Dropping pending join future should trigger task abort");
+    assert!(
+        cancel_state,
+        "Dropping pending join future should trigger task abort"
+    );
 }
 
 #[test]
@@ -540,7 +556,10 @@ fn mr6_join_future_drop_safety_ready() {
     };
 
     // MR6: Drop of ready join future should not trigger abort
-    assert!(!cancel_state, "Dropping ready join future should not trigger task abort");
+    assert!(
+        !cancel_state,
+        "Dropping ready join future should not trigger task abort"
+    );
 }
 
 // ============================================================================
@@ -572,12 +591,22 @@ fn mr7_cancel_reason_strengthening() {
     };
 
     // MR7: Multiple aborts should strengthen the cancel reason
-    assert!(first_reason.is_some(), "First abort should set cancel reason");
-    assert!(final_reason.is_some(), "Final reason should exist after strengthening");
+    assert!(
+        first_reason.is_some(),
+        "First abort should set cancel reason"
+    );
+    assert!(
+        final_reason.is_some(),
+        "Final reason should exist after strengthening"
+    );
 
     if let Some(final_reason_val) = final_reason {
         // Timeout should take precedence over user reason
-        assert_eq!(final_reason_val.kind, CancelKind::Timeout, "Timeout reason should take precedence");
+        assert_eq!(
+            final_reason_val.kind,
+            CancelKind::Timeout,
+            "Timeout reason should take precedence"
+        );
     }
 }
 

@@ -2217,11 +2217,11 @@ mod tests {
 
         // Test various sleep durations
         let test_durations = [
-            1_000_000,    // 1ms (exact level 0 boundary)
-            1_500_000,    // 1.5ms (mid-slot)
-            5_000_000,    // 5ms (multiple slots)
-            10_000_000,   // 10ms
-            100_000_000,  // 100ms (level 1 territory)
+            1_000_000,     // 1ms (exact level 0 boundary)
+            1_500_000,     // 1.5ms (mid-slot)
+            5_000_000,     // 5ms (multiple slots)
+            10_000_000,    // 10ms
+            100_000_000,   // 100ms (level 1 territory)
             1_000_000_000, // 1s (level 2 territory)
         ];
 
@@ -2352,7 +2352,12 @@ mod tests {
         );
 
         // Verify wheel is empty after all timers fired
-        crate::assert_with_log!(wheel.len() == 0, "wheel empty after firing", 0usize, wheel.len());
+        crate::assert_with_log!(
+            wheel.len() == 0,
+            "wheel empty after firing",
+            0usize,
+            wheel.len()
+        );
 
         crate::test_complete!("conformance_concurrent_sleeps_unique_deadlines");
     }
@@ -2498,7 +2503,8 @@ mod tests {
         let mut fired_order = Vec::new();
 
         for window in 0..200 {
-            let check_time = Time::from_nanos(start_promotion.as_nanos() + (window as u64 * 60_000_000_000));
+            let check_time =
+                Time::from_nanos(start_promotion.as_nanos() + (window as u64 * 60_000_000_000));
             let wakers = wheel.collect_expired(check_time);
 
             for waker in wakers {
@@ -2524,7 +2530,11 @@ mod tests {
         for i in 0..fired_order.len().min(99) {
             crate::assert_with_log!(
                 fired_order[i] <= fired_order[i + 1],
-                &format!("timer order preserved: {} <= {}", fired_order[i], fired_order[i + 1]),
+                &format!(
+                    "timer order preserved: {} <= {}",
+                    fired_order[i],
+                    fired_order[i + 1]
+                ),
                 true,
                 fired_order[i] <= fired_order[i + 1]
             );
@@ -2552,11 +2562,11 @@ mod tests {
 
         // Register timers across multiple wheel levels to test atomic advancement
         let test_timers = [
-            (Time::from_millis(1), "level0_early"),    // Level 0: 1ms
-            (Time::from_millis(5), "level0_late"),     // Level 0: 5ms
-            (Time::from_millis(100), "level1"),        // Level 1: 100ms
-            (Time::from_millis(1000), "level2"),       // Level 2: 1s
-            (Time::from_secs(60), "level3"),           // Level 3: 1min
+            (Time::from_millis(1), "level0_early"), // Level 0: 1ms
+            (Time::from_millis(5), "level0_late"),  // Level 0: 5ms
+            (Time::from_millis(100), "level1"),     // Level 1: 100ms
+            (Time::from_millis(1000), "level2"),    // Level 2: 1s
+            (Time::from_secs(60), "level3"),        // Level 3: 1min
         ];
 
         let mut counters = Vec::new();
@@ -2579,7 +2589,8 @@ mod tests {
 
         for advance_time in &time_advances {
             // Record state before advance
-            let before_counts: Vec<u64> = counters.iter()
+            let before_counts: Vec<u64> = counters
+                .iter()
                 .map(|(c, _, _)| c.load(Ordering::SeqCst))
                 .collect();
 
@@ -2661,11 +2672,8 @@ mod tests {
             .coalesce_window(Duration::from_millis(5))
             .min_group_size(3);
 
-        let mut wheel = TimerWheel::with_config(
-            Time::ZERO,
-            TimerWheelConfig::default(),
-            coalescing,
-        );
+        let mut wheel =
+            TimerWheel::with_config(Time::ZERO, TimerWheelConfig::default(), coalescing);
 
         let counters: Vec<_> = (0..10).map(|_| Arc::new(AtomicU64::new(0))).collect();
 
@@ -2686,7 +2694,8 @@ mod tests {
         }
 
         // Count how many fired
-        let fired_count = counters.iter()
+        let fired_count = counters
+            .iter()
             .map(|c| if c.load(Ordering::SeqCst) > 0 { 1 } else { 0 })
             .sum::<u32>();
 

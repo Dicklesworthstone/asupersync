@@ -14,8 +14,8 @@
 #[cfg(test)]
 mod conformance_tests {
     use crate::observability::metrics::{Histogram, Metrics};
-    use std::sync::{Arc, Barrier as StdBarrier};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Barrier as StdBarrier};
     use std::thread;
     use std::time::Duration;
 
@@ -49,7 +49,8 @@ mod conformance_tests {
     impl Histogram {
         #[cfg(test)]
         pub(crate) fn bucket_counts(&self) -> Vec<u64> {
-            self.counts.iter()
+            self.counts
+                .iter()
                 .map(|atomic| atomic.load(Ordering::Relaxed))
                 .collect()
         }
@@ -89,7 +90,12 @@ mod conformance_tests {
             let target = total * p;
             let mut cumulative = 0_u64;
 
-            for (i, &count) in self.counts.iter().enumerate().map(|(i, count)| (i, count.load(Ordering::Relaxed))) {
+            for (i, &count) in self
+                .counts
+                .iter()
+                .enumerate()
+                .map(|(i, count)| (i, count.load(Ordering::Relaxed)))
+            {
                 cumulative += count;
                 if (cumulative as f64) >= target {
                     if i == self.buckets.len() {
@@ -110,46 +116,55 @@ mod conformance_tests {
         // Test bucket boundaries at various floating-point precision levels
         let test_cases = vec![
             // Standard decimal boundaries
-            (vec![0.1, 0.5, 1.0, 5.0, 10.0], vec![
-                (0.05, 0),   // < 0.1
-                (0.1, 0),    // exactly 0.1
-                (0.2, 1),    // between 0.1 and 0.5
-                (0.5, 1),    // exactly 0.5
-                (1.0, 2),    // exactly 1.0
-                (2.0, 3),    // between 1.0 and 5.0
-                (5.0, 3),    // exactly 5.0
-                (7.5, 4),    // between 5.0 and 10.0
-                (10.0, 4),   // exactly 10.0
-                (15.0, 5),   // > 10.0 (+Inf bucket)
-            ]),
+            (
+                vec![0.1, 0.5, 1.0, 5.0, 10.0],
+                vec![
+                    (0.05, 0), // < 0.1
+                    (0.1, 0),  // exactly 0.1
+                    (0.2, 1),  // between 0.1 and 0.5
+                    (0.5, 1),  // exactly 0.5
+                    (1.0, 2),  // exactly 1.0
+                    (2.0, 3),  // between 1.0 and 5.0
+                    (5.0, 3),  // exactly 5.0
+                    (7.5, 4),  // between 5.0 and 10.0
+                    (10.0, 4), // exactly 10.0
+                    (15.0, 5), // > 10.0 (+Inf bucket)
+                ],
+            ),
             // Powers of 2 for binary precision testing
-            (vec![0.125, 0.25, 0.5, 1.0, 2.0, 4.0], vec![
-                (0.0625, 0),  // < 0.125
-                (0.125, 0),   // exactly 0.125 (2^-3)
-                (0.1875, 1),  // between 0.125 and 0.25
-                (0.25, 1),    // exactly 0.25 (2^-2)
-                (0.375, 2),   // between 0.25 and 0.5
-                (0.5, 2),     // exactly 0.5 (2^-1)
-                (0.75, 3),    // between 0.5 and 1.0
-                (1.0, 3),     // exactly 1.0 (2^0)
-                (1.5, 4),     // between 1.0 and 2.0
-                (2.0, 4),     // exactly 2.0 (2^1)
-                (3.0, 5),     // between 2.0 and 4.0
-                (4.0, 5),     // exactly 4.0 (2^2)
-                (8.0, 6),     // > 4.0 (+Inf bucket)
-            ]),
+            (
+                vec![0.125, 0.25, 0.5, 1.0, 2.0, 4.0],
+                vec![
+                    (0.0625, 0), // < 0.125
+                    (0.125, 0),  // exactly 0.125 (2^-3)
+                    (0.1875, 1), // between 0.125 and 0.25
+                    (0.25, 1),   // exactly 0.25 (2^-2)
+                    (0.375, 2),  // between 0.25 and 0.5
+                    (0.5, 2),    // exactly 0.5 (2^-1)
+                    (0.75, 3),   // between 0.5 and 1.0
+                    (1.0, 3),    // exactly 1.0 (2^0)
+                    (1.5, 4),    // between 1.0 and 2.0
+                    (2.0, 4),    // exactly 2.0 (2^1)
+                    (3.0, 5),    // between 2.0 and 4.0
+                    (4.0, 5),    // exactly 4.0 (2^2)
+                    (8.0, 6),    // > 4.0 (+Inf bucket)
+                ],
+            ),
             // Very small values testing subnormal precision
-            (vec![1e-10, 1e-8, 1e-6, 1e-4], vec![
-                (1e-12, 0),   // Very small
-                (1e-10, 0),   // Boundary
-                (1e-9, 1),    // Between boundaries
-                (1e-8, 1),    // Boundary
-                (1e-7, 2),    // Between boundaries
-                (1e-6, 2),    // Boundary
-                (1e-5, 3),    // Between boundaries
-                (1e-4, 3),    // Boundary
-                (1e-3, 4),    // Overflow bucket
-            ]),
+            (
+                vec![1e-10, 1e-8, 1e-6, 1e-4],
+                vec![
+                    (1e-12, 0), // Very small
+                    (1e-10, 0), // Boundary
+                    (1e-9, 1),  // Between boundaries
+                    (1e-8, 1),  // Boundary
+                    (1e-7, 2),  // Between boundaries
+                    (1e-6, 2),  // Boundary
+                    (1e-5, 3),  // Between boundaries
+                    (1e-4, 3),  // Boundary
+                    (1e-3, 4),  // Overflow bucket
+                ],
+            ),
         ];
 
         for (buckets, values) in test_cases {
@@ -162,19 +177,27 @@ mod conformance_tests {
                 let bucket_counts = hist.bucket_counts();
 
                 // Verify exactly one bucket was incremented
-                let incremented_buckets: Vec<_> = bucket_counts.iter().enumerate()
+                let incremented_buckets: Vec<_> = bucket_counts
+                    .iter()
+                    .enumerate()
                     .filter(|(_, &count)| count > 0)
                     .collect();
 
-                assert_eq!(incremented_buckets.len(), 1,
+                assert_eq!(
+                    incremented_buckets.len(),
+                    1,
                     "Value {} should increment exactly one bucket, got {:?}",
-                    value, incremented_buckets);
+                    value,
+                    incremented_buckets
+                );
 
                 // Verify the correct bucket was incremented
                 let (actual_bucket, &count) = incremented_buckets[0];
-                assert_eq!(actual_bucket, expected_bucket,
+                assert_eq!(
+                    actual_bucket, expected_bucket,
                     "Value {} assigned to bucket {} but expected bucket {}. Buckets: {:?}",
-                    value, actual_bucket, expected_bucket, buckets);
+                    value, actual_bucket, expected_bucket, buckets
+                );
                 assert_eq!(count, 1, "Bucket should be incremented by exactly 1");
 
                 // Test ULP precision for boundary values
@@ -191,18 +214,24 @@ mod conformance_tests {
 
                     // All should go to same bucket or adjacent buckets (never skip)
                     let counts = hist.bucket_counts();
-                    let non_zero_buckets: Vec<_> = counts.iter().enumerate()
+                    let non_zero_buckets: Vec<_> = counts
+                        .iter()
+                        .enumerate()
                         .filter(|(_, &count)| count > 0)
                         .collect();
 
                     // Should span at most 2 adjacent buckets
                     if non_zero_buckets.len() > 1 {
-                        let bucket_indices: Vec<_> = non_zero_buckets.iter().map(|(i, _)| *i).collect();
+                        let bucket_indices: Vec<_> =
+                            non_zero_buckets.iter().map(|(i, _)| *i).collect();
                         let min_bucket = *bucket_indices.iter().min().unwrap();
                         let max_bucket = *bucket_indices.iter().max().unwrap();
-                        assert!(max_bucket - min_bucket <= 1,
+                        assert!(
+                            max_bucket - min_bucket <= 1,
                             "Values within 1 ULP of boundary {} span non-adjacent buckets: {:?}",
-                            boundary, bucket_indices);
+                            boundary,
+                            bucket_indices
+                        );
                     }
                 }
             }
@@ -222,21 +251,18 @@ mod conformance_tests {
             vec![1.5],
             vec![7.5],
             vec![15.0],
-
             // Multiple observations
             vec![0.1, 0.2, 0.3],
             vec![1.1, 1.2, 1.3],
             vec![5.5, 6.0, 6.5],
             vec![11.0, 12.0, 13.0],
-
             // Mixed across buckets
             vec![0.5, 1.5, 3.0, 7.5, 15.0],
             vec![0.1, 0.9, 1.1, 1.9, 2.1, 4.9, 5.1, 9.9, 10.1, 20.0],
-
             // Edge cases
-            vec![],  // Empty
-            vec![1.0, 1.0, 1.0],  // Exact boundary values
-            vec![f64::MIN_POSITIVE, f64::MAX, f64::INFINITY],  // Extreme values
+            vec![],                                           // Empty
+            vec![1.0, 1.0, 1.0],                              // Exact boundary values
+            vec![f64::MIN_POSITIVE, f64::MAX, f64::INFINITY], // Extreme values
         ];
 
         for values in test_values {
@@ -252,13 +278,20 @@ mod conformance_tests {
             let bucket_sum: u64 = bucket_counts.iter().sum();
             let total_count = hist.count();
 
-            assert_eq!(bucket_sum, total_count,
+            assert_eq!(
+                bucket_sum, total_count,
                 "Conservation invariant violated: bucket sum {} != total count {} for values {:?}",
-                bucket_sum, total_count, values);
+                bucket_sum, total_count, values
+            );
 
-            assert_eq!(total_count, values.len() as u64,
+            assert_eq!(
+                total_count,
+                values.len() as u64,
                 "Total count {} does not match observations {} for values {:?}",
-                total_count, values.len(), values);
+                total_count,
+                values.len(),
+                values
+            );
         }
     }
 
@@ -270,19 +303,15 @@ mod conformance_tests {
         // Test cases with known statistical properties
         let test_cases = vec![
             // Single value
-            (vec![3.0], 3.0, 3.0),  // mean=3.0, all percentiles=3.0
-
+            (vec![3.0], 3.0, 3.0), // mean=3.0, all percentiles=3.0
             // Two values
-            (vec![1.0, 5.0], 3.0, 3.0),  // mean=3.0, median around 3.0
-
+            (vec![1.0, 5.0], 3.0, 3.0), // mean=3.0, median around 3.0
             // Multiple identical values
-            (vec![2.0, 2.0, 2.0, 2.0], 2.0, 2.0),  // all stats = 2.0
-
+            (vec![2.0, 2.0, 2.0, 2.0], 2.0, 2.0), // all stats = 2.0
             // Symmetric distribution
-            (vec![1.0, 2.0, 3.0, 4.0, 5.0], 3.0, 3.0),  // mean=3.0, median=3.0
-
+            (vec![1.0, 2.0, 3.0, 4.0, 5.0], 3.0, 3.0), // mean=3.0, median=3.0
             // Arithmetic sequence
-            (vec![10.0, 20.0, 30.0, 40.0, 50.0], 30.0, 30.0),  // mean=30.0
+            (vec![10.0, 20.0, 30.0, 40.0, 50.0], 30.0, 30.0), // mean=30.0
         ];
 
         for (values, expected_mean, expected_approx_median) in test_cases {
@@ -295,22 +324,33 @@ mod conformance_tests {
             // Test mean invariant: mean = sum / count
             let computed_mean = hist.mean();
             let manual_mean = hist.sum() / (hist.count() as f64);
-            assert!((computed_mean - manual_mean).abs() < f64::EPSILON,
+            assert!(
+                (computed_mean - manual_mean).abs() < f64::EPSILON,
                 "Mean computation inconsistency: computed={}, manual={}",
-                computed_mean, manual_mean);
+                computed_mean,
+                manual_mean
+            );
 
             // Test expected mean
             let mean_diff = (computed_mean - expected_mean).abs();
-            assert!(mean_diff < 1e-10,
+            assert!(
+                mean_diff < 1e-10,
                 "Mean {} differs from expected {} by {} for values {:?}",
-                computed_mean, expected_mean, mean_diff, values);
+                computed_mean,
+                expected_mean,
+                mean_diff,
+                values
+            );
 
             // Test sum invariant: sum should equal manual sum
             let expected_sum: f64 = values.iter().sum();
             let histogram_sum = hist.sum();
-            assert!((histogram_sum - expected_sum).abs() < 1e-10,
+            assert!(
+                (histogram_sum - expected_sum).abs() < 1e-10,
                 "Sum invariant violated: histogram_sum={}, expected_sum={}",
-                histogram_sum, expected_sum);
+                histogram_sum,
+                expected_sum
+            );
 
             // Test percentile consistency (when computable)
             if !values.is_empty() {
@@ -321,10 +361,14 @@ mod conformance_tests {
                 for &p in &percentiles {
                     if let Some(val) = hist.percentile(p) {
                         if let Some(prev) = prev_val {
-                            assert!(val >= prev,
+                            assert!(
+                                val >= prev,
                                 "Percentile monotonicity violated: p{}={} < p{}={}",
-                                (p * 100.0) as u8, val,
-                                ((p - 0.25) * 100.0).max(0.0) as u8, prev);
+                                (p * 100.0) as u8,
+                                val,
+                                ((p - 0.25) * 100.0).max(0.0) as u8,
+                                prev
+                            );
                         }
                         prev_val = Some(val);
                     }
@@ -332,8 +376,11 @@ mod conformance_tests {
 
                 // Test boundary percentiles
                 if let Some(p0) = hist.percentile(0.0) {
-                    assert!(values.iter().any(|&v| v <= p0),
-                        "0th percentile {} should be <= minimum value", p0);
+                    assert!(
+                        values.iter().any(|&v| v <= p0),
+                        "0th percentile {} should be <= minimum value",
+                        p0
+                    );
                 }
             }
         }
@@ -382,26 +429,37 @@ mod conformance_tests {
         }
 
         // Verify all threads completed
-        assert_eq!(completion_counter.load(Ordering::Relaxed), num_threads as u64);
+        assert_eq!(
+            completion_counter.load(Ordering::Relaxed),
+            num_threads as u64
+        );
 
         // Verify total count conservation under concurrency
         let final_count = hist.count();
-        assert_eq!(final_count, total_expected as u64,
+        assert_eq!(
+            final_count, total_expected as u64,
             "Concurrent operations resulted in incorrect count: {} expected {}",
-            final_count, total_expected);
+            final_count, total_expected
+        );
 
         // Verify bucket count conservation
         let bucket_counts = hist.bucket_counts();
         let bucket_sum: u64 = bucket_counts.iter().sum();
-        assert_eq!(bucket_sum, final_count,
+        assert_eq!(
+            bucket_sum, final_count,
             "Bucket count conservation violated under concurrency: bucket_sum={}, total={}",
-            bucket_sum, final_count);
+            bucket_sum, final_count
+        );
 
         // Verify no bucket counts exceed their theoretical maximum
         for (i, &count) in bucket_counts.iter().enumerate() {
-            assert!(count <= total_expected as u64,
+            assert!(
+                count <= total_expected as u64,
                 "Bucket {} has impossible count {} > total observations {}",
-                i, count, total_expected);
+                i,
+                count,
+                total_expected
+            );
         }
 
         // Test concurrent reset safety
@@ -461,9 +519,11 @@ mod conformance_tests {
         let final_total = reset_hist.count();
         let final_bucket_sum: u64 = final_bucket_counts.iter().sum();
 
-        assert_eq!(final_bucket_sum, final_total,
+        assert_eq!(
+            final_bucket_sum, final_total,
             "Post-concurrent-reset state inconsistent: bucket_sum={}, total={}",
-            final_bucket_sum, final_total);
+            final_bucket_sum, final_total
+        );
     }
 
     /// Test 5: Reset operation atomicity - reset should be atomic across all fields
@@ -587,8 +647,10 @@ mod conformance_tests {
         if final_count > initial_count {
             // If NaN incremented count, sum should either remain unchanged
             // or become NaN (both are valid approaches)
-            assert!(final_sum == initial_sum || final_sum.is_nan(),
-                "NaN observation should not corrupt sum in unexpected way");
+            assert!(
+                final_sum == initial_sum || final_sum.is_nan(),
+                "NaN observation should not corrupt sum in unexpected way"
+            );
         }
     }
 
@@ -623,8 +685,8 @@ mod conformance_tests {
         assert!(export.contains("le=\"+Inf\""));
 
         // Test cumulative bucket counts in export
-        hist.observe(0.5);  // Should be in <=1.0 bucket
-        hist.observe(7.5);  // Should be in <=10.0 bucket
+        hist.observe(0.5); // Should be in <=1.0 bucket
+        hist.observe(7.5); // Should be in <=10.0 bucket
         hist.observe(15.0); // Should be in +Inf bucket
 
         let final_export = metrics.export_prometheus();
@@ -634,7 +696,8 @@ mod conformance_tests {
 
         // Verify cumulative nature of bucket counts in export
         // (exact parsing would be complex, so we just verify the format is reasonable)
-        let bucket_lines: Vec<_> = final_export.lines()
+        let bucket_lines: Vec<_> = final_export
+            .lines()
             .filter(|line| line.contains("test_integration_bucket"))
             .collect();
 
@@ -644,7 +707,11 @@ mod conformance_tests {
         for line in bucket_lines {
             if let Some(value_part) = line.split_whitespace().last() {
                 if let Ok(count) = value_part.parse::<u64>() {
-                    assert!(count <= 4, "Bucket count {} exceeds total observations 4", count);
+                    assert!(
+                        count <= 4,
+                        "Bucket count {} exceeds total observations 4",
+                        count
+                    );
                 }
             }
         }

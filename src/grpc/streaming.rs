@@ -981,29 +981,44 @@ mod tests {
         let mut stream = ResponseStream::<String>::open();
 
         // Stream some responses
-        stream.push(Ok("response1".to_string())).expect("first response");
-        stream.push(Ok("response2".to_string())).expect("second response");
-        stream.push(Ok("response3".to_string())).expect("third response");
+        stream
+            .push(Ok("response1".to_string()))
+            .expect("first response");
+        stream
+            .push(Ok("response2".to_string()))
+            .expect("second response");
+        stream
+            .push(Ok("response3".to_string()))
+            .expect("third response");
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut pinned = Pin::new(&mut stream);
 
         // Consume all responses
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(Some(Ok(ref s))) if s == "response1"
-        ), "first response consumed");
+        assert!(
+            matches!(
+                pinned.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok(ref s))) if s == "response1"
+            ),
+            "first response consumed"
+        );
 
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(Some(Ok(ref s))) if s == "response2"
-        ), "second response consumed");
+        assert!(
+            matches!(
+                pinned.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok(ref s))) if s == "response2"
+            ),
+            "second response consumed"
+        );
 
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(Some(Ok(ref s))) if s == "response3"
-        ), "third response consumed");
+        assert!(
+            matches!(
+                pinned.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok(ref s))) if s == "response3"
+            ),
+            "third response consumed"
+        );
 
         // Stream termination - close() signals completion
         drop(pinned); // Drop the pin before calling close()
@@ -1011,10 +1026,10 @@ mod tests {
         let mut pinned = Pin::new(&mut stream); // Re-pin after close
 
         // Per gRPC spec: stream completion returns None to signal end
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(None)
-        ), "stream properly terminates with None after close()");
+        assert!(
+            matches!(pinned.as_mut().poll_next(&mut cx), Poll::Ready(None)),
+            "stream properly terminates with None after close()"
+        );
 
         crate::test_complete!("conformance_server_streaming_proper_termination");
     }
@@ -1028,7 +1043,8 @@ mod tests {
 
         // Send valid response followed by error
         stream.push(Ok(42)).expect("valid response");
-        stream.push(Err(Status::invalid_argument("malformed request data")))
+        stream
+            .push(Err(Status::invalid_argument("malformed request data")))
             .expect("error response");
 
         let waker = noop_waker();
@@ -1036,16 +1052,26 @@ mod tests {
         let mut pinned = Pin::new(&mut stream);
 
         // First response should be valid
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(Some(Ok(42)))
-        ), "valid response received before error");
+        assert!(
+            matches!(
+                pinned.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok(42)))
+            ),
+            "valid response received before error"
+        );
 
         // Error response should contain proper status
         match pinned.as_mut().poll_next(&mut cx) {
             Poll::Ready(Some(Err(status))) => {
-                assert_eq!(status.code(), Code::InvalidArgument, "error code propagated");
-                assert!(status.message().contains("malformed request"), "error message preserved");
+                assert_eq!(
+                    status.code(),
+                    Code::InvalidArgument,
+                    "error code propagated"
+                );
+                assert!(
+                    status.message().contains("malformed request"),
+                    "error message preserved"
+                );
             }
             other => panic!("expected error status, got {other:?}"),
         }
@@ -1053,10 +1079,10 @@ mod tests {
         drop(pinned); // Drop pin before calling close()
         stream.close();
         let mut pinned = Pin::new(&mut stream); // Re-pin after close
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(None)
-        ), "stream terminates after error");
+        assert!(
+            matches!(pinned.as_mut().poll_next(&mut cx), Poll::Ready(None)),
+            "stream terminates after error"
+        );
 
         crate::test_complete!("conformance_server_streaming_error_propagation");
     }
@@ -1070,18 +1096,24 @@ mod tests {
 
         // Fill buffer to capacity
         for i in 0..MAX_STREAM_BUFFERED {
-            stream.push(Ok(i as u64))
+            stream
+                .push(Ok(i as u64))
                 .expect("responses should fill buffer");
         }
 
         // Next push should fail with ResourceExhausted per gRPC spec
         let overflow_result = stream.push(Ok(9999));
-        assert!(overflow_result.is_err(), "buffer overflow should be rejected");
+        assert!(
+            overflow_result.is_err(),
+            "buffer overflow should be rejected"
+        );
 
         match overflow_result.unwrap_err() {
             status if status.code() == Code::ResourceExhausted => {
-                assert!(status.message().contains("buffer full"),
-                    "backpressure error message should indicate buffer state");
+                assert!(
+                    status.message().contains("buffer full"),
+                    "backpressure error message should indicate buffer state"
+                );
             }
             other_status => panic!("expected ResourceExhausted, got {other_status:?}"),
         }
@@ -1090,13 +1122,14 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut pinned = Pin::new(&mut stream);
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(Some(Ok(0)))
-        ), "draining first message should succeed");
+        assert!(
+            matches!(pinned.as_mut().poll_next(&mut cx), Poll::Ready(Some(Ok(0)))),
+            "draining first message should succeed"
+        );
 
         // Now backpressure should be relieved
-        stream.push(Ok(9999))
+        stream
+            .push(Ok(9999))
             .expect("push after drain should succeed due to available buffer space");
 
         crate::test_complete!("conformance_server_streaming_backpressure");
@@ -1109,17 +1142,24 @@ mod tests {
         init_test("conformance_server_streaming_post_close_rejection");
         let mut stream = ResponseStream::<&'static str>::open();
 
-        stream.push(Ok("valid_message")).expect("pre-close message succeeds");
+        stream
+            .push(Ok("valid_message"))
+            .expect("pre-close message succeeds");
         stream.close();
 
         // Attempt to send after close should fail
         let post_close_result = stream.push(Ok("post_close_message"));
-        assert!(post_close_result.is_err(), "post-close push should be rejected");
+        assert!(
+            post_close_result.is_err(),
+            "post-close push should be rejected"
+        );
 
         match post_close_result.unwrap_err() {
             status if status.code() == Code::FailedPrecondition => {
-                assert!(status.message().contains("closed"),
-                    "error should indicate stream is closed");
+                assert!(
+                    status.message().contains("closed"),
+                    "error should indicate stream is closed"
+                );
             }
             other => panic!("expected FailedPrecondition, got {other:?}"),
         }
@@ -1129,15 +1169,18 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
         let mut pinned = Pin::new(&mut stream);
 
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(Some(Ok("valid_message")))
-        ), "pre-close message should still be available");
+        assert!(
+            matches!(
+                pinned.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok("valid_message")))
+            ),
+            "pre-close message should still be available"
+        );
 
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(None)
-        ), "stream should terminate with None");
+        assert!(
+            matches!(pinned.as_mut().poll_next(&mut cx), Poll::Ready(None)),
+            "stream should terminate with None"
+        );
 
         crate::test_complete!("conformance_server_streaming_post_close_rejection");
     }
@@ -1159,20 +1202,26 @@ mod tests {
         let mut pinned = Pin::new(&mut server_streaming);
 
         // Server streaming should preserve order and completion semantics
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(Some(Ok(100)))
-        ), "first message preserves order");
+        assert!(
+            matches!(
+                pinned.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok(100)))
+            ),
+            "first message preserves order"
+        );
 
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(Some(Ok(200)))
-        ), "second message preserves order");
+        assert!(
+            matches!(
+                pinned.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok(200)))
+            ),
+            "second message preserves order"
+        );
 
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(None)
-        ), "completion signal preserved");
+        assert!(
+            matches!(pinned.as_mut().poll_next(&mut cx), Poll::Ready(None)),
+            "completion signal preserved"
+        );
 
         crate::test_complete!("conformance_server_streaming_wrapper_semantics");
     }
@@ -1192,10 +1241,10 @@ mod tests {
         let mut pinned = Pin::new(&mut stream);
 
         // Empty stream should immediately return None
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(None)
-        ), "empty stream should complete immediately with None");
+        assert!(
+            matches!(pinned.as_mut().poll_next(&mut cx), Poll::Ready(None)),
+            "empty stream should complete immediately with None"
+        );
 
         crate::test_complete!("conformance_server_streaming_empty_completion");
     }
@@ -1212,20 +1261,20 @@ mod tests {
         let mut pinned = Pin::new(&mut stream);
 
         // Poll on empty stream should return Pending
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Pending
-        ), "empty open stream should be pending");
+        assert!(
+            matches!(pinned.as_mut().poll_next(&mut cx), Poll::Pending),
+            "empty open stream should be pending"
+        );
 
         // Close should allow immediate completion on next poll
         drop(pinned); // Drop pin before calling close()
         stream.close();
         let mut pinned = Pin::new(&mut stream); // Re-pin after close
 
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(None)
-        ), "close should enable immediate completion on next poll");
+        assert!(
+            matches!(pinned.as_mut().poll_next(&mut cx), Poll::Ready(None)),
+            "close should enable immediate completion on next poll"
+        );
 
         crate::test_complete!("conformance_server_streaming_close_wakeup");
     }
@@ -1244,17 +1293,20 @@ mod tests {
         let mut pinned = Pin::new(&mut stream);
 
         // First poll gets the message
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(Some(Ok(val))) if (val - 3.14159).abs() < f64::EPSILON
-        ), "message received on first poll");
+        assert!(
+            matches!(
+                pinned.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok(val))) if (val - 3.14159).abs() < f64::EPSILON
+            ),
+            "message received on first poll"
+        );
 
         // Subsequent polls should consistently return None (completion)
         for attempt in 1..=5 {
-            assert!(matches!(
-                pinned.as_mut().poll_next(&mut cx),
-                Poll::Ready(None)
-            ), "completion signal should be idempotent on attempt {attempt}");
+            assert!(
+                matches!(pinned.as_mut().poll_next(&mut cx), Poll::Ready(None)),
+                "completion signal should be idempotent on attempt {attempt}"
+            );
         }
 
         crate::test_complete!("conformance_server_streaming_completion_idempotence");
@@ -1326,7 +1378,9 @@ mod tests {
         ];
 
         for (i, status) in test_statuses.iter().enumerate() {
-            stream.push(Ok(i as u8)).expect("valid response before error");
+            stream
+                .push(Ok(i as u8))
+                .expect("valid response before error");
             stream.push(Err(status.clone())).expect("error status");
         }
         stream.close();
@@ -1338,28 +1392,37 @@ mod tests {
         // Verify each status is properly propagated
         for (i, expected_status) in test_statuses.iter().enumerate() {
             // Consume valid response
-            assert!(matches!(
-                pinned.as_mut().poll_next(&mut cx),
-                Poll::Ready(Some(Ok(val))) if val == i as u8
-            ), "valid response {i} received");
+            assert!(
+                matches!(
+                    pinned.as_mut().poll_next(&mut cx),
+                    Poll::Ready(Some(Ok(val))) if val == i as u8
+                ),
+                "valid response {i} received"
+            );
 
             // Verify error status
             match pinned.as_mut().poll_next(&mut cx) {
                 Poll::Ready(Some(Err(actual_status))) => {
-                    assert_eq!(actual_status.code(), expected_status.code(),
-                        "error code preserved for status {i}");
-                    assert_eq!(actual_status.message(), expected_status.message(),
-                        "error message preserved for status {i}");
+                    assert_eq!(
+                        actual_status.code(),
+                        expected_status.code(),
+                        "error code preserved for status {i}"
+                    );
+                    assert_eq!(
+                        actual_status.message(),
+                        expected_status.message(),
+                        "error message preserved for status {i}"
+                    );
                 }
                 other => panic!("expected error status for {i}, got {other:?}"),
             }
         }
 
         // Stream should terminate properly after errors
-        assert!(matches!(
-            pinned.as_mut().poll_next(&mut cx),
-            Poll::Ready(None)
-        ), "stream terminates after error sequence");
+        assert!(
+            matches!(pinned.as_mut().poll_next(&mut cx), Poll::Ready(None)),
+            "stream terminates after error sequence"
+        );
 
         crate::test_complete!("conformance_server_streaming_detailed_status");
     }

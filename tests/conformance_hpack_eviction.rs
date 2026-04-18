@@ -93,10 +93,13 @@ fn test_dynamic_table_resize_to_zero_empties_table() {
     encoder.set_use_huffman(false);
 
     let mut buf = BytesMut::new();
-    encoder.encode(&[
-        Header::new("custom1", "value1"),
-        Header::new("custom2", "value2"),
-    ], &mut buf);
+    encoder.encode(
+        &[
+            Header::new("custom1", "value1"),
+            Header::new("custom2", "value2"),
+        ],
+        &mut buf,
+    );
 
     let mut encoded = buf.freeze();
     let headers = decoder.decode(&mut encoded).unwrap();
@@ -151,7 +154,10 @@ fn test_oversized_entry_not_inserted_table_cleared() {
     // "very-long-header-name" + "very-long-value" + 32
     // = 22 + 15 + 32 = 69 bytes > 50 byte table limit
     let mut buf2 = BytesMut::new();
-    encoder.encode(&[Header::new("very-long-header-name", "very-long-value")], &mut buf2);
+    encoder.encode(
+        &[Header::new("very-long-header-name", "very-long-value")],
+        &mut buf2,
+    );
     let mut encoded2 = buf2.freeze();
     let headers2 = decoder.decode(&mut encoded2).unwrap();
     assert_eq!(headers2.len(), 1); // Header is still returned in the decoded list
@@ -165,7 +171,10 @@ fn test_oversized_entry_not_inserted_table_cleared() {
     let result = decoder.decode(&mut test_bytes2);
 
     // Should fail because table was cleared when oversized entry was processed
-    assert!(result.is_err(), "Table should be cleared when oversized entry is inserted");
+    assert!(
+        result.is_err(),
+        "Table should be cleared when oversized entry is inserted"
+    );
 }
 
 /// Test that multiple resize SIGNAL bits are processed in order
@@ -178,10 +187,13 @@ fn test_multiple_resize_signals_processed_in_order() {
     encoder.set_use_huffman(false);
 
     let mut setup_buf = BytesMut::new();
-    encoder.encode(&[
-        Header::new("entry1", "value1"),
-        Header::new("entry2", "value2"),
-    ], &mut setup_buf);
+    encoder.encode(
+        &[
+            Header::new("entry1", "value1"),
+            Header::new("entry2", "value2"),
+        ],
+        &mut setup_buf,
+    );
 
     let mut setup_encoded = setup_buf.freeze();
     decoder.decode(&mut setup_encoded).unwrap();
@@ -218,8 +230,8 @@ fn test_multiple_resize_signals_simple() {
 
     // Use helper function for proper integer encoding
     encode_integer_helper(&mut buf, 1000, 5, 0x20); // Size update to 1000
-    encode_integer_helper(&mut buf, 500, 5, 0x20);  // Size update to 500
-    encode_integer_helper(&mut buf, 100, 5, 0x20);  // Size update to 100
+    encode_integer_helper(&mut buf, 500, 5, 0x20); // Size update to 500
+    encode_integer_helper(&mut buf, 100, 5, 0x20); // Size update to 100
 
     let mut encoded = buf.freeze();
     let headers = decoder.decode(&mut encoded).unwrap();
@@ -235,11 +247,11 @@ fn test_table_entry_size_calculation_rfc_formula() {
     // RFC 7541 Section 4.1: entry size = name.len() + value.len() + 32
 
     let test_cases = vec![
-        ("", ""),                           // Empty name/value: 0 + 0 + 32 = 32
-        ("a", "b"),                         // Single chars: 1 + 1 + 32 = 34
-        ("host", "example.com"),            // Common: 4 + 11 + 32 = 47
-        ("content-type", "text/html"),      // 12 + 9 + 32 = 53
-        ("custom-header", "custom-value"),  // 13 + 12 + 32 = 57
+        ("", ""),                          // Empty name/value: 0 + 0 + 32 = 32
+        ("a", "b"),                        // Single chars: 1 + 1 + 32 = 34
+        ("host", "example.com"),           // Common: 4 + 11 + 32 = 47
+        ("content-type", "text/html"),     // 12 + 9 + 32 = 53
+        ("custom-header", "custom-value"), // 13 + 12 + 32 = 57
     ];
 
     for (name, value) in &test_cases {
@@ -247,15 +259,19 @@ fn test_table_entry_size_calculation_rfc_formula() {
         let calculated_size = header.size();
         let manual_calculation = name.len() + value.len() + 32;
 
-        assert_eq!(calculated_size, manual_calculation,
+        assert_eq!(
+            calculated_size, manual_calculation,
             "Header::size() should match manual calculation for '{}'/'{}': {} vs {}",
-            name, value, calculated_size, manual_calculation);
+            name, value, calculated_size, manual_calculation
+        );
 
         // Verify the RFC 7541 Section 4.1 formula
         let expected_size = name.len() + value.len() + 32;
-        assert_eq!(calculated_size, expected_size,
+        assert_eq!(
+            calculated_size, expected_size,
             "Size calculation for '{}'/'{}' should be {}",
-            name, value, expected_size);
+            name, value, expected_size
+        );
     }
 }
 
@@ -263,10 +279,16 @@ fn test_table_entry_size_calculation_rfc_formula() {
 #[test]
 fn test_table_entry_size_calculation_longer_strings() {
     let test_cases = vec![
-        ("host", "example.com"),             // 4 + 11 + 32 = 47
+        ("host", "example.com"),              // 4 + 11 + 32 = 47
         ("content-type", "application/json"), // 12 + 16 + 32 = 60
-        ("authorization", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"), // 13 + 50 + 32 = 95
-        ("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"), // 10 + 68 + 32 = 110
+        (
+            "authorization",
+            "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        ), // 13 + 50 + 32 = 95
+        (
+            "user-agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        ), // 10 + 68 + 32 = 110
     ];
 
     for (name, value) in &test_cases {
@@ -274,8 +296,11 @@ fn test_table_entry_size_calculation_longer_strings() {
         let size = header.size();
         let expected = name.len() + value.len() + 32;
 
-        assert_eq!(size, expected,
-            "Size for '{}':'{}'should be {}", name, value, expected);
+        assert_eq!(
+            size, expected,
+            "Size for '{}':'{}'should be {}",
+            name, value, expected
+        );
 
         // Verify components
         assert_eq!(name.len() + value.len() + 32, size);
@@ -340,7 +365,10 @@ fn test_fifo_eviction_precise_sizes() {
     encode_integer_helper(&mut test_buf3, 64, 7, 0x80); // Index 64
     let mut test_bytes3 = test_buf3.freeze();
     let result3 = decoder.decode(&mut test_bytes3);
-    assert!(result3.is_err(), "h1 should have been evicted and index 64 should be invalid");
+    assert!(
+        result3.is_err(),
+        "h1 should have been evicted and index 64 should be invalid"
+    );
 }
 
 /// Test eviction boundary conditions
@@ -389,5 +417,8 @@ fn test_eviction_boundary_conditions() {
     encode_integer_helper(&mut test3, 64, 7, 0x80); // Index 64 should not exist
     let mut bytes3 = test3.freeze();
     let result3 = decoder.decode(&mut bytes3);
-    assert!(result3.is_err(), "Index 64 should be invalid after eviction");
+    assert!(
+        result3.is_err(),
+        "Index 64 should be invalid after eviction"
+    );
 }

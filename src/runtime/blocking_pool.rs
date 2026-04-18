@@ -2022,7 +2022,10 @@ mod tests {
             // Task 2 should be cancelled and not execute
             assert!(handle2.wait_timeout(Duration::from_secs(1))); // Should complete quickly (cancelled)
             assert!(handle2.is_cancelled());
-            assert!(!executed.load(Ordering::SeqCst), "Cancelled task should not execute");
+            assert!(
+                !executed.load(Ordering::SeqCst),
+                "Cancelled task should not execute"
+            );
 
             // Verify pool drains correctly
             assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
@@ -2052,7 +2055,10 @@ mod tests {
             assert!(handle_normal.wait_timeout(Duration::from_secs(5)));
 
             // Verify the normal task executed successfully
-            assert!(task_executed.load(Ordering::SeqCst), "Normal task should execute after panic");
+            assert!(
+                task_executed.load(Ordering::SeqCst),
+                "Normal task should execute after panic"
+            );
 
             // Verify pool is still operational after panic
             let handle_after_panic = pool.spawn(|| "still working");
@@ -2090,11 +2096,17 @@ mod tests {
             // Verify completion timing
             let end_time = Instant::now();
             let elapsed = end_time.duration_since(start_time);
-            assert!(elapsed >= Duration::from_millis(100), "Should wait at least 100ms");
+            assert!(
+                elapsed >= Duration::from_millis(100),
+                "Should wait at least 100ms"
+            );
 
             // Verify completion was signaled at the right time
             let recorded_completion = completion_time.lock().unwrap();
-            assert!(recorded_completion.is_some(), "Completion time should be recorded");
+            assert!(
+                recorded_completion.is_some(),
+                "Completion time should be recorded"
+            );
 
             // Test immediate completion check
             let instant_handle = pool.spawn(|| {});
@@ -2127,8 +2139,14 @@ mod tests {
             let elapsed = start_time.elapsed();
 
             // Should timeout in approximately 100ms
-            assert!(elapsed >= Duration::from_millis(90), "Should wait at least 90ms");
-            assert!(elapsed <= Duration::from_millis(200), "Should timeout within 200ms");
+            assert!(
+                elapsed >= Duration::from_millis(90),
+                "Should wait at least 90ms"
+            );
+            assert!(
+                elapsed <= Duration::from_millis(200),
+                "Should timeout within 200ms"
+            );
             assert!(!handle.is_done(), "Task should not be done after timeout");
 
             // Release the task
@@ -2178,7 +2196,10 @@ mod tests {
                 let handle = pool.spawn(move || {
                     // Record task start
                     tracker_clone.task_starts.fetch_add(1, Ordering::SeqCst);
-                    let current = tracker_clone.current_concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+                    let current = tracker_clone
+                        .current_concurrent
+                        .fetch_add(1, Ordering::SeqCst)
+                        + 1;
 
                     // Update max concurrent
                     let mut max = tracker_clone.max_concurrent.load(Ordering::SeqCst);
@@ -2201,7 +2222,9 @@ mod tests {
                     thread::sleep(Duration::from_millis(50));
 
                     // Record task end
-                    tracker_clone.current_concurrent.fetch_sub(1, Ordering::SeqCst);
+                    tracker_clone
+                        .current_concurrent
+                        .fetch_sub(1, Ordering::SeqCst);
                     tracker_clone.task_ends.fetch_add(1, Ordering::SeqCst);
                 });
 
@@ -2217,9 +2240,21 @@ mod tests {
             }
 
             // Verify budget accounting
-            assert_eq!(tracker.task_starts.load(Ordering::SeqCst), 3, "All tasks should start");
-            assert_eq!(tracker.task_ends.load(Ordering::SeqCst), 3, "All tasks should end");
-            assert_eq!(tracker.current_concurrent.load(Ordering::SeqCst), 0, "No tasks should be running");
+            assert_eq!(
+                tracker.task_starts.load(Ordering::SeqCst),
+                3,
+                "All tasks should start"
+            );
+            assert_eq!(
+                tracker.task_ends.load(Ordering::SeqCst),
+                3,
+                "All tasks should end"
+            );
+            assert_eq!(
+                tracker.current_concurrent.load(Ordering::SeqCst),
+                0,
+                "No tasks should be running"
+            );
 
             // Verify resource limits were respected (pool has max 4 threads, so max 3 concurrent is reasonable)
             let max_concurrent = tracker.max_concurrent.load(Ordering::SeqCst);
@@ -2309,7 +2344,10 @@ mod tests {
             });
 
             assert!(task_handle.wait_timeout(Duration::from_secs(5)));
-            assert!(executed.load(Ordering::SeqCst), "Handle-spawned task should execute");
+            assert!(
+                executed.load(Ordering::SeqCst),
+                "Handle-spawned task should execute"
+            );
 
             // Test handle priority spawning
             let priority_executed = Arc::new(AtomicBool::new(false));
@@ -2323,7 +2361,10 @@ mod tests {
             );
 
             assert!(priority_handle.wait_timeout(Duration::from_secs(5)));
-            assert!(priority_executed.load(Ordering::SeqCst), "Priority handle task should execute");
+            assert!(
+                priority_executed.load(Ordering::SeqCst),
+                "Priority handle task should execute"
+            );
 
             assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
         }
@@ -2399,12 +2440,18 @@ mod tests {
 
             // Pre-shutdown task should complete
             assert!(handle_pre.wait_timeout(Duration::from_secs(5)));
-            assert!(pre_shutdown_executed.load(Ordering::SeqCst), "Pre-shutdown task should execute");
+            assert!(
+                pre_shutdown_executed.load(Ordering::SeqCst),
+                "Pre-shutdown task should execute"
+            );
 
             // Post-shutdown task should be cancelled immediately
             assert!(handle_post.wait_timeout(Duration::from_secs(1))); // Should complete quickly (cancelled)
             assert!(handle_post.is_cancelled());
-            assert!(!post_shutdown_executed.load(Ordering::SeqCst), "Post-shutdown task should not execute");
+            assert!(
+                !post_shutdown_executed.load(Ordering::SeqCst),
+                "Post-shutdown task should not execute"
+            );
 
             // Complete shutdown
             assert!(pool.shutdown_and_wait(Duration::from_secs(5)));

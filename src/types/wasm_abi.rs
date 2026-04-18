@@ -3503,6 +3503,7 @@ pub fn is_valid_bootstrap_transition(from: NextjsBootstrapPhase, to: NextjsBoots
             NextjsBootstrapPhase::RuntimeReady
                 | NextjsBootstrapPhase::RuntimeFailed
                 | NextjsBootstrapPhase::ServerRendered
+                | NextjsBootstrapPhase::Hydrating
         ) | (
             NextjsBootstrapPhase::RuntimeReady | NextjsBootstrapPhase::RuntimeFailed,
             NextjsBootstrapPhase::Hydrating | NextjsBootstrapPhase::ServerRendered

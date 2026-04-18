@@ -784,16 +784,16 @@ mod tests {
     #[test]
     fn golden_timeout_with_custom_time_source() {
         set_test_time(1_000);
-        let mut timeout_service = Timeout::with_time_getter(
-            EchoService,
-            Duration::from_nanos(500),
-            test_time
-        );
+        let mut timeout_service =
+            Timeout::with_time_getter(EchoService, Duration::from_nanos(500), test_time);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         // Service should be ready
-        assert!(matches!(timeout_service.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            timeout_service.poll_ready(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
 
         // Call should succeed immediately since EchoService completes immediately
         let mut future = timeout_service.call(42);
@@ -808,16 +808,16 @@ mod tests {
     #[test]
     fn golden_timeout_deadline_from_custom_time() {
         set_test_time(2_000);
-        let mut timeout_service = Timeout::with_time_getter(
-            NeverService,
-            Duration::from_nanos(1_000),
-            test_time
-        );
+        let mut timeout_service =
+            Timeout::with_time_getter(NeverService, Duration::from_nanos(1_000), test_time);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         // Service should be ready
-        assert!(matches!(timeout_service.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            timeout_service.poll_ready(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
 
         // Call creates a future with deadline = start_time (2000) + duration (1000) = 3000
         let future = timeout_service.call(());
@@ -865,23 +865,20 @@ mod tests {
     #[test]
     fn golden_nested_timeout_inheritance() {
         // Create layered timeouts: outer (10ms) > inner (3ms) > never service
-        let inner_timeout = Timeout::with_time_getter(
-            NeverService,
-            Duration::from_millis(3),
-            test_time
-        );
+        let inner_timeout =
+            Timeout::with_time_getter(NeverService, Duration::from_millis(3), test_time);
 
-        let mut outer_timeout = Timeout::with_time_getter(
-            inner_timeout,
-            Duration::from_millis(10),
-            test_time
-        );
+        let mut outer_timeout =
+            Timeout::with_time_getter(inner_timeout, Duration::from_millis(10), test_time);
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         // Both services should be ready
-        assert!(matches!(outer_timeout.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            outer_timeout.poll_ready(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
 
         // Start the nested timeout at time 1000
         set_test_time(1_000_000_000); // 1000ms in nanos
@@ -901,8 +898,11 @@ mod tests {
         match result {
             Poll::Ready(Err(TimeoutError::Elapsed(elapsed))) => {
                 let expected_inner_deadline = start_time.saturating_add_nanos(3_000_000_000);
-                assert_eq!(elapsed.deadline(), expected_inner_deadline,
-                    "Should timeout at inner deadline (3s), not outer (10s)");
+                assert_eq!(
+                    elapsed.deadline(),
+                    expected_inner_deadline,
+                    "Should timeout at inner deadline (3s), not outer (10s)"
+                );
             }
             other => panic!("Expected inner timeout, got: {:?}", other),
         }
