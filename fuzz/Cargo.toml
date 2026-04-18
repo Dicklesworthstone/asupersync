@@ -762,3 +762,10 @@ path = "fuzz_targets/h2_hpack.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "length_delimited"
+path = "fuzz_targets/length_delimited.rs"
+test = false
+doc = false
+bench = false
