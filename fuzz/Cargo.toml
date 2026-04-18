@@ -527,3 +527,45 @@ path = "fuzz_targets/protobuf_fuzzing.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_progress_certificate_math"
+path = "fuzz_targets/progress_certificate_math.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_macaroon_attenuation_chain"
+path = "fuzz_targets/macaroon_attenuation_chain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_quic_forensic_log"
+path = "fuzz_targets/quic_forensic_log.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_raptorq_codec_pipeline"
+path = "fuzz_targets/raptorq_codec_pipeline.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h3_error_parsing"
+path = "fuzz_targets/h3_error_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_oneshot_drop_race"
+path = "fuzz_targets/oneshot_drop_race.rs"
+test = false
+doc = false
+bench = false

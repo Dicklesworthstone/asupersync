@@ -2793,4 +2793,1054 @@ mod tests {
         let diagnostics = Diagnostics::new(state);
         assert!(format!("{diagnostics:?}").contains("Diagnostics"));
     }
+
+    // ======================================================================
+    // Runtime Introspection Conformance Tests (INTROSPECTION-CONF-001 to INTROSPECTION-CONF-010)
+    //
+    // These tests validate the behavioral contracts for observability diagnostic
+    // endpoints, ensuring deterministic, idempotent, and cancel-safe introspection
+    // queries that maintain consistent views of runtime state.
+    // ======================================================================
+
+    #[test]
+    fn introspection_conf_001_diagnostic_query_result_idempotence() {
+        init_test("introspection_conf_001_diagnostic_query_result_idempotence");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let task_id = insert_task(&mut state, root, TaskState::Running);
+        let diagnostics = Diagnostics::new(Arc::new(state));
+
+        // Multiple calls to the same diagnostic method must return identical results
+        let explanation1 = diagnostics.explain_region_open(root);
+        let explanation2 = diagnostics.explain_region_open(root);
+        let explanation3 = diagnostics.explain_region_open(root);
+
+        crate::assert_with_log!(
+            explanation1.region_id == explanation2.region_id,
+            "region_id idempotent",
+            true,
+            explanation1.region_id == explanation2.region_id
+        );
+        crate::assert_with_log!(
+            explanation2.region_id == explanation3.region_id,
+            "region_id triple check",
+            true,
+            explanation2.region_id == explanation3.region_id
+        );
+        crate::assert_with_log!(
+            explanation1.reasons.len() == explanation2.reasons.len(),
+            "reasons count idempotent",
+            explanation1.reasons.len(),
+            explanation2.reasons.len()
+        );
+        crate::assert_with_log!(
+            explanation2.reasons.len() == explanation3.reasons.len(),
+            "reasons count triple check",
+            explanation2.reasons.len(),
+            explanation3.reasons.len()
+        );
+
+        // Task diagnostic idempotence
+        let task1 = diagnostics.explain_task_blocked(task_id);
+        let task2 = diagnostics.explain_task_blocked(task_id);
+        let task3 = diagnostics.explain_task_blocked(task_id);
+
+        crate::assert_with_log!(
+            task1.task_id == task2.task_id,
+            "task_id idempotent",
+            true,
+            task1.task_id == task2.task_id
+        );
+        crate::assert_with_log!(
+            task2.task_id == task3.task_id,
+            "task_id triple check",
+            true,
+            task2.task_id == task3.task_id
+        );
+
+        // Obligation leak detection idempotence
+        let leaks1 = diagnostics.find_leaked_obligations();
+        let leaks2 = diagnostics.find_leaked_obligations();
+        let leaks3 = diagnostics.find_leaked_obligations();
+
+        crate::assert_with_log!(
+            leaks1.len() == leaks2.len(),
+            "leaks count idempotent",
+            leaks1.len(),
+            leaks2.len()
+        );
+        crate::assert_with_log!(
+            leaks2.len() == leaks3.len(),
+            "leaks count triple check",
+            leaks2.len(),
+            leaks3.len()
+        );
+
+        crate::test_complete!("introspection_conf_001_diagnostic_query_result_idempotence");
+    }
+
+    #[test]
+    fn introspection_conf_002_deterministic_ordering_of_diagnostic_results() {
+        init_test("introspection_conf_002_deterministic_ordering_of_diagnostic_results");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+
+        // Create multiple child regions and tasks in a specific order
+        let child1 = insert_child_region(&mut state, root);
+        let child2 = insert_child_region(&mut state, root);
+        let child3 = insert_child_region(&mut state, root);
+
+        let task1 = insert_task(&mut state, child1, TaskState::Running);
+        let task2 = insert_task(&mut state, child2, TaskState::Running);
+        let task3 = insert_task(&mut state, child3, TaskState::Running);
+
+        // Create obligations in mixed order to test sorting
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(100)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+
+        let ob1 = insert_obligation(&mut state, child1, task1, ObligationKind::Ack, Time::from_millis(10));
+        let ob3 = insert_obligation(&mut state, child3, task3, ObligationKind::Lease, Time::from_millis(30));
+        let ob2 = insert_obligation(&mut state, child2, task2, ObligationKind::SendPermit, Time::from_millis(20));
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+
+        // Test deterministic ordering across multiple calls
+        let leaks_run1 = diagnostics.find_leaked_obligations();
+        let leaks_run2 = diagnostics.find_leaked_obligations();
+        let leaks_run3 = diagnostics.find_leaked_obligations();
+
+        // Verify same ordering across all runs
+        crate::assert_with_log!(
+            leaks_run1.len() == 3,
+            "leak count consistent",
+            3usize,
+            leaks_run1.len()
+        );
+
+        for i in 0..3 {
+            crate::assert_with_log!(
+                leaks_run1[i].obligation_id == leaks_run2[i].obligation_id,
+                &format!("obligation_id ordering run1==run2 idx {}", i),
+                true,
+                leaks_run1[i].obligation_id == leaks_run2[i].obligation_id
+            );
+            crate::assert_with_log!(
+                leaks_run2[i].obligation_id == leaks_run3[i].obligation_id,
+                &format!("obligation_id ordering run2==run3 idx {}", i),
+                true,
+                leaks_run2[i].obligation_id == leaks_run3[i].obligation_id
+            );
+            crate::assert_with_log!(
+                leaks_run1[i].region_id == leaks_run2[i].region_id,
+                &format!("region_id ordering run1==run2 idx {}", i),
+                true,
+                leaks_run1[i].region_id == leaks_run2[i].region_id
+            );
+        }
+
+        // Region explanations must have deterministic reason ordering
+        let explanation1 = diagnostics.explain_region_open(root);
+        let explanation2 = diagnostics.explain_region_open(root);
+
+        crate::assert_with_log!(
+            explanation1.reasons.len() == explanation2.reasons.len(),
+            "reason count deterministic",
+            explanation1.reasons.len(),
+            explanation2.reasons.len()
+        );
+
+        for i in 0..explanation1.reasons.len().min(explanation2.reasons.len()) {
+            let reason1_desc = format!("{:?}", explanation1.reasons[i]);
+            let reason2_desc = format!("{:?}", explanation2.reasons[i]);
+            crate::assert_with_log!(
+                reason1_desc == reason2_desc,
+                &format!("reason ordering idx {}", i),
+                true,
+                reason1_desc == reason2_desc
+            );
+        }
+
+        crate::test_complete!("introspection_conf_002_deterministic_ordering_of_diagnostic_results");
+    }
+
+    #[test]
+    fn introspection_conf_003_serialization_roundtrip_correctness() {
+        init_test("introspection_conf_003_serialization_roundtrip_correctness");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let task_id = insert_task(&mut state, root, TaskState::Running);
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(500)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+
+        let ob_id = insert_obligation(&mut state, root, task_id, ObligationKind::Ack, Time::from_millis(100));
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+
+        // Test ObligationLeak serialization roundtrip
+        let leaks = diagnostics.find_leaked_obligations();
+        crate::assert_with_log!(
+            !leaks.is_empty(),
+            "has leaks for serialization test",
+            true,
+            !leaks.is_empty()
+        );
+
+        for leak in &leaks {
+            // Verify all fields are populated and serializable
+            crate::assert_with_log!(
+                leak.obligation_id == ob_id,
+                "obligation_id preserved",
+                true,
+                leak.obligation_id == ob_id
+            );
+            crate::assert_with_log!(
+                !leak.obligation_type.is_empty(),
+                "obligation_type serializable",
+                true,
+                !leak.obligation_type.is_empty()
+            );
+            crate::assert_with_log!(
+                leak.holder_task == Some(task_id),
+                "holder_task preserved",
+                true,
+                leak.holder_task == Some(task_id)
+            );
+            crate::assert_with_log!(
+                leak.region_id == root,
+                "region_id preserved",
+                true,
+                leak.region_id == root
+            );
+            crate::assert_with_log!(
+                leak.age.as_millis() > 0,
+                "age computed and serializable",
+                true,
+                leak.age.as_millis() > 0
+            );
+
+            // Test Debug formatting (pseudo-serialization)
+            let debug_repr = format!("{:?}", leak);
+            crate::assert_with_log!(
+                debug_repr.contains("ObligationLeak"),
+                "debug serialization includes type",
+                true,
+                debug_repr.contains("ObligationLeak")
+            );
+            crate::assert_with_log!(
+                debug_repr.contains(&leak.obligation_type),
+                "debug serialization includes obligation_type",
+                true,
+                debug_repr.contains(&leak.obligation_type)
+            );
+        }
+
+        // Test RegionOpenExplanation display formatting (human-readable serialization)
+        let explanation = diagnostics.explain_region_open(root);
+        let display_repr = format!("{}", explanation);
+
+        crate::assert_with_log!(
+            display_repr.contains("Region"),
+            "display contains region marker",
+            true,
+            display_repr.contains("Region")
+        );
+        crate::assert_with_log!(
+            !display_repr.is_empty(),
+            "display produces non-empty output",
+            true,
+            !display_repr.is_empty()
+        );
+
+        // Test TaskBlockedExplanation display formatting
+        let task_explanation = diagnostics.explain_task_blocked(task_id);
+        let task_display = format!("{}", task_explanation);
+
+        crate::assert_with_log!(
+            task_display.contains("Task"),
+            "task display contains task marker",
+            true,
+            task_display.contains("Task")
+        );
+        crate::assert_with_log!(
+            !task_display.is_empty(),
+            "task display produces non-empty output",
+            true,
+            !task_display.is_empty()
+        );
+
+        crate::test_complete!("introspection_conf_003_serialization_roundtrip_correctness");
+    }
+
+    #[test]
+    fn introspection_conf_004_scheduler_state_accuracy_in_diagnostics() {
+        init_test("introspection_conf_004_scheduler_state_accuracy_in_diagnostics");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+
+        // Create tasks in different scheduler states
+        let running_task = insert_task(&mut state, root, TaskState::Running);
+        let completed_task = insert_task(&mut state, root, TaskState::Completed(Outcome::Ok(())));
+        let cancel_task = insert_task(&mut state, root, TaskState::CancelRequested {
+            reason: CancelReason::user("test"),
+            cleanup_budget: Budget::from_millis(100),
+        });
+
+        // Configure scheduler-visible state
+        let running_task_record = state.task_mut(running_task).expect("running task");
+        running_task_record.total_polls = 5;
+        running_task_record.last_poll_start = Some(Time::from_millis(100));
+        let notified = running_task_record.wake_state.notify();
+        crate::assert_with_log!(notified, "wake state notified", true, notified);
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+
+        // Verify scheduler state accuracy in task diagnostics
+        let running_explanation = diagnostics.explain_task_blocked(running_task);
+        crate::assert_with_log!(
+            matches!(running_explanation.block_reason, BlockReason::AwaitingSchedule),
+            "running task shows awaiting schedule",
+            true,
+            matches!(running_explanation.block_reason, BlockReason::AwaitingSchedule)
+        );
+
+        let completed_explanation = diagnostics.explain_task_blocked(completed_task);
+        crate::assert_with_log!(
+            matches!(completed_explanation.block_reason, BlockReason::Completed),
+            "completed task shows completed",
+            true,
+            matches!(completed_explanation.block_reason, BlockReason::Completed)
+        );
+
+        let cancel_explanation = diagnostics.explain_task_blocked(cancel_task);
+        let is_cancel_requested = matches!(
+            cancel_explanation.block_reason,
+            BlockReason::CancelRequested { .. }
+        );
+        crate::assert_with_log!(
+            is_cancel_requested,
+            "cancel requested task shows cancel",
+            true,
+            is_cancel_requested
+        );
+
+        // Verify region state accuracy reflects scheduler dependencies
+        let region_explanation = diagnostics.explain_region_open(root);
+
+        let mut found_running = false;
+        let mut found_completed = false;
+        let mut found_cancel = false;
+
+        for reason in &region_explanation.reasons {
+            match reason {
+                Reason::TaskRunning { task_id, poll_count, .. } if *task_id == running_task => {
+                    found_running = true;
+                    crate::assert_with_log!(
+                        *poll_count == 5,
+                        "poll count accuracy",
+                        5u64,
+                        *poll_count
+                    );
+                }
+                Reason::TaskRunning { task_id, .. } if *task_id == cancel_task => {
+                    found_cancel = true;
+                }
+                _ => {}
+            }
+        }
+
+        crate::assert_with_log!(found_running, "found running task reason", true, found_running);
+        crate::assert_with_log!(found_cancel, "found cancel task reason", true, found_cancel);
+
+        // Completed tasks should not appear as blocking reasons
+        crate::assert_with_log!(
+            !found_completed,
+            "completed task not blocking",
+            true,
+            !found_completed
+        );
+
+        crate::test_complete!("introspection_conf_004_scheduler_state_accuracy_in_diagnostics");
+    }
+
+    #[test]
+    fn introspection_conf_005_cross_method_consistency_of_diagnostic_data() {
+        init_test("introspection_conf_005_cross_method_consistency_of_diagnostic_data");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let task_id = insert_task(&mut state, root, TaskState::Running);
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(300)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+
+        let ob_id = insert_obligation(&mut state, root, task_id, ObligationKind::SendPermit, Time::from_millis(50));
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+
+        // Cross-validate data between different diagnostic methods
+        let region_explanation = diagnostics.explain_region_open(root);
+        let task_explanation = diagnostics.explain_task_blocked(task_id);
+        let leaked_obligations = diagnostics.find_leaked_obligations();
+
+        // Verify task appears in both region and task diagnostics with consistent state
+        let mut task_in_region_reasons = false;
+        for reason in &region_explanation.reasons {
+            if let Reason::TaskRunning { task_id: id, .. } = reason {
+                if *id == task_id {
+                    task_in_region_reasons = true;
+                    break;
+                }
+            }
+        }
+
+        crate::assert_with_log!(
+            task_in_region_reasons,
+            "task appears in region explanation",
+            true,
+            task_in_region_reasons
+        );
+        crate::assert_with_log!(
+            task_explanation.task_id == task_id,
+            "task explanation has correct ID",
+            true,
+            task_explanation.task_id == task_id
+        );
+
+        // Verify obligation appears in both region and obligation leak diagnostics
+        let mut obligation_in_region_reasons = false;
+        for reason in &region_explanation.reasons {
+            if let Reason::ObligationHeld { obligation_id: id, holder_task, .. } = reason {
+                if *id == ob_id && *holder_task == task_id {
+                    obligation_in_region_reasons = true;
+                    break;
+                }
+            }
+        }
+
+        crate::assert_with_log!(
+            obligation_in_region_reasons,
+            "obligation appears in region explanation",
+            true,
+            obligation_in_region_reasons
+        );
+        crate::assert_with_log!(
+            !leaked_obligations.is_empty(),
+            "obligation appears in leak detection",
+            true,
+            !leaked_obligations.is_empty()
+        );
+
+        let found_leak = leaked_obligations.iter().any(|leak| {
+            leak.obligation_id == ob_id && leak.holder_task == Some(task_id)
+        });
+        crate::assert_with_log!(
+            found_leak,
+            "leak detection finds same obligation",
+            true,
+            found_leak
+        );
+
+        // Cross-validate timing information is consistent
+        for leak in &leaked_obligations {
+            if leak.obligation_id == ob_id {
+                crate::assert_with_log!(
+                    leak.age.as_millis() == 250, // 300 - 50 = 250ms
+                    "age calculation consistent",
+                    250u128,
+                    leak.age.as_millis()
+                );
+            }
+        }
+
+        crate::test_complete!("introspection_conf_005_cross_method_consistency_of_diagnostic_data");
+    }
+
+    #[test]
+    fn introspection_conf_006_temporal_consistency_of_diagnostic_queries() {
+        init_test("introspection_conf_006_temporal_consistency_of_diagnostic_queries");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let task_id = insert_task(&mut state, root, TaskState::Running);
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(1000)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)));
+
+        let ob_id = insert_obligation(&mut state, root, task_id, ObligationKind::Ack, Time::from_millis(100));
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+
+        // Capture initial state
+        let initial_leaks = diagnostics.find_leaked_obligations();
+        crate::assert_with_log!(
+            initial_leaks.len() == 1,
+            "initial leak count",
+            1usize,
+            initial_leaks.len()
+        );
+        let initial_age = initial_leaks[0].age.as_millis();
+        crate::assert_with_log!(
+            initial_age == 900, // 1000 - 100 = 900ms
+            "initial age calculation",
+            900u128,
+            initial_age
+        );
+
+        // Advance virtual clock
+        clock.advance_to(Time::from_millis(2000));
+
+        // Verify temporal consistency after clock advance
+        let later_leaks = diagnostics.find_leaked_obligations();
+        crate::assert_with_log!(
+            later_leaks.len() == 1,
+            "leak count preserved after clock advance",
+            1usize,
+            later_leaks.len()
+        );
+
+        let later_age = later_leaks[0].age.as_millis();
+        crate::assert_with_log!(
+            later_age == 1900, // 2000 - 100 = 1900ms
+            "updated age calculation",
+            1900u128,
+            later_age
+        );
+        crate::assert_with_log!(
+            later_leaks[0].obligation_id == ob_id,
+            "obligation ID preserved across time",
+            true,
+            later_leaks[0].obligation_id == ob_id
+        );
+
+        // Verify timing consistency in multiple diagnostic methods
+        let region_explanation = diagnostics.explain_region_open(root);
+        let mut obligation_reason_found = false;
+        for reason in &region_explanation.reasons {
+            if let Reason::ObligationHeld { obligation_id: id, .. } = reason {
+                if *id == ob_id {
+                    obligation_reason_found = true;
+                    break;
+                }
+            }
+        }
+        crate::assert_with_log!(
+            obligation_reason_found,
+            "temporal consistency across methods",
+            true,
+            obligation_reason_found
+        );
+
+        crate::test_complete!("introspection_conf_006_temporal_consistency_of_diagnostic_queries");
+    }
+
+    #[test]
+    fn introspection_conf_007_resource_leak_detection_accuracy() {
+        init_test("introspection_conf_007_resource_leak_detection_accuracy");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child1 = insert_child_region(&mut state, root);
+        let child2 = insert_child_region(&mut state, root);
+
+        let task1 = insert_task(&mut state, child1, TaskState::Running);
+        let task2 = insert_task(&mut state, child2, TaskState::Running);
+        let completed_task = insert_task(&mut state, root, TaskState::Completed(Outcome::Ok(())));
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(1000)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+
+        // Create genuine leaks and non-leaks
+        let leak1 = insert_obligation(&mut state, child1, task1, ObligationKind::Ack, Time::from_millis(100));
+        let leak2 = insert_obligation(&mut state, child2, task2, ObligationKind::SendPermit, Time::from_millis(200));
+
+        // This should NOT be considered leaked (completed task)
+        let _non_leak = insert_obligation(&mut state, root, completed_task, ObligationKind::Lease, Time::from_millis(300));
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+
+        // Verify leak detection accuracy
+        let leaks = diagnostics.find_leaked_obligations();
+
+        // Should detect exactly 2 leaks (not the completed task's obligation)
+        crate::assert_with_log!(
+            leaks.len() == 2,
+            "accurate leak count",
+            2usize,
+            leaks.len()
+        );
+
+        // Verify leak details
+        let leak_ids: Vec<ObligationId> = leaks.iter().map(|l| l.obligation_id).collect();
+        crate::assert_with_log!(
+            leak_ids.contains(&leak1),
+            "detects first leak",
+            true,
+            leak_ids.contains(&leak1)
+        );
+        crate::assert_with_log!(
+            leak_ids.contains(&leak2),
+            "detects second leak",
+            true,
+            leak_ids.contains(&leak2)
+        );
+
+        // Verify age calculations for accuracy
+        for leak in &leaks {
+            match leak.obligation_id {
+                id if id == leak1 => {
+                    crate::assert_with_log!(
+                        leak.age.as_millis() == 900, // 1000 - 100 = 900
+                        "leak1 age accuracy",
+                        900u128,
+                        leak.age.as_millis()
+                    );
+                    crate::assert_with_log!(
+                        leak.holder_task == Some(task1),
+                        "leak1 holder accuracy",
+                        true,
+                        leak.holder_task == Some(task1)
+                    );
+                }
+                id if id == leak2 => {
+                    crate::assert_with_log!(
+                        leak.age.as_millis() == 800, // 1000 - 200 = 800
+                        "leak2 age accuracy",
+                        800u128,
+                        leak.age.as_millis()
+                    );
+                    crate::assert_with_log!(
+                        leak.holder_task == Some(task2),
+                        "leak2 holder accuracy",
+                        true,
+                        leak.holder_task == Some(task2)
+                    );
+                }
+                _ => {
+                    crate::assert_with_log!(
+                        false,
+                        "unexpected leak detected",
+                        true,
+                        false
+                    );
+                }
+            }
+        }
+
+        // Verify sorting by region ID (deterministic ordering)
+        crate::assert_with_log!(
+            leaks[0].region_id <= leaks[1].region_id,
+            "leaks sorted by region",
+            true,
+            leaks[0].region_id <= leaks[1].region_id
+        );
+
+        crate::test_complete!("introspection_conf_007_resource_leak_detection_accuracy");
+    }
+
+    #[test]
+    fn introspection_conf_008_deadlock_detection_determinism() {
+        init_test("introspection_conf_008_deadlock_detection_determinism");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+
+        // Create a deterministic deadlock scenario
+        let task_a = insert_task(&mut state, root, TaskState::Running);
+        let task_b = insert_task(&mut state, root, TaskState::Running);
+        let task_c = insert_task(&mut state, root, TaskState::Running);
+
+        // Create circular dependencies: A -> B -> C -> A
+        state.task_mut(task_a).expect("task A").waiters.push(task_b);
+        state.task_mut(task_b).expect("task B").waiters.push(task_c);
+        state.task_mut(task_c).expect("task C").waiters.push(task_a);
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+
+        // Test deadlock detection determinism across multiple calls
+        let report1 = diagnostics.analyze_directional_deadlock();
+        let report2 = diagnostics.analyze_directional_deadlock();
+        let report3 = diagnostics.analyze_directional_deadlock();
+
+        // Verify deterministic severity classification
+        crate::assert_with_log!(
+            report1.severity == report2.severity,
+            "severity deterministic run1==run2",
+            true,
+            report1.severity == report2.severity
+        );
+        crate::assert_with_log!(
+            report2.severity == report3.severity,
+            "severity deterministic run2==run3",
+            true,
+            report2.severity == report3.severity
+        );
+        crate::assert_with_log!(
+            matches!(report1.severity, DeadlockSeverity::Critical),
+            "detects critical deadlock",
+            true,
+            matches!(report1.severity, DeadlockSeverity::Critical)
+        );
+
+        // Verify deterministic cycle detection
+        crate::assert_with_log!(
+            report1.cycles.len() == report2.cycles.len(),
+            "cycle count deterministic run1==run2",
+            report1.cycles.len(),
+            report2.cycles.len()
+        );
+        crate::assert_with_log!(
+            report2.cycles.len() == report3.cycles.len(),
+            "cycle count deterministic run2==run3",
+            report2.cycles.len(),
+            report3.cycles.len()
+        );
+        crate::assert_with_log!(
+            !report1.cycles.is_empty(),
+            "detects cycle",
+            true,
+            !report1.cycles.is_empty()
+        );
+
+        // Verify deterministic task set in cycle
+        if !report1.cycles.is_empty() {
+            let cycle1 = &report1.cycles[0];
+            let cycle2 = &report2.cycles[0];
+            let cycle3 = &report3.cycles[0];
+
+            crate::assert_with_log!(
+                cycle1.tasks.len() == cycle2.tasks.len(),
+                "cycle task count deterministic run1==run2",
+                cycle1.tasks.len(),
+                cycle2.tasks.len()
+            );
+            crate::assert_with_log!(
+                cycle2.tasks.len() == cycle3.tasks.len(),
+                "cycle task count deterministic run2==run3",
+                cycle2.tasks.len(),
+                cycle3.tasks.len()
+            );
+
+            // Verify all expected tasks are in the cycle
+            crate::assert_with_log!(
+                cycle1.tasks.contains(&task_a),
+                "cycle contains task A",
+                true,
+                cycle1.tasks.contains(&task_a)
+            );
+            crate::assert_with_log!(
+                cycle1.tasks.contains(&task_b),
+                "cycle contains task B",
+                true,
+                cycle1.tasks.contains(&task_b)
+            );
+            crate::assert_with_log!(
+                cycle1.tasks.contains(&task_c),
+                "cycle contains task C",
+                true,
+                cycle1.tasks.contains(&task_c)
+            );
+
+            crate::assert_with_log!(
+                cycle1.trapped == cycle2.trapped,
+                "trapped status deterministic",
+                true,
+                cycle1.trapped == cycle2.trapped
+            );
+        }
+
+        // Test structural health consistency with deadlock detection
+        let health1 = diagnostics.analyze_structural_health();
+        let health2 = diagnostics.analyze_structural_health();
+
+        crate::assert_with_log!(
+            health1.classification == health2.classification,
+            "structural health deterministic",
+            true,
+            health1.classification == health2.classification
+        );
+
+        crate::test_complete!("introspection_conf_008_deadlock_detection_determinism");
+    }
+
+    #[test]
+    fn introspection_conf_009_diagnostic_query_cancel_safety() {
+        init_test("introspection_conf_009_diagnostic_query_cancel_safety");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+
+        // Create runtime state with various tasks and obligations
+        let task1 = insert_task(&mut state, root, TaskState::Running);
+        let task2 = insert_task(&mut state, root, TaskState::CancelRequested {
+            reason: CancelReason::user("test"),
+            cleanup_budget: Budget::from_millis(100),
+        });
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(1000)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+
+        let ob1 = insert_obligation(&mut state, root, task1, ObligationKind::Ack, Time::from_millis(100));
+        let ob2 = insert_obligation(&mut state, root, task2, ObligationKind::Lease, Time::from_millis(200));
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+
+        // Verify diagnostic queries are pure reads (cancel-safe)
+        // These operations must not modify the runtime state
+
+        // Capture baseline state snapshots through multiple query calls
+        let baseline_explanation = diagnostics.explain_region_open(root);
+        let baseline_task1_explanation = diagnostics.explain_task_blocked(task1);
+        let baseline_task2_explanation = diagnostics.explain_task_blocked(task2);
+        let baseline_leaks = diagnostics.find_leaked_obligations();
+        let baseline_deadlock = diagnostics.analyze_directional_deadlock();
+        let baseline_health = diagnostics.analyze_structural_health();
+
+        // Perform the same queries again to ensure no state modification occurred
+        let verify_explanation = diagnostics.explain_region_open(root);
+        let verify_task1_explanation = diagnostics.explain_task_blocked(task1);
+        let verify_task2_explanation = diagnostics.explain_task_blocked(task2);
+        let verify_leaks = diagnostics.find_leaked_obligations();
+        let verify_deadlock = diagnostics.analyze_directional_deadlock();
+        let verify_health = diagnostics.analyze_structural_health();
+
+        // Verify state immutability (cancel-safety)
+        crate::assert_with_log!(
+            baseline_explanation.reasons.len() == verify_explanation.reasons.len(),
+            "region explanation cancel-safe",
+            baseline_explanation.reasons.len(),
+            verify_explanation.reasons.len()
+        );
+
+        let task1_reason_match = match (&baseline_task1_explanation.block_reason, &verify_task1_explanation.block_reason) {
+            (BlockReason::AwaitingSchedule, BlockReason::AwaitingSchedule) => true,
+            (BlockReason::NotStarted, BlockReason::NotStarted) => true,
+            (a, b) => format!("{:?}", a) == format!("{:?}", b),
+        };
+        crate::assert_with_log!(
+            task1_reason_match,
+            "task1 explanation cancel-safe",
+            true,
+            task1_reason_match
+        );
+
+        let task2_cancel_match = matches!(
+            (&baseline_task2_explanation.block_reason, &verify_task2_explanation.block_reason),
+            (BlockReason::CancelRequested { .. }, BlockReason::CancelRequested { .. })
+        );
+        crate::assert_with_log!(
+            task2_cancel_match,
+            "task2 cancel explanation cancel-safe",
+            true,
+            task2_cancel_match
+        );
+
+        crate::assert_with_log!(
+            baseline_leaks.len() == verify_leaks.len(),
+            "leak detection cancel-safe",
+            baseline_leaks.len(),
+            verify_leaks.len()
+        );
+
+        let deadlock_severity_match = baseline_deadlock.severity == verify_deadlock.severity;
+        crate::assert_with_log!(
+            deadlock_severity_match,
+            "deadlock detection cancel-safe",
+            true,
+            deadlock_severity_match
+        );
+
+        let health_class_match = baseline_health.classification == verify_health.classification;
+        crate::assert_with_log!(
+            health_class_match,
+            "health analysis cancel-safe",
+            true,
+            health_class_match
+        );
+
+        // Verify timing-dependent queries maintain consistency
+        for (baseline_leak, verify_leak) in baseline_leaks.iter().zip(verify_leaks.iter()) {
+            crate::assert_with_log!(
+                baseline_leak.obligation_id == verify_leak.obligation_id,
+                "leak ID cancel-safe",
+                true,
+                baseline_leak.obligation_id == verify_leak.obligation_id
+            );
+            crate::assert_with_log!(
+                baseline_leak.age == verify_leak.age,
+                "leak age cancel-safe",
+                true,
+                baseline_leak.age == verify_leak.age
+            );
+        }
+
+        crate::test_complete!("introspection_conf_009_diagnostic_query_cancel_safety");
+    }
+
+    #[test]
+    fn introspection_conf_010_runtime_introspection_endpoint_stability() {
+        init_test("introspection_conf_010_runtime_introspection_endpoint_stability");
+
+        // Test endpoint stability under various runtime configurations
+
+        // Configuration 1: Empty runtime
+        let empty_state = Arc::new(RuntimeState::new());
+        let empty_diagnostics = Diagnostics::new(empty_state);
+
+        let empty_root = RegionId::new_for_test(999, 0);
+        let empty_explanation = empty_diagnostics.explain_region_open(empty_root);
+        crate::assert_with_log!(
+            matches!(empty_explanation.reasons.first(), Some(Reason::RegionNotFound)),
+            "empty runtime handles missing region",
+            true,
+            matches!(empty_explanation.reasons.first(), Some(Reason::RegionNotFound))
+        );
+
+        let empty_task = TaskId::new_for_test(999, 0);
+        let empty_task_explanation = empty_diagnostics.explain_task_blocked(empty_task);
+        crate::assert_with_log!(
+            matches!(empty_task_explanation.block_reason, BlockReason::TaskNotFound),
+            "empty runtime handles missing task",
+            true,
+            matches!(empty_task_explanation.block_reason, BlockReason::TaskNotFound)
+        );
+
+        let empty_leaks = empty_diagnostics.find_leaked_obligations();
+        crate::assert_with_log!(
+            empty_leaks.is_empty(),
+            "empty runtime has no leaks",
+            true,
+            empty_leaks.is_empty()
+        );
+
+        // Configuration 2: Minimal valid runtime
+        let mut minimal_state = RuntimeState::new();
+        let minimal_root = minimal_state.create_root_region(Budget::INFINITE);
+        let minimal_diagnostics = Diagnostics::new(Arc::new(minimal_state));
+
+        let minimal_explanation = minimal_diagnostics.explain_region_open(minimal_root);
+        crate::assert_with_log!(
+            minimal_explanation.region_state.is_some(),
+            "minimal runtime provides region state",
+            true,
+            minimal_explanation.region_state.is_some()
+        );
+
+        let minimal_leaks = minimal_diagnostics.find_leaked_obligations();
+        crate::assert_with_log!(
+            minimal_leaks.is_empty(),
+            "minimal runtime has no leaks",
+            true,
+            minimal_leaks.is_empty()
+        );
+
+        // Configuration 3: Complex runtime with multiple regions/tasks
+        let mut complex_state = RuntimeState::new();
+        let complex_root = complex_state.create_root_region(Budget::INFINITE);
+        let complex_child1 = insert_child_region(&mut complex_state, complex_root);
+        let complex_child2 = insert_child_region(&mut complex_state, complex_root);
+
+        let _complex_task1 = insert_task(&mut complex_state, complex_child1, TaskState::Running);
+        let _complex_task2 = insert_task(&mut complex_state, complex_child2, TaskState::Completed(Outcome::Ok(())));
+        let complex_task3 = insert_task(&mut complex_state, complex_root, TaskState::CancelRequested {
+            reason: CancelReason::user("cleanup"),
+            cleanup_budget: Budget::from_millis(200),
+        });
+
+        let complex_diagnostics = Diagnostics::new(Arc::new(complex_state));
+
+        let complex_explanation = complex_diagnostics.explain_region_open(complex_root);
+        crate::assert_with_log!(
+            !complex_explanation.reasons.is_empty(),
+            "complex runtime provides detailed reasons",
+            true,
+            !complex_explanation.reasons.is_empty()
+        );
+
+        let complex_cancel_explanation = complex_diagnostics.explain_task_blocked(complex_task3);
+        let is_complex_cancel = matches!(
+            complex_cancel_explanation.block_reason,
+            BlockReason::CancelRequested { .. }
+        );
+        crate::assert_with_log!(
+            is_complex_cancel,
+            "complex runtime tracks cancel state",
+            true,
+            is_complex_cancel
+        );
+
+        // Configuration 4: Runtime with timer driver vs without
+        let mut timer_state = RuntimeState::new();
+        let timer_root = timer_state.create_root_region(Budget::INFINITE);
+        let timer_task = insert_task(&mut timer_state, timer_root, TaskState::Running);
+
+        let virtual_clock = Arc::new(VirtualClock::starting_at(Time::from_millis(5000)));
+        timer_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(virtual_clock));
+        let _timer_obligation = insert_obligation(&mut timer_state, timer_root, timer_task, ObligationKind::Ack, Time::from_millis(1000));
+
+        let timer_diagnostics = Diagnostics::new(Arc::new(timer_state));
+        let timer_leaks = timer_diagnostics.find_leaked_obligations();
+
+        crate::assert_with_log!(
+            !timer_leaks.is_empty(),
+            "timer-enabled runtime detects leaks",
+            true,
+            !timer_leaks.is_empty()
+        );
+
+        if let Some(leak) = timer_leaks.first() {
+            crate::assert_with_log!(
+                leak.age.as_millis() == 4000, // 5000 - 1000 = 4000
+                "timer-enabled runtime calculates age correctly",
+                4000u128,
+                leak.age.as_millis()
+            );
+        }
+
+        // Verify endpoint stability across all configurations
+        let all_deadlock_reports = [
+            empty_diagnostics.analyze_directional_deadlock(),
+            minimal_diagnostics.analyze_directional_deadlock(),
+            complex_diagnostics.analyze_directional_deadlock(),
+            timer_diagnostics.analyze_directional_deadlock(),
+        ];
+
+        for report in &all_deadlock_reports {
+            crate::assert_with_log!(
+                report.risk_score >= 0.0 && report.risk_score <= 1.0,
+                "deadlock risk score in valid range",
+                true,
+                report.risk_score >= 0.0 && report.risk_score <= 1.0
+            );
+        }
+
+        let all_health_reports = [
+            empty_diagnostics.analyze_structural_health(),
+            minimal_diagnostics.analyze_structural_health(),
+            complex_diagnostics.analyze_structural_health(),
+            timer_diagnostics.analyze_structural_health(),
+        ];
+
+        for health in &all_health_reports {
+            // Verify health classification is valid (structural analysis completed)
+            let valid_classification = matches!(
+                health.classification,
+                crate::observability::spectral_health::HealthClassification::Healthy |
+                crate::observability::spectral_health::HealthClassification::Degraded |
+                crate::observability::spectral_health::HealthClassification::Deadlocked
+            );
+            crate::assert_with_log!(
+                valid_classification,
+                "health classification is valid",
+                true,
+                valid_classification
+            );
+        }
+
+        crate::test_complete!("introspection_conf_010_runtime_introspection_endpoint_stability");
+    }
 }

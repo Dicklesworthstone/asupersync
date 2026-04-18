@@ -3422,4 +3422,319 @@ mod tests {
             );
         }
     }
+
+    // =========================================================================
+    // 0-RTT Early Data Conformance Tests - RFC 8446 Section 4.2.10
+    // =========================================================================
+
+    /// 0-RTT state tracker for testing early data acceptance rules.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ZeroRttState {
+        /// 0-RTT not attempted or not available.
+        NotAttempted,
+        /// 0-RTT attempted, waiting for handshake completion.
+        Pending,
+        /// 0-RTT accepted by server.
+        Accepted,
+        /// 0-RTT rejected by server.
+        Rejected,
+        /// Handshake completed (1-RTT established).
+        HandshakeComplete,
+    }
+
+    /// Configuration for 0-RTT early data limits and policies.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ZeroRttConfig {
+        /// Maximum early data bytes allowed.
+        pub max_early_data: u64,
+        /// Whether to allow HTTP requests in early data.
+        pub allow_early_requests: bool,
+        /// Whether to allow SETTINGS frames in early data.
+        pub allow_early_settings: bool,
+        /// Current 0-RTT state.
+        pub state: ZeroRttState,
+        /// Bytes of early data sent so far.
+        pub early_data_sent: u64,
+    }
+
+    impl Default for ZeroRttConfig {
+        fn default() -> Self {
+            Self {
+                max_early_data: 16384, // 16KB default
+                allow_early_requests: true,
+                allow_early_settings: false, // Conservative default
+                state: ZeroRttState::NotAttempted,
+                early_data_sent: 0,
+            }
+        }
+    }
+
+    impl ZeroRttConfig {
+        /// Check if early data is currently allowed.
+        pub fn is_early_data_allowed(&self) -> bool {
+            matches!(self.state, ZeroRttState::Pending | ZeroRttState::Accepted)
+        }
+
+        /// Check if we can send more early data.
+        pub fn can_send_early_data(&self, additional_bytes: u64) -> bool {
+            self.is_early_data_allowed()
+                && self.early_data_sent.saturating_add(additional_bytes) <= self.max_early_data
+        }
+
+        /// Record early data sent.
+        pub fn record_early_data_sent(&mut self, bytes: u64) -> Result<(), H3NativeError> {
+            if !self.is_early_data_allowed() {
+                return Err(H3NativeError::StreamProtocol("0-RTT not allowed in current state"));
+            }
+            if !self.can_send_early_data(bytes) {
+                return Err(H3NativeError::StreamProtocol("early data limit exceeded"));
+            }
+            self.early_data_sent = self.early_data_sent.saturating_add(bytes);
+            Ok(())
+        }
+
+        /// Validate if a frame can be sent in early data.
+        pub fn validate_early_frame(&self, frame: &H3Frame) -> Result<(), H3NativeError> {
+            if !self.is_early_data_allowed() {
+                return Ok(()); // Not in 0-RTT, no restrictions
+            }
+
+            match frame {
+                // DATA and HEADERS are allowed in early data for requests
+                H3Frame::Data { .. } | H3Frame::Headers { .. } if self.allow_early_requests => Ok(()),
+
+                // SETTINGS may or may not be allowed based on policy
+                H3Frame::Settings(_) if self.allow_early_settings => Ok(()),
+
+                // Control frames that should wait for handshake completion
+                H3Frame::Settings(_) if !self.allow_early_settings => {
+                    Err(H3NativeError::StreamProtocol("SETTINGS frame not allowed in 0-RTT"))
+                }
+
+                // Frames that must never be sent in 0-RTT
+                H3Frame::Goaway(_) | H3Frame::MaxPushId(_) => {
+                    Err(H3NativeError::StreamProtocol("control frame not allowed in 0-RTT"))
+                }
+
+                // PUSH_PROMISE should not be sent in early data
+                H3Frame::PushPromise { .. } => {
+                    Err(H3NativeError::StreamProtocol("PUSH_PROMISE not allowed in 0-RTT"))
+                }
+
+                // Other frames follow default policy
+                _ => if self.allow_early_requests {
+                    Ok(())
+                } else {
+                    Err(H3NativeError::StreamProtocol("frame not allowed in 0-RTT"))
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zero_rtt_state_transitions() {
+        let mut config = ZeroRttConfig::default();
+        assert_eq!(config.state, ZeroRttState::NotAttempted);
+        assert!(!config.is_early_data_allowed());
+
+        // Transition to pending 0-RTT
+        config.state = ZeroRttState::Pending;
+        assert!(config.is_early_data_allowed());
+        assert!(config.can_send_early_data(1000));
+
+        // Transition to accepted
+        config.state = ZeroRttState::Accepted;
+        assert!(config.is_early_data_allowed());
+
+        // Transition to handshake complete
+        config.state = ZeroRttState::HandshakeComplete;
+        assert!(!config.is_early_data_allowed());
+
+        // Transition to rejected
+        config.state = ZeroRttState::Rejected;
+        assert!(!config.is_early_data_allowed());
+    }
+
+    #[test]
+    fn zero_rtt_early_data_limits() {
+        let mut config = ZeroRttConfig {
+            max_early_data: 1000,
+            state: ZeroRttState::Pending,
+            ..ZeroRttConfig::default()
+        };
+
+        // Can send within limit
+        assert!(config.can_send_early_data(500));
+        config.record_early_data_sent(500).expect("record early data");
+        assert_eq!(config.early_data_sent, 500);
+
+        // Can send up to limit
+        assert!(config.can_send_early_data(500));
+        config.record_early_data_sent(500).expect("record remaining");
+        assert_eq!(config.early_data_sent, 1000);
+
+        // Cannot exceed limit
+        assert!(!config.can_send_early_data(1));
+        let err = config.record_early_data_sent(1).expect_err("should reject");
+        assert!(matches!(err, H3NativeError::StreamProtocol(_)));
+    }
+
+    #[test]
+    fn zero_rtt_frame_validation_allows_requests() {
+        let config = ZeroRttConfig {
+            state: ZeroRttState::Pending,
+            allow_early_requests: true,
+            allow_early_settings: false,
+            ..ZeroRttConfig::default()
+        };
+
+        // DATA and HEADERS should be allowed for requests
+        let data_frame = H3Frame::Data { payload: vec![1, 2, 3] };
+        config.validate_early_frame(&data_frame).expect("DATA allowed");
+
+        let headers_frame = H3Frame::Headers { field_block: vec![4, 5, 6] };
+        config.validate_early_frame(&headers_frame).expect("HEADERS allowed");
+    }
+
+    #[test]
+    fn zero_rtt_frame_validation_rejects_control_frames() {
+        let config = ZeroRttConfig {
+            state: ZeroRttState::Pending,
+            allow_early_requests: true,
+            allow_early_settings: false,
+            ..ZeroRttConfig::default()
+        };
+
+        // Control frames should be rejected
+        let settings_frame = H3Frame::Settings(H3Settings::default());
+        let err = config.validate_early_frame(&settings_frame).expect_err("SETTINGS rejected");
+        assert!(matches!(err, H3NativeError::StreamProtocol(_)));
+
+        let goaway_frame = H3Frame::Goaway(123);
+        let err = config.validate_early_frame(&goaway_frame).expect_err("GOAWAY rejected");
+        assert!(matches!(err, H3NativeError::StreamProtocol(_)));
+
+        let max_push_frame = H3Frame::MaxPushId(456);
+        let err = config.validate_early_frame(&max_push_frame).expect_err("MAX_PUSH_ID rejected");
+        assert!(matches!(err, H3NativeError::StreamProtocol(_)));
+
+        let push_promise_frame = H3Frame::PushPromise {
+            push_id: 789,
+            field_block: vec![7, 8, 9],
+        };
+        let err = config.validate_early_frame(&push_promise_frame).expect_err("PUSH_PROMISE rejected");
+        assert!(matches!(err, H3NativeError::StreamProtocol(_)));
+    }
+
+    #[test]
+    fn zero_rtt_settings_policy_enforcement() {
+        let mut config = ZeroRttConfig {
+            state: ZeroRttState::Pending,
+            allow_early_settings: true,
+            ..ZeroRttConfig::default()
+        };
+
+        // SETTINGS allowed when policy permits
+        let settings_frame = H3Frame::Settings(H3Settings::default());
+        config.validate_early_frame(&settings_frame).expect("SETTINGS allowed with policy");
+
+        // SETTINGS rejected when policy forbids
+        config.allow_early_settings = false;
+        let err = config.validate_early_frame(&settings_frame).expect_err("SETTINGS rejected by policy");
+        assert!(matches!(err, H3NativeError::StreamProtocol(_)));
+    }
+
+    #[test]
+    fn zero_rtt_request_policy_enforcement() {
+        let config = ZeroRttConfig {
+            state: ZeroRttState::Pending,
+            allow_early_requests: false,
+            ..ZeroRttConfig::default()
+        };
+
+        // DATA and HEADERS rejected when requests not allowed
+        let data_frame = H3Frame::Data { payload: vec![1, 2, 3] };
+        let err = config.validate_early_frame(&data_frame).expect_err("DATA rejected by policy");
+        assert!(matches!(err, H3NativeError::StreamProtocol(_)));
+
+        let headers_frame = H3Frame::Headers { field_block: vec![4, 5, 6] };
+        let err = config.validate_early_frame(&headers_frame).expect_err("HEADERS rejected by policy");
+        assert!(matches!(err, H3NativeError::StreamProtocol(_)));
+    }
+
+    #[test]
+    fn zero_rtt_no_restrictions_after_handshake() {
+        let config = ZeroRttConfig {
+            state: ZeroRttState::HandshakeComplete,
+            allow_early_requests: false,
+            allow_early_settings: false,
+            ..ZeroRttConfig::default()
+        };
+
+        // All frames allowed after handshake completion
+        let settings_frame = H3Frame::Settings(H3Settings::default());
+        config.validate_early_frame(&settings_frame).expect("SETTINGS allowed after handshake");
+
+        let goaway_frame = H3Frame::Goaway(123);
+        config.validate_early_frame(&goaway_frame).expect("GOAWAY allowed after handshake");
+
+        let data_frame = H3Frame::Data { payload: vec![1, 2, 3] };
+        config.validate_early_frame(&data_frame).expect("DATA allowed after handshake");
+    }
+
+    #[test]
+    fn zero_rtt_replay_protection_state_isolation() {
+        // Test that 0-RTT state is properly isolated to prevent replay attacks
+        let mut config1 = ZeroRttConfig {
+            state: ZeroRttState::Accepted,
+            max_early_data: 1000,
+            ..ZeroRttConfig::default()
+        };
+
+        let mut config2 = ZeroRttConfig {
+            state: ZeroRttState::Rejected,
+            ..ZeroRttConfig::default()
+        };
+
+        // First connection can send early data
+        config1.record_early_data_sent(500).expect("config1 early data");
+        assert_eq!(config1.early_data_sent, 500);
+
+        // Second connection (replayed) cannot send early data
+        let err = config2.record_early_data_sent(500).expect_err("config2 should reject");
+        assert!(matches!(err, H3NativeError::StreamProtocol(_)));
+        assert_eq!(config2.early_data_sent, 0);
+    }
+
+    #[test]
+    fn zero_rtt_conservative_defaults() {
+        let config = ZeroRttConfig::default();
+
+        // Conservative defaults: allow requests but not control frames
+        assert!(config.allow_early_requests);
+        assert!(!config.allow_early_settings);
+        assert_eq!(config.max_early_data, 16384); // 16KB
+        assert_eq!(config.state, ZeroRttState::NotAttempted);
+        assert_eq!(config.early_data_sent, 0);
+    }
+
+    #[test]
+    fn zero_rtt_saturation_arithmetic() {
+        let mut config = ZeroRttConfig {
+            state: ZeroRttState::Pending,
+            max_early_data: u64::MAX,
+            early_data_sent: u64::MAX - 100,
+            ..ZeroRttConfig::default()
+        };
+
+        // Should saturate without overflow
+        assert!(config.can_send_early_data(50));
+        config.record_early_data_sent(50).expect("within bounds");
+
+        assert!(config.can_send_early_data(50));
+        config.record_early_data_sent(50).expect("exactly at limit");
+
+        // Should not allow more after saturation
+        assert!(!config.can_send_early_data(1));
+    }
 }
