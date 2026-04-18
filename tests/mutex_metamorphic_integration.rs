@@ -4,11 +4,10 @@
 //! correctly in a simplified environment without requiring the full test suite.
 
 use asupersync::lab::runtime::LabRuntime;
-use asupersync::sync::mutex::{LockError, Mutex, TryLockError};
+use asupersync::sync::{LockError, Mutex, TryLockError};
 use asupersync::types::Budget;
 use asupersync::util::ArenaIndex;
 use asupersync::{Cx, RegionId, TaskId};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 /// Test data structure for mutex operations
@@ -261,4 +260,6 @@ fn comprehensive_metamorphic_integration() {
     );
 
     println!("All metamorphic relations verified successfully!");
+}
+phic relations verified successfully!");
 }
