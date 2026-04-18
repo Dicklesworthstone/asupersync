@@ -1,5 +1,7 @@
 //! Standalone SQLite Prepared Statement Round-Trip Conformance Tests.
 
+#![cfg(feature = "sqlite")]
+
 use asupersync::cx::Cx;
 use asupersync::database::{SqliteConnection, SqliteError, SqliteRow, SqliteValue};
 use asupersync::lab::{LabConfig, LabRuntime};

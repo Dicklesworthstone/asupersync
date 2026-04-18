@@ -808,8 +808,8 @@ mod tests {
     /// Property-based test for MR1 with various configurations.
     #[proptest]
     fn mr1_party_count_invariant_property(
-        config in barrier_config_strategy(),
-        work_units in work_units_strategy(10),
+        #[strategy(barrier_config_strategy())] config: BarrierTestConfig,
+        #[strategy(work_units_strategy(10))] work_units: Vec<BarrierWorkUnit>,
     ) {
         let result = mr1_party_count_invariant(config, work_units);
         prop_assert!(result.is_ok(), "MR1 property failed: {:?}", result);
@@ -818,8 +818,8 @@ mod tests {
     /// Property-based test for MR2 with spurious wakeup scenarios.
     #[proptest]
     fn mr2_spurious_wakeup_preservation_property(
-        config in barrier_config_strategy().prop_filter("parties > 1", |c| c.parties > 1),
-        work_units in work_units_strategy(8),
+        #[strategy(barrier_config_strategy().prop_filter("parties > 1", |c| c.parties > 1))] config: BarrierTestConfig,
+        #[strategy(work_units_strategy(8))] work_units: Vec<BarrierWorkUnit>,
     ) {
         let result = mr2_spurious_wakeup_preservation(config, work_units);
         prop_assert!(result.is_ok(), "MR2 property failed: {:?}", result);
@@ -828,8 +828,8 @@ mod tests {
     /// Property-based test for MR4 with deterministic replay verification.
     #[proptest]
     fn mr4_deterministic_replay_property(
-        config in barrier_config_strategy(),
-        work_units in work_units_strategy(6),
+        #[strategy(barrier_config_strategy())] config: BarrierTestConfig,
+        #[strategy(work_units_strategy(6))] work_units: Vec<BarrierWorkUnit>,
     ) {
         let result = mr4_deterministic_replay(config, work_units);
         prop_assert!(result.is_ok(), "MR4 property failed: {:?}", result);

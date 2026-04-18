@@ -575,9 +575,9 @@ fn mr7_cancel_reason_strengthening() {
     assert!(first_reason.is_some(), "First abort should set cancel reason");
     assert!(final_reason.is_some(), "Final reason should exist after strengthening");
 
-    if let Some(final) = final_reason {
+    if let Some(final_reason_val) = final_reason {
         // Timeout should take precedence over user reason
-        assert_eq!(final.kind, CancelKind::Timeout, "Timeout reason should take precedence");
+        assert_eq!(final_reason_val.kind, CancelKind::Timeout, "Timeout reason should take precedence");
     }
 }
 

@@ -3,7 +3,7 @@
 #[test]
 fn kafka_record_batch_v2_conformance_integration() {
     // Import the conformance test harness
-    use asupersync_conformance::KafkaConformanceHarness;
+    use conformance::KafkaConformanceHarness;
 
     let harness = KafkaConformanceHarness::new();
 
