@@ -783,3 +783,17 @@ path = "fuzz_targets/h2_frames.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "grpc_protobuf"
+path = "fuzz_targets/grpc_protobuf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nats_parser"
+path = "fuzz_targets/nats_parser.rs"
+test = false
+doc = false
+bench = false
