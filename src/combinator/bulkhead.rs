@@ -1714,4 +1714,252 @@ mod tests {
         // 7. Queue len now 1. Can enqueue.
         bh.enqueue(1, now).expect("enqueue should succeed");
     }
+
+    // =========================================================================
+    // Conformance: Isolation under concurrent overflow
+    // =========================================================================
+
+    #[test]
+    fn conf_isolation_independent_bulkheads_isolated_overflow() {
+        // CONF-BULKHEAD-001: Overflow in one bulkhead must not affect other bulkheads
+        let bh_critical = Arc::new(Bulkhead::new(BulkheadPolicy {
+            name: "critical-service".into(),
+            max_concurrent: 2,
+            max_queue: 1,
+            ..Default::default()
+        }));
+
+        let bh_batch = Arc::new(Bulkhead::new(BulkheadPolicy {
+            name: "batch-service".into(),
+            max_concurrent: 1,
+            max_queue: 1,
+            ..Default::default()
+        }));
+
+        let now = Time::from_millis(0);
+
+        // 1. Overflow the batch service
+        let _batch_p1 = bh_batch.try_acquire(1).unwrap();
+        let _batch_queue_id = bh_batch.enqueue(1, now).unwrap();
+        let batch_overflow = bh_batch.enqueue(1, now);
+        assert!(matches!(batch_overflow, Err(BulkheadError::QueueFull)));
+
+        // 2. Verify critical service unaffected by batch overflow
+        assert_eq!(bh_critical.available(), 2);
+        let crit_p1 = bh_critical.try_acquire(1);
+        assert!(crit_p1.is_some(), "critical service should be unaffected by batch overflow");
+
+        let crit_p2 = bh_critical.try_acquire(1);
+        assert!(crit_p2.is_some(), "critical service should maintain full capacity");
+
+        // 3. Verify overflow metrics isolated
+        let batch_metrics = bh_batch.metrics();
+        let critical_metrics = bh_critical.metrics();
+
+        assert_eq!(batch_metrics.total_rejected, 1);
+        assert_eq!(critical_metrics.total_rejected, 0);
+        assert_eq!(critical_metrics.active_permits, 2);
+        assert_eq!(batch_metrics.active_permits, 1);
+    }
+
+    #[test]
+    fn conf_isolation_concurrent_overflows_independent() {
+        // CONF-BULKHEAD-002: Multiple bulkheads can overflow simultaneously without interference
+        let bh_db = Arc::new(Bulkhead::new(BulkheadPolicy {
+            name: "database".into(),
+            max_concurrent: 1,
+            max_queue: 2,
+            ..Default::default()
+        }));
+
+        let bh_api = Arc::new(Bulkhead::new(BulkheadPolicy {
+            name: "external-api".into(),
+            max_concurrent: 1,
+            max_queue: 1,
+            ..Default::default()
+        }));
+
+        let now = Time::from_millis(0);
+
+        // 1. Overflow both bulkheads simultaneously
+        let _db_p = bh_db.try_acquire(1).unwrap();
+        let _api_p = bh_api.try_acquire(1).unwrap();
+
+        // Fill queues
+        let _db_q1 = bh_db.enqueue(1, now).unwrap();
+        let _db_q2 = bh_db.enqueue(1, now).unwrap();
+        let _api_q1 = bh_api.enqueue(1, now).unwrap();
+
+        // Overflow both
+        let db_overflow = bh_db.enqueue(1, now);
+        let api_overflow = bh_api.enqueue(1, now);
+
+        assert!(matches!(db_overflow, Err(BulkheadError::QueueFull)));
+        assert!(matches!(api_overflow, Err(BulkheadError::QueueFull)));
+
+        // 2. Verify independent rejection tracking
+        assert_eq!(bh_db.metrics().total_rejected, 1);
+        assert_eq!(bh_api.metrics().total_rejected, 1);
+        assert_eq!(bh_db.metrics().queue_depth, 2);
+        assert_eq!(bh_api.metrics().queue_depth, 1);
+
+        // 3. Verify independent recovery capability
+        let third_service = Bulkhead::new(BulkheadPolicy {
+            name: "unaffected".into(),
+            max_concurrent: 5,
+            ..Default::default()
+        });
+
+        // Should work normally despite other overflows
+        let p1 = third_service.try_acquire(3);
+        assert!(p1.is_some(), "unaffected service should work during other overflows");
+        assert_eq!(third_service.available(), 2);
+    }
+
+    #[test]
+    fn conf_isolation_overflow_recovery_isolated() {
+        // CONF-BULKHEAD-003: Recovery from overflow in one bulkhead doesn't affect others
+        use std::thread;
+
+        let bh_overloaded = Arc::new(Bulkhead::new(BulkheadPolicy {
+            name: "overloaded".into(),
+            max_concurrent: 1,
+            max_queue: 2,
+            ..Default::default()
+        }));
+
+        let bh_stable = Arc::new(Bulkhead::new(BulkheadPolicy {
+            name: "stable".into(),
+            max_concurrent: 2,
+            max_queue: 5,
+            ..Default::default()
+        }));
+
+        let now = Time::from_millis(0);
+
+        // 1. Create overflow condition
+        let overloaded_permit = bh_overloaded.try_acquire(1).unwrap();
+        let _q1 = bh_overloaded.enqueue(1, now).unwrap();
+        let _q2 = bh_overloaded.enqueue(1, now).unwrap();
+        let overflow = bh_overloaded.enqueue(1, now);
+        assert!(matches!(overflow, Err(BulkheadError::QueueFull)));
+
+        // 2. Stable service operating normally
+        let stable_p1 = bh_stable.try_acquire(1).unwrap();
+        let _stable_q1 = bh_stable.enqueue(1, now).unwrap();
+        assert_eq!(bh_stable.available(), 1);
+
+        // 3. Recovery in overloaded service
+        overloaded_permit.release();
+        let _granted = bh_overloaded.process_queue(now);
+
+        // 4. Verify stable service unaffected by recovery
+        assert_eq!(bh_stable.available(), 1, "stable service should be unaffected by recovery");
+        assert_eq!(bh_stable.metrics().active_permits, 1);
+        assert_eq!(bh_stable.metrics().queue_depth, 1);
+
+        // 5. Both services should work independently after recovery
+        let new_stable = bh_stable.try_acquire(1);
+        assert!(new_stable.is_some(), "stable service should remain functional");
+
+        let overloaded_available = bh_overloaded.available();
+        assert_eq!(overloaded_available, 0, "overloaded service should have granted queued request");
+    }
+
+    #[test]
+    fn conf_isolation_weighted_permits_overflow_isolation() {
+        // CONF-BULKHEAD-004: Weighted permit overflow isolation
+        let bh_heavy = Arc::new(Bulkhead::new(BulkheadPolicy {
+            name: "heavy-ops".into(),
+            max_concurrent: 10,
+            max_queue: 3,
+            weighted: true,
+            ..Default::default()
+        }));
+
+        let bh_light = Arc::new(Bulkhead::new(BulkheadPolicy {
+            name: "light-ops".into(),
+            max_concurrent: 5,
+            max_queue: 3,
+            weighted: true,
+            ..Default::default()
+        }));
+
+        let now = Time::from_millis(0);
+
+        // 1. Overflow heavy service with weighted permits
+        let _heavy_p1 = bh_heavy.try_acquire(8).unwrap(); // 2 remaining
+        let _heavy_q1 = bh_heavy.enqueue(2, now).unwrap(); // exactly fits
+        let _heavy_q2 = bh_heavy.enqueue(1, now).unwrap();
+
+        // This should overflow - asking for 3 but queue already has demand for 3
+        let heavy_overflow = bh_heavy.enqueue(3, now);
+        assert!(matches!(heavy_overflow, Err(BulkheadError::QueueFull)));
+
+        // 2. Light service should work normally with weighted permits
+        let light_p1 = bh_light.try_acquire(3);
+        assert!(light_p1.is_some(), "light service should work despite heavy overflow");
+        assert_eq!(bh_light.available(), 2);
+
+        let _light_q1 = bh_light.enqueue(2, now).unwrap();
+        assert_eq!(bh_light.metrics().queue_depth, 1);
+
+        // 3. Verify isolation in metrics
+        assert_eq!(bh_heavy.metrics().total_rejected, 1);
+        assert_eq!(bh_light.metrics().total_rejected, 0);
+        assert!(bh_heavy.metrics().utilization > 0.8); // 8/10 = 0.8
+        assert!(bh_light.metrics().utilization > 0.5); // 3/5 = 0.6
+    }
+
+    #[test]
+    fn conf_isolation_timeout_overflow_isolation() {
+        // CONF-BULKHEAD-005: Timeout-based overflow doesn't affect other bulkheads
+        let bh_fast = Arc::new(Bulkhead::new(BulkheadPolicy {
+            name: "fast-timeout".into(),
+            max_concurrent: 1,
+            max_queue: 2,
+            queue_timeout: Duration::from_millis(10),
+            ..Default::default()
+        }));
+
+        let bh_slow = Arc::new(Bulkhead::new(BulkheadPolicy {
+            name: "slow-timeout".into(),
+            max_concurrent: 1,
+            max_queue: 2,
+            queue_timeout: Duration::from_secs(60),
+            ..Default::default()
+        }));
+
+        let now = Time::from_millis(0);
+
+        // 1. Create timeout condition in fast bulkhead
+        let _fast_p = bh_fast.try_acquire(1).unwrap();
+        let fast_q1 = bh_fast.enqueue(1, now).unwrap();
+
+        // Create similar condition in slow bulkhead
+        let _slow_p = bh_slow.try_acquire(1).unwrap();
+        let slow_q1 = bh_slow.enqueue(1, now).unwrap();
+
+        // 2. Advance time to trigger timeout in fast bulkhead only
+        let later = Time::from_millis(50);
+        bh_fast.process_queue(later);
+
+        // 3. Verify fast bulkhead timed out
+        let fast_result = bh_fast.check_entry(fast_q1, later);
+        assert!(matches!(fast_result, Err(BulkheadError::QueueTimeout { .. })));
+        assert_eq!(bh_fast.metrics().total_timeout, 1);
+
+        // 4. Verify slow bulkhead unaffected by fast timeout
+        let slow_result = bh_slow.check_entry(slow_q1, later);
+        assert!(matches!(slow_result, Ok(None)), "slow bulkhead should still be waiting");
+        assert_eq!(bh_slow.metrics().total_timeout, 0);
+        assert_eq!(bh_slow.metrics().queue_depth, 1);
+
+        // 5. Verify independent queue recovery
+        let fast_can_enqueue = bh_fast.enqueue(1, later);
+        assert!(fast_can_enqueue.is_ok(), "fast bulkhead should recover queue capacity after timeout");
+
+        let slow_metrics = bh_slow.metrics();
+        assert_eq!(slow_metrics.queue_depth, 1, "slow bulkhead queue unchanged by fast timeout");
+    }
 }
