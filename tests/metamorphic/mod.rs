@@ -8,3 +8,4 @@
 pub mod evidence_serialization;
 pub mod rwlock;
 pub mod scheduler_migration;
+pub mod task_table;
