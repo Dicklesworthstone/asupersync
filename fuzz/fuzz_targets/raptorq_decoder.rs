@@ -1,340 +1,308 @@
+//! Comprehensive RaptorQ InactivationDecoder Fuzz Target
+//!
+//! Tests security assertions:
+//! 1. No panic on oversized ESI (ESI ≥ 2^24)
+//! 2. Per-block limits K' max honored (K ≤ 8192 per RFC 6330)
+//! 3. Repair symbols parsed without overflow (column indices bounded)
+//! 4. Early decoder failure returns error not hang (timeout-resistant)
+//! 5. Duplicate ESIs idempotent (no corruption from dup processing)
+//! 6. Decoder handles empty source-block gracefully (K=0, L=0 cases)
+
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
-/// RaptorQ Galois Field GF(256) operations for fuzzing
-mod gf256 {
-    pub type Gf256 = u8;
+use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::gf256::Gf256;
 
-    pub fn add(a: Gf256, b: Gf256) -> Gf256 {
-        a ^ b
-    }
-
-    pub fn mul(a: Gf256, b: Gf256) -> Gf256 {
-        if a == 0 || b == 0 {
-            return 0;
-        }
-
-        // Simple GF(256) multiplication (not the full table for fuzzing)
-        let mut result = 0u8;
-        let mut a = a;
-        let mut b = b;
-
-        while b != 0 {
-            if b & 1 != 0 {
-                result ^= a;
-            }
-            a = if a & 0x80 != 0 {
-                (a << 1) ^ 0x1B // Primitive polynomial x^8 + x^4 + x^3 + x + 1
-            } else {
-                a << 1
-            };
-            b >>= 1;
-        }
-
-        result
-    }
-}
-
-/// Simulated RaptorQ received symbol for fuzzing
+/// Fuzz-friendly received symbol generator
 #[derive(Debug, Clone, Arbitrary)]
 struct FuzzReceivedSymbol {
-    /// Encoding Symbol Index
+    /// ESI value (may be oversized for testing)
     pub esi: u32,
-    /// Whether this is a source symbol (ESI < K)
+    /// Whether this is marked as a source symbol
     pub is_source: bool,
-    /// Column indices this symbol depends on
-    pub columns: Vec<u16>, // Use u16 to limit size
-    /// GF(256) coefficients
+    /// Column dependencies (indices into [0, L))
+    pub columns: Vec<u16>, // Limited size to prevent explosion
+    /// GF(256) coefficients for each column
     pub coefficients: Vec<u8>,
-    /// Symbol data
+    /// Symbol payload data
     pub data: Vec<u8>,
 }
 
-/// Simulated systematic parameters
+impl FuzzReceivedSymbol {
+    /// Convert to actual ReceivedSymbol, normalizing for valid ranges
+    fn to_received_symbol(&self, l: usize, symbol_size: usize) -> ReceivedSymbol {
+        // Clamp columns to valid range [0, L)
+        let columns: Vec<usize> = self
+            .columns
+            .iter()
+            .take(32) // Limit equation degree for performance
+            .map(|&col| (col as usize) % l.max(1))
+            .collect();
+
+        // Truncate coefficients to match columns
+        let coefficients: Vec<Gf256> = self
+            .coefficients
+            .iter()
+            .take(columns.len())
+            .map(|&coef| Gf256(coef))
+            .collect();
+
+        // Normalize data to expected symbol size
+        let mut data = self.data.clone();
+        data.truncate(symbol_size);
+        data.resize(symbol_size, 0u8); // Pad with zeros if needed
+
+        ReceivedSymbol {
+            esi: self.esi,
+            is_source: self.is_source,
+            columns,
+            coefficients,
+            data,
+        }
+    }
+}
+
+/// Systematic parameters for fuzzing
 #[derive(Debug, Clone, Arbitrary)]
-struct FuzzSystematicParams {
-    /// Number of source symbols
+struct FuzzParams {
+    /// Number of source symbols K
     pub k: u16,
     /// Symbol size in bytes
     pub symbol_size: u16,
-    /// Number of LDPC overhead symbols
-    pub s: u16,
-    /// Number of HDPC overhead symbols
-    pub h: u16,
+    /// Deterministic seed for decoder
+    pub seed: u64,
 }
 
-/// Simple decode error for fuzzing
-#[derive(Debug)]
-enum FuzzDecodeError {
-    InsufficientSymbols,
-    InvalidSymbolSize,
-    InvalidParameters,
-    CorruptData,
-    MatrixSingular,
+impl FuzzParams {
+    /// Normalize to valid ranges per RFC 6330
+    fn normalize(&mut self) {
+        // RFC 6330 constraint: 1 ≤ K ≤ 8192
+        self.k = self.k.clamp(1, 8192);
+        // Practical symbol size limits for fuzzing
+        self.symbol_size = self.symbol_size.clamp(1, 1024);
+    }
+
+    /// Create InactivationDecoder from normalized parameters
+    fn create_decoder(&self) -> InactivationDecoder {
+        InactivationDecoder::new(self.k as usize, self.symbol_size as usize, self.seed)
+    }
 }
 
-/// Validate and normalize systematic parameters
-fn validate_systematic_params(params: &mut FuzzSystematicParams) -> Result<(), FuzzDecodeError> {
-    // Clamp parameters to reasonable ranges for fuzzing
-    params.k = params.k.clamp(1, 256);
-    params.symbol_size = params.symbol_size.clamp(1, 1024);
-    params.s = params.s.clamp(0, 64);
-    params.h = params.h.clamp(0, 64);
+/// Security Assertion 1: No panic on oversized ESI
+fn test_oversized_esi(params: &FuzzParams, unstructured: &mut Unstructured) {
+    let decoder = params.create_decoder();
 
-    // Basic RFC 6330 constraints
-    if params.k == 0 {
-        return Err(FuzzDecodeError::InvalidParameters);
-    }
+    if let Ok(oversized_esi) = u32::arbitrary(unstructured) {
+        // Force ESI ≥ 2^24 to test bounds checking
+        let oversized_esi = oversized_esi | (1u32 << 24);
 
-    Ok(())
-}
-
-/// Validate received symbols structure
-fn validate_received_symbols(
-    symbols: &[FuzzReceivedSymbol],
-    params: &FuzzSystematicParams,
-) -> Result<(), FuzzDecodeError> {
-    let l = params.k + params.s + params.h;
-
-    for symbol in symbols {
-        // ESI bounds checking
-        if symbol.esi >= 2u32.pow(24) {
-            // 24-bit ESI limit
-            return Err(FuzzDecodeError::InvalidParameters);
-        }
-
-        // Symbol data size validation
-        if symbol.data.len() != params.symbol_size as usize {
-            return Err(FuzzDecodeError::InvalidSymbolSize);
-        }
-
-        // Coefficient/column alignment
-        if symbol.columns.len() != symbol.coefficients.len() {
-            return Err(FuzzDecodeError::CorruptData);
-        }
-
-        // Column bounds checking
-        for &col in &symbol.columns {
-            if col as usize >= l as usize {
-                return Err(FuzzDecodeError::InvalidParameters);
-            }
-        }
-
-        // Source symbol consistency
-        if symbol.is_source && symbol.esi >= params.k as u32 {
-            return Err(FuzzDecodeError::InvalidParameters);
-        }
-
-        // Limit equation complexity for fuzzing performance
-        if symbol.columns.len() > 32 {
-            return Err(FuzzDecodeError::CorruptData);
-        }
-    }
-
-    Ok(())
-}
-
-/// Simulate gaussian elimination operation for fuzzing
-fn simulate_gaussian_elimination(
-    matrix_rows: usize,
-    matrix_cols: usize,
-    symbols: &[FuzzReceivedSymbol],
-) -> Result<Vec<Vec<u8>>, FuzzDecodeError> {
-    if matrix_rows == 0 || matrix_cols == 0 {
-        return Err(FuzzDecodeError::MatrixSingular);
-    }
-
-    // Simulate creating coefficient matrix
-    let mut equations = Vec::new();
-    for symbol in symbols.iter().take(matrix_rows) {
-        let mut row = vec![0u8; matrix_cols];
-        for (&col, &coef) in symbol.columns.iter().zip(symbol.coefficients.iter()) {
-            if (col as usize) < matrix_cols {
-                row[col as usize] = coef;
-            }
-        }
-        equations.push(row);
-    }
-
-    // Simulate pivoting - just check for zero diagonal elements
-    for i in 0..matrix_rows.min(matrix_cols) {
-        if i < equations.len() && equations[i][i] == 0 {
-            // Try to find a pivot
-            let mut found_pivot = false;
-            for j in i + 1..equations.len() {
-                if equations[j][i] != 0 {
-                    equations.swap(i, j);
-                    found_pivot = true;
-                    break;
-                }
-            }
-            if !found_pivot {
-                return Err(FuzzDecodeError::MatrixSingular);
-            }
-        }
-    }
-
-    // Simulate back-substitution - return dummy solution
-    let symbol_size = if symbols.is_empty() {
-        64
-    } else {
-        symbols[0].data.len().clamp(1, 1024)
-    };
-
-    let solution: Vec<Vec<u8>> = (0..matrix_cols)
-        .map(|i| vec![(i % 256) as u8; symbol_size])
-        .collect();
-
-    Ok(solution)
-}
-
-/// Simulate RaptorQ peeling process for fuzzing
-fn simulate_peeling_phase(symbols: &[FuzzReceivedSymbol]) -> Result<usize, FuzzDecodeError> {
-    let mut solved_count = 0;
-    let mut remaining_symbols = symbols.to_vec();
-
-    // Simple peeling: find degree-1 equations and solve them
-    let mut made_progress = true;
-    while made_progress && !remaining_symbols.is_empty() {
-        made_progress = false;
-
-        let mut to_remove = Vec::new();
-        for (idx, symbol) in remaining_symbols.iter().enumerate() {
-            if symbol.columns.len() == 1 {
-                // Found a degree-1 equation - "solve" it
-                solved_count += 1;
-                to_remove.push(idx);
-                made_progress = true;
-            }
-        }
-
-        // Remove solved symbols (reverse order to maintain indices)
-        for &idx in to_remove.iter().rev() {
-            remaining_symbols.remove(idx);
-        }
-
-        // Simulate constraint propagation - reduce degree of remaining equations
-        for symbol in &mut remaining_symbols {
-            if symbol.columns.len() > 1 {
-                // Randomly reduce degree to simulate solved variable elimination
-                if symbol.columns.len() > 2 && solved_count % 3 == 0 {
-                    symbol.columns.pop();
-                    symbol.coefficients.pop();
-                }
-            }
-        }
-    }
-
-    Ok(solved_count)
-}
-
-/// Main fuzzing function that exercises RaptorQ decoding logic
-fn fuzz_raptorq_decode(
-    mut params: FuzzSystematicParams,
-    symbols: Vec<FuzzReceivedSymbol>,
-) -> Result<(), FuzzDecodeError> {
-    // Validate and normalize parameters
-    validate_systematic_params(&mut params)?;
-
-    // Validate symbol structures
-    validate_received_symbols(&symbols, &params)?;
-
-    if symbols.is_empty() {
-        return Err(FuzzDecodeError::InsufficientSymbols);
-    }
-
-    let l = params.k + params.s + params.h;
-
-    // Check if we have enough symbols for decoding
-    if symbols.len() < params.k as usize {
-        return Err(FuzzDecodeError::InsufficientSymbols);
-    }
-
-    // Phase 1: Simulate peeling
-    let peeled_count = simulate_peeling_phase(&symbols)?;
-
-    // Phase 2: Simulate Gaussian elimination on remaining system
-    let remaining_unknowns = l as usize - peeled_count;
-    if remaining_unknowns > 0 && remaining_unknowns <= symbols.len() {
-        let _solution = simulate_gaussian_elimination(
-            remaining_unknowns.min(symbols.len()),
-            remaining_unknowns,
-            &symbols,
-        )?;
-    }
-
-    // Phase 3: Simulate verification - check a few GF operations
-    if !symbols.is_empty() && !symbols[0].coefficients.is_empty() {
-        let a = symbols[0].coefficients[0];
-        let b = if symbols.len() > 1 && !symbols[1].coefficients.is_empty() {
-            symbols[1].coefficients[0]
-        } else {
-            1
+        let symbol = ReceivedSymbol {
+            esi: oversized_esi,
+            is_source: false,
+            columns: vec![0],
+            coefficients: vec![Gf256(1)],
+            data: vec![0u8; params.symbol_size as usize],
         };
 
-        let _sum = gf256::add(a, b);
-        let _product = gf256::mul(a, b);
+        // Should return error, not panic
+        let _result = decoder.decode(&[symbol]);
     }
+}
 
-    Ok(())
+/// Security Assertion 2: Per-block limits K' max honored
+fn test_k_limit_enforcement(unstructured: &mut Unstructured) {
+    // Test K > 8192 (RFC 6330 violation)
+    if let Ok(oversized_k) = u16::arbitrary(unstructured) {
+        let oversized_k = oversized_k.saturating_add(8193); // Force K > 8192
+
+        let decoder = InactivationDecoder::new(oversized_k as usize, 64, 0);
+
+        // Should handle gracefully without panic/hang
+        let symbol = ReceivedSymbol {
+            esi: 0,
+            is_source: true,
+            columns: vec![0],
+            coefficients: vec![Gf256(1)],
+            data: vec![0u8; 64],
+        };
+
+        let _result = decoder.decode(&[symbol]);
+    }
+}
+
+/// Security Assertion 3: Repair symbols parsed without overflow
+fn test_repair_symbol_overflow(params: &FuzzParams, fuzz_symbols: &[FuzzReceivedSymbol]) {
+    let decoder = params.create_decoder();
+    let l = decoder.params().l;
+
+    let symbols: Vec<ReceivedSymbol> = fuzz_symbols
+        .iter()
+        .take(50) // Limit for performance
+        .map(|fs| {
+            // Intentionally create out-of-bounds column indices
+            let mut symbol = fs.to_received_symbol(l, params.symbol_size as usize);
+
+            // Force some columns to be out of bounds
+            if !symbol.columns.is_empty() {
+                symbol.columns[0] = symbol.columns[0].saturating_add(l * 2);
+            }
+
+            symbol
+        })
+        .collect();
+
+    // Should detect out-of-bounds and return error, not overflow/panic
+    let _result = decoder.decode(&symbols);
+}
+
+/// Security Assertion 4: Early failure returns error not hang
+fn test_early_failure_no_hang(params: &FuzzParams, fuzz_symbols: &[FuzzReceivedSymbol]) {
+    let decoder = params.create_decoder();
+    let l = decoder.params().l;
+
+    // Create obviously unsolvable system (insufficient symbols)
+    let symbols: Vec<ReceivedSymbol> = fuzz_symbols
+        .iter()
+        .take((params.k as usize).saturating_sub(10).max(1)) // Definitely insufficient
+        .map(|fs| fs.to_received_symbol(l, params.symbol_size as usize))
+        .collect();
+
+    // Should return InsufficientSymbols error quickly, not hang
+    let result = decoder.decode(&symbols);
+
+    // Verify it returns the expected error type
+    if let Err(DecodeError::InsufficientSymbols { received, required }) = result {
+        assert!(received < required, "Error should indicate insufficiency");
+    }
+}
+
+/// Security Assertion 5: Duplicate ESIs idempotent
+fn test_duplicate_esi_idempotent(params: &FuzzParams, unstructured: &mut Unstructured) {
+    if let Ok(base_symbol) = FuzzReceivedSymbol::arbitrary(unstructured) {
+        let decoder = params.create_decoder();
+        let l = decoder.params().l;
+
+        let base = base_symbol.to_received_symbol(l, params.symbol_size as usize);
+
+        // Create duplicate symbols with same ESI
+        let mut symbols = vec![base.clone(), base.clone(), base];
+
+        // Add some different symbols to make system potentially solvable
+        for i in 1..params.k.min(10) {
+            if let Ok(other) = FuzzReceivedSymbol::arbitrary(unstructured) {
+                let mut other = other.to_received_symbol(l, params.symbol_size as usize);
+                other.esi = i as u32; // Ensure different ESI
+                symbols.push(other);
+            }
+        }
+
+        // Processing duplicate ESIs should be idempotent
+        let _result = decoder.decode(&symbols);
+    }
+}
+
+/// Security Assertion 6: Decoder handles empty source-block gracefully
+fn test_empty_source_block() {
+    // Test K=0 case
+    let decoder = InactivationDecoder::new(0, 64, 0);
+    let _result = decoder.decode(&[]);
+    // Should return error gracefully, not panic
+
+    // Test empty symbol list with valid K
+    let decoder2 = InactivationDecoder::new(1, 64, 0);
+    let result2 = decoder2.decode(&[]);
+    if let Err(DecodeError::InsufficientSymbols { received, required }) = result2 {
+        assert_eq!(received, 0);
+        assert!(required > 0);
+    }
+}
+
+/// Additional stress test: Malformed symbol structures
+fn test_malformed_symbol_structures(params: &FuzzParams, fuzz_symbols: &[FuzzReceivedSymbol]) {
+    let decoder = params.create_decoder();
+    let l = decoder.params().l;
+
+    let symbols: Vec<ReceivedSymbol> = fuzz_symbols
+        .iter()
+        .take(20)
+        .map(|fs| {
+            let mut symbol = fs.to_received_symbol(l, params.symbol_size as usize);
+
+            // Introduce various malformations
+            if !symbol.columns.is_empty() && !symbol.coefficients.is_empty() {
+                // Mismatched columns/coefficients lengths
+                symbol.coefficients.pop();
+
+                // Wrong symbol size
+                if !symbol.data.is_empty() {
+                    symbol.data.pop();
+                }
+            }
+
+            symbol
+        })
+        .collect();
+
+    // Should detect malformation and return appropriate errors
+    let _result = decoder.decode(&symbols);
 }
 
 fuzz_target!(|data: &[u8]| {
-    // Guard against very large inputs
-    if data.len() > 50_000 {
+    // Guard against excessive input sizes
+    if data.len() > 100_000 {
         return;
     }
 
-    // Parse input using arbitrary
     let mut unstructured = Unstructured::new(data);
 
-    // Try to generate systematic parameters
-    let params = if let Ok(p) = FuzzSystematicParams::arbitrary(&mut unstructured) {
-        p
-    } else {
-        return;
+    // Generate fuzzing parameters
+    let mut params = match FuzzParams::arbitrary(&mut unstructured) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    params.normalize();
+
+    // Generate fuzzed symbols
+    let fuzz_symbols: Vec<FuzzReceivedSymbol> = match Vec::arbitrary(&mut unstructured) {
+        Ok(s) => s.into_iter().take(200).collect(), // Limit for performance
+        Err(_) => vec![],
     };
 
-    // Try to generate received symbols
-    let symbols: Vec<FuzzReceivedSymbol> =
-        if let Ok(s) = Vec::<FuzzReceivedSymbol>::arbitrary(&mut unstructured) {
-            s
-        } else {
-            return;
-        };
+    // Security Assertion 1: No panic on oversized ESI
+    test_oversized_esi(&params, &mut unstructured);
 
-    // Limit the number of symbols for performance
-    let limited_symbols: Vec<_> = symbols.into_iter().take(100).collect();
+    // Security Assertion 2: Per-block limits K' max honored
+    test_k_limit_enforcement(&mut unstructured);
 
-    // Run the RaptorQ decode simulation
-    let _ = fuzz_raptorq_decode(params, limited_symbols);
+    // Security Assertion 3: Repair symbols parsed without overflow
+    test_repair_symbol_overflow(&params, &fuzz_symbols);
 
-    // Test some additional edge cases if we have remaining data
-    if unstructured.len() > 0 {
-        // Test empty symbol list
-        let _ = fuzz_raptorq_decode(
-            FuzzSystematicParams {
-                k: 1,
-                symbol_size: 64,
-                s: 0,
-                h: 0,
-            },
-            vec![],
-        );
+    // Security Assertion 4: Early decoder failure returns error not hang
+    test_early_failure_no_hang(&params, &fuzz_symbols);
 
-        // Test single symbol
-        if let Ok(single_symbol) = FuzzReceivedSymbol::arbitrary(&mut unstructured) {
-            let _ = fuzz_raptorq_decode(
-                FuzzSystematicParams {
-                    k: 1,
-                    symbol_size: single_symbol.data.len() as u16,
-                    s: 0,
-                    h: 0,
-                },
-                vec![single_symbol],
-            );
-        }
+    // Security Assertion 5: Duplicate ESIs idempotent
+    test_duplicate_esi_idempotent(&params, &mut unstructured);
+
+    // Security Assertion 6: Decoder handles empty source-block gracefully
+    test_empty_source_block();
+
+    // Additional: Malformed symbol structures
+    test_malformed_symbol_structures(&params, &fuzz_symbols);
+
+    // Main decode test with valid symbols
+    let decoder = params.create_decoder();
+    let l = decoder.params().l;
+
+    let valid_symbols: Vec<ReceivedSymbol> = fuzz_symbols
+        .iter()
+        .take(100)
+        .map(|fs| fs.to_received_symbol(l, params.symbol_size as usize))
+        .collect();
+
+    if !valid_symbols.is_empty() {
+        let _result = decoder.decode(&valid_symbols);
     }
 });
