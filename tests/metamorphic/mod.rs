@@ -6,6 +6,7 @@
 //! known input transformations."
 
 pub mod evidence_serialization;
+pub mod metrics;
 pub mod quic_packet_number;
 pub mod rwlock;
 pub mod scheduler_migration;
