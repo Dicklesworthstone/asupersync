@@ -592,6 +592,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_settings_frame"
+path = "fuzz_targets/h2_settings_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "bytes_mut_freeze_split"
 path = "fuzz_targets/bytes_mut_freeze_split.rs"
 test = false
@@ -650,6 +657,13 @@ bench = false
 [[bin]]
 name = "lab_runtime_virtual_time_fuzz"
 path = "fuzz_targets/lab_runtime_virtual_time_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tcp_accept_loop_fuzz"
+path = "fuzz_targets/tcp_accept_loop_fuzz.rs"
 test = false
 doc = false
 bench = false
