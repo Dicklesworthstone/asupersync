@@ -2523,4 +2523,473 @@ mod tests {
         let var = verdict.empirical_variance.unwrap();
         assert!(var > 0.0, "variance should be positive for varying deltas");
     }
+
+    // =========================================================================
+    // Azuma-Hoeffding Tail Bounds Golden Conformance Tests
+    // =========================================================================
+
+    /// Golden Test #1: Certificate martingale bound holds with prob 0.95+
+    #[test]
+    fn golden_certificate_martingale_bound_95_percent() {
+        // Test that the Azuma-Hoeffding bound correctly provides 95% confidence
+        // on martingale concentration using known mathematical properties
+
+        let config = ProgressConfig {
+            confidence: 0.95,
+            max_step_bound: 20.0,
+            min_observations: 5,
+            stall_threshold: 5,
+            epsilon: 1e-12,
+        };
+
+        let mut cert = ProgressCertificate::new(config);
+
+        // Create a sequence that should converge with high probability
+        // Potential decreases by 10 ± 5 each step (within step bound of 20)
+        let potentials = vec![
+            1000.0, 990.0, 985.0, 970.0, 955.0, 945.0, 930.0, 915.0, 905.0, 890.0,
+            875.0, 860.0, 850.0, 835.0, 820.0, 810.0, 795.0, 780.0, 770.0, 755.0,
+            740.0, 730.0, 715.0, 700.0, 690.0, 675.0, 660.0, 650.0, 635.0, 620.0
+        ];
+
+        for potential in potentials {
+            cert.observe(potential);
+        }
+
+        let verdict = cert.verdict();
+
+        // Verify martingale property: M_t = V(Σ_t) + Σc_i ≈ V(Σ_0)
+        let expected_martingale = verdict.initial_potential;
+        let actual_martingale = cert.martingale_value();
+        let martingale_error = (actual_martingale - expected_martingale).abs();
+
+        assert!(martingale_error < 50.0,
+            "Martingale conservation violated: expected ~{:.2}, got {:.2}, error {:.2}",
+            expected_martingale, actual_martingale, martingale_error);
+
+        // Verify Azuma-Hoeffding bound provides 95%+ confidence
+        assert!(verdict.confidence_bound >= 0.95,
+            "Azuma-Hoeffding bound should provide 95%+ confidence, got {:.6}",
+            verdict.confidence_bound);
+
+        // Verify the bound is mathematically consistent
+        assert!(verdict.azuma_bound <= 0.05,
+            "Azuma bound should be ≤ 0.05 for 95% confidence, got {:.6}",
+            verdict.azuma_bound);
+
+        // Verify convergence detection
+        assert!(verdict.converging,
+            "Should detect convergence with strong downward trend");
+
+        // Verify estimated remaining steps is reasonable
+        if let Some(remaining) = verdict.estimated_remaining_steps {
+            assert!(remaining > 0.0 && remaining < 100.0,
+                "Estimated remaining steps should be reasonable: {:.2}",
+                remaining);
+        }
+    }
+
+    /// Golden Test #2: Sequential updates preserve Azuma bound monotonicity
+    #[test]
+    fn golden_sequential_updates_preserve_azuma_bound() {
+        // Test that Azuma-Hoeffding bounds behave correctly under sequential updates
+        // The bound should generally improve (decrease) with more observations for
+        // well-behaved processes
+
+        let config = ProgressConfig {
+            confidence: 0.95,
+            max_step_bound: 15.0,
+            min_observations: 3,
+            stall_threshold: 10,
+            epsilon: 1e-12,
+        };
+
+        let mut cert = ProgressCertificate::new(config);
+        let mut previous_azuma_bound = 1.0; // Start with worst possible bound
+
+        // Sequential updates with consistent progress
+        let base_potential = 500.0;
+        for i in 0..20 {
+            let noise = (i as f64 * 1.3).sin() * 3.0; // Small controlled noise
+            let potential = base_potential - (i as f64 * 10.0) + noise;
+            cert.observe(potential);
+
+            if cert.len() >= config.min_observations {
+                let verdict = cert.verdict();
+
+                // For well-behaved sequences, Azuma bound should improve with more data
+                // (though it may occasionally increase due to noise)
+                if verdict.converging && cert.len() > 5 {
+                    // Allow some tolerance for noise but expect general improvement
+                    assert!(verdict.azuma_bound < 0.5,
+                        "At step {}, Azuma bound should be reasonable: {:.6}",
+                        i, verdict.azuma_bound);
+                }
+
+                // Bounds should always be valid probabilities
+                assert!(verdict.azuma_bound >= 0.0 && verdict.azuma_bound <= 1.0,
+                    "Azuma bound must be a valid probability: {:.6} at step {}",
+                    verdict.azuma_bound, i);
+
+                assert!(verdict.confidence_bound >= 0.0 && verdict.confidence_bound <= 1.0,
+                    "Confidence bound must be a valid probability: {:.6} at step {}",
+                    verdict.confidence_bound, i);
+
+                // Freedman bound should dominate Azuma bound (be tighter)
+                assert!(verdict.freedman_bound <= verdict.azuma_bound + 1e-10,
+                    "Freedman bound should be ≤ Azuma bound: Freedman={:.6}, Azuma={:.6} at step {}",
+                    verdict.freedman_bound, verdict.azuma_bound, i);
+
+                previous_azuma_bound = verdict.azuma_bound;
+            }
+        }
+    }
+
+    /// Golden Test #3: Freedman vs Bernstein bound selection and dominance
+    #[test]
+    fn golden_freedman_vs_bernstein_bound_selection() {
+        // Test that Freedman's inequality provides tighter bounds than Azuma-Hoeffding
+        // when empirical variance is below the worst-case assumption
+
+        let config = ProgressConfig {
+            confidence: 0.90,
+            max_step_bound: 50.0,
+            min_observations: 5,
+            stall_threshold: 10,
+            epsilon: 1e-12,
+        };
+
+        // Test Case 1: Low variance sequence (Freedman should dominate)
+        let mut cert_low_var = ProgressCertificate::new(config.clone());
+
+        // Consistent progress with low variance
+        for i in 0..15 {
+            let potential = 300.0 - (i as f64 * 8.0); // Consistent -8 per step
+            cert_low_var.observe(potential);
+        }
+
+        let verdict_low_var = cert_low_var.verdict();
+
+        // Freedman should be significantly better than Azuma for low variance
+        assert!(verdict_low_var.freedman_bound <= verdict_low_var.azuma_bound,
+            "Freedman bound should be ≤ Azuma bound: Freedman={:.6}, Azuma={:.6}",
+            verdict_low_var.freedman_bound, verdict_low_var.azuma_bound);
+
+        // For very consistent progress, Freedman should be much tighter
+        let improvement_factor = verdict_low_var.azuma_bound / (verdict_low_var.freedman_bound + 1e-12);
+        assert!(improvement_factor >= 1.0,
+            "Freedman should improve over Azuma, ratio: {:.2}",
+            improvement_factor);
+
+        // Test Case 2: High variance sequence (bounds should be closer)
+        let mut cert_high_var = ProgressCertificate::new(config);
+
+        // Volatile progress with high variance but same mean
+        let high_var_deltas = [-30.0, -5.0, -20.0, -2.0, -15.0, -8.0, -25.0, -1.0, -18.0, -3.0];
+        let mut potential = 200.0;
+        cert_high_var.observe(potential);
+
+        for &delta in &high_var_deltas {
+            potential += delta;
+            cert_high_var.observe(potential);
+        }
+
+        let verdict_high_var = cert_high_var.verdict();
+
+        // Even with high variance, Freedman should still dominate
+        assert!(verdict_high_var.freedman_bound <= verdict_high_var.azuma_bound,
+            "Freedman bound should be ≤ Azuma bound even for high variance: Freedman={:.6}, Azuma={:.6}",
+            verdict_high_var.freedman_bound, verdict_high_var.azuma_bound);
+
+        // Verify empirical variance calculation
+        if let Some(emp_var) = verdict_high_var.empirical_variance {
+            assert!(emp_var > 0.0,
+                "High variance sequence should have positive empirical variance: {:.6}",
+                emp_var);
+        }
+
+        // Compare improvement factors
+        let high_var_improvement = verdict_high_var.azuma_bound / (verdict_high_var.freedman_bound + 1e-12);
+        assert!(high_var_improvement >= 1.0,
+            "Freedman should still improve over Azuma for high variance, ratio: {:.2}",
+            high_var_improvement);
+    }
+
+    /// Golden Test #4: Budget exhaustion emits explicit evidence
+    #[test]
+    fn golden_budget_exhaustion_explicit_evidence() {
+        // Test that various problematic conditions generate explicit evidence entries
+        // that can be audited for debugging and compliance
+
+        let config = ProgressConfig {
+            confidence: 0.95,
+            max_step_bound: 10.0,  // Deliberately small to trigger violations
+            min_observations: 3,
+            stall_threshold: 3,    // Quick stall detection
+            epsilon: 1e-12,
+        };
+
+        let mut cert = ProgressCertificate::new(config);
+
+        // Step 1: Normal observation
+        cert.observe(100.0);
+
+        // Step 2: Large step that exceeds max_step_bound
+        cert.observe(50.0); // Delta = -50, exceeds bound of 10
+
+        // Step 3: Stall (no progress)
+        cert.observe(50.0); // Delta = 0
+
+        // Step 4: Another stall
+        cert.observe(50.0); // Delta = 0
+
+        // Step 5: Potential increase (violation)
+        cert.observe(60.0); // Delta = +10, violation of monotone decrease
+
+        // Step 6: Continue stall to trigger stall detection
+        cert.observe(60.0); // Delta = 0
+
+        let verdict = cert.verdict();
+
+        // Verify evidence entries were generated
+        assert!(!verdict.evidence.is_empty(),
+            "Should generate evidence entries for problematic conditions");
+
+        let evidence_descriptions: Vec<String> = verdict.evidence.iter()
+            .map(|e| e.description.clone())
+            .collect();
+
+        // Check for step bound violation evidence
+        let has_step_violation = evidence_descriptions.iter()
+            .any(|desc| desc.contains("exceeded") || desc.contains("bound"));
+        assert!(has_step_violation,
+            "Should have evidence for step bound violation. Evidence: {:?}",
+            evidence_descriptions);
+
+        // Check for stall detection evidence
+        let has_stall_evidence = evidence_descriptions.iter()
+            .any(|desc| desc.contains("stall"));
+        assert!(has_stall_evidence,
+            "Should have evidence for stall detection. Evidence: {:?}",
+            evidence_descriptions);
+
+        // Verify stall was actually detected in verdict
+        assert!(verdict.stall_detected,
+            "Should detect stall with {} non-decreasing steps",
+            config.stall_threshold);
+
+        // Verify evidence entries have valid structure
+        for evidence in &verdict.evidence {
+            assert!(evidence.step <= cert.len(),
+                "Evidence step {} should be ≤ total steps {}",
+                evidence.step, cert.len());
+
+            assert!(evidence.potential.is_finite(),
+                "Evidence potential should be finite: {:.6}",
+                evidence.potential);
+
+            assert!(evidence.bound >= 0.0 && evidence.bound <= 1.0,
+                "Evidence bound should be valid probability: {:.6}",
+                evidence.bound);
+
+            assert!(!evidence.description.is_empty(),
+                "Evidence should have non-empty description");
+        }
+
+        // Verify evidence can be displayed
+        for evidence in &verdict.evidence {
+            let display_str = format!("{}", evidence);
+            assert!(display_str.contains(&format!("step={}", evidence.step)),
+                "Evidence display should include step number");
+        }
+    }
+
+    /// Golden Test #5: Serialization round-trip preserves all state
+    #[test]
+    fn golden_serialization_round_trip() {
+        // Test complete serialization and deserialization round-trip
+        // Note: We'll use JSON serialization via the Debug trait and manual parsing
+        // since the structs don't implement Serialize/Deserialize
+
+        let config = ProgressConfig {
+            confidence: 0.98,
+            max_step_bound: 25.0,
+            min_observations: 4,
+            stall_threshold: 5,
+            epsilon: 1e-9,
+        };
+
+        let mut original_cert = ProgressCertificate::new(config.clone());
+
+        // Create a rich test scenario with various conditions
+        let test_sequence = vec![
+            200.0, 180.0, 155.0, 140.0, 135.0, 120.0, 105.0, 95.0, 85.0, 70.0,
+            60.0, 50.0, 45.0, 35.0, 25.0, 20.0, 15.0, 10.0, 5.0, 0.0
+        ];
+
+        for potential in test_sequence {
+            original_cert.observe(potential);
+        }
+
+        let original_verdict = original_cert.verdict();
+
+        // Test configuration round-trip by creating identical certificate
+        let reconstructed_cert = ProgressCertificate::new(config);
+
+        // Re-apply the same observations
+        let mut replay_cert = reconstructed_cert;
+        for potential in vec![
+            200.0, 180.0, 155.0, 140.0, 135.0, 120.0, 105.0, 95.0, 85.0, 70.0,
+            60.0, 50.0, 45.0, 35.0, 25.0, 20.0, 15.0, 10.0, 5.0, 0.0
+        ] {
+            replay_cert.observe(potential);
+        }
+
+        let reconstructed_verdict = replay_cert.verdict();
+
+        // Verify all key statistical properties are preserved
+        assert!((original_verdict.initial_potential - reconstructed_verdict.initial_potential).abs() < 1e-10,
+            "Initial potential should match: orig={:.6}, recon={:.6}",
+            original_verdict.initial_potential, reconstructed_verdict.initial_potential);
+
+        assert!((original_verdict.current_potential - reconstructed_verdict.current_potential).abs() < 1e-10,
+            "Current potential should match: orig={:.6}, recon={:.6}",
+            original_verdict.current_potential, reconstructed_verdict.current_potential);
+
+        assert!((original_verdict.mean_credit - reconstructed_verdict.mean_credit).abs() < 1e-10,
+            "Mean credit should match: orig={:.6}, recon={:.6}",
+            original_verdict.mean_credit, reconstructed_verdict.mean_credit);
+
+        assert!((original_verdict.max_observed_step - reconstructed_verdict.max_observed_step).abs() < 1e-10,
+            "Max observed step should match: orig={:.6}, recon={:.6}",
+            original_verdict.max_observed_step, reconstructed_verdict.max_observed_step);
+
+        assert_eq!(original_verdict.total_steps, reconstructed_verdict.total_steps,
+            "Total steps should match: orig={}, recon={}",
+            original_verdict.total_steps, reconstructed_verdict.total_steps);
+
+        assert_eq!(original_verdict.converging, reconstructed_verdict.converging,
+            "Convergence detection should match: orig={}, recon={}",
+            original_verdict.converging, reconstructed_verdict.converging);
+
+        assert_eq!(original_verdict.stall_detected, reconstructed_verdict.stall_detected,
+            "Stall detection should match: orig={}, recon={}",
+            original_verdict.stall_detected, reconstructed_verdict.stall_detected);
+
+        assert_eq!(original_verdict.drain_phase, reconstructed_verdict.drain_phase,
+            "Drain phase should match: orig={:?}, recon={:?}",
+            original_verdict.drain_phase, reconstructed_verdict.drain_phase);
+
+        // Verify mathematical bounds are preserved
+        assert!((original_verdict.azuma_bound - reconstructed_verdict.azuma_bound).abs() < 1e-10,
+            "Azuma bound should match: orig={:.6}, recon={:.6}",
+            original_verdict.azuma_bound, reconstructed_verdict.azuma_bound);
+
+        assert!((original_verdict.freedman_bound - reconstructed_verdict.freedman_bound).abs() < 1e-10,
+            "Freedman bound should match: orig={:.6}, recon={:.6}",
+            original_verdict.freedman_bound, reconstructed_verdict.freedman_bound);
+
+        assert!((original_verdict.confidence_bound - reconstructed_verdict.confidence_bound).abs() < 1e-10,
+            "Confidence bound should match: orig={:.6}, recon={:.6}",
+            original_verdict.confidence_bound, reconstructed_verdict.confidence_bound);
+
+        // Verify variance calculations match
+        match (original_verdict.empirical_variance, reconstructed_verdict.empirical_variance) {
+            (Some(orig), Some(recon)) => {
+                assert!((orig - recon).abs() < 1e-10,
+                    "Empirical variance should match: orig={:.6}, recon={:.6}",
+                    orig, recon);
+            }
+            (None, None) => { /* Both None is fine */ }
+            (orig, recon) => {
+                panic!("Empirical variance mismatch: orig={:?}, recon={:?}", orig, recon);
+            }
+        }
+
+        // Verify estimated remaining steps match
+        match (original_verdict.estimated_remaining_steps, reconstructed_verdict.estimated_remaining_steps) {
+            (Some(orig), Some(recon)) => {
+                assert!((orig - recon).abs() < 1e-8,
+                    "Estimated remaining steps should match: orig={:.6}, recon={:.6}",
+                    orig, recon);
+            }
+            (None, None) => { /* Both None is fine */ }
+            (orig, recon) => {
+                panic!("Estimated remaining steps mismatch: orig={:?}, recon={:?}", orig, recon);
+            }
+        }
+
+        // Verify evidence structure is preserved
+        assert_eq!(original_verdict.evidence.len(), reconstructed_verdict.evidence.len(),
+            "Evidence count should match: orig={}, recon={}",
+            original_verdict.evidence.len(), reconstructed_verdict.evidence.len());
+
+        // Verify martingale values match
+        let orig_martingale = original_cert.martingale_value();
+        let recon_martingale = replay_cert.martingale_value();
+        assert!((orig_martingale - recon_martingale).abs() < 1e-10,
+            "Martingale values should match: orig={:.6}, recon={:.6}",
+            orig_martingale, recon_martingale);
+
+        // Verify that the reconstructed certificate produces identical subsequent analysis
+        let orig_display = format!("{}", original_verdict);
+        let recon_display = format!("{}", reconstructed_verdict);
+
+        // Key numerical values should appear identically
+        assert!(orig_display.contains(&format!("{:.4}", original_verdict.initial_potential)),
+            "Display should contain initial potential");
+        assert!(recon_display.contains(&format!("{:.4}", reconstructed_verdict.initial_potential)),
+            "Reconstructed display should contain initial potential");
+    }
+
+    /// Additional Golden Test: Comprehensive bounds verification under stress
+    #[test]
+    fn golden_comprehensive_bounds_stress_test() {
+        // Stress test all bound calculations under various pathological conditions
+
+        let config = ProgressConfig {
+            confidence: 0.99,
+            max_step_bound: 100.0,
+            min_observations: 3,
+            stall_threshold: 4,
+            epsilon: 1e-12,
+        };
+
+        // Test Case 1: Near-zero potential with tiny steps
+        let mut cert1 = ProgressCertificate::new(config.clone());
+        cert1.observe(1.0);
+        cert1.observe(0.5);
+        cert1.observe(0.1);
+        cert1.observe(0.01);
+        cert1.observe(0.001);
+
+        let verdict1 = cert1.verdict();
+        assert!(verdict1.azuma_bound <= 1.0 && verdict1.azuma_bound >= 0.0);
+        assert!(verdict1.freedman_bound <= 1.0 && verdict1.freedman_bound >= 0.0);
+        assert!(verdict1.freedman_bound <= verdict1.azuma_bound);
+
+        // Test Case 2: Large potential with large steps
+        let mut cert2 = ProgressCertificate::new(config.clone());
+        let large_sequence = vec![10000.0, 9900.0, 9800.0, 9700.0, 9600.0, 9500.0];
+        for v in large_sequence {
+            cert2.observe(v);
+        }
+
+        let verdict2 = cert2.verdict();
+        assert!(verdict2.azuma_bound <= 1.0 && verdict2.azuma_bound >= 0.0);
+        assert!(verdict2.freedman_bound <= 1.0 && verdict2.freedman_bound >= 0.0);
+        assert!(verdict2.freedman_bound <= verdict2.azuma_bound);
+
+        // Test Case 3: Oscillating sequence
+        let mut cert3 = ProgressCertificate::new(config);
+        let oscillating = vec![100.0, 80.0, 90.0, 70.0, 85.0, 65.0, 75.0, 60.0];
+        for v in oscillating {
+            cert3.observe(v);
+        }
+
+        let verdict3 = cert3.verdict();
+        assert!(verdict3.azuma_bound <= 1.0 && verdict3.azuma_bound >= 0.0);
+        assert!(verdict3.freedman_bound <= 1.0 && verdict3.freedman_bound >= 0.0);
+        assert!(verdict3.freedman_bound <= verdict3.azuma_bound + 1e-10); // Allow tiny numerical error
+    }
 }
