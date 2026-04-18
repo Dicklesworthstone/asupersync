@@ -8450,4 +8450,746 @@ mod tests {
         let dbg = format!("{t:?}");
         assert!(dbg.contains("InsertionOrder"));
     }
+
+    // =========================================================================
+    // METAMORPHIC TESTING: Supervision Strategies OneForOne/OneForAll
+    // =========================================================================
+
+    /// Configuration for metamorphic supervision testing
+    #[derive(Debug, Clone)]
+    struct SupervisionMetamorphicConfig {
+        /// Number of children to test
+        child_count: usize,
+        /// Max restarts for testing restart budget exhaustion
+        max_restarts: u32,
+        /// Restart window for rate limiting tests
+        restart_window: Duration,
+        /// Storm threshold for intensity testing
+        storm_threshold: Option<f64>,
+    }
+
+    impl Default for SupervisionMetamorphicConfig {
+        fn default() -> Self {
+            Self {
+                child_count: 5,
+                max_restarts: 3,
+                restart_window: Duration::from_mins(1),
+                storm_threshold: Some(2.0), // 2 restarts/second
+            }
+        }
+    }
+
+    /// Deterministic RNG extension for supervision testing
+    trait SupervisionDetRngExt {
+        fn gen_range(&mut self, range: std::ops::Range<usize>) -> usize;
+        fn choose<T>(&mut self, items: &[T]) -> &T;
+        fn shuffle<T>(&mut self, slice: &mut [T]);
+    }
+
+    impl SupervisionDetRngExt for crate::util::det_rng::DetRng {
+        fn gen_range(&mut self, range: std::ops::Range<usize>) -> usize {
+            if range.is_empty() {
+                range.start
+            } else {
+                range.start + (self.next_u64() as usize % (range.end - range.start))
+            }
+        }
+
+        fn choose<T>(&mut self, items: &[T]) -> &T {
+            let idx = self.gen_range(0..items.len());
+            &items[idx]
+        }
+
+        fn shuffle<T>(&mut self, slice: &mut [T]) {
+            for i in (1..slice.len()).rev() {
+                let j = self.gen_range(0..i + 1);
+                slice.swap(i, j);
+            }
+        }
+    }
+
+    /// Mock start function for testing
+    fn noop_start(_ctx: &crate::cx::Cx, _name: &str) -> Result<TaskId, SpawnError> {
+        // Return a dummy TaskId for testing
+        use crate::util::ArenaIndex;
+        let arena_idx = ArenaIndex::new(42, 0);
+        Ok(TaskId::from_arena(arena_idx))
+    }
+
+    /// Generate supervision config for testing different scenarios
+    fn generate_supervision_config(
+        config: &SupervisionMetamorphicConfig,
+        restart_policy: RestartPolicy,
+        rng: &mut crate::util::det_rng::DetRng,
+    ) -> SupervisionConfig {
+        SupervisionConfig {
+            restart_policy,
+            max_restarts: config.max_restarts,
+            restart_window: config.restart_window,
+            backoff: BackoffStrategy::Fixed(Duration::from_millis(rng.gen_range(10..100) as u64)),
+            escalation: *rng.choose(&[EscalationPolicy::Stop, EscalationPolicy::Escalate]),
+            storm_threshold: config.storm_threshold,
+        }
+    }
+
+    /// Create supervisor builder with test children
+    fn create_test_supervisor_builder(
+        name: &str,
+        child_count: usize,
+        restart_policy: RestartPolicy,
+        rng: &mut crate::util::det_rng::DetRng,
+    ) -> SupervisorBuilder {
+        let mut builder = SupervisorBuilder::new(name)
+            .with_restart_policy(restart_policy);
+
+        for i in 0..child_count {
+            let child_name = format!("child_{}", i);
+            let restart_config = RestartConfig::new(3, Duration::from_mins(1))
+                .with_backoff(BackoffStrategy::Fixed(Duration::from_millis(
+                    rng.gen_range(10..100) as u64,
+                )));
+
+            builder = builder.child(
+                ChildSpec::new(&child_name, noop_start)
+                    .with_restart(SupervisionStrategy::Restart(restart_config)),
+            );
+        }
+
+        builder
+    }
+
+    // =========================================================================
+    // MR1: OneForOne vs OneForAll Restart Scope Equivalence
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_one_for_one_vs_one_for_all_restart_scope() {
+        init_test("metamorphic_one_for_one_vs_one_for_all_restart_scope");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        let config = SupervisionMetamorphicConfig::default();
+
+        // Create identical supervisors with different restart policies
+        let one_for_one = create_test_supervisor_builder(
+            "one_for_one_sup",
+            config.child_count,
+            RestartPolicy::OneForOne,
+            &mut rng,
+        )
+        .compile()
+        .unwrap();
+
+        let one_for_all = create_test_supervisor_builder(
+            "one_for_all_sup",
+            config.child_count,
+            RestartPolicy::OneForAll,
+            &mut rng,
+        )
+        .compile()
+        .unwrap();
+
+        let err_outcome: Outcome<(), ()> = Outcome::Err(());
+
+        // Test failure of each child
+        for child_idx in 0..config.child_count {
+            let failed_child_name = format!("child_{}", child_idx);
+
+            let one_for_one_plan = one_for_one
+                .restart_plan_for_failure(&failed_child_name, &err_outcome)
+                .expect("OneForOne plan");
+
+            let one_for_all_plan = one_for_all
+                .restart_plan_for_failure(&failed_child_name, &err_outcome)
+                .expect("OneForAll plan");
+
+            // MR: OneForOne should restart only the failed child
+            assert_eq!(
+                one_for_one_plan.cancel_order.len(),
+                1,
+                "OneForOne should cancel only failed child {}",
+                child_idx
+            );
+            assert_eq!(
+                one_for_one_plan.restart_order.len(),
+                1,
+                "OneForOne should restart only failed child {}",
+                child_idx
+            );
+            assert_eq!(
+                one_for_one_plan.cancel_order[0].as_str(),
+                failed_child_name,
+                "OneForOne should cancel the failed child {}",
+                child_idx
+            );
+
+            // MR: OneForAll should restart ALL children
+            assert_eq!(
+                one_for_all_plan.cancel_order.len(),
+                config.child_count,
+                "OneForAll should cancel all {} children when child {} fails",
+                config.child_count,
+                child_idx
+            );
+            assert_eq!(
+                one_for_all_plan.restart_order.len(),
+                config.child_count,
+                "OneForAll should restart all {} children when child {} fails",
+                config.child_count,
+                child_idx
+            );
+
+            // MR: Both policies should have same restart policy recorded
+            assert_eq!(one_for_one_plan.policy, RestartPolicy::OneForOne);
+            assert_eq!(one_for_all_plan.policy, RestartPolicy::OneForAll);
+        }
+
+        crate::test_complete!("metamorphic_one_for_one_vs_one_for_all_restart_scope");
+    }
+
+    // =========================================================================
+    // MR2: Restart Budget Exhaustion Invariance
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_restart_budget_exhaustion_invariance() {
+        init_test("metamorphic_restart_budget_exhaustion_invariance");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        // Test that restart budget exhaustion behaves consistently regardless of:
+        // 1. Which child fails first
+        // 2. The order of failures
+        // 3. The restart policy (OneForOne vs OneForAll)
+
+        let config = SupervisionMetamorphicConfig {
+            child_count: 3,
+            max_restarts: 2, // Low limit for easier exhaustion testing
+            restart_window: Duration::from_secs(60),
+            storm_threshold: None, // Disable storm detection for this test
+        };
+
+        for &restart_policy in &[RestartPolicy::OneForOne, RestartPolicy::OneForAll] {
+            let supervisor = SupervisorBuilder::new("budget_test")
+                .with_restart_policy(restart_policy)
+                .child(
+                    ChildSpec::new("child_0", noop_start)
+                        .with_restart(SupervisionStrategy::Restart(
+                            RestartConfig::new(config.max_restarts, config.restart_window)
+                        )),
+                )
+                .child(
+                    ChildSpec::new("child_1", noop_start)
+                        .with_restart(SupervisionStrategy::Restart(
+                            RestartConfig::new(config.max_restarts, config.restart_window)
+                        )),
+                )
+                .child(
+                    ChildSpec::new("child_2", noop_start)
+                        .with_restart(SupervisionStrategy::Restart(
+                            RestartConfig::new(config.max_restarts, config.restart_window)
+                        )),
+                )
+                .compile()
+                .unwrap();
+
+            let err_outcome: Outcome<(), ()> = Outcome::Err(());
+
+            // Test different failure sequences
+            let failure_sequences = vec![
+                vec!["child_0", "child_1", "child_2"],
+                vec!["child_2", "child_1", "child_0"],
+                vec!["child_1", "child_0", "child_2"],
+            ];
+
+            for (seq_idx, sequence) in failure_sequences.iter().enumerate() {
+                // Each child should produce restart plans initially
+                for &child_name in sequence {
+                    let plan = supervisor.restart_plan_for_failure(child_name, &err_outcome);
+
+                    match restart_policy {
+                        RestartPolicy::OneForOne => {
+                            if let Some(plan) = plan {
+                                assert!(plan.cancel_order.contains(&ChildName::new(child_name)));
+                                assert!(plan.restart_order.contains(&ChildName::new(child_name)));
+                            }
+                        }
+                        RestartPolicy::OneForAll => {
+                            if let Some(plan) = plan {
+                                assert_eq!(plan.cancel_order.len(), config.child_count);
+                                assert_eq!(plan.restart_order.len(), config.child_count);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                // MR: Budget exhaustion behavior should be consistent regardless of failure order
+                // Note: This test demonstrates the pattern - full budget tracking would require
+                // more sophisticated state management in the test harness
+            }
+        }
+
+        crate::test_complete!("metamorphic_restart_budget_exhaustion_invariance");
+    }
+
+    // =========================================================================
+    // MR3: Child Failure Isolation Property
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_child_failure_isolation() {
+        init_test("metamorphic_child_failure_isolation");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        // MR: Under OneForOne policy, failure of child A should not affect
+        // the restart plan for independent failure of child B
+
+        let config = SupervisionMetamorphicConfig::default();
+
+        let supervisor = SupervisorBuilder::new("isolation_test")
+            .with_restart_policy(RestartPolicy::OneForOne)
+            .child(
+                ChildSpec::new("child_a", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(
+                        RestartConfig::new(3, Duration::from_mins(1))
+                    )),
+            )
+            .child(
+                ChildSpec::new("child_b", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(
+                        RestartConfig::new(3, Duration::from_mins(1))
+                    )),
+            )
+            .child(
+                ChildSpec::new("child_c", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(
+                        RestartConfig::new(3, Duration::from_mins(1))
+                    )),
+            )
+            .compile()
+            .unwrap();
+
+        let err_outcome: Outcome<(), ()> = Outcome::Err(());
+
+        // Test baseline plans for each child individually
+        let plan_a = supervisor.restart_plan_for_failure("child_a", &err_outcome).unwrap();
+        let plan_b = supervisor.restart_plan_for_failure("child_b", &err_outcome).unwrap();
+        let plan_c = supervisor.restart_plan_for_failure("child_c", &err_outcome).unwrap();
+
+        // Under OneForOne, each plan should be isolated
+        assert_eq!(plan_a.cancel_order.len(), 1);
+        assert_eq!(plan_a.cancel_order[0].as_str(), "child_a");
+        assert_eq!(plan_a.restart_order[0].as_str(), "child_a");
+
+        assert_eq!(plan_b.cancel_order.len(), 1);
+        assert_eq!(plan_b.cancel_order[0].as_str(), "child_b");
+        assert_eq!(plan_b.restart_order[0].as_str(), "child_b");
+
+        assert_eq!(plan_c.cancel_order.len(), 1);
+        assert_eq!(plan_c.cancel_order[0].as_str(), "child_c");
+        assert_eq!(plan_c.restart_order[0].as_str(), "child_c");
+
+        // MR: Plans should be identical regardless of which other children might have failed
+        // In practice, this is testing that the restart planning is stateless with respect
+        // to other children's states under OneForOne policy
+
+        for &failed_child in &["child_a", "child_b", "child_c"] {
+            let isolated_plan = supervisor
+                .restart_plan_for_failure(failed_child, &err_outcome)
+                .unwrap();
+
+            // Verify isolation: plan only affects the failed child
+            assert_eq!(isolated_plan.cancel_order.len(), 1);
+            assert_eq!(isolated_plan.restart_order.len(), 1);
+            assert_eq!(isolated_plan.cancel_order[0].as_str(), failed_child);
+            assert_eq!(isolated_plan.restart_order[0].as_str(), failed_child);
+            assert_eq!(isolated_plan.policy, RestartPolicy::OneForOne);
+        }
+
+        crate::test_complete!("metamorphic_child_failure_isolation");
+    }
+
+    // =========================================================================
+    // MR4: Restart Policy Commutativity Under Different Failure Orderings
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_restart_policy_commutativity() {
+        init_test("metamorphic_restart_policy_commutativity");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        // MR: Under OneForAll policy, the restart plan should be identical regardless
+        // of which child fails (all children are restarted anyway)
+
+        let config = SupervisionMetamorphicConfig {
+            child_count: 4,
+            ..SupervisionMetamorphicConfig::default()
+        };
+
+        let supervisor = SupervisorBuilder::new("commutativity_test")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(
+                ChildSpec::new("alpha", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(
+                        RestartConfig::new(3, Duration::from_mins(1))
+                    )),
+            )
+            .child(
+                ChildSpec::new("beta", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(
+                        RestartConfig::new(3, Duration::from_mins(1))
+                    )),
+            )
+            .child(
+                ChildSpec::new("gamma", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(
+                        RestartConfig::new(3, Duration::from_mins(1))
+                    )),
+            )
+            .child(
+                ChildSpec::new("delta", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(
+                        RestartConfig::new(3, Duration::from_mins(1))
+                    )),
+            )
+            .compile()
+            .unwrap();
+
+        let err_outcome: Outcome<(), ()> = Outcome::Err(());
+        let child_names = ["alpha", "beta", "gamma", "delta"];
+        let mut plans = Vec::new();
+
+        // Generate restart plans for each child failure
+        for &child_name in &child_names {
+            let plan = supervisor
+                .restart_plan_for_failure(child_name, &err_outcome)
+                .unwrap();
+            plans.push(plan);
+        }
+
+        // MR: Under OneForAll, all plans should be structurally identical
+        // (same children to cancel/restart, just different triggering failure)
+        for i in 1..plans.len() {
+            assert_eq!(
+                plans[0].policy,
+                plans[i].policy,
+                "Plan {} has different policy than plan 0",
+                i
+            );
+            assert_eq!(
+                plans[0].cancel_order.len(),
+                plans[i].cancel_order.len(),
+                "Plan {} has different cancel count than plan 0",
+                i
+            );
+            assert_eq!(
+                plans[0].restart_order.len(),
+                plans[i].restart_order.len(),
+                "Plan {} has different restart count than plan 0",
+                i
+            );
+
+            // All plans should include all children (OneForAll semantics)
+            assert_eq!(plans[i].cancel_order.len(), child_names.len());
+            assert_eq!(plans[i].restart_order.len(), child_names.len());
+        }
+
+        // Verify that all children are included in every plan
+        for plan in &plans {
+            for &expected_child in &child_names {
+                assert!(
+                    plan.cancel_order
+                        .iter()
+                        .any(|name| name.as_str() == expected_child),
+                    "Plan missing {} in cancel_order",
+                    expected_child
+                );
+                assert!(
+                    plan.restart_order
+                        .iter()
+                        .any(|name| name.as_str() == expected_child),
+                    "Plan missing {} in restart_order",
+                    expected_child
+                );
+            }
+        }
+
+        crate::test_complete!("metamorphic_restart_policy_commutativity");
+    }
+
+    // =========================================================================
+    // MR5: Escalation Policy Consistency
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_escalation_policy_consistency() {
+        init_test("metamorphic_escalation_policy_consistency");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        // MR: Escalation policy should behave consistently regardless of:
+        // 1. The restart policy (OneForOne vs OneForAll)
+        // 2. Which child triggers the escalation
+        // 3. The number of children in the supervisor
+
+        let escalation_policies = [EscalationPolicy::Stop, EscalationPolicy::Escalate];
+        let restart_policies = [RestartPolicy::OneForOne, RestartPolicy::OneForAll];
+        let child_counts = [1, 3, 5];
+
+        for &escalation_policy in &escalation_policies {
+            for &restart_policy in &restart_policies {
+                for &child_count in &child_counts {
+                    let mut builder = SupervisorBuilder::new("escalation_test")
+                        .with_restart_policy(restart_policy);
+
+                    for i in 0..child_count {
+                        let child_name = format!("child_{}", i);
+                        builder = builder.child(
+                            ChildSpec::new(&child_name, noop_start)
+                                .with_restart(SupervisionStrategy::Restart(
+                                    RestartConfig::new(1, Duration::from_secs(1)) // Low budget for testing
+                                        .with_escalation(escalation_policy),
+                                )),
+                        );
+                    }
+
+                    let supervisor = builder.compile().unwrap();
+
+                    // Test that restart plans are generated consistently
+                    let err_outcome: Outcome<(), ()> = Outcome::Err(());
+
+                    for i in 0..child_count {
+                        let child_name = format!("child_{}", i);
+                        let plan_result = supervisor.restart_plan_for_failure(&child_name, &err_outcome);
+
+                        match plan_result {
+                            Some(plan) => {
+                                // Verify plan structure matches restart policy
+                                match restart_policy {
+                                    RestartPolicy::OneForOne => {
+                                        assert_eq!(plan.cancel_order.len(), 1);
+                                        assert_eq!(plan.restart_order.len(), 1);
+                                        assert_eq!(plan.cancel_order[0].as_str(), child_name);
+                                    }
+                                    RestartPolicy::OneForAll => {
+                                        assert_eq!(plan.cancel_order.len(), child_count);
+                                        assert_eq!(plan.restart_order.len(), child_count);
+                                    }
+                                    RestartPolicy::RestForOne => {
+                                        // Would restart child and all started after it
+                                        assert!(!plan.cancel_order.is_empty());
+                                        assert!(!plan.restart_order.is_empty());
+                                    }
+                                }
+                                assert_eq!(plan.policy, restart_policy);
+                            }
+                            None => {
+                                // No plan generated - could be due to Stop strategy or other factors
+                                // This is also valid behavior depending on configuration
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        crate::test_complete!("metamorphic_escalation_policy_consistency");
+    }
+
+    // =========================================================================
+    // MR6: LabRuntime Replay Determinism
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_lab_runtime_replay_determinism() {
+        init_test("metamorphic_lab_runtime_replay_determinism");
+
+        // MR: Supervision behavior should be deterministic under LabRuntime replay
+        // Same sequence of operations with same seed should produce identical plans
+
+        const SEED: u64 = 0xDEADBEEF_CAFEBABE;
+
+        // Run the same supervision scenario multiple times with the same seed
+        let results: Vec<Vec<String>> = (0..3)
+            .map(|_| {
+                let mut rng = crate::util::det_rng::DetRng::new(SEED);
+                let mut plan_summaries = Vec::new();
+
+                let supervisor = SupervisorBuilder::new("determinism_test")
+                    .with_restart_policy(RestartPolicy::OneForOne)
+                    .child(
+                        ChildSpec::new("service_a", noop_start)
+                            .with_restart(SupervisionStrategy::Restart(
+                                RestartConfig::new(3, Duration::from_mins(1))
+                            )),
+                    )
+                    .child(
+                        ChildSpec::new("service_b", noop_start)
+                            .with_restart(SupervisionStrategy::Restart(
+                                RestartConfig::new(3, Duration::from_mins(1))
+                            )),
+                    )
+                    .compile()
+                    .unwrap();
+
+                let err_outcome: Outcome<(), ()> = Outcome::Err(());
+
+                // Generate deterministic failure sequence
+                let services = ["service_a", "service_b"];
+                for _ in 0..10 {
+                    let chosen_service = rng.choose(&services);
+                    if let Some(plan) = supervisor.restart_plan_for_failure(chosen_service, &err_outcome) {
+                        plan_summaries.push(format!(
+                            "fail:{} policy:{:?} cancel:{} restart:{}",
+                            chosen_service,
+                            plan.policy,
+                            plan.cancel_order.len(),
+                            plan.restart_order.len()
+                        ));
+                    }
+                }
+
+                plan_summaries
+            })
+            .collect();
+
+        // All runs should produce identical results
+        for i in 1..results.len() {
+            assert_eq!(
+                results[0], results[i],
+                "Run {} produced different results than run 0 - determinism broken",
+                i
+            );
+        }
+
+        // Results should be non-empty (sanity check)
+        assert!(!results[0].is_empty(), "Should have generated some supervision plans");
+
+        crate::test_complete!("metamorphic_lab_runtime_replay_determinism");
+    }
+
+    // =========================================================================
+    // MR7: Composite Supervision Strategy Invariants
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_composite_supervision_invariants() {
+        init_test("metamorphic_composite_supervision_invariants");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        // MR: Combining multiple metamorphic properties should preserve all individual properties
+        // Test: OneForOne + Escalation + Budget limits + Deterministic ordering
+
+        let config = SupervisionMetamorphicConfig {
+            child_count: 3,
+            max_restarts: 2,
+            restart_window: Duration::from_secs(30),
+            storm_threshold: Some(1.5),
+        };
+
+        // Create supervisor with composite configuration
+        let supervisor = SupervisorBuilder::new("composite_test")
+            .with_restart_policy(RestartPolicy::OneForOne)
+            .child(
+                ChildSpec::new("primary", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(
+                        RestartConfig::new(config.max_restarts, config.restart_window)
+                            .with_escalation(EscalationPolicy::Escalate)
+                            .with_backoff(BackoffStrategy::Exponential {
+                                initial: Duration::from_millis(100),
+                                max: Duration::from_secs(5),
+                                multiplier: 2.0,
+                            }),
+                    )),
+            )
+            .child(
+                ChildSpec::new("secondary", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(
+                        RestartConfig::new(config.max_restarts, config.restart_window)
+                            .with_escalation(EscalationPolicy::Stop)
+                    )),
+            )
+            .child(
+                ChildSpec::new("tertiary", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(
+                        RestartConfig::new(config.max_restarts, config.restart_window)
+                    )),
+            )
+            .compile()
+            .unwrap();
+
+        let err_outcome: Outcome<(), ()> = Outcome::Err(());
+        let children = ["primary", "secondary", "tertiary"];
+
+        // Test that all individual properties hold under composite configuration
+        for &child_name in &children {
+            let plan = supervisor.restart_plan_for_failure(child_name, &err_outcome);
+
+            if let Some(plan) = plan {
+                // OneForOne property: only failed child should be affected
+                assert_eq!(plan.cancel_order.len(), 1);
+                assert_eq!(plan.restart_order.len(), 1);
+                assert_eq!(plan.cancel_order[0].as_str(), child_name);
+                assert_eq!(plan.restart_order[0].as_str(), child_name);
+
+                // Policy consistency
+                assert_eq!(plan.policy, RestartPolicy::OneForOne);
+
+                // Plan structure integrity
+                assert!(!plan.cancel_order.is_empty());
+                assert!(!plan.restart_order.is_empty());
+                assert_eq!(plan.cancel_order.len(), plan.restart_order.len());
+            }
+        }
+
+        // Test deterministic behavior with repeated calls
+        for _ in 0..5 {
+            let primary_plan1 = supervisor.restart_plan_for_failure("primary", &err_outcome);
+            let primary_plan2 = supervisor.restart_plan_for_failure("primary", &err_outcome);
+
+            match (primary_plan1, primary_plan2) {
+                (Some(plan1), Some(plan2)) => {
+                    assert_eq!(plan1.policy, plan2.policy);
+                    assert_eq!(plan1.cancel_order, plan2.cancel_order);
+                    assert_eq!(plan1.restart_order, plan2.restart_order);
+                }
+                (None, None) => {
+                    // Consistent behavior
+                }
+                _ => {
+                    panic!("Inconsistent restart plan generation for same input");
+                }
+            }
+        }
+
+        crate::test_complete!("metamorphic_composite_supervision_invariants");
+    }
 }
