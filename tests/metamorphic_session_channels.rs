@@ -533,10 +533,10 @@ fn mr10_drop_safety_mpsc_panic() {
     let cx = test_cx();
     let (tx, _rx) = tracked_channel::<i32>(1);
 
-    let result = std::panic::catch_unwind(|| {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let permit = tx.try_reserve().unwrap();
         drop(permit); // Should panic
-    });
+    }));
 
     // MR10: Drop must always panic with specific message
     assert!(
@@ -568,10 +568,10 @@ fn mr10_drop_safety_oneshot_panic() {
     let cx = test_cx();
     let (tx, _rx) = tracked_oneshot::<i32>();
 
-    let result = std::panic::catch_unwind(|| {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let permit = tx.reserve(&cx);
         drop(permit); // Should panic
-    });
+    }));
 
     // MR10: Oneshot drop must also panic with same message
     assert!(
@@ -662,11 +662,5 @@ proptest! {
             "Compound test: value preservation violated");
         prop_assert_eq!(received_values.len(), send_count,
             "Compound test: send count mismatch");
-    }
-}
-ch");
-    }
-}
-count mismatch");
     }
 }
