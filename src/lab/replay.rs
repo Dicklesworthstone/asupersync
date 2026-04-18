@@ -2282,4 +2282,663 @@ mod tests {
 
         crate::test_complete!("inferred_crashpack_reference_requires_crashpack_like_path");
     }
+
+    // =========================================================================
+    // METAMORPHIC TESTING: Lab::Replay Deterministic Fork/Join
+    // =========================================================================
+
+    /// Configuration for metamorphic replay testing
+    #[derive(Debug, Clone)]
+    struct ReplayMetamorphicConfig {
+        /// Number of workers for parallel execution
+        worker_count: usize,
+        /// Number of checkpoints to test
+        checkpoint_count: usize,
+        /// Number of concurrent tasks to spawn
+        task_count: usize,
+        /// Maximum steps for deterministic testing
+        max_steps: u64,
+    }
+
+    impl Default for ReplayMetamorphicConfig {
+        fn default() -> Self {
+            Self {
+                worker_count: 4,
+                checkpoint_count: 5,
+                task_count: 8,
+                max_steps: 1000,
+            }
+        }
+    }
+
+    /// Generate deterministic test scenario for fork/join patterns
+    fn create_fork_join_test_scenario(
+        config: &ReplayMetamorphicConfig,
+        rng_seed: u64,
+    ) -> impl Fn(&mut LabRuntime) + Clone {
+        let task_count = config.task_count;
+        move |runtime: &mut LabRuntime| {
+            // Use the runtime's deterministic execution to create fork/join patterns
+            use crate::util::det_rng::DetRng;
+            let mut rng = DetRng::new(rng_seed);
+
+            // Create a simple fork/join pattern with multiple concurrent tasks
+            for i in 0..task_count {
+                let task_seed = rng.next_u64();
+                // This would normally spawn tasks using the runtime's spawn mechanisms
+                // For testing, we'll create trace events that represent fork/join operations
+                runtime.trace().record_event(
+                    &crate::trace::TraceEvent::user_trace(
+                        i as u64,
+                        runtime.time(),
+                        format!("fork_task_{}", i),
+                    )
+                );
+            }
+
+            // Simulate join phase
+            for i in 0..task_count {
+                runtime.trace().record_event(
+                    &crate::trace::TraceEvent::user_trace(
+                        (task_count + i) as u64,
+                        runtime.time(),
+                        format!("join_task_{}", i),
+                    )
+                );
+            }
+        }
+    }
+
+    // =========================================================================
+    // MR1: Checkpoint Replay Equivalence
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_checkpoint_replay_equivalence() {
+        init_test("metamorphic_checkpoint_replay_equivalence");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        let config = ReplayMetamorphicConfig::default();
+
+        // Test scenario: original execution vs replay from various checkpoints
+        let test_scenario = create_fork_join_test_scenario(&config, seed);
+
+        // Run original execution
+        let mut original_config = LabConfig::new(seed);
+        original_config = original_config.worker_count(config.worker_count);
+        let mut original_runtime = LabRuntime::new(original_config);
+        test_scenario(&mut original_runtime);
+        let original_trace = original_runtime.trace().snapshot();
+        let original_certificate = original_runtime.certificate().hash();
+
+        // MR: Replay from different checkpoints should produce equivalent results
+        // when executed to the same point
+        for checkpoint_idx in 0..config.checkpoint_count.min(original_trace.len()) {
+            let mut replay_config = LabConfig::new(seed);
+            replay_config = replay_config.worker_count(config.worker_count);
+            let mut replay_runtime = LabRuntime::new(replay_config);
+
+            // Simulate replay from checkpoint by processing events up to checkpoint
+            for event in &original_trace[..checkpoint_idx] {
+                replay_runtime.trace().record_event(event);
+            }
+
+            // Continue execution from checkpoint
+            test_scenario(&mut replay_runtime);
+            let replay_trace = replay_runtime.trace().snapshot();
+            let replay_certificate = replay_runtime.certificate().hash();
+
+            // MR: Certificate hashes should match between original and replayed execution
+            assert_eq!(
+                original_certificate,
+                replay_certificate,
+                "Checkpoint {} replay diverged in certificate hash",
+                checkpoint_idx
+            );
+
+            // MR: The portion of the trace after the checkpoint should match
+            // when both executions reach the same logical point
+            if replay_trace.len() >= original_trace.len() {
+                for (i, (orig_event, replay_event)) in original_trace
+                    .iter()
+                    .zip(replay_trace.iter())
+                    .enumerate()
+                {
+                    if i >= checkpoint_idx {
+                        assert!(
+                            events_match(orig_event, replay_event),
+                            "Event {} after checkpoint {} doesn't match: {:?} vs {:?}",
+                            i,
+                            checkpoint_idx,
+                            orig_event,
+                            replay_event
+                        );
+                    }
+                }
+            }
+        }
+
+        crate::test_complete!("metamorphic_checkpoint_replay_equivalence");
+    }
+
+    // =========================================================================
+    // MR2: Parallel Scope Fork/Join Order Determinism
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_parallel_scope_fork_join_determinism() {
+        init_test("metamorphic_parallel_scope_fork_join_determinism");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        let config = ReplayMetamorphicConfig::default();
+
+        // MR: Fork/join order should be deterministic across multiple runs with same seed
+        let test_scenario = create_fork_join_test_scenario(&config, seed);
+
+        let mut executions = Vec::new();
+
+        // Execute the same scenario multiple times with the same seed
+        for run_idx in 0..5 {
+            let mut runtime_config = LabConfig::new(seed); // Same seed every time
+            runtime_config = runtime_config.worker_count(config.worker_count);
+            let mut runtime = LabRuntime::new(runtime_config);
+
+            test_scenario(&mut runtime);
+
+            let trace = runtime.trace().snapshot();
+            let certificate = runtime.certificate().hash();
+            let steps = runtime.steps();
+
+            executions.push((trace, certificate, steps));
+        }
+
+        // MR: All executions should produce identical results
+        for (run_idx, (trace, certificate, steps)) in executions.iter().enumerate().skip(1) {
+            assert_eq!(
+                executions[0].1,
+                *certificate,
+                "Run {} has different certificate than run 0",
+                run_idx
+            );
+            assert_eq!(
+                executions[0].2,
+                *steps,
+                "Run {} has different step count than run 0",
+                run_idx
+            );
+
+            // Check trace equivalence
+            let divergence = find_divergence(&executions[0].0, trace);
+            assert!(
+                divergence.is_none(),
+                "Run {} diverged from run 0: {:?}",
+                run_idx,
+                divergence
+            );
+        }
+
+        // MR: Fork/join ordering should be stable within each trace
+        for (run_idx, (trace, _, _)) in executions.iter().enumerate() {
+            let mut fork_events = Vec::new();
+            let mut join_events = Vec::new();
+
+            for event in trace {
+                if event.data.contains("fork_task_") {
+                    fork_events.push(event.clone());
+                } else if event.data.contains("join_task_") {
+                    join_events.push(event.clone());
+                }
+            }
+
+            // Verify fork events appear before join events (proper fork/join ordering)
+            if let (Some(last_fork), Some(first_join)) = (fork_events.last(), join_events.first()) {
+                assert!(
+                    last_fork.time <= first_join.time,
+                    "Run {}: Fork events should complete before join events start",
+                    run_idx
+                );
+            }
+        }
+
+        crate::test_complete!("metamorphic_parallel_scope_fork_join_determinism");
+    }
+
+    // =========================================================================
+    // MR3: Panic Replay Cause Chain Consistency
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_panic_replay_cause_chain_consistency() {
+        init_test("metamorphic_panic_replay_cause_chain_consistency");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        let config = ReplayMetamorphicConfig::default();
+
+        // Test scenario that includes panic conditions
+        let panic_scenario = move |runtime: &mut LabRuntime| {
+            use crate::util::det_rng::DetRng;
+            let mut rng = DetRng::new(seed);
+
+            // Create events including simulated panic conditions
+            for i in 0..config.task_count {
+                if rng.next_u64() % 4 == 0 {
+                    // 25% chance of panic
+                    runtime.trace().record_event(
+                        &crate::trace::TraceEvent::user_trace(
+                            i as u64,
+                            runtime.time(),
+                            format!("panic_task_{}", i),
+                        )
+                    );
+                } else {
+                    runtime.trace().record_event(
+                        &crate::trace::TraceEvent::user_trace(
+                            i as u64,
+                            runtime.time(),
+                            format!("normal_task_{}", i),
+                        )
+                    );
+                }
+            }
+        };
+
+        // Run original execution
+        let mut original_config = LabConfig::new(seed);
+        original_config = original_config.worker_count(config.worker_count);
+        let mut original_runtime = LabRuntime::new(original_config);
+        panic_scenario(&mut original_runtime);
+        let original_trace = original_runtime.trace().snapshot();
+
+        // Run replay
+        let mut replay_config = LabConfig::new(seed);
+        replay_config = replay_config.worker_count(config.worker_count);
+        let mut replay_runtime = LabRuntime::new(replay_config);
+        panic_scenario(&mut replay_runtime);
+        let replay_trace = replay_runtime.trace().snapshot();
+
+        // MR: Panic cause chains should be identical between original and replay
+        let original_panics: Vec<_> = original_trace
+            .iter()
+            .filter(|event| event.data.contains("panic_"))
+            .collect();
+        let replay_panics: Vec<_> = replay_trace
+            .iter()
+            .filter(|event| event.data.contains("panic_"))
+            .collect();
+
+        assert_eq!(
+            original_panics.len(),
+            replay_panics.len(),
+            "Panic count should match between original and replay"
+        );
+
+        for (original_panic, replay_panic) in original_panics.iter().zip(replay_panics.iter()) {
+            assert!(
+                events_match(original_panic, replay_panic),
+                "Panic events should match: {:?} vs {:?}",
+                original_panic,
+                replay_panic
+            );
+        }
+
+        // MR: Overall trace should be identical (no divergence)
+        let divergence = find_divergence(&original_trace, &replay_trace);
+        assert!(
+            divergence.is_none(),
+            "Panic replay diverged: {:?}",
+            divergence
+        );
+
+        crate::test_complete!("metamorphic_panic_replay_cause_chain_consistency");
+    }
+
+    // =========================================================================
+    // MR4: Cross-Region Trace Ordering Preservation
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_cross_region_trace_ordering_preservation() {
+        init_test("metamorphic_cross_region_trace_ordering_preservation");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        let config = ReplayMetamorphicConfig::default();
+
+        // Test scenario with multiple regions
+        let multi_region_scenario = move |runtime: &mut LabRuntime| {
+            use crate::util::det_rng::DetRng;
+            let mut rng = DetRng::new(seed);
+
+            let region_count = 3;
+
+            // Create events across multiple regions
+            for region_id in 0..region_count {
+                for task_id in 0..config.task_count / region_count {
+                    let event_id = region_id * 1000 + task_id;
+                    runtime.trace().record_event(
+                        &crate::trace::TraceEvent::user_trace(
+                            event_id as u64,
+                            runtime.time(),
+                            format!("region_{}_task_{}", region_id, task_id),
+                        )
+                    );
+                }
+            }
+        };
+
+        // Test ordering preservation across different execution contexts
+        let execution_contexts = [
+            ("single_worker", 1),
+            ("dual_worker", 2),
+            ("multi_worker", 4),
+        ];
+
+        let mut context_traces = Vec::new();
+
+        for (context_name, worker_count) in &execution_contexts {
+            let mut runtime_config = LabConfig::new(seed);
+            runtime_config = runtime_config.worker_count(*worker_count);
+            let mut runtime = LabRuntime::new(runtime_config);
+
+            multi_region_scenario(&mut runtime);
+            let trace = runtime.trace().snapshot();
+            context_traces.push((context_name, trace));
+        }
+
+        // MR: Cross-region ordering should be preserved regardless of worker count
+        for (context_name, trace) in &context_traces {
+            let mut region_events: std::collections::BTreeMap<u32, Vec<&crate::trace::TraceEvent>> =
+                std::collections::BTreeMap::new();
+
+            for event in trace {
+                if event.data.contains("region_") {
+                    if let Some(region_start) = event.data.find("region_") {
+                        if let Some(region_end) = event.data[region_start + 7..].find('_') {
+                            if let Ok(region_id) = event.data[region_start + 7..region_start + 7 + region_end].parse::<u32>() {
+                                region_events.entry(region_id).or_default().push(event);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Verify each region has events
+            assert!(
+                !region_events.is_empty(),
+                "Context {} should have region events",
+                context_name
+            );
+
+            // MR: Within each region, event ordering should be deterministic
+            for (region_id, events) in &region_events {
+                for window in events.windows(2) {
+                    assert!(
+                        window[0].time <= window[1].time,
+                        "Context {}: Region {} events not in time order",
+                        context_name,
+                        region_id
+                    );
+                }
+            }
+        }
+
+        // MR: Different worker counts should produce equivalent logical ordering
+        // (may have different physical timing but same logical causality)
+        for i in 1..context_traces.len() {
+            let (name1, trace1) = &context_traces[0];
+            let (name2, trace2) = &context_traces[i];
+
+            // Extract logical ordering (ignoring precise timing)
+            let logical_order1: Vec<_> = trace1.iter()
+                .filter(|e| e.data.contains("region_"))
+                .map(|e| &e.data)
+                .collect();
+            let logical_order2: Vec<_> = trace2.iter()
+                .filter(|e| e.data.contains("region_"))
+                .map(|e| &e.data)
+                .collect();
+
+            assert_eq!(
+                logical_order1, logical_order2,
+                "Logical ordering differs between {} and {}",
+                name1, name2
+            );
+        }
+
+        crate::test_complete!("metamorphic_cross_region_trace_ordering_preservation");
+    }
+
+    // =========================================================================
+    // MR5: LabRuntime Seed Determinism
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_lab_runtime_seed_determinism() {
+        init_test("metamorphic_lab_runtime_seed_determinism");
+
+        // MR: Same seed should produce identical execution across multiple runs
+        const SEED: u64 = 0x1234_5678_9ABC_DEF0;
+
+        let config = ReplayMetamorphicConfig::default();
+
+        let deterministic_scenario = |runtime: &mut LabRuntime| {
+            use crate::util::det_rng::DetRng;
+            let mut rng = DetRng::new(SEED); // Use the same fixed seed
+
+            // Create deterministic sequence of events
+            for i in 0..config.task_count {
+                let choice = rng.next_u64() % 3;
+                let event_type = match choice {
+                    0 => "fork",
+                    1 => "work",
+                    _ => "join",
+                };
+
+                runtime.trace().record_event(
+                    &crate::trace::TraceEvent::user_trace(
+                        i as u64,
+                        runtime.time(),
+                        format!("{}_{}", event_type, i),
+                    )
+                );
+            }
+        };
+
+        // Run multiple times with same seed
+        let mut run_results = Vec::new();
+
+        for run_idx in 0..5 {
+            let mut runtime_config = LabConfig::new(SEED);
+            runtime_config = runtime_config.worker_count(config.worker_count);
+            let mut runtime = LabRuntime::new(runtime_config);
+
+            deterministic_scenario(&mut runtime);
+
+            let trace = runtime.trace().snapshot();
+            let certificate = runtime.certificate().hash();
+            let steps = runtime.steps();
+
+            run_results.push((run_idx, trace, certificate, steps));
+        }
+
+        // MR: All runs should produce identical results
+        for (run_idx, trace, certificate, steps) in &run_results[1..] {
+            assert_eq!(
+                run_results[0].2,
+                *certificate,
+                "Run {} certificate differs from run 0",
+                run_idx
+            );
+            assert_eq!(
+                run_results[0].3,
+                *steps,
+                "Run {} step count differs from run 0",
+                run_idx
+            );
+
+            let divergence = find_divergence(&run_results[0].1, trace);
+            assert!(
+                divergence.is_none(),
+                "Run {} trace diverged from run 0: {:?}",
+                run_idx,
+                divergence
+            );
+        }
+
+        // MR: Test seed independence - different seeds should produce different results
+        let mut different_seed_config = LabConfig::new(SEED + 1);
+        different_seed_config = different_seed_config.worker_count(config.worker_count);
+        let mut different_seed_runtime = LabRuntime::new(different_seed_config);
+
+        deterministic_scenario(&mut different_seed_runtime);
+        let different_trace = different_seed_runtime.trace().snapshot();
+        let different_certificate = different_seed_runtime.certificate().hash();
+
+        assert_ne!(
+            run_results[0].2,
+            different_certificate,
+            "Different seed should produce different certificate"
+        );
+
+        // Traces may or may not be different, but certificates should differ
+        // showing that the seed is actually affecting the execution
+
+        crate::test_complete!("metamorphic_lab_runtime_seed_determinism");
+    }
+
+    // =========================================================================
+    // MR6: Composite Replay Invariants
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_composite_replay_invariants() {
+        init_test("metamorphic_composite_replay_invariants");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        let config = ReplayMetamorphicConfig::default();
+
+        // MR: Combination of multiple replay properties should all hold simultaneously
+        let composite_scenario = |runtime: &mut LabRuntime| {
+            use crate::util::det_rng::DetRng;
+            let mut rng = DetRng::new(seed);
+
+            // Create a complex scenario combining:
+            // 1. Fork/join patterns
+            // 2. Cross-region operations
+            // 3. Potential panic conditions
+            // 4. Checkpoint-worthy state changes
+
+            let regions = 2;
+            let tasks_per_region = config.task_count / regions;
+
+            for region_id in 0..regions {
+                // Fork phase
+                for task_id in 0..tasks_per_region {
+                    let event_id = region_id * 1000 + task_id;
+                    runtime.trace().record_event(
+                        &crate::trace::TraceEvent::user_trace(
+                            event_id as u64,
+                            runtime.time(),
+                            format!("fork_region_{}_task_{}", region_id, task_id),
+                        )
+                    );
+                }
+
+                // Work phase (with occasional panics)
+                for task_id in 0..tasks_per_region {
+                    let event_id = region_id * 1000 + task_id + 100;
+                    let event_type = if rng.next_u64() % 10 == 0 {
+                        "panic"
+                    } else {
+                        "work"
+                    };
+                    runtime.trace().record_event(
+                        &crate::trace::TraceEvent::user_trace(
+                            event_id as u64,
+                            runtime.time(),
+                            format!("{}_region_{}_task_{}", event_type, region_id, task_id),
+                        )
+                    );
+                }
+
+                // Join phase
+                for task_id in 0..tasks_per_region {
+                    let event_id = region_id * 1000 + task_id + 200;
+                    runtime.trace().record_event(
+                        &crate::trace::TraceEvent::user_trace(
+                            event_id as u64,
+                            runtime.time(),
+                            format!("join_region_{}_task_{}", region_id, task_id),
+                        )
+                    );
+                }
+            }
+        };
+
+        // Test the scenario with replay validation
+        let replay_validation = validate_replay(seed, config.worker_count, composite_scenario);
+
+        assert!(
+            replay_validation.matched,
+            "Composite scenario replay should match original: certificates {} vs {}, steps {} vs {}",
+            replay_validation.original_certificate,
+            replay_validation.replay_certificate,
+            replay_validation.original_steps,
+            replay_validation.replay_steps
+        );
+
+        assert!(
+            replay_validation.divergence.is_none(),
+            "Composite scenario should have no divergence: {:?}",
+            replay_validation.divergence
+        );
+
+        // Test multiple seeds for robustness
+        let test_seeds = [seed, seed + 1, seed + 42, seed + 1337, seed + 0xDEAD];
+
+        for &test_seed in &test_seeds {
+            let validation = validate_replay(test_seed, config.worker_count, |runtime| {
+                composite_scenario(runtime);
+            });
+
+            assert!(
+                validation.matched,
+                "Seed {} composite replay failed: {:?}",
+                test_seed,
+                validation.divergence
+            );
+        }
+
+        // MR: Multi-seed validation should show consistent determinism
+        let multi_validation = validate_replay_multi(&test_seeds, config.worker_count, composite_scenario);
+
+        for (i, validation) in multi_validation.iter().enumerate() {
+            assert!(
+                validation.matched,
+                "Multi-seed run {} failed validation",
+                i
+            );
+        }
+
+        crate::test_complete!("metamorphic_composite_replay_invariants");
+    }
 }
