@@ -25,19 +25,23 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::{Bytes, BytesMut, BufMut};
-use asupersync::codec::framed::{Framed, DEFAULT_CAPACITY};
+use asupersync::codec::framed::Framed;
 use asupersync::codec::{Encoder, Decoder};
+use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
+use asupersync::stream::Stream;
 use libfuzzer_sys::fuzz_target;
 use std::io::{self, ErrorKind};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use futures::prelude::*;
 
 /// Maximum fuzz input size to prevent timeouts
 const MAX_FUZZ_INPUT_SIZE: usize = 16_384;
 
 /// Maximum number of operations per test case
 const MAX_OPERATIONS: usize = 50;
+
+/// Default capacity for framed buffers (matches internal constant)
+const DEFAULT_CAPACITY: usize = 8192;
 
 /// Test codec that can inject errors and track roundtrip behavior
 #[derive(Debug, Clone)]
@@ -142,10 +146,10 @@ impl AsyncRead for MockTransport {
     fn poll_read(
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         if self.is_closed {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(Ok(()));
         }
 
         if self.inject_read_error && self.read_pos % 7 == 0 {
@@ -156,15 +160,15 @@ impl AsyncRead for MockTransport {
         if remaining == 0 {
             // **ASSERTION 1: Partial frames buffered correctly**
             // EOF condition - no more data available
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(Ok(()));
         }
 
         // Simulate partial reads for more realistic testing
-        let to_read = remaining.min(buf.len()).min(self.partial_read_size);
-        buf[..to_read].copy_from_slice(&self.read_data[self.read_pos..self.read_pos + to_read]);
+        let to_read = remaining.min(buf.remaining()).min(self.partial_read_size);
+        buf.put_slice(&self.read_data[self.read_pos..self.read_pos + to_read]);
         self.read_pos += to_read;
 
-        Poll::Ready(Ok(to_read))
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -200,7 +204,7 @@ impl AsyncWrite for MockTransport {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         // **ASSERTION 3: Shutdown releases all buffered state cleanly**
         self.is_closed = true;
         Poll::Ready(Ok(()))
@@ -270,6 +274,16 @@ fuzz_target!(|input: FuzzInput| {
     }
 });
 
+/// Helper functions for creating noop wakers in tests
+fn noop_clone(_: *const ()) -> std::task::RawWaker {
+    noop_raw_waker()
+}
+fn noop(_: *const ()) {}
+fn noop_raw_waker() -> std::task::RawWaker {
+    use std::task::RawWakerVTable;
+    std::task::RawWaker::new(std::ptr::null(), &RawWakerVTable::new(noop_clone, noop, noop, noop))
+}
+
 /// Execute the framed operations test
 fn test_framed_operations(input: &FuzzInput) -> Result<(), Box<dyn std::error::Error>> {
     // Create mock transport with initial data
@@ -299,7 +313,8 @@ fn test_framed_operations(input: &FuzzInput) -> Result<(), Box<dyn std::error::E
 
                 // Use a simple poll-based approach since we can't use async in libfuzzer
                 // This tests the core Stream::poll_next logic
-                let waker = futures::task::noop_waker();
+                let raw_waker = noop_raw_waker();
+                let waker = unsafe { std::task::Waker::from_raw(raw_waker) };
                 let mut cx = Context::from_waker(&waker);
 
                 match Pin::new(&mut framed).poll_next(&mut cx) {
@@ -332,13 +347,11 @@ fn test_framed_operations(input: &FuzzInput) -> Result<(), Box<dyn std::error::E
                 }
 
                 let frame = Bytes::copy_from_slice(data);
-                let waker = futures::task::noop_waker();
-                let mut cx = Context::from_waker(&waker);
 
                 // Test the send operation (which calls encoder internally)
-                match Pin::new(&mut framed).start_send(frame) {
+                match framed.send(frame) {
                     Ok(()) => {
-                        // Successfully started send - encoder worked
+                        // Successfully encoded and buffered
                         // **ASSERTION 4: Roundtrip property maintained**
                     }
                     Err(_err) => {
@@ -349,10 +362,11 @@ fn test_framed_operations(input: &FuzzInput) -> Result<(), Box<dyn std::error::E
 
             FramedOperation::Flush => {
                 // **ASSERTION 3: Flush releases all buffered state**
-                let waker = futures::task::noop_waker();
+                let raw_waker = noop_raw_waker();
+                let waker = unsafe { std::task::Waker::from_raw(raw_waker) };
                 let mut cx = Context::from_waker(&waker);
 
-                match Pin::new(&mut framed).poll_flush(&mut cx) {
+                match framed.poll_flush(&mut cx) {
                     Poll::Ready(Ok(())) => {
                         // Flush completed successfully
                     }
@@ -367,10 +381,11 @@ fn test_framed_operations(input: &FuzzInput) -> Result<(), Box<dyn std::error::E
 
             FramedOperation::Close => {
                 // **ASSERTION 3: Shutdown releases all buffered state cleanly**
-                let waker = futures::task::noop_waker();
+                let raw_waker = noop_raw_waker();
+                let waker = unsafe { std::task::Waker::from_raw(raw_waker) };
                 let mut cx = Context::from_waker(&waker);
 
-                match Pin::new(&mut framed).poll_close(&mut cx) {
+                match framed.poll_close(&mut cx) {
                     Poll::Ready(Ok(())) => {
                         // Close completed successfully
                         // **ASSERTION 3: All state released cleanly**
