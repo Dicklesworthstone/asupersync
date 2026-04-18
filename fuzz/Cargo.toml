@@ -1091,3 +1091,10 @@ path = "fuzz_targets/raptorq_matrix_ops.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h3_native_frames"
+path = "fuzz_targets/h3_native_frames.rs"
+test = false
+doc = false
+bench = false
