@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use asupersync::database::postgres::PgError;
+use libfuzzer_sys::fuzz_target;
 // Import the actual SCRAM implementation for comprehensive testing
 // Note: ScramAuth is internal, so we'll test through the exposed parser functions
 
@@ -342,9 +342,9 @@ fn test_channel_binding(channel_data: &[u8]) -> Result<String, String> {
 
     // Test GS2 header variations
     let gs2_headers = [
-        "n,,",      // No channel binding
-        "y,,",      // Client supports channel binding but not using it
-        "p=tls-unique,," // Channel binding with TLS unique
+        "n,,",            // No channel binding
+        "y,,",            // Client supports channel binding but not using it
+        "p=tls-unique,,", // Channel binding with TLS unique
     ];
 
     for header in &gs2_headers {
@@ -393,13 +393,13 @@ fn test_pbkdf2_boundaries(data: &[u8]) {
     // Test various boundary conditions
     let test_cases = [
         (password_data, salt_data, iterations),
-        (password_data, salt_data, 1),           // Minimum iterations
-        (password_data, salt_data, 4096),        // PostgreSQL default
-        (password_data, salt_data, 600_000),     // Maximum safe iterations
-        (password_data, salt_data, 600_001),     // Just over maximum (should fail gracefully)
-        (b"", salt_data, iterations),            // Empty password
-        (password_data, b"", iterations),        // Empty salt
-        (b"a", b"s", 4096),                      // Minimal valid case
+        (password_data, salt_data, 1),       // Minimum iterations
+        (password_data, salt_data, 4096),    // PostgreSQL default
+        (password_data, salt_data, 600_000), // Maximum safe iterations
+        (password_data, salt_data, 600_001), // Just over maximum (should fail gracefully)
+        (b"", salt_data, iterations),        // Empty password
+        (password_data, b"", iterations),    // Empty salt
+        (b"a", b"s", 4096),                  // Minimal valid case
     ];
 
     for (pwd, salt, iter) in test_cases {
@@ -539,7 +539,8 @@ fn test_full_scram_flow(data: &[u8]) {
             let client_first_bare = format!("n={username},r={client_nonce}");
             let channel_binding = base64::engine::general_purpose::STANDARD.encode(b"n,,");
             let client_final_without_proof = format!("c={channel_binding},r={server_nonce}");
-            let auth_message = format!("{client_first_bare},{server_first},{client_final_without_proof}");
+            let auth_message =
+                format!("{client_first_bare},{server_first},{client_final_without_proof}");
 
             // Test signature computations
             let client_signature = hmac_sha256_test(&stored_key, auth_message.as_bytes());
@@ -549,7 +550,8 @@ fn test_full_scram_flow(data: &[u8]) {
             let _ = constant_time_compare_test(&server_signature, &server_signature);
 
             // Test server-final message
-            let server_sig_b64 = base64::engine::general_purpose::STANDARD.encode(&server_signature);
+            let server_sig_b64 =
+                base64::engine::general_purpose::STANDARD.encode(&server_signature);
             let server_final = format!("v={server_sig_b64}");
             let _ = parse_server_final(server_final.as_bytes());
         }

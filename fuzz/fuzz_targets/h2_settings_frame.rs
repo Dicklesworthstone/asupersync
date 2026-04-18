@@ -3,10 +3,10 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
+use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::connection::Connection;
 use asupersync::http::h2::frame::{Frame, FrameHeader, Setting, SettingsFrame, settings_flags};
 use asupersync::http::h2::settings::Settings;
-use asupersync::bytes::{Bytes, BytesMut};
 
 /// Comprehensive fuzz input for HTTP/2 SETTINGS frame parsing and handling
 #[derive(Arbitrary, Debug, Clone)]
@@ -30,10 +30,7 @@ enum SettingsOperation {
         ack: bool,
     },
     /// Send raw SETTINGS frame bytes for parsing edge cases
-    SendRawSettingsFrame {
-        raw_payload: Vec<u8>,
-        ack: bool,
-    },
+    SendRawSettingsFrame { raw_payload: Vec<u8>, ack: bool },
     /// Test unknown settings handling
     SendUnknownSettings {
         unknown_settings: Vec<(u16, u32)>, // (id, value) pairs for unknown settings
@@ -41,13 +38,9 @@ enum SettingsOperation {
     /// Test SETTINGS ACK handling
     SendSettingsAck,
     /// Test boundary value settings
-    SendBoundarySettings {
-        boundary_type: BoundaryType,
-    },
+    SendBoundarySettings { boundary_type: BoundaryType },
     /// Test SETTINGS flood (CVE-2019-9515)
-    SendSettingsFlood {
-        frame_count: u32,
-    },
+    SendSettingsFlood { frame_count: u32 },
 }
 
 /// Different boundary conditions to test for settings values
@@ -76,9 +69,7 @@ enum SettingsFrameScenario {
         invalid_setting_size: bool,
     },
     /// SETTINGS flood protection test
-    SettingsFlood {
-        frame_count: u8,
-    },
+    SettingsFlood { frame_count: u8 },
     /// Mixed valid/invalid settings
     MixedValidInvalid {
         valid_settings: Vec<FuzzSetting>,
@@ -187,7 +178,9 @@ impl SettingsShadowModel {
             }
 
             // Apply setting to remote settings
-            self.remote_settings.apply(*setting).map_err(|e| format!("Settings apply failed: {}", e))?;
+            self.remote_settings
+                .apply(*setting)
+                .map_err(|e| format!("Settings apply failed: {}", e))?;
         }
 
         self.received_remote_settings = true;
@@ -253,7 +246,7 @@ fn normalize_settings(settings: &mut FuzzSettings) {
 fn normalize_setting(setting: &mut FuzzSetting) {
     match setting {
         FuzzSetting::HeaderTableSize(v) => *v = (*v).clamp(0, 1024 * 1024),
-        FuzzSetting::EnablePush(_) => {}, // bool is always valid
+        FuzzSetting::EnablePush(_) => {} // bool is always valid
         FuzzSetting::MaxConcurrentStreams(v) => *v = (*v).clamp(0, u32::MAX),
         FuzzSetting::InitialWindowSize(v) => *v = (*v).clamp(0, 0x7fff_ffff),
         FuzzSetting::MaxFrameSize(v) => *v = (*v).clamp(16384, 16_777_215),
@@ -288,22 +281,22 @@ fn create_boundary_settings(boundary_type: BoundaryType) -> Vec<Setting> {
             Setting::HeaderTableSize(u32::MAX),    // Maximum
         ],
         BoundaryType::MaxConcurrentStreamsOverflow => vec![
-            Setting::MaxConcurrentStreams(0),       // Disable new streams
-            Setting::MaxConcurrentStreams(1),       // Minimum streams
-            Setting::MaxConcurrentStreams(100),     // Typical value
+            Setting::MaxConcurrentStreams(0),        // Disable new streams
+            Setting::MaxConcurrentStreams(1),        // Minimum streams
+            Setting::MaxConcurrentStreams(100),      // Typical value
             Setting::MaxConcurrentStreams(u32::MAX), // Maximum (may cause issues)
         ],
         BoundaryType::InitialWindowSizeBoundaries => vec![
-            Setting::InitialWindowSize(0),          // Minimum
-            Setting::InitialWindowSize(65535),      // Default
+            Setting::InitialWindowSize(0),           // Minimum
+            Setting::InitialWindowSize(65535),       // Default
             Setting::InitialWindowSize(0x7fff_ffff), // Maximum valid
             Setting::InitialWindowSize(0x8000_0000), // Invalid (should fail)
         ],
         BoundaryType::MaxFrameSizeBoundaries => vec![
-            Setting::MaxFrameSize(16384),           // Minimum valid
-            Setting::MaxFrameSize(16383),           // Below minimum (invalid)
-            Setting::MaxFrameSize(16_777_215),      // Maximum valid
-            Setting::MaxFrameSize(16_777_216),      // Above maximum (invalid)
+            Setting::MaxFrameSize(16384),      // Minimum valid
+            Setting::MaxFrameSize(16383),      // Below minimum (invalid)
+            Setting::MaxFrameSize(16_777_215), // Maximum valid
+            Setting::MaxFrameSize(16_777_216), // Above maximum (invalid)
         ],
         BoundaryType::AllMaxValues => vec![
             Setting::HeaderTableSize(u32::MAX),
@@ -344,12 +337,16 @@ fn execute_settings_operations(
                         }
                         Err(e) => {
                             // ACKs should generally succeed
-                            return Err(format!("SETTINGS ACK failed at operation {}: {}", op_index, e));
+                            return Err(format!(
+                                "SETTINGS ACK failed at operation {}: {}",
+                                op_index, e
+                            ));
                         }
                     }
                 } else {
                     // Create SETTINGS frame with settings
-                    let actual_settings: Vec<Setting> = settings.iter().map(|s| s.clone().into()).collect();
+                    let actual_settings: Vec<Setting> =
+                        settings.iter().map(|s| s.clone().into()).collect();
                     let settings_frame = SettingsFrame::new(actual_settings.clone());
                     let frame = Frame::Settings(settings_frame);
 
@@ -412,7 +409,9 @@ fn execute_settings_operations(
 
                     // Parse and process - unknown settings should be ignored
                     if let Ok(header) = FrameHeader::parse(&mut header_buf) {
-                        if let Ok(frame) = asupersync::http::h2::frame::parse_frame(&header, payload_bytes) {
+                        if let Ok(frame) =
+                            asupersync::http::h2::frame::parse_frame(&header, payload_bytes)
+                        {
                             let _ = connection.process_frame(frame);
                         }
                     }
@@ -508,7 +507,10 @@ fn execute_settings_operations(
                     all_settings
                 } else {
                     // Server should not send EnablePush
-                    all_settings.into_iter().filter(|s| !matches!(s, Setting::EnablePush(_))).collect()
+                    all_settings
+                        .into_iter()
+                        .filter(|s| !matches!(s, Setting::EnablePush(_)))
+                        .collect()
                 };
 
                 let settings_frame = SettingsFrame::new(filtered_settings);
@@ -516,7 +518,10 @@ fn execute_settings_operations(
                 let _ = connection.process_frame(frame);
             }
 
-            SettingsFrameScenario::MalformedFrame { invalid_payload_length, invalid_setting_size } => {
+            SettingsFrameScenario::MalformedFrame {
+                invalid_payload_length,
+                invalid_setting_size,
+            } => {
                 let mut raw_payload = Vec::new();
 
                 if *invalid_setting_size {
@@ -549,7 +554,7 @@ fn execute_settings_operations(
                     let frame = Frame::Settings(settings_frame);
 
                     match connection.process_frame(frame) {
-                        Ok(_) => {},
+                        Ok(_) => {}
                         Err(_) => {
                             // Flood protection may kick in - that's good
                             break;
@@ -558,7 +563,10 @@ fn execute_settings_operations(
                 }
             }
 
-            SettingsFrameScenario::MixedValidInvalid { valid_settings, invalid_raw_bytes } => {
+            SettingsFrameScenario::MixedValidInvalid {
+                valid_settings,
+                invalid_raw_bytes,
+            } => {
                 // Mix valid settings with invalid bytes
                 let mut raw_payload = Vec::new();
 
@@ -572,7 +580,8 @@ fn execute_settings_operations(
                         }
                         Setting::EnablePush(v) => {
                             raw_payload.extend_from_slice(&2u16.to_be_bytes());
-                            raw_payload.extend_from_slice(&(if v { 1u32 } else { 0u32 }).to_be_bytes());
+                            raw_payload
+                                .extend_from_slice(&(if v { 1u32 } else { 0u32 }).to_be_bytes());
                         }
                         Setting::MaxConcurrentStreams(v) => {
                             raw_payload.extend_from_slice(&3u16.to_be_bytes());

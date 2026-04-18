@@ -10,10 +10,10 @@
 //! 5. Cancellation during blocking accept operations
 //! 6. Accept storm backoff and timing edge cases
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
-use std::time::{Duration, Instant};
+use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// Simplified fuzz input for TCP accept operations
 #[derive(Arbitrary, Debug, Clone)]
@@ -159,26 +159,45 @@ fn normalize_fuzz_input(input: &mut TcpAcceptFuzzInput) {
     // Normalize individual operations
     for op in &mut input.operations {
         match op {
-            TcpAcceptOperation::AcceptBurst { connection_count, burst_delay_micros } => {
+            TcpAcceptOperation::AcceptBurst {
+                connection_count,
+                burst_delay_micros,
+            } => {
                 *connection_count = (*connection_count).clamp(1, 100);
                 *burst_delay_micros = (*burst_delay_micros).clamp(1, 10000);
             }
-            TcpAcceptOperation::ReusePortSetup { listener_count, connection_distribution } => {
+            TcpAcceptOperation::ReusePortSetup {
+                listener_count,
+                connection_distribution,
+            } => {
                 *listener_count = (*listener_count).clamp(1, 8);
                 connection_distribution.truncate(*listener_count as usize);
             }
-            TcpAcceptOperation::FdExhaustion { fd_limit, connection_attempts } => {
+            TcpAcceptOperation::FdExhaustion {
+                fd_limit,
+                connection_attempts,
+            } => {
                 *fd_limit = (*fd_limit).clamp(1, 1024);
                 *connection_attempts = (*connection_attempts).clamp(1, 2048);
             }
-            TcpAcceptOperation::ClientRstMidAccept { connection_count, rst_probability: _ } => {
+            TcpAcceptOperation::ClientRstMidAccept {
+                connection_count,
+                rst_probability: _,
+            } => {
                 *connection_count = (*connection_count).clamp(1, 50);
             }
-            TcpAcceptOperation::CancelDuringAccept { accept_timeout_ms, cancel_after_ms } => {
+            TcpAcceptOperation::CancelDuringAccept {
+                accept_timeout_ms,
+                cancel_after_ms,
+            } => {
                 *accept_timeout_ms = (*accept_timeout_ms).clamp(1, 1000);
                 *cancel_after_ms = (*cancel_after_ms).clamp(1, *accept_timeout_ms);
             }
-            TcpAcceptOperation::AcceptStorm { storm_intensity, backoff_multiplier, max_backoff_ms } => {
+            TcpAcceptOperation::AcceptStorm {
+                storm_intensity,
+                backoff_multiplier,
+                max_backoff_ms,
+            } => {
                 *storm_intensity = (*storm_intensity).clamp(1, 100);
                 *backoff_multiplier = (*backoff_multiplier).clamp(1, 10);
                 *max_backoff_ms = (*max_backoff_ms).clamp(1, 2000);
@@ -188,8 +207,15 @@ fn normalize_fuzz_input(input: &mut TcpAcceptFuzzInput) {
 }
 
 /// Test accept loop burst handling
-fn test_accept_burst(op: &TcpAcceptOperation, shadow: &AcceptLoopShadowModel) -> Result<(), String> {
-    if let TcpAcceptOperation::AcceptBurst { connection_count, burst_delay_micros } = op {
+fn test_accept_burst(
+    op: &TcpAcceptOperation,
+    shadow: &AcceptLoopShadowModel,
+) -> Result<(), String> {
+    if let TcpAcceptOperation::AcceptBurst {
+        connection_count,
+        burst_delay_micros,
+    } = op
+    {
         let _start = Instant::now();
         let mut processed = 0;
 
@@ -226,8 +252,15 @@ fn test_accept_burst(op: &TcpAcceptOperation, shadow: &AcceptLoopShadowModel) ->
 }
 
 /// Test SO_REUSEPORT fairness simulation
-fn test_reuseport_fairness(op: &TcpAcceptOperation, shadow: &AcceptLoopShadowModel) -> Result<(), String> {
-    if let TcpAcceptOperation::ReusePortSetup { listener_count, connection_distribution } = op {
+fn test_reuseport_fairness(
+    op: &TcpAcceptOperation,
+    shadow: &AcceptLoopShadowModel,
+) -> Result<(), String> {
+    if let TcpAcceptOperation::ReusePortSetup {
+        listener_count,
+        connection_distribution,
+    } = op
+    {
         let mut listener_counts = vec![0u64; *listener_count as usize];
 
         // Simulate connection distribution across listeners
@@ -264,8 +297,15 @@ fn test_reuseport_fairness(op: &TcpAcceptOperation, shadow: &AcceptLoopShadowMod
 }
 
 /// Test file descriptor exhaustion handling
-fn test_fd_exhaustion(op: &TcpAcceptOperation, shadow: &AcceptLoopShadowModel) -> Result<(), String> {
-    if let TcpAcceptOperation::FdExhaustion { fd_limit, connection_attempts } = op {
+fn test_fd_exhaustion(
+    op: &TcpAcceptOperation,
+    shadow: &AcceptLoopShadowModel,
+) -> Result<(), String> {
+    if let TcpAcceptOperation::FdExhaustion {
+        fd_limit,
+        connection_attempts,
+    } = op
+    {
         let mut active_fds = 0u16;
         let mut successful_accepts = 0u16;
 
@@ -302,8 +342,15 @@ fn test_fd_exhaustion(op: &TcpAcceptOperation, shadow: &AcceptLoopShadowModel) -
 }
 
 /// Test client RST during accept scenarios
-fn test_client_rst_scenarios(op: &TcpAcceptOperation, shadow: &AcceptLoopShadowModel) -> Result<(), String> {
-    if let TcpAcceptOperation::ClientRstMidAccept { connection_count, rst_probability } = op {
+fn test_client_rst_scenarios(
+    op: &TcpAcceptOperation,
+    shadow: &AcceptLoopShadowModel,
+) -> Result<(), String> {
+    if let TcpAcceptOperation::ClientRstMidAccept {
+        connection_count,
+        rst_probability,
+    } = op
+    {
         for i in 0..*connection_count {
             if shadow.is_cancelled() {
                 break;
@@ -325,8 +372,15 @@ fn test_client_rst_scenarios(op: &TcpAcceptOperation, shadow: &AcceptLoopShadowM
 }
 
 /// Test cancellation during accept operations
-fn test_cancel_during_accept(op: &TcpAcceptOperation, shadow: &AcceptLoopShadowModel) -> Result<(), String> {
-    if let TcpAcceptOperation::CancelDuringAccept { accept_timeout_ms, cancel_after_ms } = op {
+fn test_cancel_during_accept(
+    op: &TcpAcceptOperation,
+    shadow: &AcceptLoopShadowModel,
+) -> Result<(), String> {
+    if let TcpAcceptOperation::CancelDuringAccept {
+        accept_timeout_ms,
+        cancel_after_ms,
+    } = op
+    {
         let start = Instant::now();
         let cancel_time = Duration::from_millis(*cancel_after_ms as u64);
         let timeout_time = Duration::from_millis(*accept_timeout_ms as u64);
@@ -360,8 +414,16 @@ fn test_cancel_during_accept(op: &TcpAcceptOperation, shadow: &AcceptLoopShadowM
 }
 
 /// Test accept storm backoff behavior
-fn test_accept_storm_backoff(op: &TcpAcceptOperation, shadow: &AcceptLoopShadowModel) -> Result<(), String> {
-    if let TcpAcceptOperation::AcceptStorm { storm_intensity, backoff_multiplier, max_backoff_ms } = op {
+fn test_accept_storm_backoff(
+    op: &TcpAcceptOperation,
+    shadow: &AcceptLoopShadowModel,
+) -> Result<(), String> {
+    if let TcpAcceptOperation::AcceptStorm {
+        storm_intensity,
+        backoff_multiplier,
+        max_backoff_ms,
+    } = op
+    {
         let mut current_backoff_ms = 1u16;
         let storm_threshold = 10; // Simulate storm detection after 10 rapid accepts
 
@@ -384,8 +446,9 @@ fn test_accept_storm_backoff(op: &TcpAcceptOperation, shadow: &AcceptLoopShadowM
                 }
 
                 // Increase backoff for next iteration
-                current_backoff_ms = (current_backoff_ms.saturating_mul((*backoff_multiplier) as u16))
-                    .min(*max_backoff_ms);
+                current_backoff_ms = (current_backoff_ms
+                    .saturating_mul((*backoff_multiplier) as u16))
+                .min(*max_backoff_ms);
             }
 
             shadow.record_accept_attempt(true);
@@ -413,24 +476,18 @@ fn execute_tcp_accept_operations(input: &TcpAcceptFuzzInput) -> Result<(), Strin
         }
 
         let result = match operation {
-            TcpAcceptOperation::AcceptBurst { .. } => {
-                test_accept_burst(operation, &shadow)
-            }
+            TcpAcceptOperation::AcceptBurst { .. } => test_accept_burst(operation, &shadow),
             TcpAcceptOperation::ReusePortSetup { .. } => {
                 test_reuseport_fairness(operation, &shadow)
             }
-            TcpAcceptOperation::FdExhaustion { .. } => {
-                test_fd_exhaustion(operation, &shadow)
-            }
+            TcpAcceptOperation::FdExhaustion { .. } => test_fd_exhaustion(operation, &shadow),
             TcpAcceptOperation::ClientRstMidAccept { .. } => {
                 test_client_rst_scenarios(operation, &shadow)
             }
             TcpAcceptOperation::CancelDuringAccept { .. } => {
                 test_cancel_during_accept(operation, &shadow)
             }
-            TcpAcceptOperation::AcceptStorm { .. } => {
-                test_accept_storm_backoff(operation, &shadow)
-            }
+            TcpAcceptOperation::AcceptStorm { .. } => test_accept_storm_backoff(operation, &shadow),
         };
 
         if let Err(e) = result {

@@ -14,8 +14,8 @@
 use arbitrary::Arbitrary;
 use asupersync::raptorq::gf256::Gf256;
 use asupersync::raptorq::linalg::{
-    DenseRow, SparseRow, row_xor, row_scale_add, row_swap, row_scale,
-    select_pivot_basic, select_pivot_markowitz, row_nonzero_count, row_first_nonzero_from
+    DenseRow, SparseRow, row_first_nonzero_from, row_nonzero_count, row_scale, row_scale_add,
+    row_swap, row_xor, select_pivot_basic, select_pivot_markowitz,
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
@@ -60,10 +60,7 @@ enum RowOperation {
         row_b_data: Vec<u8>,
     },
     /// Test row_scale with GF(256) coefficients
-    Scale {
-        row_data: Vec<u8>,
-        coefficient: u8,
-    },
+    Scale { row_data: Vec<u8>, coefficient: u8 },
     /// Test chained operations: scale-add followed by XOR
     ChainedOps {
         dst_data: Vec<u8>,
@@ -78,9 +75,7 @@ enum RowOperation {
 #[derive(Arbitrary, Debug)]
 enum DenseRowOperation {
     /// Create dense row and test basic operations
-    Creation {
-        data: Vec<u8>,
-    },
+    Creation { data: Vec<u8> },
     /// Test resizing operations
     Resize {
         initial_data: Vec<u8>,
@@ -168,18 +163,14 @@ struct PivotSearchParam {
 #[derive(Arbitrary, Debug)]
 enum ConversionTest {
     /// Dense to sparse conversion
-    DenseToSparse {
-        dense_data: Vec<u8>,
-    },
+    DenseToSparse { dense_data: Vec<u8> },
     /// Sparse to dense conversion
     SparseToDense {
         entries: Vec<(usize, u8)>,
         logical_len: usize,
     },
     /// Roundtrip: dense -> sparse -> dense
-    Roundtrip {
-        dense_data: Vec<u8>,
-    },
+    Roundtrip { dense_data: Vec<u8> },
     /// Test conversion preserves mathematical properties
     PropertyPreservation {
         dense_data: Vec<u8>,
@@ -205,7 +196,9 @@ struct FuzzRng {
 #[allow(dead_code)]
 impl FuzzRng {
     fn new(seed: u64) -> Self {
-        Self { state: seed.wrapping_add(1) } // Ensure non-zero seed
+        Self {
+            state: seed.wrapping_add(1),
+        } // Ensure non-zero seed
     }
 
     fn next_u32(&mut self) -> u32 {
@@ -220,7 +213,8 @@ impl FuzzRng {
 
 fuzz_target!(|input: RaptorQLinalgFuzzInput| {
     // Test row operations
-    for row_op in input.row_ops.iter().take(32) { // Limit iterations
+    for row_op in input.row_ops.iter().take(32) {
+        // Limit iterations
         test_row_operation(row_op);
     }
 
@@ -250,7 +244,9 @@ fn test_row_operation(op: &RowOperation) {
         RowOperation::Xor { dst_data, src_data } => {
             // Ensure compatible sizes (limit to MAX_ROW_LEN)
             let len = dst_data.len().min(src_data.len()).min(MAX_ROW_LEN);
-            if len == 0 { return; }
+            if len == 0 {
+                return;
+            }
 
             let mut dst = dst_data[..len].to_vec();
             let src = &src_data[..len];
@@ -263,9 +259,15 @@ fn test_row_operation(op: &RowOperation) {
             assert_eq!(dst, original_dst, "XOR self-inverse property failed");
         }
 
-        RowOperation::ScaleAdd { dst_data, src_data, coefficient } => {
+        RowOperation::ScaleAdd {
+            dst_data,
+            src_data,
+            coefficient,
+        } => {
             let len = dst_data.len().min(src_data.len()).min(MAX_ROW_LEN);
-            if len == 0 { return; }
+            if len == 0 {
+                return;
+            }
 
             let mut dst = dst_data[..len].to_vec();
             let src = &src_data[..len];
@@ -276,20 +278,31 @@ fn test_row_operation(op: &RowOperation) {
 
             // Test edge case: coefficient = 0 should not change dst
             if coeff.is_zero() {
-                assert_eq!(dst, original_dst, "Scale-add with zero coefficient changed destination");
+                assert_eq!(
+                    dst, original_dst,
+                    "Scale-add with zero coefficient changed destination"
+                );
             }
 
             // Test edge case: coefficient = 1 should be equivalent to XOR
             if coeff.raw() == 1 {
                 let mut expected = original_dst.clone();
                 row_xor(&mut expected, src);
-                assert_eq!(dst, expected, "Scale-add with coefficient 1 differs from XOR");
+                assert_eq!(
+                    dst, expected,
+                    "Scale-add with coefficient 1 differs from XOR"
+                );
             }
         }
 
-        RowOperation::Swap { row_a_data, row_b_data } => {
+        RowOperation::Swap {
+            row_a_data,
+            row_b_data,
+        } => {
             let len = row_a_data.len().min(row_b_data.len()).min(MAX_ROW_LEN);
-            if len == 0 { return; }
+            if len == 0 {
+                return;
+            }
 
             let mut row_a = row_a_data[..len].to_vec();
             let mut row_b = row_b_data[..len].to_vec();
@@ -302,9 +315,14 @@ fn test_row_operation(op: &RowOperation) {
             assert_eq!(row_b, original_a, "Swap failed: row_b != original row_a");
         }
 
-        RowOperation::Scale { row_data, coefficient } => {
+        RowOperation::Scale {
+            row_data,
+            coefficient,
+        } => {
             let len = row_data.len().min(MAX_ROW_LEN);
-            if len == 0 { return; }
+            if len == 0 {
+                return;
+            }
 
             let mut row = row_data[..len].to_vec();
             let original_row = row.clone();
@@ -314,16 +332,31 @@ fn test_row_operation(op: &RowOperation) {
 
             // Test edge cases
             if coeff.is_zero() {
-                assert!(row.iter().all(|&x| x == 0), "Scaling by zero should produce zero row");
+                assert!(
+                    row.iter().all(|&x| x == 0),
+                    "Scaling by zero should produce zero row"
+                );
             }
             if coeff.raw() == 1 {
                 assert_eq!(row, original_row, "Scaling by one should preserve row");
             }
         }
 
-        RowOperation::ChainedOps { dst_data, src1_data, src2_data, coeff1, coeff2 } => {
-            let len = dst_data.len().min(src1_data.len()).min(src2_data.len()).min(MAX_ROW_LEN);
-            if len == 0 { return; }
+        RowOperation::ChainedOps {
+            dst_data,
+            src1_data,
+            src2_data,
+            coeff1,
+            coeff2,
+        } => {
+            let len = dst_data
+                .len()
+                .min(src1_data.len())
+                .min(src2_data.len())
+                .min(MAX_ROW_LEN);
+            if len == 0 {
+                return;
+            }
 
             let mut dst = dst_data[..len].to_vec();
             let src1 = &src1_data[..len];
@@ -354,7 +387,11 @@ fn test_dense_row_operation(op: &DenseRowOperation) {
             assert_eq!(row.as_slice(), &data[..len]);
         }
 
-        DenseRowOperation::Resize { initial_data, new_len, fill_value } => {
+        DenseRowOperation::Resize {
+            initial_data,
+            new_len,
+            fill_value,
+        } => {
             let len = initial_data.len().min(MAX_ROW_LEN);
             let new_len = (*new_len).min(MAX_ROW_LEN);
 
@@ -372,7 +409,9 @@ fn test_dense_row_operation(op: &DenseRowOperation) {
 
         DenseRowOperation::GetSet { data, operations } => {
             let len = data.len().min(MAX_ROW_LEN);
-            if len == 0 { return; }
+            if len == 0 {
+                return;
+            }
 
             let mut row = DenseRow::new(data[..len].to_vec());
 
@@ -394,7 +433,10 @@ fn test_dense_row_operation(op: &DenseRowOperation) {
             }
         }
 
-        DenseRowOperation::NonzeroAnalysis { data, search_starts } => {
+        DenseRowOperation::NonzeroAnalysis {
+            data,
+            search_starts,
+        } => {
             let len = data.len().min(MAX_ROW_LEN);
             let row = DenseRow::new(data[..len].to_vec());
 
@@ -414,14 +456,20 @@ fn test_dense_row_operation(op: &DenseRowOperation) {
             // Test first nonzero from various starting points
             for &start in search_starts.iter().take(8) {
                 if start < len {
-                    let expected = data[start..len].iter().position(|&x| x != 0).map(|i| start + i);
+                    let expected = data[start..len]
+                        .iter()
+                        .position(|&x| x != 0)
+                        .map(|i| start + i);
                     assert_eq!(row.first_nonzero_from(start), expected);
                     assert_eq!(row_first_nonzero_from(row.as_slice(), start), expected);
                 }
             }
         }
 
-        DenseRowOperation::Manipulation { row1_data, row2_data } => {
+        DenseRowOperation::Manipulation {
+            row1_data,
+            row2_data,
+        } => {
             let len1 = row1_data.len().min(MAX_ROW_LEN);
             let len2 = row2_data.len().min(MAX_ROW_LEN);
 
@@ -449,7 +497,10 @@ fn test_dense_row_operation(op: &DenseRowOperation) {
 
 fn test_sparse_row_operation(op: &SparseRowOperation) {
     match op {
-        SparseRowOperation::Creation { entries, logical_len } => {
+        SparseRowOperation::Creation {
+            entries,
+            logical_len,
+        } => {
             let logical_len = (*logical_len).min(MAX_ROW_LEN);
             let entries_len = entries.len().min(MAX_SPARSE_ENTRIES);
 
@@ -479,7 +530,10 @@ fn test_sparse_row_operation(op: &SparseRowOperation) {
             assert!(sparse_row.nonzero_count() <= expected_nonzero);
         }
 
-        SparseRowOperation::Analysis { entries, logical_len } => {
+        SparseRowOperation::Analysis {
+            entries,
+            logical_len,
+        } => {
             let logical_len = (*logical_len).min(MAX_ROW_LEN);
             let entries_len = entries.len().min(MAX_SPARSE_ENTRIES);
 
@@ -507,11 +561,18 @@ fn test_sparse_row_operation(op: &SparseRowOperation) {
                 assert_eq!(first_nonzero, None, "Zero row should have no first nonzero");
             } else {
                 assert!(!is_zero, "Row with nonzeros should not be zero");
-                assert!(first_nonzero.is_some(), "Row with nonzeros should have first nonzero");
+                assert!(
+                    first_nonzero.is_some(),
+                    "Row with nonzeros should have first nonzero"
+                );
             }
         }
 
-        SparseRowOperation::Manipulation { entries1, entries2, logical_len } => {
+        SparseRowOperation::Manipulation {
+            entries1,
+            entries2,
+            logical_len,
+        } => {
             let logical_len = (*logical_len).min(MAX_ROW_LEN);
             let entries1_len = entries1.len().min(MAX_SPARSE_ENTRIES);
             let entries2_len = entries2.len().min(MAX_SPARSE_ENTRIES);
@@ -519,14 +580,22 @@ fn test_sparse_row_operation(op: &SparseRowOperation) {
             let gf_entries1: Vec<(usize, Gf256)> = entries1[..entries1_len]
                 .iter()
                 .filter_map(|(idx, val)| {
-                    if *idx < logical_len { Some((*idx, Gf256::new(*val))) } else { None }
+                    if *idx < logical_len {
+                        Some((*idx, Gf256::new(*val)))
+                    } else {
+                        None
+                    }
                 })
                 .collect();
 
             let gf_entries2: Vec<(usize, Gf256)> = entries2[..entries2_len]
                 .iter()
                 .filter_map(|(idx, val)| {
-                    if *idx < logical_len { Some((*idx, Gf256::new(*val))) } else { None }
+                    if *idx < logical_len {
+                        Some((*idx, Gf256::new(*val)))
+                    } else {
+                        None
+                    }
                 })
                 .collect();
 
@@ -557,17 +626,27 @@ fn test_sparse_row_operation(op: &SparseRowOperation) {
 
 fn test_pivot_selection(test: &PivotTest) {
     match test {
-        PivotTest::Basic { matrix_data, start, end, col } => {
+        PivotTest::Basic {
+            matrix_data,
+            start,
+            end,
+            col,
+        } => {
             let num_rows = matrix_data.len().min(MAX_MATRIX_ROWS);
-            if num_rows == 0 { return; }
+            if num_rows == 0 {
+                return;
+            }
 
-            let max_cols = matrix_data.iter()
+            let max_cols = matrix_data
+                .iter()
                 .map(|row| row.len())
                 .max()
                 .unwrap_or(0)
                 .min(MAX_ROW_LEN);
 
-            if max_cols == 0 || *col >= max_cols { return; }
+            if max_cols == 0 || *col >= max_cols {
+                return;
+            }
 
             let start = (*start).min(num_rows);
             let end = (*end).min(num_rows).max(start);
@@ -588,22 +667,35 @@ fn test_pivot_selection(test: &PivotTest) {
 
             // If a pivot was found, verify it's valid
             if let Some(pivot_row) = pivot {
-                assert!(pivot_row >= start && pivot_row < end, "Pivot row out of range");
+                assert!(
+                    pivot_row >= start && pivot_row < end,
+                    "Pivot row out of range"
+                );
                 assert!(matrix_refs[pivot_row][*col] != 0, "Pivot element is zero");
             }
         }
 
-        PivotTest::Markowitz { matrix_data, start, end, col } => {
+        PivotTest::Markowitz {
+            matrix_data,
+            start,
+            end,
+            col,
+        } => {
             let num_rows = matrix_data.len().min(MAX_MATRIX_ROWS);
-            if num_rows == 0 { return; }
+            if num_rows == 0 {
+                return;
+            }
 
-            let max_cols = matrix_data.iter()
+            let max_cols = matrix_data
+                .iter()
                 .map(|row| row.len())
                 .max()
                 .unwrap_or(0)
                 .min(MAX_ROW_LEN);
 
-            if max_cols == 0 || *col >= max_cols { return; }
+            if max_cols == 0 || *col >= max_cols {
+                return;
+            }
 
             let start = (*start).min(num_rows);
             let end = (*end).min(num_rows).max(start);
@@ -623,37 +715,54 @@ fn test_pivot_selection(test: &PivotTest) {
 
             // If a pivot was found, verify it's valid
             if let Some((pivot_row, pivot_nonzeros)) = pivot {
-                assert!(pivot_row >= start && pivot_row < end, "Pivot row out of range");
+                assert!(
+                    pivot_row >= start && pivot_row < end,
+                    "Pivot row out of range"
+                );
                 assert!(matrix_refs[pivot_row][*col] != 0, "Pivot element is zero");
 
                 // Verify pivot nonzero count is reasonable
                 let actual_nonzeros = row_nonzero_count(matrix_refs[pivot_row]);
-                assert!(pivot_nonzeros <= actual_nonzeros,
-                       "Reported nonzeros {} exceeds actual {}", pivot_nonzeros, actual_nonzeros);
+                assert!(
+                    pivot_nonzeros <= actual_nonzeros,
+                    "Reported nonzeros {} exceeds actual {}",
+                    pivot_nonzeros,
+                    actual_nonzeros
+                );
 
                 // Verify no row in range has nonzero at col with fewer overall nonzeros
                 for r in start..end {
                     if matrix_refs[r][*col] != 0 {
                         let r_nonzeros = row_nonzero_count(matrix_refs[r]);
-                        assert!(r_nonzeros >= pivot_nonzeros,
-                               "Markowitz didn't select row with minimum nonzeros");
+                        assert!(
+                            r_nonzeros >= pivot_nonzeros,
+                            "Markowitz didn't select row with minimum nonzeros"
+                        );
                         break; // First valid pivot should be optimal due to algorithm
                     }
                 }
             }
         }
 
-        PivotTest::EdgeCases { matrix_data, search_params } => {
+        PivotTest::EdgeCases {
+            matrix_data,
+            search_params,
+        } => {
             let num_rows = matrix_data.len().min(MAX_MATRIX_ROWS);
-            if num_rows == 0 { return; }
+            if num_rows == 0 {
+                return;
+            }
 
-            let max_cols = matrix_data.iter()
+            let max_cols = matrix_data
+                .iter()
                 .map(|row| row.len())
                 .max()
                 .unwrap_or(0)
                 .min(MAX_ROW_LEN);
 
-            if max_cols == 0 { return; }
+            if max_cols == 0 {
+                return;
+            }
 
             let matrix_rows: Vec<Vec<u8>> = matrix_data[..num_rows]
                 .iter()
@@ -685,14 +794,19 @@ fn test_pivot_selection(test: &PivotTest) {
                         // Verify no valid pivot exists
                         for r in start..end {
                             if r < matrix_refs.len() && col < matrix_refs[r].len() {
-                                assert_eq!(matrix_refs[r][col], 0, "Pivot should exist but neither found it");
+                                assert_eq!(
+                                    matrix_refs[r][col], 0,
+                                    "Pivot should exist but neither found it"
+                                );
                             }
                         }
                     }
                     _ => {
                         // Inconsistent results - this shouldn't happen
-                        panic!("Pivot algorithms gave inconsistent results: basic={:?}, markowitz={:?}",
-                               basic_pivot, markowitz_pivot);
+                        panic!(
+                            "Pivot algorithms gave inconsistent results: basic={:?}, markowitz={:?}",
+                            basic_pivot, markowitz_pivot
+                        );
                     }
                 }
             }
@@ -719,14 +833,21 @@ fn test_conversion(test: &ConversionTest) {
             }
         }
 
-        ConversionTest::SparseToDense { entries, logical_len } => {
+        ConversionTest::SparseToDense {
+            entries,
+            logical_len,
+        } => {
             let logical_len = (*logical_len).min(MAX_ROW_LEN);
             let entries_len = entries.len().min(MAX_SPARSE_ENTRIES);
 
             let gf_entries: Vec<(usize, Gf256)> = entries[..entries_len]
                 .iter()
                 .filter_map(|(idx, val)| {
-                    if *idx < logical_len { Some((*idx, Gf256::new(*val))) } else { None }
+                    if *idx < logical_len {
+                        Some((*idx, Gf256::new(*val)))
+                    } else {
+                        None
+                    }
                 })
                 .collect();
 
@@ -757,13 +878,24 @@ fn test_conversion(test: &ConversionTest) {
             assert_eq!(original_dense.as_slice(), roundtrip_dense.as_slice());
             assert_eq!(original_dense.len(), roundtrip_dense.len());
             assert_eq!(original_dense.is_zero(), roundtrip_dense.is_zero());
-            assert_eq!(original_dense.nonzero_count(), roundtrip_dense.nonzero_count());
-            assert_eq!(original_dense.first_nonzero(), roundtrip_dense.first_nonzero());
+            assert_eq!(
+                original_dense.nonzero_count(),
+                roundtrip_dense.nonzero_count()
+            );
+            assert_eq!(
+                original_dense.first_nonzero(),
+                roundtrip_dense.first_nonzero()
+            );
         }
 
-        ConversionTest::PropertyPreservation { dense_data, test_operations } => {
+        ConversionTest::PropertyPreservation {
+            dense_data,
+            test_operations,
+        } => {
             let len = dense_data.len().min(MAX_ROW_LEN);
-            if len == 0 { return; }
+            if len == 0 {
+                return;
+            }
 
             let dense = DenseRow::new(dense_data[..len].to_vec());
             let sparse = dense.to_sparse();
@@ -782,8 +914,12 @@ fn test_conversion(test: &ConversionTest) {
                     ConversionPropertyTest::SpecificElements { indices } => {
                         for &idx in indices.iter().take(16) {
                             if idx < len {
-                                assert_eq!(dense.get(idx), sparse.get(idx),
-                                          "Element mismatch at index {}", idx);
+                                assert_eq!(
+                                    dense.get(idx),
+                                    sparse.get(idx),
+                                    "Element mismatch at index {}",
+                                    idx
+                                );
                             }
                         }
                     }

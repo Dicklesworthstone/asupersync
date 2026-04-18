@@ -85,33 +85,84 @@ struct ConnectionSettings {
 #[derive(Arbitrary, Debug)]
 enum StreamOperation {
     // Core state transitions
-    SendHeaders { stream_id: u32, end_stream: bool },
-    RecvHeaders { stream_id: u32, end_stream: bool, end_headers: bool },
-    SendData { stream_id: u32, length: u32, end_stream: bool },
-    RecvData { stream_id: u32, length: u32, end_stream: bool },
-    Reset { stream_id: u32, error_code: u8 },
+    SendHeaders {
+        stream_id: u32,
+        end_stream: bool,
+    },
+    RecvHeaders {
+        stream_id: u32,
+        end_stream: bool,
+        end_headers: bool,
+    },
+    SendData {
+        stream_id: u32,
+        length: u32,
+        end_stream: bool,
+    },
+    RecvData {
+        stream_id: u32,
+        length: u32,
+        end_stream: bool,
+    },
+    Reset {
+        stream_id: u32,
+        error_code: u8,
+    },
 
     // Flow control operations
-    UpdateSendWindow { stream_id: u32, delta: i32 },
-    UpdateRecvWindow { stream_id: u32, delta: i32 },
-    ConsumeSendWindow { stream_id: u32, amount: u32 },
+    UpdateSendWindow {
+        stream_id: u32,
+        delta: i32,
+    },
+    UpdateRecvWindow {
+        stream_id: u32,
+        delta: i32,
+    },
+    ConsumeSendWindow {
+        stream_id: u32,
+        amount: u32,
+    },
 
     // Data queueing operations
-    QueueData { stream_id: u32, data_size: u16, end_stream: bool },
-    TakePendingData { stream_id: u32, max_len: u32 },
+    QueueData {
+        stream_id: u32,
+        data_size: u16,
+        end_stream: bool,
+    },
+    TakePendingData {
+        stream_id: u32,
+        max_len: u32,
+    },
 
     // CONTINUATION frame simulation
-    RecvContinuation { stream_id: u32, fragment_size: u16, end_headers: bool },
+    RecvContinuation {
+        stream_id: u32,
+        fragment_size: u16,
+        end_headers: bool,
+    },
 
     // State queries (should never fail)
-    QueryState { stream_id: u32 },
-    QueryWindows { stream_id: u32 },
-    QueryPriority { stream_id: u32 },
+    QueryState {
+        stream_id: u32,
+    },
+    QueryWindows {
+        stream_id: u32,
+    },
+    QueryPriority {
+        stream_id: u32,
+    },
 
     // Bulk operations for stress testing
-    BulkHeaderSend { count: u8 },
-    BulkDataTransfer { stream_count: u8, data_per_stream: u16 },
-    WindowExhaustion { stream_id: u32 },
+    BulkHeaderSend {
+        count: u8,
+    },
+    BulkDataTransfer {
+        stream_count: u8,
+        data_per_stream: u16,
+    },
+    WindowExhaustion {
+        stream_id: u32,
+    },
 }
 
 /// Shadow state for tracking expected behavior
@@ -141,7 +192,9 @@ impl TestEnv {
     }
 
     fn record_invalid_transition(&self) {
-        self.shadow.invalid_transitions.fetch_add(1, Ordering::Relaxed);
+        self.shadow
+            .invalid_transitions
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_window_overflow(&self) {
@@ -149,7 +202,9 @@ impl TestEnv {
     }
 
     fn record_successful_transition(&self) {
-        self.shadow.successful_transitions.fetch_add(1, Ordering::Relaxed);
+        self.shadow
+            .successful_transitions
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -188,7 +243,10 @@ fuzz_target!(|input: &[u8]| {
     let settings = ConnectionSettings {
         initial_window_size: fuzz_input.settings.initial_window_size.min(MAX_WINDOW_SIZE),
         max_header_list_size: fuzz_input.settings.max_header_list_size.min(1024 * 1024),
-        max_frame_size: fuzz_input.settings.max_frame_size.clamp(16384, MAX_FRAME_SIZE),
+        max_frame_size: fuzz_input
+            .settings
+            .max_frame_size
+            .clamp(16384, MAX_FRAME_SIZE),
         max_concurrent_streams: fuzz_input.settings.max_concurrent_streams.min(1000),
     };
 
@@ -202,17 +260,27 @@ fuzz_target!(|input: &[u8]| {
         }
 
         // Ensure valid stream ID (must be positive, per RFC 9113 §5.1.1)
-        let stream_id = if config.stream_id == 0 { 1 } else { config.stream_id };
+        let stream_id = if config.stream_id == 0 {
+            1
+        } else {
+            config.stream_id
+        };
 
         let initial_window_size = config.initial_send_window.min(MAX_WINDOW_SIZE);
         let max_header_list_size = settings.max_header_list_size;
 
         let stream = match config.initial_state {
-            InitialState::Idle => {
-                asupersync::http::h2::stream::Stream::new(stream_id, initial_window_size, max_header_list_size)
-            }
+            InitialState::Idle => asupersync::http::h2::stream::Stream::new(
+                stream_id,
+                initial_window_size,
+                max_header_list_size,
+            ),
             InitialState::ReservedRemote => {
-                asupersync::http::h2::stream::Stream::new_reserved_remote(stream_id, initial_window_size, max_header_list_size)
+                asupersync::http::h2::stream::Stream::new_reserved_remote(
+                    stream_id,
+                    initial_window_size,
+                    max_header_list_size,
+                )
             }
         };
 
@@ -225,7 +293,10 @@ fuzz_target!(|input: &[u8]| {
         env.record_operation();
 
         match operation {
-            StreamOperation::SendHeaders { stream_id, end_stream } => {
+            StreamOperation::SendHeaders {
+                stream_id,
+                end_stream,
+            } => {
                 if let Some(stream) = streams.get_mut(&stream_id) {
                     let old_state = stream.state();
                     match stream.send_headers(end_stream) {
@@ -233,7 +304,12 @@ fuzz_target!(|input: &[u8]| {
                             env.record_successful_transition();
                             // Verify state transition is valid
                             let new_state = stream.state();
-                            verify_valid_transition(old_state, new_state, "send_headers", end_stream);
+                            verify_valid_transition(
+                                old_state,
+                                new_state,
+                                "send_headers",
+                                end_stream,
+                            );
                         }
                         Err(_) => {
                             env.record_invalid_transition();
@@ -243,7 +319,11 @@ fuzz_target!(|input: &[u8]| {
                 }
             }
 
-            StreamOperation::RecvHeaders { stream_id, end_stream, end_headers } => {
+            StreamOperation::RecvHeaders {
+                stream_id,
+                end_stream,
+                end_headers,
+            } => {
                 if let Some(stream) = streams.get_mut(&stream_id) {
                     let old_state = stream.state();
                     match stream.recv_headers(end_stream, end_headers) {
@@ -251,7 +331,12 @@ fuzz_target!(|input: &[u8]| {
                             env.record_successful_transition();
                             // Verify state transition is valid
                             let new_state = stream.state();
-                            verify_valid_transition(old_state, new_state, "recv_headers", end_stream);
+                            verify_valid_transition(
+                                old_state,
+                                new_state,
+                                "recv_headers",
+                                end_stream,
+                            );
                         }
                         Err(_) => {
                             env.record_invalid_transition();
@@ -261,7 +346,11 @@ fuzz_target!(|input: &[u8]| {
                 }
             }
 
-            StreamOperation::SendData { stream_id, length, end_stream } => {
+            StreamOperation::SendData {
+                stream_id,
+                length,
+                end_stream,
+            } => {
                 if let Some(stream) = streams.get_mut(&stream_id) {
                     let limited_length = length.min(MAX_DATA_SIZE as u32);
                     let old_state = stream.state();
@@ -270,13 +359,19 @@ fuzz_target!(|input: &[u8]| {
                             env.record_successful_transition();
                             // Only consume window if we have a positive window
                             if stream.send_window() > 0 && limited_length > 0 {
-                                let consume_amount = limited_length.min(stream.send_window() as u32);
+                                let consume_amount =
+                                    limited_length.min(stream.send_window() as u32);
                                 stream.consume_send_window(consume_amount);
                             }
                             // Verify state transition
                             let new_state = stream.state();
                             if end_stream {
-                                verify_valid_transition(old_state, new_state, "send_data_end_stream", true);
+                                verify_valid_transition(
+                                    old_state,
+                                    new_state,
+                                    "send_data_end_stream",
+                                    true,
+                                );
                             }
                         }
                         Err(_) => {
@@ -286,7 +381,11 @@ fuzz_target!(|input: &[u8]| {
                 }
             }
 
-            StreamOperation::RecvData { stream_id, length, end_stream } => {
+            StreamOperation::RecvData {
+                stream_id,
+                length,
+                end_stream,
+            } => {
                 if let Some(stream) = streams.get_mut(&stream_id) {
                     let limited_length = length.min(MAX_DATA_SIZE as u32);
                     match stream.recv_data(limited_length, end_stream) {
@@ -300,10 +399,14 @@ fuzz_target!(|input: &[u8]| {
                 }
             }
 
-            StreamOperation::Reset { stream_id, error_code } => {
+            StreamOperation::Reset {
+                stream_id,
+                error_code,
+            } => {
                 if let Some(stream) = streams.get_mut(&stream_id) {
                     // Reset should always succeed from any state
-                    let error_code = asupersync::http::h2::error::ErrorCode::from_u32(error_code as u32);
+                    let error_code =
+                        asupersync::http::h2::error::ErrorCode::from_u32(error_code as u32);
                     stream.reset(error_code);
 
                     // Verify stream is now closed
@@ -359,7 +462,11 @@ fuzz_target!(|input: &[u8]| {
                 }
             }
 
-            StreamOperation::QueueData { stream_id, data_size, end_stream } => {
+            StreamOperation::QueueData {
+                stream_id,
+                data_size,
+                end_stream,
+            } => {
                 if let Some(stream) = streams.get_mut(&stream_id) {
                     let limited_size = (data_size as usize).min(MAX_DATA_SIZE);
                     let data = asupersync::bytes::Bytes::from(vec![0u8; limited_size]);
@@ -382,7 +489,11 @@ fuzz_target!(|input: &[u8]| {
                 }
             }
 
-            StreamOperation::RecvContinuation { stream_id, fragment_size, end_headers } => {
+            StreamOperation::RecvContinuation {
+                stream_id,
+                fragment_size,
+                end_headers,
+            } => {
                 if let Some(stream) = streams.get_mut(&stream_id) {
                     let limited_size = (fragment_size as usize).min(1024);
                     let header_block = asupersync::bytes::Bytes::from(vec![0u8; limited_size]);
@@ -398,7 +509,6 @@ fuzz_target!(|input: &[u8]| {
                     }
                 }
             }
-
 
             StreamOperation::QueryState { stream_id } => {
                 if let Some(stream) = streams.get(&stream_id) {
@@ -446,7 +556,10 @@ fuzz_target!(|input: &[u8]| {
                 }
             }
 
-            StreamOperation::BulkDataTransfer { stream_count, data_per_stream } => {
+            StreamOperation::BulkDataTransfer {
+                stream_count,
+                data_per_stream,
+            } => {
                 let limited_streams = (stream_count as usize).min(8);
                 let limited_data = (data_per_stream as usize).min(1024);
 

@@ -29,6 +29,8 @@ pub mod grpc_trailer_forwarding_rfc9113;
 #[cfg(feature = "quic")]
 pub mod quic_connection_migration_rfc9000;
 pub mod websocket_extension_negotiation_rfc6455;
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub mod kqueue_bsd_events;
 
 // Re-export main conformance test functionality
 pub use h1_rfc9112::{H1ConformanceHarness, H1ConformanceResult, RequirementLevel, TestVerdict};

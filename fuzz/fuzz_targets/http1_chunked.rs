@@ -190,7 +190,10 @@ enum ChunkedOperation {
     /// Add chunk with boundary size values
     BoundarySize { size_type: BoundarySizeType },
     /// Add invalid characters in various positions
-    InvalidChars { position: InvalidCharPosition, chars: Vec<u8> },
+    InvalidChars {
+        position: InvalidCharPosition,
+        chars: Vec<u8>,
+    },
     /// Add overlarge data to test limits
     OverlargeData { data: Vec<u8> },
 }
@@ -243,7 +246,12 @@ fuzz_target!(|input: ChunkedFuzzConfig| {
     let mut request_buffer = BytesMut::new();
 
     // Add request line
-    let uri = input.request_setup.uri.chars().take(256).collect::<String>();
+    let uri = input
+        .request_setup
+        .uri
+        .chars()
+        .take(256)
+        .collect::<String>();
     let request_line = format!(
         "{} {} {}\r\n",
         input.request_setup.method.as_str(),
@@ -255,11 +263,13 @@ fuzz_target!(|input: ChunkedFuzzConfig| {
     // Add headers before Transfer-Encoding
     for (name, value) in input.request_setup.headers.iter().take(32) {
         // Sanitize header names and values to prevent buffer bloat
-        let clean_name: String = name.chars()
+        let clean_name: String = name
+            .chars()
             .filter(|c| c.is_ascii_graphic() && *c != ':')
             .take(64)
             .collect();
-        let clean_value: String = value.chars()
+        let clean_value: String = value
+            .chars()
             .filter(|c| c.is_ascii() && *c != '\r' && *c != '\n')
             .take(256)
             .collect();
@@ -290,7 +300,8 @@ fuzz_target!(|input: ChunkedFuzzConfig| {
             }
 
             ChunkedOperation::MalformedSize { size_line } => {
-                let limited_line: Vec<u8> = size_line.iter()
+                let limited_line: Vec<u8> = size_line
+                    .iter()
                     .take(1024) // Limit line length
                     .cloned()
                     .collect();
@@ -298,14 +309,20 @@ fuzz_target!(|input: ChunkedFuzzConfig| {
                 request_buffer.extend_from_slice(b"\r\n");
             }
 
-            ChunkedOperation::ChunkWithExtensions { size, extensions, data } => {
+            ChunkedOperation::ChunkWithExtensions {
+                size,
+                extensions,
+                data,
+            } => {
                 let actual_size = (*size as usize).min(data.len()).min(MAX_INPUT_SIZE / 10);
                 let chunk_data = &data[..actual_size.min(data.len())];
 
                 // Build chunk size line with extensions
                 let mut size_line = format!("{:X}", actual_size);
                 for ext in extensions.iter().take(8) {
-                    let clean_name: String = ext.name.chars()
+                    let clean_name: String = ext
+                        .name
+                        .chars()
                         .filter(|c| c.is_ascii_graphic() && *c != '=' && *c != ';')
                         .take(32)
                         .collect();
@@ -313,7 +330,8 @@ fuzz_target!(|input: ChunkedFuzzConfig| {
                         size_line.push(';');
                         size_line.push_str(&clean_name);
                         if let Some(ref value) = ext.value {
-                            let clean_value: String = value.chars()
+                            let clean_value: String = value
+                                .chars()
                                 .filter(|c| c.is_ascii_graphic())
                                 .take(64)
                                 .collect();
@@ -338,11 +356,13 @@ fuzz_target!(|input: ChunkedFuzzConfig| {
 
             ChunkedOperation::Trailers { headers } => {
                 for (name, value) in headers.iter().take(16) {
-                    let clean_name: String = name.chars()
+                    let clean_name: String = name
+                        .chars()
                         .filter(|c| c.is_ascii_graphic() && *c != ':')
                         .take(64)
                         .collect();
-                    let clean_value: String = value.chars()
+                    let clean_value: String = value
+                        .chars()
                         .filter(|c| c.is_ascii() && *c != '\r' && *c != '\n')
                         .take(256)
                         .collect();
@@ -366,7 +386,8 @@ fuzz_target!(|input: ChunkedFuzzConfig| {
                 request_buffer.extend_from_slice(size_line.as_bytes());
 
                 // Only include partial data, no trailing CRLF
-                let limited_data: Vec<u8> = partial_data.iter()
+                let limited_data: Vec<u8> = partial_data
+                    .iter()
                     .take((*size as usize).min(MAX_INPUT_SIZE / 10))
                     .cloned()
                     .collect();
@@ -382,12 +403,22 @@ fuzz_target!(|input: ChunkedFuzzConfig| {
                         format!("{:X}", 1usize << power_clamped)
                     }
                     BoundarySizeType::HexOverflow { hex_digits } => {
-                        let limited_digits: String = hex_digits.iter()
+                        let limited_digits: String = hex_digits
+                            .iter()
                             .take(32) // Limit hex string length
-                            .map(|&b| char::from(b.wrapping_add(b'0') % 16 + if b % 2 == 0 { b'0' } else { b'A' }))
+                            .map(|&b| {
+                                char::from(
+                                    b.wrapping_add(b'0') % 16
+                                        + if b % 2 == 0 { b'0' } else { b'A' },
+                                )
+                            })
                             .filter(|c| c.is_ascii_hexdigit())
                             .collect();
-                        if limited_digits.is_empty() { "F".to_string() } else { limited_digits }
+                        if limited_digits.is_empty() {
+                            "F".to_string()
+                        } else {
+                            limited_digits
+                        }
                     }
                 };
                 let size_line = format!("{}\r\n", size_str);
@@ -451,11 +482,7 @@ fuzz_target!(|input: ChunkedFuzzConfig| {
     test_chunked_decoder(&mut codec, &mut request_buffer, &input.decoder_config);
 });
 
-fn test_chunked_decoder(
-    codec: &mut Http1Codec,
-    buffer: &mut BytesMut,
-    config: &DecoderConfig,
-) {
+fn test_chunked_decoder(codec: &mut Http1Codec, buffer: &mut BytesMut, config: &DecoderConfig) {
     if config.partial_reads {
         // Test partial reads by feeding data in small chunks
         let mut pos = 0;

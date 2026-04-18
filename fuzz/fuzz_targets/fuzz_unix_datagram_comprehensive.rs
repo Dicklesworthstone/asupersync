@@ -170,7 +170,8 @@ impl FuzzPath {
 
             // Handle unicode edge cases
             if !self.include_unicode {
-                cleaned = cleaned.chars()
+                cleaned = cleaned
+                    .chars()
                     .filter(|c| c.is_ascii() && !c.is_control())
                     .collect();
             }
@@ -258,7 +259,10 @@ fuzz_target!(|config: UnixDatagramFuzzConfig| {
 });
 
 /// Execute a single datagram operation
-fn execute_operation(operation: DatagramOperation, context: &mut TestContext) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_operation(
+    operation: DatagramOperation,
+    context: &mut TestContext,
+) -> Result<(), Box<dyn std::error::Error>> {
     match operation {
         DatagramOperation::CreateSocket(test) => execute_socket_creation(test, context),
         DatagramOperation::BindSocket(test) => execute_binding_test(test, context),
@@ -271,7 +275,10 @@ fn execute_operation(operation: DatagramOperation, context: &mut TestContext) ->
 }
 
 /// Test socket creation patterns
-fn execute_socket_creation(test: SocketCreationTest, context: &mut TestContext) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_socket_creation(
+    test: SocketCreationTest,
+    context: &mut TestContext,
+) -> Result<(), Box<dyn std::error::Error>> {
     match test {
         SocketCreationTest::Unbound => {
             let socket = UnixDatagram::unbound()?;
@@ -322,7 +329,10 @@ fn execute_socket_creation(test: SocketCreationTest, context: &mut TestContext) 
 }
 
 /// Test binding operations
-fn execute_binding_test(test: BindingTest, context: &mut TestContext) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_binding_test(
+    test: BindingTest,
+    context: &mut TestContext,
+) -> Result<(), Box<dyn std::error::Error>> {
     let path_buf = test.path.to_path_buf();
 
     // Remove any existing socket file
@@ -348,7 +358,10 @@ fn execute_binding_test(test: BindingTest, context: &mut TestContext) -> Result<
 }
 
 /// Test connection operations
-fn execute_connection_test(test: ConnectionTest, context: &mut TestContext) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_connection_test(
+    test: ConnectionTest,
+    context: &mut TestContext,
+) -> Result<(), Box<dyn std::error::Error>> {
     let socket = UnixDatagram::unbound()?;
 
     if test.use_abstract {
@@ -383,7 +396,10 @@ fn execute_connection_test(test: ConnectionTest, context: &mut TestContext) -> R
 }
 
 /// Test address operations
-fn execute_address_test(test: AddressTest, context: &mut TestContext) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_address_test(
+    test: AddressTest,
+    context: &mut TestContext,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (socket_a, socket_b) = UnixDatagram::pair()?;
 
     match test {
@@ -407,7 +423,10 @@ fn execute_address_test(test: AddressTest, context: &mut TestContext) -> Result<
 }
 
 /// Test ancillary data operations
-fn execute_ancillary_test(test: AncillaryTest, context: &mut TestContext) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_ancillary_test(
+    test: AncillaryTest,
+    context: &mut TestContext,
+) -> Result<(), Box<dyn std::error::Error>> {
     let fd_count = (test.fd_count as usize).min(MAX_FDS);
     let buffer_size = test.buffer_size.clamp(64, 2048) as usize;
 
@@ -438,14 +457,19 @@ fn execute_ancillary_test(test: AncillaryTest, context: &mut TestContext) -> Res
 
     // Cleanup test file descriptors
     for fd in test_fds {
-        unsafe { libc::close(fd); }
+        unsafe {
+            libc::close(fd);
+        }
     }
 
     Ok(())
 }
 
 /// Test socket options
-fn execute_socket_options_test(test: SocketOptionsTest, context: &mut TestContext) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_socket_options_test(
+    test: SocketOptionsTest,
+    context: &mut TestContext,
+) -> Result<(), Box<dyn std::error::Error>> {
     let socket = UnixDatagram::unbound()?;
 
     match test {
@@ -487,7 +511,10 @@ fn execute_socket_options_test(test: SocketOptionsTest, context: &mut TestContex
 }
 
 /// Test timeout operations
-fn execute_timeout_test(test: TimeoutTest, context: &mut TestContext) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_timeout_test(
+    test: TimeoutTest,
+    context: &mut TestContext,
+) -> Result<(), Box<dyn std::error::Error>> {
     let socket = UnixDatagram::unbound()?;
 
     // Test read timeout

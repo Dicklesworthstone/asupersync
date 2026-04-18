@@ -1,11 +1,11 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use libfuzzer_sys::fuzz_target;
-use asupersync::http::h3::error::H3Error;
 use asupersync::error::{Error, ErrorKind};
+use asupersync::http::h3::error::H3Error;
 use asupersync::types::CancelReason;
 use h3::error::{Code, ConnectionError, StreamError};
+use libfuzzer_sys::fuzz_target;
 use std::io;
 
 /// Comprehensive fuzz target for HTTP/3 error code parsing and handling
@@ -66,13 +66,9 @@ enum ErrorOperation {
         source: Box<ErrorOperation>,
     },
     /// Test error serialization and display
-    SerializationTest {
-        error_op: Box<ErrorOperation>,
-    },
+    SerializationTest { error_op: Box<ErrorOperation> },
     /// Test error properties and classification
-    PropertyTest {
-        error_op: Box<ErrorOperation>,
-    },
+    PropertyTest { error_op: Box<ErrorOperation> },
 }
 
 /// Types of connection errors to test
@@ -190,34 +186,52 @@ fn test_error_operation(operation: &ErrorOperation, depth: usize) {
     }
 
     match operation {
-        ErrorOperation::ConnectionError { error_type, code, message } => {
+        ErrorOperation::ConnectionError {
+            error_type,
+            code,
+            message,
+        } => {
             test_connection_error_conversion(error_type, *code, message);
-        },
-        ErrorOperation::StreamError { error_type, code, message } => {
+        }
+        ErrorOperation::StreamError {
+            error_type,
+            code,
+            message,
+        } => {
             test_stream_error_conversion(error_type, *code, message);
-        },
-        ErrorOperation::IoError { error_kind, message } => {
+        }
+        ErrorOperation::IoError {
+            error_kind,
+            message,
+        } => {
             test_io_error_conversion(error_kind, message);
-        },
-        ErrorOperation::CancellationError { cancel_reason_type, message } => {
+        }
+        ErrorOperation::CancellationError {
+            cancel_reason_type,
+            message,
+        } => {
             test_cancellation_error(cancel_reason_type, message);
-        },
-        ErrorOperation::AsupersyncError { error_kind, is_cancelled, message } => {
+        }
+        ErrorOperation::AsupersyncError {
+            error_kind,
+            is_cancelled,
+            message,
+        } => {
             test_asupersync_error_conversion(error_kind, *is_cancelled, message);
-        },
+        }
         ErrorOperation::ChainedError { primary, source } => {
             test_error_operation(primary, depth + 1);
             test_error_operation(source, depth + 1);
             test_error_chaining(primary, source);
-        },
+        }
         ErrorOperation::SerializationTest { error_op } => {
             test_error_operation(error_op, depth + 1);
             test_error_serialization(error_op);
-        },
+        }
         ErrorOperation::PropertyTest { error_op } => {
             test_error_operation(error_op, depth + 1);
             test_error_properties(error_op);
-        },
+        }
     }
 }
 
@@ -239,10 +253,10 @@ fn test_connection_error_conversion(error_type: &ConnectionErrorType, code: u64,
         H3Error::Connection(ref ce) => {
             // Should preserve connection error properties
             test_connection_error_properties(ce);
-        },
+        }
         _ => {
             // Unexpected variant for connection error input
-        },
+        }
     }
 }
 
@@ -264,10 +278,10 @@ fn test_stream_error_conversion(error_type: &StreamErrorType, code: u64, message
         H3Error::Stream(ref se) => {
             // Should preserve stream error properties
             test_stream_error_properties(se);
-        },
+        }
         _ => {
             // Unexpected variant for stream error input
-        },
+        }
     }
 }
 
@@ -289,10 +303,10 @@ fn test_io_error_conversion(error_kind: &IoErrorKind, message: &str) {
         H3Error::Io(ref ie) => {
             // Should preserve I/O error properties
             test_io_error_properties(ie);
-        },
+        }
         _ => {
             // Unexpected variant for I/O error input
-        },
+        }
     }
 }
 
@@ -309,13 +323,20 @@ fn test_cancellation_error(cancel_reason_type: &CancelReasonType, message: &str)
     let h3_error = H3Error::from(asupersync_error);
 
     // Test cancellation detection
-    assert!(h3_error.is_cancelled(), "Cancelled error should be detected as cancelled");
+    assert!(
+        h3_error.is_cancelled(),
+        "Cancelled error should be detected as cancelled"
+    );
 
     // Test error properties
     test_h3_error_properties(&h3_error);
 }
 
-fn test_asupersync_error_conversion(error_kind: &AsupersyncErrorKind, is_cancelled: bool, message: &str) {
+fn test_asupersync_error_conversion(
+    error_kind: &AsupersyncErrorKind,
+    is_cancelled: bool,
+    message: &str,
+) {
     let safe_message = limit_string(message, MAX_MESSAGE_LEN);
 
     // Create asupersync error
@@ -331,8 +352,11 @@ fn test_asupersync_error_conversion(error_kind: &AsupersyncErrorKind, is_cancell
     let h3_error = H3Error::from(asupersync_error);
 
     // Test cancellation detection consistency
-    assert_eq!(h3_error.is_cancelled(), *is_cancelled,
-              "Cancellation detection should match input");
+    assert_eq!(
+        h3_error.is_cancelled(),
+        *is_cancelled,
+        "Cancellation detection should match input"
+    );
 
     // Test error properties
     test_h3_error_properties(&h3_error);
@@ -347,16 +371,20 @@ fn test_error_chaining(primary: &ErrorOperation, source: &ErrorOperation) {
 fn test_error_serialization(error_op: &ErrorOperation) {
     // Create error from operation and test serialization
     match error_op {
-        ErrorOperation::ConnectionError { error_type, code, message } => {
+        ErrorOperation::ConnectionError {
+            error_type,
+            code,
+            message,
+        } => {
             let safe_message = limit_string(message, MAX_MESSAGE_LEN);
             let h3_code = convert_connection_error_type(error_type, *code);
             let conn_error = create_connection_error(h3_code, &safe_message);
             let h3_error = H3Error::from(conn_error);
             test_error_display(&h3_error);
-        },
+        }
         _ => {
             // Test other error types similarly
-        },
+        }
     }
 }
 
@@ -365,10 +393,10 @@ fn test_error_properties(error_op: &ErrorOperation) {
     match error_op {
         ErrorOperation::CancellationError { .. } => {
             // Cancellation errors should be detected properly
-        },
+        }
         _ => {
             // Other error types have their own properties to test
-        },
+        }
     }
 }
 
@@ -434,7 +462,10 @@ fn test_conversion_round_trips() {
 
     for error in &errors {
         let display_string = format!("{}", error);
-        assert!(!display_string.is_empty(), "Error display should not be empty");
+        assert!(
+            !display_string.is_empty(),
+            "Error display should not be empty"
+        );
 
         let debug_string = format!("{:?}", error);
         assert!(!debug_string.is_empty(), "Error debug should not be empty");
@@ -468,10 +499,10 @@ fn test_h3_error_properties(error: &H3Error) {
     match error {
         H3Error::Cancelled => {
             assert!(is_cancelled, "Cancelled variant should report as cancelled");
-        },
+        }
         _ => {
             // Other variants may or may not be cancelled depending on implementation
-        },
+        }
     }
 
     // Test error source chain (if implemented)

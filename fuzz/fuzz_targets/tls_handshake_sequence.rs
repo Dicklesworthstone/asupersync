@@ -1,8 +1,8 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use libfuzzer_sys::fuzz_target;
 use asupersync::tls::{TlsConnector, TlsError};
+use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
 /// Comprehensive fuzz target for TLS handshake sequence edge cases
@@ -71,10 +71,10 @@ struct MockIoBehavior {
     close_at_op: u8,
 }
 
+use std::collections::VecDeque;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::collections::VecDeque;
 
 /// Mock I/O stream for testing TLS handshake
 struct MockIo {
@@ -114,8 +114,8 @@ impl MockIo {
     }
 
     fn should_close(&self) -> bool {
-        self.behavior.unexpected_close &&
-        self.read_ops + self.write_ops >= self.behavior.close_at_op as usize
+        self.behavior.unexpected_close
+            && self.read_ops + self.write_ops >= self.behavior.close_at_op as usize
     }
 }
 
@@ -188,10 +188,7 @@ impl asupersync::io::AsyncWrite for MockIo {
             )));
         }
 
-        let max_write = std::cmp::min(
-            buf.len(),
-            self.behavior.max_write_size as usize,
-        ).max(1); // Always write at least 1 byte if buffer is non-empty
+        let max_write = std::cmp::min(buf.len(), self.behavior.max_write_size as usize).max(1); // Always write at least 1 byte if buffer is non-empty
 
         let written = std::cmp::min(buf.len(), max_write);
         self.write_ops += 1;
@@ -221,7 +218,6 @@ const MAX_ALPN_PROTOCOLS: usize = 10;
 const MAX_READ_CHUNKS: usize = 20;
 
 fuzz_target!(|input: TlsHandshakeFuzz| {
-
     let domain = if input.domain.len() > MAX_DOMAIN_LEN {
         &input.domain[..MAX_DOMAIN_LEN]
     } else {
@@ -242,7 +238,9 @@ fuzz_target!(|input: TlsHandshakeFuzz| {
 
     // Create mock I/O with limited read data
     let limited_behavior = MockIoBehavior {
-        read_data: input.io_behavior.read_data
+        read_data: input
+            .io_behavior
+            .read_data
             .into_iter()
             .take(MAX_READ_CHUNKS)
             .collect(),
@@ -265,7 +263,9 @@ fuzz_target!(|input: TlsHandshakeFuzz| {
         let timeout_duration = Duration::from_millis(500);
         // Use asupersync timeout with current time
         let now = asupersync::time::wall_now();
-        match asupersync::time::timeout(now, timeout_duration, connector.connect(domain, mock_io)).await {
+        match asupersync::time::timeout(now, timeout_duration, connector.connect(domain, mock_io))
+            .await
+        {
             Ok(result) => Some(result),
             Err(_) => None, // Timeout
         }
@@ -275,13 +275,16 @@ fuzz_target!(|input: TlsHandshakeFuzz| {
     match connection_result {
         Some(Ok(_tls_stream)) => {
             // Handshake succeeded - domain should have been valid
-            assert!(domain_validation_result.is_ok(),
-                "Handshake succeeded but domain validation failed for: {:?}", domain);
-        },
+            assert!(
+                domain_validation_result.is_ok(),
+                "Handshake succeeded but domain validation failed for: {:?}",
+                domain
+            );
+        }
         Some(Err(tls_error)) => {
             // Handshake failed - verify error is reasonable
             verify_tls_error(&tls_error, domain, &input.config);
-        },
+        }
         None => {
             // Timeout occurred - acceptable for fuzzing scenarios
         }
@@ -299,7 +302,8 @@ fn create_test_connector(config: &ConnectorConfig) -> Result<TlsConnector, TlsEr
 
     // Configure ALPN protocols
     if !config.alpn_protocols.is_empty() {
-        let protocols: Vec<Vec<u8>> = config.alpn_protocols
+        let protocols: Vec<Vec<u8>> = config
+            .alpn_protocols
             .iter()
             .take(MAX_ALPN_PROTOCOLS)
             .map(|p| match p {
@@ -334,40 +338,52 @@ fn create_test_connector(config: &ConnectorConfig) -> Result<TlsConnector, TlsEr
 fn verify_tls_error(error: &TlsError, domain: &str, config: &ConnectorConfig) {
     match error {
         TlsError::InvalidDnsName(name) => {
-            assert_eq!(name, domain, "Invalid DNS name error should match input domain");
-        },
+            assert_eq!(
+                name, domain,
+                "Invalid DNS name error should match input domain"
+            );
+        }
         TlsError::Handshake(_msg) => {
             // Handshake errors are expected with malformed data/mock I/O
-        },
+        }
         TlsError::Configuration(_msg) => {
             // Configuration errors are expected with invalid ALPN/certs
-        },
+        }
         TlsError::Io(_io_error) => {
             // I/O errors are expected with mock transport failures
-        },
+        }
         TlsError::Timeout(duration) => {
             if config.timeout_ms > 0 {
                 let expected_timeout = Duration::from_millis(config.timeout_ms as u64);
-                assert_eq!(*duration, expected_timeout,
-                    "Timeout duration should match configured value");
+                assert_eq!(
+                    *duration, expected_timeout,
+                    "Timeout duration should match configured value"
+                );
             }
-        },
-        TlsError::AlpnNegotiationFailed { expected, negotiated: _ } => {
-            assert!(config.alpn_required,
-                "ALPN negotiation failure should only occur when ALPN is required");
-            assert!(!expected.is_empty(),
-                "Expected ALPN protocols should not be empty if negotiation failed");
-        },
-        TlsError::Certificate(_) |
-        TlsError::CertificateExpired { .. } |
-        TlsError::CertificateNotYetValid { .. } |
-        TlsError::ChainValidation(_) |
-        TlsError::PinMismatch { .. } => {
+        }
+        TlsError::AlpnNegotiationFailed {
+            expected,
+            negotiated: _,
+        } => {
+            assert!(
+                config.alpn_required,
+                "ALPN negotiation failure should only occur when ALPN is required"
+            );
+            assert!(
+                !expected.is_empty(),
+                "Expected ALPN protocols should not be empty if negotiation failed"
+            );
+        }
+        TlsError::Certificate(_)
+        | TlsError::CertificateExpired { .. }
+        | TlsError::CertificateNotYetValid { .. }
+        | TlsError::ChainValidation(_)
+        | TlsError::PinMismatch { .. } => {
             // Certificate errors are expected with mock transport
-        },
+        }
         TlsError::Rustls(_) => {
             // Rustls errors are expected with malformed TLS data
-        },
+        }
     }
 }
 
@@ -375,4 +391,3 @@ fn verify_tls_error(error: &TlsError, domain: &str, config: &ConnectorConfig) {
 fn simple_runtime() -> Result<asupersync::runtime::Runtime, asupersync::error::Error> {
     asupersync::runtime::RuntimeBuilder::current_thread().build()
 }
-

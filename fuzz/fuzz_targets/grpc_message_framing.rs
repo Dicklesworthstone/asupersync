@@ -382,7 +382,10 @@ fn test_unknown_field_preservation(data: &[u8]) {
     let mut protobuf_data = Vec::new();
 
     // Add known fields (tags 1-2)
-    encode_varint(&mut protobuf_data, (1 << 3) | (WireType::LengthDelimited as u64));
+    encode_varint(
+        &mut protobuf_data,
+        (1 << 3) | (WireType::LengthDelimited as u64),
+    );
     encode_varint(&mut protobuf_data, 4);
     protobuf_data.extend_from_slice(b"test");
 
@@ -421,7 +424,10 @@ fn test_unknown_field_preservation(data: &[u8]) {
                 }
                 WireType::StartGroup => {
                     // Test deprecated group with unknown field
-                    encode_varint(&mut protobuf_data, ((tag + 1) << 3) | (WireType::Varint as u64));
+                    encode_varint(
+                        &mut protobuf_data,
+                        ((tag + 1) << 3) | (WireType::Varint as u64),
+                    );
                     encode_varint(&mut protobuf_data, data[i] as u64);
                     encode_varint(&mut protobuf_data, (tag << 3) | (WireType::EndGroup as u64));
                 }
@@ -447,10 +453,10 @@ fn test_varint_field_number_overflow(data: &[u8]) {
 
     // Test field numbers at boundaries and beyond limits
     let overflow_tags = [
-        536870911u32,  // Maximum valid tag number (2^29 - 1)
-        536870912u32,  // Just above maximum (should be rejected)
-        u32::MAX,      // Maximum u32 value
-        0u32,          // Invalid tag number 0
+        536870911u32, // Maximum valid tag number (2^29 - 1)
+        536870912u32, // Just above maximum (should be rejected)
+        u32::MAX,     // Maximum u32 value
+        0u32,         // Invalid tag number 0
     ];
 
     for (i, &tag) in overflow_tags.iter().enumerate() {
@@ -543,7 +549,10 @@ fn test_malformed_message_scenarios(data: &[u8]) {
         let mut mixed_data = Vec::new();
 
         // Valid message start
-        encode_varint(&mut mixed_data, (1 << 3) | (WireType::LengthDelimited as u64));
+        encode_varint(
+            &mut mixed_data,
+            (1 << 3) | (WireType::LengthDelimited as u64),
+        );
         encode_varint(&mut mixed_data, 4);
         mixed_data.extend_from_slice(b"test");
 

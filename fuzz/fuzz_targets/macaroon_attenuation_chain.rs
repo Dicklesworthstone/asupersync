@@ -1,12 +1,12 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use libfuzzer_sys::fuzz_target;
 use asupersync::cx::macaroon::{
-    MacaroonToken, CaveatPredicate, VerificationContext, VerificationError
+    CaveatPredicate, MacaroonToken, VerificationContext, VerificationError,
 };
 use asupersync::security::key::AuthKey;
 use asupersync::types::Time;
+use libfuzzer_sys::fuzz_target;
 
 /// Comprehensive fuzz target for Macaroon capability token attenuation chains
 ///
@@ -40,9 +40,7 @@ enum MacaroonOperation {
         location: String,
     },
     /// Add a first-party caveat
-    AddCaveat {
-        predicate: CaveatPredicateFuzz,
-    },
+    AddCaveat { predicate: CaveatPredicateFuzz },
     /// Add a third-party caveat
     AddThirdPartyCaveat {
         location: String,
@@ -54,13 +52,9 @@ enum MacaroonOperation {
     /// Deserialize from binary data
     Deserialize(Vec<u8>),
     /// Verify signature with given key
-    VerifySignature {
-        key_seed: u64,
-    },
+    VerifySignature { key_seed: u64 },
     /// Full verification with context
-    Verify {
-        key_seed: u64,
-    },
+    Verify { key_seed: u64 },
     /// Bind discharge token
     BindForRequest {
         discharge_ops: Vec<MacaroonOperation>,
@@ -126,7 +120,11 @@ fuzz_target!(|input: MacaroonFuzz| {
 
     for operation in operations {
         match operation {
-            MacaroonOperation::Mint { root_key_seed, identifier, location } => {
+            MacaroonOperation::Mint {
+                root_key_seed,
+                identifier,
+                location,
+            } => {
                 let safe_identifier = limit_string(identifier, MAX_IDENTIFIER_LEN);
                 let safe_location = limit_string(location, MAX_LOCATION_LEN);
 
@@ -135,13 +133,17 @@ fuzz_target!(|input: MacaroonFuzz| {
                     &safe_identifier,
                     &safe_location,
                 ));
-            },
+            }
             MacaroonOperation::AddCaveat { predicate } => {
                 if let Some(token) = current_token.take() {
                     current_token = Some(test_add_caveat(token, predicate));
                 }
-            },
-            MacaroonOperation::AddThirdPartyCaveat { location, caveat_key_seed, identifier } => {
+            }
+            MacaroonOperation::AddThirdPartyCaveat {
+                location,
+                caveat_key_seed,
+                identifier,
+            } => {
                 if let Some(token) = current_token.take() {
                     let safe_location = limit_string(location, MAX_LOCATION_LEN);
                     let safe_identifier = limit_string(identifier, MAX_IDENTIFIER_LEN);
@@ -153,12 +155,12 @@ fuzz_target!(|input: MacaroonFuzz| {
                         &safe_identifier,
                     ));
                 }
-            },
+            }
             MacaroonOperation::Serialize => {
                 if let Some(token) = &current_token {
                     test_serialization_round_trip(token);
                 }
-            },
+            }
             MacaroonOperation::Deserialize(data) => {
                 let limited_data = if data.len() > MAX_MALFORMED_DATA_LEN {
                     &data[..MAX_MALFORMED_DATA_LEN]
@@ -166,25 +168,25 @@ fuzz_target!(|input: MacaroonFuzz| {
                     data
                 };
                 test_safe_deserialization(limited_data);
-            },
+            }
             MacaroonOperation::VerifySignature { key_seed } => {
                 if let Some(token) = &current_token {
                     test_signature_verification(token, *key_seed);
                 }
-            },
+            }
             MacaroonOperation::Verify { key_seed } => {
                 if let Some(token) = &current_token {
                     test_full_verification(token, *key_seed, &verification_context);
                 }
-            },
+            }
             MacaroonOperation::BindForRequest { discharge_ops } => {
                 if let Some(token) = &current_token {
                     test_discharge_binding(token, discharge_ops);
                 }
-            },
+            }
             MacaroonOperation::TestMalformedPredicate(data) => {
                 test_malformed_predicate_parsing(data);
-            },
+            }
         }
     }
 
@@ -249,8 +251,14 @@ fn test_serialization_round_trip(token: &MacaroonToken) {
     let serialized = token.serialize();
 
     // Basic sanity checks
-    assert!(!serialized.is_empty(), "Serialized token should not be empty");
-    assert!(serialized.len() < 100_000, "Serialized token should be reasonable size");
+    assert!(
+        !serialized.is_empty(),
+        "Serialized token should not be empty"
+    );
+    assert!(
+        serialized.len() < 100_000,
+        "Serialized token should be reasonable size"
+    );
 
     // Deserialization should succeed for valid tokens
     if let Some(deserialized) = MacaroonToken::deserialize(&serialized) {
@@ -258,7 +266,10 @@ fn test_serialization_round_trip(token: &MacaroonToken) {
         assert_eq!(deserialized.identifier(), token.identifier());
         assert_eq!(deserialized.location(), token.location());
         assert_eq!(deserialized.caveat_count(), token.caveat_count());
-        assert_eq!(deserialized.signature().as_bytes(), token.signature().as_bytes());
+        assert_eq!(
+            deserialized.signature().as_bytes(),
+            token.signature().as_bytes()
+        );
     }
 }
 
@@ -299,7 +310,10 @@ fn test_predicate_round_trip(operations: &[MacaroonOperation]) {
             // Encoding should never panic
             let bytes = pred.to_bytes();
             assert!(!bytes.is_empty(), "Encoded predicate should not be empty");
-            assert!(bytes.len() < 10_000, "Encoded predicate should be reasonable size");
+            assert!(
+                bytes.len() < 10_000,
+                "Encoded predicate should be reasonable size"
+            );
 
             // Decoding should succeed for valid predicates
             if let Some((decoded, consumed)) = CaveatPredicate::from_bytes(&bytes) {
@@ -332,14 +346,13 @@ fn test_signature_verification(token: &MacaroonToken, key_seed: u64) {
 
     // Result should be deterministic
     let result2 = token.verify_signature(&test_key);
-    assert_eq!(result, result2, "Signature verification should be deterministic");
+    assert_eq!(
+        result, result2,
+        "Signature verification should be deterministic"
+    );
 }
 
-fn test_full_verification(
-    token: &MacaroonToken,
-    key_seed: u64,
-    context: &VerificationContext,
-) {
+fn test_full_verification(token: &MacaroonToken, key_seed: u64, context: &VerificationContext) {
     let test_key = AuthKey::from_seed(key_seed);
 
     // Verification should never panic
@@ -348,11 +361,11 @@ fn test_full_verification(
     // Result should be deterministic
     let result2 = token.verify(&test_key, context);
     match (result, result2) {
-        (Ok(()), Ok(())) => {}, // Both succeeded
+        (Ok(()), Ok(())) => {} // Both succeeded
         (Err(ref e1), Err(ref e2)) => {
             // Both failed - error types should match
             assert_eq!(std::mem::discriminant(e1), std::mem::discriminant(e2));
-        },
+        }
         _ => panic!("Verification results should be deterministic"),
     }
 }
@@ -400,18 +413,19 @@ fn convert_predicate_fuzz(predicate_fuzz: &CaveatPredicateFuzz) -> CaveatPredica
         CaveatPredicateFuzz::ResourceScope(pattern) => {
             let safe_pattern = limit_string(pattern, MAX_STRING_LEN);
             CaveatPredicate::ResourceScope(safe_pattern)
-        },
-        CaveatPredicateFuzz::RateLimit { max_count, window_secs } => {
-            CaveatPredicate::RateLimit {
-                max_count: *max_count,
-                window_secs: *window_secs,
-            }
+        }
+        CaveatPredicateFuzz::RateLimit {
+            max_count,
+            window_secs,
+        } => CaveatPredicate::RateLimit {
+            max_count: *max_count,
+            window_secs: *window_secs,
         },
         CaveatPredicateFuzz::Custom(key, value) => {
             let safe_key = limit_string(key, MAX_STRING_LEN);
             let safe_value = limit_string(value, MAX_STRING_LEN);
             CaveatPredicate::Custom(safe_key, safe_value)
-        },
+        }
     }
 }
 

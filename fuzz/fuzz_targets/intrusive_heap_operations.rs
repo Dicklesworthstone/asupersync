@@ -87,16 +87,30 @@ impl ShadowState {
         }
     }
 
-    fn verify_ring_invariants(&self, ring: &asupersync::runtime::scheduler::intrusive::IntrusiveRing) {
+    fn verify_ring_invariants(
+        &self,
+        ring: &asupersync::runtime::scheduler::intrusive::IntrusiveRing,
+    ) {
         // Ring length must match shadow state
         assert_eq!(ring.len(), self.ring_len, "Ring length mismatch");
-        assert_eq!(ring.is_empty(), self.ring_len == 0, "Ring emptiness mismatch");
+        assert_eq!(
+            ring.is_empty(),
+            self.ring_len == 0,
+            "Ring emptiness mismatch"
+        );
     }
 
-    fn verify_stack_invariants(&self, stack: &asupersync::runtime::scheduler::intrusive::IntrusiveStack) {
+    fn verify_stack_invariants(
+        &self,
+        stack: &asupersync::runtime::scheduler::intrusive::IntrusiveStack,
+    ) {
         // Stack length must match shadow state
         assert_eq!(stack.len(), self.stack_len, "Stack length mismatch");
-        assert_eq!(stack.is_empty(), self.stack_len == 0, "Stack emptiness mismatch");
+        assert_eq!(
+            stack.is_empty(),
+            self.stack_len == 0,
+            "Stack emptiness mismatch"
+        );
     }
 }
 
@@ -105,9 +119,9 @@ const MAX_OPERATIONS: usize = 100;
 const MAX_TASKS: usize = 100;
 
 fuzz_target!(|input: IntrusiveHeapFuzz| {
-    use asupersync::runtime::scheduler::intrusive::{IntrusiveRing, IntrusiveStack};
     use asupersync::record::task::TaskRecord;
-    use asupersync::types::{TaskId, RegionId, Budget};
+    use asupersync::runtime::scheduler::intrusive::{IntrusiveRing, IntrusiveStack};
+    use asupersync::types::{Budget, RegionId, TaskId};
     use asupersync::util::Arena;
     use std::collections::HashMap;
 
@@ -119,7 +133,11 @@ fuzz_target!(|input: IntrusiveHeapFuzz| {
     let initial_tasks = (input.initial_tasks as usize).max(1).min(MAX_TASKS);
 
     // Ensure valid queue tags (non-zero)
-    let ring_tag = if input.ring_tag == 0 { 1 } else { input.ring_tag };
+    let ring_tag = if input.ring_tag == 0 {
+        1
+    } else {
+        input.ring_tag
+    };
     let stack_tag = if input.stack_tag == 0 || input.stack_tag == ring_tag {
         ring_tag.wrapping_add(1).max(1)
     } else {
@@ -163,12 +181,14 @@ fuzz_target!(|input: IntrusiveHeapFuzz| {
                         }
                     }
                 }
-            },
+            }
 
             RingOperation::PopFront => {
                 if let Some(task_id) = ring.pop_front(&mut arena) {
                     // Find the logical task index
-                    if let Some((&logical_index, _)) = task_map.iter().find(|(_, &id)| id == task_id) {
+                    if let Some((&logical_index, _)) =
+                        task_map.iter().find(|(_, &id)| id == task_id)
+                    {
                         // Update shadow state
                         shadow.ring_tasks.remove(&logical_index);
                         shadow.ring_len = shadow.ring_len.saturating_sub(1);
@@ -179,7 +199,7 @@ fuzz_target!(|input: IntrusiveHeapFuzz| {
                         assert!(!record.is_in_queue(), "Popped task still shows as in queue");
                     }
                 }
-            },
+            }
 
             RingOperation::Remove { task_index } => {
                 if let Some(&task_id) = task_map.get(task_index) {
@@ -192,11 +212,14 @@ fuzz_target!(|input: IntrusiveHeapFuzz| {
 
                         // Verify task is no longer in queue
                         if let Some(record) = arena.get(task_id.arena_index()) {
-                            assert!(!record.is_in_queue(), "Removed task still shows as in queue");
+                            assert!(
+                                !record.is_in_queue(),
+                                "Removed task still shows as in queue"
+                            );
                         }
                     }
                 }
-            },
+            }
 
             RingOperation::Contains { task_index } => {
                 if let Some(&task_id) = task_map.get(task_index) {
@@ -204,20 +227,26 @@ fuzz_target!(|input: IntrusiveHeapFuzz| {
                     let expected = shadow.ring_tasks.contains(task_index);
 
                     // Verify contains matches shadow state
-                    assert_eq!(contains, expected,
+                    assert_eq!(
+                        contains, expected,
                         "Contains mismatch for task {}: ring says {}, shadow says {}",
-                        task_index, contains, expected);
+                        task_index, contains, expected
+                    );
                 }
-            },
+            }
 
             RingOperation::PeekFront => {
                 let front = ring.peek_front();
                 let is_empty = shadow.ring_len == 0;
 
-                assert_eq!(front.is_none(), is_empty,
+                assert_eq!(
+                    front.is_none(),
+                    is_empty,
                     "Peek front emptiness mismatch: got {:?}, expected empty: {}",
-                    front, is_empty);
-            },
+                    front,
+                    is_empty
+                );
+            }
 
             RingOperation::Clear => {
                 ring.clear(&mut arena);
@@ -228,11 +257,11 @@ fuzz_target!(|input: IntrusiveHeapFuzz| {
 
                 assert_eq!(ring.len(), 0, "Ring not empty after clear");
                 assert!(ring.is_empty(), "Ring not empty after clear");
-            },
+            }
 
             RingOperation::VerifyInvariants => {
                 shadow.verify_ring_invariants(&ring);
-            },
+            }
         }
     }
 
@@ -254,7 +283,7 @@ fuzz_target!(|input: IntrusiveHeapFuzz| {
                         }
                     }
                 }
-            },
+            }
 
             StackOperation::PushBottom { task_index } => {
                 if let Some(&task_id) = task_map.get(task_index) {
@@ -270,12 +299,14 @@ fuzz_target!(|input: IntrusiveHeapFuzz| {
                         }
                     }
                 }
-            },
+            }
 
             StackOperation::Pop => {
                 if let Some(task_id) = stack.pop(&mut arena) {
                     // Find the logical task index
-                    if let Some((&logical_index, _)) = task_map.iter().find(|(_, &id)| id == task_id) {
+                    if let Some((&logical_index, _)) =
+                        task_map.iter().find(|(_, &id)| id == task_id)
+                    {
                         // Update shadow state
                         shadow.stack_tasks.remove(&logical_index);
                         shadow.stack_len = shadow.stack_len.saturating_sub(1);
@@ -286,7 +317,7 @@ fuzz_target!(|input: IntrusiveHeapFuzz| {
                         assert!(!record.is_in_queue(), "Popped task still shows as in queue");
                     }
                 }
-            },
+            }
 
             StackOperation::StealBatch { max_steal } => {
                 let mut stolen = Vec::new();
@@ -296,12 +327,14 @@ fuzz_target!(|input: IntrusiveHeapFuzz| {
 
                 // Update shadow state for stolen tasks
                 for &task_id in &stolen {
-                    if let Some((&logical_index, _)) = task_map.iter().find(|(_, &id)| id == task_id) {
+                    if let Some((&logical_index, _)) =
+                        task_map.iter().find(|(_, &id)| id == task_id)
+                    {
                         shadow.stack_tasks.remove(&logical_index);
                     }
                 }
                 shadow.stack_len = shadow.stack_len.saturating_sub(stolen.len());
-            },
+            }
 
             StackOperation::StealBatchInto { max_steal } => {
                 let mut dest_stack = IntrusiveStack::new(stack_tag.wrapping_add(1).max(1));
@@ -314,17 +347,19 @@ fuzz_target!(|input: IntrusiveHeapFuzz| {
 
                 // Clear stolen tasks from shadow (conservative approach)
                 if stolen_count > 0 {
-                    let remaining_tasks: std::collections::HashSet<u8> = shadow.stack_tasks.iter()
+                    let remaining_tasks: std::collections::HashSet<u8> = shadow
+                        .stack_tasks
+                        .iter()
                         .take(shadow.stack_len)
                         .copied()
                         .collect();
                     shadow.stack_tasks = remaining_tasks;
                 }
-            },
+            }
 
             StackOperation::VerifyInvariants => {
                 shadow.verify_stack_invariants(&stack);
-            },
+            }
 
             StackOperation::CheckLocalCount => {
                 let has_local = stack.has_local_tasks();
@@ -333,7 +368,7 @@ fuzz_target!(|input: IntrusiveHeapFuzz| {
                 if shadow.stack_len == 0 {
                     assert!(!has_local, "Empty stack reports local tasks");
                 }
-            },
+            }
         }
     }
 

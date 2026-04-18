@@ -106,7 +106,9 @@ fn create_minimal_trace(data: &[u8]) -> Vec<u8> {
         let event_len = 10u32; // Fixed small event size
         trace.extend_from_slice(&event_len.to_le_bytes());
         // Add minimal event data
-        trace.extend_from_slice(&[0x82, 0xa4, b'k', b'i', b'n', b'd', 0x01, 0xa4, b'd', b'a', b't', b'a', 0x80]);
+        trace.extend_from_slice(&[
+            0x82, 0xa4, b'k', b'i', b'n', b'd', 0x01, 0xa4, b'd', b'a', b't', b'a', 0x80,
+        ]);
     }
 
     trace
@@ -122,11 +124,14 @@ fn create_minimal_metadata() -> Vec<u8> {
         0x42, // positive fixnum 66 (seed value)
         0xa7, b'v', b'e', b'r', b's', b'i', b'o', b'n', // "version"
         0x01, // positive fixnum 1
-        0xab, b'r', b'e', b'c', b'o', b'r', b'd', b'e', b'd', b'_', b'a', b't', // "recorded_at"
+        0xab, b'r', b'e', b'c', b'o', b'r', b'd', b'e', b'd', b'_', b'a',
+        b't', // "recorded_at"
         0xce, 0x00, 0x00, 0x00, 0x00, // uint32 timestamp
-        0xab, b'c', b'o', b'n', b'f', b'i', b'g', b'_', b'h', b'a', b's', b'h', // "config_hash"
+        0xab, b'c', b'o', b'n', b'f', b'i', b'g', b'_', b'h', b'a', b's',
+        b'h', // "config_hash"
         0xcc, 0x42, // uint8 config hash
-        0xab, b'd', b'e', b's', b'c', b'r', b'i', b'p', b't', b'i', b'o', b'n', // "description"
+        0xab, b'd', b'e', b's', b'c', b'r', b'i', b'p', b't', b'i', b'o',
+        b'n', // "description"
         0xa4, b't', b'e', b's', b't', // "test"
     ]
 }
@@ -164,10 +169,7 @@ fn test_progress_calculations(config: &ProgressTestConfig) {
         assert_eq!(over_total.remaining(), 0); // saturating_sub
 
         // Test max values
-        let max_progress = asupersync::trace::streaming::ReplayProgress::new(
-            u64::MAX,
-            u64::MAX,
-        );
+        let max_progress = asupersync::trace::streaming::ReplayProgress::new(u64::MAX, u64::MAX);
         assert_eq!(max_progress.percent(), 100.0);
         assert_eq!(max_progress.fraction(), 1.0);
         assert!(max_progress.is_complete());
@@ -182,21 +184,14 @@ fn test_checkpoint_serialization(checkpoint_data: &[u8]) {
     // If we have enough data, test creating and round-tripping synthetic checkpoints
     if checkpoint_data.len() >= 40 {
         // Extract values from the fuzz data for creating a synthetic checkpoint
-        let events_processed = u64::from_le_bytes(
-            checkpoint_data[0..8].try_into().unwrap_or([0; 8])
-        );
-        let total_events = u64::from_le_bytes(
-            checkpoint_data[8..16].try_into().unwrap_or([0; 8])
-        ).max(events_processed);
-        let seed = u64::from_le_bytes(
-            checkpoint_data[16..24].try_into().unwrap_or([0; 8])
-        );
-        let metadata_hash = u64::from_le_bytes(
-            checkpoint_data[24..32].try_into().unwrap_or([0; 8])
-        );
-        let created_at = u64::from_le_bytes(
-            checkpoint_data[32..40].try_into().unwrap_or([0; 8])
-        );
+        let events_processed =
+            u64::from_le_bytes(checkpoint_data[0..8].try_into().unwrap_or([0; 8]));
+        let total_events = u64::from_le_bytes(checkpoint_data[8..16].try_into().unwrap_or([0; 8]))
+            .max(events_processed);
+        let seed = u64::from_le_bytes(checkpoint_data[16..24].try_into().unwrap_or([0; 8]));
+        let metadata_hash =
+            u64::from_le_bytes(checkpoint_data[24..32].try_into().unwrap_or([0; 8]));
+        let created_at = u64::from_le_bytes(checkpoint_data[32..40].try_into().unwrap_or([0; 8]));
 
         // Create synthetic checkpoint for round-trip testing
         let checkpoint = asupersync::trace::streaming::ReplayCheckpoint {
@@ -289,10 +284,10 @@ fuzz_target!(|input: &[u8]| {
                                 created_at: replayer.metadata().recorded_at,
                             };
 
-                            let _resume_result = asupersync::trace::streaming::StreamingReplayer::resume(
-                                &temp_file,
-                                checkpoint,
-                            );
+                            let _resume_result =
+                                asupersync::trace::streaming::StreamingReplayer::resume(
+                                    &temp_file, checkpoint,
+                                );
                         }
                         StreamingOperation::NextEvent => {
                             let _event_result = replayer.next_event();
@@ -306,7 +301,9 @@ fuzz_target!(|input: &[u8]| {
                             // Test checkpoint serialization
                             if let Ok(bytes) = checkpoint.to_bytes() {
                                 let _deserialize_result =
-                                    asupersync::trace::streaming::ReplayCheckpoint::from_bytes(&bytes);
+                                    asupersync::trace::streaming::ReplayCheckpoint::from_bytes(
+                                        &bytes,
+                                    );
                             }
                         }
                         StreamingOperation::QueryProgress => {
@@ -349,13 +346,17 @@ fuzz_target!(|input: &[u8]| {
                             let checkpoint = replayer.checkpoint();
                             if let Ok(serialized) = checkpoint.to_bytes() {
                                 let _round_trip =
-                                    asupersync::trace::streaming::ReplayCheckpoint::from_bytes(&serialized);
+                                    asupersync::trace::streaming::ReplayCheckpoint::from_bytes(
+                                        &serialized,
+                                    );
                             }
                         }
                         StreamingOperation::DeserializeCorruptCheckpoint => {
                             // Test deserializing corrupt checkpoint data
                             let _corrupt_result =
-                                asupersync::trace::streaming::ReplayCheckpoint::from_bytes(&fuzz_input.checkpoint_data);
+                                asupersync::trace::streaming::ReplayCheckpoint::from_bytes(
+                                    &fuzz_input.checkpoint_data,
+                                );
                         }
                     }
 
@@ -376,9 +377,12 @@ fuzz_target!(|input: &[u8]| {
     // Test 4: Direct MessagePack deserialization fuzzing
     if fuzz_input.trace_data.len() >= 4 {
         // Test deserializing as ReplayEvent (will mostly fail, but should fail gracefully)
-        let _event_result = rmp_serde::from_slice::<asupersync::trace::replay::ReplayEvent>(&fuzz_input.trace_data);
+        let _event_result =
+            rmp_serde::from_slice::<asupersync::trace::replay::ReplayEvent>(&fuzz_input.trace_data);
 
         // Test deserializing as TraceMetadata
-        let _metadata_result = rmp_serde::from_slice::<asupersync::trace::replay::TraceMetadata>(&fuzz_input.trace_data);
+        let _metadata_result = rmp_serde::from_slice::<asupersync::trace::replay::TraceMetadata>(
+            &fuzz_input.trace_data,
+        );
     }
 });

@@ -209,19 +209,24 @@ fuzz_target!(|input: BroadcastLagFuzz| {
                     match result {
                         Ok(live_count) => {
                             shadow.send_message(*msg_value);
-                            let expected_live = receiver_active.iter().filter(|&&active| active).count();
-                            assert_eq!(live_count, expected_live,
+                            let expected_live =
+                                receiver_active.iter().filter(|&&active| active).count();
+                            assert_eq!(
+                                live_count, expected_live,
                                 "Live receiver count mismatch: got {}, expected {}",
-                                live_count, expected_live);
-                        },
+                                live_count, expected_live
+                            );
+                        }
                         Err(broadcast::SendError::Closed(_)) => {
-                            assert!(!should_succeed,
+                            assert!(
+                                !should_succeed,
                                 "Send failed but {} receivers are active",
-                                receiver_active.iter().filter(|&&active| active).count());
+                                receiver_active.iter().filter(|&&active| active).count()
+                            );
                         }
                     }
                 }
-            },
+            }
 
             BroadcastOperation::Subscribe => {
                 if senders.is_empty() {
@@ -235,7 +240,7 @@ fuzz_target!(|input: BroadcastLagFuzz| {
                 receivers.push(new_receiver);
                 receiver_active.push(true);
                 shadow.subscribe_receiver();
-            },
+            }
 
             BroadcastOperation::DropReceiver { receiver_index } => {
                 let index = (*receiver_index as usize) % receivers.len();
@@ -244,7 +249,7 @@ fuzz_target!(|input: BroadcastLagFuzz| {
                     shadow.drop_receiver(index);
                     // Note: We don't actually drop the receiver object to keep indices stable
                 }
-            },
+            }
 
             BroadcastOperation::TryRecv { receiver_index } => {
                 let index = (*receiver_index as usize) % receivers.len();
@@ -257,34 +262,45 @@ fuzz_target!(|input: BroadcastLagFuzz| {
 
                 match (actual_result, shadow_result) {
                     (Ok(actual_msg), Ok(shadow_msg)) => {
-                        assert_eq!(actual_msg, shadow_msg,
+                        assert_eq!(
+                            actual_msg, shadow_msg,
                             "Message value mismatch: got {}, expected {}",
-                            actual_msg, shadow_msg);
-                    },
+                            actual_msg, shadow_msg
+                        );
+                    }
 
-                    (Err(TryRecvError::Lagged(actual_missed)), Err((true, Some(shadow_missed)))) => {
-                        assert_eq!(actual_missed, shadow_missed,
+                    (
+                        Err(TryRecvError::Lagged(actual_missed)),
+                        Err((true, Some(shadow_missed))),
+                    ) => {
+                        assert_eq!(
+                            actual_missed, shadow_missed,
                             "Lag count mismatch: got {}, expected {}",
-                            actual_missed, shadow_missed);
-                    },
+                            actual_missed, shadow_missed
+                        );
+                    }
 
                     (Err(TryRecvError::Empty), Err((false, None))) => {
                         // Both report empty - correct
-                    },
+                    }
 
                     (Err(TryRecvError::Closed), Err((false, None))) => {
                         // Both report closed/unavailable - correct if channel is closed
-                        assert!(shadow.closed || shadow.all_messages.is_empty(),
-                            "Channel reports closed but shadow shows messages available");
-                    },
+                        assert!(
+                            shadow.closed || shadow.all_messages.is_empty(),
+                            "Channel reports closed but shadow shows messages available"
+                        );
+                    }
 
                     _ => {
                         // Mismatch - this is a bug
-                        panic!("Receive result mismatch: actual={:?}, shadow={:?}",
-                            actual_result, shadow_result);
+                        panic!(
+                            "Receive result mismatch: actual={:?}, shadow={:?}",
+                            actual_result, shadow_result
+                        );
                     }
                 }
-            },
+            }
 
             BroadcastOperation::CheckLag { receiver_index } => {
                 let index = (*receiver_index as usize) % receivers.len();
@@ -307,7 +323,7 @@ fuzz_target!(|input: BroadcastLagFuzz| {
 
                 // Try a non-destructive check by cloning receiver state would be ideal,
                 // but we test this implicitly through try_recv patterns
-            },
+            }
 
             BroadcastOperation::SendBurst { count, start_value } => {
                 if senders.is_empty() {
@@ -321,21 +337,25 @@ fuzz_target!(|input: BroadcastLagFuzz| {
                     let _ = senders[0].send(&cx, msg);
                     shadow.send_message(msg);
                 }
-            },
+            }
 
             BroadcastOperation::CloseSenders => {
                 senders.clear();
                 shadow.close();
-            },
+            }
 
             BroadcastOperation::CloneSender => {
-                if !senders.is_empty() && senders.len() < 10 { // Limit sender count
+                if !senders.is_empty() && senders.len() < 10 {
+                    // Limit sender count
                     let new_sender = senders[0].clone();
                     senders.push(new_sender);
                 }
-            },
+            }
 
-            BroadcastOperation::FastForward { receiver_index, amount } => {
+            BroadcastOperation::FastForward {
+                receiver_index,
+                amount,
+            } => {
                 let index = (*receiver_index as usize) % receivers.len();
                 if !receiver_active[index] {
                     continue;
@@ -347,7 +367,7 @@ fuzz_target!(|input: BroadcastLagFuzz| {
                 // Fast-forward actual receiver by repeatedly calling try_recv or simulating lag
                 // Since we can't directly modify next_index, this tests that the lag detection
                 // handles large index gaps correctly
-            },
+            }
         }
 
         // Invariant checks after each operation
@@ -356,15 +376,20 @@ fuzz_target!(|input: BroadcastLagFuzz| {
 
         // Channel should be closed iff no senders exist
         if sender_count == 0 {
-            assert!(shadow.closed, "Shadow should be closed when no senders exist");
+            assert!(
+                shadow.closed,
+                "Shadow should be closed when no senders exist"
+            );
         }
 
         // Receiver count should match active receivers
         if !senders.is_empty() {
             let reported_count = senders[0].receiver_count();
-            assert_eq!(reported_count, active_receiver_count,
+            assert_eq!(
+                reported_count, active_receiver_count,
                 "Reported receiver count {} != active count {}",
-                reported_count, active_receiver_count);
+                reported_count, active_receiver_count
+            );
         }
     }
 
@@ -377,10 +402,10 @@ fuzz_target!(|input: BroadcastLagFuzz| {
                 match shadow.try_recv(i) {
                     Ok(_shadow_msg) => {
                         // Both successful - good
-                    },
+                    }
                     Err((true, Some(_missed))) => {
                         // Shadow detected lag - this should have been detected earlier
-                    },
+                    }
                     _ => {
                         // Mismatch in final drain
                     }

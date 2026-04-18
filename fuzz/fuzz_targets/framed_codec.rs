@@ -20,7 +20,7 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::framed::Framed;
-use asupersync::codec::{Decoder, Encoder, LinesCodec, BytesCodec};
+use asupersync::codec::{BytesCodec, Decoder, Encoder, LinesCodec};
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::stream::Stream;
 use libfuzzer_sys::fuzz_target;
@@ -83,13 +83,19 @@ enum TransportBehavior {
     /// Partial I/O - returns small chunks at a time
     Partial { data: Vec<u8>, chunk_size: u8 },
     /// Pending transport - sometimes returns Poll::Pending
-    Pending { data: Vec<u8>, pending_frequency: u8 },
+    Pending {
+        data: Vec<u8>,
+        pending_frequency: u8,
+    },
     /// Error-prone transport - occasionally returns I/O errors
     ErrorProne { data: Vec<u8>, error_frequency: u8 },
     /// EOF early - signals EOF before all data is consumed
     EofEarly { data: Vec<u8>, eof_position: u16 },
     /// Slow writer - write operations may fail or return partial
-    SlowWriter { data: Vec<u8>, write_success_rate: u8 },
+    SlowWriter {
+        data: Vec<u8>,
+        write_success_rate: u8,
+    },
 }
 
 /// Codec types for testing different encoding/decoding behaviors
@@ -170,25 +176,41 @@ impl MockTransport {
                 read_behavior: ReadBehavior::Partial {
                     chunk_size: (chunk_size as usize).max(1),
                 },
-                write_behavior: WriteBehavior::Partial { max_write: chunk_size as usize },
+                write_behavior: WriteBehavior::Partial {
+                    max_write: chunk_size as usize,
+                },
                 eof_position: None,
                 bytes_read: 0,
                 poll_count: 0,
             },
-            TransportBehavior::Pending { data, pending_frequency } => Self {
+            TransportBehavior::Pending {
+                data,
+                pending_frequency,
+            } => Self {
                 read_data: data.into(),
                 write_data: Vec::new(),
-                read_behavior: ReadBehavior::Pending { frequency: pending_frequency },
-                write_behavior: WriteBehavior::Pending { frequency: pending_frequency },
+                read_behavior: ReadBehavior::Pending {
+                    frequency: pending_frequency,
+                },
+                write_behavior: WriteBehavior::Pending {
+                    frequency: pending_frequency,
+                },
                 eof_position: None,
                 bytes_read: 0,
                 poll_count: 0,
             },
-            TransportBehavior::ErrorProne { data, error_frequency } => Self {
+            TransportBehavior::ErrorProne {
+                data,
+                error_frequency,
+            } => Self {
                 read_data: data.into(),
                 write_data: Vec::new(),
-                read_behavior: ReadBehavior::ErrorProne { frequency: error_frequency },
-                write_behavior: WriteBehavior::ErrorProne { frequency: error_frequency },
+                read_behavior: ReadBehavior::ErrorProne {
+                    frequency: error_frequency,
+                },
+                write_behavior: WriteBehavior::ErrorProne {
+                    frequency: error_frequency,
+                },
                 eof_position: None,
                 bytes_read: 0,
                 poll_count: 0,
@@ -202,7 +224,10 @@ impl MockTransport {
                 bytes_read: 0,
                 poll_count: 0,
             },
-            TransportBehavior::SlowWriter { data, write_success_rate } => Self {
+            TransportBehavior::SlowWriter {
+                data,
+                write_success_rate,
+            } => Self {
                 read_data: data.into(),
                 write_data: Vec::new(),
                 read_behavior: ReadBehavior::Normal,
@@ -356,7 +381,10 @@ impl Decoder for MockErrorCodec {
         self.decode_count += 1;
 
         if self.decode_count % (self.error_frequency as usize + 1) == 0 {
-            return Err(std::io::Error::new(ErrorKind::InvalidData, "mock decode error"));
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "mock decode error",
+            ));
         }
 
         if buf.is_empty() {
@@ -379,7 +407,10 @@ impl Encoder<BytesMut> for MockErrorCodec {
         self.encode_count += 1;
 
         if self.encode_count % (self.error_frequency as usize + 1) == 0 {
-            return Err(std::io::Error::new(ErrorKind::InvalidInput, "mock encode error"));
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "mock encode error",
+            ));
         }
 
         buf.extend_from_slice(&item);
@@ -449,19 +480,13 @@ fuzz_target!(|input: FramedFuzzConfig| {
             test_framed_operations_bytes(&mut framed, operations);
         }
         CodecType::ErrorProne { error_frequency } => {
-            let mut framed = Framed::with_capacity(
-                transport,
-                MockErrorCodec::new(error_frequency),
-                capacity
-            );
+            let mut framed =
+                Framed::with_capacity(transport, MockErrorCodec::new(error_frequency), capacity);
             test_framed_operations_bytes(&mut framed, operations);
         }
         CodecType::Slow { decode_speed } => {
-            let mut framed = Framed::with_capacity(
-                transport,
-                MockSlowCodec::new(decode_speed),
-                capacity
-            );
+            let mut framed =
+                Framed::with_capacity(transport, MockSlowCodec::new(decode_speed), capacity);
             test_framed_operations_bytes(&mut framed, operations);
         }
     }
@@ -469,7 +494,7 @@ fuzz_target!(|input: FramedFuzzConfig| {
 
 fn test_framed_operations_lines<T>(
     framed: &mut Framed<T, LinesCodec>,
-    operations: std::iter::Take<std::slice::Iter<FramedOperation>>
+    operations: std::iter::Take<std::slice::Iter<FramedOperation>>,
 ) where
     T: AsyncRead + AsyncWrite + Unpin,
 {
@@ -521,7 +546,7 @@ fn test_framed_operations_lines<T>(
 
 fn test_framed_operations_bytes<T, U>(
     framed: &mut Framed<T, U>,
-    operations: std::iter::Take<std::slice::Iter<FramedOperation>>
+    operations: std::iter::Take<std::slice::Iter<FramedOperation>>,
 ) where
     T: AsyncRead + AsyncWrite + Unpin,
     U: Decoder + Encoder<BytesMut> + Unpin,

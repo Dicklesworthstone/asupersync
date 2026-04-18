@@ -141,7 +141,10 @@ enum ConnectionBehavior {
     /// Connection timeout during request
     Timeout { at_stage: TimeoutStage },
     /// Connection reset/error injection
-    Error { at_stage: ErrorStage, error_type: ErrorType },
+    Error {
+        at_stage: ErrorStage,
+        error_type: ErrorType,
+    },
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -212,11 +215,20 @@ enum ResponseScenario {
     /// Normal response
     Normal { spec: ResponseSpec },
     /// Chunked transfer encoding
-    Chunked { chunks: Vec<ChunkData>, trailers: Vec<(String, String)> },
+    Chunked {
+        chunks: Vec<ChunkData>,
+        trailers: Vec<(String, String)>,
+    },
     /// Content-length mismatch
-    ContentLengthMismatch { declared: usize, actual_data: Vec<u8> },
+    ContentLengthMismatch {
+        declared: usize,
+        actual_data: Vec<u8>,
+    },
     /// Both Transfer-Encoding and Content-Length (protocol violation)
-    AmbiguousLength { content_length: usize, chunks: Vec<ChunkData> },
+    AmbiguousLength {
+        content_length: usize,
+        chunks: Vec<ChunkData>,
+    },
     /// No Content-Length or Transfer-Encoding (EOF-delimited)
     EofDelimited { data: Vec<u8> },
     /// Empty body with various status codes
@@ -342,7 +354,6 @@ enum RedirectTest {
     },
 }
 
-
 #[derive(Debug, Clone, Arbitrary)]
 enum LoopDetectionTest {
     /// Exact URL loop
@@ -376,7 +387,10 @@ enum EdgeCaseTest {
     /// Invalid HTTP versions in responses
     InvalidVersions { versions: Vec<String> },
     /// Stress test with rapid requests
-    StressTest { request_count: u8, timing: StressTimingPattern },
+    StressTest {
+        request_count: u8,
+        timing: StressTimingPattern,
+    },
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -470,7 +484,11 @@ fn normalize_config(config: &mut H1ClientFuzzConfig) {
 
 fn normalize_client_operation(op: &mut ClientOperation) {
     match op {
-        ClientOperation::SequentialRequests { requests, responses, .. } => {
+        ClientOperation::SequentialRequests {
+            requests,
+            responses,
+            ..
+        } => {
             requests.truncate(5);
             responses.truncate(5);
             for req in requests {
@@ -480,7 +498,11 @@ fn normalize_client_operation(op: &mut ClientOperation) {
                 normalize_response_spec(resp);
             }
         }
-        ClientOperation::PipelinedRequests { requests, responses, .. } => {
+        ClientOperation::PipelinedRequests {
+            requests,
+            responses,
+            ..
+        } => {
             requests.truncate(3);
             responses.truncate(3);
             for req in requests {
@@ -490,8 +512,15 @@ fn normalize_client_operation(op: &mut ClientOperation) {
                 normalize_response_spec(resp);
             }
         }
-        ClientOperation::SingleRequest { request_spec, response_spec } |
-        ClientOperation::ContinueRequest { request_spec, final_response: response_spec, .. } => {
+        ClientOperation::SingleRequest {
+            request_spec,
+            response_spec,
+        }
+        | ClientOperation::ContinueRequest {
+            request_spec,
+            final_response: response_spec,
+            ..
+        } => {
             normalize_request_spec(request_spec);
             normalize_response_spec(response_spec);
         }
@@ -572,11 +601,17 @@ fn normalize_response_scenario(scenario: &mut ResponseScenario) {
                 normalize_header_value(value);
             }
         }
-        ResponseScenario::ContentLengthMismatch { declared, actual_data } => {
+        ResponseScenario::ContentLengthMismatch {
+            declared,
+            actual_data,
+        } => {
             *declared = (*declared).clamp(0, MAX_RESPONSE_SIZE);
             actual_data.truncate(MAX_RESPONSE_SIZE);
         }
-        ResponseScenario::AmbiguousLength { content_length, chunks } => {
+        ResponseScenario::AmbiguousLength {
+            content_length,
+            chunks,
+        } => {
             *content_length = (*content_length).clamp(0, MAX_RESPONSE_SIZE);
             chunks.truncate(5);
         }
@@ -601,7 +636,9 @@ fn normalize_response_scenario(scenario: &mut ResponseScenario) {
 
 fn normalize_redirect_test(test: &mut RedirectTest) {
     match test {
-        RedirectTest::RedirectChain { urls, status_codes, .. } => {
+        RedirectTest::RedirectChain {
+            urls, status_codes, ..
+        } => {
             urls.truncate(MAX_FUZZ_REDIRECTS as usize);
             status_codes.truncate(MAX_FUZZ_REDIRECTS as usize);
             for url in urls {
@@ -614,12 +651,19 @@ fn normalize_redirect_test(test: &mut RedirectTest) {
                 normalize_url(url);
             }
         }
-        RedirectTest::CrossOriginRedirect { from_url, to_url, sensitive_headers } => {
+        RedirectTest::CrossOriginRedirect {
+            from_url,
+            to_url,
+            sensitive_headers,
+        } => {
             normalize_url(from_url);
             normalize_url(to_url);
             sensitive_headers.truncate(5);
         }
-        RedirectTest::MalformedLocation { base_url, location_values } => {
+        RedirectTest::MalformedLocation {
+            base_url,
+            location_values,
+        } => {
             normalize_url(base_url);
             location_values.truncate(5);
         }
@@ -715,12 +759,14 @@ fn build_response_bytes(scenario: &ResponseScenario) -> Vec<u8> {
     match scenario {
         ResponseScenario::Normal { spec } => build_response_from_spec(spec),
         ResponseScenario::Chunked { chunks, trailers } => build_chunked_response(chunks, trailers),
-        ResponseScenario::ContentLengthMismatch { declared, actual_data } => {
-            build_content_length_mismatch_response(*declared, actual_data)
-        }
-        ResponseScenario::AmbiguousLength { content_length, chunks } => {
-            build_ambiguous_length_response(*content_length, chunks)
-        }
+        ResponseScenario::ContentLengthMismatch {
+            declared,
+            actual_data,
+        } => build_content_length_mismatch_response(*declared, actual_data),
+        ResponseScenario::AmbiguousLength {
+            content_length,
+            chunks,
+        } => build_ambiguous_length_response(*content_length, chunks),
         ResponseScenario::EofDelimited { data } => build_eof_delimited_response(data),
         ResponseScenario::EmptyBody { status_codes } => {
             build_empty_body_response(status_codes.first().copied().unwrap_or(200))
@@ -734,7 +780,8 @@ fn build_response_from_spec(spec: &ResponseSpec) -> Vec<u8> {
 
     // Status line
     let version: Version = spec.version.clone().into();
-    response.extend_from_slice(format!("{:?} {} {}\r\n", version, spec.status, spec.reason).as_bytes());
+    response
+        .extend_from_slice(format!("{:?} {} {}\r\n", version, spec.status, spec.reason).as_bytes());
 
     // Headers
     for (name, value) in &spec.headers {
@@ -744,7 +791,8 @@ fn build_response_from_spec(spec: &ResponseSpec) -> Vec<u8> {
     // Content-Length if not chunked
     match spec.body_encoding {
         BodyEncoding::ContentLength => {
-            response.extend_from_slice(format!("Content-Length: {}\r\n", spec.body.len()).as_bytes());
+            response
+                .extend_from_slice(format!("Content-Length: {}\r\n", spec.body.len()).as_bytes());
         }
         BodyEncoding::Chunked { .. } => {
             response.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
@@ -882,19 +930,26 @@ fn build_malformed_headers_response(headers: &[MalformedHeader]) -> Vec<u8> {
     for header in headers {
         match header.header_type {
             MalformedHeaderType::EmbeddedCrlf => {
-                response.extend_from_slice(format!("{}: {}\r\nInjected: evil\r\n", header.name, header.value).as_bytes());
+                response.extend_from_slice(
+                    format!("{}: {}\r\nInjected: evil\r\n", header.name, header.value).as_bytes(),
+                );
             }
             MalformedHeaderType::MissingColon => {
-                response.extend_from_slice(format!("{} {}\r\n", header.name, header.value).as_bytes());
+                response
+                    .extend_from_slice(format!("{} {}\r\n", header.name, header.value).as_bytes());
             }
             MalformedHeaderType::InvalidName => {
-                response.extend_from_slice(format!("invalid\x00name: {}\r\n", header.value).as_bytes());
+                response
+                    .extend_from_slice(format!("invalid\x00name: {}\r\n", header.value).as_bytes());
             }
             MalformedHeaderType::InvalidValue => {
-                response.extend_from_slice(format!("{}: invalid\x00value\r\n", header.name).as_bytes());
+                response
+                    .extend_from_slice(format!("{}: invalid\x00value\r\n", header.name).as_bytes());
             }
             MalformedHeaderType::WhitespaceCorruption => {
-                response.extend_from_slice(format!(" {} : {} \r\n", header.name, header.value).as_bytes());
+                response.extend_from_slice(
+                    format!(" {} : {} \r\n", header.name, header.value).as_bytes(),
+                );
             }
         }
     }
@@ -903,7 +958,10 @@ fn build_malformed_headers_response(headers: &[MalformedHeader]) -> Vec<u8> {
     response
 }
 
-fn validate_parsed_response(response: &Response, scenario: &ResponseScenario) -> Result<(), String> {
+fn validate_parsed_response(
+    response: &Response,
+    scenario: &ResponseScenario,
+) -> Result<(), String> {
     // Basic validation that response makes sense
     if response.status < 100 || response.status > 999 {
         return Err(format!("Invalid status code: {}", response.status));
@@ -912,7 +970,10 @@ fn validate_parsed_response(response: &Response, scenario: &ResponseScenario) ->
     match scenario {
         ResponseScenario::Normal { spec } => {
             if response.status != spec.status {
-                return Err(format!("Status mismatch: {} vs {}", response.status, spec.status));
+                return Err(format!(
+                    "Status mismatch: {} vs {}",
+                    response.status, spec.status
+                ));
             }
         }
         ResponseScenario::EmptyBody { .. } => {
@@ -926,7 +987,10 @@ fn validate_parsed_response(response: &Response, scenario: &ResponseScenario) ->
     Ok(())
 }
 
-fn validate_error_is_reasonable(error: &HttpError, scenario: &ResponseScenario) -> Result<(), String> {
+fn validate_error_is_reasonable(
+    error: &HttpError,
+    scenario: &ResponseScenario,
+) -> Result<(), String> {
     // Ensure error makes sense for the input scenario
     match scenario {
         ResponseScenario::AmbiguousLength { .. } => {
@@ -954,14 +1018,24 @@ fn test_connection_management(config: &H1ClientFuzzConfig) -> Result<(), String>
 
 fn test_connection_scenario(test: &ConnectionTest) -> Result<(), String> {
     match test {
-        ConnectionTest::KeepAliveBoundary { boundary_condition, .. } => {
+        ConnectionTest::KeepAliveBoundary {
+            boundary_condition, ..
+        } => {
             test_keep_alive_boundary(boundary_condition)?;
         }
         ConnectionTest::ReuseAfterError { error_scenario, .. } => {
             test_connection_reuse_after_error(error_scenario)?;
         }
-        ConnectionTest::VersionMismatch { request_version, response_version, connection_header } => {
-            test_version_mismatch(request_version.clone(), response_version.clone(), connection_header)?;
+        ConnectionTest::VersionMismatch {
+            request_version,
+            response_version,
+            connection_header,
+        } => {
+            test_version_mismatch(
+                request_version.clone(),
+                response_version.clone(),
+                connection_header,
+            )?;
         }
     }
     Ok(())
@@ -1026,7 +1100,11 @@ fn test_invalid_chunk_size(corruption: &ChunkSizeCorruption) -> Result<(), Strin
     Ok(())
 }
 
-fn test_version_mismatch(request_version: FuzzVersion, response_version: FuzzVersion, connection_header: &Option<String>) -> Result<(), String> {
+fn test_version_mismatch(
+    request_version: FuzzVersion,
+    response_version: FuzzVersion,
+    connection_header: &Option<String>,
+) -> Result<(), String> {
     // Test HTTP/1.0 vs HTTP/1.1 keep-alive behavior differences
     let req_ver: Version = request_version.into();
     let resp_ver: Version = response_version.into();
@@ -1062,26 +1140,52 @@ fn test_redirect_handling(config: &H1ClientFuzzConfig) -> Result<(), String> {
 
 fn test_redirect_scenario(test: &RedirectTest) -> Result<(), String> {
     match test {
-        RedirectTest::RedirectChain { urls, status_codes, policy } => {
+        RedirectTest::RedirectChain {
+            urls,
+            status_codes,
+            policy,
+        } => {
             test_redirect_chain(urls, status_codes, policy)?;
         }
-        RedirectTest::RedirectLoop { loop_urls, loop_detection } => {
+        RedirectTest::RedirectLoop {
+            loop_urls,
+            loop_detection,
+        } => {
             test_redirect_loop(loop_urls, loop_detection)?;
         }
-        RedirectTest::CrossOriginRedirect { from_url, to_url, sensitive_headers } => {
+        RedirectTest::CrossOriginRedirect {
+            from_url,
+            to_url,
+            sensitive_headers,
+        } => {
             test_cross_origin_redirect(from_url, to_url, sensitive_headers)?;
         }
-        RedirectTest::MalformedLocation { base_url, location_values } => {
+        RedirectTest::MalformedLocation {
+            base_url,
+            location_values,
+        } => {
             test_malformed_location(base_url, location_values)?;
         }
-        RedirectTest::MethodConversion { original_method, redirect_status, expected_method } => {
-            test_method_conversion(original_method.clone(), *redirect_status, expected_method.clone())?;
+        RedirectTest::MethodConversion {
+            original_method,
+            redirect_status,
+            expected_method,
+        } => {
+            test_method_conversion(
+                original_method.clone(),
+                *redirect_status,
+                expected_method.clone(),
+            )?;
         }
     }
     Ok(())
 }
 
-fn test_redirect_chain(urls: &[String], status_codes: &[u16], policy: &RedirectPolicySpec) -> Result<(), String> {
+fn test_redirect_chain(
+    urls: &[String],
+    status_codes: &[u16],
+    policy: &RedirectPolicySpec,
+) -> Result<(), String> {
     // Test redirect chain handling
     if urls.is_empty() {
         return Ok(());
@@ -1108,7 +1212,10 @@ fn test_redirect_chain(urls: &[String], status_codes: &[u16], policy: &RedirectP
     Ok(())
 }
 
-fn test_redirect_loop(loop_urls: &[String], loop_detection: &LoopDetectionTest) -> Result<(), String> {
+fn test_redirect_loop(
+    loop_urls: &[String],
+    loop_detection: &LoopDetectionTest,
+) -> Result<(), String> {
     if loop_urls.len() < 2 {
         return Ok(());
     }
@@ -1128,7 +1235,11 @@ fn test_redirect_loop(loop_urls: &[String], loop_detection: &LoopDetectionTest) 
     Ok(())
 }
 
-fn test_cross_origin_redirect(from_url: &str, to_url: &str, sensitive_headers: &[(String, String)]) -> Result<(), String> {
+fn test_cross_origin_redirect(
+    from_url: &str,
+    to_url: &str,
+    sensitive_headers: &[(String, String)],
+) -> Result<(), String> {
     // Test that sensitive headers are stripped on cross-origin redirects
     let from_origin = extract_origin(from_url);
     let to_origin = extract_origin(to_url);
@@ -1137,7 +1248,10 @@ fn test_cross_origin_redirect(from_url: &str, to_url: &str, sensitive_headers: &
         // Cross-origin redirect - sensitive headers should be stripped
         for (name, _) in sensitive_headers {
             let name_lower = name.to_lowercase();
-            if matches!(name_lower.as_str(), "authorization" | "cookie" | "proxy-authorization") {
+            if matches!(
+                name_lower.as_str(),
+                "authorization" | "cookie" | "proxy-authorization"
+            ) {
                 // These should be stripped
             }
         }
@@ -1150,7 +1264,11 @@ fn extract_origin(url: &str) -> Option<String> {
     if let Some(scheme_end) = url.find("://") {
         let after_scheme = &url[scheme_end + 3..];
         if let Some(path_start) = after_scheme.find('/') {
-            Some(format!("{}{}", &url[..scheme_end + 3], &after_scheme[..path_start]))
+            Some(format!(
+                "{}{}",
+                &url[..scheme_end + 3],
+                &after_scheme[..path_start]
+            ))
         } else {
             Some(url.to_string())
         }
@@ -1159,7 +1277,10 @@ fn extract_origin(url: &str) -> Option<String> {
     }
 }
 
-fn test_malformed_location(_base_url: &str, location_values: &[LocationValue]) -> Result<(), String> {
+fn test_malformed_location(
+    _base_url: &str,
+    location_values: &[LocationValue],
+) -> Result<(), String> {
     for location in location_values {
         match location {
             LocationValue::Valid { .. } => {
@@ -1185,7 +1306,11 @@ fn test_malformed_location(_base_url: &str, location_values: &[LocationValue]) -
     Ok(())
 }
 
-fn test_method_conversion(original_method: FuzzMethod, redirect_status: u16, expected_method: FuzzMethod) -> Result<(), String> {
+fn test_method_conversion(
+    original_method: FuzzMethod,
+    redirect_status: u16,
+    expected_method: FuzzMethod,
+) -> Result<(), String> {
     // Test method conversion rules during redirects
     let orig_method: Method = original_method.into();
     let exp_method: Method = expected_method.into();
@@ -1257,7 +1382,10 @@ fn test_edge_case_scenario(test: &EdgeCaseTest) -> Result<(), String> {
                 test_invalid_version(version)?;
             }
         }
-        EdgeCaseTest::StressTest { request_count, timing } => {
+        EdgeCaseTest::StressTest {
+            request_count,
+            timing,
+        } => {
             test_stress_scenario(*request_count, timing)?;
         }
     }
@@ -1353,11 +1481,12 @@ fn fuzz_h1_client(mut config: H1ClientFuzzConfig) -> Result<(), String> {
     normalize_config(&mut config);
 
     // Skip degenerate cases
-    if config.client_operations.is_empty() &&
-       config.response_scenarios.is_empty() &&
-       config.connection_tests.is_empty() &&
-       config.redirect_tests.is_empty() &&
-       config.edge_case_tests.is_empty() {
+    if config.client_operations.is_empty()
+        && config.response_scenarios.is_empty()
+        && config.connection_tests.is_empty()
+        && config.redirect_tests.is_empty()
+        && config.edge_case_tests.is_empty()
+    {
         return Ok(());
     }
 

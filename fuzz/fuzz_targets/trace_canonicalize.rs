@@ -13,11 +13,11 @@
 //! 5. UTF-8 Corruption Handling: Invalid UTF-8 in trace data fails gracefully
 //! 6. Monoid Laws: Identity, associativity, and commutativity properties hold
 
+use asupersync::trace::canonicalize::{FoataTrace, TraceMonoid, canonicalize, trace_fingerprint};
+use asupersync::trace::distributed::{LamportTime, LogicalTime};
+use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
+use asupersync::types::{RegionId, TaskId, Time};
 use libfuzzer_sys::fuzz_target;
-use asupersync::trace::canonicalize::{canonicalize, trace_fingerprint, TraceMonoid, FoataTrace};
-use asupersync::trace::event::{TraceEvent, TraceEventKind, TraceData};
-use asupersync::trace::distributed::{LogicalTime, LamportTime};
-use asupersync::types::{TaskId, RegionId, Time};
 
 fuzz_target!(|data: &[u8]| {
     // Skip tiny inputs
@@ -119,20 +119,44 @@ fn generate_linear_trace(count: usize, rng_state: &mut u64) -> Vec<TraceEvent> {
             0 => {
                 let task_id = TaskId::new_for_test((*rng_state % 100) as u32, 0);
                 let region_id = RegionId::new_for_test((*rng_state % 50) as u32, 0);
-                (TraceEventKind::Spawn, TraceData::Task { task: task_id, region: region_id })
+                (
+                    TraceEventKind::Spawn,
+                    TraceData::Task {
+                        task: task_id,
+                        region: region_id,
+                    },
+                )
             }
             1 => {
                 let task_id = TaskId::new_for_test((*rng_state % 100) as u32, 0);
                 let region_id = RegionId::new_for_test((*rng_state % 50) as u32, 0);
-                (TraceEventKind::Complete, TraceData::Task { task: task_id, region: region_id })
+                (
+                    TraceEventKind::Complete,
+                    TraceData::Task {
+                        task: task_id,
+                        region: region_id,
+                    },
+                )
             }
             2 => {
                 let region_id = RegionId::new_for_test((*rng_state % 50) as u32, 0);
-                (TraceEventKind::RegionCreated, TraceData::Region { region: region_id, parent: None })
+                (
+                    TraceEventKind::RegionCreated,
+                    TraceData::Region {
+                        region: region_id,
+                        parent: None,
+                    },
+                )
             }
             3 => {
                 let region_id = RegionId::new_for_test((*rng_state % 50) as u32, 0);
-                (TraceEventKind::RegionCloseComplete, TraceData::Region { region: region_id, parent: None })
+                (
+                    TraceEventKind::RegionCloseComplete,
+                    TraceData::Region {
+                        region: region_id,
+                        parent: None,
+                    },
+                )
             }
             _ => unreachable!(),
         };
@@ -167,36 +191,49 @@ fn permute_independent_events(events: &[TraceEvent], rng_state: &mut u64) -> Vec
 fn can_swap_safely(a: &TraceEvent, b: &TraceEvent) -> bool {
     match (&a.data, &b.data) {
         // Different tasks/regions can typically be reordered
-        (TraceData::Task { task: task_a, region: region_a },
-         TraceData::Task { task: task_b, region: region_b }) => {
-            task_a != task_b && region_a != region_b
-        }
-        (TraceData::Region { region: region_a, .. },
-         TraceData::Region { region: region_b, .. }) => {
-            region_a != region_b
-        }
+        (
+            TraceData::Task {
+                task: task_a,
+                region: region_a,
+            },
+            TraceData::Task {
+                task: task_b,
+                region: region_b,
+            },
+        ) => task_a != task_b && region_a != region_b,
+        (
+            TraceData::Region {
+                region: region_a, ..
+            },
+            TraceData::Region {
+                region: region_b, ..
+            },
+        ) => region_a != region_b,
         // Different data types might be independent
-        _ => a.kind != b.kind
+        _ => a.kind != b.kind,
     }
 }
 
 /// Generate trace with timestamp skewing to test tolerance
 fn apply_timestamp_skew(events: &[TraceEvent], skew_ns: i64) -> Vec<TraceEvent> {
-    events.iter().map(|event| {
-        let new_time = if skew_ns >= 0 {
-            Time::from_nanos(event.time.as_nanos() + skew_ns as u64)
-        } else {
-            Time::from_nanos(event.time.as_nanos().saturating_sub((-skew_ns) as u64))
-        };
-        TraceEvent {
-            version: event.version,
-            seq: event.seq,
-            time: new_time,
-            logical_time: event.logical_time.clone(),
-            kind: event.kind,
-            data: event.data.clone(),
-        }
-    }).collect()
+    events
+        .iter()
+        .map(|event| {
+            let new_time = if skew_ns >= 0 {
+                Time::from_nanos(event.time.as_nanos() + skew_ns as u64)
+            } else {
+                Time::from_nanos(event.time.as_nanos().saturating_sub((-skew_ns) as u64))
+            };
+            TraceEvent {
+                version: event.version,
+                seq: event.seq,
+                time: new_time,
+                logical_time: event.logical_time.clone(),
+                kind: event.kind,
+                data: event.data.clone(),
+            }
+        })
+        .collect()
 }
 
 /// Generate trace with missing optional fields
@@ -225,19 +262,30 @@ fn test_canonical_equivalence(operations: &[CanonicalizeOperation]) {
                 let canonical2 = canonicalize(events);
 
                 // Same input should produce same canonical form
-                assert_eq!(canonical1.fingerprint(), canonical2.fingerprint(),
-                    "Same trace produced different canonical forms");
-                assert_eq!(canonical1.len(), canonical2.len(),
-                    "Same trace produced different lengths");
+                assert_eq!(
+                    canonical1.fingerprint(),
+                    canonical2.fingerprint(),
+                    "Same trace produced different canonical forms"
+                );
+                assert_eq!(
+                    canonical1.len(),
+                    canonical2.len(),
+                    "Same trace produced different lengths"
+                );
             }
             CanonicalizeOperation::PermutedTrace(events) => {
                 let canonical = canonicalize(events);
 
                 // Verify canonical form properties
-                assert!(canonical.depth() <= events.len(),
-                    "Canonical depth exceeds original length");
-                assert_eq!(canonical.len(), events.len(),
-                    "Canonical form lost events during canonicalization");
+                assert!(
+                    canonical.depth() <= events.len(),
+                    "Canonical depth exceeds original length"
+                );
+                assert_eq!(
+                    canonical.len(),
+                    events.len(),
+                    "Canonical form lost events during canonicalization"
+                );
             }
             _ => {}
         }
@@ -248,7 +296,9 @@ fn test_canonical_equivalence(operations: &[CanonicalizeOperation]) {
 fn test_permutation_invariance(operations: &[CanonicalizeOperation]) {
     for op in operations {
         if let CanonicalizeOperation::LinearTrace(events) = op {
-            if events.len() < 2 { continue; }
+            if events.len() < 2 {
+                continue;
+            }
 
             let original_fingerprint = trace_fingerprint(events);
             let original_canonical = canonicalize(events);
@@ -265,8 +315,10 @@ fn test_permutation_invariance(operations: &[CanonicalizeOperation]) {
                 // Note: This is a heuristic test - true independence requires
                 // deep semantic analysis, but we test obvious cases
                 if are_likely_equivalent(&original_canonical, &permuted_canonical) {
-                    assert_eq!(original_fingerprint, permuted_fingerprint,
-                        "Independent permutation changed fingerprint");
+                    assert_eq!(
+                        original_fingerprint, permuted_fingerprint,
+                        "Independent permutation changed fingerprint"
+                    );
                 }
             }
         }
@@ -283,12 +335,19 @@ fn test_timestamp_skew_tolerance(operations: &[CanonicalizeOperation]) {
                 let skewed_canonical = canonicalize(&skewed_events);
 
                 // Small skews shouldn't change the logical structure dramatically
-                if skew.abs() < 100 {  // Small skew threshold
-                    assert_eq!(original_canonical.len(), skewed_canonical.len(),
-                        "Small timestamp skew changed event count");
+                if skew.abs() < 100 {
+                    // Small skew threshold
+                    assert_eq!(
+                        original_canonical.len(),
+                        skewed_canonical.len(),
+                        "Small timestamp skew changed event count"
+                    );
                     // Depth might change slightly due to reordering, but shouldn't be dramatic
-                    assert!((original_canonical.depth() as i32 - skewed_canonical.depth() as i32).abs() <= 2,
-                        "Small timestamp skew caused dramatic depth change");
+                    assert!(
+                        (original_canonical.depth() as i32 - skewed_canonical.depth() as i32).abs()
+                            <= 2,
+                        "Small timestamp skew caused dramatic depth change"
+                    );
                 }
             }
             _ => {}
@@ -302,8 +361,11 @@ fn test_missing_field_defaults(operations: &[CanonicalizeOperation]) {
         if let CanonicalizeOperation::MissingFields(events) = op {
             // Should not panic on missing fields
             let canonical = canonicalize(events);
-            assert_eq!(canonical.len(), events.len(),
-                "Missing fields caused event loss during canonicalization");
+            assert_eq!(
+                canonical.len(),
+                events.len(),
+                "Missing fields caused event loss during canonicalization"
+            );
 
             // Should produce valid fingerprint
             let fingerprint = canonical.fingerprint();
@@ -319,8 +381,11 @@ fn test_utf8_corruption_handling(operations: &[CanonicalizeOperation]) {
         if let CanonicalizeOperation::CorruptUtf8(events) = op {
             // Should not panic on corrupted events with extreme values
             let canonical = canonicalize(events);
-            assert_eq!(canonical.len(), events.len(),
-                "Corrupted events caused event loss during canonicalization");
+            assert_eq!(
+                canonical.len(),
+                events.len(),
+                "Corrupted events caused event loss during canonicalization"
+            );
 
             // Should produce valid fingerprint
             let fingerprint = canonical.fingerprint();
@@ -332,25 +397,32 @@ fn test_utf8_corruption_handling(operations: &[CanonicalizeOperation]) {
     let extreme_task_id = TaskId::new_for_test(u32::MAX, u32::MAX);
     let extreme_region_id = RegionId::new_for_test(u32::MAX, u32::MAX);
 
-    let extreme_events = vec![
-        TraceEvent::new(
-            u64::MAX,
-            Time::from_nanos(u64::MAX),
-            TraceEventKind::Spawn,
-            TraceData::Task { task: extreme_task_id, region: extreme_region_id }
-        )
-    ];
+    let extreme_events = vec![TraceEvent::new(
+        u64::MAX,
+        Time::from_nanos(u64::MAX),
+        TraceEventKind::Spawn,
+        TraceData::Task {
+            task: extreme_task_id,
+            region: extreme_region_id,
+        },
+    )];
 
     // Should not panic with extreme values
     let canonical = canonicalize(&extreme_events);
-    assert_eq!(canonical.len(), 1, "Extreme values caused canonicalization failure");
+    assert_eq!(
+        canonical.len(),
+        1,
+        "Extreme values caused canonicalization failure"
+    );
 }
 
 /// Test monoid laws: identity, associativity
 fn test_monoid_laws(operations: &[CanonicalizeOperation]) {
     for op in operations {
         if let CanonicalizeOperation::LinearTrace(events) = op {
-            if events.is_empty() { continue; }
+            if events.is_empty() {
+                continue;
+            }
 
             let trace_monoid = TraceMonoid::from_events(events);
             let identity = TraceMonoid::identity();
@@ -359,10 +431,16 @@ fn test_monoid_laws(operations: &[CanonicalizeOperation]) {
             let left_identity = identity.concat(&trace_monoid);
             let right_identity = trace_monoid.concat(&identity);
 
-            assert_eq!(trace_monoid.class_fingerprint(), left_identity.class_fingerprint(),
-                "Left identity law violated");
-            assert_eq!(trace_monoid.class_fingerprint(), right_identity.class_fingerprint(),
-                "Right identity law violated");
+            assert_eq!(
+                trace_monoid.class_fingerprint(),
+                left_identity.class_fingerprint(),
+                "Left identity law violated"
+            );
+            assert_eq!(
+                trace_monoid.class_fingerprint(),
+                right_identity.class_fingerprint(),
+                "Right identity law violated"
+            );
         }
     }
 }
@@ -371,15 +449,17 @@ fn test_monoid_laws(operations: &[CanonicalizeOperation]) {
 fn test_fingerprint_consistency(operations: &[CanonicalizeOperation]) {
     for op in operations {
         match op {
-            CanonicalizeOperation::LinearTrace(events) |
-            CanonicalizeOperation::PermutedTrace(events) |
-            CanonicalizeOperation::MissingFields(events) => {
+            CanonicalizeOperation::LinearTrace(events)
+            | CanonicalizeOperation::PermutedTrace(events)
+            | CanonicalizeOperation::MissingFields(events) => {
                 let canonical = canonicalize(events);
                 let direct_fingerprint = trace_fingerprint(events);
                 let canonical_fingerprint = canonical.fingerprint();
 
-                assert_eq!(direct_fingerprint, canonical_fingerprint,
-                    "Direct fingerprint doesn't match canonical fingerprint");
+                assert_eq!(
+                    direct_fingerprint, canonical_fingerprint,
+                    "Direct fingerprint doesn't match canonical fingerprint"
+                );
             }
             CanonicalizeOperation::EmptyTrace => {
                 let empty_events: Vec<TraceEvent> = vec![];
@@ -387,8 +467,10 @@ fn test_fingerprint_consistency(operations: &[CanonicalizeOperation]) {
                 let fingerprint = canonical.fingerprint();
                 let direct_fingerprint = trace_fingerprint(&empty_events);
 
-                assert_eq!(fingerprint, direct_fingerprint,
-                    "Empty trace fingerprints don't match");
+                assert_eq!(
+                    fingerprint, direct_fingerprint,
+                    "Empty trace fingerprints don't match"
+                );
             }
             _ => {}
         }
@@ -398,8 +480,8 @@ fn test_fingerprint_consistency(operations: &[CanonicalizeOperation]) {
 /// Heuristic check if two canonical forms are likely equivalent
 fn are_likely_equivalent(canonical1: &FoataTrace, canonical2: &FoataTrace) -> bool {
     // Simple heuristic: same number of events and similar structure
-    canonical1.len() == canonical2.len() &&
-    (canonical1.depth() as i32 - canonical2.depth() as i32).abs() <= 1
+    canonical1.len() == canonical2.len()
+        && (canonical1.depth() as i32 - canonical2.depth() as i32).abs() <= 1
 }
 
 // Helper functions to extract data from fuzzer input

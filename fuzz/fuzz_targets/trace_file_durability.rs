@@ -13,11 +13,11 @@
 //! 5. Compression Integrity: Round-trip integrity with different compression modes
 //! 6. Metadata Consistency: Metadata and event count consistency after crashes
 
+use asupersync::trace::file::{CompressionMode, TraceFileConfig, TraceReader, TraceWriter};
+use asupersync::trace::replay::{CompactRegionId, CompactTaskId, ReplayEvent, TraceMetadata};
 use libfuzzer_sys::fuzz_target;
 use std::fs;
 use std::path::PathBuf;
-use asupersync::trace::file::{TraceWriter, TraceReader, TraceFileConfig, CompressionMode};
-use asupersync::trace::replay::{ReplayEvent, TraceMetadata, CompactTaskId, CompactRegionId};
 
 fuzz_target!(|data: &[u8]| {
     // Skip tiny inputs
@@ -152,8 +152,8 @@ fn test_compression_durability(_operations: &[FuzzOperation]) {
 
         for level in compression_levels {
             let temp_path = get_temp_path();
-            let config = TraceFileConfig::default()
-                .with_compression(CompressionMode::Lz4 { level });
+            let config =
+                TraceFileConfig::default().with_compression(CompressionMode::Lz4 { level });
 
             // Create a simple trace with compression
             let simple_ops = vec![
@@ -190,9 +190,11 @@ fn test_metadata_consistency(operations: &[FuzzOperation]) {
 
             // Event count should match what was written (within reason for fuzzing)
             if expected_events <= 100 && actual_count <= 100 {
-                assert_eq!(expected_events, actual_count,
-                          "Event count mismatch: expected {} got {}",
-                          expected_events, actual_count);
+                assert_eq!(
+                    expected_events, actual_count,
+                    "Event count mismatch: expected {} got {}",
+                    expected_events, actual_count
+                );
             }
         }
     }
@@ -266,7 +268,7 @@ fn test_concurrent_access(operations: &[FuzzOperation]) {
 fn write_trace_operations(
     operations: &[FuzzOperation],
     path: &PathBuf,
-    config: &TraceFileConfig
+    config: &TraceFileConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut trace_writer = TraceWriter::create_with_config(path, config.clone())?;
     let mut metadata_written = false;
@@ -322,13 +324,16 @@ fn verify_trace_integrity(reader: &mut TraceReader, operations: &[FuzzOperation]
 
     // Events should match (within reason for fuzzing)
     if expected_events <= 50 && actual_events <= 100 {
-        assert_eq!(expected_events, actual_events,
-                  "Round-trip event count mismatch");
+        assert_eq!(
+            expected_events, actual_events,
+            "Round-trip event count mismatch"
+        );
     }
 }
 
 fn count_expected_events(operations: &[FuzzOperation]) -> u64 {
-    operations.iter()
+    operations
+        .iter()
         .filter(|op| matches!(op, FuzzOperation::WriteEvent(_)))
         .count() as u64
 }
@@ -355,15 +360,13 @@ fn extract_u8(input: &mut &[u8], rng_state: &mut u64) -> u8 {
     }
 }
 
-
 fn extract_u64(input: &mut &[u8], rng_state: &mut u64) -> u64 {
     if input.len() < 8 {
         *rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
         *rng_state
     } else {
         let val = u64::from_le_bytes([
-            input[0], input[1], input[2], input[3],
-            input[4], input[5], input[6], input[7],
+            input[0], input[1], input[2], input[3], input[4], input[5], input[6], input[7],
         ]);
         *input = &input[8..];
         val

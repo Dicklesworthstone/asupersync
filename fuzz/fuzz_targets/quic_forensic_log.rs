@@ -1,11 +1,11 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use libfuzzer_sys::fuzz_target;
 use asupersync::net::quic_native::forensic_log::{
-    QuicH3Event, QuicH3ForensicLogger, QuicH3ScenarioManifest,
-    FORENSIC_SCHEMA_VERSION, FORENSIC_MANIFEST_SCHEMA_ID, SUBSYSTEM
+    FORENSIC_MANIFEST_SCHEMA_ID, FORENSIC_SCHEMA_VERSION, QuicH3Event, QuicH3ForensicLogger,
+    QuicH3ScenarioManifest, SUBSYSTEM,
 };
+use libfuzzer_sys::fuzz_target;
 use serde_json;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -106,10 +106,7 @@ enum LoggerOperation {
     /// Emit to NDJSON
     EmitNdjson,
     /// Create manifest
-    CreateManifest {
-        passed: bool,
-        exit_code: i32,
-    },
+    CreateManifest { passed: bool, exit_code: i32 },
 }
 
 /// Maximum limits for safety during fuzzing
@@ -238,7 +235,10 @@ fn test_event_serialization(event: &QuicH3Event) {
 
         if let Ok(json_value) = parsed {
             // Should have type field
-            assert!(json_value.get("type").is_some(), "Event should have type field");
+            assert!(
+                json_value.get("type").is_some(),
+                "Event should have type field"
+            );
 
             // Type should match event name
             if let Some(type_val) = json_value.get("type") {
@@ -317,14 +317,14 @@ fn test_logger_operations(operations: &[LoggerOperation]) {
 
                 // Logging should never panic
                 logger.log(&safe_category, converted_event);
-            },
+            }
             LoggerOperation::EmitNdjson => {
                 // Emission should handle any internal state gracefully
                 let result = logger.emit_ndjson();
                 if let Err(_) = result {
                     // Emission can fail (e.g., I/O errors) but shouldn't panic
                 }
-            },
+            }
             LoggerOperation::CreateManifest { passed, exit_code } => {
                 // Manifest creation should never panic
                 let manifest = logger.create_scenario_manifest(*passed, *exit_code);
@@ -333,7 +333,7 @@ fn test_logger_operations(operations: &[LoggerOperation]) {
                 assert_eq!(manifest.scenario_id(), "fuzz_scenario");
                 assert_eq!(manifest.passed(), *passed);
                 assert_eq!(manifest.exit_code(), *exit_code);
-            },
+            }
         }
     }
 
@@ -383,13 +383,13 @@ fn test_extreme_numeric_values() {
 fn test_extreme_string_values() {
     // Test with various string edge cases
     let edge_strings = [
-        String::new(), // Empty
-        "\0".to_string(), // Null byte
-        "🦀".to_string(), // Unicode
-        "\n\r\t".to_string(), // Control characters
-        "\"'\\".to_string(), // JSON special characters
+        String::new(),          // Empty
+        "\0".to_string(),       // Null byte
+        "🦀".to_string(),       // Unicode
+        "\n\r\t".to_string(),   // Control characters
+        "\"'\\".to_string(),    // JSON special characters
         "\u{FEFF}".to_string(), // BOM
-        "a".repeat(1000), // Long string
+        "a".repeat(1000),       // Long string
     ];
 
     for edge_str in &edge_strings {
@@ -433,17 +433,28 @@ fn test_malformed_json_structures() {
 
 fn convert_event_fuzz(event_fuzz: &QuicH3EventFuzz) -> QuicH3Event {
     match event_fuzz {
-        QuicH3EventFuzz::PacketSent { pn_space, packet_number, size_bytes, ack_eliciting, in_flight, send_time_us } => {
-            QuicH3Event::PacketSent {
-                pn_space: limit_string(pn_space, MAX_STRING_LEN),
-                packet_number: *packet_number,
-                size_bytes: *size_bytes,
-                ack_eliciting: *ack_eliciting,
-                in_flight: *in_flight,
-                send_time_us: *send_time_us,
-            }
+        QuicH3EventFuzz::PacketSent {
+            pn_space,
+            packet_number,
+            size_bytes,
+            ack_eliciting,
+            in_flight,
+            send_time_us,
+        } => QuicH3Event::PacketSent {
+            pn_space: limit_string(pn_space, MAX_STRING_LEN),
+            packet_number: *packet_number,
+            size_bytes: *size_bytes,
+            ack_eliciting: *ack_eliciting,
+            in_flight: *in_flight,
+            send_time_us: *send_time_us,
         },
-        QuicH3EventFuzz::AckReceived { pn_space, acked_ranges, ack_delay_us, acked_packets, acked_bytes } => {
+        QuicH3EventFuzz::AckReceived {
+            pn_space,
+            acked_ranges,
+            ack_delay_us,
+            acked_packets,
+            acked_bytes,
+        } => {
             let limited_ranges = if acked_ranges.len() > MAX_ACKED_RANGES {
                 acked_ranges[..MAX_ACKED_RANGES].to_vec()
             } else {
@@ -457,58 +468,80 @@ fn convert_event_fuzz(event_fuzz: &QuicH3EventFuzz) -> QuicH3Event {
                 acked_packets: *acked_packets,
                 acked_bytes: *acked_bytes,
             }
+        }
+        QuicH3EventFuzz::LossDetected {
+            pn_space,
+            lost_packets,
+            lost_bytes,
+            detection_method,
+        } => QuicH3Event::LossDetected {
+            pn_space: limit_string(pn_space, MAX_STRING_LEN),
+            lost_packets: *lost_packets,
+            lost_bytes: *lost_bytes,
+            detection_method: limit_string(detection_method, MAX_STRING_LEN),
         },
-        QuicH3EventFuzz::LossDetected { pn_space, lost_packets, lost_bytes, detection_method } => {
-            QuicH3Event::LossDetected {
-                pn_space: limit_string(pn_space, MAX_STRING_LEN),
-                lost_packets: *lost_packets,
-                lost_bytes: *lost_bytes,
-                detection_method: limit_string(detection_method, MAX_STRING_LEN),
-            }
+        QuicH3EventFuzz::CwndUpdated {
+            old_cwnd,
+            new_cwnd,
+            ssthresh,
+            bytes_in_flight,
+            reason,
+        } => QuicH3Event::CwndUpdated {
+            old_cwnd: *old_cwnd,
+            new_cwnd: *new_cwnd,
+            ssthresh: *ssthresh,
+            bytes_in_flight: *bytes_in_flight,
+            reason: limit_string(reason, MAX_STRING_LEN),
         },
-        QuicH3EventFuzz::CwndUpdated { old_cwnd, new_cwnd, ssthresh, bytes_in_flight, reason } => {
-            QuicH3Event::CwndUpdated {
-                old_cwnd: *old_cwnd,
-                new_cwnd: *new_cwnd,
-                ssthresh: *ssthresh,
-                bytes_in_flight: *bytes_in_flight,
-                reason: limit_string(reason, MAX_STRING_LEN),
-            }
+        QuicH3EventFuzz::StreamOpened {
+            stream_id,
+            direction,
+            role,
+            is_local,
+        } => QuicH3Event::StreamOpened {
+            stream_id: *stream_id,
+            direction: limit_string(direction, MAX_STRING_LEN),
+            role: limit_string(role, MAX_STRING_LEN),
+            is_local: *is_local,
         },
-        QuicH3EventFuzz::StreamOpened { stream_id, direction, role, is_local } => {
-            QuicH3Event::StreamOpened {
-                stream_id: *stream_id,
-                direction: limit_string(direction, MAX_STRING_LEN),
-                role: limit_string(role, MAX_STRING_LEN),
-                is_local: *is_local,
-            }
+        QuicH3EventFuzz::RequestStarted {
+            stream_id,
+            method,
+            scheme,
+            authority,
+            path,
+        } => QuicH3Event::RequestStarted {
+            stream_id: *stream_id,
+            method: limit_string(method, MAX_STRING_LEN),
+            scheme: limit_string(scheme, MAX_STRING_LEN),
+            authority: limit_string(authority, MAX_STRING_LEN),
+            path: limit_string(path, MAX_STRING_LEN),
         },
-        QuicH3EventFuzz::RequestStarted { stream_id, method, scheme, authority, path } => {
-            QuicH3Event::RequestStarted {
-                stream_id: *stream_id,
-                method: limit_string(method, MAX_STRING_LEN),
-                scheme: limit_string(scheme, MAX_STRING_LEN),
-                authority: limit_string(authority, MAX_STRING_LEN),
-                path: limit_string(path, MAX_STRING_LEN),
-            }
+        QuicH3EventFuzz::FrameError {
+            frame_type,
+            error_kind,
+            error_message,
+            stream_id,
+        } => QuicH3Event::FrameError {
+            frame_type: limit_string(frame_type, MAX_STRING_LEN),
+            error_kind: limit_string(error_kind, MAX_STRING_LEN),
+            error_message: limit_string(error_message, MAX_STRING_LEN),
+            stream_id: *stream_id,
         },
-        QuicH3EventFuzz::FrameError { frame_type, error_kind, error_message, stream_id } => {
-            QuicH3Event::FrameError {
-                frame_type: limit_string(frame_type, MAX_STRING_LEN),
-                error_kind: limit_string(error_kind, MAX_STRING_LEN),
-                error_message: limit_string(error_message, MAX_STRING_LEN),
-                stream_id: *stream_id,
-            }
-        },
-        QuicH3EventFuzz::ScenarioCompleted { scenario_id, seed, passed, duration_us, event_count, failure_class } => {
-            QuicH3Event::ScenarioCompleted {
-                scenario_id: limit_string(scenario_id, MAX_STRING_LEN),
-                seed: *seed,
-                passed: *passed,
-                duration_us: *duration_us,
-                event_count: *event_count,
-                failure_class: limit_string(failure_class, MAX_STRING_LEN),
-            }
+        QuicH3EventFuzz::ScenarioCompleted {
+            scenario_id,
+            seed,
+            passed,
+            duration_us,
+            event_count,
+            failure_class,
+        } => QuicH3Event::ScenarioCompleted {
+            scenario_id: limit_string(scenario_id, MAX_STRING_LEN),
+            seed: *seed,
+            passed: *passed,
+            duration_us: *duration_us,
+            event_count: *event_count,
+            failure_class: limit_string(failure_class, MAX_STRING_LEN),
         },
     }
 }

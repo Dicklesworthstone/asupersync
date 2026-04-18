@@ -17,10 +17,10 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::bytes::BytesMut;
 use asupersync::http::h2::frame::{FrameHeader, parse_frame};
+use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct FuzzPriorityFrame {
@@ -69,14 +69,9 @@ enum PriorityFuzzCase {
     /// Test well-formed PRIORITY frame with various edge cases
     StructuredFrame(FuzzPriorityFrame),
     /// Test malformed PRIORITY frame with wrong payload size
-    MalformedPayload {
-        stream_id: u32,
-        payload: Vec<u8>,
-    },
+    MalformedPayload { stream_id: u32, payload: Vec<u8> },
     /// Test boundary conditions and edge cases
-    EdgeCases {
-        case_type: u8,
-    },
+    EdgeCases { case_type: u8 },
     /// Test multiple PRIORITY frames in sequence
     FrameSequence(Vec<FuzzPriorityFrame>),
 }
@@ -88,31 +83,33 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let mut unstructured = Unstructured::new(data);
-    let Ok(case) = PriorityFuzzCase::arbitrary(&mut unstructured) else { return };
+    let Ok(case) = PriorityFuzzCase::arbitrary(&mut unstructured) else {
+        return;
+    };
 
     match case {
         PriorityFuzzCase::RawBytes(bytes) => {
             fuzz_raw_priority_bytes(&bytes);
-        },
+        }
 
         PriorityFuzzCase::StructuredFrame(frame) => {
             fuzz_structured_priority_frame(&frame);
-        },
+        }
 
         PriorityFuzzCase::MalformedPayload { stream_id, payload } => {
             fuzz_malformed_priority_payload(stream_id, &payload);
-        },
+        }
 
         PriorityFuzzCase::EdgeCases { case_type } => {
             fuzz_priority_edge_cases(case_type);
-        },
+        }
 
         PriorityFuzzCase::FrameSequence(frames) => {
             if frames.len() > 50 {
                 return; // Limit sequence length
             }
             fuzz_priority_frame_sequence(&frames);
-        },
+        }
     }
 });
 
@@ -178,7 +175,7 @@ fn fuzz_priority_edge_cases(case_type: u8) {
                 exclusive: false,
             };
             fuzz_structured_priority_frame(&frame);
-        },
+        }
 
         1 => {
             // Maximum stream ID
@@ -189,7 +186,7 @@ fn fuzz_priority_edge_cases(case_type: u8) {
                 exclusive: true,
             };
             fuzz_structured_priority_frame(&frame);
-        },
+        }
 
         2 => {
             // Zero weight (should be treated as 1)
@@ -200,7 +197,7 @@ fn fuzz_priority_edge_cases(case_type: u8) {
                 exclusive: false,
             };
             fuzz_structured_priority_frame(&frame);
-        },
+        }
 
         3 => {
             // Dependency on stream 0 (connection level, invalid)
@@ -211,7 +208,7 @@ fn fuzz_priority_edge_cases(case_type: u8) {
                 exclusive: true,
             };
             fuzz_structured_priority_frame(&frame);
-        },
+        }
 
         4 => {
             // PRIORITY frame on stream 0 (invalid)
@@ -222,7 +219,7 @@ fn fuzz_priority_edge_cases(case_type: u8) {
                 exclusive: false,
             };
             fuzz_structured_priority_frame(&frame);
-        },
+        }
 
         5 => {
             // Maximum weight
@@ -233,7 +230,7 @@ fn fuzz_priority_edge_cases(case_type: u8) {
                 exclusive: true,
             };
             fuzz_structured_priority_frame(&frame);
-        },
+        }
 
         6 => {
             // Create potential cycle: A depends on B, then test B depends on A
@@ -251,7 +248,7 @@ fn fuzz_priority_edge_cases(case_type: u8) {
             };
             fuzz_structured_priority_frame(&frame_a);
             fuzz_structured_priority_frame(&frame_b);
-        },
+        }
 
         _ => {
             // Reserved bit set in dependency
@@ -260,10 +257,10 @@ fn fuzz_priority_edge_cases(case_type: u8) {
             payload[1] = 0xFF;
             payload[2] = 0xFF;
             payload[3] = 0x01; // Stream 1 dependency
-            payload[4] = 50;   // Weight
+            payload[4] = 50; // Weight
 
             fuzz_malformed_priority_payload(1, &payload);
-        },
+        }
     }
 }
 

@@ -14,9 +14,9 @@
 //! 5. Size Transitions: Behavior is consistent across kernel threshold boundaries
 //! 6. Edge Case Robustness: Empty slices, single-byte buffers, and odd sizes work
 
+use asupersync::raptorq::gf256::{Gf256, gf256_add_slice, gf256_addmul_slice, gf256_mul_slice};
+use asupersync::raptorq::gf256::{gf256_add_slices2, gf256_addmul_slices2, gf256_mul_slices2};
 use libfuzzer_sys::fuzz_target;
-use asupersync::raptorq::gf256::{Gf256, gf256_add_slice, gf256_mul_slice, gf256_addmul_slice};
-use asupersync::raptorq::gf256::{gf256_add_slices2, gf256_mul_slices2, gf256_addmul_slices2};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 8 {
@@ -43,12 +43,37 @@ fuzz_target!(|data: &[u8]| {
 
 #[derive(Debug, Clone)]
 enum Gf256Operation {
-    AddSlice { dst: Vec<u8>, src: Vec<u8> },
-    MulSlice { dst: Vec<u8>, scalar: u8 },
-    AddMulSlice { dst: Vec<u8>, src: Vec<u8>, scalar: u8 },
-    DualAdd { dst_a: Vec<u8>, src_a: Vec<u8>, dst_b: Vec<u8>, src_b: Vec<u8> },
-    DualMul { dst_a: Vec<u8>, dst_b: Vec<u8>, scalar: u8 },
-    DualAddMul { dst_a: Vec<u8>, src_a: Vec<u8>, dst_b: Vec<u8>, src_b: Vec<u8>, scalar: u8 },
+    AddSlice {
+        dst: Vec<u8>,
+        src: Vec<u8>,
+    },
+    MulSlice {
+        dst: Vec<u8>,
+        scalar: u8,
+    },
+    AddMulSlice {
+        dst: Vec<u8>,
+        src: Vec<u8>,
+        scalar: u8,
+    },
+    DualAdd {
+        dst_a: Vec<u8>,
+        src_a: Vec<u8>,
+        dst_b: Vec<u8>,
+        src_b: Vec<u8>,
+    },
+    DualMul {
+        dst_a: Vec<u8>,
+        dst_b: Vec<u8>,
+        scalar: u8,
+    },
+    DualAddMul {
+        dst_a: Vec<u8>,
+        src_a: Vec<u8>,
+        dst_b: Vec<u8>,
+        src_b: Vec<u8>,
+        scalar: u8,
+    },
 }
 
 fn parse_gf256_operations(input: &mut &[u8]) -> Vec<Gf256Operation> {
@@ -87,7 +112,12 @@ fn parse_gf256_operations(input: &mut &[u8]) -> Vec<Gf256Operation> {
                 let src_a = generate_buffer(size_a, &mut rng_state);
                 let dst_b = generate_buffer(size_b, &mut rng_state);
                 let src_b = generate_buffer(size_b, &mut rng_state);
-                ops.push(Gf256Operation::DualAdd { dst_a, src_a, dst_b, src_b });
+                ops.push(Gf256Operation::DualAdd {
+                    dst_a,
+                    src_a,
+                    dst_b,
+                    src_b,
+                });
             }
             4 => {
                 // DualMul
@@ -96,7 +126,11 @@ fn parse_gf256_operations(input: &mut &[u8]) -> Vec<Gf256Operation> {
                 let dst_a = generate_buffer(size_a, &mut rng_state);
                 let dst_b = generate_buffer(size_b, &mut rng_state);
                 let scalar = generate_test_scalar(&mut rng_state);
-                ops.push(Gf256Operation::DualMul { dst_a, dst_b, scalar });
+                ops.push(Gf256Operation::DualMul {
+                    dst_a,
+                    dst_b,
+                    scalar,
+                });
             }
             5 => {
                 // DualAddMul
@@ -107,7 +141,13 @@ fn parse_gf256_operations(input: &mut &[u8]) -> Vec<Gf256Operation> {
                 let dst_b = generate_buffer(size_b, &mut rng_state);
                 let src_b = generate_buffer(size_b, &mut rng_state);
                 let scalar = generate_test_scalar(&mut rng_state);
-                ops.push(Gf256Operation::DualAddMul { dst_a, src_a, dst_b, src_b, scalar });
+                ops.push(Gf256Operation::DualAddMul {
+                    dst_a,
+                    src_a,
+                    dst_b,
+                    src_b,
+                    scalar,
+                });
             }
             _ => unreachable!(),
         }
@@ -122,11 +162,11 @@ fn generate_test_scalar(rng_state: &mut u64) -> u8 {
     let choice = (*rng_state >> 8) % 10;
 
     match choice {
-        0 | 1 => 0,      // c==0 fast path (20% of cases)
-        2 | 3 => 1,      // c==1 fast path (20% of cases)
-        4 => 2,          // Generator/primitive element
-        5 => 255,        // Maximum value
-        _ => (*rng_state >> 16) as u8,  // Random value (60% of cases)
+        0 | 1 => 0,                    // c==0 fast path (20% of cases)
+        2 | 3 => 1,                    // c==1 fast path (20% of cases)
+        4 => 2,                        // Generator/primitive element
+        5 => 255,                      // Maximum value
+        _ => (*rng_state >> 16) as u8, // Random value (60% of cases)
     }
 }
 
@@ -151,7 +191,10 @@ fn test_kernel_divergence(operations: &[Gf256Operation]) {
                 gf256_add_slice(&mut result1, src);
                 gf256_add_slice(&mut result2, src);
 
-                assert_eq!(result1, result2, "GF256 add_slice kernel divergence detected");
+                assert_eq!(
+                    result1, result2,
+                    "GF256 add_slice kernel divergence detected"
+                );
             }
             Gf256Operation::MulSlice { dst, scalar } => {
                 let mut result1 = dst.clone();
@@ -160,7 +203,10 @@ fn test_kernel_divergence(operations: &[Gf256Operation]) {
                 gf256_mul_slice(&mut result1, Gf256::new(*scalar));
                 gf256_mul_slice(&mut result2, Gf256::new(*scalar));
 
-                assert_eq!(result1, result2, "GF256 mul_slice kernel divergence detected");
+                assert_eq!(
+                    result1, result2,
+                    "GF256 mul_slice kernel divergence detected"
+                );
             }
             Gf256Operation::AddMulSlice { dst, src, scalar } => {
                 let mut result1 = dst.clone();
@@ -169,7 +215,10 @@ fn test_kernel_divergence(operations: &[Gf256Operation]) {
                 gf256_addmul_slice(&mut result1, src, Gf256::new(*scalar));
                 gf256_addmul_slice(&mut result2, src, Gf256::new(*scalar));
 
-                assert_eq!(result1, result2, "GF256 addmul_slice kernel divergence detected");
+                assert_eq!(
+                    result1, result2,
+                    "GF256 addmul_slice kernel divergence detected"
+                );
             }
             _ => {} // Skip dual operations for this test
         }
@@ -181,14 +230,18 @@ fn test_alignment_independence(operations: &[Gf256Operation]) {
     for op in operations {
         match op {
             Gf256Operation::AddSlice { dst, src } => {
-                if dst.len() < 64 { continue; }
+                if dst.len() < 64 {
+                    continue;
+                }
 
                 // Test various alignments by offsetting into larger buffer
                 let large_dst = [&vec![0u8; 32], dst.as_slice(), &vec![0u8; 32]].concat();
                 let large_src = [&vec![0u8; 32], src.as_slice(), &vec![0u8; 32]].concat();
 
                 for offset in &[0, 1, 2, 3, 4, 8, 16, 31] {
-                    if large_dst.len() < dst.len() + offset + 32 { continue; }
+                    if large_dst.len() < dst.len() + offset + 32 {
+                        continue;
+                    }
 
                     let mut aligned = dst.clone();
                     let mut unaligned = large_dst.clone();
@@ -198,7 +251,10 @@ fn test_alignment_independence(operations: &[Gf256Operation]) {
                     gf256_add_slice(&mut aligned, src);
                     gf256_add_slice(unaligned_dst, unaligned_src);
 
-                    assert_eq!(&aligned, unaligned_dst, "Alignment-dependent behavior in add_slice");
+                    assert_eq!(
+                        &aligned, unaligned_dst,
+                        "Alignment-dependent behavior in add_slice"
+                    );
                 }
             }
             _ => {} // Focus on most critical operation
@@ -246,7 +302,9 @@ fn test_buffer_partitioning(operations: &[Gf256Operation]) {
     for op in operations {
         match op {
             Gf256Operation::AddSlice { dst, src } => {
-                if dst.len() < 100 { continue; }
+                if dst.len() < 100 {
+                    continue;
+                }
 
                 // Test that splitting into chunks produces the same result as whole-buffer operation
                 let mut whole_result = dst.clone();
@@ -261,7 +319,10 @@ fn test_buffer_partitioning(operations: &[Gf256Operation]) {
                     gf256_add_slice(&mut chunked_result[i..end], &src[i..end]);
                 }
 
-                assert_eq!(whole_result, chunked_result, "Buffer partitioning caused divergence");
+                assert_eq!(
+                    whole_result, chunked_result,
+                    "Buffer partitioning caused divergence"
+                );
             }
             _ => {}
         }
@@ -271,10 +332,14 @@ fn test_buffer_partitioning(operations: &[Gf256Operation]) {
 /// Test behavior across kernel threshold boundaries
 fn test_size_threshold_boundaries(_operations: &[Gf256Operation]) {
     // Test around common SIMD thresholds (32, 64, 128, 256 bytes)
-    let threshold_sizes = [1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257];
+    let threshold_sizes = [
+        1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257,
+    ];
 
     for &size in &threshold_sizes {
-        if size > 512 { continue; }
+        if size > 512 {
+            continue;
+        }
 
         let dst = generate_fixed_buffer(size, 0x42);
         let src = generate_fixed_buffer(size, 0x73);
@@ -292,7 +357,12 @@ fn test_size_threshold_boundaries(_operations: &[Gf256Operation]) {
         // Verify mathematical properties hold
         // add_slice should be XOR: dst ^ src
         for i in 0..size {
-            assert_eq!(add_result[i], dst[i] ^ src[i], "add_slice not equivalent to XOR at size {}", size);
+            assert_eq!(
+                add_result[i],
+                dst[i] ^ src[i],
+                "add_slice not equivalent to XOR at size {}",
+                size
+            );
         }
 
         // Verify addmul is consistent with separate add/mul
@@ -301,7 +371,11 @@ fn test_size_threshold_boundaries(_operations: &[Gf256Operation]) {
         gf256_mul_slice(&mut temp_src, scalar);
         gf256_add_slice(&mut separate_result, &temp_src);
 
-        assert_eq!(addmul_result, separate_result, "addmul not equivalent to separate mul+add at size {}", size);
+        assert_eq!(
+            addmul_result, separate_result,
+            "addmul not equivalent to separate mul+add at size {}",
+            size
+        );
     }
 }
 
@@ -309,7 +383,12 @@ fn test_size_threshold_boundaries(_operations: &[Gf256Operation]) {
 fn test_dual_slice_consistency(operations: &[Gf256Operation]) {
     for op in operations {
         match op {
-            Gf256Operation::DualAdd { dst_a, src_a, dst_b, src_b } => {
+            Gf256Operation::DualAdd {
+                dst_a,
+                src_a,
+                dst_b,
+                src_b,
+            } => {
                 let mut dual_result_a = dst_a.clone();
                 let mut dual_result_b = dst_b.clone();
                 let mut separate_result_a = dst_a.clone();
@@ -320,10 +399,20 @@ fn test_dual_slice_consistency(operations: &[Gf256Operation]) {
                 gf256_add_slice(&mut separate_result_a, src_a);
                 gf256_add_slice(&mut separate_result_b, src_b);
 
-                assert_eq!(dual_result_a, separate_result_a, "dual add_slices2 diverged from separate operations (slice A)");
-                assert_eq!(dual_result_b, separate_result_b, "dual add_slices2 diverged from separate operations (slice B)");
+                assert_eq!(
+                    dual_result_a, separate_result_a,
+                    "dual add_slices2 diverged from separate operations (slice A)"
+                );
+                assert_eq!(
+                    dual_result_b, separate_result_b,
+                    "dual add_slices2 diverged from separate operations (slice B)"
+                );
             }
-            Gf256Operation::DualMul { dst_a, dst_b, scalar } => {
+            Gf256Operation::DualMul {
+                dst_a,
+                dst_b,
+                scalar,
+            } => {
                 let mut dual_result_a = dst_a.clone();
                 let mut dual_result_b = dst_b.clone();
                 let mut separate_result_a = dst_a.clone();
@@ -333,25 +422,45 @@ fn test_dual_slice_consistency(operations: &[Gf256Operation]) {
                 gf256_mul_slice(&mut separate_result_a, Gf256::new(*scalar));
                 gf256_mul_slice(&mut separate_result_b, Gf256::new(*scalar));
 
-                assert_eq!(dual_result_a, separate_result_a, "dual mul_slices2 diverged from separate operations (slice A)");
-                assert_eq!(dual_result_b, separate_result_b, "dual mul_slices2 diverged from separate operations (slice B)");
+                assert_eq!(
+                    dual_result_a, separate_result_a,
+                    "dual mul_slices2 diverged from separate operations (slice A)"
+                );
+                assert_eq!(
+                    dual_result_b, separate_result_b,
+                    "dual mul_slices2 diverged from separate operations (slice B)"
+                );
             }
-            Gf256Operation::DualAddMul { dst_a, src_a, dst_b, src_b, scalar } => {
+            Gf256Operation::DualAddMul {
+                dst_a,
+                src_a,
+                dst_b,
+                src_b,
+                scalar,
+            } => {
                 let mut dual_result_a = dst_a.clone();
                 let mut dual_result_b = dst_b.clone();
                 let mut separate_result_a = dst_a.clone();
                 let mut separate_result_b = dst_b.clone();
 
                 gf256_addmul_slices2(
-                    &mut dual_result_a, src_a,
-                    &mut dual_result_b, src_b,
-                    Gf256::new(*scalar)
+                    &mut dual_result_a,
+                    src_a,
+                    &mut dual_result_b,
+                    src_b,
+                    Gf256::new(*scalar),
                 );
                 gf256_addmul_slice(&mut separate_result_a, src_a, Gf256::new(*scalar));
                 gf256_addmul_slice(&mut separate_result_b, src_b, Gf256::new(*scalar));
 
-                assert_eq!(dual_result_a, separate_result_a, "dual addmul_slices2 diverged from separate operations (slice A)");
-                assert_eq!(dual_result_b, separate_result_b, "dual addmul_slices2 diverged from separate operations (slice B)");
+                assert_eq!(
+                    dual_result_a, separate_result_a,
+                    "dual addmul_slices2 diverged from separate operations (slice A)"
+                );
+                assert_eq!(
+                    dual_result_b, separate_result_b,
+                    "dual addmul_slices2 diverged from separate operations (slice B)"
+                );
             }
             _ => {}
         }

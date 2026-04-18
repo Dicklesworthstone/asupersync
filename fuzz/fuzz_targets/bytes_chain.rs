@@ -111,10 +111,7 @@ impl ShadowChain {
 
     fn get_u16(&mut self) -> Option<u16> {
         if self.remaining() >= 2 {
-            let val = u16::from_be_bytes([
-                self.data[self.position],
-                self.data[self.position + 1],
-            ]);
+            let val = u16::from_be_bytes([self.data[self.position], self.data[self.position + 1]]);
             self.advance(2);
             Some(val)
         } else {
@@ -158,10 +155,16 @@ fuzz_target!(|input: BytesChainFuzz| {
             let mut chain = $chain;
 
             // Initial invariant checks
-            assert_eq!(chain.remaining(), shadow.remaining(),
-                "Initial remaining mismatch");
-            assert_eq!(chain.has_remaining(), shadow.has_remaining(),
-                "Initial has_remaining mismatch");
+            assert_eq!(
+                chain.remaining(),
+                shadow.remaining(),
+                "Initial remaining mismatch"
+            );
+            assert_eq!(
+                chain.has_remaining(),
+                shadow.has_remaining(),
+                "Initial has_remaining mismatch"
+            );
 
             // Execute operations
             for op in input.chain_ops.iter().take(MAX_OPERATIONS) {
@@ -176,23 +179,32 @@ fuzz_target!(|input: BytesChainFuzz| {
                             shadow.advance(amount);
 
                             // Verify state consistency
-                            assert_eq!(chain.remaining(), shadow.remaining(),
-                                "Remaining mismatch after advance {}", amount);
+                            assert_eq!(
+                                chain.remaining(),
+                                shadow.remaining(),
+                                "Remaining mismatch after advance {}",
+                                amount
+                            );
                         } else {
                             // Oversized advance - should panic
                             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                                 let mut temp_chain = first_data.chain(second_data);
                                 temp_chain.advance(amount);
                             }));
-                            assert!(result.is_err(),
+                            assert!(
+                                result.is_err(),
                                 "Oversized advance {} with {} remaining should panic",
-                                amount, initial_remaining);
+                                amount,
+                                initial_remaining
+                            );
                         }
-                    },
+                    }
 
                     ChainOperation::CopyToSlice { dst_len } => {
                         let dst_len = *dst_len as usize;
-                        if dst_len == 0 { continue; }
+                        if dst_len == 0 {
+                            continue;
+                        }
 
                         let mut actual_dst = vec![0u8; dst_len];
                         let mut shadow_dst = vec![0u8; dst_len];
@@ -200,26 +212,34 @@ fuzz_target!(|input: BytesChainFuzz| {
                         let can_copy = dst_len <= chain.remaining();
                         let shadow_can_copy = shadow.copy_to_slice(&mut shadow_dst);
 
-                        assert_eq!(can_copy, shadow_can_copy,
-                            "Copy feasibility mismatch for {} bytes", dst_len);
+                        assert_eq!(
+                            can_copy, shadow_can_copy,
+                            "Copy feasibility mismatch for {} bytes",
+                            dst_len
+                        );
 
                         if can_copy {
                             chain.copy_to_slice(&mut actual_dst);
-                            assert_eq!(actual_dst, shadow_dst,
-                                "Copy data mismatch");
-                            assert_eq!(chain.remaining(), shadow.remaining(),
-                                "Remaining mismatch after copy");
+                            assert_eq!(actual_dst, shadow_dst, "Copy data mismatch");
+                            assert_eq!(
+                                chain.remaining(),
+                                shadow.remaining(),
+                                "Remaining mismatch after copy"
+                            );
                         } else {
                             // Should panic on underflow
                             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                                 let mut temp_chain = first_data.chain(second_data);
                                 temp_chain.copy_to_slice(&mut actual_dst);
                             }));
-                            assert!(result.is_err(),
+                            assert!(
+                                result.is_err(),
                                 "Copy {} bytes with {} remaining should panic",
-                                dst_len, chain.remaining());
+                                dst_len,
+                                chain.remaining()
+                            );
                         }
-                    },
+                    }
 
                     ChainOperation::GetU8 => {
                         let can_get = chain.remaining() >= 1;
@@ -227,20 +247,25 @@ fuzz_target!(|input: BytesChainFuzz| {
 
                         if can_get {
                             let actual_val = chain.get_u8();
-                            assert_eq!(Some(actual_val), shadow_val,
-                                "GetU8 value mismatch");
-                            assert_eq!(chain.remaining(), shadow.remaining(),
-                                "Remaining mismatch after get_u8");
+                            assert_eq!(Some(actual_val), shadow_val, "GetU8 value mismatch");
+                            assert_eq!(
+                                chain.remaining(),
+                                shadow.remaining(),
+                                "Remaining mismatch after get_u8"
+                            );
                         } else {
                             // Should panic on underflow
                             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                                 let mut temp_chain = first_data.chain(second_data);
                                 temp_chain.get_u8()
                             }));
-                            assert!(result.is_err(),
-                                "GetU8 with {} remaining should panic", chain.remaining());
+                            assert!(
+                                result.is_err(),
+                                "GetU8 with {} remaining should panic",
+                                chain.remaining()
+                            );
                         }
-                    },
+                    }
 
                     ChainOperation::GetU16 => {
                         let can_get = chain.remaining() >= 2;
@@ -248,25 +273,33 @@ fuzz_target!(|input: BytesChainFuzz| {
 
                         if can_get {
                             let actual_val = chain.get_u16();
-                            assert_eq!(Some(actual_val), shadow_val,
-                                "GetU16 value mismatch");
-                            assert_eq!(chain.remaining(), shadow.remaining(),
-                                "Remaining mismatch after get_u16");
+                            assert_eq!(Some(actual_val), shadow_val, "GetU16 value mismatch");
+                            assert_eq!(
+                                chain.remaining(),
+                                shadow.remaining(),
+                                "Remaining mismatch after get_u16"
+                            );
                         } else {
                             // Should panic on underflow
                             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                                 let mut temp_chain = first_data.chain(second_data);
                                 temp_chain.get_u16()
                             }));
-                            assert!(result.is_err(),
-                                "GetU16 with {} remaining should panic", chain.remaining());
+                            assert!(
+                                result.is_err(),
+                                "GetU16 with {} remaining should panic",
+                                chain.remaining()
+                            );
                         }
-                    },
+                    }
 
                     ChainOperation::CheckRemaining => {
-                        assert_eq!(chain.remaining(), shadow.remaining(),
-                            "Remaining consistency check failed");
-                    },
+                        assert_eq!(
+                            chain.remaining(),
+                            shadow.remaining(),
+                            "Remaining consistency check failed"
+                        );
+                    }
 
                     ChainOperation::GetChunk => {
                         let chunk = chain.chunk();
@@ -275,17 +308,19 @@ fuzz_target!(|input: BytesChainFuzz| {
                         if !shadow_chunk.is_empty() {
                             // Chunk should start with the same data
                             assert!(!chunk.is_empty(), "Chain chunk empty but shadow non-empty");
-                            assert_eq!(chunk[0], shadow_chunk[0],
-                                "Chunk first byte mismatch");
+                            assert_eq!(chunk[0], shadow_chunk[0], "Chunk first byte mismatch");
                         } else {
                             assert!(chunk.is_empty(), "Chain chunk non-empty but shadow empty");
                         }
-                    },
+                    }
 
                     ChainOperation::HasRemaining => {
-                        assert_eq!(chain.has_remaining(), shadow.has_remaining(),
-                            "HasRemaining mismatch");
-                    },
+                        assert_eq!(
+                            chain.has_remaining(),
+                            shadow.has_remaining(),
+                            "HasRemaining mismatch"
+                        );
+                    }
 
                     ChainOperation::OversizedAdvance { amount } => {
                         let amount = (*amount as usize).max(chain.remaining() + 1);
@@ -295,16 +330,18 @@ fuzz_target!(|input: BytesChainFuzz| {
                             let mut temp_chain = first_data.chain(second_data);
                             temp_chain.advance(amount);
                         }));
-                        assert!(result.is_err(),
-                            "Oversized advance {} should panic", amount);
-                    },
+                        assert!(result.is_err(), "Oversized advance {} should panic", amount);
+                    }
                 }
 
                 // Invariant: remaining should never exceed initial total
                 let initial_total = first_data.len() + second_data.len();
-                assert!(chain.remaining() <= initial_total,
+                assert!(
+                    chain.remaining() <= initial_total,
                     "Remaining {} exceeds initial total {}",
-                    chain.remaining(), initial_total);
+                    chain.remaining(),
+                    initial_total
+                );
             }
         }};
     }
@@ -313,22 +350,22 @@ fuzz_target!(|input: BytesChainFuzz| {
     match input.buffer_variant {
         BufferVariant::SliceSlice => {
             test_chain!(first_data.chain(second_data));
-        },
+        }
 
         BufferVariant::BytesSlice => {
             let first = Bytes::copy_from_slice(first_data).reader();
             test_chain!(first.chain(second_data));
-        },
+        }
 
         BufferVariant::SliceByte => {
             let second = Bytes::copy_from_slice(second_data).reader();
             test_chain!(first_data.chain(second));
-        },
+        }
 
         BufferVariant::BytesBytes => {
             let first = Bytes::copy_from_slice(first_data).reader();
             let second = Bytes::copy_from_slice(second_data).reader();
             test_chain!(first.chain(second));
-        },
+        }
     }
 });

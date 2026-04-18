@@ -1,13 +1,15 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use libfuzzer_sys::fuzz_target;
 use asupersync::codec::raptorq::{EncodedSymbol, EncodingError, EncodingPipeline, EncodingStats};
 use asupersync::config::EncodingConfig;
-use asupersync::decoding::{DecodingConfig, DecodingPipeline, DecodingError, RejectReason, SymbolAcceptResult};
+use asupersync::decoding::{
+    DecodingConfig, DecodingError, DecodingPipeline, RejectReason, SymbolAcceptResult,
+};
+use asupersync::security::SecurityContext;
 use asupersync::types::resource::{PoolConfig, SymbolPool};
 use asupersync::types::{ObjectId, Symbol, SymbolId, SymbolKind};
-use asupersync::security::SecurityContext;
+use libfuzzer_sys::fuzz_target;
 
 /// Comprehensive fuzz target for RaptorQ codec encoding/decoding pipeline
 ///
@@ -38,10 +40,7 @@ struct RaptorQCodecFuzz {
 #[derive(Arbitrary, Debug)]
 enum CodecOperation {
     /// Encode data and collect symbols
-    Encode {
-        object_id: u64,
-        data: Vec<u8>,
-    },
+    Encode { object_id: u64, data: Vec<u8> },
     /// Test decoding with potentially corrupted symbols
     Decode {
         object_id: u64,
@@ -60,10 +59,7 @@ enum CodecOperation {
         use_security: bool,
     },
     /// Test pool exhaustion scenarios
-    TestPoolExhaustion {
-        pool_size: u16,
-        data_size: u32,
-    },
+    TestPoolExhaustion { pool_size: u16, data_size: u32 },
     /// Test configuration edge cases
     TestConfigEdgeCases {
         symbol_size: u16,
@@ -147,11 +143,16 @@ fuzz_target!(|input: RaptorQCodecFuzz| {
         match operation {
             CodecOperation::Encode { object_id, data } => {
                 test_encoding_operation(&safe_encoding_config, *object_id, data);
-            },
+            }
             CodecOperation::Decode { object_id, symbols } => {
                 test_decoding_operation(&safe_decoding_config, *object_id, symbols);
-            },
-            CodecOperation::RoundTrip { object_id, data, corruption_rate, missing_symbols } => {
+            }
+            CodecOperation::RoundTrip {
+                object_id,
+                data,
+                corruption_rate,
+                missing_symbols,
+            } => {
                 test_round_trip_operation(
                     &safe_encoding_config,
                     &safe_decoding_config,
@@ -160,16 +161,26 @@ fuzz_target!(|input: RaptorQCodecFuzz| {
                     *corruption_rate,
                     missing_symbols,
                 );
-            },
-            CodecOperation::AuthenticateSymbols { symbols, use_security } => {
+            }
+            CodecOperation::AuthenticateSymbols {
+                symbols,
+                use_security,
+            } => {
                 test_symbol_authentication(symbols, *use_security);
-            },
-            CodecOperation::TestPoolExhaustion { pool_size, data_size } => {
+            }
+            CodecOperation::TestPoolExhaustion {
+                pool_size,
+                data_size,
+            } => {
                 test_pool_exhaustion_scenarios(*pool_size, *data_size);
-            },
-            CodecOperation::TestConfigEdgeCases { symbol_size, max_block_size, repair_overhead } => {
+            }
+            CodecOperation::TestConfigEdgeCases {
+                symbol_size,
+                max_block_size,
+                repair_overhead,
+            } => {
                 test_config_edge_cases(*symbol_size, *max_block_size, *repair_overhead);
-            },
+            }
         }
     }
 
@@ -241,11 +252,11 @@ fn test_encoding_operation(config: &EncodingConfig, object_id: u64, data: &[u8])
         match symbol_result {
             Ok(encoded_symbol) => {
                 test_encoded_symbol_properties(&encoded_symbol, object_id);
-            },
+            }
             Err(err) => {
                 // Encoding errors are acceptable
                 test_encoding_error_properties(&err);
-            },
+            }
         }
         symbol_count += 1;
     }
@@ -276,19 +287,19 @@ fn test_decoding_operation(config: &DecodingConfig, object_id: u64, symbols: &[S
         match accept_result {
             Ok(SymbolAcceptResult::Accepted) => {
                 // Symbol was accepted
-            },
+            }
             Ok(SymbolAcceptResult::Rejected(reason)) => {
                 // Symbol was rejected - verify reason is valid
                 test_reject_reason_validity(reason);
-            },
+            }
             Ok(SymbolAcceptResult::ObjectComplete(data)) => {
                 // Object decoding completed
                 test_decoded_data_properties(&data);
-            },
+            }
             Err(err) => {
                 // Decoding errors are acceptable
                 test_decoding_error_properties(&err);
-            },
+            }
         }
     }
 
@@ -297,10 +308,10 @@ fn test_decoding_operation(config: &DecodingConfig, object_id: u64, symbols: &[S
     match decode_result {
         Ok(data) => {
             test_decoded_data_properties(&data);
-        },
+        }
         Err(err) => {
             test_decoding_error_properties(&err);
-        },
+        }
     }
 }
 
@@ -339,8 +350,8 @@ fn test_round_trip_operation(
 
         if let Ok(encoded_symbol) = symbol_result {
             let should_drop = missing_symbols.contains(&symbol_count);
-            let should_corrupt = corruption_rate > 0.0 &&
-                (symbol_count as f64 * corruption_rate) % 1.0 < corruption_rate;
+            let should_corrupt = corruption_rate > 0.0
+                && (symbol_count as f64 * corruption_rate) % 1.0 < corruption_rate;
 
             if !should_drop {
                 let mut symbol = encoded_symbol.into_symbol();
@@ -383,10 +394,10 @@ fn test_symbol_authentication(symbols: &[SymbolFuzz], use_security: bool) {
             match verify_result {
                 Ok(()) => {
                     // Authentication succeeded
-                },
+                }
                 Err(_err) => {
                     // Authentication failed - acceptable
-                },
+                }
             }
         }
     } else {
@@ -434,22 +445,22 @@ fn test_pool_exhaustion_scenarios(pool_size: u16, data_size: u32) {
             // Consume symbols until pool exhaustion or completion
             for symbol_result in symbol_iter.take(MAX_SYMBOLS) {
                 match symbol_result {
-                    Ok(_) => {}, // Symbol produced successfully
+                    Ok(_) => {} // Symbol produced successfully
                     Err(EncodingError::PoolExhausted) => {
                         // Expected exhaustion
                         break;
-                    },
+                    }
                     Err(_) => {
                         // Other errors are also acceptable
                         break;
-                    },
+                    }
                 }
             }
-        },
+        }
         Err(err) => {
             // Encoding can fail due to pool exhaustion
             test_encoding_error_properties(&err);
-        },
+        }
     }
 }
 
@@ -574,12 +585,14 @@ fn corrupt_symbol_data(symbol: &mut Symbol) {
     }
 }
 
-
 // Test validation functions
 
 fn test_encoded_symbol_properties(symbol: &EncodedSymbol, expected_object_id: ObjectId) {
     assert_eq!(symbol.symbol().id().object_id(), expected_object_id);
-    assert!(matches!(symbol.kind(), SymbolKind::Source | SymbolKind::Repair));
+    assert!(matches!(
+        symbol.kind(),
+        SymbolKind::Source | SymbolKind::Repair
+    ));
     assert!(!symbol.symbol().data().is_empty());
 }
 
@@ -588,14 +601,14 @@ fn test_encoding_error_properties(err: &EncodingError) {
     match err {
         EncodingError::DataTooLarge { size, limit } => {
             assert!(*size > *limit);
-        },
-        EncodingError::PoolExhausted => {},
+        }
+        EncodingError::PoolExhausted => {}
         EncodingError::InvalidConfig { reason } => {
             assert!(!reason.is_empty());
-        },
+        }
         EncodingError::ComputationFailed { details } => {
             assert!(!details.is_empty());
-        },
+        }
     }
 }
 
@@ -605,24 +618,24 @@ fn test_decoding_error_properties(err: &DecodingError) {
         DecodingError::AuthenticationFailed { symbol_id } => {
             // Symbol ID should be valid
             let _ = symbol_id.object_id();
-        },
+        }
         DecodingError::InsufficientSymbols { received, needed } => {
             assert!(*received < *needed);
-        },
+        }
         DecodingError::MatrixInversionFailed { reason } => {
             assert!(!reason.is_empty());
-        },
+        }
         DecodingError::BlockTimeout { sbn, elapsed } => {
             assert!(*sbn <= 255);
             assert!(*elapsed > std::time::Duration::ZERO);
-        },
+        }
         DecodingError::InconsistentMetadata { sbn, details } => {
             assert!(*sbn <= 255);
             assert!(!details.is_empty());
-        },
+        }
         DecodingError::SymbolSizeMismatch { expected, actual } => {
             assert!(*expected != *actual as u16);
-        },
+        }
     }
 }
 
@@ -639,14 +652,14 @@ fn test_decoded_data_properties(data: &[u8]) {
 fn test_reject_reason_validity(reason: RejectReason) {
     // All reject reasons should be valid enum variants
     match reason {
-        RejectReason::WrongObjectId |
-        RejectReason::AuthenticationFailed |
-        RejectReason::SymbolSizeMismatch |
-        RejectReason::BlockAlreadyDecoded |
-        RejectReason::InsufficientRank |
-        RejectReason::InconsistentEquations |
-        RejectReason::InvalidMetadata |
-        RejectReason::MemoryLimitReached => {
+        RejectReason::WrongObjectId
+        | RejectReason::AuthenticationFailed
+        | RejectReason::SymbolSizeMismatch
+        | RejectReason::BlockAlreadyDecoded
+        | RejectReason::InsufficientRank
+        | RejectReason::InconsistentEquations
+        | RejectReason::InvalidMetadata
+        | RejectReason::MemoryLimitReached => {
             // All valid reasons
         }
     }

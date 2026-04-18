@@ -14,14 +14,17 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::obligation::ledger::{ObligationLedger, ObligationToken, LedgerStats};
-use asupersync::obligation::types::{ObligationKind, ObligationAbortReason};
-use asupersync::types::{TaskId, RegionId, Time};
-use asupersync::util::ArenaIndex;
 use asupersync::lab::runtime::SourceLocation;
+use asupersync::obligation::ledger::{LedgerStats, ObligationLedger, ObligationToken};
+use asupersync::obligation::types::{ObligationAbortReason, ObligationKind};
+use asupersync::types::{RegionId, TaskId, Time};
+use asupersync::util::ArenaIndex;
 use libfuzzer_sys::fuzz_target;
-use std::collections::{HashMap, BTreeMap};
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicBool, Ordering}};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use std::thread;
 use std::time::Duration;
 
@@ -126,10 +129,7 @@ enum LedgerOperation {
         time_offset: u64,
     },
     /// Commit existing obligation
-    Commit {
-        token_index: u8,
-        time_offset: u64,
-    },
+    Commit { token_index: u8, time_offset: u64 },
     /// Abort existing obligation
     Abort {
         token_index: u8,
@@ -137,10 +137,7 @@ enum LedgerOperation {
         time_offset: u64,
     },
     /// Mark obligation as leaked
-    MarkLeaked {
-        token_index: u8,
-        time_offset: u64,
-    },
+    MarkLeaked { token_index: u8, time_offset: u64 },
     /// Take ledger snapshot
     Snapshot,
     /// Restore from snapshot
@@ -268,7 +265,8 @@ impl SimulatedJournal {
         self.operations_since_sync += 1;
 
         if self.buffer.len() >= self.buffer_size
-            || self.operations_since_sync >= self.sync_frequency {
+            || self.operations_since_sync >= self.sync_frequency
+        {
             self.sync()?;
         }
 
@@ -296,7 +294,9 @@ impl SimulatedJournal {
             if entry.sequence >= start_sequence {
                 // Verify checksum during replay
                 let expected_checksum = compute_checksum(entry.sequence, &entry.timestamp);
-                if entry.checksum != expected_checksum && !self.corrupted_entries.contains(&(entry.sequence as usize)) {
+                if entry.checksum != expected_checksum
+                    && !self.corrupted_entries.contains(&(entry.sequence as usize))
+                {
                     return Err(format!("Checksum mismatch at sequence {}", entry.sequence));
                 }
                 entries.push(entry.clone());
@@ -311,7 +311,11 @@ impl SimulatedJournal {
         Ok(entries)
     }
 
-    fn detect_sequence_gaps(&self, entries: &[JournalEntry], start_sequence: u64) -> Result<(), String> {
+    fn detect_sequence_gaps(
+        &self,
+        entries: &[JournalEntry],
+        start_sequence: u64,
+    ) -> Result<(), String> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -320,9 +324,15 @@ impl SimulatedJournal {
         for entry in entries {
             if entry.sequence != expected {
                 if entry.sequence > expected {
-                    return Err(format!("Sequence gap detected: expected {}, found {}", expected, entry.sequence));
+                    return Err(format!(
+                        "Sequence gap detected: expected {}, found {}",
+                        expected, entry.sequence
+                    ));
                 } else {
-                    return Err(format!("Sequence regression: expected {}, found {}", expected, entry.sequence));
+                    return Err(format!(
+                        "Sequence regression: expected {}, found {}",
+                        expected, entry.sequence
+                    ));
                 }
             }
             expected += 1;
@@ -399,8 +409,12 @@ impl FuzzTestEnv {
             journal: SimulatedJournal::new(buffer_size, sync_frequency),
             active_tokens: Vec::new(),
             snapshots: Vec::new(),
-            task_ids: (0..256).map(|i| TaskId::from_arena(ArenaIndex::new(i, 0))).collect(),
-            region_ids: (0..256).map(|i| RegionId::from_arena(ArenaIndex::new(i, 0))).collect(),
+            task_ids: (0..256)
+                .map(|i| TaskId::from_arena(ArenaIndex::new(i, 0)))
+                .collect(),
+            region_ids: (0..256)
+                .map(|i| RegionId::from_arena(ArenaIndex::new(i, 0)))
+                .collect(),
             current_time: Time::from_nanos(1_000_000_000), // Start at 1 second
             operation_count: 0,
         }
@@ -423,7 +437,12 @@ impl FuzzTestEnv {
         self.operation_count += 1;
 
         match op {
-            LedgerOperation::Acquire { kind, holder_index, region_index, time_offset } => {
+            LedgerOperation::Acquire {
+                kind,
+                holder_index,
+                region_index,
+                time_offset,
+            } => {
                 self.advance_time(*time_offset);
                 let holder = self.get_task_id(*holder_index);
                 let region = self.get_region_id(*region_index);
@@ -451,7 +470,10 @@ impl FuzzTestEnv {
                 self.active_tokens.push(token);
             }
 
-            LedgerOperation::Commit { token_index, time_offset } => {
+            LedgerOperation::Commit {
+                token_index,
+                time_offset,
+            } => {
                 if self.active_tokens.is_empty() {
                     return Ok(()); // No tokens to commit
                 }
@@ -470,7 +492,11 @@ impl FuzzTestEnv {
                 let _seq = self.journal.append(journal_op, self.current_time)?;
             }
 
-            LedgerOperation::Abort { token_index, reason, time_offset } => {
+            LedgerOperation::Abort {
+                token_index,
+                reason,
+                time_offset,
+            } => {
                 if self.active_tokens.is_empty() {
                     return Ok(()); // No tokens to abort
                 }
@@ -479,7 +505,9 @@ impl FuzzTestEnv {
                 let token = self.active_tokens.remove(idx);
 
                 self.advance_time(*time_offset);
-                let duration = self.ledger.abort(token.clone(), self.current_time, reason.to_abort_reason());
+                let duration =
+                    self.ledger
+                        .abort(token.clone(), self.current_time, reason.to_abort_reason());
 
                 // Journal the abort
                 let journal_op = JournalOperation::Abort {
@@ -490,7 +518,10 @@ impl FuzzTestEnv {
                 let _seq = self.journal.append(journal_op, self.current_time)?;
             }
 
-            LedgerOperation::MarkLeaked { token_index, time_offset } => {
+            LedgerOperation::MarkLeaked {
+                token_index,
+                time_offset,
+            } => {
                 if self.active_tokens.is_empty() {
                     return Ok(()); // No tokens to mark leaked
                 }
@@ -547,7 +578,8 @@ impl FuzzTestEnv {
 
             LedgerOperation::CorruptJournal { entry_index } => {
                 let idx = *entry_index as usize;
-                self.journal.corrupt_entry(idx, &CorruptionPattern::BitFlip { position: 0 });
+                self.journal
+                    .corrupt_entry(idx, &CorruptionPattern::BitFlip { position: 0 });
             }
 
             LedgerOperation::CrashRestart => {
@@ -591,9 +623,7 @@ impl FuzzTestEnv {
         if stats.total_acquired < total_resolved + stats.pending {
             return Err(format!(
                 "Total count invariant violated: acquired={}, resolved={}, pending={}",
-                stats.total_acquired,
-                total_resolved,
-                stats.pending
+                stats.total_acquired, total_resolved, stats.pending
             ));
         }
 
@@ -650,7 +680,10 @@ fn test_concurrent_commit_abort_races(config: &ConcurrencyConfig) -> Result<(), 
                     // Alternate between acquire and resolve operations
                     if ops_completed % 2 == 0 {
                         // Acquire new obligation
-                        let task = TaskId::from_arena(ArenaIndex::new((thread_id * 1000 + ops_completed) as u32, 0));
+                        let task = TaskId::from_arena(ArenaIndex::new(
+                            (thread_id * 1000 + ops_completed) as u32,
+                            0,
+                        ));
                         let region = RegionId::from_arena(ArenaIndex::new(thread_id as u32, 0));
                         let time = Time::from_nanos(thread_time);
                         let location = SourceLocation::caller();
@@ -670,7 +703,10 @@ fn test_concurrent_commit_abort_races(config: &ConcurrencyConfig) -> Result<(), 
                     } else {
                         // Try to resolve existing obligations (would need token tracking in real test)
                         // For now, just acquire more obligations to test concurrent access
-                        let task = TaskId::from_arena(ArenaIndex::new((thread_id * 1000 + ops_completed) as u32, 0));
+                        let task = TaskId::from_arena(ArenaIndex::new(
+                            (thread_id * 1000 + ops_completed) as u32,
+                            0,
+                        ));
                         let region = RegionId::from_arena(ArenaIndex::new(thread_id as u32, 0));
                         let time = Time::from_nanos(thread_time);
                         let location = SourceLocation::caller();
@@ -771,11 +807,14 @@ fuzz_target!(|input: ObligationLedgerFuzzConfig| {
             }
 
             // Test checksum corruption
-            if input.checksum_config.enabled && !input.checksum_config.corruption_patterns.is_empty() {
+            if input.checksum_config.enabled
+                && !input.checksum_config.corruption_patterns.is_empty()
+            {
                 if (i % 50) < input.checksum_config.corruption_probability as usize {
                     let pattern_idx = i % input.checksum_config.corruption_patterns.len();
                     let pattern = &input.checksum_config.corruption_patterns[pattern_idx];
-                    env.journal.corrupt_entry(i % env.journal.entries.len().max(1), pattern);
+                    env.journal
+                        .corrupt_entry(i % env.journal.entries.len().max(1), pattern);
 
                     // Test replay with corruption
                     let _ = env.journal.replay_from(1);
@@ -833,8 +872,8 @@ fuzz_target!(|input: ObligationLedgerFuzzConfig| {
             // Gap detection is implementation-dependent
             // This tests that the system handles gaps gracefully
             match replay_result {
-                Ok(_) => {}, // Gap was handled or too small to matter
-                Err(_) => {}, // Gap was detected and reported as error
+                Ok(_) => {}  // Gap was handled or too small to matter
+                Err(_) => {} // Gap was detected and reported as error
             }
         }
     }

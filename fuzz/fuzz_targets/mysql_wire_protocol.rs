@@ -23,8 +23,8 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent memory exhaustion.
 const MAX_INPUT_SIZE: usize = 100_000;
@@ -122,7 +122,12 @@ fn generate_lenenc_int(value: u64) -> Vec<u8> {
 }
 
 /// Generate a MySQL OK packet (0x00 + affected_rows + last_insert_id + status + warnings).
-fn generate_ok_packet(affected_rows: u64, last_insert_id: u64, status: u16, warnings: u16) -> Vec<u8> {
+fn generate_ok_packet(
+    affected_rows: u64,
+    last_insert_id: u64,
+    status: u16,
+    warnings: u16,
+) -> Vec<u8> {
     let mut packet = vec![0x00]; // OK packet marker
     packet.extend_from_slice(&generate_lenenc_int(affected_rows));
     packet.extend_from_slice(&generate_lenenc_int(last_insert_id));
@@ -219,7 +224,9 @@ fn test_packet_header_corruption(data: &[u8], corrupt_length: u32, expected_seq:
     test_data[2] = ((corrupt_length >> 16) & 0xFF) as u8;
 
     // Test boundary conditions for packet length
-    let boundary_lengths = [0, 1, 250, 251, 65535, 65536, 16_777_214, 16_777_215, 16_777_216];
+    let boundary_lengths = [
+        0, 1, 250, 251, 65535, 65536, 16_777_214, 16_777_215, 16_777_216,
+    ];
 
     for &length in &boundary_lengths {
         let header = generate_packet_header(length, expected_seq);
@@ -252,10 +259,8 @@ fn test_packet_sequence_corruption(data: &[u8], corrupt_sequence: u8) {
 fn test_lenenc_int_boundary(value: u64) {
     // Test the critical boundary values mentioned in the task
     let boundary_values = [
-        0, 1, 250, 251, 252, 253, 254, 255,
-        65534, 65535, 65536,
-        16_777_214, 16_777_215, 16_777_216,
-        value, // Plus the fuzzed value
+        0, 1, 250, 251, 252, 253, 254, 255, 65534, 65535, 65536, 16_777_214, 16_777_215,
+        16_777_216, value, // Plus the fuzzed value
     ];
 
     for &test_value in &boundary_values {
@@ -348,13 +353,13 @@ fn test_handshake_version_discrimination(version: u8) {
 fn test_capability_flags_combinations(flags: u32) {
     // Test various flag combinations including edge cases
     let flag_combinations = [
-        0x0000_0000, // No flags
-        0x0000_0001, // CLIENT_LONG_PASSWORD
-        0x0000_0200, // CLIENT_PROTOCOL_41
-        0x0000_8000, // CLIENT_SECURE_CONNECTION
-        0x0010_0000, // CLIENT_MULTI_STATEMENTS
-        0x0100_0000, // CLIENT_DEPRECATE_EOF
-        flags,       // Fuzzed flags
+        0x0000_0000,         // No flags
+        0x0000_0001,         // CLIENT_LONG_PASSWORD
+        0x0000_0200,         // CLIENT_PROTOCOL_41
+        0x0000_8000,         // CLIENT_SECURE_CONNECTION
+        0x0010_0000,         // CLIENT_MULTI_STATEMENTS
+        0x0100_0000,         // CLIENT_DEPRECATE_EOF
+        flags,               // Fuzzed flags
         flags | 0x0000_0200, // Fuzzed + PROTOCOL_41
     ];
 
@@ -447,7 +452,9 @@ fn parse_packet_header(data: &[u8], expected_seq: u8) -> Result<(u32, u8), Strin
     }
 
     if sequence != expected_seq {
-        return Err(format!("Sequence mismatch: expected {expected_seq}, got {sequence}"));
+        return Err(format!(
+            "Sequence mismatch: expected {expected_seq}, got {sequence}"
+        ));
     }
 
     Ok((length, sequence))
@@ -479,7 +486,7 @@ fn parse_lenenc_int(data: &[u8], start_offset: usize) -> Result<u64, String> {
                 data[start_offset + 1],
                 data[start_offset + 2],
                 data[start_offset + 3],
-                0
+                0,
             ]);
             Ok(u64::from(val))
         }
@@ -488,8 +495,14 @@ fn parse_lenenc_int(data: &[u8], start_offset: usize) -> Result<u64, String> {
                 return Err("Insufficient data for 8-byte int".to_string());
             }
             let val = u64::from_le_bytes([
-                data[start_offset + 1], data[start_offset + 2], data[start_offset + 3], data[start_offset + 4],
-                data[start_offset + 5], data[start_offset + 6], data[start_offset + 7], data[start_offset + 8],
+                data[start_offset + 1],
+                data[start_offset + 2],
+                data[start_offset + 3],
+                data[start_offset + 4],
+                data[start_offset + 5],
+                data[start_offset + 6],
+                data[start_offset + 7],
+                data[start_offset + 8],
             ]);
             Ok(val)
         }
@@ -504,11 +517,13 @@ fn parse_ok_packet(data: &[u8]) -> Result<(u64, u64, u16, u16), String> {
     }
 
     let mut offset = 1;
-    let affected_rows = parse_lenenc_int(data, offset).map_err(|_| "Invalid affected_rows".to_string())?;
+    let affected_rows =
+        parse_lenenc_int(data, offset).map_err(|_| "Invalid affected_rows".to_string())?;
 
     // Calculate offset after reading affected_rows
     offset += lenenc_size(affected_rows);
-    let last_insert_id = parse_lenenc_int(data, offset).map_err(|_| "Invalid last_insert_id".to_string())?;
+    let last_insert_id =
+        parse_lenenc_int(data, offset).map_err(|_| "Invalid last_insert_id".to_string())?;
 
     offset += lenenc_size(last_insert_id);
     if offset + 4 > data.len() {
@@ -654,7 +669,11 @@ fn lenenc_size(value: u64) -> usize {
 }
 
 fuzz_target!(|input: MySqlFuzzConfig| {
-    let MySqlFuzzConfig { operations, base_packet, parser_config } = input;
+    let MySqlFuzzConfig {
+        operations,
+        base_packet,
+        parser_config,
+    } = input;
 
     // Limit operations to prevent timeout
     let limited_operations: Vec<FuzzOperation> = operations.into_iter().take(50).collect();

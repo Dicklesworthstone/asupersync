@@ -26,9 +26,9 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::bytes::BytesMut;
+use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct AtomicityTest {
@@ -82,7 +82,9 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let mut unstructured = Unstructured::new(data);
-    let Ok(test) = AtomicityTest::arbitrary(&mut unstructured) else { return };
+    let Ok(test) = AtomicityTest::arbitrary(&mut unstructured) else {
+        return;
+    };
 
     // Skip empty operations to focus on meaningful tests
     if test.operations.is_empty() {
@@ -123,7 +125,7 @@ fn execute_atomicity_operation(initial_data: &[u8], operation: AtomicityOperatio
                 // Data should be preserved
                 assert_eq!(frozen.as_ptr(), original_ptr);
             }
-        },
+        }
 
         AtomicityOperation::SplitOffAtomic { position } => {
             if initial_data.is_empty() {
@@ -156,7 +158,7 @@ fn execute_atomicity_operation(initial_data: &[u8], operation: AtomicityOperatio
             if split_pos > 0 && split_result.len() > 0 {
                 assert_ne!(bytes_mut.as_ptr(), split_result.as_ptr());
             }
-        },
+        }
 
         AtomicityOperation::SplitToAtomic { position } => {
             if initial_data.is_empty() {
@@ -183,7 +185,7 @@ fn execute_atomicity_operation(initial_data: &[u8], operation: AtomicityOperatio
             reconstructed.extend_from_slice(&bytes_mut);
 
             assert_eq!(reconstructed, pre_split_data);
-        },
+        }
 
         AtomicityOperation::SplitThenFreeze { split_pos } => {
             let mut bytes_mut = BytesMut::from(initial_data);
@@ -215,7 +217,7 @@ fn execute_atomicity_operation(initial_data: &[u8], operation: AtomicityOperatio
             if !clone2.is_empty() {
                 assert_eq!(clone2.as_ptr(), frozen_second.as_ptr());
             }
-        },
+        }
 
         AtomicityOperation::CloneFreeze { clone_count } => {
             let clones = (clone_count as usize).min(10).max(1);
@@ -243,14 +245,20 @@ fn execute_atomicity_operation(initial_data: &[u8], operation: AtomicityOperatio
                     assert_eq!(clone.as_ptr(), frozen.as_ptr());
                 }
             }
-        },
+        }
 
         AtomicityOperation::BoundarySplits => {
             if initial_data.is_empty() {
                 return;
             }
 
-            let boundaries = vec![0, 1, initial_data.len() / 2, initial_data.len() - 1, initial_data.len()];
+            let boundaries = vec![
+                0,
+                1,
+                initial_data.len() / 2,
+                initial_data.len() - 1,
+                initial_data.len(),
+            ];
 
             for &boundary in &boundaries {
                 if boundary <= initial_data.len() {
@@ -269,7 +277,7 @@ fn execute_atomicity_operation(initial_data: &[u8], operation: AtomicityOperatio
                     assert_eq!(bytes_mut2.len(), original_len - boundary);
                 }
             }
-        },
+        }
 
         AtomicityOperation::RapidSplitFreeze { iterations } => {
             let iters = (iterations as usize).min(20).max(1);
@@ -294,10 +302,11 @@ fn execute_atomicity_operation(initial_data: &[u8], operation: AtomicityOperatio
                 assert_eq!(frozen1.len(), split_pos);
                 assert_eq!(frozen2.len(), len - split_pos);
             }
-        },
+        }
 
         AtomicityOperation::MultiSizeFreeze { sizes } => {
-            for size in sizes.iter().take(10) { // Limit iterations
+            for size in sizes.iter().take(10) {
+                // Limit iterations
                 let capped_size = size.min(&(64 * 1024)); // Cap at 64KB
 
                 if *capped_size > 0 {
@@ -314,7 +323,7 @@ fn execute_atomicity_operation(initial_data: &[u8], operation: AtomicityOperatio
                     }
                 }
             }
-        },
+        }
 
         AtomicityOperation::SplitChain { chain_length } => {
             let chain_len = (chain_length as usize).min(8).max(1);
@@ -342,13 +351,14 @@ fn execute_atomicity_operation(initial_data: &[u8], operation: AtomicityOperatio
             // Verify chain integrity
             let total_recovered: usize = split_parts.iter().map(|(bytes, _)| bytes.len()).sum();
             assert_eq!(total_recovered, initial_data.len());
-        },
+        }
 
         AtomicityOperation::ExtendThenFreeze { extend_data } => {
             let mut bytes_mut = BytesMut::from(initial_data);
             let original_len = bytes_mut.len();
 
-            if extend_data.len() <= 16 * 1024 { // Limit extension size
+            if extend_data.len() <= 16 * 1024 {
+                // Limit extension size
                 bytes_mut.extend_from_slice(&extend_data);
 
                 let expected_len = original_len + extend_data.len();
@@ -365,7 +375,7 @@ fn execute_atomicity_operation(initial_data: &[u8], operation: AtomicityOperatio
                     assert_eq!(frozen[original_len], extend_data[0]);
                 }
             }
-        },
+        }
 
         AtomicityOperation::ValidatedSplit { position } => {
             if initial_data.is_empty() {
@@ -391,7 +401,7 @@ fn execute_atomicity_operation(initial_data: &[u8], operation: AtomicityOperatio
             // Verify checksums match expected split
             let combined_checksum = combine_checksums(post_split_checksum1, post_split_checksum2);
             assert_eq!(combined_checksum, pre_split_checksum);
-        },
+        }
 
         AtomicityOperation::StressFreeze { iterations } => {
             let stress_iters = (iterations as usize).min(100).max(1);
@@ -420,7 +430,7 @@ fn execute_atomicity_operation(initial_data: &[u8], operation: AtomicityOperatio
                     }
                 }
             }
-        },
+        }
     }
 }
 

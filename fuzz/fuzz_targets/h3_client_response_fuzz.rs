@@ -208,11 +208,15 @@ fn parse_h3_client_operations(input: &mut &[u8]) -> Vec<H3ClientOperation> {
                     503 => "Service Unavailable",
                     504 => "Gateway Timeout",
                     _ => "Error",
-                }.to_string();
+                }
+                .to_string();
 
                 let headers = vec![
                     ("content-type".to_string(), "text/plain".to_string()),
-                    ("x-error-code".to_string(), format!("ERR-{}", extract_u16(input, &mut rng_state))),
+                    (
+                        "x-error-code".to_string(),
+                        format!("ERR-{}", extract_u16(input, &mut rng_state)),
+                    ),
                 ];
 
                 let body_size = (extract_u8(input, &mut rng_state) % 128) as usize;
@@ -299,21 +303,30 @@ fn test_headers_data_interleaving(operations: &[H3ClientOperation]) {
         } = op
         {
             // Verify status code is in valid range
-            assert!((100..=599).contains(status_code),
-                "Status code {} out of valid range", status_code);
+            assert!(
+                (100..=599).contains(status_code),
+                "Status code {} out of valid range",
+                status_code
+            );
 
             // Test header frame construction
             for (key, _value) in headers {
-
                 // Verify header names are valid (no uppercase, no invalid chars)
-                assert!(key.chars().all(|c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit()),
-                    "Invalid header name: {}", key);
+                assert!(
+                    key.chars()
+                        .all(|c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit()),
+                    "Invalid header name: {}",
+                    key
+                );
             }
 
             // Verify data chunks are reasonable
             let total_data_size: usize = data_chunks.iter().map(|chunk| chunk.len()).sum();
-            assert!(total_data_size <= 1_000_000,
-                "Data size {} exceeds reasonable limit", total_data_size);
+            assert!(
+                total_data_size <= 1_000_000,
+                "Data size {} exceeds reasonable limit",
+                total_data_size
+            );
 
             // Test interleaving pattern validity
             for frame_type in interleaving_pattern {
@@ -341,13 +354,15 @@ fn test_trailer_handling(operations: &[H3ClientOperation]) {
         } = op
         {
             // Verify status code validity
-            assert!((100..=599).contains(status_code),
-                "Invalid status code: {}", status_code);
+            assert!(
+                (100..=599).contains(status_code),
+                "Invalid status code: {}",
+                status_code
+            );
 
             // Check for Transfer-Encoding: chunked requirement for trailers
             let has_chunked = headers.iter().any(|(k, v)| {
-                k.to_lowercase() == "transfer-encoding" &&
-                v.to_lowercase().contains("chunked")
+                k.to_lowercase() == "transfer-encoding" && v.to_lowercase().contains("chunked")
             });
 
             if !trailers.is_empty() && !has_chunked {
@@ -360,21 +375,41 @@ fn test_trailer_handling(operations: &[H3ClientOperation]) {
                 let name_lower = trailer_name.to_lowercase();
 
                 // Forbidden trailer field names per RFC 7230
-                assert!(!matches!(name_lower.as_str(),
-                    "transfer-encoding" | "content-length" | "host" |
-                    "cache-control" | "expect" | "max-forwards" |
-                    "pragma" | "range" | "te"
-                ), "Forbidden trailer field: {}", trailer_name);
+                assert!(
+                    !matches!(
+                        name_lower.as_str(),
+                        "transfer-encoding"
+                            | "content-length"
+                            | "host"
+                            | "cache-control"
+                            | "expect"
+                            | "max-forwards"
+                            | "pragma"
+                            | "range"
+                            | "te"
+                    ),
+                    "Forbidden trailer field: {}",
+                    trailer_name
+                );
 
                 // Verify trailer name format
-                assert!(trailer_name.chars().all(|c|
-                    c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit()
-                ), "Invalid trailer name format: {}", trailer_name);
+                assert!(
+                    trailer_name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit()),
+                    "Invalid trailer name format: {}",
+                    trailer_name
+                );
 
                 // Verify trailer value is printable ASCII
-                assert!(trailer_value.chars().all(|c| c.is_ascii() && !c.is_control()) ||
-                    trailer_value.is_empty(),
-                    "Invalid trailer value: {}", trailer_value);
+                assert!(
+                    trailer_value
+                        .chars()
+                        .all(|c| c.is_ascii() && !c.is_control())
+                        || trailer_value.is_empty(),
+                    "Invalid trailer value: {}",
+                    trailer_value
+                );
             }
 
             // Body should be consumable
@@ -403,9 +438,9 @@ fn test_status_code_propagation(operations: &[H3ClientOperation]) {
             }
 
             // Error responses should have appropriate headers
-            let has_content_type = headers.iter().any(|(k, _)|
-                k.to_lowercase() == "content-type"
-            );
+            let has_content_type = headers
+                .iter()
+                .any(|(k, _)| k.to_lowercase() == "content-type");
 
             if !body.is_empty() && !has_content_type {
                 // Error response with body should have content-type
@@ -414,14 +449,20 @@ fn test_status_code_propagation(operations: &[H3ClientOperation]) {
 
             // Verify headers are well-formed
             for (name, _value) in headers {
-                assert!(name.chars().all(|c|
-                    c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit()
-                ), "Invalid header name in error response: {}", name);
+                assert!(
+                    name.chars()
+                        .all(|c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit()),
+                    "Invalid header name in error response: {}",
+                    name
+                );
             }
 
             // Error body should be reasonable size
-            assert!(body.len() <= 50_000,
-                "Error response body too large: {}", body.len());
+            assert!(
+                body.len() <= 50_000,
+                "Error response body too large: {}",
+                body.len()
+            );
         }
     }
 }
@@ -495,7 +536,8 @@ fn test_graceful_reset_handling(operations: &[H3ClientOperation]) {
         } = op
         {
             // Verify reset code is valid H3 error code
-            let is_valid_h3_code = matches!(*reset_code,
+            let is_valid_h3_code = matches!(
+                *reset_code,
                 0x0100 | // H3_NO_ERROR
                 0x0101 | // H3_GENERAL_PROTOCOL_ERROR
                 0x0102 | // H3_INTERNAL_ERROR
@@ -512,7 +554,7 @@ fn test_graceful_reset_handling(operations: &[H3ClientOperation]) {
                 0x010D | // H3_REQUEST_INCOMPLETE
                 0x010E | // H3_MESSAGE_ERROR
                 0x010F | // H3_CONNECT_ERROR
-                0x0110   // H3_VERSION_FALLBACK
+                0x0110 // H3_VERSION_FALLBACK
             );
 
             if !is_valid_h3_code && (*reset_code < 0x0100 || *reset_code > 0x01FF) {
@@ -523,8 +565,10 @@ fn test_graceful_reset_handling(operations: &[H3ClientOperation]) {
             match reset_timing {
                 ResetTiming::BeforeHeaders => {
                     // Reset before any response data - should fail cleanly
-                    assert!(!partial_response,
-                        "Can't have partial response if reset before headers");
+                    assert!(
+                        !partial_response,
+                        "Can't have partial response if reset before headers"
+                    );
                 }
                 ResetTiming::DuringHeaders => {
                     // Reset while receiving headers - should handle gracefully
@@ -540,8 +584,10 @@ fn test_graceful_reset_handling(operations: &[H3ClientOperation]) {
                 }
                 ResetTiming::DuringData => {
                     // Reset while receiving body data
-                    assert!(*partial_response,
-                        "Should have partial response if reset during data");
+                    assert!(
+                        *partial_response,
+                        "Should have partial response if reset during data"
+                    );
                 }
                 ResetTiming::AfterData => {
                     // Reset after body but before/during trailers
@@ -554,9 +600,10 @@ fn test_graceful_reset_handling(operations: &[H3ClientOperation]) {
             // Connection vs stream reset handling
             if *reset_code == 0x0100 {
                 // H3_NO_ERROR - graceful close
-                assert!(!*partial_response ||
-                        matches!(*reset_timing, ResetTiming::AfterData),
-                    "NO_ERROR should only occur at natural boundaries");
+                assert!(
+                    !*partial_response || matches!(*reset_timing, ResetTiming::AfterData),
+                    "NO_ERROR should only occur at natural boundaries"
+                );
             }
         }
     }
@@ -591,8 +638,7 @@ fn extract_u64(input: &mut &[u8], rng_state: &mut u64) -> u64 {
         *rng_state
     } else {
         let val = u64::from_le_bytes([
-            input[0], input[1], input[2], input[3],
-            input[4], input[5], input[6], input[7],
+            input[0], input[1], input[2], input[3], input[4], input[5], input[6], input[7],
         ]);
         *input = &input[8..];
         val

@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// Comprehensive trace event fuzzing for sequence allocation and event serialization
 #[derive(Arbitrary, Debug)]
@@ -48,10 +48,7 @@ enum SequenceOperation {
 #[derive(Arbitrary, Debug)]
 enum EventOperation {
     /// Create task lifecycle event
-    CreateTaskEvent {
-        kind: TaskEventKind,
-        time_ns: u64,
-    },
+    CreateTaskEvent { kind: TaskEventKind, time_ns: u64 },
     /// Create obligation event
     CreateObligationEvent {
         kind: ObligationEventKind,
@@ -71,13 +68,9 @@ enum EventOperation {
         bytes: i64,
     },
     /// Create user trace message
-    CreateUserTrace {
-        message: String,
-    },
+    CreateUserTrace { message: String },
     /// Create malformed event data
-    CreateMalformedEvent {
-        corrupted_data: Vec<u8>,
-    },
+    CreateMalformedEvent { corrupted_data: Vec<u8> },
 }
 
 /// Task event kinds for fuzzing
@@ -182,12 +175,20 @@ fn test_buffer_configuration(config: &BufferConfig) {
 
     // Test basic buffer properties
     assert_eq!(handle.len(), 0, "New buffer should be empty");
-    assert_eq!(handle.total_pushed(), 0, "New buffer should have zero total");
+    assert_eq!(
+        handle.total_pushed(),
+        0,
+        "New buffer should have zero total"
+    );
 
     // Test initial sequence allocation
     let first_seq = handle.next_seq();
     let second_seq = handle.next_seq();
-    assert_eq!(second_seq, first_seq + 1, "Sequence numbers should be consecutive");
+    assert_eq!(
+        second_seq,
+        first_seq + 1,
+        "Sequence numbers should be consecutive"
+    );
 
     if config.test_overflow {
         test_buffer_overflow(&handle, capacity);
@@ -200,7 +201,7 @@ fn test_buffer_configuration(config: &BufferConfig) {
 
 /// Test buffer overflow and ring buffer wraparound
 fn test_buffer_overflow(handle: &asupersync::trace::buffer::TraceBufferHandle, capacity: usize) {
-    use asupersync::trace::event::{TraceEvent, TraceEventKind, TraceData};
+    use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
     use asupersync::types::Time;
 
     // Fill buffer beyond capacity
@@ -215,8 +216,16 @@ fn test_buffer_overflow(handle: &asupersync::trace::buffer::TraceBufferHandle, c
     }
 
     // Buffer should be at capacity, not overflow
-    assert_eq!(handle.len(), capacity, "Buffer should be at capacity after overflow");
-    assert_eq!(handle.total_pushed(), (capacity * 2) as u64, "Total pushed should count all events");
+    assert_eq!(
+        handle.len(),
+        capacity,
+        "Buffer should be at capacity after overflow"
+    );
+    assert_eq!(
+        handle.total_pushed(),
+        (capacity * 2) as u64,
+        "Total pushed should count all events"
+    );
 
     // Verify events are ordered correctly (newest events survive)
     let snapshot = handle.snapshot();
@@ -225,13 +234,18 @@ fn test_buffer_overflow(handle: &asupersync::trace::buffer::TraceBufferHandle, c
     if !snapshot.is_empty() {
         // Check that we have the most recent events
         let first_event = &snapshot[0];
-        assert!(first_event.seq >= capacity as u64,
-            "First event sequence should be from second batch");
+        assert!(
+            first_event.seq >= capacity as u64,
+            "First event sequence should be from second batch"
+        );
     }
 }
 
 /// Test concurrent sequence allocation
-fn test_concurrent_producers(handle: &asupersync::trace::buffer::TraceBufferHandle, producer_count: u8) {
+fn test_concurrent_producers(
+    handle: &asupersync::trace::buffer::TraceBufferHandle,
+    producer_count: u8,
+) {
     use std::sync::Arc;
     use std::thread;
 
@@ -262,14 +276,22 @@ fn test_concurrent_producers(handle: &asupersync::trace::buffer::TraceBufferHand
     // Verify all sequences are unique (no collisions)
     all_sequences.sort_unstable();
     for window in all_sequences.windows(2) {
-        assert_ne!(window[0], window[1],
-            "Sequence collision detected: {} appears twice", window[0]);
+        assert_ne!(
+            window[0], window[1],
+            "Sequence collision detected: {} appears twice",
+            window[0]
+        );
     }
 
     // Verify sequences are monotonic overall
     let expected_count = producer_count as usize * sequences_per_thread;
-    assert_eq!(all_sequences.len(), expected_count,
-        "Should have {} unique sequences, got {}", expected_count, all_sequences.len());
+    assert_eq!(
+        all_sequences.len(),
+        expected_count,
+        "Should have {} unique sequences, got {}",
+        expected_count,
+        all_sequences.len()
+    );
 }
 
 /// Test individual sequence operations
@@ -294,8 +316,11 @@ fn test_sequence_operation(op: &SequenceOperation) {
 
             // Verify sequences are consecutive
             for i in 1..sequences.len() {
-                assert_eq!(sequences[i], sequences[i-1] + 1,
-                    "Batch sequences should be consecutive");
+                assert_eq!(
+                    sequences[i],
+                    sequences[i - 1] + 1,
+                    "Batch sequences should be consecutive"
+                );
             }
         }
         SequenceOperation::ConcurrentAllocation { thread_count } => {
@@ -308,7 +333,10 @@ fn test_sequence_operation(op: &SequenceOperation) {
             // Test sequence numbers near wraparound boundaries
             test_sequence_wraparound(*base_seq);
         }
-        SequenceOperation::TestGaps { expected_seq, actual_seq } => {
+        SequenceOperation::TestGaps {
+            expected_seq,
+            actual_seq,
+        } => {
             // Test gap detection in sequence numbers
             test_sequence_gaps(*expected_seq, *actual_seq);
         }
@@ -318,11 +346,7 @@ fn test_sequence_operation(op: &SequenceOperation) {
 /// Test sequence number wraparound scenarios
 fn test_sequence_wraparound(base_seq: u64) {
     // Test scenarios where sequence numbers approach u64::MAX
-    let near_max_values = [
-        u64::MAX - 10,
-        u64::MAX - 1,
-        u64::MAX,
-    ];
+    let near_max_values = [u64::MAX - 10, u64::MAX - 1, u64::MAX];
 
     for &start_seq in &near_max_values {
         let test_seq = base_seq.saturating_add(start_seq);
@@ -360,8 +384,8 @@ fn test_sequence_gaps(expected_seq: u64, actual_seq: u64) {
 
 /// Test event creation and serialization
 fn test_event_operation(op: &EventOperation) {
-    use asupersync::trace::event::{TraceEvent, TraceEventKind, TraceData};
-    use asupersync::types::{Time, TaskId, RegionId};
+    use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
+    use asupersync::types::{RegionId, TaskId, Time};
 
     match op {
         EventOperation::CreateTaskEvent { kind, time_ns } => {
@@ -396,14 +420,24 @@ fn test_event_operation(op: &EventOperation) {
             }
         }
         EventOperation::CreateObligationEvent {
-            kind, state, duration_ns
+            kind,
+            state,
+            duration_ns,
         } => {
             test_obligation_event_creation(kind, state, *duration_ns);
         }
-        EventOperation::CreateTimerEvent { timer_id, deadline_ns } => {
+        EventOperation::CreateTimerEvent {
+            timer_id,
+            deadline_ns,
+        } => {
             test_timer_event_creation(*timer_id, *deadline_ns);
         }
-        EventOperation::CreateIoEvent { token, interest, readiness, bytes } => {
+        EventOperation::CreateIoEvent {
+            token,
+            interest,
+            readiness,
+            bytes,
+        } => {
             test_io_event_creation(*token, *interest, *readiness, *bytes);
         }
         EventOperation::CreateUserTrace { message } => {
@@ -426,9 +460,9 @@ fn test_obligation_event_creation(
     state: &ObligationStateVariant,
     duration_ns: Option<u64>,
 ) {
-    use asupersync::trace::event::{TraceEvent, TraceEventKind, TraceData};
-    use asupersync::types::{Time, TaskId, RegionId, ObligationId};
     use asupersync::record::{ObligationKind, ObligationState};
+    use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
+    use asupersync::types::{ObligationId, RegionId, TaskId, Time};
 
     let event_kind = match kind {
         ObligationEventKind::Reserve => TraceEventKind::ObligationReserve,
@@ -460,7 +494,10 @@ fn test_obligation_event_creation(
     );
 
     // Verify obligation data consistency
-    if let TraceData::Obligation { state: obs_state, .. } = &event.data {
+    if let TraceData::Obligation {
+        state: obs_state, ..
+    } = &event.data
+    {
         assert_eq!(*obs_state, obligation_state);
     } else {
         panic!("Event data should be Obligation variant");
@@ -469,7 +506,7 @@ fn test_obligation_event_creation(
 
 /// Test timer event creation
 fn test_timer_event_creation(timer_id: u64, deadline_ns: Option<u64>) {
-    use asupersync::trace::event::{TraceEvent, TraceEventKind, TraceData};
+    use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
     use asupersync::types::Time;
 
     let deadline = deadline_ns.map(Time::from_nanos);
@@ -482,7 +519,11 @@ fn test_timer_event_creation(timer_id: u64, deadline_ns: Option<u64>) {
     );
 
     // Verify timer data
-    if let TraceData::Timer { timer_id: tid, deadline: dl } = &event.data {
+    if let TraceData::Timer {
+        timer_id: tid,
+        deadline: dl,
+    } = &event.data
+    {
         assert_eq!(*tid, timer_id);
         assert_eq!(*dl, deadline);
     } else {
@@ -492,14 +533,23 @@ fn test_timer_event_creation(timer_id: u64, deadline_ns: Option<u64>) {
 
 /// Test I/O event creation
 fn test_io_event_creation(token: u64, interest: u8, readiness: u8, bytes: i64) {
-    use asupersync::trace::event::{TraceEvent, TraceEventKind, TraceData};
+    use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
     use asupersync::types::Time;
 
     // Test different I/O event types
     let events = [
-        (TraceEventKind::IoRequested, TraceData::IoRequested { token, interest }),
-        (TraceEventKind::IoReady, TraceData::IoReady { token, readiness }),
-        (TraceEventKind::IoResult, TraceData::IoResult { token, bytes }),
+        (
+            TraceEventKind::IoRequested,
+            TraceData::IoRequested { token, interest },
+        ),
+        (
+            TraceEventKind::IoReady,
+            TraceData::IoReady { token, readiness },
+        ),
+        (
+            TraceEventKind::IoResult,
+            TraceData::IoResult { token, bytes },
+        ),
     ];
 
     for (kind, data) in &events {
@@ -507,11 +557,23 @@ fn test_io_event_creation(token: u64, interest: u8, readiness: u8, bytes: i64) {
 
         // Verify I/O data consistency
         match (&event.data, kind) {
-            (TraceData::IoRequested { token: t, interest: i }, TraceEventKind::IoRequested) => {
+            (
+                TraceData::IoRequested {
+                    token: t,
+                    interest: i,
+                },
+                TraceEventKind::IoRequested,
+            ) => {
                 assert_eq!(*t, token);
                 assert_eq!(*i, interest);
             }
-            (TraceData::IoReady { token: t, readiness: r }, TraceEventKind::IoReady) => {
+            (
+                TraceData::IoReady {
+                    token: t,
+                    readiness: r,
+                },
+                TraceEventKind::IoReady,
+            ) => {
                 assert_eq!(*t, token);
                 assert_eq!(*r, readiness);
             }
@@ -526,7 +588,7 @@ fn test_io_event_creation(token: u64, interest: u8, readiness: u8, bytes: i64) {
 
 /// Test user trace message creation
 fn test_user_trace_creation(message: &str) {
-    use asupersync::trace::event::{TraceEvent, TraceEventKind, TraceData};
+    use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
     use asupersync::types::Time;
 
     let event = TraceEvent::new(
@@ -561,8 +623,7 @@ fn test_malformed_event_handling(corrupted_data: &[u8]) {
 fn test_corrupted_sequence_numbers(data: &[u8]) {
     if data.len() >= 8 {
         let corrupted_seq = u64::from_le_bytes([
-            data[0], data[1], data[2], data[3],
-            data[4], data[5], data[6], data[7],
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ]);
 
         // Test edge case sequence numbers
@@ -582,8 +643,7 @@ fn test_corrupted_timestamps(data: &[u8]) {
 
     if data.len() >= 8 {
         let corrupted_nanos = u64::from_le_bytes([
-            data[0], data[1], data[2], data[3],
-            data[4], data[5], data[6], data[7],
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ]);
 
         // Test edge case timestamps
@@ -615,10 +675,13 @@ fn test_corrupted_event_kinds(data: &[u8]) {
 
 /// Test schema compatibility
 fn test_schema_compatibility(test: &SchemaTest) {
-    use asupersync::trace::event::{TRACE_EVENT_SCHEMA_VERSION, BROWSER_TRACE_SCHEMA_VERSION};
+    use asupersync::trace::event::{BROWSER_TRACE_SCHEMA_VERSION, TRACE_EVENT_SCHEMA_VERSION};
 
     // Test current schema version
-    assert_eq!(TRACE_EVENT_SCHEMA_VERSION, 1, "Current schema should be version 1");
+    assert_eq!(
+        TRACE_EVENT_SCHEMA_VERSION, 1,
+        "Current schema should be version 1"
+    );
     assert_eq!(BROWSER_TRACE_SCHEMA_VERSION, "browser-trace-schema-v1");
 
     // Test version compatibility
@@ -652,7 +715,7 @@ fn test_corrupted_schema(corrupted_data: &[u8]) {
             corrupted_data[0],
             corrupted_data[1],
             corrupted_data[2],
-            corrupted_data[3]
+            corrupted_data[3],
         ]);
 
         // Test extreme version numbers
@@ -668,7 +731,10 @@ fn test_corrupted_schema(corrupted_data: &[u8]) {
 /// Test stress scenarios
 fn test_stress_scenario(scenario: &StressScenario) {
     match scenario {
-        StressScenario::RapidEvents { count, interval_us: _ } => {
+        StressScenario::RapidEvents {
+            count,
+            interval_us: _,
+        } => {
             let count = (*count as usize).min(MAX_EVENT_COUNT as usize);
             test_rapid_event_generation(count);
         }
@@ -693,7 +759,7 @@ fn test_stress_scenario(scenario: &StressScenario) {
 /// Test rapid event generation
 fn test_rapid_event_generation(count: usize) {
     use asupersync::trace::buffer::TraceBufferHandle;
-    use asupersync::trace::event::{TraceEvent, TraceEventKind, TraceData};
+    use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
     use asupersync::types::Time;
 
     let handle = TraceBufferHandle::new(count.max(100));
@@ -715,7 +781,7 @@ fn test_rapid_event_generation(count: usize) {
 
 /// Test large payload handling
 fn test_large_payload_handling(payload_size: usize) {
-    use asupersync::trace::event::{TraceEvent, TraceEventKind, TraceData};
+    use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
     use asupersync::types::Time;
 
     let large_payload = "A".repeat(payload_size);
@@ -736,7 +802,7 @@ fn test_large_payload_handling(payload_size: usize) {
 /// Test buffer thrashing (fill and drain repeatedly)
 fn test_buffer_thrashing(cycles: usize) {
     use asupersync::trace::buffer::TraceBufferHandle;
-    use asupersync::trace::event::{TraceEvent, TraceEventKind, TraceData};
+    use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
     use asupersync::types::Time;
 
     let capacity = 100;
@@ -773,11 +839,7 @@ fn test_sequence_exhaustion(near_max: bool) {
 
     if near_max {
         // Test behavior near u64::MAX
-        let test_sequences = [
-            u64::MAX - 10,
-            u64::MAX - 1,
-            u64::MAX,
-        ];
+        let test_sequences = [u64::MAX - 10, u64::MAX - 1, u64::MAX];
 
         for &test_seq in &test_sequences {
             // Test sequence arithmetic near limits

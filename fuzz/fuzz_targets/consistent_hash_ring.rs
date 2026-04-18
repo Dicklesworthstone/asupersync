@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use asupersync::distributed::consistent_hash::HashRing;
+use libfuzzer_sys::fuzz_target;
 use std::collections::{BTreeMap, BTreeSet};
 
 fuzz_target!(|data: &[u8]| {
@@ -129,7 +129,7 @@ fuzz_target!(|data: &[u8]| {
 fn verify_ring_invariants(
     ring: &HashRing,
     vnodes_per_node: usize,
-    expected_nodes: &BTreeSet<String>
+    expected_nodes: &BTreeSet<String>,
 ) {
     // Node count consistency
     assert_eq!(ring.node_count(), expected_nodes.len());
@@ -192,7 +192,10 @@ fn verify_minimal_remap(
 
         // For consistent hashing, adding one node should remap approximately 1/n keys
         // where n is the total number of nodes. We allow generous bounds for fuzzing.
-        assert!(change_ratio <= 0.8, "Too many keys remapped: {change_ratio}");
+        assert!(
+            change_ratio <= 0.8,
+            "Too many keys remapped: {change_ratio}"
+        );
     }
 }
 
@@ -238,10 +241,16 @@ fn verify_deterministic_lookups(ring: &HashRing, test_keys: &[u64]) {
     for &key in test_keys {
         let first_lookup = ring.node_for_key(&key);
         let second_lookup = ring.node_for_key(&key);
-        assert_eq!(first_lookup, second_lookup, "Lookup not deterministic for key {key}");
+        assert_eq!(
+            first_lookup, second_lookup,
+            "Lookup not deterministic for key {key}"
+        );
 
         if let Some(node) = first_lookup {
-            assert!(ring.nodes().any(|n| n == node), "Assigned node {node} not in ring");
+            assert!(
+                ring.nodes().any(|n| n == node),
+                "Assigned node {node} not in ring"
+            );
         }
     }
 }

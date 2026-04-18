@@ -5,7 +5,7 @@ use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use asupersync::lab::config::LabConfig;
-use asupersync::lab::runtime::{LabRuntime, AutoAdvanceTermination, VirtualTimeReport};
+use asupersync::lab::runtime::{AutoAdvanceTermination, LabRuntime, VirtualTimeReport};
 use asupersync::types::Time;
 
 /// Simplified fuzz input for LabRuntime virtual time advance functionality
@@ -74,7 +74,9 @@ impl VirtualTimeShadowModel {
     }
 
     fn record_time_advance(&self, nanos: u64) {
-        let previous = self.expected_virtual_time.fetch_add(nanos, Ordering::SeqCst);
+        let previous = self
+            .expected_virtual_time
+            .fetch_add(nanos, Ordering::SeqCst);
         let new_time = previous + nanos;
 
         // Check for overflow
@@ -88,10 +90,7 @@ impl VirtualTimeShadowModel {
 
         // Time should not go backward
         if nanos < previous {
-            self.add_violation(format!(
-                "Time went backward: {} -> {}",
-                previous, nanos
-            ));
+            self.add_violation(format!("Time went backward: {} -> {}", previous, nanos));
         }
     }
 
@@ -148,9 +147,7 @@ fn normalize_fuzz_input(input: &mut LabRuntimeVirtualTimeFuzz) {
     if let Some(ref mut max_steps) = input.runtime_config.max_steps {
         *max_steps = (*max_steps).clamp(1, 1000);
     }
-    input
-        .runtime_config
-        .max_virtual_time_nanos = input
+    input.runtime_config.max_virtual_time_nanos = input
         .runtime_config
         .max_virtual_time_nanos
         .clamp(0, MAX_TIME_NANOS);
@@ -176,7 +173,9 @@ fn execute_virtual_time_operations(
 
     // Execute operation sequence
     for (op_index, operation) in input.operations.iter().enumerate() {
-        shadow.operation_count.store(op_index as u64, Ordering::SeqCst);
+        shadow
+            .operation_count
+            .store(op_index as u64, Ordering::SeqCst);
 
         // Check if we've exceeded maximum virtual time to prevent runaway tests
         if runtime.now().as_nanos() > input.runtime_config.max_virtual_time_nanos {
@@ -214,7 +213,9 @@ fn execute_virtual_time_operations(
                     if after_time != target {
                         return Err(format!(
                             "advance_time_to({}) failed: expected {}, actual {}",
-                            target_nanos, target.as_nanos(), after_time.as_nanos()
+                            target_nanos,
+                            target.as_nanos(),
+                            after_time.as_nanos()
                         ));
                     }
                     shadow.set_virtual_time(*target_nanos);
@@ -223,7 +224,9 @@ fn execute_virtual_time_operations(
                     if after_time != before_time {
                         return Err(format!(
                             "advance_time_to({}) incorrectly changed time from {} to {}",
-                            target_nanos, before_time.as_nanos(), after_time.as_nanos()
+                            target_nanos,
+                            before_time.as_nanos(),
+                            after_time.as_nanos()
                         ));
                     }
                 }
@@ -257,7 +260,8 @@ fn execute_virtual_time_operations(
                     limited_config = limited_config.with_auto_advance();
                 }
                 if let Some(max_steps) = input.runtime_config.max_steps {
-                    limited_config = limited_config.max_steps(max_steps.min(*max_iterations as u64));
+                    limited_config =
+                        limited_config.max_steps(max_steps.min(*max_iterations as u64));
                 } else {
                     limited_config = limited_config.max_steps(*max_iterations as u64);
                 }
@@ -340,14 +344,16 @@ fn verify_virtual_time_report(
     if report.time_start != before_time {
         return Err(format!(
             "VirtualTimeReport start time mismatch: expected {}, actual {}",
-            before_time.as_nanos(), report.time_start.as_nanos()
+            before_time.as_nanos(),
+            report.time_start.as_nanos()
         ));
     }
 
     if report.time_end != after_time {
         return Err(format!(
             "VirtualTimeReport end time mismatch: expected {}, actual {}",
-            after_time.as_nanos(), report.time_end.as_nanos()
+            after_time.as_nanos(),
+            report.time_end.as_nanos()
         ));
     }
 

@@ -119,9 +119,8 @@ fn parse_pg_injection_operations(input: &mut &[u8]) -> Vec<PgInjectionOperation>
                     let declared_type = extract_u8(input, &mut rng_state) % 7;
                     let actual_type = extract_u8(input, &mut rng_state) % 7;
 
-                    let (param, declared_oid, actual_oid) = create_mismatched_param(
-                        declared_type, actual_type, &mut rng_state
-                    );
+                    let (param, declared_oid, actual_oid) =
+                        create_mismatched_param(declared_type, actual_type, &mut rng_state);
 
                     param_values.push(param);
                     declared_oids.push(declared_oid);
@@ -181,8 +180,10 @@ fn parse_pg_injection_operations(input: &mut &[u8]) -> Vec<PgInjectionOperation>
                         1 => "\\x41\\x42\\x43".to_string(),
                         2 => "\0\r\n\t\"'\\".to_string(),
                         3 => "🦀🚀💀".to_string(), // Unicode
-                        4 => format!("SELECT * FROM secrets WHERE id = {}",
-                                   extract_u32(input, &mut rng_state)),
+                        4 => format!(
+                            "SELECT * FROM secrets WHERE id = {}",
+                            extract_u32(input, &mut rng_state)
+                        ),
                         5 => {
                             // Binary data disguised as string
                             let size = (extract_u8(input, &mut rng_state) % 32) as usize;
@@ -375,7 +376,11 @@ fn generate_test_sql(rng_state: &mut u64, sql_type: SqlType) -> String {
     }
 }
 
-fn create_mismatched_param(declared_type: u8, actual_type: u8, rng_state: &mut u64) -> (MockParam, u32, u32) {
+fn create_mismatched_param(
+    declared_type: u8,
+    actual_type: u8,
+    rng_state: &mut u64,
+) -> (MockParam, u32, u32) {
     *rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
     let value = *rng_state;
 
@@ -411,8 +416,12 @@ fn create_mismatched_param(declared_type: u8, actual_type: u8, rng_state: &mut u
             let size = (value % 32) as usize + 1;
             MockParam::Binary((0..size).map(|i| ((value >> i) & 0xFF) as u8).collect())
         }
-        6 => MockParam::Text(format!("2024-04-18T{}:{}:{}.000Z",
-                                   (value % 24), (value % 60), (value % 60))),
+        6 => MockParam::Text(format!(
+            "2024-04-18T{}:{}:{}.000Z",
+            (value % 24),
+            (value % 60),
+            (value % 60)
+        )),
         _ => MockParam::Text(format!("default_{}", value % 1000)),
     };
 
@@ -423,47 +432,79 @@ fn create_mismatched_param(declared_type: u8, actual_type: u8, rng_state: &mut u
 fn test_parameter_type_coercion(operations: &[PgInjectionOperation]) {
     for op in operations {
         if let PgInjectionOperation::TypeCoercion {
-            sql, param_values, declared_oids, actual_oids
-        } = op {
+            sql,
+            param_values,
+            declared_oids,
+            actual_oids,
+        } = op
+        {
             // Verify SQL is reasonable
             assert!(sql.len() <= 1000, "SQL too long: {}", sql.len());
             assert!(!sql.is_empty(), "Empty SQL");
-            assert!(sql.starts_with("SELECT") || sql.starts_with("INSERT") ||
-                   sql.starts_with("UPDATE") || sql.starts_with("DELETE"),
-                   "Unexpected SQL prefix: {}", &sql[..sql.len().min(10)]);
+            assert!(
+                sql.starts_with("SELECT")
+                    || sql.starts_with("INSERT")
+                    || sql.starts_with("UPDATE")
+                    || sql.starts_with("DELETE"),
+                "Unexpected SQL prefix: {}",
+                &sql[..sql.len().min(10)]
+            );
 
             // Check parameter count consistency
-            assert_eq!(param_values.len(), declared_oids.len(),
-                      "Parameter count mismatch");
-            assert_eq!(param_values.len(), actual_oids.len(),
-                      "OID count mismatch");
+            assert_eq!(
+                param_values.len(),
+                declared_oids.len(),
+                "Parameter count mismatch"
+            );
+            assert_eq!(param_values.len(), actual_oids.len(), "OID count mismatch");
 
             // Test type coercion edge cases
-            for (i, (param, (&declared_oid, &actual_oid))) in
-                param_values.iter().zip(declared_oids.iter().zip(actual_oids.iter())).enumerate() {
-
+            for (i, (param, (&declared_oid, &actual_oid))) in param_values
+                .iter()
+                .zip(declared_oids.iter().zip(actual_oids.iter()))
+                .enumerate()
+            {
                 // Validate OIDs are known PostgreSQL types
-                assert!(is_valid_pg_oid(declared_oid),
-                       "Invalid declared OID {} at param {}", declared_oid, i);
-                assert!(is_valid_pg_oid(actual_oid),
-                       "Invalid actual OID {} at param {}", actual_oid, i);
+                assert!(
+                    is_valid_pg_oid(declared_oid),
+                    "Invalid declared OID {} at param {}",
+                    declared_oid,
+                    i
+                );
+                assert!(
+                    is_valid_pg_oid(actual_oid),
+                    "Invalid actual OID {} at param {}",
+                    actual_oid,
+                    i
+                );
 
                 // Test parameter encoding
                 match param {
                     MockParam::Integer(val) => {
                         assert!(val.abs() <= i64::MAX, "Integer overflow");
-                        if declared_oid == 21 { // INT2
-                            assert!(*val >= i16::MIN as i64 && *val <= i16::MAX as i64,
-                                   "INT2 overflow: {}", val);
-                        } else if declared_oid == 23 { // INT4
-                            assert!(*val >= i32::MIN as i64 && *val <= i32::MAX as i64,
-                                   "INT4 overflow: {}", val);
+                        if declared_oid == 21 {
+                            // INT2
+                            assert!(
+                                *val >= i16::MIN as i64 && *val <= i16::MAX as i64,
+                                "INT2 overflow: {}",
+                                val
+                            );
+                        } else if declared_oid == 23 {
+                            // INT4
+                            assert!(
+                                *val >= i32::MIN as i64 && *val <= i32::MAX as i64,
+                                "INT4 overflow: {}",
+                                val
+                            );
                         }
                     }
                     MockParam::Float(val) => {
-                        if declared_oid == 700 { // FLOAT4
-                            assert!(val.is_finite() || val.is_nan() || val.is_infinite(),
-                                   "Invalid float4 value");
+                        if declared_oid == 700 {
+                            // FLOAT4
+                            assert!(
+                                val.is_finite() || val.is_nan() || val.is_infinite(),
+                                "Invalid float4 value"
+                            );
                         }
                     }
                     MockParam::Text(text) => {
@@ -495,8 +536,12 @@ fn test_parameter_type_coercion(operations: &[PgInjectionOperation]) {
 fn test_null_injection_attacks(operations: &[PgInjectionOperation]) {
     for op in operations {
         if let PgInjectionOperation::NullInjection {
-            sql, null_positions, null_bytes_in_strings, malformed_nulls
-        } = op {
+            sql,
+            null_positions,
+            null_bytes_in_strings,
+            malformed_nulls,
+        } = op
+        {
             // Verify SQL structure
             assert!(sql.len() <= 1000, "SQL too long");
             assert!(!sql.is_empty(), "Empty SQL");
@@ -504,8 +549,12 @@ fn test_null_injection_attacks(operations: &[PgInjectionOperation]) {
             // Check NULL position validity
             let param_count = sql.matches('$').count();
             for &pos in null_positions {
-                assert!(pos < param_count.max(10),
-                       "NULL position {} beyond parameter count {}", pos, param_count);
+                assert!(
+                    pos < param_count.max(10),
+                    "NULL position {} beyond parameter count {}",
+                    pos,
+                    param_count
+                );
             }
 
             // Test NULL byte injection in strings
@@ -544,8 +593,12 @@ fn test_null_injection_attacks(operations: &[PgInjectionOperation]) {
 fn test_sql_escape_boundaries(operations: &[PgInjectionOperation]) {
     for op in operations {
         if let PgInjectionOperation::EscapeBoundary {
-            sql, string_params, binary_params, format_confusion
-        } = op {
+            sql,
+            string_params,
+            binary_params,
+            format_confusion,
+        } = op
+        {
             // Basic SQL validation
             assert!(sql.len() <= 1000, "SQL too long");
             assert!(!sql.is_empty(), "Empty SQL");
@@ -598,11 +651,18 @@ fn test_sql_escape_boundaries(operations: &[PgInjectionOperation]) {
 fn test_string_numeric_mismatch(operations: &[PgInjectionOperation]) {
     for op in operations {
         if let PgInjectionOperation::NumericMismatch {
-            sql, numeric_strings, expected_types
-        } = op {
+            sql,
+            numeric_strings,
+            expected_types,
+        } = op
+        {
             // Basic validation
             assert!(sql.len() <= 1000, "SQL too long");
-            assert_eq!(numeric_strings.len(), expected_types.len(), "Count mismatch");
+            assert_eq!(
+                numeric_strings.len(),
+                expected_types.len(),
+                "Count mismatch"
+            );
 
             // Test numeric parsing edge cases
             for (numeric_str, expected_type) in numeric_strings.iter().zip(expected_types.iter()) {
@@ -676,15 +736,22 @@ fn test_string_numeric_mismatch(operations: &[PgInjectionOperation]) {
 fn test_oversized_parameter_rejection(operations: &[PgInjectionOperation]) {
     for op in operations {
         if let PgInjectionOperation::OversizedParameter {
-            sql, large_params, size_limits
-        } = op {
+            sql,
+            large_params,
+            size_limits,
+        } = op
+        {
             // Basic validation
             assert!(sql.len() <= 1000, "SQL too long");
             assert_eq!(large_params.len(), size_limits.len(), "Count mismatch");
 
             // Test memory exhaustion protection
             for (large_param, &size_limit) in large_params.iter().zip(size_limits.iter()) {
-                assert!(size_limit <= 1_000_000, "Size limit too large: {}", size_limit);
+                assert!(
+                    size_limit <= 1_000_000,
+                    "Size limit too large: {}",
+                    size_limit
+                );
 
                 match large_param {
                     LargeParam::LongString(size) => {
@@ -710,14 +777,19 @@ fn test_oversized_parameter_rejection(operations: &[PgInjectionOperation]) {
 
             // Total parameter size check
             let total_size: usize = size_limits.iter().sum();
-            assert!(total_size <= 10_000_000, "Total parameter size too large: {}", total_size);
+            assert!(
+                total_size <= 10_000_000,
+                "Total parameter size too large: {}",
+                total_size
+            );
         }
     }
 }
 
 /// Check if OID is a valid PostgreSQL type
 fn is_valid_pg_oid(oid: u32) -> bool {
-    matches!(oid,
+    matches!(
+        oid,
         16 |    // BOOL
         17 |    // BYTEA
         18 |    // CHAR
@@ -734,7 +806,7 @@ fn is_valid_pg_oid(oid: u32) -> bool {
         1114 |  // TIMESTAMP
         1184 |  // TIMESTAMPTZ
         2950 |  // UUID
-        3802    // JSONB
+        3802 // JSONB
     )
 }
 

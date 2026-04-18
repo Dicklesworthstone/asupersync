@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// Comprehensive WebSocket frame fuzzing targeting RFC 6455 compliance
 #[derive(Arbitrary, Debug)]
@@ -24,22 +24,17 @@ enum FrameOperation {
     /// Create text frame with potentially invalid UTF-8
     CreateText {
         fin: bool,
-        payload: Vec<u8>,  // May contain invalid UTF-8
+        payload: Vec<u8>, // May contain invalid UTF-8
     },
     /// Create binary frame
-    CreateBinary {
-        fin: bool,
-        payload: Vec<u8>,
-    },
+    CreateBinary { fin: bool, payload: Vec<u8> },
     /// Create control frame
     CreateControl {
         opcode: ControlOpcode,
         payload: Vec<u8>,
     },
     /// Create fragmented frame sequence
-    CreateFragmented {
-        fragments: Vec<FragmentData>,
-    },
+    CreateFragmented { fragments: Vec<FragmentData> },
     /// Create frame with malformed headers
     CreateMalformed {
         raw_header: Vec<u8>,
@@ -219,8 +214,14 @@ fn parse_websocket_frame(bytes: &[u8]) -> Result<ParsedFrame, ParseError> {
                 return Err(ParseError::TooShort);
             }
             let len = u64::from_be_bytes([
-                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
-                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+                bytes[offset + 4],
+                bytes[offset + 5],
+                bytes[offset + 6],
+                bytes[offset + 7],
             ]);
             offset += 8;
             len
@@ -233,7 +234,12 @@ fn parse_websocket_frame(bytes: &[u8]) -> Result<ParsedFrame, ParseError> {
         if bytes.len() < offset + 4 {
             return Err(ParseError::TooShort);
         }
-        let mask = [bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]];
+        let mask = [
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ];
         offset += 4;
         Some(mask)
     } else {
@@ -288,8 +294,11 @@ fn verify_frame_invariants(frame: &ParsedFrame) {
         assert_eq!(frame.fin, true, "Control frames must have FIN=1");
 
         // Control frames must have payload <= 125 bytes
-        assert!(frame.payload.len() <= 125,
-            "Control frame payload too large: {} bytes", frame.payload.len());
+        assert!(
+            frame.payload.len() <= 125,
+            "Control frame payload too large: {} bytes",
+            frame.payload.len()
+        );
     }
 
     // RSV bits must be 0 unless extensions are negotiated
@@ -306,7 +315,7 @@ fn verify_frame_invariants(frame: &ParsedFrame) {
 
 /// Check if opcode is a control frame
 fn is_control_opcode(opcode: u8) -> bool {
-    opcode >= 8  // Control frames are 8-15, data frames are 0-7
+    opcode >= 8 // Control frames are 8-15, data frames are 0-7
 }
 
 /// Test structured frame operations using WebSocket APIs
@@ -331,12 +340,16 @@ fn test_frame_operation(operation: &FrameOperation) {
             test_control_frame_creation(opcode, payload);
         }
         FrameOperation::CreateFragmented { fragments } => {
-            if fragments.len() > 20 {  // Limit fragments to prevent timeout
+            if fragments.len() > 20 {
+                // Limit fragments to prevent timeout
                 return;
             }
             test_fragmented_frame_sequence(fragments);
         }
-        FrameOperation::CreateMalformed { raw_header, payload } => {
+        FrameOperation::CreateMalformed {
+            raw_header,
+            payload,
+        } => {
             if raw_header.len() + payload.len() > MAX_PAYLOAD_SIZE {
                 return;
             }
@@ -363,7 +376,7 @@ fn test_text_frame_creation(fin: bool, payload: &[u8]) {
 /// Create text frame (stub implementation)
 fn create_text_frame_internal(_text: &str, _fin: bool) -> TestFrame {
     TestFrame {
-        opcode: 1,  // Text
+        opcode: 1, // Text
         fin: _fin,
         payload: _text.as_bytes().to_vec(),
     }
@@ -373,7 +386,7 @@ fn create_text_frame_internal(_text: &str, _fin: bool) -> TestFrame {
 fn test_binary_frame_creation(fin: bool, payload: &[u8]) {
     // Binary frames can contain any data
     let _frame = TestFrame {
-        opcode: 2,  // Binary
+        opcode: 2, // Binary
         fin,
         payload: payload.to_vec(),
     };
@@ -392,7 +405,7 @@ fn test_control_frame_creation(opcode: &ControlOpcode, payload: &[u8]) {
 
     let _frame = TestFrame {
         opcode: opcode_num,
-        fin: true,  // Control frames must have FIN=true
+        fin: true, // Control frames must have FIN=true
         payload: payload.to_vec(),
     };
 
@@ -498,7 +511,8 @@ fn test_masking_operation(test: &MaskingTest) {
 
 /// Test masking entropy properties
 fn test_masking_entropy(original: &[u8], masked: &[u8], mask: &[u8; 4]) {
-    let differences = original.iter()
+    let differences = original
+        .iter()
         .zip(masked.iter())
         .filter(|(o, m)| o != m)
         .count();
@@ -507,9 +521,12 @@ fn test_masking_entropy(original: &[u8], masked: &[u8], mask: &[u8; 4]) {
     let non_zero_mask = mask.iter().any(|&b| b != 0);
     if non_zero_mask && original.len() >= 8 {
         // Most bytes should be different with good masking
-        assert!(differences > original.len() / 8,
+        assert!(
+            differences > original.len() / 8,
             "Insufficient masking entropy: {}/{} bytes changed",
-            differences, original.len());
+            differences,
+            original.len()
+        );
     }
 }
 
@@ -555,7 +572,7 @@ fn test_invalid_rsv_control_frame(opcode: &ControlOpcode, payload: &[u8]) {
     };
 
     // Create frame with RSV1=1 (invalid)
-    let first_byte = 0x80 | 0x40 | opcode_byte;  // FIN=1, RSV1=1
+    let first_byte = 0x80 | 0x40 | opcode_byte; // FIN=1, RSV1=1
     let second_byte = payload.len() as u8;
 
     let mut frame_bytes = vec![first_byte, second_byte];
@@ -619,8 +636,8 @@ fn encode_test_frame(frame: &TestFrame, role: &Role) -> Vec<u8> {
 
     // Second byte: MASK + payload length
     let mask_bit = match role {
-        Role::Client => 0x80,  // Clients mask
-        Role::Server => 0x00,  // Servers don't mask
+        Role::Client => 0x80, // Clients mask
+        Role::Server => 0x00, // Servers don't mask
     };
 
     let payload_len = frame.payload.len();

@@ -1,8 +1,8 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
 use asupersync::grpc::Codec;
+use libfuzzer_sys::fuzz_target;
 
 /// Comprehensive protobuf fuzzing for varint boundary conditions and large messages
 #[derive(Arbitrary, Debug)]
@@ -167,7 +167,7 @@ enum StressScenario {
 
 /// Maximum limits for safety
 const MAX_STRING_SIZE: usize = 1024 * 1024; // 1MB
-const MAX_BYTES_SIZE: usize = 1024 * 1024;  // 1MB
+const MAX_BYTES_SIZE: usize = 1024 * 1024; // 1MB
 const MAX_REPEATED_COUNT: u16 = 10000;
 const MAX_NESTING_DEPTH: u8 = 50;
 const MAX_ITERATIONS: u8 = 100;
@@ -258,7 +258,12 @@ fn test_varint_encoding_value(value: &VarintValue) {
         }
         VarintValue::ThirtyFiveBit(base) => {
             // Test around 35-bit boundary
-            let boundary_values = [34359738366u64, 34359738367u64, 34359738368u64, 34359738369u64];
+            let boundary_values = [
+                34359738366u64,
+                34359738367u64,
+                34359738368u64,
+                34359738369u64,
+            ];
             for &val in &boundary_values {
                 test_single_varint_value(&mut codec, val);
             }
@@ -279,7 +284,10 @@ fn test_varint_encoding_value(value: &VarintValue) {
 }
 
 /// Test single varint value encoding/decoding
-fn test_single_varint_value(codec: &mut asupersync::grpc::protobuf::ProstCodec<TestMessage, TestMessage>, value: u64) {
+fn test_single_varint_value(
+    codec: &mut asupersync::grpc::protobuf::ProstCodec<TestMessage, TestMessage>,
+    value: u64,
+) {
     let message = TestMessage {
         name: "varint_test".to_string(),
         value,
@@ -292,8 +300,11 @@ fn test_single_varint_value(codec: &mut asupersync::grpc::protobuf::ProstCodec<T
             match codec.decode(&encoded) {
                 Ok(decoded) => {
                     // Verify round-trip consistency
-                    assert_eq!(decoded.value, value,
-                        "Varint round-trip failed for value: {}", value);
+                    assert_eq!(
+                        decoded.value, value,
+                        "Varint round-trip failed for value: {}",
+                        value
+                    );
                     assert_eq!(decoded.name, message.name);
                 }
                 Err(_) => {
@@ -312,8 +323,17 @@ fn test_negative_varint_encoding() {
     // Protobuf uses zigzag encoding for signed integers
     // Test boundary conditions for negative values
     let negative_test_values: Vec<i64> = vec![
-        -1, -127, -128, -16383, -16384, -2097151, -2097152,
-        i64::MIN, i64::MIN + 1, i64::MAX, i64::MAX - 1,
+        -1,
+        -127,
+        -128,
+        -16383,
+        -16384,
+        -2097151,
+        -2097152,
+        i64::MIN,
+        i64::MIN + 1,
+        i64::MAX,
+        i64::MAX - 1,
     ];
 
     for &value in &negative_test_values {
@@ -323,15 +343,21 @@ fn test_negative_varint_encoding() {
 
 /// Test signed varint value
 fn test_signed_varint_value(value: i64) {
-    let message = SignedTestMessage { signed_value: value };
-    let mut codec = asupersync::grpc::protobuf::ProstCodec::<SignedTestMessage, SignedTestMessage>::new();
+    let message = SignedTestMessage {
+        signed_value: value,
+    };
+    let mut codec =
+        asupersync::grpc::protobuf::ProstCodec::<SignedTestMessage, SignedTestMessage>::new();
 
     match codec.encode(&message) {
         Ok(encoded) => {
             match codec.decode(&encoded) {
                 Ok(decoded) => {
-                    assert_eq!(decoded.signed_value, value,
-                        "Signed varint round-trip failed for value: {}", value);
+                    assert_eq!(
+                        decoded.signed_value, value,
+                        "Signed varint round-trip failed for value: {}",
+                        value
+                    );
                 }
                 Err(_) => {
                     // Decode error for edge case values
@@ -346,15 +372,17 @@ fn test_signed_varint_value(value: i64) {
 
 /// Test malformed varint decoding
 fn test_malformed_varint_decoding() {
-    use asupersync::grpc::protobuf::ProstCodec;
     use asupersync::bytes::Bytes;
+    use asupersync::grpc::protobuf::ProstCodec;
 
     let mut codec = ProstCodec::<TestMessage, TestMessage>::new();
 
     // Test various malformed varint patterns
     let malformed_varints = [
         // Varint with too many continuation bytes (should fail)
-        vec![0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01],
+        vec![
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01,
+        ],
         // Incomplete varint (all continuation bits set, no end)
         vec![0xFF, 0xFF, 0xFF, 0xFF],
         // Single continuation byte with no value
@@ -409,7 +437,10 @@ fn test_large_messages(test: &LargeMessageTest) {
         LargeContentType::LargeBytes { size } => {
             test_large_single_bytes(*size, &test.operation, target_size);
         }
-        LargeContentType::DeepNesting { depth, payload_size } => {
+        LargeContentType::DeepNesting {
+            depth,
+            payload_size,
+        } => {
             test_deep_nesting(*depth, *payload_size, &test.operation);
         }
         LargeContentType::ManyScalars { count } => {
@@ -434,7 +465,12 @@ fn calculate_target_size(factor: &SizeFactor) -> usize {
 }
 
 /// Test large repeated string messages
-fn test_large_repeated_strings(string_size: u16, count: u16, operation: &ProtobufOperation, _target_size: usize) {
+fn test_large_repeated_strings(
+    string_size: u16,
+    count: u16,
+    operation: &ProtobufOperation,
+    _target_size: usize,
+) {
     use asupersync::grpc::protobuf::ProstCodec;
 
     let safe_string_size = (string_size as usize).min(MAX_STRING_SIZE / 100);
@@ -501,7 +537,12 @@ fn test_large_single_string(size: u32, operation: &ProtobufOperation, target_siz
 }
 
 /// Test large repeated bytes messages
-fn test_large_repeated_bytes(bytes_size: u16, count: u16, operation: &ProtobufOperation, _target_size: usize) {
+fn test_large_repeated_bytes(
+    bytes_size: u16,
+    count: u16,
+    operation: &ProtobufOperation,
+    _target_size: usize,
+) {
     use asupersync::grpc::protobuf::ProstCodec;
 
     let safe_bytes_size = (bytes_size as usize).min(MAX_BYTES_SIZE / 100);
@@ -621,7 +662,8 @@ fn test_many_scalars(count: u32, operation: &ProtobufOperation) {
         values,
     };
 
-    let mut codec = asupersync::grpc::protobuf::ProstCodec::<RepeatedMessage, RepeatedMessage>::new();
+    let mut codec =
+        asupersync::grpc::protobuf::ProstCodec::<RepeatedMessage, RepeatedMessage>::new();
 
     match operation {
         ProtobufOperation::Encode => {
@@ -639,8 +681,10 @@ fn test_many_scalars(count: u32, operation: &ProtobufOperation) {
 }
 
 /// Test oversized decode data
-fn test_oversized_decode_data<T, U>(codec: &mut asupersync::grpc::protobuf::ProstCodec<T, U>, size: usize)
-where
+fn test_oversized_decode_data<T, U>(
+    codec: &mut asupersync::grpc::protobuf::ProstCodec<T, U>,
+    size: usize,
+) where
     T: prost::Message + Default + Send + 'static,
     U: prost::Message + Default + Send + 'static,
 {
@@ -726,9 +770,9 @@ fn test_different_codec_configs(message: &TestMessage) {
 
     // Test various codec configurations
     let configs = [
-        ProstCodec::new(), // Default config
-        ProstCodec::with_max_size(1024), // Small limit
-        ProstCodec::with_max_size(1024 * 1024), // 1MB limit
+        ProstCodec::new(),                           // Default config
+        ProstCodec::with_max_size(1024),             // Small limit
+        ProstCodec::with_max_size(1024 * 1024),      // 1MB limit
         ProstCodec::with_max_size(16 * 1024 * 1024), // Large limit
     ];
 
@@ -739,8 +783,8 @@ fn test_different_codec_configs(message: &TestMessage) {
 
 /// Test wire format parsing
 fn test_wire_format_parsing(test: &WireFormatTest) {
-    use asupersync::grpc::protobuf::ProstCodec;
     use asupersync::bytes::Bytes;
+    use asupersync::grpc::protobuf::ProstCodec;
 
     let mut codec = ProstCodec::<TestMessage, TestMessage>::new();
 
@@ -767,8 +811,8 @@ fn test_wire_format_parsing(test: &WireFormatTest) {
 
 /// Test malformed wire format data
 fn test_malformed_wire_format(raw_bytes: &[u8]) {
-    use asupersync::grpc::protobuf::ProstCodec;
     use asupersync::bytes::Bytes;
+    use asupersync::grpc::protobuf::ProstCodec;
 
     if raw_bytes.is_empty() {
         return;
@@ -803,8 +847,8 @@ fn test_malformed_wire_format(raw_bytes: &[u8]) {
 
 /// Test truncated wire format data
 fn test_truncated_wire_format(raw_bytes: &[u8]) {
-    use asupersync::grpc::protobuf::ProstCodec;
     use asupersync::bytes::Bytes;
+    use asupersync::grpc::protobuf::ProstCodec;
 
     if raw_bytes.len() < 2 {
         return;
@@ -882,7 +926,10 @@ fn test_structure_stress(test: &StructureStressTest) {
             let safe_cycles = (*cycles as usize).min(1000);
             test_repeated_operations(safe_cycles, stress_level);
         }
-        StressScenario::MixedSizes { small_count, large_count } => {
+        StressScenario::MixedSizes {
+            small_count,
+            large_count,
+        } => {
             test_mixed_message_sizes(*small_count, *large_count, stress_level);
         }
         StressScenario::ConcurrentOperations { thread_count } => {

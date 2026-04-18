@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// Fuzzing input for QUIC stream lifecycle and state machine
 #[derive(Arbitrary, Debug)]
@@ -57,15 +57,9 @@ enum StreamOperation {
         direction: StreamDirectionFuzz,
     },
     /// Write data to stream
-    Write {
-        stream_index: u8,
-        data_len: u16,
-    },
+    Write { stream_index: u8, data_len: u16 },
     /// Receive data on stream
-    Receive {
-        stream_index: u8,
-        data_len: u16,
-    },
+    Receive { stream_index: u8, data_len: u16 },
     /// Receive out-of-order data
     ReceiveSegment {
         stream_index: u8,
@@ -80,28 +74,15 @@ enum StreamOperation {
         final_size: u32,
     },
     /// Stop sending on stream
-    StopSending {
-        stream_index: u8,
-        error_code: u32,
-    },
+    StopSending { stream_index: u8, error_code: u32 },
     /// Set final size
-    SetFinalSize {
-        stream_index: u8,
-        final_size: u32,
-    },
+    SetFinalSize { stream_index: u8, final_size: u32 },
     /// Increase connection flow control limits
-    IncreaseConnectionLimits {
-        send_limit: u32,
-        recv_limit: u32,
-    },
+    IncreaseConnectionLimits { send_limit: u32, recv_limit: u32 },
     /// Round-robin iteration test
-    TestRoundRobin {
-        iterations: u8,
-    },
+    TestRoundRobin { iterations: u8 },
     /// Close random streams
-    CloseRandomStreams {
-        count: u8,
-    },
+    CloseRandomStreams { count: u8 },
 }
 
 /// Stream direction for fuzzing
@@ -129,9 +110,7 @@ enum FlowControlTest {
         excess_amount: u16,
     },
     /// Exhaust connection credit
-    ExhaustConnectionCredit {
-        total_writes: u8,
-    },
+    ExhaustConnectionCredit { total_writes: u8 },
     /// Credit release and reuse
     CreditReleaseReuse {
         stream_index: u8,
@@ -144,9 +123,7 @@ enum FlowControlTest {
         regressed_limit: u32,
     },
     /// Flow control race conditions
-    FlowControlRace {
-        operations: Vec<FlowControlOp>,
-    },
+    FlowControlRace { operations: Vec<FlowControlOp> },
 }
 
 /// Flow control operation
@@ -278,7 +255,8 @@ fn fuzz_stream_lifecycle(input: QuicStreamLifecycleFuzz) {
     let mut rr_count = 0;
     while let Some(_stream_id) = table.next_writable_stream() {
         rr_count += 1;
-        if rr_count > 100 { // Prevent infinite loops
+        if rr_count > 100 {
+            // Prevent infinite loops
             break;
         }
     }
@@ -291,7 +269,7 @@ fn execute_stream_operation(
     op: StreamOperation,
     role: asupersync::net::quic_native::streams::StreamRole,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use asupersync::net::quic_native::streams::{StreamId, StreamDirection};
+    use asupersync::net::quic_native::streams::{StreamDirection, StreamId};
 
     match op {
         StreamOperation::OpenLocalBidi => {
@@ -307,56 +285,83 @@ fn execute_stream_operation(
         StreamOperation::AcceptRemote { id_base, direction } => {
             // Generate a remote stream ID
             let remote_role = match role {
-                asupersync::net::quic_native::streams::StreamRole::Client =>
-                    asupersync::net::quic_native::streams::StreamRole::Server,
-                asupersync::net::quic_native::streams::StreamRole::Server =>
-                    asupersync::net::quic_native::streams::StreamRole::Client,
+                asupersync::net::quic_native::streams::StreamRole::Client => {
+                    asupersync::net::quic_native::streams::StreamRole::Server
+                }
+                asupersync::net::quic_native::streams::StreamRole::Server => {
+                    asupersync::net::quic_native::streams::StreamRole::Client
+                }
             };
             let id = StreamId::local(remote_role, direction.into(), id_base as u64);
             if let Ok(_) = table.accept_remote_stream(id) {
                 stream_ids.push(id);
             }
         }
-        StreamOperation::Write { stream_index, data_len } => {
+        StreamOperation::Write {
+            stream_index,
+            data_len,
+        } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 let _ = table.write_stream(id, data_len as u64);
             }
         }
-        StreamOperation::Receive { stream_index, data_len } => {
+        StreamOperation::Receive {
+            stream_index,
+            data_len,
+        } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 let _ = table.receive_stream(id, data_len as u64);
             }
         }
-        StreamOperation::ReceiveSegment { stream_index, offset, data_len, is_fin } => {
+        StreamOperation::ReceiveSegment {
+            stream_index,
+            offset,
+            data_len,
+            is_fin,
+        } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 let _ = table.receive_stream_segment(id, offset as u64, data_len as u64, is_fin);
             }
         }
-        StreamOperation::ResetStream { stream_index, error_code, final_size } => {
+        StreamOperation::ResetStream {
+            stream_index,
+            error_code,
+            final_size,
+        } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 if let Ok(stream) = table.stream_mut(id) {
                     let _ = stream.reset_send(error_code as u64, final_size as u64);
                 }
             }
         }
-        StreamOperation::StopSending { stream_index, error_code } => {
+        StreamOperation::StopSending {
+            stream_index,
+            error_code,
+        } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 if let Ok(stream) = table.stream_mut(id) {
                     stream.on_stop_sending(error_code as u64);
                 }
             }
         }
-        StreamOperation::SetFinalSize { stream_index, final_size } => {
+        StreamOperation::SetFinalSize {
+            stream_index,
+            final_size,
+        } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 let _ = table.set_stream_final_size(id, final_size as u64);
             }
         }
-        StreamOperation::IncreaseConnectionLimits { send_limit, recv_limit } => {
+        StreamOperation::IncreaseConnectionLimits {
+            send_limit,
+            recv_limit,
+        } => {
             let _ = table.increase_connection_send_limit(send_limit as u64);
             let _ = table.increase_connection_recv_limit(recv_limit as u64);
         }
         StreamOperation::TestRoundRobin { iterations } => {
-            for _ in 0..iterations.min(50) { // Cap iterations to prevent timeouts
+            for _ in 0..iterations.min(50) {
+                // Cap iterations to prevent timeouts
                 let _ = table.next_writable_stream();
             }
         }
@@ -379,7 +384,10 @@ fn execute_flow_control_test(
     test: FlowControlTest,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match test {
-        FlowControlTest::ExhaustStreamCredit { stream_index, excess_amount } => {
+        FlowControlTest::ExhaustStreamCredit {
+            stream_index,
+            excess_amount,
+        } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 // Try to write more than the stream's credit
                 let _ = table.write_stream(id, u64::MAX);
@@ -394,14 +402,21 @@ fn execute_flow_control_test(
                 }
             }
         }
-        FlowControlTest::CreditReleaseReuse { stream_index, write_amount, release_amount } => {
+        FlowControlTest::CreditReleaseReuse {
+            stream_index,
+            write_amount,
+            release_amount,
+        } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 let _ = table.write_stream(id, write_amount as u64);
                 // Note: Credit release would be tested if the API exposed it
                 let _ = table.write_stream(id, release_amount as u64);
             }
         }
-        FlowControlTest::LimitRegression { original_limit, regressed_limit } => {
+        FlowControlTest::LimitRegression {
+            original_limit,
+            regressed_limit,
+        } => {
             let _ = table.increase_connection_send_limit(original_limit as u64);
             // Try to regress the limit (should fail)
             let _ = table.increase_connection_send_limit(regressed_limit as u64);
@@ -410,19 +425,29 @@ fn execute_flow_control_test(
             for op in operations {
                 match op {
                     FlowControlOp::Write { stream_idx, len } => {
-                        if let Some(&id) = stream_ids.get(stream_idx as usize % stream_ids.len().max(1)) {
+                        if let Some(&id) =
+                            stream_ids.get(stream_idx as usize % stream_ids.len().max(1))
+                        {
                             let _ = table.write_stream(id, len as u64);
                         }
                     }
                     FlowControlOp::Receive { stream_idx, len } => {
-                        if let Some(&id) = stream_ids.get(stream_idx as usize % stream_ids.len().max(1)) {
+                        if let Some(&id) =
+                            stream_ids.get(stream_idx as usize % stream_ids.len().max(1))
+                        {
                             let _ = table.receive_stream(id, len as u64);
                         }
                     }
-                    FlowControlOp::IncreaseLimit { stream_idx: _, new_limit } => {
+                    FlowControlOp::IncreaseLimit {
+                        stream_idx: _,
+                        new_limit,
+                    } => {
                         let _ = table.increase_connection_send_limit(new_limit as u64);
                     }
-                    FlowControlOp::Release { stream_idx: _, amount: _ } => {
+                    FlowControlOp::Release {
+                        stream_idx: _,
+                        amount: _,
+                    } => {
                         // Credit release would be tested if exposed by API
                     }
                 }
@@ -439,7 +464,7 @@ fn execute_edge_case_test(
     edge_case: StreamEdgeCase,
     role: asupersync::net::quic_native::streams::StreamRole,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use asupersync::net::quic_native::streams::{StreamId, StreamDirection};
+    use asupersync::net::quic_native::streams::{StreamDirection, StreamId};
 
     match edge_case {
         StreamEdgeCase::DuplicateStreamId { id_pattern } => {
@@ -472,7 +497,7 @@ fn execute_edge_case_test(
         StreamEdgeCase::InconsistentResetFinalSize {
             stream_index,
             first_final_size,
-            second_final_size
+            second_final_size,
         } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 if let Ok(stream) = table.stream_mut(id) {
@@ -481,28 +506,36 @@ fn execute_edge_case_test(
                 }
             }
         }
-        StreamEdgeCase::OffsetOverflow { stream_index, offset, len } => {
+        StreamEdgeCase::OffsetOverflow {
+            stream_index,
+            offset,
+            len,
+        } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 // Try to receive at an offset that would overflow
                 let _ = table.receive_stream_segment(id, offset, len, false);
             }
         }
-        StreamEdgeCase::FinalSizeViolation { stream_index, final_size, excess_data } => {
+        StreamEdgeCase::FinalSizeViolation {
+            stream_index,
+            final_size,
+            excess_data,
+        } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 let _ = table.set_stream_final_size(id, final_size as u64);
                 // Try to receive more data than the final size allows
-                let _ = table.receive_stream_segment(
-                    id,
-                    final_size as u64,
-                    excess_data as u64,
-                    false
-                );
+                let _ =
+                    table.receive_stream_segment(id, final_size as u64, excess_data as u64, false);
             }
         }
-        StreamEdgeCase::RangeMergingStress { stream_index, ranges } => {
+        StreamEdgeCase::RangeMergingStress {
+            stream_index,
+            ranges,
+        } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 // Send overlapping and adjacent ranges to stress-test merging logic
-                for (offset, len) in ranges.into_iter().take(50) { // Limit to prevent timeouts
+                for (offset, len) in ranges.into_iter().take(50) {
+                    // Limit to prevent timeouts
                     let _ = table.receive_stream_segment(id, offset as u64, len as u64, false);
                 }
             }

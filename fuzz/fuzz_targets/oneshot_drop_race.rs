@@ -1,6 +1,6 @@
 #![no_main]
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 use asupersync::channel::oneshot::{self, RecvError, SendError, TryRecvError};
 use asupersync::cx::Cx;
@@ -128,7 +128,9 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
 
     // Shared state for concurrent operations
     let channel_dropped = Arc::new(AtomicBool::new(false));
-    let operation_barrier = Arc::new(std::sync::Barrier::new(scenario.thread_pool_size.max(1) as usize));
+    let operation_barrier = Arc::new(std::sync::Barrier::new(
+        scenario.thread_pool_size.max(1) as usize
+    ));
 
     for (op_index, operation) in scenario.operations.iter().enumerate() {
         // Prevent infinite loops in fuzzing
@@ -147,7 +149,7 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
                     tracker.sender_exists = false;
                     tracker.permit_exists = true;
                 }
-            },
+            }
 
             OneShotOperation::SenderSend { value } => {
                 if tracker.sender_exists {
@@ -162,13 +164,13 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
                         Err(SendError::Disconnected(_)) => tracker.channel_closed = true,
                     }
                 }
-            },
+            }
 
             OneShotOperation::SenderIsClosedCheck => {
                 if tracker.sender_exists {
                     let _is_closed = tx.is_closed();
                 }
-            },
+            }
 
             OneShotOperation::SenderDrop => {
                 if tracker.sender_exists {
@@ -176,7 +178,7 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
                     tracker.sender_exists = false;
                     tracker.channel_closed = !tracker.permit_exists && tracker.value_sent.is_none();
                 }
-            },
+            }
 
             OneShotOperation::PermitSend { value } => {
                 if let Some(permit) = permit_opt.take() {
@@ -188,7 +190,7 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
                         Err(SendError::Disconnected(_)) => tracker.channel_closed = true,
                     }
                 }
-            },
+            }
 
             OneShotOperation::PermitAbort => {
                 if let Some(permit) = permit_opt.take() {
@@ -196,27 +198,27 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
                     tracker.permit_exists = false;
                     tracker.channel_closed = true;
                 }
-            },
+            }
 
             OneShotOperation::PermitIsClosedCheck => {
                 if let Some(ref permit) = permit_opt {
                     let _is_closed = permit.is_closed();
                 }
-            },
+            }
 
             OneShotOperation::PermitDrop => {
                 if permit_opt.take().is_some() {
                     tracker.permit_exists = false;
                     tracker.channel_closed = true;
                 }
-            },
+            }
 
             OneShotOperation::ReceiverRecvStart => {
                 if tracker.receiver_exists && recv_future_opt.is_none() {
                     recv_future_opt = Some(Box::pin(rx.recv(&cx)));
                     tracker.recv_future_exists = true;
                 }
-            },
+            }
 
             OneShotOperation::ReceiverRecvPoll => {
                 if let Some(ref mut recv_future) = recv_future_opt {
@@ -228,69 +230,69 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
                             recv_future_opt = None;
                             tracker.recv_future_exists = false;
                             tracker.value_sent = Some(value);
-                        },
+                        }
                         Poll::Ready(Err(RecvError::Closed)) => {
                             recv_future_opt = None;
                             tracker.recv_future_exists = false;
                             tracker.channel_closed = true;
-                        },
+                        }
                         Poll::Ready(Err(RecvError::Cancelled)) => {
                             recv_future_opt = None;
                             tracker.recv_future_exists = false;
-                        },
+                        }
                         Poll::Ready(Err(RecvError::PolledAfterCompletion)) => {
                             // This should only happen on subsequent polls
-                        },
+                        }
                         Poll::Pending => {
                             // Future is waiting for value or close
                         }
                     }
                 }
-            },
+            }
 
             OneShotOperation::ReceiverRecvDrop => {
                 if recv_future_opt.take().is_some() {
                     tracker.recv_future_exists = false;
                 }
-            },
+            }
 
             OneShotOperation::ReceiverTryRecv => {
                 if tracker.receiver_exists {
                     match rx.try_recv() {
                         Ok(value) => tracker.value_sent = Some(value),
-                        Err(TryRecvError::Empty) => {},
+                        Err(TryRecvError::Empty) => {}
                         Err(TryRecvError::Closed) => tracker.channel_closed = true,
                     }
                 }
-            },
+            }
 
             OneShotOperation::ReceiverIsReadyCheck => {
                 if tracker.receiver_exists {
                     let _is_ready = rx.is_ready();
                 }
-            },
+            }
 
             OneShotOperation::ReceiverIsClosedCheck => {
                 if tracker.receiver_exists {
                     let _is_closed = rx.is_closed();
                 }
-            },
+            }
 
             OneShotOperation::ReceiverDrop => {
                 if tracker.receiver_exists {
                     drop(std::mem::replace(&mut rx, unsafe { std::mem::zeroed() }));
                     tracker.receiver_exists = false;
                 }
-            },
+            }
 
             OneShotOperation::YieldThread => {
                 thread::yield_now();
-            },
+            }
 
             OneShotOperation::ShortDelay { micros } => {
                 let delay = Duration::from_micros((*micros as u64).min(MAX_DELAY_MICROS));
                 thread::sleep(delay);
-            },
+            }
 
             OneShotOperation::SpawnConcurrentSenderDrop => {
                 if tracker.sender_exists {
@@ -307,7 +309,7 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
                     std::mem::forget(std::mem::replace(&mut tx, unsafe { std::mem::zeroed() }));
                     tracker.sender_exists = false;
                 }
-            },
+            }
 
             OneShotOperation::SpawnConcurrentReceiverDrop => {
                 if tracker.receiver_exists {
@@ -321,7 +323,7 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
                     std::mem::forget(std::mem::replace(&mut rx, unsafe { std::mem::zeroed() }));
                     tracker.receiver_exists = false;
                 }
-            },
+            }
 
             OneShotOperation::SpawnConcurrentPermitDrop => {
                 if let Some(permit) = permit_opt.take() {
@@ -331,7 +333,7 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
                     });
                     tracker.permit_exists = false;
                 }
-            },
+            }
 
             OneShotOperation::SpawnConcurrentRecvFutureDrop => {
                 if let Some(recv_future) = recv_future_opt.take() {
@@ -341,7 +343,7 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
                     });
                     tracker.recv_future_exists = false;
                 }
-            },
+            }
         }
 
         // Yield to allow concurrent operations to progress
@@ -365,7 +367,11 @@ fn verify_oneshot_invariants(tracker: &ComponentTracker) {
     let wake_count = tracker.wake_count.load(Ordering::SeqCst);
 
     // No waker leaks - wake count should be reasonable (not excessive)
-    assert!(wake_count <= 100, "Excessive waker notifications: {}", wake_count);
+    assert!(
+        wake_count <= 100,
+        "Excessive waker notifications: {}",
+        wake_count
+    );
 
     // Channel state should be consistent
     if tracker.value_sent.is_none() && !tracker.sender_exists && !tracker.permit_exists {
@@ -420,7 +426,7 @@ fn test_oneshot_basic_properties(scenario: &OneShotFuzzScenario) {
 
     match rx.try_recv() {
         Ok(value) => assert_eq!(value, 42),
-        Err(_) => {}, // May be empty if sender dropped without sending
+        Err(_) => {} // May be empty if sender dropped without sending
     }
 }
 

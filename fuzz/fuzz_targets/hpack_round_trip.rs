@@ -680,9 +680,12 @@ fn test_large_header_round_trip(
                 decoded.name
             );
             assert_eq!(
-                orig.value, decoded.value,
+                orig.value,
+                decoded.value,
                 "Large header value mismatch for '{}': lengths {} vs {}",
-                orig.name, orig.value.len(), decoded.value.len()
+                orig.name,
+                orig.value.len(),
+                decoded.value.len()
             );
         }
     }
@@ -699,7 +702,11 @@ fn huffman_boundary_test(encoder: &mut HpackEncoder, decoder: &mut HpackDecoder,
     let repeated_e = "e".repeat(50);
     let repeated_space = " ".repeat(80);
     let random_value = generate_low_compression_value(data, 100);
-    let mixed_value = format!("{}{}", "a".repeat(50), generate_low_compression_value(data, 50));
+    let mixed_value = format!(
+        "{}{}",
+        "a".repeat(50),
+        generate_low_compression_value(data, 50)
+    );
     let ascii_value = generate_ascii_boundary_value(data);
 
     let test_cases = vec![
@@ -707,18 +714,14 @@ fn huffman_boundary_test(encoder: &mut HpackEncoder, decoder: &mut HpackDecoder,
         ("x", "a"),
         ("xy", "ab"),
         ("xyz", "abc"),
-
         // Strings with high compression ratio (lots of repeated chars)
         ("aaa", repeated_a.as_str()),
         ("eee", repeated_e.as_str()),
         ("   ", repeated_space.as_str()), // spaces compress well
-
         // Strings with low compression ratio (random-ish content)
         ("x-random", random_value.as_str()),
-
         // Mixed content (some compressible, some not)
         ("x-mixed", mixed_value.as_str()),
-
         // ASCII vs Latin-1 boundary content
         ("x-ascii", ascii_value.as_str()),
     ];
@@ -799,10 +802,10 @@ fn generate_ascii_boundary_value(data: &[u8]) -> String {
     // Mix ASCII and near-boundary characters
     for (i, &byte) in data.iter().enumerate().take(50) {
         let ch = match i % 4 {
-            0 => (byte % 95 + 32) as char,      // ASCII printable
-            1 => '\x7f',                        // DEL character
-            2 => char::from(byte % 32 + 128),   // High bit set (using char::from for safety)
-            3 => char::from(byte % 127 + 129),  // Latin-1 range (using char::from for safety)
+            0 => (byte % 95 + 32) as char,     // ASCII printable
+            1 => '\x7f',                       // DEL character
+            2 => char::from(byte % 32 + 128),  // High bit set (using char::from for safety)
+            3 => char::from(byte % 127 + 129), // Latin-1 range (using char::from for safety)
             _ => unreachable!(),
         };
         value.push(ch);
@@ -828,7 +831,10 @@ fn header_fragmentation_test(
     for i in 0..8 {
         large_header_set.push(Header {
             name: format!("x-fragment-test-{}", i),
-            value: format!("value_that_might_trigger_fragmentation_{}_with_longer_content", i),
+            value: format!(
+                "value_that_might_trigger_fragmentation_{}_with_longer_content",
+                i
+            ),
         });
     }
 

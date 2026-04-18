@@ -1,8 +1,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::net::quic_native::tls::{
+    CryptoLevel, KeyUpdateEvent, QuicTlsError, QuicTlsMachine,
+};
 use libfuzzer_sys::fuzz_target;
-use asupersync::net::quic_native::tls::{QuicTlsMachine, CryptoLevel, QuicTlsError, KeyUpdateEvent};
 
 /// Wrapper for CryptoLevel that implements Arbitrary
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -82,14 +84,21 @@ impl InvariantChecker {
     fn check_invariants(&self) {
         // Invariant 1: Level progression is monotonic
         let level = self.machine.level();
-        assert!(level as u8 <= CryptoLevel::OneRtt as u8,
-            "Invalid crypto level: {:?}", level);
+        assert!(
+            level as u8 <= CryptoLevel::OneRtt as u8,
+            "Invalid crypto level: {:?}",
+            level
+        );
 
         // Invariant 2: 1-RTT requires OneRtt level AND handshake confirmation
         let can_send_1rtt = self.machine.can_send_1rtt();
         if can_send_1rtt {
-            assert_eq!(level, CryptoLevel::OneRtt,
-                "1-RTT allowed but not at OneRtt level: {:?}", level);
+            assert_eq!(
+                level,
+                CryptoLevel::OneRtt,
+                "1-RTT allowed but not at OneRtt level: {:?}",
+                level
+            );
             // Note: We can't directly check handshake_confirmed as it's private,
             // but the implementation ensures this invariant
         }
@@ -98,12 +107,20 @@ impl InvariantChecker {
         let can_send_0rtt = self.machine.can_send_0rtt();
         let resumption_enabled = self.machine.resumption_enabled();
         if can_send_0rtt {
-            assert!(resumption_enabled, "0-RTT allowed but resumption not enabled");
-            assert!(level >= CryptoLevel::Handshake,
-                "0-RTT allowed but below Handshake level: {:?}", level);
+            assert!(
+                resumption_enabled,
+                "0-RTT allowed but resumption not enabled"
+            );
+            assert!(
+                level >= CryptoLevel::Handshake,
+                "0-RTT allowed but below Handshake level: {:?}",
+                level
+            );
             // 0-RTT should not be allowed after handshake confirmation
-            assert!(!self.machine.can_send_1rtt(),
-                "Both 0-RTT and 1-RTT allowed simultaneously");
+            assert!(
+                !self.machine.can_send_1rtt(),
+                "Both 0-RTT and 1-RTT allowed simultaneously"
+            );
         }
 
         // Invariant 4: Key phase bits are well-defined
@@ -149,7 +166,6 @@ fuzz_target!(|input: QuicTlsStateMachineFuzz| {
     let mut expected_level = CryptoLevel::Initial;
 
     for operation in input.operations.iter().take(MAX_OPERATIONS) {
-
         match operation {
             QuicTlsOperation::OnHandshakeKeysAvailable => {
                 let result = machine.on_handshake_keys_available();
@@ -162,7 +178,12 @@ fuzz_target!(|input: QuicTlsStateMachineFuzz| {
                     }
                     Err(QuicTlsError::InvalidTransition { from, to }) => {
                         // Backwards transition should fail
-                        assert!(to < from, "Error for non-backwards transition: {:?} -> {:?}", from, to);
+                        assert!(
+                            to < from,
+                            "Error for non-backwards transition: {:?} -> {:?}",
+                            from,
+                            to
+                        );
                     }
                     Err(e) => {
                         panic!("Unexpected error from on_handshake_keys_available: {:?}", e);
@@ -180,7 +201,12 @@ fuzz_target!(|input: QuicTlsStateMachineFuzz| {
                         assert_eq!(machine.level(), expected_level);
                     }
                     Err(QuicTlsError::InvalidTransition { from, to }) => {
-                        assert!(to < from, "Error for non-backwards transition: {:?} -> {:?}", from, to);
+                        assert!(
+                            to < from,
+                            "Error for non-backwards transition: {:?} -> {:?}",
+                            from,
+                            to
+                        );
                     }
                     Err(e) => {
                         panic!("Unexpected error from on_1rtt_keys_available: {:?}", e);
@@ -211,14 +237,23 @@ fuzz_target!(|input: QuicTlsStateMachineFuzz| {
                     Ok(KeyUpdateEvent::NoChange) => {
                         // Either handshake not confirmed or already pending
                     }
-                    Ok(KeyUpdateEvent::LocalUpdateScheduled { next_phase, generation }) => {
+                    Ok(KeyUpdateEvent::LocalUpdateScheduled {
+                        next_phase,
+                        generation,
+                    }) => {
                         // Should be opposite of current phase
                         assert_ne!(next_phase, machine.local_key_phase());
                         assert!(generation > 0);
-                        assert!(machine.can_send_1rtt(), "Key update scheduled but 1-RTT not available");
+                        assert!(
+                            machine.can_send_1rtt(),
+                            "Key update scheduled but 1-RTT not available"
+                        );
                     }
                     Ok(event) => {
-                        panic!("Unexpected event from request_local_key_update: {:?}", event);
+                        panic!(
+                            "Unexpected event from request_local_key_update: {:?}",
+                            event
+                        );
                     }
                     Err(QuicTlsError::HandshakeNotConfirmed) => {
                         assert!(!machine.can_send_1rtt());
@@ -238,7 +273,10 @@ fuzz_target!(|input: QuicTlsStateMachineFuzz| {
                         // No pending update
                         assert_eq!(machine.local_key_phase(), old_phase);
                     }
-                    Ok(KeyUpdateEvent::LocalUpdateScheduled { next_phase, generation }) => {
+                    Ok(KeyUpdateEvent::LocalUpdateScheduled {
+                        next_phase,
+                        generation,
+                    }) => {
                         // Phase should have flipped
                         assert_eq!(machine.local_key_phase(), next_phase);
                         assert_ne!(old_phase, next_phase);
@@ -264,12 +302,18 @@ fuzz_target!(|input: QuicTlsStateMachineFuzz| {
                             assert_eq!(old_remote_phase, *phase);
                         }
                     }
-                    Ok(KeyUpdateEvent::RemoteUpdateAccepted { new_phase, generation }) => {
+                    Ok(KeyUpdateEvent::RemoteUpdateAccepted {
+                        new_phase,
+                        generation,
+                    }) => {
                         assert_eq!(new_phase, *phase);
                         assert_eq!(machine.remote_key_phase(), *phase);
                         assert_ne!(old_remote_phase, *phase);
                         assert!(generation > 0);
-                        assert!(machine.can_send_1rtt(), "Peer key update accepted but 1-RTT not available");
+                        assert!(
+                            machine.can_send_1rtt(),
+                            "Peer key update accepted but 1-RTT not available"
+                        );
                     }
                     Ok(event) => {
                         panic!("Unexpected event from on_peer_key_phase: {:?}", event);
@@ -376,16 +420,26 @@ fn test_consistency(machine: &QuicTlsMachine) {
 
     // Consistency check: 1-RTT requires OneRtt level
     if can_1rtt {
-        assert_eq!(level, CryptoLevel::OneRtt, "1-RTT enabled but not at OneRtt level");
+        assert_eq!(
+            level,
+            CryptoLevel::OneRtt,
+            "1-RTT enabled but not at OneRtt level"
+        );
     }
 
     // Consistency check: 0-RTT and 1-RTT are mutually exclusive
-    assert!(!(can_0rtt && can_1rtt), "Both 0-RTT and 1-RTT enabled simultaneously");
+    assert!(
+        !(can_0rtt && can_1rtt),
+        "Both 0-RTT and 1-RTT enabled simultaneously"
+    );
 
     // Consistency check: 0-RTT requires resumption
     if can_0rtt {
         assert!(resumption, "0-RTT enabled but resumption disabled");
-        assert!(level >= CryptoLevel::Handshake, "0-RTT enabled below Handshake level");
+        assert!(
+            level >= CryptoLevel::Handshake,
+            "0-RTT enabled below Handshake level"
+        );
     }
 
     // Consistency check: Key phases are boolean

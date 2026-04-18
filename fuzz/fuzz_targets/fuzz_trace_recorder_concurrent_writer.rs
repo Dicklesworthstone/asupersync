@@ -3,13 +3,16 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::trace::recorder::{RecorderConfig, TraceRecorder, LimitAction};
+use asupersync::trace::recorder::{LimitAction, RecorderConfig, TraceRecorder};
 use asupersync::trace::replay::TraceMetadata;
-use asupersync::types::{TaskId, RegionId, Time, Severity};
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use asupersync::types::{RegionId, Severity, TaskId, Time};
+use std::io;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::Duration;
-use std::io;
 
 /// Fuzzing configuration for trace recorder concurrent writer contention testing.
 #[derive(Debug, Clone, Arbitrary)]
@@ -68,23 +71,70 @@ impl FuzzLimitAction {
 /// Event types for fuzzing
 #[derive(Debug, Clone, Arbitrary)]
 enum FuzzEventType {
-    TaskScheduled { task_index: u8, tick: u64 },
-    TaskYielded { task_index: u8 },
-    TaskCompleted { task_index: u8, severity: u8 },
-    TaskSpawned { task_index: u8, region_index: u8, tick: u64 },
-    TimeAdvanced { from_nanos: u64, to_nanos: u64 },
-    TimerCreated { timer_id: u64, deadline_nanos: u64 },
-    TimerFired { timer_id: u64 },
-    TimerCancelled { timer_id: u64 },
-    IoReady { token: u64, readable: bool, writable: bool, error: bool, hangup: bool },
-    IoResult { token: u64, bytes: i64 },
-    IoError { token: u64, error_kind: u8 },
-    RngSeed { seed: u64 },
-    RngValue { value: u64 },
-    CancelInjection { task_index: u8 },
-    DelayInjection { task_index: Option<u8>, delay_nanos: u64 },
-    WakerWake { task_index: u8 },
-    WakerBatchWake { count: u32 },
+    TaskScheduled {
+        task_index: u8,
+        tick: u64,
+    },
+    TaskYielded {
+        task_index: u8,
+    },
+    TaskCompleted {
+        task_index: u8,
+        severity: u8,
+    },
+    TaskSpawned {
+        task_index: u8,
+        region_index: u8,
+        tick: u64,
+    },
+    TimeAdvanced {
+        from_nanos: u64,
+        to_nanos: u64,
+    },
+    TimerCreated {
+        timer_id: u64,
+        deadline_nanos: u64,
+    },
+    TimerFired {
+        timer_id: u64,
+    },
+    TimerCancelled {
+        timer_id: u64,
+    },
+    IoReady {
+        token: u64,
+        readable: bool,
+        writable: bool,
+        error: bool,
+        hangup: bool,
+    },
+    IoResult {
+        token: u64,
+        bytes: i64,
+    },
+    IoError {
+        token: u64,
+        error_kind: u8,
+    },
+    RngSeed {
+        seed: u64,
+    },
+    RngValue {
+        value: u64,
+    },
+    CancelInjection {
+        task_index: u8,
+    },
+    DelayInjection {
+        task_index: Option<u8>,
+        delay_nanos: u64,
+    },
+    WakerWake {
+        task_index: u8,
+    },
+    WakerBatchWake {
+        count: u32,
+    },
 }
 
 /// Panic injection configuration
@@ -453,10 +503,8 @@ fn test_panic_safety_during_writes(config: &TraceRecorderConcurrentConfig) {
     } else {
         // Test that we can abandon a recorder and create a new one
         drop(recorder);
-        let mut new_recorder = TraceRecorder::with_config(
-            TraceMetadata::new(1000),
-            RecorderConfig::enabled(),
-        );
+        let mut new_recorder =
+            TraceRecorder::with_config(TraceMetadata::new(1000), RecorderConfig::enabled());
         new_recorder.record_task_scheduled(make_task_id(100), 0);
         assert_eq!(new_recorder.event_count(), 1);
     }
@@ -471,23 +519,34 @@ fn record_fuzz_event(recorder: &mut TraceRecorder, event_type: &FuzzEventType, _
         FuzzEventType::TaskYielded { task_index } => {
             recorder.record_task_yielded(make_task_id(*task_index));
         }
-        FuzzEventType::TaskCompleted { task_index, severity } => {
+        FuzzEventType::TaskCompleted {
+            task_index,
+            severity,
+        } => {
             recorder.record_task_completed(make_task_id(*task_index), index_to_severity(*severity));
         }
-        FuzzEventType::TaskSpawned { task_index, region_index, tick } => {
+        FuzzEventType::TaskSpawned {
+            task_index,
+            region_index,
+            tick,
+        } => {
             recorder.record_task_spawned(
                 make_task_id(*task_index),
                 make_region_id(*region_index),
                 *tick,
             );
         }
-        FuzzEventType::TimeAdvanced { from_nanos, to_nanos } => {
-            recorder.record_time_advanced(
-                Time::from_nanos(*from_nanos),
-                Time::from_nanos(*to_nanos),
-            );
+        FuzzEventType::TimeAdvanced {
+            from_nanos,
+            to_nanos,
+        } => {
+            recorder
+                .record_time_advanced(Time::from_nanos(*from_nanos), Time::from_nanos(*to_nanos));
         }
-        FuzzEventType::TimerCreated { timer_id, deadline_nanos } => {
+        FuzzEventType::TimerCreated {
+            timer_id,
+            deadline_nanos,
+        } => {
             recorder.record_timer_created(*timer_id, Time::from_nanos(*deadline_nanos));
         }
         FuzzEventType::TimerFired { timer_id } => {
@@ -496,7 +555,13 @@ fn record_fuzz_event(recorder: &mut TraceRecorder, event_type: &FuzzEventType, _
         FuzzEventType::TimerCancelled { timer_id } => {
             recorder.record_timer_cancelled(*timer_id);
         }
-        FuzzEventType::IoReady { token, readable, writable, error, hangup } => {
+        FuzzEventType::IoReady {
+            token,
+            readable,
+            writable,
+            error,
+            hangup,
+        } => {
             recorder.record_io_ready(*token, *readable, *writable, *error, *hangup);
         }
         FuzzEventType::IoResult { token, bytes } => {
@@ -514,7 +579,10 @@ fn record_fuzz_event(recorder: &mut TraceRecorder, event_type: &FuzzEventType, _
         FuzzEventType::CancelInjection { task_index } => {
             recorder.record_cancel_injection(make_task_id(*task_index));
         }
-        FuzzEventType::DelayInjection { task_index, delay_nanos } => {
+        FuzzEventType::DelayInjection {
+            task_index,
+            delay_nanos,
+        } => {
             let task = task_index.map(make_task_id);
             recorder.record_delay_injection(task, *delay_nanos);
         }

@@ -169,7 +169,8 @@ fuzz_target!(|input: &[u8]| {
 
     let (tx, _rx) = asupersync::channel::watch::channel(initial_value.clone());
     let mut env = TestEnv::new(initial_value);
-    let mut receivers: HashMap<u8, asupersync::channel::watch::Receiver<TestValue>> = HashMap::new();
+    let mut receivers: HashMap<u8, asupersync::channel::watch::Receiver<TestValue>> =
+        HashMap::new();
     let sender_active = true;
 
     // Create initial receivers based on config
@@ -207,7 +208,10 @@ fuzz_target!(|input: &[u8]| {
                 }
             }
 
-            WatchOperation::SendModify { id_delta, data_byte } => {
+            WatchOperation::SendModify {
+                id_delta,
+                data_byte,
+            } => {
                 if sender_active {
                     let result = tx.send_modify(|val| {
                         val.id = val.id.wrapping_add(id_delta as u32);
@@ -219,7 +223,8 @@ fuzz_target!(|input: &[u8]| {
                     });
 
                     if result.is_ok() {
-                        env.shadow.current_value.id = env.shadow.current_value.id.wrapping_add(id_delta as u32);
+                        env.shadow.current_value.id =
+                            env.shadow.current_value.id.wrapping_add(id_delta as u32);
                         if !env.shadow.current_value.data.is_empty() {
                             env.shadow.current_value.data[0] = data_byte;
                         } else {
@@ -241,7 +246,10 @@ fuzz_target!(|input: &[u8]| {
             }
 
             WatchOperation::Subscribe { receiver_id } => {
-                if sender_active && receivers.len() < MAX_RECEIVERS && !receivers.contains_key(&receiver_id) {
+                if sender_active
+                    && receivers.len() < MAX_RECEIVERS
+                    && !receivers.contains_key(&receiver_id)
+                {
                     let new_rx = tx.subscribe();
                     let current_version = tx.borrow().id as u64;
                     env.track_receiver(receiver_id, current_version);
@@ -294,7 +302,9 @@ fuzz_target!(|input: &[u8]| {
 
                     // Update shadow receiver version if there was a change
                     if was_changed {
-                        if let Some(shadow_version) = env.shadow.receiver_versions.get_mut(&receiver_id) {
+                        if let Some(shadow_version) =
+                            env.shadow.receiver_versions.get_mut(&receiver_id)
+                        {
                             *shadow_version = env.shadow.version.load(Ordering::Relaxed);
                         }
                     }
@@ -313,7 +323,12 @@ fuzz_target!(|input: &[u8]| {
                         let has_changed = receiver.has_changed();
 
                         // Verify version consistency
-                        let shadow_receiver_version = env.shadow.receiver_versions.get(&receiver_id).copied().unwrap_or(0);
+                        let shadow_receiver_version = env
+                            .shadow
+                            .receiver_versions
+                            .get(&receiver_id)
+                            .copied()
+                            .unwrap_or(0);
                         let current_version = env.shadow.version.load(Ordering::Relaxed);
 
                         if shadow_receiver_version < current_version {
@@ -351,7 +366,12 @@ fuzz_target!(|input: &[u8]| {
             WatchOperation::QueryVersion { receiver_id } => {
                 if let Some(receiver) = receivers.get(&receiver_id) {
                     let version = receiver.seen_version();
-                    let _shadow_version = env.shadow.receiver_versions.get(&receiver_id).copied().unwrap_or(0);
+                    let _shadow_version = env
+                        .shadow
+                        .receiver_versions
+                        .get(&receiver_id)
+                        .copied()
+                        .unwrap_or(0);
 
                     // Version should be consistent with shadow tracking
                     // (allowing for some drift due to concurrent updates)

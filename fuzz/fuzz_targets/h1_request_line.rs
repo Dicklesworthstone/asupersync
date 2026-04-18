@@ -19,7 +19,7 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
-use asupersync::http::h1::{HttpError, Http1Codec};
+use asupersync::http::h1::{Http1Codec, HttpError};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum request line length from the implementation
@@ -27,8 +27,7 @@ const MAX_REQUEST_LINE: usize = 8192;
 
 /// HTTP methods to use in generation
 const VALID_METHODS: &[&[u8]] = &[
-    b"GET", b"HEAD", b"POST", b"PUT", b"DELETE",
-    b"CONNECT", b"OPTIONS", b"TRACE", b"PATCH"
+    b"GET", b"HEAD", b"POST", b"PUT", b"DELETE", b"CONNECT", b"OPTIONS", b"TRACE", b"PATCH",
 ];
 
 /// HTTP versions to use in generation
@@ -36,12 +35,22 @@ const VALID_VERSIONS: &[&[u8]] = &[b"HTTP/1.0", b"HTTP/1.1"];
 
 /// Invalid methods for negative testing
 const INVALID_METHODS: &[&[u8]] = &[
-    b"", b"GE\x00T", b"GET\x01", b"g e t", b"GET\x7F", b"\x80METHOD"
+    b"",
+    b"GE\x00T",
+    b"GET\x01",
+    b"g e t",
+    b"GET\x7F",
+    b"\x80METHOD",
 ];
 
 /// Invalid versions for negative testing
 const INVALID_VERSIONS: &[&[u8]] = &[
-    b"", b"HTTP/2.0", b"http/1.1", b"HTTP/1.", b"HTTP\x00/1.1", b"\x80VER"
+    b"",
+    b"HTTP/2.0",
+    b"http/1.1",
+    b"HTTP/1.",
+    b"HTTP\x00/1.1",
+    b"\x80VER",
 ];
 
 /// Fuzzable request-line components for structure-aware generation
@@ -60,14 +69,12 @@ enum RequestLineType {
         base_valid: bool,
     },
     /// Boundary condition testing
-    Boundary {
-        condition: BoundaryCondition,
-    },
+    Boundary { condition: BoundaryCondition },
 }
 
 #[derive(Arbitrary, Debug, Clone)]
 enum MethodChoice {
-    StandardValid(u8), // Index into VALID_METHODS
+    StandardValid(u8),   // Index into VALID_METHODS
     StandardInvalid(u8), // Index into INVALID_METHODS
     CustomValid(String),
     CustomInvalid(Vec<u8>),
@@ -85,17 +92,17 @@ enum PathChoice {
 
 #[derive(Arbitrary, Debug, Clone)]
 enum VersionChoice {
-    StandardValid(u8), // Index into VALID_VERSIONS
+    StandardValid(u8),   // Index into VALID_VERSIONS
     StandardInvalid(u8), // Index into INVALID_VERSIONS
     Custom(String),
 }
 
 #[derive(Arbitrary, Debug, Clone)]
 enum WhitespacePattern {
-    Standard, // Single space between components
-    Multiple(u8), // Multiple spaces (1-16)
+    Standard,       // Single space between components
+    Multiple(u8),   // Multiple spaces (1-16)
     Mixed(Vec<u8>), // Mixed whitespace chars
-    None, // No whitespace
+    None,           // No whitespace
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -109,7 +116,7 @@ enum CorruptionType {
 
 #[derive(Arbitrary, Debug, Clone)]
 enum BoundaryCondition {
-    MaxLength, // Exactly MAX_REQUEST_LINE bytes
+    MaxLength,       // Exactly MAX_REQUEST_LINE bytes
     OverLength(u16), // MAX_REQUEST_LINE + n bytes
     CrlfVariants(CrlfType),
     WhitespaceFlooding(u16),
@@ -117,10 +124,10 @@ enum BoundaryCondition {
 
 #[derive(Arbitrary, Debug, Clone)]
 enum CrlfType {
-    Standard, // \r\n
-    LfOnly, // \n
-    CrOnly, // \r
-    Double, // \r\n\r\n
+    Standard,       // \r\n
+    LfOnly,         // \n
+    CrOnly,         // \r
+    Double,         // \r\n\r\n
     Mixed(Vec<u8>), // Custom line ending
 }
 
@@ -141,7 +148,12 @@ impl RequestLineType {
     /// Generate the request-line bytes for this configuration
     fn to_bytes(&self) -> Vec<u8> {
         match self {
-            RequestLineType::Valid { method, path, version, whitespace } => {
+            RequestLineType::Valid {
+                method,
+                path,
+                version,
+                whitespace,
+            } => {
                 let method_bytes = method.to_bytes();
                 let path_bytes = path.to_bytes();
                 let version_bytes = version.to_bytes();
@@ -156,7 +168,10 @@ impl RequestLineType {
                 result.extend_from_slice(&version_bytes);
                 result
             }
-            RequestLineType::Malformed { corruption, base_valid } => {
+            RequestLineType::Malformed {
+                corruption,
+                base_valid,
+            } => {
                 let mut base = if *base_valid {
                     b"GET /test HTTP/1.1".to_vec()
                 } else {
@@ -165,9 +180,7 @@ impl RequestLineType {
                 corruption.apply(&mut base);
                 base
             }
-            RequestLineType::Boundary { condition } => {
-                condition.to_bytes()
-            }
+            RequestLineType::Boundary { condition } => condition.to_bytes(),
         }
     }
 }
@@ -197,15 +210,24 @@ impl PathChoice {
     fn to_bytes(&self) -> Vec<u8> {
         match self {
             PathChoice::Simple(s) => {
-                if s.is_empty() { b"/".to_vec() } else { format!("/{}", s).into_bytes() }
+                if s.is_empty() {
+                    b"/".to_vec()
+                } else {
+                    format!("/{}", s).into_bytes()
+                }
             }
-            PathChoice::WithQuery(path, query) => {
-                format!("/{}?{}", path, query).into_bytes()
-            }
+            PathChoice::WithQuery(path, query) => format!("/{}?{}", path, query).into_bytes(),
             PathChoice::PercentEncoded(s) => {
                 // Simple percent-encoding for testing
-                let encoded = s.chars()
-                    .map(|c| if c.is_ascii_alphanumeric() { c.to_string() } else { format!("%{:02X}", c as u8) })
+                let encoded = s
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() {
+                            c.to_string()
+                        } else {
+                            format!("%{:02X}", c as u8)
+                        }
+                    })
                     .collect::<String>();
                 format!("/{}", encoded).into_bytes()
             }
@@ -251,7 +273,8 @@ impl WhitespacePattern {
                 if chars.is_empty() {
                     b" ".to_vec()
                 } else {
-                    chars.iter()
+                    chars
+                        .iter()
                         .filter(|&&c| c == b' ' || c == b'\t')
                         .copied()
                         .collect()
@@ -286,8 +309,8 @@ impl CorruptionType {
             CorruptionType::MissingComponents(which) => {
                 // Simplified: just truncate to simulate missing components
                 let truncate_at = match which % 3 {
-                    0 => 0, // No method
-                    1 => data.iter().position(|&b| b == b' ').unwrap_or(0), // No path
+                    0 => 0,                                                           // No method
+                    1 => data.iter().position(|&b| b == b' ').unwrap_or(0),           // No path
                     _ => data.iter().rposition(|&b| b == b' ').unwrap_or(data.len()), // No version
                 };
                 data.truncate(truncate_at);
@@ -356,8 +379,9 @@ fn fuzz_parse_request_line(request_line: RequestLineType) {
     // Instead, we'll test through the public codec interface
     let full_request = [
         &line_bytes[..],
-        b"\r\n\r\n"  // Add minimal headers termination
-    ].concat();
+        b"\r\n\r\n", // Add minimal headers termination
+    ]
+    .concat();
 
     let mut codec = Http1Codec::new();
     let mut buf = BytesMut::from(&full_request[..]);
@@ -394,7 +418,8 @@ fn fuzz_parse_full_head(request_line: RequestLineType, headers: Vec<(String, Str
     full_request.extend_from_slice(b"\r\n");
 
     // Add headers
-    for (name, value) in headers.iter().take(10) { // Limit headers for performance
+    for (name, value) in headers.iter().take(10) {
+        // Limit headers for performance
         full_request.extend_from_slice(name.as_bytes());
         full_request.extend_from_slice(b": ");
         full_request.extend_from_slice(value.as_bytes());

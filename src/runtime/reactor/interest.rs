@@ -69,6 +69,11 @@ impl Interest {
     /// Event fires on state CHANGE, not while condition persists.
     pub const EDGE_TRIGGERED: Self = Self(1 << 6);
 
+    /// Request dispatch mode (EV_DISPATCH on BSD/macOS).
+    /// Event fires once then is disabled (not removed like ONESHOT).
+    /// Must re-enable with modify() to receive more events.
+    pub const DISPATCH: Self = Self(1 << 7);
+
     /// All currently defined interest flags.
     pub const ALL: Self = Self(
         Self::READABLE.0
@@ -77,7 +82,8 @@ impl Interest {
             | Self::HUP.0
             | Self::PRIORITY.0
             | Self::ONESHOT.0
-            | Self::EDGE_TRIGGERED.0,
+            | Self::EDGE_TRIGGERED.0
+            | Self::DISPATCH.0,
     );
 
     /// Common combination for sockets.
@@ -174,6 +180,12 @@ impl Interest {
         (self.0 & Self::EDGE_TRIGGERED.0) != 0
     }
 
+    /// Check if dispatch mode is set.
+    #[must_use]
+    pub const fn is_dispatch(&self) -> bool {
+        (self.0 & Self::DISPATCH.0) != 0
+    }
+
     /// Combines interests by adding flags.
     #[must_use]
     #[allow(clippy::should_implement_trait)]
@@ -197,6 +209,30 @@ impl Interest {
     #[must_use]
     pub const fn with_edge_triggered(self) -> Self {
         Self(self.0 | Self::EDGE_TRIGGERED.0)
+    }
+
+    /// Returns a new interest with dispatch mode set.
+    #[must_use]
+    pub const fn with_dispatch(self) -> Self {
+        Self(self.0 | Self::DISPATCH.0)
+    }
+
+    /// Returns interest in readable events with oneshot mode.
+    #[must_use]
+    pub const fn oneshot() -> Self {
+        Self(Self::READABLE.0 | Self::ONESHOT.0)
+    }
+
+    /// Returns interest in readable events with edge-triggered mode.
+    #[must_use]
+    pub const fn clear() -> Self {
+        Self(Self::READABLE.0 | Self::EDGE_TRIGGERED.0)
+    }
+
+    /// Returns interest in readable events with dispatch mode.
+    #[must_use]
+    pub const fn dispatch() -> Self {
+        Self(Self::READABLE.0 | Self::DISPATCH.0)
     }
 }
 
@@ -264,6 +300,9 @@ impl std::fmt::Display for Interest {
         }
         if self.is_edge_triggered() {
             flags.push("EDGE_TRIGGERED");
+        }
+        if self.is_dispatch() {
+            flags.push("DISPATCH");
         }
         if flags.is_empty() {
             write!(f, "NONE")
@@ -334,6 +373,12 @@ mod tests {
             "EDGE_TRIGGERED bits",
             64,
             Interest::EDGE_TRIGGERED.bits()
+        );
+        crate::assert_with_log!(
+            Interest::DISPATCH.bits() == 128,
+            "DISPATCH bits",
+            128,
+            Interest::DISPATCH.bits()
         );
         crate::test_complete!("interest_constants");
     }
@@ -562,7 +607,7 @@ mod tests {
     #[test]
     fn interest_modes() {
         init_test("interest_modes");
-        let interest = Interest::READABLE.with_oneshot().with_edge_triggered();
+        let interest = Interest::READABLE.with_oneshot().with_edge_triggered().with_dispatch();
         crate::assert_with_log!(
             interest.is_readable(),
             "modes keep readable",
@@ -581,7 +626,65 @@ mod tests {
             true,
             interest.is_edge_triggered()
         );
+        crate::assert_with_log!(
+            interest.is_dispatch(),
+            "dispatch set",
+            true,
+            interest.is_dispatch()
+        );
         crate::test_complete!("interest_modes");
+    }
+
+    #[test]
+    fn interest_dispatch_helpers() {
+        init_test("interest_dispatch_helpers");
+
+        // Test dispatch helper method
+        let dispatch_interest = Interest::dispatch();
+        crate::assert_with_log!(
+            dispatch_interest.is_readable(),
+            "dispatch() includes readable",
+            true,
+            dispatch_interest.is_readable()
+        );
+        crate::assert_with_log!(
+            dispatch_interest.is_dispatch(),
+            "dispatch() includes dispatch",
+            true,
+            dispatch_interest.is_dispatch()
+        );
+
+        // Test oneshot helper method
+        let oneshot_interest = Interest::oneshot();
+        crate::assert_with_log!(
+            oneshot_interest.is_readable(),
+            "oneshot() includes readable",
+            true,
+            oneshot_interest.is_readable()
+        );
+        crate::assert_with_log!(
+            oneshot_interest.is_oneshot(),
+            "oneshot() includes oneshot",
+            true,
+            oneshot_interest.is_oneshot()
+        );
+
+        // Test clear helper method
+        let clear_interest = Interest::clear();
+        crate::assert_with_log!(
+            clear_interest.is_readable(),
+            "clear() includes readable",
+            true,
+            clear_interest.is_readable()
+        );
+        crate::assert_with_log!(
+            clear_interest.is_edge_triggered(),
+            "clear() includes edge_triggered",
+            true,
+            clear_interest.is_edge_triggered()
+        );
+
+        crate::test_complete!("interest_dispatch_helpers");
     }
 
     #[test]

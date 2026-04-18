@@ -143,9 +143,11 @@ fuzz_target!(|op: FuzzOperation| {
     let estimated_size = match &op {
         FuzzOperation::RoundTrip { data, .. } => data.to_bytes().len(),
         FuzzOperation::PartialFrames { data, .. } => data.to_bytes().len(),
-        FuzzOperation::ErrorRecovery { invalid_data, recovery_data, .. } => {
-            invalid_data.len() + recovery_data.to_bytes().len()
-        }
+        FuzzOperation::ErrorRecovery {
+            invalid_data,
+            recovery_data,
+            ..
+        } => invalid_data.len() + recovery_data.to_bytes().len(),
         FuzzOperation::CapacityGrowth { growth_pattern, .. } => {
             growth_pattern.iter().map(|d| d.to_bytes().len()).sum()
         }
@@ -162,13 +164,25 @@ fuzz_target!(|op: FuzzOperation| {
         FuzzOperation::RoundTrip { codec, data } => {
             fuzz_round_trip(codec, data);
         }
-        FuzzOperation::PartialFrames { codec, data, chunk_sizes } => {
+        FuzzOperation::PartialFrames {
+            codec,
+            data,
+            chunk_sizes,
+        } => {
             fuzz_partial_frames(codec, data, chunk_sizes);
         }
-        FuzzOperation::ErrorRecovery { codec, invalid_data, recovery_data } => {
+        FuzzOperation::ErrorRecovery {
+            codec,
+            invalid_data,
+            recovery_data,
+        } => {
             fuzz_error_recovery(codec, invalid_data, recovery_data);
         }
-        FuzzOperation::CapacityGrowth { codec, initial_capacity, growth_pattern } => {
+        FuzzOperation::CapacityGrowth {
+            codec,
+            initial_capacity,
+            growth_pattern,
+        } => {
             fuzz_capacity_growth(codec, initial_capacity, growth_pattern);
         }
         FuzzOperation::StatePersistence { codec, operations } => {
@@ -263,7 +277,6 @@ fn fuzz_round_trip(codec_type: CodecType, test_data: TestData) {
                 }
             }
         }
-
     }
 }
 
@@ -325,7 +338,8 @@ fn fuzz_partial_frames(codec_type: CodecType, test_data: TestData, chunk_sizes: 
             }
 
             // Partial frame oracle: decoded lines should be prefix of expected
-            let expected_lines: Vec<String> = test_lines.into_iter()
+            let expected_lines: Vec<String> = test_lines
+                .into_iter()
                 .filter(|line| !line.is_empty())
                 .collect();
 
@@ -338,7 +352,8 @@ fn fuzz_partial_frames(codec_type: CodecType, test_data: TestData, chunk_sizes: 
                 if i < expected_lines.len() {
                     assert_eq!(
                         decoded_line, &expected_lines[i],
-                        "Partial frame decoding corrupted line {}", i
+                        "Partial frame decoding corrupted line {}",
+                        i
                     );
                 }
             }
@@ -401,7 +416,11 @@ fn fuzz_error_recovery(codec_type: CodecType, invalid_data: Vec<u8>, recovery_da
 }
 
 /// (4) BytesMut capacity growth testing
-fn fuzz_capacity_growth(codec_type: CodecType, initial_capacity: u16, growth_pattern: Vec<TestData>) {
+fn fuzz_capacity_growth(
+    codec_type: CodecType,
+    initial_capacity: u16,
+    growth_pattern: Vec<TestData>,
+) {
     let mut encode_buf = BytesMut::with_capacity(initial_capacity as usize);
     let _initial_cap = encode_buf.capacity();
 
@@ -425,7 +444,9 @@ fn fuzz_capacity_growth(codec_type: CodecType, initial_capacity: u16, growth_pat
                 // Capacity growth oracle: capacity should never decrease
                 assert!(
                     capacity_after >= capacity_before,
-                    "Capacity decreased: {} -> {}", capacity_before, capacity_after
+                    "Capacity decreased: {} -> {}",
+                    capacity_before,
+                    capacity_after
                 );
 
                 // Length should increase (data was added)
@@ -437,7 +458,9 @@ fn fuzz_capacity_growth(codec_type: CodecType, initial_capacity: u16, growth_pat
                 // Capacity should be reasonable (not excessive growth)
                 assert!(
                     capacity_after <= len_after * 4,
-                    "Excessive capacity growth: capacity={}, len={}", capacity_after, len_after
+                    "Excessive capacity growth: capacity={}, len={}",
+                    capacity_after,
+                    len_after
                 );
             }
         }

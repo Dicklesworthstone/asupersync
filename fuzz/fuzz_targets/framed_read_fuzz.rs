@@ -11,13 +11,13 @@
 //! 6. Cancel safety and state preservation across polls
 //! 7. Buffer growth and reallocation edge cases
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::io;
 use std::pin::Pin;
-use std::task::{Context, Poll, Wake, Waker};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
 use asupersync::bytes::BytesMut;
 use asupersync::codec::{Decoder, FramedRead};
@@ -168,7 +168,7 @@ impl AsyncRead for MockAsyncReader {
         if this.error_points.contains(&this.reads_count) {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
-                "mock reader error"
+                "mock reader error",
             )));
         }
 
@@ -282,9 +282,7 @@ impl Decoder for MockDecoder {
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         match self.decoder_type {
-            DecoderType::AlwaysError => {
-                Err(MockDecodeError::InvalidFrame)
-            }
+            DecoderType::AlwaysError => Err(MockDecodeError::InvalidFrame),
             DecoderType::AlwaysPartial => {
                 // Never completes, always needs more data
                 Ok(None)
@@ -349,9 +347,7 @@ impl Decoder for MockDecoder {
         self.eof_called = true;
 
         match self.decoder_type {
-            DecoderType::AlwaysError => {
-                Err(MockDecodeError::InvalidFrame)
-            }
+            DecoderType::AlwaysError => Err(MockDecodeError::InvalidFrame),
             DecoderType::AlwaysPartial => {
                 // Even at EOF, never completes
                 Ok(None)
@@ -370,12 +366,11 @@ impl Decoder for MockDecoder {
                             let frame = src.split_to(src.len());
                             Ok(Some(frame.to_vec()))
                         }
-                        _ => {
-                            Err(io::Error::new(
-                                io::ErrorKind::UnexpectedEof,
-                                "incomplete frame at EOF"
-                            ).into())
-                        }
+                        _ => Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "incomplete frame at EOF",
+                        )
+                        .into()),
                     }
                 } else {
                     Ok(None)
@@ -487,7 +482,10 @@ fn normalize_fuzz_input(input: &mut FramedReadFuzzInput) {
 
     // Ensure we have some data to work with
     if input.reader_config.data_chunks.is_empty() {
-        input.reader_config.data_chunks.push(vec![b'a', input.decoder_config.delimiter, b'b']);
+        input
+            .reader_config
+            .data_chunks
+            .push(vec![b'a', input.decoder_config.delimiter, b'b']);
     }
 }
 

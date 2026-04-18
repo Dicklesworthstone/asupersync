@@ -263,7 +263,7 @@ fuzz_target!(|input: &[u8]| {
 
                     if len > 0 {
                         // Test all critical boundaries
-                        let boundaries = vec![0, 1, len/2, len.saturating_sub(1), len];
+                        let boundaries = vec![0, 1, len / 2, len.saturating_sub(1), len];
 
                         for &start in &boundaries {
                             for &end in &boundaries {
@@ -282,7 +282,7 @@ fuzz_target!(|input: &[u8]| {
 
                         // Test single-byte slices at all positions
                         for i in 0..len {
-                            let single = bytes.slice(i..i+1);
+                            let single = bytes.slice(i..i + 1);
                             assert_eq!(single.len(), 1);
                             assert_eq!(single[0], bytes[i]);
                         }

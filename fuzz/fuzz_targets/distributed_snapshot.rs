@@ -161,7 +161,9 @@ enum TaskStateConfig {
     Cancelled,
     Panicked,
     /// Invalid task state byte
-    Invalid { state_byte: u8 },
+    Invalid {
+        state_byte: u8,
+    },
 }
 
 /// Budget configuration
@@ -181,9 +183,14 @@ struct BudgetConfig {
 #[allow(dead_code)]
 enum OptionalU64Config {
     None,
-    Some { value: u64 },
+    Some {
+        value: u64,
+    },
     /// Invalid presence flag
-    Invalid { flag: u8, value: u64 },
+    Invalid {
+        flag: u8,
+        value: u64,
+    },
 }
 
 /// Optional U32 value configuration
@@ -191,9 +198,14 @@ enum OptionalU64Config {
 #[allow(dead_code)]
 enum OptionalU32Config {
     None,
-    Some { value: u32 },
+    Some {
+        value: u32,
+    },
     /// Invalid presence flag
-    Invalid { flag: u8, value: u32 },
+    Invalid {
+        flag: u8,
+        value: u32,
+    },
 }
 
 /// Optional string configuration
@@ -201,11 +213,19 @@ enum OptionalU32Config {
 #[allow(dead_code)]
 enum OptionalStringConfig {
     None,
-    Some { content: String },
+    Some {
+        content: String,
+    },
     /// Invalid presence flag
-    InvalidFlag { flag: u8, content: String },
+    InvalidFlag {
+        flag: u8,
+        content: String,
+    },
     /// Invalid UTF-8 bytes
-    InvalidUtf8 { flag: u8, bytes: Vec<u8> },
+    InvalidUtf8 {
+        flag: u8,
+        bytes: Vec<u8>,
+    },
 }
 
 /// Optional ID configuration
@@ -213,9 +233,14 @@ enum OptionalStringConfig {
 #[allow(dead_code)]
 enum OptionalIdConfig {
     None,
-    Some { id: IdConfig },
+    Some {
+        id: IdConfig,
+    },
     /// Invalid presence flag
-    Invalid { flag: u8, id: IdConfig },
+    Invalid {
+        flag: u8,
+        id: IdConfig,
+    },
 }
 
 /// Snapshot manipulation operations to test
@@ -227,13 +252,20 @@ enum SnapshotOperation {
     /// Change version byte
     ChangeVersion { version: u8 },
     /// Inject invalid state byte
-    InjectInvalidState { position: StatePosition, state_byte: u8 },
+    InjectInvalidState {
+        position: StatePosition,
+        state_byte: u8,
+    },
     /// Truncate data at specific position
     TruncateAt { position: u16 },
     /// Add trailing bytes
     AddTrailingBytes { bytes: Vec<u8> },
     /// Corrupt count fields
-    CorruptCounts { task_count: u32, children_count: u32, metadata_len: u32 },
+    CorruptCounts {
+        task_count: u32,
+        children_count: u32,
+        metadata_len: u32,
+    },
     /// Inject invalid presence flags
     CorruptPresenceFlags { flags: Vec<u8> },
     /// Corrupt string encoding
@@ -243,7 +275,10 @@ enum SnapshotOperation {
     /// Inject boundary values
     InjectBoundaryValues { boundary_type: BoundaryType },
     /// Create partial field corruption
-    PartialFieldCorruption { field: FieldType, corruption: Vec<u8> },
+    PartialFieldCorruption {
+        field: FieldType,
+        corruption: Vec<u8>,
+    },
 }
 
 /// State injection positions
@@ -324,7 +359,9 @@ fn build_base_snapshot(config: &SnapshotConfig) -> RegionSnapshot {
     snapshot.finalizer_count = config.finalizer_count;
 
     // Limit metadata size to prevent OOM
-    let limited_metadata = config.metadata.iter()
+    let limited_metadata = config
+        .metadata
+        .iter()
         .take(MAX_INPUT_SIZE / 4)
         .cloned()
         .collect();
@@ -339,14 +376,18 @@ fn build_base_snapshot(config: &SnapshotConfig) -> RegionSnapshot {
             TaskStateConfig::Completed => asupersync::distributed::snapshot::TaskState::Completed,
             TaskStateConfig::Cancelled => asupersync::distributed::snapshot::TaskState::Cancelled,
             TaskStateConfig::Panicked => asupersync::distributed::snapshot::TaskState::Panicked,
-            TaskStateConfig::Invalid { .. } => asupersync::distributed::snapshot::TaskState::Pending, // Use valid default
+            TaskStateConfig::Invalid { .. } => {
+                asupersync::distributed::snapshot::TaskState::Pending
+            } // Use valid default
         };
 
-        snapshot.tasks.push(asupersync::distributed::snapshot::TaskSnapshot {
-            task_id,
-            state: task_state,
-            priority: task_config.priority,
-        });
+        snapshot
+            .tasks
+            .push(asupersync::distributed::snapshot::TaskSnapshot {
+                task_id,
+                state: task_state,
+                priority: task_config.priority,
+            });
     }
 
     // Add child regions (limited)
@@ -375,15 +416,19 @@ fn apply_operation(
             }
         }
 
-        SnapshotOperation::InjectInvalidState { position, state_byte } => {
+        SnapshotOperation::InjectInvalidState {
+            position,
+            state_byte,
+        } => {
             let offset = match position {
                 StatePosition::RegionState => Some(13), // After magic(4) + version(1) + region_id(8)
                 StatePosition::TaskState => find_task_state_offset(snapshot_bytes),
             };
             if let Some(offset) = offset
-                && snapshot_bytes.len() > offset {
-                    snapshot_bytes[offset] = *state_byte;
-                }
+                && snapshot_bytes.len() > offset
+            {
+                snapshot_bytes[offset] = *state_byte;
+            }
         }
 
         SnapshotOperation::TruncateAt { position } => {
@@ -396,35 +441,43 @@ fn apply_operation(
             snapshot_bytes.extend_from_slice(&limited_bytes);
         }
 
-        SnapshotOperation::CorruptCounts { task_count, children_count, metadata_len } => {
+        SnapshotOperation::CorruptCounts {
+            task_count,
+            children_count,
+            metadata_len,
+        } => {
             // Find and corrupt the task count field (after sequence field)
             if let Some(task_count_offset) = find_task_count_offset()
-                && snapshot_bytes.len() >= task_count_offset + 4 {
-                    let bytes = task_count.to_le_bytes();
-                    snapshot_bytes[task_count_offset..task_count_offset + 4].copy_from_slice(&bytes);
-                }
+                && snapshot_bytes.len() >= task_count_offset + 4
+            {
+                let bytes = task_count.to_le_bytes();
+                snapshot_bytes[task_count_offset..task_count_offset + 4].copy_from_slice(&bytes);
+            }
 
             // Similar for children count and metadata length
             if let Some(children_offset) = find_children_count_offset(snapshot_bytes)
-                && snapshot_bytes.len() >= children_offset + 4 {
-                    let bytes = children_count.to_le_bytes();
-                    snapshot_bytes[children_offset..children_offset + 4].copy_from_slice(&bytes);
-                }
+                && snapshot_bytes.len() >= children_offset + 4
+            {
+                let bytes = children_count.to_le_bytes();
+                snapshot_bytes[children_offset..children_offset + 4].copy_from_slice(&bytes);
+            }
 
             if let Some(metadata_offset) = find_metadata_length_offset(snapshot_bytes)
-                && snapshot_bytes.len() >= metadata_offset + 4 {
-                    let bytes = metadata_len.to_le_bytes();
-                    snapshot_bytes[metadata_offset..metadata_offset + 4].copy_from_slice(&bytes);
-                }
+                && snapshot_bytes.len() >= metadata_offset + 4
+            {
+                let bytes = metadata_len.to_le_bytes();
+                snapshot_bytes[metadata_offset..metadata_offset + 4].copy_from_slice(&bytes);
+            }
         }
 
         SnapshotOperation::CorruptPresenceFlags { flags } => {
             // Inject invalid presence flags at various optional field positions
             for (i, &flag) in flags.iter().take(8).enumerate() {
                 if let Some(offset) = find_presence_flag_offset(snapshot_bytes, i)
-                    && snapshot_bytes.len() > offset {
-                        snapshot_bytes[offset] = flag;
-                    }
+                    && snapshot_bytes.len() > offset
+                {
+                    snapshot_bytes[offset] = flag;
+                }
             }
         }
 
@@ -486,7 +539,7 @@ fn apply_operation(
 
         SnapshotOperation::PartialFieldCorruption { field, corruption } => {
             let offset = match field {
-                FieldType::RegionId => Some(5),  // After magic + version
+                FieldType::RegionId => Some(5), // After magic + version
                 FieldType::TaskId => find_task_id_offset(snapshot_bytes),
                 FieldType::Timestamp => Some(14),
                 FieldType::Sequence => Some(22),
@@ -554,7 +607,12 @@ fn find_children_count_offset(data: &[u8]) -> Option<usize> {
     let task_count_offset = 30;
     if data.len() > task_count_offset + 4 {
         let task_count_bytes = &data[task_count_offset..task_count_offset + 4];
-        let task_count = u32::from_le_bytes([task_count_bytes[0], task_count_bytes[1], task_count_bytes[2], task_count_bytes[3]]);
+        let task_count = u32::from_le_bytes([
+            task_count_bytes[0],
+            task_count_bytes[1],
+            task_count_bytes[2],
+            task_count_bytes[3],
+        ]);
         let tasks_size = (task_count as usize).saturating_mul(10); // Each task is 10 bytes
         Some(task_count_offset + 4 + tasks_size)
     } else {
@@ -608,7 +666,7 @@ fn find_finalizer_count_offset(data: &[u8]) -> Option<usize> {
                 children_count_bytes[0],
                 children_count_bytes[1],
                 children_count_bytes[2],
-                children_count_bytes[3]
+                children_count_bytes[3],
             ]);
             let children_size = (children_count as usize).saturating_mul(8); // Each child is 8 bytes
             Some(children_offset + 4 + children_size)

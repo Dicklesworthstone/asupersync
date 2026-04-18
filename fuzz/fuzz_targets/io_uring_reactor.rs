@@ -75,37 +75,37 @@ impl Drop for MockSource {
 #[derive(Debug, Clone, Arbitrary)]
 struct IoUringFuzzConfig {
     // Registration operations
-    register_count: u8,           // 0-255 registrations
-    invalid_fd_probability: u8,   // 0-100 (%)
+    register_count: u8,              // 0-255 registrations
+    invalid_fd_probability: u8,      // 0-100 (%)
     duplicate_token_probability: u8, // 0-100 (%)
-    modify_operations: u8,        // 0-255 modifications
+    modify_operations: u8,           // 0-255 modifications
 
     // Poll operations
-    poll_iterations: u8,          // 0-255 polls
+    poll_iterations: u8, // 0-255 polls
     timeout_mode: TimeoutMode,
-    wake_probability: u8,         // 0-100 (%) per poll
+    wake_probability: u8, // 0-100 (%) per poll
 
     // (interest_flags and close_fd_probability removed - unused in fuzzing logic)
 
     // Timing
-    timeout_millis: u16,          // 0-65535 milliseconds
+    timeout_millis: u16, // 0-65535 milliseconds
 
     chaos_seed: u64,
 }
 
 #[derive(Debug, Clone, Arbitrary)]
 enum TimeoutMode {
-    None,           // No timeout
-    Zero,           // Zero timeout
-    Short,          // timeout_millis
-    Long,           // timeout_millis * 10
+    None,  // No timeout
+    Zero,  // Zero timeout
+    Short, // timeout_millis
+    Long,  // timeout_millis * 10
 }
 
 #[derive(Debug, Clone, Arbitrary)]
 struct ReactorOperation {
     op_type: OperationType,
-    token: u8,                    // 0-255 for token values
-    interest: u8,                 // Bitmask for interest flags
+    token: u8,    // 0-255 for token values
+    interest: u8, // Bitmask for interest flags
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -130,7 +130,6 @@ impl IoUringFuzzConfig {
     fn wake_prob_f64(&self) -> f64 {
         (self.wake_probability as f64) / 100.0
     }
-
 
     fn get_timeout(&self) -> Option<Duration> {
         match self.timeout_mode {
@@ -176,7 +175,9 @@ struct FuzzRng {
 
 impl FuzzRng {
     fn new(seed: u64) -> Self {
-        Self { state: seed.wrapping_add(1) }
+        Self {
+            state: seed.wrapping_add(1),
+        }
     }
 
     fn next_bool(&mut self, probability: f64) -> bool {
@@ -213,7 +214,7 @@ fn test_registration_edge_cases(config: &IoUringFuzzConfig, reactor: &IoUringRea
                 Ok((read_end, _write_end)) => {
                     sources.push(_write_end); // Keep write end alive
                     read_end
-                },
+                }
                 Err(_) => MockSource::invalid(),
             }
         };
@@ -314,10 +315,10 @@ fn test_poll_operations(config: &IoUringFuzzConfig, reactor: &IoUringReactor) {
                         let ready = event.ready;
                         assert!(
                             ready.is_readable()
-                            || ready.is_writable()
-                            || ready.is_priority()
-                            || ready.is_error()
-                            || ready.is_hup()
+                                || ready.is_writable()
+                                || ready.is_priority()
+                                || ready.is_error()
+                                || ready.is_hup()
                         );
                     }
                 }
@@ -376,10 +377,20 @@ fn test_interest_roundtrips(config: &IoUringFuzzConfig) {
         Interest::READABLE.add(Interest::ERROR),
         Interest::READABLE.add(Interest::HUP),
         Interest::WRITABLE.add(Interest::ERROR),
-        Interest::READABLE.add(Interest::WRITABLE).add(Interest::PRIORITY),
-        Interest::READABLE.add(Interest::WRITABLE).add(Interest::ERROR),
-        Interest::READABLE.add(Interest::WRITABLE).add(Interest::HUP),
-        Interest::READABLE.add(Interest::WRITABLE).add(Interest::PRIORITY).add(Interest::ERROR).add(Interest::HUP),
+        Interest::READABLE
+            .add(Interest::WRITABLE)
+            .add(Interest::PRIORITY),
+        Interest::READABLE
+            .add(Interest::WRITABLE)
+            .add(Interest::ERROR),
+        Interest::READABLE
+            .add(Interest::WRITABLE)
+            .add(Interest::HUP),
+        Interest::READABLE
+            .add(Interest::WRITABLE)
+            .add(Interest::PRIORITY)
+            .add(Interest::ERROR)
+            .add(Interest::HUP),
     ];
 
     // Also test fuzzer-generated interest combinations
@@ -524,16 +535,19 @@ fuzz_target!(|data: (IoUringFuzzConfig, Vec<ReactorOperation>)| {
     let mut registered_tokens = std::collections::HashSet::new();
     let mut rng = FuzzRng::new(config.chaos_seed.wrapping_add(5));
 
-    for operation in operations.iter().take(64) { // Limit operations to prevent excessive test time
+    for operation in operations.iter().take(64) {
+        // Limit operations to prevent excessive test time
         match operation.op_type {
             OperationType::Register => {
-                if registered_tokens.len() < 16 { // Limit registrations
+                if registered_tokens.len() < 16 {
+                    // Limit registrations
                     let token = Token::new(operation.token as usize);
                     let interest = config.interest_from_flags(operation.interest);
 
                     if !registered_tokens.contains(&token)
                         && let Ok((read_end, write_end)) = MockSource::from_valid_pipe()
-                        && reactor.register(&read_end, token, interest).is_ok() {
+                        && reactor.register(&read_end, token, interest).is_ok()
+                    {
                         registered_tokens.insert(token);
                         sources.push((token, read_end, write_end));
                     }
