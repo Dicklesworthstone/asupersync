@@ -533,6 +533,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_distributed_bridge"
+path = "fuzz_targets/distributed_bridge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_trace_streaming"
 path = "fuzz_targets/trace_streaming.rs"
 test = false
