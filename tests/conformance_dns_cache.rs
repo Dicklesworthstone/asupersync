@@ -93,7 +93,13 @@ impl DnsCacheConformance for DnsCache {
 
     fn get_statistics(&self) -> (usize, u64, u64, u64, f64) {
         let stats = self.stats();
-        (stats.size, stats.hits, stats.misses, stats.evictions, stats.hit_rate)
+        (
+            stats.size,
+            stats.hits,
+            stats.misses,
+            stats.evictions,
+            stats.hit_rate,
+        )
     }
 
     fn clear_cache(&self) {
@@ -155,7 +161,7 @@ fn test_ttl_clamping_min_max() {
 
     let config = CacheConfig {
         max_entries: 100,
-        min_ttl: Duration::from_secs(300), // 5 minutes minimum
+        min_ttl: Duration::from_secs(300),  // 5 minutes minimum
         max_ttl: Duration::from_secs(1800), // 30 minutes maximum
         negative_ttl: Duration::from_secs(60),
     };
@@ -197,7 +203,7 @@ fn test_nxdomain_negative_caching() {
 
     // Verify negative result is cached
     match cache.get_cached_result("nonexistent.com") {
-        Some(Err(DnsError::NoRecords(_))) => {}, // Expected
+        Some(Err(DnsError::NoRecords(_))) => {} // Expected
         other => panic!("Expected cached negative result, got: {:?}", other),
     }
 
@@ -238,11 +244,20 @@ fn test_cache_capacity_and_lru_eviction() {
     let ip4 = IpAddr::V4(Ipv4Addr::new(4, 4, 4, 4));
 
     // Fill cache to capacity
-    cache.cache_positive_result("host1.com", &create_test_lookup("host1.com", ip1, Duration::from_secs(300)));
+    cache.cache_positive_result(
+        "host1.com",
+        &create_test_lookup("host1.com", ip1, Duration::from_secs(300)),
+    );
     advance_time_by(Duration::from_millis(10)); // Ensure different insertion times
-    cache.cache_positive_result("host2.com", &create_test_lookup("host2.com", ip2, Duration::from_secs(300)));
+    cache.cache_positive_result(
+        "host2.com",
+        &create_test_lookup("host2.com", ip2, Duration::from_secs(300)),
+    );
     advance_time_by(Duration::from_millis(10));
-    cache.cache_positive_result("host3.com", &create_test_lookup("host3.com", ip3, Duration::from_secs(300)));
+    cache.cache_positive_result(
+        "host3.com",
+        &create_test_lookup("host3.com", ip3, Duration::from_secs(300)),
+    );
 
     let (size, _, _, evictions, _) = cache.get_statistics();
     assert_eq!(size, 3);
@@ -256,7 +271,10 @@ fn test_cache_capacity_and_lru_eviction() {
     advance_time_by(Duration::from_millis(10));
 
     // Adding fourth entry should evict oldest (host1.com)
-    cache.cache_positive_result("host4.com", &create_test_lookup("host4.com", ip4, Duration::from_secs(300)));
+    cache.cache_positive_result(
+        "host4.com",
+        &create_test_lookup("host4.com", ip4, Duration::from_secs(300)),
+    );
 
     let (size, _, _, evictions, _) = cache.get_statistics();
     assert_eq!(size, 3);
@@ -368,9 +386,15 @@ fn test_cache_update_vs_new_entry_eviction() {
     let ip3 = IpAddr::V4(Ipv4Addr::new(3, 3, 3, 3));
 
     // Fill cache to capacity
-    cache.cache_positive_result("host1.com", &create_test_lookup("host1.com", ip1, Duration::from_secs(300)));
+    cache.cache_positive_result(
+        "host1.com",
+        &create_test_lookup("host1.com", ip1, Duration::from_secs(300)),
+    );
     advance_time_by(Duration::from_millis(10));
-    cache.cache_positive_result("host2.com", &create_test_lookup("host2.com", ip2, Duration::from_secs(300)));
+    cache.cache_positive_result(
+        "host2.com",
+        &create_test_lookup("host2.com", ip2, Duration::from_secs(300)),
+    );
 
     let (size, _, _, evictions, _) = cache.get_statistics();
     assert_eq!(size, 2);
@@ -380,7 +404,10 @@ fn test_cache_update_vs_new_entry_eviction() {
 
     // Update existing entry (should not trigger eviction)
     let updated_ip1 = IpAddr::V4(Ipv4Addr::new(10, 1, 1, 1));
-    cache.cache_positive_result("host1.com", &create_test_lookup("host1.com", updated_ip1, Duration::from_secs(300)));
+    cache.cache_positive_result(
+        "host1.com",
+        &create_test_lookup("host1.com", updated_ip1, Duration::from_secs(300)),
+    );
 
     let (size, _, _, evictions, _) = cache.get_statistics();
     assert_eq!(size, 2); // Still 2 entries
@@ -396,7 +423,10 @@ fn test_cache_update_vs_new_entry_eviction() {
     advance_time_by(Duration::from_millis(10));
 
     // Adding new entry should trigger eviction of oldest
-    cache.cache_positive_result("host3.com", &create_test_lookup("host3.com", ip3, Duration::from_secs(300)));
+    cache.cache_positive_result(
+        "host3.com",
+        &create_test_lookup("host3.com", ip3, Duration::from_secs(300)),
+    );
 
     let (size, _, _, evictions, _) = cache.get_statistics();
     assert_eq!(size, 2);
@@ -432,12 +462,12 @@ fn test_mixed_positive_negative_caching() {
     assert!(cache.get_cached_ip("nonexistent.com").is_none());
 
     match cache.get_cached_result("exists.com") {
-        Some(Ok(_)) => {},
+        Some(Ok(_)) => {}
         other => panic!("Expected positive result, got: {:?}", other),
     }
 
     match cache.get_cached_result("nonexistent.com") {
-        Some(Err(DnsError::NoRecords(_))) => {},
+        Some(Err(DnsError::NoRecords(_))) => {}
         other => panic!("Expected negative result, got: {:?}", other),
     }
 
@@ -544,7 +574,7 @@ fn test_statistics_accuracy() {
     let (_, hits, misses, _, hit_rate) = cache.get_statistics();
     assert_eq!(hits, 2);
     assert_eq!(misses, 1);
-    assert!((hit_rate - (2.0/3.0)).abs() < f64::EPSILON); // 2 hits / 3 total = 0.667
+    assert!((hit_rate - (2.0 / 3.0)).abs() < f64::EPSILON); // 2 hits / 3 total = 0.667
 
     // Expire entry and trigger eviction stat
     advance_time_by(Duration::from_secs(400));

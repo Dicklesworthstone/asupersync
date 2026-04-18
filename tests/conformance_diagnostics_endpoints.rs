@@ -16,7 +16,7 @@ use asupersync::record::{ObligationKind, ObligationState};
 use asupersync::runtime::state::RuntimeState;
 use asupersync::test_utils::VirtualClock;
 use asupersync::time::TimerDriverHandle;
-use asupersync::types::{Budget, CancelReason, Outcome, Time, TaskId, RegionId, ObligationId};
+use asupersync::types::{Budget, CancelReason, ObligationId, Outcome, RegionId, TaskId, Time};
 use asupersync::util::ArenaIndex;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Barrier, Mutex};
@@ -43,9 +43,15 @@ fn setup_complex_runtime() -> Arc<RuntimeState> {
     let root = state.create_root_region(Budget::INFINITE);
 
     // Create nested region hierarchy
-    let child1 = state.create_child_region(root, Budget::from_millis(1000)).unwrap();
-    let child2 = state.create_child_region(root, Budget::from_millis(2000)).unwrap();
-    let grandchild = state.create_child_region(child1, Budget::from_millis(500)).unwrap();
+    let child1 = state
+        .create_child_region(root, Budget::from_millis(1000))
+        .unwrap();
+    let child2 = state
+        .create_child_region(root, Budget::from_millis(2000))
+        .unwrap();
+    let grandchild = state
+        .create_child_region(child1, Budget::from_millis(500))
+        .unwrap();
 
     // Create various task states
     let _running_task = state.spawn_task(child1, Budget::from_millis(100), None);
@@ -73,7 +79,9 @@ fn setup_deadline_runtime() -> Arc<RuntimeState> {
     state.set_timer_driver(TimerDriverHandle::with_virtual_clock(virtual_clock));
 
     let root = state.create_root_region(Budget::INFINITE);
-    let child = state.create_child_region(root, Budget::from_millis(5000)).unwrap();
+    let child = state
+        .create_child_region(root, Budget::from_millis(5000))
+        .unwrap();
     let task = state.spawn_task(child, Budget::from_millis(100), None);
 
     // Create some obligations to test leak detection
@@ -106,8 +114,8 @@ fn test_endpoint_api_contract_stability() {
             matches!(
                 health.classification,
                 HealthClassification::Healthy
-                | HealthClassification::Degraded
-                | HealthClassification::Deadlocked
+                    | HealthClassification::Degraded
+                    | HealthClassification::Deadlocked
             ),
             "{}: health analysis returns valid classification",
             name
@@ -156,13 +164,16 @@ fn test_endpoint_api_contract_stability() {
         for (_, region) in state.regions_iter() {
             let explanation = diagnostics.explain_region_open(region.id);
             assert_eq!(
-                explanation.region_id,
-                region.id,
+                explanation.region_id, region.id,
                 "{}: explanation matches requested region",
                 name
             );
             assert!(
-                explanation.region_state.is_some() || explanation.reasons.iter().any(|r| matches!(r, Reason::RegionNotFound)),
+                explanation.region_state.is_some()
+                    || explanation
+                        .reasons
+                        .iter()
+                        .any(|r| matches!(r, Reason::RegionNotFound)),
                 "{}: either region state is provided or not found reason is given",
                 name
             );
@@ -172,13 +183,13 @@ fn test_endpoint_api_contract_stability() {
         for (_, task) in state.tasks_iter() {
             let explanation = diagnostics.explain_task_blocked(task.id);
             assert_eq!(
-                explanation.task_id,
-                task.id,
+                explanation.task_id, task.id,
                 "{}: explanation matches requested task",
                 name
             );
             assert!(
-                !explanation.recommendations.is_empty() || matches!(explanation.block_reason, BlockReason::TaskNotFound),
+                !explanation.recommendations.is_empty()
+                    || matches!(explanation.block_reason, BlockReason::TaskNotFound),
                 "{}: recommendations provided for valid tasks",
                 name
             );
@@ -265,19 +276,30 @@ fn test_endpoint_concurrent_access_safety() {
             // Concurrent structural health analysis
             for _ in 0..5 {
                 let health = diagnostics.analyze_structural_health();
-                thread_results.push(format!("thread-{}: health.radius={:.3}", thread_id, health.spectral_radius));
+                thread_results.push(format!(
+                    "thread-{}: health.radius={:.3}",
+                    thread_id, health.spectral_radius
+                ));
             }
 
             // Concurrent deadlock analysis
             for _ in 0..5 {
                 let deadlock = diagnostics.analyze_directional_deadlock();
-                thread_results.push(format!("thread-{}: deadlock.risk={:.3}", thread_id, deadlock.risk_score));
+                thread_results.push(format!(
+                    "thread-{}: deadlock.risk={:.3}",
+                    thread_id, deadlock.risk_score
+                ));
             }
 
             // Concurrent region explanations
             for (_, region) in state.regions_iter().take(3) {
                 let explanation = diagnostics.explain_region_open(region.id);
-                thread_results.push(format!("thread-{}: region-{:?}.reasons={}", thread_id, region.id, explanation.reasons.len()));
+                thread_results.push(format!(
+                    "thread-{}: region-{:?}.reasons={}",
+                    thread_id,
+                    region.id,
+                    explanation.reasons.len()
+                ));
             }
 
             // Concurrent leak detection
@@ -373,7 +395,10 @@ fn test_endpoint_error_handling_robustness() {
 
     let region_explanation = diagnostics.explain_region_open(invalid_region);
     assert!(
-        matches!(region_explanation.reasons.first(), Some(Reason::RegionNotFound)),
+        matches!(
+            region_explanation.reasons.first(),
+            Some(Reason::RegionNotFound)
+        ),
         "invalid region ID handled gracefully"
     );
     assert!(!region_explanation.recommendations.is_empty());
@@ -424,13 +449,11 @@ fn test_endpoint_deterministic_behavior() {
     // Verify health analysis determinism
     for i in 1..health_results.len() {
         assert_eq!(
-            health_results[0].classification,
-            health_results[i].classification,
+            health_results[0].classification, health_results[i].classification,
             "health classification is deterministic"
         );
         assert_eq!(
-            health_results[0].spectral_radius,
-            health_results[i].spectral_radius,
+            health_results[0].spectral_radius, health_results[i].spectral_radius,
             "spectral radius is deterministic"
         );
     }
@@ -438,13 +461,11 @@ fn test_endpoint_deterministic_behavior() {
     // Verify deadlock analysis determinism
     for i in 1..deadlock_results.len() {
         assert_eq!(
-            deadlock_results[0].severity,
-            deadlock_results[i].severity,
+            deadlock_results[0].severity, deadlock_results[i].severity,
             "deadlock severity is deterministic"
         );
         assert_eq!(
-            deadlock_results[0].risk_score,
-            deadlock_results[i].risk_score,
+            deadlock_results[0].risk_score, deadlock_results[i].risk_score,
             "deadlock risk score is deterministic"
         );
         assert_eq!(
@@ -508,7 +529,8 @@ fn test_advanced_observability_contract_completeness() {
         AdvancedEventClass::VerificationGovernance,
     ];
 
-    let contract_class_ids: HashSet<String> = contract.event_classes
+    let contract_class_ids: HashSet<String> = contract
+        .event_classes
         .iter()
         .map(|spec| spec.class_id.clone())
         .collect();
@@ -529,7 +551,8 @@ fn test_advanced_observability_contract_completeness() {
         AdvancedSeverity::Critical,
     ];
 
-    let contract_severities: HashSet<String> = contract.severity_semantics
+    let contract_severities: HashSet<String> = contract
+        .severity_semantics
         .iter()
         .map(|spec| spec.severity.clone())
         .collect();
@@ -553,7 +576,8 @@ fn test_advanced_observability_contract_completeness() {
         TroubleshootingDimension::RuntimeInvariant,
     ];
 
-    let contract_dimensions: HashSet<String> = contract.troubleshooting_dimensions
+    let contract_dimensions: HashSet<String> = contract
+        .troubleshooting_dimensions
         .iter()
         .map(|spec| spec.dimension.clone())
         .collect();
@@ -614,7 +638,8 @@ fn test_tail_latency_taxonomy_contract_completeness() {
     }
 
     // Verify required log fields are comprehensive
-    let required_fields: HashSet<String> = contract.required_log_fields
+    let required_fields: HashSet<String> = contract
+        .required_log_fields
         .iter()
         .map(|field| field.key.clone())
         .collect();
@@ -638,7 +663,9 @@ fn test_endpoint_integration_with_real_scenarios() {
 
     // Create many child regions and tasks to simulate contention
     for i in 0..20 {
-        let child = contention_state.create_child_region(root, Budget::from_millis(100)).unwrap();
+        let child = contention_state
+            .create_child_region(root, Budget::from_millis(100))
+            .unwrap();
         for j in 0..5 {
             let task = contention_state.spawn_task(child, Budget::from_millis(10), None);
 
@@ -647,14 +674,18 @@ fn test_endpoint_integration_with_real_scenarios() {
                 match (i + j) % 4 {
                     0 => task_record.state = TaskState::Running,
                     1 => task_record.state = TaskState::Completed(Outcome::Ok(())),
-                    2 => task_record.state = TaskState::CancelRequested {
-                        reason: CancelReason::user("load test"),
-                        cleanup_budget: Budget::from_millis(50),
-                    },
-                    _ => task_record.state = TaskState::Finalizing {
-                        reason: CancelReason::user("cleanup"),
-                        cleanup_budget: Budget::from_millis(25),
-                    },
+                    2 => {
+                        task_record.state = TaskState::CancelRequested {
+                            reason: CancelReason::user("load test"),
+                            cleanup_budget: Budget::from_millis(50),
+                        }
+                    }
+                    _ => {
+                        task_record.state = TaskState::Finalizing {
+                            reason: CancelReason::user("cleanup"),
+                            cleanup_budget: Budget::from_millis(25),
+                        }
+                    }
                 }
             }
         }
@@ -665,7 +696,10 @@ fn test_endpoint_integration_with_real_scenarios() {
     // Test that diagnostics handle high contention gracefully
     let health = contention_diagnostics.analyze_structural_health();
     assert!(
-        matches!(health.classification, HealthClassification::Healthy | HealthClassification::Degraded),
+        matches!(
+            health.classification,
+            HealthClassification::Healthy | HealthClassification::Degraded
+        ),
         "high contention scenario produces valid health classification"
     );
 
@@ -675,13 +709,19 @@ fn test_endpoint_integration_with_real_scenarios() {
     // Scenario 2: Memory pressure scenario with many obligations
     let mut pressure_state = RuntimeState::new();
     let root = pressure_state.create_root_region(Budget::INFINITE);
-    let child = pressure_state.create_child_region(root, Budget::from_millis(1000)).unwrap();
+    let child = pressure_state
+        .create_child_region(root, Budget::from_millis(1000))
+        .unwrap();
     let task = pressure_state.spawn_task(child, Budget::from_millis(100), None);
 
     // Create many obligations to simulate memory pressure
     for i in 0..100 {
         let _obligation = pressure_state.obligation_table.reserve(
-            if i % 2 == 0 { ObligationKind::Permit } else { ObligationKind::Ack },
+            if i % 2 == 0 {
+                ObligationKind::Permit
+            } else {
+                ObligationKind::Ack
+            },
             child,
             task,
             Time::from_millis(1000 + i as u64 * 10),
@@ -692,7 +732,11 @@ fn test_endpoint_integration_with_real_scenarios() {
 
     // Test obligation leak detection under pressure
     let leaks = pressure_diagnostics.find_leaked_obligations();
-    assert_eq!(leaks.len(), 100, "all obligations detected as potential leaks");
+    assert_eq!(
+        leaks.len(),
+        100,
+        "all obligations detected as potential leaks"
+    );
 
     // Verify leak ages are calculated correctly
     for (i, leak) in leaks.iter().enumerate() {

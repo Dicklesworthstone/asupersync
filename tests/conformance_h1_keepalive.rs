@@ -7,7 +7,7 @@
 #![cfg(test)]
 
 use asupersync::http::h1::server::{Http1Config, Http1Server};
-use asupersync::http::h1::types::{Request, Response, Method};
+use asupersync::http::h1::types::{Method, Request, Response};
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::runtime::RuntimeBuilder;
 use std::io;
@@ -73,7 +73,7 @@ impl AsyncWrite for TestTransport {
         if self.closed {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
-                "transport closed"
+                "transport closed",
             )));
         }
 
@@ -157,14 +157,19 @@ fn test_connection_close_terminates_pipeline() {
 
     rt.block_on(async {
         // Client sends Connection: close on first request
-        let req1 = make_http_request("GET", "/close-me", "HTTP/1.1", &[
-            ("Host", "example.com"),
-            ("Connection", "close"),
-        ]);
+        let req1 = make_http_request(
+            "GET",
+            "/close-me",
+            "HTTP/1.1",
+            &[("Host", "example.com"), ("Connection", "close")],
+        );
         // This second request should never be processed
-        let req2 = make_http_request("GET", "/never-reached", "HTTP/1.1", &[
-            ("Host", "example.com"),
-        ]);
+        let req2 = make_http_request(
+            "GET",
+            "/never-reached",
+            "HTTP/1.1",
+            &[("Host", "example.com")],
+        );
 
         let (transport, written) = TestTransport::with_multiple_requests(vec![&req1, &req2]);
 
@@ -206,10 +211,12 @@ fn test_100_continue_with_keepalive() {
         );
 
         // Follow-up request after successful POST
-        let req2 = make_http_request("GET", "/after-upload", "HTTP/1.1", &[
-            ("Host", "example.com"),
-            ("Connection", "close"),
-        ]);
+        let req2 = make_http_request(
+            "GET",
+            "/after-upload",
+            "HTTP/1.1",
+            &[("Host", "example.com"), ("Connection", "close")],
+        );
 
         let (transport, written) = TestTransport::with_multiple_requests(vec![&req1, &req2]);
 
@@ -246,20 +253,22 @@ fn test_idle_timeout_eviction() {
 
     rt.block_on(async {
         // Only send one request, then let connection sit idle
-        let req1 = make_http_request("GET", "/first", "HTTP/1.1", &[
-            ("Host", "example.com"),
-            ("Connection", "keep-alive"),
-        ]);
+        let req1 = make_http_request(
+            "GET",
+            "/first",
+            "HTTP/1.1",
+            &[("Host", "example.com"), ("Connection", "keep-alive")],
+        );
 
         let (transport, written) = TestTransport::new(req1.into_bytes());
 
         // Configure server with very short idle timeout
-        let config = Http1Config::default()
-            .idle_timeout(Some(Duration::from_millis(10)));
+        let config = Http1Config::default().idle_timeout(Some(Duration::from_millis(10)));
 
-        let server = Http1Server::with_config(|_req: Request| async move {
-            Response::new(200, "OK", b"OK".to_vec())
-        }, config);
+        let server = Http1Server::with_config(
+            |_req: Request| async move { Response::new(200, "OK", b"OK".to_vec()) },
+            config,
+        );
 
         let result = server.serve(transport).await;
         assert!(result.is_ok());
@@ -285,15 +294,18 @@ fn test_max_requests_per_connection_enforcement() {
         let req3 = make_http_request("GET", "/3", "HTTP/1.1", &[("Host", "example.com")]);
         let req4 = make_http_request("GET", "/4", "HTTP/1.1", &[("Host", "example.com")]);
 
-        let (transport, written) = TestTransport::with_multiple_requests(vec![&req1, &req2, &req3, &req4]);
+        let (transport, written) =
+            TestTransport::with_multiple_requests(vec![&req1, &req2, &req3, &req4]);
 
         // Configure server with max 3 requests per connection
-        let config = Http1Config::default()
-            .max_requests(Some(3));
+        let config = Http1Config::default().max_requests(Some(3));
 
-        let server = Http1Server::with_config(|req: Request| async move {
-            Response::new(200, "OK", format!("Response {}", req.uri).into_bytes())
-        }, config);
+        let server = Http1Server::with_config(
+            |req: Request| async move {
+                Response::new(200, "OK", format!("Response {}", req.uri).into_bytes())
+            },
+            config,
+        );
 
         let result = server.serve(transport).await;
         assert!(result.is_ok());
@@ -323,9 +335,7 @@ fn test_http10_explicit_keepalive_required() {
         closed: false,
     };
 
-    let server = Http1Server::new(|_req: Request| async move {
-        Response::new(200, "OK", b"OK")
-    });
+    let server = Http1Server::new(|_req: Request| async move { Response::new(200, "OK", b"OK") });
 
     let runtime = RuntimeBuilder::current_thread()
         .build()
@@ -348,20 +358,22 @@ fn test_http10_explicit_keepalive_required() {
 /// Test HTTP/1.0 with explicit Connection: keep-alive.
 #[test]
 fn test_http10_explicit_keepalive_works() {
-    let req1 = make_http_request("GET", "/first", "HTTP/1.0", &[
-        ("Host", "example.com"),
-        ("Connection", "keep-alive"),
-    ]);
-    let req2 = make_http_request("GET", "/second", "HTTP/1.0", &[
-        ("Host", "example.com"),
-        ("Connection", "close"),
-    ]);
+    let req1 = make_http_request(
+        "GET",
+        "/first",
+        "HTTP/1.0",
+        &[("Host", "example.com"), ("Connection", "keep-alive")],
+    );
+    let req2 = make_http_request(
+        "GET",
+        "/second",
+        "HTTP/1.0",
+        &[("Host", "example.com"), ("Connection", "close")],
+    );
 
     let (transport, written) = TestTransport::with_multiple_requests(vec![&req1, &req2]);
 
-    let server = Http1Server::new(|_req: Request| async move {
-        Response::new(200, "OK", b"OK")
-    });
+    let server = Http1Server::new(|_req: Request| async move { Response::new(200, "OK", b"OK") });
 
     let runtime = RuntimeBuilder::current_thread()
         .build()
@@ -388,22 +400,23 @@ fn test_keepalive_disabled_server_wide() {
     let rt = RuntimeBuilder::new().build().unwrap();
 
     rt.block_on(async {
-        let req1 = make_http_request("GET", "/first", "HTTP/1.1", &[
-            ("Host", "example.com"),
-            ("Connection", "keep-alive"),
-        ]);
-        let req2 = make_http_request("GET", "/second", "HTTP/1.1", &[
-            ("Host", "example.com"),
-        ]);
+        let req1 = make_http_request(
+            "GET",
+            "/first",
+            "HTTP/1.1",
+            &[("Host", "example.com"), ("Connection", "keep-alive")],
+        );
+        let req2 = make_http_request("GET", "/second", "HTTP/1.1", &[("Host", "example.com")]);
 
         let (transport, written) = TestTransport::with_multiple_requests(vec![&req1, &req2]);
 
         // Disable keep-alive server-wide
         let config = Http1Config::default().keep_alive(false);
 
-        let server = Http1Server::with_config(|_req: Request| async move {
-            Response::new(200, "OK", b"OK".to_vec())
-        }, config);
+        let server = Http1Server::with_config(
+            |_req: Request| async move { Response::new(200, "OK", b"OK".to_vec()) },
+            config,
+        );
 
         let result = server.serve(transport).await;
         assert!(result.is_ok());

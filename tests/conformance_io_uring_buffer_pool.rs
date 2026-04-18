@@ -96,11 +96,7 @@ mod linux_io_uring_tests {
         fn release_buffer(&self, handle: BufferHandle) -> io::Result<()>;
 
         /// Read into a registered buffer (zero-copy)
-        fn read_to_registered_buffer(
-            &self,
-            token: Token,
-            handle: BufferHandle,
-        ) -> io::Result<()>;
+        fn read_to_registered_buffer(&self, token: Token, handle: BufferHandle) -> io::Result<()>;
 
         /// Write from a registered buffer (zero-copy)
         fn write_from_registered_buffer(
@@ -223,7 +219,8 @@ mod linux_io_uring_tests {
 
             // Simulate memory allocation constraints
             let total_size = config.buffer_count * config.buffer_size;
-            if total_size > 1_073_741_824 {  // 1GB limit
+            if total_size > 1_073_741_824 {
+                // 1GB limit
                 return Err(io::Error::new(
                     io::ErrorKind::OutOfMemory,
                     "total buffer pool size exceeds memory limit",
@@ -284,11 +281,7 @@ mod linux_io_uring_tests {
             Ok(())
         }
 
-        fn read_to_registered_buffer(
-            &self,
-            token: Token,
-            handle: BufferHandle,
-        ) -> io::Result<()> {
+        fn read_to_registered_buffer(&self, token: Token, handle: BufferHandle) -> io::Result<()> {
             if self.pool_config.is_none() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -353,7 +346,8 @@ mod linux_io_uring_tests {
             buffer_size: 4096,
             use_huge_pages: false,
         };
-        let err = reactor.register_buffer_pool(&empty_config)
+        let err = reactor
+            .register_buffer_pool(&empty_config)
             .expect_err("zero buffer count should fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 
@@ -363,7 +357,8 @@ mod linux_io_uring_tests {
             buffer_size: 0,
             use_huge_pages: false,
         };
-        let err = reactor.register_buffer_pool(&empty_size_config)
+        let err = reactor
+            .register_buffer_pool(&empty_size_config)
             .expect_err("zero buffer size should fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 
@@ -373,17 +368,19 @@ mod linux_io_uring_tests {
             buffer_size: 4096,
             use_huge_pages: false,
         };
-        let err = reactor.register_buffer_pool(&excessive_config)
+        let err = reactor
+            .register_buffer_pool(&excessive_config)
             .expect_err("excessive buffer count should fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 
         // Test excessive total size rejection
         let huge_config = BufferPoolConfig {
             buffer_count: 1000,
-            buffer_size: 2_000_000,  // 2GB total
+            buffer_size: 2_000_000, // 2GB total
             use_huge_pages: false,
         };
-        let err = reactor.register_buffer_pool(&huge_config)
+        let err = reactor
+            .register_buffer_pool(&huge_config)
             .expect_err("excessive total size should fail");
         assert_eq!(err.kind(), io::ErrorKind::OutOfMemory);
     }
@@ -395,10 +392,12 @@ mod linux_io_uring_tests {
         };
 
         let config = BufferPoolConfig::default();
-        reactor.register_buffer_pool(&config)
+        reactor
+            .register_buffer_pool(&config)
             .expect("valid config should succeed");
 
-        reactor.unregister_buffer_pool()
+        reactor
+            .unregister_buffer_pool()
             .expect("unregister should succeed");
     }
 
@@ -408,7 +407,8 @@ mod linux_io_uring_tests {
             return;
         };
 
-        let err = reactor.acquire_buffer(4096)
+        let err = reactor
+            .acquire_buffer(4096)
             .expect_err("buffer acquisition without pool should fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("no buffer pool registered"));
@@ -417,41 +417,51 @@ mod linux_io_uring_tests {
     #[test]
     fn test_buffer_acquisition_respects_size_limits() {
         let Some(reactor) = MockRegisteredBufferReactor::with_pool_registered()
-            .or_else(|_| skip_if_unsupported().ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "")))
-            .ok() else {
+            .or_else(|_| {
+                skip_if_unsupported().ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, ""))
+            })
+            .ok()
+        else {
             return;
         };
 
         // Test oversized request rejection
-        let err = reactor.acquire_buffer(8192)  // Larger than default 4096
+        let err = reactor
+            .acquire_buffer(8192) // Larger than default 4096
             .expect_err("oversized request should fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 
         // Test valid size acceptance
-        let handle = reactor.acquire_buffer(2048)
+        let handle = reactor
+            .acquire_buffer(2048)
             .expect("valid size should succeed");
         assert_eq!(handle.length, 2048);
         assert_eq!(handle.offset, 0);
 
-        reactor.release_buffer(handle)
+        reactor
+            .release_buffer(handle)
             .expect("buffer release should succeed");
     }
 
     #[test]
     fn test_buffer_handle_validation() {
         let Some(reactor) = MockRegisteredBufferReactor::with_pool_registered()
-            .or_else(|_| skip_if_unsupported().ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "")))
-            .ok() else {
+            .or_else(|_| {
+                skip_if_unsupported().ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, ""))
+            })
+            .ok()
+        else {
             return;
         };
 
         // Test invalid buffer index rejection
         let invalid_handle = BufferHandle {
-            index: 999,  // Beyond configured pool size
+            index: 999, // Beyond configured pool size
             offset: 0,
             length: 1024,
         };
-        let err = reactor.release_buffer(invalid_handle)
+        let err = reactor
+            .release_buffer(invalid_handle)
             .expect_err("invalid handle should fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
@@ -469,11 +479,13 @@ mod linux_io_uring_tests {
             length: 1024,
         };
 
-        let read_err = reactor.read_to_registered_buffer(token, handle)
+        let read_err = reactor
+            .read_to_registered_buffer(token, handle)
             .expect_err("read without pool should fail");
         assert_eq!(read_err.kind(), io::ErrorKind::InvalidInput);
 
-        let write_err = reactor.write_from_registered_buffer(token, handle)
+        let write_err = reactor
+            .write_from_registered_buffer(token, handle)
             .expect_err("write without pool should fail");
         assert_eq!(write_err.kind(), io::ErrorKind::InvalidInput);
     }
@@ -481,12 +493,16 @@ mod linux_io_uring_tests {
     #[test]
     fn test_buffer_pool_stats_tracking() {
         let Some(reactor) = MockRegisteredBufferReactor::with_pool_registered()
-            .or_else(|_| skip_if_unsupported().ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "")))
-            .ok() else {
+            .or_else(|_| {
+                skip_if_unsupported().ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, ""))
+            })
+            .ok()
+        else {
             return;
         };
 
-        let stats = reactor.buffer_pool_stats()
+        let stats = reactor
+            .buffer_pool_stats()
             .expect("stats should be available");
 
         // Verify initial state
@@ -502,7 +518,8 @@ mod linux_io_uring_tests {
         };
 
         // Start without pool
-        let err = reactor.acquire_buffer(1024)
+        let err = reactor
+            .acquire_buffer(1024)
             .expect_err("should fail without pool");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 
@@ -512,26 +529,33 @@ mod linux_io_uring_tests {
             buffer_size: 2048,
             use_huge_pages: false,
         };
-        reactor.register_buffer_pool(&config)
+        reactor
+            .register_buffer_pool(&config)
             .expect("pool registration should succeed");
 
         // Acquire and release buffers
-        let handle1 = reactor.acquire_buffer(1024)
+        let handle1 = reactor
+            .acquire_buffer(1024)
             .expect("buffer acquisition should succeed");
-        let handle2 = reactor.acquire_buffer(512)
+        let handle2 = reactor
+            .acquire_buffer(512)
             .expect("second acquisition should succeed");
 
-        reactor.release_buffer(handle1)
+        reactor
+            .release_buffer(handle1)
             .expect("first release should succeed");
-        reactor.release_buffer(handle2)
+        reactor
+            .release_buffer(handle2)
             .expect("second release should succeed");
 
         // Unregister pool
-        reactor.unregister_buffer_pool()
+        reactor
+            .unregister_buffer_pool()
             .expect("pool unregistration should succeed");
 
         // Verify pool is gone
-        let err = reactor.acquire_buffer(1024)
+        let err = reactor
+            .acquire_buffer(1024)
             .expect_err("should fail after pool unregistration");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
@@ -539,32 +563,40 @@ mod linux_io_uring_tests {
     #[test]
     fn test_registered_buffer_io_operations_basic_contract() {
         let Some(reactor) = MockRegisteredBufferReactor::with_pool_registered()
-            .or_else(|_| skip_if_unsupported().ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "")))
-            .ok() else {
+            .or_else(|_| {
+                skip_if_unsupported().ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, ""))
+            })
+            .ok()
+        else {
             return;
         };
 
-        let (source1, _source2) = TestSource::new()
-            .expect("test source creation should succeed");
+        let (source1, _source2) = TestSource::new().expect("test source creation should succeed");
 
         let token = Token::new(42);
-        reactor.register(&source1, token, Interest::READABLE)
+        reactor
+            .register(&source1, token, Interest::READABLE)
             .expect("source registration should succeed");
 
-        let handle = reactor.acquire_buffer(1024)
+        let handle = reactor
+            .acquire_buffer(1024)
             .expect("buffer acquisition should succeed");
 
         // Test read operation contract
-        reactor.read_to_registered_buffer(token, handle)
+        reactor
+            .read_to_registered_buffer(token, handle)
             .expect("registered buffer read should succeed");
 
         // Test write operation contract
-        reactor.write_from_registered_buffer(token, handle)
+        reactor
+            .write_from_registered_buffer(token, handle)
             .expect("registered buffer write should succeed");
 
-        reactor.release_buffer(handle)
+        reactor
+            .release_buffer(handle)
             .expect("buffer release should succeed");
-        reactor.deregister(token)
+        reactor
+            .deregister(token)
             .expect("source deregistration should succeed");
     }
 
@@ -580,34 +612,42 @@ mod linux_io_uring_tests {
             buffer_size: 64,
             use_huge_pages: false,
         };
-        reactor.register_buffer_pool(&small_config)
+        reactor
+            .register_buffer_pool(&small_config)
             .expect("small buffer pool should succeed");
 
-        let stats = reactor.buffer_pool_stats()
+        let stats = reactor
+            .buffer_pool_stats()
             .expect("stats should be available");
         assert_eq!(stats.total_bytes, 1000 * 64);
 
-        reactor.unregister_buffer_pool()
+        reactor
+            .unregister_buffer_pool()
             .expect("unregistration should succeed");
 
         // Test that large buffers respect limits
         let large_config = BufferPoolConfig {
             buffer_count: 256,
-            buffer_size: 1024 * 1024,  // 1MB each
+            buffer_size: 1024 * 1024, // 1MB each
             use_huge_pages: true,
         };
-        reactor.register_buffer_pool(&large_config)
+        reactor
+            .register_buffer_pool(&large_config)
             .expect("large buffer pool should succeed");
 
-        reactor.unregister_buffer_pool()
+        reactor
+            .unregister_buffer_pool()
             .expect("unregistration should succeed");
     }
 
     #[test]
     fn test_concurrent_buffer_operations_safety() {
         let Some(reactor) = MockRegisteredBufferReactor::with_pool_registered()
-            .or_else(|_| skip_if_unsupported().ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "")))
-            .ok() else {
+            .or_else(|_| {
+                skip_if_unsupported().ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, ""))
+            })
+            .ok()
+        else {
             return;
         };
 
@@ -619,7 +659,8 @@ mod linux_io_uring_tests {
 
         // Release in different order
         for handle in handles.into_iter().rev() {
-            reactor.release_buffer(handle)
+            reactor
+                .release_buffer(handle)
                 .expect("out-of-order release should succeed");
         }
     }

@@ -15,9 +15,9 @@
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::{
     frame::{ContinuationFrame, FrameHeader},
-    stream::Stream,
     hpack::{Decoder as HpackDecoder, Encoder as HpackEncoder, Header},
     settings::DEFAULT_MAX_HEADER_LIST_SIZE,
+    stream::Stream,
 };
 
 /// Test that HEADERS+CONTINUATION frames decode as a single logical header block
@@ -32,11 +32,20 @@ fn headers_plus_continuation_single_block_decode() {
         Header::new(":path", "/very/long/path/that/might/need/fragmentation"),
         Header::new(":scheme", "https"),
         Header::new(":authority", "example.com"),
-        Header::new("user-agent", "test-agent/1.0 with a very long user agent string"),
-        Header::new("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+        Header::new(
+            "user-agent",
+            "test-agent/1.0 with a very long user agent string",
+        ),
+        Header::new(
+            "accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ),
         Header::new("accept-language", "en-US,en;q=0.5"),
         Header::new("accept-encoding", "gzip, deflate, br"),
-        Header::new("custom-header", "custom-value-with-lots-of-data-to-force-fragmentation"),
+        Header::new(
+            "custom-header",
+            "custom-value-with-lots-of-data-to-force-fragmentation",
+        ),
     ];
 
     // Encode headers into a single block
@@ -151,15 +160,21 @@ fn end_headers_flag_semantics() {
     assert!(stream.is_receiving_headers());
 
     // Add continuation without END_HEADERS
-    stream.recv_continuation(Bytes::from_static(b"fragment1"), false).unwrap();
+    stream
+        .recv_continuation(Bytes::from_static(b"fragment1"), false)
+        .unwrap();
     assert!(stream.is_receiving_headers());
 
     // Add another continuation without END_HEADERS
-    stream.recv_continuation(Bytes::from_static(b"fragment2"), false).unwrap();
+    stream
+        .recv_continuation(Bytes::from_static(b"fragment2"), false)
+        .unwrap();
     assert!(stream.is_receiving_headers());
 
     // Final continuation with END_HEADERS should complete the block
-    stream.recv_continuation(Bytes::from_static(b"fragment3"), true).unwrap();
+    stream
+        .recv_continuation(Bytes::from_static(b"fragment3"), true)
+        .unwrap();
     assert!(!stream.is_receiving_headers());
 
     // Verify all fragments were collected
@@ -182,7 +197,11 @@ fn continuation_rejected_when_no_headers_in_progress() {
     let result = stream.recv_continuation(Bytes::from_static(b"test"), false);
     assert!(result.is_err());
     let error_msg = format!("{}", result.unwrap_err());
-    assert!(error_msg.contains("protocol") || error_msg.contains("unexpected") || error_msg.contains("receiving"));
+    assert!(
+        error_msg.contains("protocol")
+            || error_msg.contains("unexpected")
+            || error_msg.contains("receiving")
+    );
 }
 
 /// Test header block fragmentation at arbitrary byte boundaries
@@ -193,10 +212,10 @@ fn fragmentation_at_arbitrary_boundaries() {
 
     // Create headers with mixed encoding (indexed, literal, etc.)
     let headers = vec![
-        Header::new(":method", "GET"),           // Should be indexed
-        Header::new(":path", "/test"),           // Should be indexed
-        Header::new("custom", "value"),          // Literal
-        Header::new("x-test", "data"),          // Literal
+        Header::new(":method", "GET"),  // Should be indexed
+        Header::new(":path", "/test"),  // Should be indexed
+        Header::new("custom", "value"), // Literal
+        Header::new("x-test", "data"),  // Literal
     ];
 
     let mut encoded_block = BytesMut::new();
@@ -256,7 +275,10 @@ fn multiple_continuation_frames() {
         Header::new(":scheme", "https"),
         Header::new(":authority", "api.example.com"),
         Header::new("content-type", "application/json"),
-        Header::new("authorization", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"),
+        Header::new(
+            "authorization",
+            "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        ),
         Header::new("x-request-id", "550e8400-e29b-41d4-a716-446655440000"),
         Header::new("user-agent", "MyApp/1.0 (compatible; HTTPClient/1.0)"),
     ];
@@ -322,11 +344,15 @@ fn fragment_accumulation_size_limits() {
 
     // Add fragment that fits
     let small_fragment = vec![0u8; 2000];
-    stream.add_header_fragment(Bytes::from(small_fragment)).unwrap();
+    stream
+        .add_header_fragment(Bytes::from(small_fragment))
+        .unwrap();
 
     // Add fragment that still fits
     let medium_fragment = vec![0u8; 1500];
-    stream.add_header_fragment(Bytes::from(medium_fragment)).unwrap();
+    stream
+        .add_header_fragment(Bytes::from(medium_fragment))
+        .unwrap();
 
     // Try to add fragment that would exceed limit (1000 * 4 = 4000)
     let large_fragment = vec![0u8; 600]; // Total would be 4100 > 4000
@@ -334,7 +360,11 @@ fn fragment_accumulation_size_limits() {
 
     assert!(result.is_err());
     let error_msg = format!("{}", result.unwrap_err());
-    assert!(error_msg.contains("too large") || error_msg.contains("limit") || error_msg.contains("ENHANCE_YOUR_CALM"));
+    assert!(
+        error_msg.contains("too large")
+            || error_msg.contains("limit")
+            || error_msg.contains("ENHANCE_YOUR_CALM")
+    );
 }
 
 /// Test frame encoding/decoding round-trip for CONTINUATION frames

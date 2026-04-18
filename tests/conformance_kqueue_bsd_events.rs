@@ -15,7 +15,7 @@
 
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
-use asupersync::runtime::reactor::{Interest, KqueueReactor, Event, Token};
+use asupersync::runtime::reactor::{Event, Interest, KqueueReactor, Token};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -130,7 +130,11 @@ impl KqueueGoldenManager {
     }
 
     /// Validates that events match the saved golden file
-    fn validate_golden(&self, path: &Path, actual_events: Vec<CapturedEvent>) -> Result<(), String> {
+    fn validate_golden(
+        &self,
+        path: &Path,
+        actual_events: Vec<CapturedEvent>,
+    ) -> Result<(), String> {
         let json = fs::read_to_string(path)
             .map_err(|_| {
                 format!(
@@ -153,7 +157,8 @@ impl KqueueGoldenManager {
         }
 
         // Compare events, ignoring timestamps and sequence as they're not deterministic
-        for (i, (expected, actual)) in expected_events.iter().zip(actual_events.iter()).enumerate() {
+        for (i, (expected, actual)) in expected_events.iter().zip(actual_events.iter()).enumerate()
+        {
             if expected.token != actual.token || expected.ready_flags != actual.ready_flags {
                 return Err(format!(
                     "Event mismatch at index {}:\nExpected: token={}, ready={:08b}\nActual: token={}, ready={:08b}",
@@ -455,7 +460,7 @@ fn kqueue_concurrent_kevent_calls() {
 
     // Create shared reactor wrapped in Arc<Mutex<>> for thread safety
     let reactor = Arc::new(Mutex::new(
-        KqueueReactor::new().expect("Failed to create kqueue reactor")
+        KqueueReactor::new().expect("Failed to create kqueue reactor"),
     ));
 
     let (read_fd, write_fd) = create_test_pipe();
@@ -522,7 +527,11 @@ fn kqueue_concurrent_kevent_calls() {
 
     // Write data while threads are polling concurrently
     unsafe {
-        libc::write(write_fd, b"concurrent\0".as_ptr() as *const libc::c_void, 10);
+        libc::write(
+            write_fd,
+            b"concurrent\0".as_ptr() as *const libc::c_void,
+            10,
+        );
     }
 
     // Wait for all polling threads to complete
