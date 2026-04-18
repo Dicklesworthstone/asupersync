@@ -13,6 +13,10 @@ categories = ["asynchronous", "development-tools::testing"]
 name = "raptorq_rfc6330_conformance"
 path = "src/bin/raptorq_rfc6330_conformance.rs"
 
+[[bin]]
+name = "quic_migration_rfc9000"
+path = "src/bin/quic_migration_rfc9000.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
