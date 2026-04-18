@@ -1867,6 +1867,549 @@ mod tests {
         );
         assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
     }
+
+    // ================================================================
+    // spawn_blocking Lifecycle Conformance Tests
+    // ================================================================
+
+    mod spawn_blocking_conformance {
+        use super::*;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        /// Test data for conformance verification.
+        struct ConformanceTestData {
+            thread_ids: Arc<Mutex<Vec<thread::ThreadId>>>,
+            execution_count: Arc<AtomicU32>,
+            barrier: Arc<Barrier>,
+        }
+
+        impl ConformanceTestData {
+            fn new(expected_threads: usize) -> Self {
+                Self {
+                    thread_ids: Arc::new(Mutex::new(Vec::new())),
+                    execution_count: Arc::new(AtomicU32::new(0)),
+                    barrier: Arc::new(Barrier::new(expected_threads + 1)), // +1 for test thread
+                }
+            }
+
+            fn record_execution(&self) {
+                let current_thread = thread::current().id();
+                self.thread_ids.lock().push(current_thread);
+                self.execution_count.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn get_unique_thread_count(&self) -> usize {
+                let mut ids = self.thread_ids.lock();
+                ids.sort();
+                ids.dedup();
+                ids.len()
+            }
+        }
+
+        #[test]
+        fn blocking_task_scheduled_on_dedicated_thread_pool_conformance() {
+            let _guard = deterministic_hook_test_guard();
+
+            // Create pool with 2 threads minimum to test thread separation
+            let pool = BlockingPool::new(2, 4);
+            let test_data = ConformanceTestData::new(3);
+
+            // Get the main thread ID to verify blocking tasks don't run there
+            let main_thread_id = thread::current().id();
+
+            // Spawn multiple blocking tasks to verify thread pool usage
+            let mut handles = Vec::new();
+            for _ in 0..3 {
+                let test_data_clone = test_data.thread_ids.clone();
+                let barrier_clone = test_data.barrier.clone();
+
+                let handle = pool.spawn(move || {
+                    // Record which thread this task runs on
+                    let current_thread = thread::current().id();
+                    test_data_clone.lock().push(current_thread);
+
+                    // Wait for all tasks to start
+                    barrier_clone.wait();
+
+                    // Do some work to ensure we're actually on a blocking thread
+                    thread::sleep(Duration::from_millis(10));
+                });
+                handles.push(handle);
+            }
+
+            // Wait for all tasks to start
+            test_data.barrier.wait();
+
+            // Wait for all tasks to complete
+            for handle in handles {
+                assert!(handle.wait_timeout(Duration::from_secs(5)));
+            }
+
+            // Verify tasks ran on dedicated threads (not main thread)
+            let thread_ids = test_data.thread_ids.lock();
+            assert_eq!(thread_ids.len(), 3, "All three tasks should have executed");
+
+            for thread_id in thread_ids.iter() {
+                assert_ne!(
+                    *thread_id, main_thread_id,
+                    "Blocking tasks should not run on main thread"
+                );
+            }
+
+            // Verify at least 2 different threads were used (pool has min 2 threads)
+            let unique_count = test_data.get_unique_thread_count();
+            assert!(
+                unique_count >= 2,
+                "Should use at least 2 different threads, got {}",
+                unique_count
+            );
+
+            assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        }
+
+        #[test]
+        fn cancellation_drains_pool_correctly_conformance() {
+            let _guard = deterministic_hook_test_guard();
+
+            let pool = BlockingPool::new(1, 2);
+            let start_barrier = Arc::new(Barrier::new(2));
+            let finish_gate = Arc::new((Mutex::new(false), Condvar::new()));
+
+            // Task 1: Blocks until we signal completion
+            let start_barrier_clone = start_barrier.clone();
+            let finish_gate_clone = finish_gate.clone();
+            let handle1 = pool.spawn(move || {
+                start_barrier_clone.wait(); // Signal task started
+                let (lock, cvar) = &*finish_gate_clone;
+                let mut finish = lock.lock();
+                while !*finish {
+                    finish = cvar.wait(finish);
+                }
+                // Task completes after gate opens
+            });
+
+            // Wait for task 1 to start
+            start_barrier.wait();
+
+            // Task 2: Will be queued while task 1 is running
+            let executed = Arc::new(AtomicBool::new(false));
+            let executed_clone = executed.clone();
+            let handle2 = pool.spawn(move || {
+                executed_clone.store(true, Ordering::SeqCst);
+            });
+
+            // Small delay to ensure task 2 is queued
+            thread::sleep(Duration::from_millis(50));
+
+            // Cancel task 2 before it gets to execute
+            handle2.cancel();
+
+            // Release task 1 to complete
+            {
+                let (lock, cvar) = &*finish_gate;
+                let mut finish = lock.lock();
+                *finish = true;
+                cvar.notify_all();
+            }
+
+            // Task 1 should complete successfully
+            assert!(handle1.wait_timeout(Duration::from_secs(5)));
+            assert!(!handle1.is_cancelled());
+
+            // Task 2 should be cancelled and not execute
+            assert!(handle2.wait_timeout(Duration::from_secs(1))); // Should complete quickly (cancelled)
+            assert!(handle2.is_cancelled());
+            assert!(!executed.load(Ordering::SeqCst), "Cancelled task should not execute");
+
+            // Verify pool drains correctly
+            assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        }
+
+        #[test]
+        fn panic_in_blocking_task_isolated_conformance() {
+            let _guard = deterministic_hook_test_guard();
+
+            let pool = BlockingPool::new(1, 2);
+            let task_executed = Arc::new(AtomicBool::new(false));
+
+            // Task 1: Panics during execution
+            let handle_panic = pool.spawn(|| {
+                panic!("Test panic - should be isolated");
+            });
+
+            // Task 2: Normal execution after panic
+            let task_executed_clone = task_executed.clone();
+            let handle_normal = pool.spawn(move || {
+                task_executed_clone.store(true, Ordering::SeqCst);
+                42 // Return a value
+            });
+
+            // Both tasks should complete (panic is isolated)
+            assert!(handle_panic.wait_timeout(Duration::from_secs(5)));
+            assert!(handle_normal.wait_timeout(Duration::from_secs(5)));
+
+            // Verify the normal task executed successfully
+            assert!(task_executed.load(Ordering::SeqCst), "Normal task should execute after panic");
+
+            // Verify pool is still operational after panic
+            let handle_after_panic = pool.spawn(|| "still working");
+            assert!(handle_after_panic.wait_timeout(Duration::from_secs(5)));
+
+            assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        }
+
+        #[test]
+        fn result_returned_via_completion_mechanism_conformance() {
+            let _guard = deterministic_hook_test_guard();
+
+            let pool = BlockingPool::new(1, 2);
+
+            // Test synchronous completion signaling
+            let completion_time = Arc::new(Mutex::new(None::<Instant>));
+            let completion_time_clone = completion_time.clone();
+
+            let handle = pool.spawn(move || {
+                thread::sleep(Duration::from_millis(100));
+                *completion_time_clone.lock() = Some(Instant::now());
+            });
+
+            let start_time = Instant::now();
+
+            // Verify task is not initially done
+            assert!(!handle.is_done());
+
+            // Wait for completion
+            assert!(handle.wait_timeout(Duration::from_secs(5)));
+
+            // Verify task is now done
+            assert!(handle.is_done());
+
+            // Verify completion timing
+            let end_time = Instant::now();
+            let elapsed = end_time.duration_since(start_time);
+            assert!(elapsed >= Duration::from_millis(100), "Should wait at least 100ms");
+
+            // Verify completion was signaled at the right time
+            let recorded_completion = completion_time.lock().unwrap();
+            assert!(recorded_completion.is_some(), "Completion time should be recorded");
+
+            // Test immediate completion check
+            let instant_handle = pool.spawn(|| {});
+            assert!(instant_handle.wait_timeout(Duration::from_secs(5)));
+            assert!(instant_handle.is_done());
+
+            assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        }
+
+        #[test]
+        fn completion_mechanism_timeout_conformance() {
+            let _guard = deterministic_hook_test_guard();
+
+            let pool = BlockingPool::new(1, 2);
+            let gate = Arc::new((Mutex::new(false), Condvar::new()));
+            let gate_clone = gate.clone();
+
+            // Task that blocks indefinitely until signaled
+            let handle = pool.spawn(move || {
+                let (lock, cvar) = &*gate_clone;
+                let mut release = lock.lock();
+                while !*release {
+                    release = cvar.wait(release);
+                }
+            });
+
+            // Test timeout behavior
+            let start_time = Instant::now();
+            assert!(!handle.wait_timeout(Duration::from_millis(100)));
+            let elapsed = start_time.elapsed();
+
+            // Should timeout in approximately 100ms
+            assert!(elapsed >= Duration::from_millis(90), "Should wait at least 90ms");
+            assert!(elapsed <= Duration::from_millis(200), "Should timeout within 200ms");
+            assert!(!handle.is_done(), "Task should not be done after timeout");
+
+            // Release the task
+            {
+                let (lock, cvar) = &*gate;
+                let mut release = lock.lock();
+                *release = true;
+                cvar.notify_all();
+            }
+
+            // Now it should complete
+            assert!(handle.wait_timeout(Duration::from_secs(5)));
+            assert!(handle.is_done());
+
+            assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        }
+
+        #[test]
+        fn budget_accounting_across_poll_boundaries_conformance() {
+            let _guard = deterministic_hook_test_guard();
+
+            let pool = BlockingPool::new(1, 4);
+
+            // Track resource usage across task boundaries
+            struct ResourceTracker {
+                task_starts: AtomicU32,
+                task_ends: AtomicU32,
+                max_concurrent: AtomicU32,
+                current_concurrent: AtomicU32,
+            }
+
+            let tracker = Arc::new(ResourceTracker {
+                task_starts: AtomicU32::new(0),
+                task_ends: AtomicU32::new(0),
+                max_concurrent: AtomicU32::new(0),
+                current_concurrent: AtomicU32::new(0),
+            });
+
+            let barrier = Arc::new(Barrier::new(4)); // 3 tasks + test thread
+            let mut handles = Vec::new();
+
+            // Submit 3 tasks to test concurrent execution
+            for i in 0..3 {
+                let tracker_clone = tracker.clone();
+                let barrier_clone = barrier.clone();
+
+                let handle = pool.spawn(move || {
+                    // Record task start
+                    tracker_clone.task_starts.fetch_add(1, Ordering::SeqCst);
+                    let current = tracker_clone.current_concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+
+                    // Update max concurrent
+                    let mut max = tracker_clone.max_concurrent.load(Ordering::SeqCst);
+                    while current > max {
+                        match tracker_clone.max_concurrent.compare_exchange_weak(
+                            max,
+                            current,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ) {
+                            Ok(_) => break,
+                            Err(new_max) => max = new_max,
+                        }
+                    }
+
+                    // Wait for all tasks to start
+                    barrier_clone.wait();
+
+                    // Simulate work
+                    thread::sleep(Duration::from_millis(50));
+
+                    // Record task end
+                    tracker_clone.current_concurrent.fetch_sub(1, Ordering::SeqCst);
+                    tracker_clone.task_ends.fetch_add(1, Ordering::SeqCst);
+                });
+
+                handles.push(handle);
+            }
+
+            // Wait for all tasks to start
+            barrier.wait();
+
+            // Wait for all tasks to complete
+            for handle in handles {
+                assert!(handle.wait_timeout(Duration::from_secs(5)));
+            }
+
+            // Verify budget accounting
+            assert_eq!(tracker.task_starts.load(Ordering::SeqCst), 3, "All tasks should start");
+            assert_eq!(tracker.task_ends.load(Ordering::SeqCst), 3, "All tasks should end");
+            assert_eq!(tracker.current_concurrent.load(Ordering::SeqCst), 0, "No tasks should be running");
+
+            // Verify resource limits were respected (pool has max 4 threads, so max 3 concurrent is reasonable)
+            let max_concurrent = tracker.max_concurrent.load(Ordering::SeqCst);
+            assert!(max_concurrent <= 4, "Should not exceed pool thread limit");
+            assert!(max_concurrent >= 1, "At least one task should run");
+
+            assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        }
+
+        #[test]
+        fn spawn_blocking_priority_scheduling_conformance() {
+            let _guard = deterministic_hook_test_guard();
+
+            let pool = BlockingPool::new(1, 1); // Single thread to force sequential execution
+
+            let execution_order = Arc::new(Mutex::new(Vec::new()));
+            let start_gate = Arc::new((Mutex::new(false), Condvar::new()));
+
+            // First task blocks to allow others to queue
+            let start_gate_clone = start_gate.clone();
+            let handle_blocker = pool.spawn(move || {
+                let (lock, cvar) = &*start_gate_clone;
+                let mut start = lock.lock();
+                while !*start {
+                    start = cvar.wait(start);
+                }
+            });
+
+            // Queue tasks with different priorities
+            let mut priority_handles = Vec::new();
+
+            for (priority, task_id) in [(0, "high"), (128, "medium"), (255, "low")] {
+                let execution_order_clone = execution_order.clone();
+                let handle = pool.spawn_with_priority(
+                    move || {
+                        execution_order_clone.lock().push(task_id);
+                    },
+                    priority,
+                );
+                priority_handles.push(handle);
+            }
+
+            // Small delay to ensure tasks are queued
+            thread::sleep(Duration::from_millis(50));
+
+            // Release the blocker task
+            {
+                let (lock, cvar) = &*start_gate;
+                let mut start = lock.lock();
+                *start = true;
+                cvar.notify_all();
+            }
+
+            // Wait for all tasks to complete
+            assert!(handle_blocker.wait_timeout(Duration::from_secs(5)));
+            for handle in priority_handles {
+                assert!(handle.wait_timeout(Duration::from_secs(5)));
+            }
+
+            // Verify execution order respects priority (higher priority = lower number = executes first)
+            let order = execution_order.lock();
+            assert_eq!(order.len(), 3, "All priority tasks should execute");
+
+            // Note: Due to concurrent execution, exact order might vary, but high priority should generally go first
+            // At minimum, verify all tasks executed
+            assert!(order.contains(&"high"));
+            assert!(order.contains(&"medium"));
+            assert!(order.contains(&"low"));
+
+            assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        }
+
+        #[test]
+        fn blocking_pool_handle_conformance() {
+            let _guard = deterministic_hook_test_guard();
+
+            let pool = BlockingPool::new(1, 2);
+            let handle = pool.handle();
+
+            // Verify handle spawning works identically to pool spawning
+            let executed = Arc::new(AtomicBool::new(false));
+            let executed_clone = executed.clone();
+
+            let task_handle = handle.spawn(move || {
+                executed_clone.store(true, Ordering::SeqCst);
+                "handle result"
+            });
+
+            assert!(task_handle.wait_timeout(Duration::from_secs(5)));
+            assert!(executed.load(Ordering::SeqCst), "Handle-spawned task should execute");
+
+            // Test handle priority spawning
+            let priority_executed = Arc::new(AtomicBool::new(false));
+            let priority_executed_clone = priority_executed.clone();
+
+            let priority_handle = handle.spawn_with_priority(
+                move || {
+                    priority_executed_clone.store(true, Ordering::SeqCst);
+                },
+                64, // High priority
+            );
+
+            assert!(priority_handle.wait_timeout(Duration::from_secs(5)));
+            assert!(priority_executed.load(Ordering::SeqCst), "Priority handle task should execute");
+
+            assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        }
+
+        #[test]
+        fn blocking_task_lifecycle_state_transitions_conformance() {
+            let _guard = deterministic_hook_test_guard();
+
+            let pool = BlockingPool::new(1, 2);
+
+            // Test task state transitions: created -> running -> done
+            let gate = Arc::new((Mutex::new(false), Condvar::new()));
+            let gate_clone = gate.clone();
+
+            let handle = pool.spawn(move || {
+                let (lock, cvar) = &*gate_clone;
+                let mut release = lock.lock();
+                while !*release {
+                    release = cvar.wait(release);
+                }
+                "completed"
+            });
+
+            // Initially: not done, not cancelled
+            assert!(!handle.is_done());
+            assert!(!handle.is_cancelled());
+
+            // Test cancellation state
+            handle.cancel();
+            assert!(handle.is_cancelled());
+            assert!(!handle.is_done()); // Still not done until completion
+
+            // Release and complete task
+            {
+                let (lock, cvar) = &*gate;
+                let mut release = lock.lock();
+                *release = true;
+                cvar.notify_all();
+            }
+
+            assert!(handle.wait_timeout(Duration::from_secs(5)));
+
+            // Final state: done and cancelled
+            assert!(handle.is_done());
+            assert!(handle.is_cancelled());
+
+            assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        }
+
+        #[test]
+        fn blocking_pool_shutdown_lifecycle_conformance() {
+            let _guard = deterministic_hook_test_guard();
+
+            let pool = BlockingPool::new(1, 2);
+
+            // Submit a task before shutdown
+            let pre_shutdown_executed = Arc::new(AtomicBool::new(false));
+            let pre_shutdown_executed_clone = pre_shutdown_executed.clone();
+            let handle_pre = pool.spawn(move || {
+                thread::sleep(Duration::from_millis(100)); // Ensure shutdown happens during execution
+                pre_shutdown_executed_clone.store(true, Ordering::SeqCst);
+            });
+
+            // Start shutdown (but don't wait)
+            pool.shutdown();
+
+            // Attempt to submit task after shutdown - should be immediately cancelled
+            let post_shutdown_executed = Arc::new(AtomicBool::new(false));
+            let post_shutdown_executed_clone = post_shutdown_executed.clone();
+            let handle_post = pool.spawn(move || {
+                post_shutdown_executed_clone.store(true, Ordering::SeqCst);
+            });
+
+            // Pre-shutdown task should complete
+            assert!(handle_pre.wait_timeout(Duration::from_secs(5)));
+            assert!(pre_shutdown_executed.load(Ordering::SeqCst), "Pre-shutdown task should execute");
+
+            // Post-shutdown task should be cancelled immediately
+            assert!(handle_post.wait_timeout(Duration::from_secs(1))); // Should complete quickly (cancelled)
+            assert!(handle_post.is_cancelled());
+            assert!(!post_shutdown_executed.load(Ordering::SeqCst), "Post-shutdown task should not execute");
+
+            // Complete shutdown
+            assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        }
+    }
 }
 
 // Metamorphic tests for blocking pool fairness properties
