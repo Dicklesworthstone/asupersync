@@ -1112,3 +1112,10 @@ path = "fuzz_targets/codec_raptorq.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "web_multipart"
+path = "fuzz_targets/web_multipart.rs"
+test = false
+doc = false
+bench = false
