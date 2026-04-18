@@ -2015,4 +2015,274 @@ mod tests {
             "Broken pipe should be detected independently of CTRL_C event handling"
         );
     }
+
+    // =========================================================================
+    // TCP Options Conformance Tests - TCP_NODELAY + SO_KEEPALIVE
+    // =========================================================================
+
+    #[cfg(all(not(target_arch = "wasm32"), unix))]
+    #[test]
+    fn tcp_nodelay_option_conformance() {
+        use std::os::unix::io::AsRawFd;
+
+        let listener = net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+
+        let client = net::TcpStream::connect(addr).expect("connect client");
+        let stream = TcpStream::from_std(client).expect("from_std");
+
+        let socket_fd = stream.inner.as_raw_fd();
+
+        // Test setting TCP_NODELAY to true
+        stream.set_nodelay(true).expect("set nodelay true");
+
+        let mut nodelay_val: libc::c_int = 0;
+        let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                socket_fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_NODELAY,
+                &mut nodelay_val as *mut _ as *mut libc::c_void,
+                &mut opt_len,
+            )
+        };
+        assert_eq!(result, 0, "getsockopt TCP_NODELAY should succeed");
+        assert_eq!(nodelay_val, 1, "TCP_NODELAY should be enabled");
+
+        // Test setting TCP_NODELAY to false
+        stream.set_nodelay(false).expect("set nodelay false");
+
+        let mut nodelay_val: libc::c_int = 0;
+        let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                socket_fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_NODELAY,
+                &mut nodelay_val as *mut _ as *mut libc::c_void,
+                &mut opt_len,
+            )
+        };
+        assert_eq!(result, 0, "getsockopt TCP_NODELAY should succeed");
+        assert_eq!(nodelay_val, 0, "TCP_NODELAY should be disabled");
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), unix))]
+    #[test]
+    fn so_keepalive_option_conformance() {
+        use std::os::unix::io::AsRawFd;
+
+        let listener = net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+
+        let client = net::TcpStream::connect(addr).expect("connect client");
+        let stream = TcpStream::from_std(client).expect("from_std");
+
+        let socket_fd = stream.inner.as_raw_fd();
+
+        // Test enabling SO_KEEPALIVE with interval
+        let keepalive_interval = Duration::from_secs(30);
+        stream.set_keepalive(Some(keepalive_interval)).expect("set keepalive enabled");
+
+        let mut keepalive_val: libc::c_int = 0;
+        let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                socket_fd,
+                libc::SOL_SOCKET,
+                libc::SO_KEEPALIVE,
+                &mut keepalive_val as *mut _ as *mut libc::c_void,
+                &mut opt_len,
+            )
+        };
+        assert_eq!(result, 0, "getsockopt SO_KEEPALIVE should succeed");
+        assert_eq!(keepalive_val, 1, "SO_KEEPALIVE should be enabled");
+
+        // Test disabling SO_KEEPALIVE
+        stream.set_keepalive(None).expect("set keepalive disabled");
+
+        let mut keepalive_val: libc::c_int = 0;
+        let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                socket_fd,
+                libc::SOL_SOCKET,
+                libc::SO_KEEPALIVE,
+                &mut keepalive_val as *mut _ as *mut libc::c_void,
+                &mut opt_len,
+            )
+        };
+        assert_eq!(result, 0, "getsockopt SO_KEEPALIVE should succeed");
+        assert_eq!(keepalive_val, 0, "SO_KEEPALIVE should be disabled");
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "linux"))]
+    #[test]
+    fn tcp_keepalive_interval_conformance() {
+        use std::os::unix::io::AsRawFd;
+
+        let listener = net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+
+        let client = net::TcpStream::connect(addr).expect("connect client");
+        let stream = TcpStream::from_std(client).expect("from_std");
+
+        let socket_fd = stream.inner.as_raw_fd();
+
+        // Test setting specific keepalive interval (Linux-specific)
+        let keepalive_interval = Duration::from_secs(60);
+        stream.set_keepalive(Some(keepalive_interval)).expect("set keepalive with interval");
+
+        // Verify TCP_KEEPIDLE parameter on Linux
+        let mut keepidle_val: libc::c_int = 0;
+        let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                socket_fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_KEEPIDLE,
+                &mut keepidle_val as *mut _ as *mut libc::c_void,
+                &mut opt_len,
+            )
+        };
+        assert_eq!(result, 0, "getsockopt TCP_KEEPIDLE should succeed");
+        assert_eq!(keepidle_val, 60, "TCP_KEEPIDLE should be set to 60 seconds");
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), unix))]
+    #[test]
+    fn tcp_stream_builder_nodelay_conformance() {
+        use std::os::unix::io::AsRawFd;
+
+        let listener = net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+
+        // Accept connection in background to avoid blocking
+        let handle = std::thread::spawn(move || {
+            listener.accept().expect("accept connection");
+        });
+
+        // Test TcpStreamBuilder with nodelay enabled
+        let stream = futures_lite::future::block_on(
+            TcpStreamBuilder::new(addr)
+                .nodelay(true)
+                .connect()
+        ).expect("connect with nodelay");
+
+        handle.join().expect("join accept thread");
+
+        let socket_fd = stream.inner.as_raw_fd();
+
+        // Verify TCP_NODELAY was set via builder
+        let mut nodelay_val: libc::c_int = 0;
+        let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                socket_fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_NODELAY,
+                &mut nodelay_val as *mut _ as *mut libc::c_void,
+                &mut opt_len,
+            )
+        };
+        assert_eq!(result, 0, "getsockopt TCP_NODELAY should succeed");
+        assert_eq!(nodelay_val, 1, "TCP_NODELAY should be enabled via builder");
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), unix))]
+    #[test]
+    fn tcp_stream_builder_keepalive_conformance() {
+        use std::os::unix::io::AsRawFd;
+
+        let listener = net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+
+        // Accept connection in background
+        let handle = std::thread::spawn(move || {
+            listener.accept().expect("accept connection");
+        });
+
+        // Test TcpStreamBuilder with keepalive enabled
+        let keepalive_duration = Duration::from_secs(45);
+        let stream = futures_lite::future::block_on(
+            TcpStreamBuilder::new(addr)
+                .keepalive(Some(keepalive_duration))
+                .connect()
+        ).expect("connect with keepalive");
+
+        handle.join().expect("join accept thread");
+
+        let socket_fd = stream.inner.as_raw_fd();
+
+        // Verify SO_KEEPALIVE was set via builder
+        let mut keepalive_val: libc::c_int = 0;
+        let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                socket_fd,
+                libc::SOL_SOCKET,
+                libc::SO_KEEPALIVE,
+                &mut keepalive_val as *mut _ as *mut libc::c_void,
+                &mut opt_len,
+            )
+        };
+        assert_eq!(result, 0, "getsockopt SO_KEEPALIVE should succeed");
+        assert_eq!(keepalive_val, 1, "SO_KEEPALIVE should be enabled via builder");
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), unix))]
+    #[test]
+    fn tcp_stream_builder_combined_options_conformance() {
+        use std::os::unix::io::AsRawFd;
+
+        let listener = net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+
+        // Accept connection in background
+        let handle = std::thread::spawn(move || {
+            listener.accept().expect("accept connection");
+        });
+
+        // Test TcpStreamBuilder with both options
+        let stream = futures_lite::future::block_on(
+            TcpStreamBuilder::new(addr)
+                .nodelay(true)
+                .keepalive(Some(Duration::from_secs(120)))
+                .connect()
+        ).expect("connect with both options");
+
+        handle.join().expect("join accept thread");
+
+        let socket_fd = stream.inner.as_raw_fd();
+
+        // Verify both options were set
+        let mut nodelay_val: libc::c_int = 0;
+        let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                socket_fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_NODELAY,
+                &mut nodelay_val as *mut _ as *mut libc::c_void,
+                &mut opt_len,
+            )
+        };
+        assert_eq!(result, 0, "getsockopt TCP_NODELAY should succeed");
+        assert_eq!(nodelay_val, 1, "TCP_NODELAY should be enabled");
+
+        let mut keepalive_val: libc::c_int = 0;
+        let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                socket_fd,
+                libc::SOL_SOCKET,
+                libc::SO_KEEPALIVE,
+                &mut keepalive_val as *mut _ as *mut libc::c_void,
+                &mut opt_len,
+            )
+        };
+        assert_eq!(result, 0, "getsockopt SO_KEEPALIVE should succeed");
+        assert_eq!(keepalive_val, 1, "SO_KEEPALIVE should be enabled");
+    }
 }
