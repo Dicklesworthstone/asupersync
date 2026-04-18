@@ -1000,3 +1000,17 @@ path = "fuzz_targets/h2_push_promise.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "codec_framed_read"
+path = "fuzz_targets/codec_framed_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "diagnostics_snapshot"
+path = "fuzz_targets/diagnostics_snapshot.rs"
+test = false
+doc = false
+bench = false
