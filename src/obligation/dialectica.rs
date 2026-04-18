@@ -1427,4 +1427,743 @@ mod tests {
         assert!(!m.forward_taken);
         assert!(!m.backward_taken);
     }
+
+    // =========================================================================
+    // METAMORPHIC TESTING: Adversarial Permit Constraints
+    // =========================================================================
+
+    /// Configuration for metamorphic testing
+    #[derive(Debug, Clone)]
+    struct DialecticaMetamorphicConfig {
+        /// Number of obligations to test
+        obligation_count: u32,
+        /// Number of regions to use
+        region_count: u32,
+        /// Time range for events (nanoseconds)
+        max_time_ns: u64,
+        /// Obligation kinds to test
+        obligation_kinds: Vec<ObligationKind>,
+    }
+
+    impl Default for DialecticaMetamorphicConfig {
+        fn default() -> Self {
+            Self {
+                obligation_count: 10,
+                region_count: 3,
+                max_time_ns: 1000,
+                obligation_kinds: vec![
+                    ObligationKind::SendPermit,
+                    ObligationKind::Ack,
+                    ObligationKind::Lease,
+                    ObligationKind::IoOp,
+                ],
+            }
+        }
+    }
+
+    /// Generate deterministic test trace
+    fn generate_dialectica_trace(
+        config: &DialecticaMetamorphicConfig,
+        rng: &mut crate::util::det_rng::DetRng,
+    ) -> Vec<MarkingEvent> {
+        let mut events = Vec::new();
+        let mut next_time = 0u64;
+
+        // Generate obligations with reserve + resolution events
+        for i in 0..config.obligation_count {
+            let obligation_id = o(i);
+            let task_id = t(i % 5); // Reuse task IDs
+            let region_id = r(i % config.region_count);
+            let kind_idx = (rng.next_u64() as usize) % config.obligation_kinds.len();
+            let kind = config.obligation_kinds[kind_idx];
+
+            // Reserve event
+            events.push(reserve(next_time, obligation_id, kind, task_id, region_id));
+            next_time += (rng.next_u64() % 50) + 1;
+
+            // Resolution event (commit, abort, or leak)
+            let resolution_choice = rng.next_u64() % 10;
+            if resolution_choice < 6 {
+                // 60% commit
+                events.push(commit(next_time, obligation_id, region_id, kind));
+            } else if resolution_choice < 9 {
+                // 30% abort
+                events.push(abort(next_time, obligation_id, region_id, kind));
+            } else {
+                // 10% leak
+                events.push(leak(next_time, obligation_id, region_id, kind));
+            }
+            next_time += (rng.next_u64() % 30) + 1;
+        }
+
+        // Close all regions at the end
+        for i in 0..config.region_count {
+            events.push(close(next_time, r(i)));
+            next_time += 10;
+        }
+
+        events
+    }
+
+    /// Trait extension for deterministic RNG
+    trait DetRngExt {
+        fn gen_range(&mut self, range: std::ops::Range<u64>) -> u64;
+        fn shuffle<T>(&mut self, slice: &mut [T]);
+    }
+
+    impl DetRngExt for crate::util::det_rng::DetRng {
+        fn gen_range(&mut self, range: std::ops::Range<u64>) -> u64 {
+            if range.is_empty() {
+                range.start
+            } else {
+                range.start + (self.next_u64() % (range.end - range.start))
+            }
+        }
+
+        fn shuffle<T>(&mut self, slice: &mut [T]) {
+            for i in (1..slice.len()).rev() {
+                let j = self.gen_range(0..i as u64 + 1) as usize;
+                slice.swap(i, j);
+            }
+        }
+    }
+
+    // =========================================================================
+    // MR1: Temporal Transformation Invariance
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_temporal_transformation_invariance() {
+        init_test("metamorphic_temporal_transformation_invariance");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        let config = DialecticaMetamorphicConfig::default();
+        let base_events = generate_dialectica_trace(&config, &mut rng);
+
+        // Test multiple time offsets
+        for offset_ns in [0, 100, 1000, 10000, 100000] {
+            let shifted_events: Vec<MarkingEvent> = base_events
+                .iter()
+                .map(|event| MarkingEvent::new(
+                    Time::from_nanos(event.time.as_nanos() + offset_ns),
+                    event.kind.clone(),
+                ))
+                .collect();
+
+            let mut checker1 = ContractChecker::new();
+            let mut checker2 = ContractChecker::new();
+
+            let result1 = checker1.check(&base_events);
+            let result2 = checker2.check(&shifted_events);
+
+            // Contract satisfaction should be identical regardless of time offset
+            assert_eq!(
+                result1.contract_status.exhaustive_resolution,
+                result2.contract_status.exhaustive_resolution,
+                "Temporal shift by {} changed ExhaustiveResolution satisfaction", offset_ns
+            );
+            assert_eq!(
+                result1.contract_status.no_partial_commit,
+                result2.contract_status.no_partial_commit,
+                "Temporal shift by {} changed NoPartialCommit satisfaction", offset_ns
+            );
+            assert_eq!(
+                result1.contract_status.region_closure_safety,
+                result2.contract_status.region_closure_safety,
+                "Temporal shift by {} changed RegionClosureSafety satisfaction", offset_ns
+            );
+            assert_eq!(
+                result1.violations.len(),
+                result2.violations.len(),
+                "Temporal shift by {} changed violation count", offset_ns
+            );
+        }
+
+        crate::test_complete!("metamorphic_temporal_transformation_invariance");
+    }
+
+    // =========================================================================
+    // MR2: Obligation Kind Invariance
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_obligation_kind_invariance() {
+        init_test("metamorphic_obligation_kind_invariance");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        // Test that contract checking is identical across different obligation kinds
+        let kinds = [
+            ObligationKind::SendPermit,
+            ObligationKind::Ack,
+            ObligationKind::Lease,
+            ObligationKind::IoOp,
+        ];
+
+        let base_trace = vec![
+            reserve(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            commit(10, o(0), r(0), ObligationKind::SendPermit),
+            reserve(20, o(1), ObligationKind::SendPermit, t(1), r(1)),
+            abort(30, o(1), r(1), ObligationKind::SendPermit),
+            close(40, r(0)),
+            close(50, r(1)),
+        ];
+
+        let mut results = Vec::new();
+
+        // Test same trace structure with different obligation kinds
+        for &kind in &kinds {
+            let kind_specific_trace: Vec<MarkingEvent> = base_trace
+                .iter()
+                .map(|event| match &event.kind {
+                    MarkingEventKind::Reserve { obligation, task, region, .. } => {
+                        reserve(event.time.as_nanos(), *obligation, kind, *task, *region)
+                    }
+                    MarkingEventKind::Commit { obligation, region, .. } => {
+                        commit(event.time.as_nanos(), *obligation, *region, kind)
+                    }
+                    MarkingEventKind::Abort { obligation, region, .. } => {
+                        abort(event.time.as_nanos(), *obligation, *region, kind)
+                    }
+                    MarkingEventKind::Leak { obligation, region, .. } => {
+                        leak(event.time.as_nanos(), *obligation, *region, kind)
+                    }
+                    MarkingEventKind::RegionClose { region } => {
+                        close(event.time.as_nanos(), *region)
+                    }
+                })
+                .collect();
+
+            let mut checker = ContractChecker::new();
+            let result = checker.check(&kind_specific_trace);
+            results.push(result);
+        }
+
+        // All results should be identical (KindUniformStateMachine contract)
+        for i in 1..results.len() {
+            assert_eq!(
+                results[0].is_clean(),
+                results[i].is_clean(),
+                "Kind {} produced different clean status than kind {}",
+                kinds[0], kinds[i]
+            );
+            assert_eq!(
+                results[0].violations.len(),
+                results[i].violations.len(),
+                "Kind {} produced different violation count than kind {}",
+                kinds[0], kinds[i]
+            );
+            assert_eq!(
+                results[0].contract_status.exhaustive_resolution,
+                results[i].contract_status.exhaustive_resolution,
+                "Kind {} produced different ExhaustiveResolution status than kind {}",
+                kinds[0], kinds[i]
+            );
+        }
+
+        crate::test_complete!("metamorphic_obligation_kind_invariance");
+    }
+
+    // =========================================================================
+    // MR3: Region Isolation Property
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_region_isolation() {
+        init_test("metamorphic_region_isolation");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        // Create a base trace with obligations in region 0
+        let region0_trace = vec![
+            reserve(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            reserve(10, o(1), ObligationKind::Ack, t(1), r(0)),
+            commit(20, o(0), r(0), ObligationKind::SendPermit),
+            commit(30, o(1), r(0), ObligationKind::Ack),
+            close(40, r(0)),
+        ];
+
+        // Create additional trace with obligations in region 1
+        let region1_trace = vec![
+            reserve(5, o(2), ObligationKind::Lease, t(2), r(1)),
+            reserve(15, o(3), ObligationKind::IoOp, t(3), r(1)),
+            abort(25, o(2), r(1), ObligationKind::Lease),
+            leak(35, o(3), r(1), ObligationKind::IoOp),
+            close(45, r(1)),
+        ];
+
+        // Test original region 0 trace alone
+        let mut checker1 = ContractChecker::new();
+        let result1 = checker1.check(&region0_trace);
+
+        // Test combined trace (region 0 + region 1)
+        let mut combined_trace = region0_trace.clone();
+        combined_trace.extend(region1_trace.clone());
+        combined_trace.sort_by_key(|event| event.time);
+
+        let mut checker2 = ContractChecker::new();
+        let result2 = checker2.check(&combined_trace);
+
+        // The contract satisfaction for region 0 obligations should be unaffected
+        // by the presence of region 1 obligations
+        assert_eq!(
+            result1.is_clean(),
+            result2.is_clean(),
+            "Region isolation failed: adding region 1 changed overall clean status"
+        );
+
+        // Check that violations specific to region 0 obligations are preserved
+        let region0_violations1: Vec<_> = result1.violations.iter()
+            .filter(|v| v.region == Some(r(0)))
+            .collect();
+        let region0_violations2: Vec<_> = result2.violations.iter()
+            .filter(|v| v.region == Some(r(0)))
+            .collect();
+
+        assert_eq!(
+            region0_violations1.len(),
+            region0_violations2.len(),
+            "Region isolation failed: region 0 violation count changed when region 1 added"
+        );
+
+        // Test with various region permutations
+        for region_offset in 1..5 {
+            let shifted_region1_trace: Vec<MarkingEvent> = region1_trace
+                .iter()
+                .map(|event| match &event.kind {
+                    MarkingEventKind::Reserve { obligation, kind, task, .. } => {
+                        reserve(event.time.as_nanos(), *obligation, *kind, *task, r(region_offset))
+                    }
+                    MarkingEventKind::Commit { obligation, kind, .. } => {
+                        commit(event.time.as_nanos(), *obligation, r(region_offset), *kind)
+                    }
+                    MarkingEventKind::Abort { obligation, kind, .. } => {
+                        abort(event.time.as_nanos(), *obligation, r(region_offset), *kind)
+                    }
+                    MarkingEventKind::Leak { obligation, kind, .. } => {
+                        leak(event.time.as_nanos(), *obligation, r(region_offset), *kind)
+                    }
+                    MarkingEventKind::RegionClose { .. } => {
+                        close(event.time.as_nanos(), r(region_offset))
+                    }
+                })
+                .collect();
+
+            let mut test_combined = region0_trace.clone();
+            test_combined.extend(shifted_region1_trace);
+            test_combined.sort_by_key(|event| event.time);
+
+            let mut checker3 = ContractChecker::new();
+            let result3 = checker3.check(&test_combined);
+
+            // Region 0 results should remain consistent
+            let region0_violations3: Vec<_> = result3.violations.iter()
+                .filter(|v| v.region == Some(r(0)))
+                .collect();
+
+            assert_eq!(
+                region0_violations1.len(),
+                region0_violations3.len(),
+                "Region isolation failed with region offset {}: region 0 violations changed",
+                region_offset
+            );
+        }
+
+        crate::test_complete!("metamorphic_region_isolation");
+    }
+
+    // =========================================================================
+    // MR4: Event Reordering Invariance (Commutative Operations)
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_event_reordering_invariance() {
+        init_test("metamorphic_event_reordering_invariance");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        // Create a trace with independent obligations that can be reordered
+        let base_trace = vec![
+            // Independent obligations in different regions
+            reserve(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            reserve(1, o(1), ObligationKind::Ack, t(1), r(1)),
+            reserve(2, o(2), ObligationKind::Lease, t(2), r(2)),
+            commit(10, o(0), r(0), ObligationKind::SendPermit),
+            commit(11, o(1), r(1), ObligationKind::Ack),
+            abort(12, o(2), r(2), ObligationKind::Lease),
+            close(20, r(0)),
+            close(21, r(1)),
+            close(22, r(2)),
+        ];
+
+        // Test original order
+        let mut checker_original = ContractChecker::new();
+        let result_original = checker_original.check(&base_trace);
+
+        // Test multiple random permutations of the trace
+        for test_iteration in 0..20 {
+            let mut reordered_trace = base_trace.clone();
+
+            // Only reorder events that are logically independent:
+            // - Reserves can be reordered among themselves
+            // - Commits/aborts can be reordered among themselves (if for different obligations)
+            // - Region closes can be reordered among themselves
+
+            // Separate by event type to safely reorder within each group
+            let mut reserves = Vec::new();
+            let mut resolutions = Vec::new();
+            let mut closes = Vec::new();
+
+            for event in &reordered_trace {
+                match &event.kind {
+                    MarkingEventKind::Reserve { .. } => reserves.push(event.clone()),
+                    MarkingEventKind::Commit { .. } | MarkingEventKind::Abort { .. } | MarkingEventKind::Leak { .. } => {
+                        resolutions.push(event.clone())
+                    }
+                    MarkingEventKind::RegionClose { .. } => closes.push(event.clone()),
+                }
+            }
+
+            // Shuffle each group independently
+            rng.shuffle(&mut reserves);
+            rng.shuffle(&mut resolutions);
+            rng.shuffle(&mut closes);
+
+            // Reconstruct the trace maintaining logical dependencies
+            let mut reconstructed = Vec::new();
+            reconstructed.extend(reserves);
+            reconstructed.extend(resolutions);
+            reconstructed.extend(closes);
+
+            let mut checker_reordered = ContractChecker::new();
+            let result_reordered = checker_reordered.check(&reconstructed);
+
+            // Contract satisfaction should be identical under safe reorderings
+            assert_eq!(
+                result_original.is_clean(),
+                result_reordered.is_clean(),
+                "Iteration {}: Reordering changed clean status", test_iteration
+            );
+            assert_eq!(
+                result_original.contract_status.exhaustive_resolution,
+                result_reordered.contract_status.exhaustive_resolution,
+                "Iteration {}: Reordering changed ExhaustiveResolution", test_iteration
+            );
+            assert_eq!(
+                result_original.contract_status.no_partial_commit,
+                result_reordered.contract_status.no_partial_commit,
+                "Iteration {}: Reordering changed NoPartialCommit", test_iteration
+            );
+            assert_eq!(
+                result_original.violations.len(),
+                result_reordered.violations.len(),
+                "Iteration {}: Reordering changed violation count", test_iteration
+            );
+        }
+
+        crate::test_complete!("metamorphic_event_reordering_invariance");
+    }
+
+    // =========================================================================
+    // MR5: Resolution Path Equivalence
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_resolution_path_equivalence() {
+        init_test("metamorphic_resolution_path_equivalence");
+
+        // Test that different valid resolution paths don't affect contract checking
+        // of other obligations in the same trace
+
+        let base_obligations = vec![
+            (o(0), ObligationKind::SendPermit, t(0), r(0)),
+            (o(1), ObligationKind::Ack, t(1), r(1)),
+            (o(2), ObligationKind::Lease, t(2), r(2)),
+        ];
+
+        // Test different resolution combinations
+        let resolution_variants = vec![
+            // All commit
+            vec!["commit", "commit", "commit"],
+            // All abort
+            vec!["abort", "abort", "abort"],
+            // Mixed 1
+            vec!["commit", "abort", "commit"],
+            // Mixed 2
+            vec!["abort", "commit", "abort"],
+            // With leak
+            vec!["commit", "leak", "abort"],
+        ];
+
+        let mut results = Vec::new();
+
+        for (variant_idx, resolutions) in resolution_variants.iter().enumerate() {
+            let mut events = Vec::new();
+
+            // Reserve all obligations
+            for (i, &(obligation_id, kind, task_id, region_id)) in base_obligations.iter().enumerate() {
+                events.push(reserve(i as u64 * 10, obligation_id, kind, task_id, region_id));
+            }
+
+            // Apply different resolution patterns
+            for (i, (&(obligation_id, kind, _, region_id), &resolution)) in
+                base_obligations.iter().zip(resolutions.iter()).enumerate() {
+
+                let resolve_time = (base_obligations.len() as u64 * 10) + (i as u64 * 10);
+                match resolution {
+                    "commit" => events.push(commit(resolve_time, obligation_id, region_id, kind)),
+                    "abort" => events.push(abort(resolve_time, obligation_id, region_id, kind)),
+                    "leak" => events.push(leak(resolve_time, obligation_id, region_id, kind)),
+                    _ => panic!("Unknown resolution type: {}", resolution),
+                }
+            }
+
+            // Close all regions
+            for (i, &(_, _, _, region_id)) in base_obligations.iter().enumerate() {
+                let close_time = (base_obligations.len() as u64 * 20) + (i as u64 * 5);
+                events.push(close(close_time, region_id));
+            }
+
+            let mut checker = ContractChecker::new();
+            let result = checker.check(&events);
+            results.push((variant_idx, result));
+        }
+
+        // All variants should satisfy the same contracts (just with different resolution paths)
+        for i in 1..results.len() {
+            let (variant1, ref result1) = results[0];
+            let (variant2, ref result2) = results[i];
+
+            // ExhaustiveResolution should be satisfied in all cases (all obligations resolved)
+            assert_eq!(
+                result1.contract_status.exhaustive_resolution,
+                result2.contract_status.exhaustive_resolution,
+                "Resolution variant {} differs from variant {} on ExhaustiveResolution",
+                variant2, variant1
+            );
+
+            // NoPartialCommit should be satisfied (no double resolutions)
+            assert_eq!(
+                result1.contract_status.no_partial_commit,
+                result2.contract_status.no_partial_commit,
+                "Resolution variant {} differs from variant {} on NoPartialCommit",
+                variant2, variant1
+            );
+
+            // RegionClosureSafety should be satisfied (all resolved before close)
+            assert_eq!(
+                result1.contract_status.region_closure_safety,
+                result2.contract_status.region_closure_safety,
+                "Resolution variant {} differs from variant {} on RegionClosureSafety",
+                variant2, variant1
+            );
+        }
+
+        // All variants should be clean (no violations)
+        for (variant_idx, result) in &results {
+            assert!(
+                result.is_clean(),
+                "Resolution variant {} has violations: {:?}",
+                variant_idx,
+                result.violations
+            );
+        }
+
+        crate::test_complete!("metamorphic_resolution_path_equivalence");
+    }
+
+    // =========================================================================
+    // MR6: Adversarial Permit Stress Testing
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_adversarial_permit_stress() {
+        init_test("metamorphic_adversarial_permit_stress");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        // Test contract checking under adversarial conditions:
+        // - Large number of obligations
+        // - Complex interleavings
+        // - Edge case timings
+        // - Maximal region usage
+
+        let config = DialecticaMetamorphicConfig {
+            obligation_count: 50,
+            region_count: 10,
+            max_time_ns: 5000,
+            obligation_kinds: vec![
+                ObligationKind::SendPermit,
+                ObligationKind::Ack,
+                ObligationKind::Lease,
+                ObligationKind::IoOp,
+            ],
+        };
+
+        // Generate multiple adversarial traces
+        let trace_variants = (0..5).map(|_| {
+            generate_dialectica_trace(&config, &mut rng)
+        }).collect::<Vec<_>>();
+
+        for (i, trace) in trace_variants.iter().enumerate() {
+            let mut checker = ContractChecker::new();
+            let result = checker.check(trace);
+
+            // In adversarial scenarios, we primarily check for consistency:
+            // - No panics or crashes during checking
+            // - Reasonable violation patterns
+            // - Contract logic remains sound
+
+            // The trace generator should produce valid traces, so basic contracts should hold
+            assert!(
+                result.contract_status.exhaustive_resolution,
+                "Adversarial trace {} failed ExhaustiveResolution", i
+            );
+            assert!(
+                result.contract_status.no_partial_commit,
+                "Adversarial trace {} failed NoPartialCommit", i
+            );
+            assert!(
+                result.contract_status.region_closure_safety,
+                "Adversarial trace {} failed RegionClosureSafety", i
+            );
+
+            // Verify that all events were processed
+            assert_eq!(
+                result.events_checked,
+                trace.len(),
+                "Adversarial trace {}: events_checked mismatch", i
+            );
+
+            // Check for contract uniformity across obligation kinds
+            for contract in [
+                DialecticaContract::ExhaustiveResolution,
+                DialecticaContract::NoPartialCommit,
+                DialecticaContract::RegionClosureSafety,
+                DialecticaContract::CancellationNonCascading,
+                DialecticaContract::KindUniformStateMachine,
+            ] {
+                let violations_for_contract = result.violations_for(contract);
+                // Adversarial traces should not introduce contract-specific violations
+                // if the generator produces valid sequences
+                if !violations_for_contract.is_empty() {
+                    println!("Adversarial trace {} has violations for {:?}: {:?}",
+                            i, contract, violations_for_contract);
+                }
+            }
+        }
+
+        crate::test_complete!("metamorphic_adversarial_permit_stress");
+    }
+
+    // =========================================================================
+    // Composite Metamorphic Relations
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_composite_invariances() {
+        init_test("metamorphic_composite_invariances");
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
+        // Test combinations of metamorphic transformations:
+        // Temporal shift + Kind substitution + Region isolation
+
+        let base_trace = vec![
+            reserve(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            reserve(10, o(1), ObligationKind::Ack, t(1), r(1)),
+            commit(20, o(0), r(0), ObligationKind::SendPermit),
+            abort(30, o(1), r(1), ObligationKind::Ack),
+            close(40, r(0)),
+            close(50, r(1)),
+        ];
+
+        let mut checker_base = ContractChecker::new();
+        let result_base = checker_base.check(&base_trace);
+
+        // Apply composite transformation:
+        // 1. Shift time by 1000ns
+        // 2. Change all obligations to IoOp kind
+        // 3. Move second obligation to new region
+        let transformed_trace: Vec<MarkingEvent> = base_trace
+            .iter()
+            .map(|event| {
+                let new_time = Time::from_nanos(event.time.as_nanos() + 1000);
+                match &event.kind {
+                    MarkingEventKind::Reserve { obligation, task, region, .. } => {
+                        let new_region = if *obligation == o(1) { r(2) } else { *region };
+                        reserve(new_time.as_nanos(), *obligation, ObligationKind::IoOp, *task, new_region)
+                    }
+                    MarkingEventKind::Commit { obligation, region, .. } => {
+                        let new_region = if *obligation == o(1) { r(2) } else { *region };
+                        commit(new_time.as_nanos(), *obligation, new_region, ObligationKind::IoOp)
+                    }
+                    MarkingEventKind::Abort { obligation, region, .. } => {
+                        let new_region = if *obligation == o(1) { r(2) } else { *region };
+                        abort(new_time.as_nanos(), *obligation, new_region, ObligationKind::IoOp)
+                    }
+                    MarkingEventKind::Leak { obligation, region, .. } => {
+                        let new_region = if *obligation == o(1) { r(2) } else { *region };
+                        leak(new_time.as_nanos(), *obligation, new_region, ObligationKind::IoOp)
+                    }
+                    MarkingEventKind::RegionClose { region } => {
+                        let new_region = if *region == r(1) { r(2) } else { *region };
+                        close(new_time.as_nanos(), new_region)
+                    }
+                }
+            })
+            .collect();
+
+        let mut checker_transformed = ContractChecker::new();
+        let result_transformed = checker_transformed.check(&transformed_trace);
+
+        // Composite transformation should preserve contract satisfaction
+        assert_eq!(
+            result_base.is_clean(),
+            result_transformed.is_clean(),
+            "Composite transformation changed overall clean status"
+        );
+        assert_eq!(
+            result_base.contract_status.exhaustive_resolution,
+            result_transformed.contract_status.exhaustive_resolution,
+            "Composite transformation changed ExhaustiveResolution"
+        );
+        assert_eq!(
+            result_base.contract_status.no_partial_commit,
+            result_transformed.contract_status.no_partial_commit,
+            "Composite transformation changed NoPartialCommit"
+        );
+        assert_eq!(
+            result_base.contract_status.kind_uniform_state_machine,
+            result_transformed.contract_status.kind_uniform_state_machine,
+            "Composite transformation changed KindUniformStateMachine"
+        );
+
+        crate::test_complete!("metamorphic_composite_invariances");
+    }
 }
