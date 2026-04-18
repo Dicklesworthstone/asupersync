@@ -1175,3 +1175,10 @@ path = "fuzz_targets/grpc_streaming.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hpack_huffman_decode"
+path = "fuzz_targets/hpack_huffman_decode.rs"
+test = false
+doc = false
+bench = false
