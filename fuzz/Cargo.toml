@@ -713,3 +713,10 @@ path = "fuzz_targets/h2_window_update_frame.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "postgres_listen_notify"
+path = "fuzz_targets/postgres_listen_notify.rs"
+test = false
+doc = false
+bench = false
