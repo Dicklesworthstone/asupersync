@@ -632,3 +632,10 @@ path = "fuzz_targets/fuzz_h1_client_comprehensive.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_unix_datagram_comprehensive"
+path = "fuzz_targets/fuzz_unix_datagram_comprehensive.rs"
+test = false
+doc = false
+bench = false
