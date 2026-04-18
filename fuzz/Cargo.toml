@@ -804,3 +804,10 @@ path = "fuzz_targets/unix_stream.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hpack_integer"
+path = "fuzz_targets/hpack_integer.rs"
+test = false
+doc = false
+bench = false
