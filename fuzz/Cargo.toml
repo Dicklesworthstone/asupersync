@@ -1049,3 +1049,10 @@ path = "fuzz_targets/protobuf_varint.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "jetstream_records"
+path = "fuzz_targets/jetstream_records.rs"
+test = false
+doc = false
+bench = false

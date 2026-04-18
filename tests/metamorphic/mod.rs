@@ -5,6 +5,7 @@
 //! verify what the output is, verify how outputs relate to each other under
 //! known input transformations."
 
+pub mod blocking_pool;
 pub mod evidence_serialization;
 pub mod metrics;
 pub mod plan_analysis;
