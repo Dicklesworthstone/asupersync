@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! TCP listener accept loop conformance tests.
 //!
 //! Tests the accept loop behavior under load conditions per TCP listener
@@ -236,7 +237,7 @@ fn test_mr2_accept_reports_emfile_cleanly_when_fd_exhausted() {
                     errors_seen.push(e.kind());
 
                     // MR2: EMFILE errors should be reported cleanly, not panic or hang
-                    if e.kind() == ErrorKind::Uncategorized ||
+                    if e.kind() == ErrorKind::Other ||
                        e.raw_os_error() == Some(libc::EMFILE) {
                         // This is the expected behavior for FD exhaustion
                     }

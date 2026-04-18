@@ -3166,6 +3166,59 @@ unsafe fn gf256_addmul_slices2_x86_avx2_impl_tables(
 
     let common = src_a.len().min(src_b.len());
     let mut i = 0usize;
+
+    // Unrolled loop processing 4×32 = 128 bytes per iteration for dual slices
+    while i + 128 <= common {
+        // Prefetch next cache lines (pf64 prefetch distance)
+        if i + 128 + 64 < common {
+            unsafe {
+                _mm_prefetch((src_a.as_ptr().add(i + 128 + 64)).cast::<i8>(), _MM_HINT_T0);
+                _mm_prefetch((dst_a.as_ptr().add(i + 128 + 64)).cast::<i8>(), _MM_HINT_T0);
+                _mm_prefetch((src_b.as_ptr().add(i + 128 + 64)).cast::<i8>(), _MM_HINT_T0);
+                _mm_prefetch((dst_b.as_ptr().add(i + 128 + 64)).cast::<i8>(), _MM_HINT_T0);
+            }
+        }
+
+        // Unroll factor 4: process 4 chunks of 32 bytes each for both slices
+        for chunk_offset in [0, 32, 64, 96] {
+            let src_ptr_a = unsafe { src_a.as_ptr().add(i + chunk_offset) };
+            let dst_ptr_a = unsafe { dst_a.as_mut_ptr().add(i + chunk_offset) };
+            let src_ptr_b = unsafe { src_b.as_ptr().add(i + chunk_offset) };
+            let dst_ptr_b = unsafe { dst_b.as_mut_ptr().add(i + chunk_offset) };
+            // SAFETY: pointer ranges are in-bounds and unaligned loads/stores are used.
+            let src_v_a = unsafe { _mm256_loadu_si256(src_ptr_a.cast::<__m256i>()) };
+            let src_v_b = unsafe { _mm256_loadu_si256(src_ptr_b.cast::<__m256i>()) };
+            let dst_v_a = unsafe { _mm256_loadu_si256(dst_ptr_a.cast::<__m256i>()) };
+            let dst_v_b = unsafe { _mm256_loadu_si256(dst_ptr_b.cast::<__m256i>()) };
+            let low_nibbles_a = _mm256_and_si256(src_v_a, nibble_mask);
+            let high_nibbles_a = _mm256_and_si256(_mm256_srli_epi16(src_v_a, 4), nibble_mask);
+            let low_nibbles_b = _mm256_and_si256(src_v_b, nibble_mask);
+            let high_nibbles_b = _mm256_and_si256(_mm256_srli_epi16(src_v_b, 4), nibble_mask);
+            let product_a = _mm256_xor_si256(
+                _mm256_shuffle_epi8(low_tbl_256, low_nibbles_a),
+                _mm256_shuffle_epi8(high_tbl_256, high_nibbles_a),
+            );
+            let product_b = _mm256_xor_si256(
+                _mm256_shuffle_epi8(low_tbl_256, low_nibbles_b),
+                _mm256_shuffle_epi8(high_tbl_256, high_nibbles_b),
+            );
+            unsafe {
+                _mm256_storeu_si256(
+                    dst_ptr_a.cast::<__m256i>(),
+                    _mm256_xor_si256(dst_v_a, product_a),
+                );
+            };
+            unsafe {
+                _mm256_storeu_si256(
+                    dst_ptr_b.cast::<__m256i>(),
+                    _mm256_xor_si256(dst_v_b, product_b),
+                );
+            };
+        }
+        i += 128;
+    }
+
+    // Handle remaining chunks that don't fit in the unrolled loop
     while i + 32 <= common {
         let src_ptr_a = unsafe { src_a.as_ptr().add(i) };
         let dst_ptr_a = unsafe { dst_a.as_mut_ptr().add(i) };

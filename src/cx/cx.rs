@@ -2200,12 +2200,18 @@ impl<Caps> Cx<Caps> {
     /// assert_eq!(cx.cancel_reason().unwrap().kind, CancelKind::ParentCancelled);
     /// ```
     pub fn set_cancel_reason(&self, reason: CancelReason) {
-        let mut inner = self.inner.write();
-        inner.cancel_requested = true;
-        inner
-            .fast_cancel
-            .store(true, std::sync::atomic::Ordering::Release);
-        inner.cancel_reason = Some(reason);
+        let waker = {
+            let mut inner = self.inner.write();
+            inner.cancel_requested = true;
+            inner
+                .fast_cancel
+                .store(true, std::sync::atomic::Ordering::Release);
+            inner.cancel_reason = Some(reason);
+            inner.cancel_waker.clone()
+        };
+        if let Some(w) = waker {
+            w.wake();
+        }
     }
 
     /// Races multiple futures, waiting for the first to complete.

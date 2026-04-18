@@ -2085,7 +2085,7 @@ Connection: Upgrade\n\
         );
 
         // Test case 6: Malformed request handling
-        let malformed_requests = vec![
+        let malformed_requests: Vec<&[u8]> = vec![
             b"NOT HTTP\r\n\r\n",
             b"GET /test\r\n\r\n",          // Missing HTTP version
             b"GET /test HTTP/1.0\r\n\r\n", // Wrong HTTP version should still work

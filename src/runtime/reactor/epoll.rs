@@ -318,17 +318,14 @@ impl Reactor for EpollReactor {
                     ))
                 }
                 Some(libc::EBADF) => {
-                    let fd_still_valid = unsafe { fcntl(raw_fd, F_GETFD) } != -1;
-                    if fd_still_valid {
-                        Err(err)
-                    } else {
-                        let info = entry.remove();
-                        fds.remove(&info.raw_fd);
-                        Err(io::Error::new(
-                            io::ErrorKind::NotFound,
-                            "token not registered",
-                        ))
-                    }
+                    // EBADF means the target fd is closed. We must remove it to
+                    // prevent leaking the token if the fd was concurrently reused.
+                    let info = entry.remove();
+                    fds.remove(&info.raw_fd);
+                    Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "token not registered",
+                    ))
                 }
                 _ => Err(err),
             },
@@ -1879,6 +1876,11 @@ mod tests {
             true,
             deregister_result.is_ok()
         );
+
+        crate::test_complete!("oneshot_close_before_rearm_no_leak");
+    }
+}
+ );
 
         crate::test_complete!("oneshot_close_before_rearm_no_leak");
     }

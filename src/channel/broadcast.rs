@@ -1893,7 +1893,7 @@ mod tests {
                 };
 
                 // Send messages
-                let messages: Vec<i32> = (0..num_messages).collect();
+                let messages: Vec<i32> = (0..num_messages).map(|x| x as i32).collect();
                 for &msg in &messages {
                     tx.send(&cx, msg).expect("send");
                 }
@@ -1963,7 +1963,7 @@ mod tests {
 
                 // Fast receiver consumes all
                 for _ in 0..capacity {
-                    rx_fast.recv(&cx).await.expect("fast recv");
+                    block_on(rx_fast.recv(&cx)).expect("fast recv");
                 }
 
                 // Send overrun messages, causing lag for slow receiver

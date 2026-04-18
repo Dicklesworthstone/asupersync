@@ -20,7 +20,7 @@
 
 use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
-use crate::record::{Budget, TaskId};
+use crate::types::{Budget, TaskId};
 use crate::sync::{Barrier, BarrierWaitError, BarrierWaitResult};
 use crate::util::{DetEntropy, DetRng};
 use parking_lot::Mutex;
@@ -802,34 +802,33 @@ mod tests {
         crate::test_complete!("mr5_leader_election_determinism_basic");
     }
 
-    /// Property-based test for MR1 with various configurations.
-    #[proptest]
-    fn mr1_party_count_invariant_property(
-        #[strategy(barrier_config_strategy())] config: BarrierTestConfig,
-        #[strategy(work_units_strategy(10))] work_units: Vec<BarrierWorkUnit>,
-    ) {
-        let result = mr1_party_count_invariant(config, work_units);
-        prop_assert!(result.is_ok(), "MR1 property failed: {:?}", result);
-    }
+    proptest! {
+        #[test]
+        fn mr1_party_count_invariant_property(
+            config in barrier_config_strategy(),
+            work_units in work_units_strategy(10),
+        ) {
+            let result = mr1_party_count_invariant(config, work_units);
+            prop_assert!(result.is_ok(), "MR1 property failed: {:?}", result);
+        }
 
-    /// Property-based test for MR2 with spurious wakeup scenarios.
-    #[proptest]
-    fn mr2_spurious_wakeup_preservation_property(
-        #[strategy(barrier_config_strategy().prop_filter("parties > 1", |c| c.parties > 1))] config: BarrierTestConfig,
-        #[strategy(work_units_strategy(8))] work_units: Vec<BarrierWorkUnit>,
-    ) {
-        let result = mr2_spurious_wakeup_preservation(config, work_units);
-        prop_assert!(result.is_ok(), "MR2 property failed: {:?}", result);
-    }
+        #[test]
+        fn mr2_spurious_wakeup_preservation_property(
+            config in barrier_config_strategy().prop_filter("parties > 1", |c| c.parties > 1),
+            work_units in work_units_strategy(8),
+        ) {
+            let result = mr2_spurious_wakeup_preservation(config, work_units);
+            prop_assert!(result.is_ok(), "MR2 property failed: {:?}", result);
+        }
 
-    /// Property-based test for MR4 with deterministic replay verification.
-    #[proptest]
-    fn mr4_deterministic_replay_property(
-        #[strategy(barrier_config_strategy())] config: BarrierTestConfig,
-        #[strategy(work_units_strategy(6))] work_units: Vec<BarrierWorkUnit>,
-    ) {
-        let result = mr4_deterministic_replay(config, work_units);
-        prop_assert!(result.is_ok(), "MR4 property failed: {:?}", result);
+        #[test]
+        fn mr4_deterministic_replay_property(
+            config in barrier_config_strategy(),
+            work_units in work_units_strategy(6),
+        ) {
+            let result = mr4_deterministic_replay(config, work_units);
+            prop_assert!(result.is_ok(), "MR4 property failed: {:?}", result);
+        }
     }
 
     /// Stress test combining all metamorphic relations.

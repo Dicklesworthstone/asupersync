@@ -953,7 +953,7 @@ fn integration_realistic_handler_usage() {
 
         // Log for observability
         assert_eq!(root.kind, CancelKind::Timeout);
-        assert_eq!(root.message, Some("request timeout after 30s"));
+        assert_eq!(root.message, Some("request timeout after 30s".to_string()));
     }
 
     // Full chain inspection for detailed logging

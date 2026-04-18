@@ -4906,7 +4906,7 @@ mod tests {
                     2u32
                 };
 
-                let (result1, result2) = tokio::join!(task1, task2);
+                let (result1, result2) = futures_lite::future::zip(task1, task2).await;
                 acquisition_order.push(result1);
                 acquisition_order.push(result2);
                 acquisition_order
@@ -4940,6 +4940,12 @@ mod tests {
         impl Wake for NoopPoolWaker {
             fn wake(self: Arc<Self>) {}
             fn wake_by_ref(self: &Arc<Self>) {}
+        }
+
+        Waker::from(Arc::new(NoopPoolWaker))
+    }
+}
+elf>) {}
         }
 
         Waker::from(Arc::new(NoopPoolWaker))

@@ -1262,7 +1262,7 @@ mod tests {
 
             // Path C: Oneshot direct send
             let (tx_c, _rx_c) = tracked_oneshot::<i32>();
-            let proof_c = tx_c.send(&cx, i).await.expect("oneshot direct send");
+            let proof_c = block_on(tx_c.send(&cx, i)).expect("oneshot direct send");
             committed_proofs.push(proof_c);
 
             // Path D: MPSC reserve + abort

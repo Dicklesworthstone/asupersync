@@ -1191,7 +1191,7 @@ mod tests {
             .expect("create task 1");
 
         // Simulate deterministic obligation creation pattern
-        let entropy1 = DetEntropy::with_seed(12345);
+        let entropy1 = DetEntropy::mix_seed(12345);
         let mut obligation_ids_1 = Vec::new();
 
         for i in 0..3 {

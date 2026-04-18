@@ -2061,7 +2061,7 @@ mod tests {
             );
 
             // Verify pool is still operational after panic
-            let handle_after_panic = pool.spawn(|| "still working");
+            let handle_after_panic = pool.spawn(|| { let _ = "still working"; });
             assert!(handle_after_panic.wait_timeout(Duration::from_secs(5)));
 
             assert!(pool.shutdown_and_wait(Duration::from_secs(5)));

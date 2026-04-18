@@ -775,9 +775,8 @@ impl IoRegistration {
         {
             let slab_key = SlabToken::from_usize(self.token.0);
             if let Some(slot) = guard.wakers.get_mut(slab_key) {
-                let cloned = waker.clone();
-                slot.clone_from(&cloned);
-                self.cached_waker = Some(cloned);
+                *slot = waker.clone();
+                self.cached_waker = Some(waker.clone());
             } else {
                 return Ok(false);
             }
