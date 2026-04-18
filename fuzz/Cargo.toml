@@ -71,6 +71,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "hpack_static"
+path = "fuzz_targets/hpack_static.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_http2_frame"
 path = "fuzz_targets/http2_frame.rs"
 test = false
