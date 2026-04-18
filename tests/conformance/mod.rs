@@ -3,6 +3,7 @@
 //! This module contains conformance test suites that validate our implementations
 //! against formal specifications (RFCs) and reference implementations.
 
+pub mod aggregator_flush;
 // pub mod codec_framing;
 pub mod h1_rfc9112;
 pub mod h2_alpn_negotiation_rfc7540;
@@ -36,6 +37,10 @@ pub mod quic_connection_migration_rfc9000;
 pub mod websocket_extension_negotiation_rfc6455;
 
 // Re-export main conformance test functionality
+pub use aggregator_flush::{
+    AggregatorFlushConformanceHarness, AggregatorFlushConformanceResult,
+    TestCategory as AggregatorFlushTestCategory,
+};
 pub use h1_rfc9112::{H1ConformanceHarness, H1ConformanceResult, RequirementLevel, TestVerdict};
 #[cfg(feature = "tls")]
 pub use h2_alpn_negotiation_rfc7540::{
@@ -98,6 +103,12 @@ pub use websocket_extension_negotiation_rfc6455::{
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestCategory {
+    // Aggregator flush/drain categories
+    FlushSynchronous,
+    DrainThenClose,
+    CancelPreservation,
+    BackpressurePropagation,
+    ConcurrentWriterSafety,
     // HPACK categories
     StaticTable,
     DynamicTable,
@@ -248,6 +259,38 @@ pub struct ConformanceTestResult {
 /// Run all available conformance test suites.
 pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
     let mut results = Vec::new();
+
+    // Aggregator flush/drain conformance
+    let aggregator_harness = AggregatorFlushConformanceHarness::new();
+    let aggregator_results: Vec<ConformanceTestResult> = aggregator_harness
+        .run_all_tests()
+        .into_iter()
+        .map(|r| ConformanceTestResult {
+            test_id: r.test_id,
+            description: r.description,
+            category: match r.category {
+                aggregator_flush::TestCategory::FlushSynchronous => TestCategory::FlushSynchronous,
+                aggregator_flush::TestCategory::DrainThenClose => TestCategory::DrainThenClose,
+                aggregator_flush::TestCategory::CancelPreservation => TestCategory::CancelPreservation,
+                aggregator_flush::TestCategory::BackpressurePropagation => TestCategory::BackpressurePropagation,
+                aggregator_flush::TestCategory::ConcurrentWriterSafety => TestCategory::ConcurrentWriterSafety,
+            },
+            requirement_level: match r.requirement_level {
+                aggregator_flush::RequirementLevel::Must => RequirementLevel::Must,
+                aggregator_flush::RequirementLevel::Should => RequirementLevel::Should,
+                aggregator_flush::RequirementLevel::May => RequirementLevel::May,
+            },
+            verdict: match r.verdict {
+                aggregator_flush::TestVerdict::Pass => TestVerdict::Pass,
+                aggregator_flush::TestVerdict::Fail => TestVerdict::Fail,
+                aggregator_flush::TestVerdict::Skipped => TestVerdict::Skipped,
+                aggregator_flush::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+            },
+            error_message: r.error_message,
+            execution_time_ms: r.execution_time_ms,
+        })
+        .collect();
+    results.extend(aggregator_results);
 
     // HTTP/1.1 RFC 9112 conformance
     let h1_harness = H1ConformanceHarness::new();
