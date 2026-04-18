@@ -720,3 +720,10 @@ path = "fuzz_targets/postgres_listen_notify.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "trace_integrity"
+path = "fuzz_targets/trace_integrity.rs"
+test = false
+doc = false
+bench = false
