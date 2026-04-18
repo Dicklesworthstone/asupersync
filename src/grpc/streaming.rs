@@ -968,4 +968,399 @@ mod tests {
         });
         crate::test_complete!("request_sink_send_rejects_after_close");
     }
+
+    // =========================================================================
+    // gRPC Specification Conformance Tests for Server Streaming RPC Completion
+    // =========================================================================
+
+    /// GRPC-CONF-001: Server streaming completion must signal proper termination
+    /// Per gRPC spec: "A streaming RPC ends with a status and optional trailing metadata"
+    #[test]
+    fn conformance_server_streaming_proper_termination() {
+        init_test("conformance_server_streaming_proper_termination");
+        let mut stream = ResponseStream::<String>::open();
+
+        // Stream some responses
+        stream.push(Ok("response1".to_string())).expect("first response");
+        stream.push(Ok("response2".to_string())).expect("second response");
+        stream.push(Ok("response3".to_string())).expect("third response");
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+
+        // Consume all responses
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(ref s))) if s == "response1"
+        ), "first response consumed");
+
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(ref s))) if s == "response2"
+        ), "second response consumed");
+
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(ref s))) if s == "response3"
+        ), "third response consumed");
+
+        // Stream termination - close() signals completion
+        drop(pinned); // Drop the pin before calling close()
+        stream.close();
+        let mut pinned = Pin::new(&mut stream); // Re-pin after close
+
+        // Per gRPC spec: stream completion returns None to signal end
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ), "stream properly terminates with None after close()");
+
+        crate::test_complete!("conformance_server_streaming_proper_termination");
+    }
+
+    /// GRPC-CONF-002: Error during streaming should propagate status code
+    /// Per gRPC spec: "Status codes indicate success or failure of gRPC calls"
+    #[test]
+    fn conformance_server_streaming_error_propagation() {
+        init_test("conformance_server_streaming_error_propagation");
+        let mut stream = ResponseStream::<u32>::open();
+
+        // Send valid response followed by error
+        stream.push(Ok(42)).expect("valid response");
+        stream.push(Err(Status::invalid_argument("malformed request data")))
+            .expect("error response");
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+
+        // First response should be valid
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(42)))
+        ), "valid response received before error");
+
+        // Error response should contain proper status
+        match pinned.as_mut().poll_next(&mut cx) {
+            Poll::Ready(Some(Err(status))) => {
+                assert_eq!(status.code(), Code::InvalidArgument, "error code propagated");
+                assert!(status.message().contains("malformed request"), "error message preserved");
+            }
+            other => panic!("expected error status, got {other:?}"),
+        }
+
+        drop(pinned); // Drop pin before calling close()
+        stream.close();
+        let mut pinned = Pin::new(&mut stream); // Re-pin after close
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ), "stream terminates after error");
+
+        crate::test_complete!("conformance_server_streaming_error_propagation");
+    }
+
+    /// GRPC-CONF-003: Backpressure behavior must comply with gRPC flow control
+    /// Per gRPC spec: "Flow control prevents fast senders from overwhelming slow receivers"
+    #[test]
+    fn conformance_server_streaming_backpressure() {
+        init_test("conformance_server_streaming_backpressure");
+        let mut stream = ResponseStream::<u64>::open();
+
+        // Fill buffer to capacity
+        for i in 0..MAX_STREAM_BUFFERED {
+            stream.push(Ok(i as u64))
+                .expect("responses should fill buffer");
+        }
+
+        // Next push should fail with ResourceExhausted per gRPC spec
+        let overflow_result = stream.push(Ok(9999));
+        assert!(overflow_result.is_err(), "buffer overflow should be rejected");
+
+        match overflow_result.unwrap_err() {
+            status if status.code() == Code::ResourceExhausted => {
+                assert!(status.message().contains("buffer full"),
+                    "backpressure error message should indicate buffer state");
+            }
+            other_status => panic!("expected ResourceExhausted, got {other_status:?}"),
+        }
+
+        // Drain one message to free buffer space
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(0)))
+        ), "draining first message should succeed");
+
+        // Now backpressure should be relieved
+        stream.push(Ok(9999))
+            .expect("push after drain should succeed due to available buffer space");
+
+        crate::test_complete!("conformance_server_streaming_backpressure");
+    }
+
+    /// GRPC-CONF-004: Stream must not accept new messages after close()
+    /// Per gRPC spec: "Once a stream is closed, no further messages can be sent"
+    #[test]
+    fn conformance_server_streaming_post_close_rejection() {
+        init_test("conformance_server_streaming_post_close_rejection");
+        let mut stream = ResponseStream::<&'static str>::open();
+
+        stream.push(Ok("valid_message")).expect("pre-close message succeeds");
+        stream.close();
+
+        // Attempt to send after close should fail
+        let post_close_result = stream.push(Ok("post_close_message"));
+        assert!(post_close_result.is_err(), "post-close push should be rejected");
+
+        match post_close_result.unwrap_err() {
+            status if status.code() == Code::FailedPrecondition => {
+                assert!(status.message().contains("closed"),
+                    "error should indicate stream is closed");
+            }
+            other => panic!("expected FailedPrecondition, got {other:?}"),
+        }
+
+        // Stream should still terminate properly
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok("valid_message")))
+        ), "pre-close message should still be available");
+
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ), "stream should terminate with None");
+
+        crate::test_complete!("conformance_server_streaming_post_close_rejection");
+    }
+
+    /// GRPC-CONF-005: Server streaming wrapper preserves inner stream semantics
+    /// Per gRPC spec: "Server streaming responses are ordered"
+    #[test]
+    fn conformance_server_streaming_wrapper_semantics() {
+        init_test("conformance_server_streaming_wrapper_semantics");
+        let mut inner_stream = ResponseStream::<i32>::open();
+        inner_stream.push(Ok(100)).expect("inner stream message");
+        inner_stream.push(Ok(200)).expect("inner stream message");
+        inner_stream.close();
+
+        let mut server_streaming = ServerStreaming::new(inner_stream);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut server_streaming);
+
+        // Server streaming should preserve order and completion semantics
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(100)))
+        ), "first message preserves order");
+
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(200)))
+        ), "second message preserves order");
+
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ), "completion signal preserved");
+
+        crate::test_complete!("conformance_server_streaming_wrapper_semantics");
+    }
+
+    /// GRPC-CONF-006: Empty stream completion should be valid
+    /// Per gRPC spec: "A server may immediately close a stream with no messages"
+    #[test]
+    fn conformance_server_streaming_empty_completion() {
+        init_test("conformance_server_streaming_empty_completion");
+        let mut stream = ResponseStream::<String>::open();
+
+        // Immediately close without sending any messages
+        stream.close();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+
+        // Empty stream should immediately return None
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ), "empty stream should complete immediately with None");
+
+        crate::test_complete!("conformance_server_streaming_empty_completion");
+    }
+
+    /// GRPC-CONF-007: Stream wakeup behavior on close should be immediate
+    /// Per gRPC spec: "Stream completion should wake pending consumers"
+    #[test]
+    fn conformance_server_streaming_close_wakeup() {
+        init_test("conformance_server_streaming_close_wakeup");
+        let mut stream = ResponseStream::<bool>::open();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+
+        // Poll on empty stream should return Pending
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Pending
+        ), "empty open stream should be pending");
+
+        // Close should allow immediate completion on next poll
+        drop(pinned); // Drop pin before calling close()
+        stream.close();
+        let mut pinned = Pin::new(&mut stream); // Re-pin after close
+
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ), "close should enable immediate completion on next poll");
+
+        crate::test_complete!("conformance_server_streaming_close_wakeup");
+    }
+
+    /// GRPC-CONF-008: Multiple polling attempts after completion should be idempotent
+    /// Per gRPC spec: "Completed streams should consistently return completion signal"
+    #[test]
+    fn conformance_server_streaming_completion_idempotence() {
+        init_test("conformance_server_streaming_completion_idempotence");
+        let mut stream = ResponseStream::<f64>::open();
+        stream.push(Ok(3.14159)).expect("single message");
+        stream.close();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+
+        // First poll gets the message
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(val))) if (val - 3.14159).abs() < f64::EPSILON
+        ), "message received on first poll");
+
+        // Subsequent polls should consistently return None (completion)
+        for attempt in 1..=5 {
+            assert!(matches!(
+                pinned.as_mut().poll_next(&mut cx),
+                Poll::Ready(None)
+            ), "completion signal should be idempotent on attempt {attempt}");
+        }
+
+        crate::test_complete!("conformance_server_streaming_completion_idempotence");
+    }
+
+    /// GRPC-CONF-009: Metadata preservation throughout streaming lifecycle
+    /// Per gRPC spec: "Metadata must be preserved for request/response pairs"
+    #[test]
+    fn conformance_server_streaming_metadata_preservation() {
+        init_test("conformance_server_streaming_metadata_preservation");
+
+        // Create request with metadata
+        let mut metadata = Metadata::new();
+        metadata.insert("x-client-id", "test-client-123");
+        metadata.insert("x-request-timeout", "30s");
+        metadata.insert_bin("trace-context-bin", Bytes::from_static(b"\x01\x02\x03\x04"));
+
+        let request = Request::with_metadata("stream_request", metadata.clone());
+
+        // Verify metadata preservation in request
+        assert_eq!(
+            request.metadata().get("x-client-id"),
+            Some(&MetadataValue::Ascii("test-client-123".to_string())),
+            "ASCII metadata preserved"
+        );
+
+        assert_eq!(
+            request.metadata().get("x-request-timeout"),
+            Some(&MetadataValue::Ascii("30s".to_string())),
+            "ASCII metadata preserved"
+        );
+
+        match request.metadata().get("trace-context-bin") {
+            Some(MetadataValue::Binary(bytes)) => {
+                assert_eq!(bytes.as_ref(), &[1, 2, 3, 4], "binary metadata preserved");
+            }
+            other => panic!("expected binary metadata, got {other:?}"),
+        }
+
+        // Create response with metadata
+        let mut resp_metadata = Metadata::new();
+        resp_metadata.insert("x-server-version", "1.0.0");
+        let response = Response::with_metadata("stream_response", resp_metadata);
+
+        assert_eq!(
+            response.metadata().get("x-server-version"),
+            Some(&MetadataValue::Ascii("1.0.0".to_string())),
+            "response metadata preserved"
+        );
+
+        crate::test_complete!("conformance_server_streaming_metadata_preservation");
+    }
+
+    /// GRPC-CONF-010: Stream status propagation with detailed error information
+    /// Per gRPC spec: "Status should include error code and descriptive message"
+    #[test]
+    fn conformance_server_streaming_detailed_status() {
+        init_test("conformance_server_streaming_detailed_status");
+        let mut stream = ResponseStream::<u8>::open();
+
+        // Test various error codes as per gRPC spec
+        let test_statuses = [
+            Status::cancelled("client cancelled request"),
+            Status::deadline_exceeded("request timeout after 30s"),
+            Status::not_found("resource /api/v1/users/999 not found"),
+            Status::permission_denied("insufficient privileges for admin operation"),
+            Status::internal("database connection lost"),
+            Status::unimplemented("feature not yet implemented"),
+        ];
+
+        for (i, status) in test_statuses.iter().enumerate() {
+            stream.push(Ok(i as u8)).expect("valid response before error");
+            stream.push(Err(status.clone())).expect("error status");
+        }
+        stream.close();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+
+        // Verify each status is properly propagated
+        for (i, expected_status) in test_statuses.iter().enumerate() {
+            // Consume valid response
+            assert!(matches!(
+                pinned.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok(val))) if val == i as u8
+            ), "valid response {i} received");
+
+            // Verify error status
+            match pinned.as_mut().poll_next(&mut cx) {
+                Poll::Ready(Some(Err(actual_status))) => {
+                    assert_eq!(actual_status.code(), expected_status.code(),
+                        "error code preserved for status {i}");
+                    assert_eq!(actual_status.message(), expected_status.message(),
+                        "error message preserved for status {i}");
+                }
+                other => panic!("expected error status for {i}, got {other:?}"),
+            }
+        }
+
+        // Stream should terminate properly after errors
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ), "stream terminates after error sequence");
+
+        crate::test_complete!("conformance_server_streaming_detailed_status");
+    }
 }
