@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use asupersync::lab::{LabConfig, LabRuntime};
-use tokio::time::sleep;
+use asupersync::time::sleep;
 
 use crate::runtime::{ObligationId, RegionId, RuntimeHandle};
 use crate::tests::conformance::obligation_invariants::src::{
