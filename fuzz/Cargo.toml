@@ -99,6 +99,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "postgres_row"
+path = "fuzz_targets/postgres_row.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_typed_symbol_parser"
 path = "fuzz_targets/typed_symbol_parser.rs"
 test = false
