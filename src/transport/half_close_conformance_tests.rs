@@ -108,7 +108,7 @@ impl HalfCloseGoldenTester {
         // Test 1: shutdown(Both)
         client1.shutdown(Shutdown::Both)?;
         let mut buf = [0u8; 64];
-        let server1_eof = server1.read(&mut buf).map(|n| n == 0).unwrap_or(false);
+        let server1_eof = server1.read(&mut buf).is_ok_and(|n| n == 0);
         let client1_write_err = client1.write(b"test").is_err();
         let client1_read_err = client1.read(&mut buf).is_err();
 
@@ -116,7 +116,7 @@ impl HalfCloseGoldenTester {
         drop(client2);
         // Allow some time for the connection to close
         std::thread::sleep(Duration::from_millis(10));
-        let server2_eof = server2.read(&mut buf).map(|n| n == 0).unwrap_or(false);
+        let server2_eof = server2.read(&mut buf).is_ok_and(|n| n == 0);
 
         // Both should behave identically
         let behaviors_match = (server1_eof == server2_eof) &&
@@ -151,7 +151,7 @@ impl HalfCloseGoldenTester {
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 // Data not available yet, try again briefly
                 std::thread::sleep(Duration::from_millis(1));
-                client.read(&mut buf).map(|n| n == 0).unwrap_or(false)
+                client.read(&mut buf).is_ok_and(|n| n == 0)
             }
             Err(_) => false,  // Error
         };
@@ -225,7 +225,7 @@ impl HalfCloseResult {
             self.peer_observes_eof,
             self.local_can_read,
             self.local_can_write,
-            self.error.as_ref().map(|s| s.as_str()).unwrap_or("none")
+            self.error.as_deref().unwrap_or("none")
         )
     }
 }

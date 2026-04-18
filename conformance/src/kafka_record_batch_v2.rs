@@ -97,7 +97,7 @@ impl RecordBatchV2 {
         self.last_offset_delta = record.offset_delta;
 
         // Update max timestamp
-        let record_timestamp = self.first_timestamp + record.timestamp_delta as i64;
+        let record_timestamp = self.first_timestamp + record.timestamp_delta;
         if record_timestamp > self.max_timestamp {
             self.max_timestamp = record_timestamp;
         }
@@ -1236,7 +1236,7 @@ impl KafkaConformanceHarness {
         match self.decode_record_batch(&encoded) {
             Ok(decoded) => {
                 if decoded.record_count != 0
-                    || decoded.records.len() != 0
+                    || !decoded.records.is_empty()
                     || decoded.last_offset_delta != 0
                 {
                     return ConformanceTestResult::fail(

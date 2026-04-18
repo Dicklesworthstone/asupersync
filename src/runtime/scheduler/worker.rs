@@ -1556,4 +1556,451 @@ mod tests {
         let dbg2 = format!("{p2:?}");
         assert!(dbg2.contains("Parker"));
     }
+
+    // ========== Work-Stealing Fairness Conformance Tests ==========
+
+    #[test]
+    fn conformance_steal_uniform_distribution() {
+        // Conformance: In the absence of load differences, stealing should
+        // distribute uniformly across workers over many trials.
+        use crate::runtime::scheduler::local_queue::LocalQueue;
+        use crate::util::DetRng;
+        use std::collections::HashMap;
+
+        const NUM_WORKERS: usize = 8;
+        const TRIALS: usize = 1000;
+
+        // Create workers with equal single-task loads
+        let queues: Vec<_> = (0..NUM_WORKERS)
+            .map(|i| {
+                let q = LocalQueue::new_for_test(4);
+                q.push(TaskId::new_for_test(i as u32, 0));
+                q
+            })
+            .collect();
+
+        let stealers: Vec<_> = queues.iter().map(LocalQueue::stealer).collect();
+        let mut steal_counts = HashMap::new();
+        let mut rng = DetRng::new(12345);
+
+        // Perform many steals and track which queues were selected
+        for _ in 0..TRIALS {
+            // Refresh queues for each trial
+            for (i, q) in queues.iter().enumerate() {
+                if q.len() == 0 {
+                    q.push(TaskId::new_for_test(i as u32, 0));
+                }
+            }
+
+            if let Some(task) = stealing::steal_task(&stealers, &mut rng) {
+                let worker_id = task.task_gen() as usize;
+                *steal_counts.entry(worker_id).or_insert(0) += 1;
+            }
+        }
+
+        // Verify uniform distribution: no worker should be severely under-represented
+        let total_steals: usize = steal_counts.values().sum();
+        let expected_per_worker = total_steals / NUM_WORKERS;
+
+        for worker_id in 0..NUM_WORKERS {
+            let actual = steal_counts.get(&worker_id).unwrap_or(&0);
+            let deviation = if *actual > expected_per_worker {
+                *actual - expected_per_worker
+            } else {
+                expected_per_worker - *actual
+            };
+
+            // Allow 30% deviation for randomness, but not systematic bias
+            let max_deviation = expected_per_worker * 3 / 10;
+            assert!(
+                deviation <= max_deviation,
+                "Worker {} steal count {} deviates {} from expected {} (max deviation {})",
+                worker_id, actual, deviation, expected_per_worker, max_deviation
+            );
+        }
+    }
+
+    #[test]
+    fn conformance_steal_load_preference() {
+        // Conformance: "Power of Two Choices" should prefer heavily loaded workers
+        // over lightly loaded ones with high probability.
+        use crate::runtime::scheduler::local_queue::LocalQueue;
+        use crate::util::DetRng;
+
+        const TRIALS: usize = 100;
+
+        let heavy_queue = LocalQueue::new_for_test(10);
+        let light_queue = LocalQueue::new_for_test(10);
+
+        let mut heavy_chosen = 0;
+        let mut light_chosen = 0;
+
+        for trial in 0..TRIALS {
+            // Set up load imbalance: heavy has 5 tasks, light has 1 task
+            for _ in 0..5 {
+                heavy_queue.push(TaskId::new_for_test(100 + trial as u32, 0));
+            }
+            light_queue.push(TaskId::new_for_test(200 + trial as u32, 0));
+
+            let stealers = vec![heavy_queue.stealer(), light_queue.stealer()];
+            let mut rng = DetRng::new(42 + trial as u64);
+
+            if let Some(task) = stealing::steal_task(&stealers, &mut rng) {
+                let task_id = task.task_gen();
+                if (100..200).contains(&task_id) {
+                    heavy_chosen += 1;
+                } else if (200..300).contains(&task_id) {
+                    light_chosen += 1;
+                }
+            }
+
+            // Clear queues for next trial
+            while heavy_queue.pop().is_some() {}
+            while light_queue.pop().is_some() {}
+        }
+
+        // The heavily loaded worker should be chosen significantly more often
+        // Power of Two Choices should make this at least 60% in favor of heavy
+        let total = heavy_chosen + light_chosen;
+        let heavy_ratio = heavy_chosen as f64 / total as f64;
+
+        assert!(
+            heavy_ratio >= 0.6,
+            "Heavily loaded worker chosen {}/{} times ({}%), expected >= 60%",
+            heavy_chosen, total, heavy_ratio * 100.0
+        );
+    }
+
+    #[test]
+    fn conformance_steal_no_starvation() {
+        // Conformance: Every worker must be eventually selectable for stealing.
+        // This prevents systematic starvation of specific workers.
+        use crate::runtime::scheduler::local_queue::LocalQueue;
+        use crate::util::DetRng;
+        use std::collections::HashSet;
+
+        const NUM_WORKERS: usize = 12;
+        const MAX_ATTEMPTS: usize = NUM_WORKERS * 50;
+
+        // Create workers with work available
+        let queues: Vec<_> = (0..NUM_WORKERS)
+            .map(|i| {
+                let q = LocalQueue::new_for_test(4);
+                q.push(TaskId::new_for_test(i as u32, 0));
+                q
+            })
+            .collect();
+
+        let stealers: Vec<_> = queues.iter().map(LocalQueue::stealer).collect();
+        let mut visited_workers = HashSet::new();
+        let mut rng = DetRng::new(9999);
+
+        for attempt in 0..MAX_ATTEMPTS {
+            // Refresh any empty queues
+            for (i, q) in queues.iter().enumerate() {
+                if q.len() == 0 {
+                    q.push(TaskId::new_for_test(i as u32 + attempt as u32 * NUM_WORKERS as u32, 0));
+                }
+            }
+
+            if let Some(task) = stealing::steal_task(&stealers, &mut rng) {
+                let worker_id = (task.task_gen() as usize) % NUM_WORKERS;
+                visited_workers.insert(worker_id);
+            }
+
+            // Early exit if we've visited all workers
+            if visited_workers.len() == NUM_WORKERS {
+                break;
+            }
+        }
+
+        assert_eq!(
+            visited_workers.len(),
+            NUM_WORKERS,
+            "Starvation detected: only {}/{} workers were visited in {} attempts. Missing: {:?}",
+            visited_workers.len(),
+            NUM_WORKERS,
+            MAX_ATTEMPTS,
+            (0..NUM_WORKERS).filter(|w| !visited_workers.contains(w)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn conformance_steal_cross_worker_fairness() {
+        // Conformance: When viewed from different workers' perspectives,
+        // the stealing distribution should remain fair.
+        use crate::runtime::scheduler::local_queue::LocalQueue;
+        use crate::util::DetRng;
+        use std::collections::HashMap;
+
+        const NUM_WORKERS: usize = 6;
+        const STEALS_PER_WORKER: usize = 60;
+
+        // Create workers, each excluding themselves from stealing
+        let queues: Vec<_> = (0..NUM_WORKERS)
+            .map(|_| LocalQueue::new_for_test(8))
+            .collect();
+
+        // Populate all queues
+        for (worker_id, q) in queues.iter().enumerate() {
+            for task_id in 0..4 {
+                q.push(TaskId::new_for_test(
+                    (worker_id * 100 + task_id) as u32,
+                    0
+                ));
+            }
+        }
+
+        // For each worker, simulate their stealing perspective
+        for stealer_worker in 0..NUM_WORKERS {
+            let mut stealers: Vec<_> = queues
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != stealer_worker) // Don't steal from self
+                .map(|(_, q)| q.stealer())
+                .collect();
+
+            let mut steal_distribution = HashMap::new();
+            let mut rng = DetRng::new(stealer_worker as u64 * 1000);
+
+            for _ in 0..STEALS_PER_WORKER {
+                // Refresh queues
+                for (worker_id, q) in queues.iter().enumerate() {
+                    if worker_id != stealer_worker && q.len() < 2 {
+                        for task_id in 0..2 {
+                            q.push(TaskId::new_for_test(
+                                (worker_id * 100 + task_id + 50) as u32,
+                                0
+                            ));
+                        }
+                    }
+                }
+
+                if let Some(task) = stealing::steal_task(&stealers, &mut rng) {
+                    let target_worker = (task.task_gen() as usize) / 100;
+                    *steal_distribution.entry(target_worker).or_insert(0) += 1;
+                }
+            }
+
+            // Verify this worker's stealing is reasonably fair across targets
+            let total_steals: usize = steal_distribution.values().sum();
+            let expected_per_target = total_steals / (NUM_WORKERS - 1);
+
+            for target_worker in 0..NUM_WORKERS {
+                if target_worker == stealer_worker {
+                    continue;
+                }
+
+                let actual = steal_distribution.get(&target_worker).unwrap_or(&0);
+                let deviation = if *actual > expected_per_target {
+                    *actual - expected_per_target
+                } else {
+                    expected_per_target - *actual
+                };
+
+                // Allow 40% deviation for small sample sizes and randomness
+                let max_deviation = expected_per_target * 4 / 10;
+                assert!(
+                    deviation <= max_deviation,
+                    "Worker {} stealing from worker {}: {} steals vs {} expected (deviation {} > {})",
+                    stealer_worker, target_worker, actual, expected_per_target,
+                    deviation, max_deviation
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conformance_steal_statistical_invariants() {
+        // Conformance: Statistical properties of the stealing algorithm
+        // should remain consistent under various load distributions.
+        use crate::runtime::scheduler::local_queue::LocalQueue;
+        use crate::util::DetRng;
+        use std::collections::HashMap;
+
+        const NUM_WORKERS: usize = 8;
+        const TOTAL_TRIALS: usize = 400;
+
+        struct LoadScenario {
+            name: &'static str,
+            loads: Vec<usize>, // Tasks per worker
+        }
+
+        let scenarios = vec![
+            LoadScenario {
+                name: "uniform_load",
+                loads: vec![4; NUM_WORKERS],
+            },
+            LoadScenario {
+                name: "single_heavy",
+                loads: vec![20, 1, 1, 1, 1, 1, 1, 1],
+            },
+            LoadScenario {
+                name: "bimodal",
+                loads: vec![10, 10, 1, 1, 10, 10, 1, 1],
+            },
+            LoadScenario {
+                name: "gradient",
+                loads: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            },
+        ];
+
+        for scenario in &scenarios {
+            let queues: Vec<_> = (0..NUM_WORKERS)
+                .map(|_| LocalQueue::new_for_test(25))
+                .collect();
+
+            let mut steal_counts = HashMap::new();
+            let mut rng = DetRng::new(42);
+
+            for trial in 0..TOTAL_TRIALS {
+                // Set up load distribution
+                for (worker_id, &load) in scenario.loads.iter().enumerate() {
+                    let q = &queues[worker_id];
+                    // Clear and repopulate
+                    while q.pop().is_some() {}
+                    for task_idx in 0..load {
+                        q.push(TaskId::new_for_test(
+                            (worker_id * 1000 + task_idx + trial * 10) as u32,
+                            0
+                        ));
+                    }
+                }
+
+                let stealers: Vec<_> = queues.iter().map(LocalQueue::stealer).collect();
+
+                if let Some(task) = stealing::steal_task(&stealers, &mut rng) {
+                    let worker_id = (task.task_gen() as usize) / 1000;
+                    *steal_counts.entry(worker_id).or_insert(0) += 1;
+                }
+            }
+
+            // Verify statistical properties
+            let total_steals: usize = steal_counts.values().sum();
+
+            // Property 1: Non-zero workers should all be selectable
+            let non_zero_workers: Vec<_> = scenario.loads
+                .iter()
+                .enumerate()
+                .filter(|(_, &load)| load > 0)
+                .map(|(i, _)| i)
+                .collect();
+
+            for &worker_id in &non_zero_workers {
+                let count = steal_counts.get(&worker_id).unwrap_or(&0);
+                assert!(
+                    *count > 0,
+                    "Scenario '{}': Worker {} with load {} was never selected",
+                    scenario.name, worker_id, scenario.loads[worker_id]
+                );
+            }
+
+            // Property 2: Heavily loaded workers should be preferred
+            if scenario.loads.iter().any(|&load| load > 5) {
+                let max_load = *scenario.loads.iter().max().unwrap();
+                let max_workers: Vec<_> = scenario.loads
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &load)| load == max_load)
+                    .map(|(i, _)| i)
+                    .collect();
+
+                let max_worker_steals: usize = max_workers
+                    .iter()
+                    .map(|&w| steal_counts.get(&w).unwrap_or(&0))
+                    .sum();
+
+                let max_worker_ratio = max_worker_steals as f64 / total_steals as f64;
+                let expected_min_ratio = 0.3; // At least 30% for heavily loaded workers
+
+                assert!(
+                    max_worker_ratio >= expected_min_ratio,
+                    "Scenario '{}': Heavily loaded workers got {:.1}% steals, expected >= {:.1}%",
+                    scenario.name, max_worker_ratio * 100.0, expected_min_ratio * 100.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conformance_steal_deterministic_fairness() {
+        // Conformance: For a given RNG seed, stealing should be deterministic
+        // and still maintain fairness properties.
+        use crate::runtime::scheduler::local_queue::LocalQueue;
+        use crate::util::DetRng;
+        use std::collections::HashMap;
+
+        const NUM_WORKERS: usize = 5;
+        const TRIALS: usize = 50;
+        const SEED: u64 = 0xDEADBEEF;
+
+        // Run the same stealing pattern twice with identical setup
+        let mut results_run1 = Vec::new();
+        let mut results_run2 = Vec::new();
+
+        for run in 0..2 {
+            let queues: Vec<_> = (0..NUM_WORKERS)
+                .map(|_| LocalQueue::new_for_test(4))
+                .collect();
+
+            let mut rng = DetRng::new(SEED);
+            let mut run_results = Vec::new();
+
+            for trial in 0..TRIALS {
+                // Identical setup for each trial
+                for (worker_id, q) in queues.iter().enumerate() {
+                    while q.pop().is_some() {} // Clear
+                    for task_idx in 0..2 {
+                        q.push(TaskId::new_for_test(
+                            (worker_id * 100 + task_idx + trial * 10) as u32,
+                            0
+                        ));
+                    }
+                }
+
+                let stealers: Vec<_> = queues.iter().map(LocalQueue::stealer).collect();
+
+                if let Some(task) = stealing::steal_task(&stealers, &mut rng) {
+                    let worker_id = (task.task_gen() as usize) / 100;
+                    run_results.push(worker_id);
+                }
+            }
+
+            if run == 0 {
+                results_run1 = run_results;
+            } else {
+                results_run2 = run_results;
+            }
+        }
+
+        // Property 1: Determinism - identical seeds produce identical results
+        assert_eq!(
+            results_run1, results_run2,
+            "Deterministic stealing failed: runs with identical seeds produced different results"
+        );
+
+        // Property 2: Fairness - even with determinism, all workers should be visited
+        let mut worker_visits = HashMap::new();
+        for &worker_id in &results_run1 {
+            *worker_visits.entry(worker_id).or_insert(0) += 1;
+        }
+
+        assert_eq!(
+            worker_visits.len(),
+            NUM_WORKERS,
+            "Deterministic stealing visited only {}/{} workers: {:?}",
+            worker_visits.len(), NUM_WORKERS, worker_visits.keys().collect::<Vec<_>>()
+        );
+
+        // Property 3: No single worker dominance in deterministic case
+        let total_visits = results_run1.len();
+        let max_visits = *worker_visits.values().max().unwrap();
+        let dominance_ratio = max_visits as f64 / total_visits as f64;
+
+        assert!(
+            dominance_ratio <= 0.7,
+            "Deterministic stealing shows dominance: worker visited {}/{} times ({:.1}%)",
+            max_visits, total_visits, dominance_ratio * 100.0
+        );
+    }
 }
