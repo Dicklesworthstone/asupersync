@@ -692,3 +692,10 @@ path = "fuzz_targets/concurrency_limit_metamorphic.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "plan_dag_fuzz"
+path = "fuzz_targets/plan_dag_fuzz.rs"
+test = false
+doc = false
+bench = false
