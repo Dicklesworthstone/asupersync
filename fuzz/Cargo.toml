@@ -825,3 +825,17 @@ path = "fuzz_targets/h3_body.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "codec_framed"
+path = "fuzz_targets/codec_framed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quic_stream"
+path = "fuzz_targets/quic_stream.rs"
+test = false
+doc = false
+bench = false
