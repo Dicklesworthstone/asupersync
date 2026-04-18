@@ -106,6 +106,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "mysql_wire"
+path = "fuzz_targets/mysql_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_postgres_wire_protocol"
 path = "fuzz_targets/postgres_wire_protocol.rs"
 test = false
