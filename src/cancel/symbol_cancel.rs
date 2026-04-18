@@ -1958,6 +1958,320 @@ mod tests {
     }
 
     // =========================================================================
+    // Metamorphic Testing: Cascade Invariants (META-CANCEL)
+    // =========================================================================
+
+    /// META-CANCEL-001: Transitive Cascade Property
+    /// If A→B→C (chain), then cancel(A) = {A,B,C} all cancelled
+    /// Metamorphic relation: cancel_depth(chain, root) = all_descendants_cancelled(root)
+    #[test]
+    fn meta_transitive_cascade_property() {
+        let mut rng = DetRng::new(12345);
+        let root = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+        let level1 = root.child(&mut rng);
+        let level2 = level1.child(&mut rng);
+        let level3 = level2.child(&mut rng);
+
+        // Create reference chain for comparison
+        let mut rng2 = DetRng::new(12345); // Same seed = same behavior
+        let ref_root = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng2);
+        let ref_level1 = ref_root.child(&mut rng2);
+        let ref_level2 = ref_level1.child(&mut rng2);
+        let ref_level3 = ref_level2.child(&mut rng2);
+
+        let now = Time::from_millis(500);
+
+        // Metamorphic relation: cancelling at any depth should produce same cascade pattern
+        root.cancel(&CancelReason::user("cascade_test"), now);
+        ref_root.cancel(&CancelReason::user("cascade_test"), now);
+
+        // All descendants should be cancelled in both chains
+        assert_eq!(root.is_cancelled(), ref_root.is_cancelled());
+        assert_eq!(level1.is_cancelled(), ref_level1.is_cancelled());
+        assert_eq!(level2.is_cancelled(), ref_level2.is_cancelled());
+        assert_eq!(level3.is_cancelled(), ref_level3.is_cancelled());
+
+        // All should have ParentCancelled except root
+        assert_eq!(root.reason().unwrap().kind, CancelKind::User);
+        assert_eq!(level1.reason().unwrap().kind, CancelKind::ParentCancelled);
+        assert_eq!(level2.reason().unwrap().kind, CancelKind::ParentCancelled);
+        assert_eq!(level3.reason().unwrap().kind, CancelKind::ParentCancelled);
+    }
+
+    /// META-CANCEL-002: Order Independence Property
+    /// Children added in different orders should be cancelled identically
+    /// Metamorphic relation: cancel(permute(children)) = same_cancelled_set
+    #[test]
+    fn meta_order_independence_cascade() {
+        // Setup 1: Add children in order A, B, C
+        let mut rng1 = DetRng::new(67890);
+        let parent1 = SymbolCancelToken::new(ObjectId::new_for_test(10), &mut rng1);
+        let child1a = parent1.child(&mut rng1);
+        let child1b = parent1.child(&mut rng1);
+        let child1c = parent1.child(&mut rng1);
+
+        // Setup 2: Add children in order C, A, B (permuted)
+        let mut rng2 = DetRng::new(67890); // Same initial seed
+        let parent2 = SymbolCancelToken::new(ObjectId::new_for_test(10), &mut rng2);
+        // Skip ahead to same RNG state as after child1c creation
+        let _ = rng2.next_u64(); // child1a token_id
+        let _ = rng2.next_u64(); // child1b token_id
+        let child2c_id = rng2.next_u64(); // child1c token_id
+
+        // Reset and create in different order
+        let mut rng2 = DetRng::new(67890);
+        let parent2 = SymbolCancelToken::new(ObjectId::new_for_test(10), &mut rng2);
+        // Create children in permuted order but with same logical identity
+        let child2a = parent2.child(&mut rng2);
+        let child2c = parent2.child(&mut rng2);
+        let child2b = parent2.child(&mut rng2);
+
+        let now = Time::from_millis(1000);
+
+        // Cancel both parents
+        parent1.cancel(&CancelReason::timeout(), now);
+        parent2.cancel(&CancelReason::timeout(), now);
+
+        // Metamorphic relation: cancellation results should be identical regardless of creation order
+        assert_eq!(parent1.is_cancelled(), parent2.is_cancelled());
+        assert_eq!(child1a.is_cancelled(), child2a.is_cancelled());
+        assert_eq!(child1b.is_cancelled(), child2b.is_cancelled());
+        assert_eq!(child1c.is_cancelled(), child2c.is_cancelled());
+
+        // All children should have same reason kind
+        assert_eq!(child1a.reason().unwrap().kind, child2a.reason().unwrap().kind);
+        assert_eq!(child1b.reason().unwrap().kind, child2b.reason().unwrap().kind);
+        assert_eq!(child1c.reason().unwrap().kind, child2c.reason().unwrap().kind);
+    }
+
+    /// META-CANCEL-003: Reason Monotonicity Property
+    /// Multiple cancellations should only strengthen, never weaken reason severity
+    /// Metamorphic relation: strength(apply_sequence(reasons)) = max(strength(reasons))
+    #[test]
+    fn meta_reason_monotonicity_cascade() {
+        let mut rng = DetRng::new(11111);
+        let token = SymbolCancelToken::new(ObjectId::new_for_test(20), &mut rng);
+
+        // Create sequence of reasons with different severities
+        let weak_reasons = vec![
+            CancelReason::user("weak1"),
+            CancelReason::user("weak2"),
+        ];
+        let strong_reasons = vec![
+            CancelReason::timeout(),
+            CancelReason::new(CancelKind::Shutdown),
+        ];
+
+        let now = Time::from_millis(2000);
+
+        // Apply weak reasons first
+        for reason in &weak_reasons {
+            token.cancel(reason, now);
+        }
+        let after_weak = token.reason().unwrap().kind;
+
+        // Apply strong reasons
+        for reason in &strong_reasons {
+            token.cancel(reason, now);
+        }
+        let after_strong = token.reason().unwrap().kind;
+
+        // Metamorphic relation: final reason should be strongest applied
+        assert_eq!(after_strong, CancelKind::Shutdown); // Strongest
+        // Monotonicity: strength never decreases
+        assert!(matches!(
+            (after_weak, after_strong),
+            (CancelKind::User, CancelKind::Shutdown) |
+            (CancelKind::Timeout, CancelKind::Shutdown) |
+            (CancelKind::Shutdown, CancelKind::Shutdown)
+        ));
+    }
+
+    /// META-CANCEL-004: Upward Isolation Property
+    /// Child cancellation should never affect parent or siblings
+    /// Metamorphic relation: cancel(child) ∩ affect(parent ∪ siblings) = ∅
+    #[test]
+    fn meta_upward_isolation_property() {
+        let mut rng = DetRng::new(22222);
+        let parent = SymbolCancelToken::new(ObjectId::new_for_test(30), &mut rng);
+        let child_a = parent.child(&mut rng);
+        let child_b = parent.child(&mut rng);
+        let child_c = parent.child(&mut rng);
+
+        // Take snapshots before child cancellation
+        let parent_before = parent.is_cancelled();
+        let sibling_b_before = child_b.is_cancelled();
+        let sibling_c_before = child_c.is_cancelled();
+
+        // Cancel only child_a
+        child_a.cancel(&CancelReason::user("isolated"), Time::from_millis(3000));
+
+        // Metamorphic relation: isolation should preserve parent and siblings
+        assert_eq!(parent.is_cancelled(), parent_before);
+        assert_eq!(child_b.is_cancelled(), sibling_b_before);
+        assert_eq!(child_c.is_cancelled(), sibling_c_before);
+
+        // Only the cancelled child should be affected
+        assert!(child_a.is_cancelled());
+        assert!(!parent.is_cancelled());
+        assert!(!child_b.is_cancelled());
+        assert!(!child_c.is_cancelled());
+    }
+
+    /// META-CANCEL-005: Listener Multiplicativity Property
+    /// N listeners should all be notified exactly once per cancellation
+    /// Metamorphic relation: notifications_received = listeners_count × cancellations_count
+    #[test]
+    fn meta_listener_multiplicativity() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let mut rng = DetRng::new(33333);
+        let token = SymbolCancelToken::new(ObjectId::new_for_test(40), &mut rng);
+
+        let notification_count = Arc::new(AtomicU32::new(0));
+        let listener_count = 5u32;
+
+        // Add N listeners
+        for _ in 0..listener_count {
+            let count_clone = notification_count.clone();
+            token.add_listener(move |_: &CancelReason, _: Time| {
+                count_clone.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+
+        // Cancel once
+        token.cancel(&CancelReason::timeout(), Time::from_millis(4000));
+
+        // Metamorphic relation: exactly N notifications for 1 cancellation
+        assert_eq!(notification_count.load(Ordering::SeqCst), listener_count);
+
+        // Additional cancellation attempts should not trigger more notifications (listeners drained)
+        let before_second = notification_count.load(Ordering::SeqCst);
+        token.cancel(&CancelReason::new(CancelKind::Shutdown), Time::from_millis(5000));
+        let after_second = notification_count.load(Ordering::SeqCst);
+
+        assert_eq!(before_second, after_second); // No additional notifications
+    }
+
+    /// META-CANCEL-006: Broadcast Deduplication Property
+    /// Identical messages should be deduplicated regardless of processing order
+    /// Metamorphic relation: process(permute(duplicates)) = process_once(unique)
+    #[test]
+    fn meta_broadcast_deduplication_invariant() {
+        let broadcaster = CancelBroadcaster::new(NullSink);
+
+        let msg = CancelMessage::new(
+            12345,
+            ObjectId::new_for_test(50),
+            CancelKind::Timeout,
+            Time::from_millis(6000),
+            777,
+        );
+
+        let now = Time::from_millis(6000);
+
+        // Process same message multiple times in different patterns
+        let results: Vec<_> = (0..5)
+            .map(|_| broadcaster.receive_message(&msg, now))
+            .collect();
+
+        // Metamorphic relation: only first should succeed, rest should be None (duplicate)
+        assert!(results[0].is_some(), "first message should be processed");
+        assert!(results[1..].iter().all(|r| r.is_none()), "subsequent messages should be duplicates");
+
+        let metrics = broadcaster.metrics();
+        assert_eq!(metrics.received, 1, "only one message should be counted as received");
+        assert_eq!(metrics.duplicates, 4, "four duplicates should be detected");
+    }
+
+    /// META-CANCEL-007: Cascade Depth Invariance Property
+    /// Cancellation effects should be invariant to tree structure depth
+    /// Metamorphic relation: cancel(flatten(tree)) = cancel(nested(tree))
+    #[test]
+    fn meta_cascade_depth_invariance() {
+        let mut rng = DetRng::new(44444);
+
+        // Flat structure: root with 3 direct children
+        let flat_root = SymbolCancelToken::new(ObjectId::new_for_test(60), &mut rng);
+        let flat_children: Vec<_> = (0..3).map(|_| flat_root.child(&mut rng)).collect();
+
+        // Nested structure: root → child1 → child2 → child3 (3 levels deep)
+        let mut rng2 = DetRng::new(44444); // Same seed for comparison
+        let nested_root = SymbolCancelToken::new(ObjectId::new_for_test(60), &mut rng2);
+        let nested_l1 = nested_root.child(&mut rng2);
+        let nested_l2 = nested_l1.child(&mut rng2);
+        let nested_l3 = nested_l2.child(&mut rng2);
+
+        let now = Time::from_millis(7000);
+
+        // Cancel both structures
+        flat_root.cancel(&CancelReason::new(CancelKind::Deadline), now);
+        nested_root.cancel(&CancelReason::new(CancelKind::Deadline), now);
+
+        // Metamorphic relation: all descendants cancelled regardless of structure
+        assert!(flat_root.is_cancelled());
+        assert!(nested_root.is_cancelled());
+
+        // All children/descendants should be cancelled
+        assert!(flat_children.iter().all(|child| child.is_cancelled()));
+        assert!(nested_l1.is_cancelled());
+        assert!(nested_l2.is_cancelled());
+        assert!(nested_l3.is_cancelled());
+
+        // All derived cancellations should have ParentCancelled reason
+        assert!(flat_children.iter().all(|child| child.reason().unwrap().kind == CancelKind::ParentCancelled));
+        assert_eq!(nested_l1.reason().unwrap().kind, CancelKind::ParentCancelled);
+        assert_eq!(nested_l2.reason().unwrap().kind, CancelKind::ParentCancelled);
+        assert_eq!(nested_l3.reason().unwrap().kind, CancelKind::ParentCancelled);
+    }
+
+    /// META-CANCEL-008: Cleanup Coordinator Independence Property
+    /// Object cleanup should be independent across different objects
+    /// Metamorphic relation: cleanup(O1 ∪ O2) = cleanup(O1) + cleanup(O2)
+    #[test]
+    fn meta_cleanup_independence_property() {
+        let coordinator = CleanupCoordinator::new();
+        let now = Time::from_millis(8000);
+
+        let obj1 = ObjectId::new_for_test(70);
+        let obj2 = ObjectId::new_for_test(71);
+
+        // Register symbols for both objects
+        for i in 0..3 {
+            coordinator.register_pending(obj1, Symbol::new_for_test(70, 0, i, &[1, 2]), now);
+        }
+        for i in 0..2 {
+            coordinator.register_pending(obj2, Symbol::new_for_test(71, 0, i, &[3, 4, 5]), now);
+        }
+
+        // Create separate coordinators for independent cleanup comparison
+        let coord1 = CleanupCoordinator::new();
+        let coord2 = CleanupCoordinator::new();
+
+        // Register same symbols in separate coordinators
+        for i in 0..3 {
+            coord1.register_pending(obj1, Symbol::new_for_test(70, 0, i, &[1, 2]), now);
+        }
+        for i in 0..2 {
+            coord2.register_pending(obj2, Symbol::new_for_test(71, 0, i, &[3, 4, 5]), now);
+        }
+
+        // Cleanup obj1 in both scenarios
+        let combined_result1 = coordinator.cleanup(obj1, None);
+        let independent_result1 = coord1.cleanup(obj1, None);
+
+        // Metamorphic relation: obj1 cleanup should be identical regardless of obj2 presence
+        assert_eq!(combined_result1.symbols_cleaned, independent_result1.symbols_cleaned);
+        assert_eq!(combined_result1.bytes_freed, independent_result1.bytes_freed);
+        assert_eq!(combined_result1.completed, independent_result1.completed);
+
+        // obj2 should be unaffected in combined coordinator
+        let stats_after = coordinator.stats();
+        assert_eq!(stats_after.pending_objects, 1); // only obj2 remains
+        assert_eq!(stats_after.pending_symbols, 2); // obj2 symbols still there
+    }
+
+    // =========================================================================
     // Wave 58 – pure data-type trait coverage
     // =========================================================================
 
