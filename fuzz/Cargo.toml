@@ -1070,3 +1070,10 @@ path = "fuzz_targets/websocket_close.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "encoding_universal"
+path = "fuzz_targets/encoding_universal.rs"
+test = false
+doc = false
+bench = false
