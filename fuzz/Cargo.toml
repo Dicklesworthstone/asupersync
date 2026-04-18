@@ -699,3 +699,10 @@ path = "fuzz_targets/plan_dag_fuzz.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h3_datagram_frame"
+path = "fuzz_targets/h3_datagram_frame.rs"
+test = false
+doc = false
+bench = false
