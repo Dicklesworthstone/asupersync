@@ -576,3 +576,10 @@ path = "fuzz_targets/h2_priority.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bytes_mut_freeze_split"
+path = "fuzz_targets/bytes_mut_freeze_split.rs"
+test = false
+doc = false
+bench = false
