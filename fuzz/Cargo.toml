@@ -569,3 +569,10 @@ path = "fuzz_targets/oneshot_drop_race.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_priority"
+path = "fuzz_targets/h2_priority.rs"
+test = false
+doc = false
+bench = false
