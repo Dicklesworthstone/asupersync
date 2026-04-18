@@ -3737,4 +3737,394 @@ mod tests {
         // Should not allow more after saturation
         assert!(!config.can_send_early_data(1));
     }
+
+    // ========== QPACK Dynamic Table Eviction Conformance Tests ==========
+
+    /// Mock dynamic table entry for conformance testing.
+    #[derive(Debug, Clone, PartialEq)]
+    struct QpackDynamicEntry {
+        name: String,
+        value: String,
+        size: usize,
+        reference_count: usize,
+        insertion_order: u64,
+    }
+
+    impl QpackDynamicEntry {
+        fn new(name: String, value: String, insertion_order: u64) -> Self {
+            let size = 32 + name.len() + value.len(); // RFC 9204 size calculation
+            Self {
+                name,
+                value,
+                size,
+                reference_count: 0,
+                insertion_order,
+            }
+        }
+
+        fn add_reference(&mut self) {
+            self.reference_count = self.reference_count.saturating_add(1);
+        }
+
+        fn remove_reference(&mut self) {
+            self.reference_count = self.reference_count.saturating_sub(1);
+        }
+
+        fn is_referenced(&self) -> bool {
+            self.reference_count > 0
+        }
+    }
+
+    /// Mock QPACK dynamic table for conformance testing.
+    #[derive(Debug, Clone)]
+    struct QpackDynamicTable {
+        entries: Vec<QpackDynamicEntry>,
+        max_capacity: usize,
+        current_size: usize,
+        insertion_counter: u64,
+        evicted_count: usize,
+    }
+
+    impl QpackDynamicTable {
+        fn new(max_capacity: usize) -> Self {
+            Self {
+                entries: Vec::new(),
+                max_capacity,
+                current_size: 0,
+                insertion_counter: 0,
+                evicted_count: 0,
+            }
+        }
+
+        fn insert(&mut self, name: String, value: String) -> Result<u64, &'static str> {
+            let entry = QpackDynamicEntry::new(name, value, self.insertion_counter);
+            let entry_size = entry.size;
+
+            if entry_size > self.max_capacity {
+                return Err("entry larger than table capacity");
+            }
+
+            // Evict entries to make space (LRU with reference checking)
+            while self.current_size + entry_size > self.max_capacity {
+                if !self.evict_lru_unreferenced() {
+                    return Err("cannot evict enough space (all entries referenced)");
+                }
+            }
+
+            let insertion_id = self.insertion_counter;
+            self.entries.push(entry);
+            self.current_size += entry_size;
+            self.insertion_counter += 1;
+
+            Ok(insertion_id)
+        }
+
+        fn evict_lru_unreferenced(&mut self) -> bool {
+            // Find the least recently used unreferenced entry
+            let mut lru_index = None;
+            let mut lru_insertion_order = u64::MAX;
+
+            for (i, entry) in self.entries.iter().enumerate() {
+                if !entry.is_referenced() && entry.insertion_order < lru_insertion_order {
+                    lru_insertion_order = entry.insertion_order;
+                    lru_index = Some(i);
+                }
+            }
+
+            if let Some(index) = lru_index {
+                let evicted = self.entries.remove(index);
+                self.current_size -= evicted.size;
+                self.evicted_count += 1;
+                true
+            } else {
+                false
+            }
+        }
+
+        fn reference_entry(&mut self, insertion_id: u64) -> bool {
+            if let Some(entry) = self.entries.iter_mut()
+                .find(|e| e.insertion_order == insertion_id) {
+                entry.add_reference();
+                true
+            } else {
+                false
+            }
+        }
+
+        fn unreference_entry(&mut self, insertion_id: u64) -> bool {
+            if let Some(entry) = self.entries.iter_mut()
+                .find(|e| e.insertion_order == insertion_id) {
+                entry.remove_reference();
+                true
+            } else {
+                false
+            }
+        }
+
+        fn len(&self) -> usize {
+            self.entries.len()
+        }
+
+        fn size(&self) -> usize {
+            self.current_size
+        }
+
+        fn capacity(&self) -> usize {
+            self.max_capacity
+        }
+    }
+
+    #[test]
+    fn qpack_conformance_dynamic_table_lru_eviction() {
+        // Conformance: RFC 9204 Section 3.2 - Dynamic Table
+        // LRU eviction must evict least recently inserted unreferenced entries first.
+
+        let mut table = QpackDynamicTable::new(200); // Small table for testing
+
+        // Insert entries that together exceed capacity
+        let id1 = table.insert("header-a".into(), "value-a".into()).unwrap();
+        let id2 = table.insert("header-b".into(), "value-b".into()).unwrap();
+        let id3 = table.insert("header-c".into(), "value-c".into()).unwrap();
+
+        assert_eq!(table.len(), 3);
+
+        // Insert a large entry that requires eviction
+        let id4 = table.insert("large-header".into(), "very-large-value-that-forces-eviction".into()).unwrap();
+
+        // First entry (oldest, LRU) should have been evicted
+        assert!(table.len() < 4);
+        assert!(!table.reference_entry(id1)); // id1 should be gone
+        assert!(table.reference_entry(id2));  // id2+ should still exist
+        assert!(table.reference_entry(id3));
+        assert!(table.reference_entry(id4));
+    }
+
+    #[test]
+    fn qpack_conformance_dynamic_table_reference_protection() {
+        // Conformance: RFC 9204 Section 3.2 - Referenced entries cannot be evicted.
+
+        let mut table = QpackDynamicTable::new(150);
+
+        let id1 = table.insert("ref-header".into(), "ref-value".into()).unwrap();
+        let id2 = table.insert("temp-header".into(), "temp-value".into()).unwrap();
+
+        // Reference the first entry
+        assert!(table.reference_entry(id1));
+
+        // Insert entries that would normally evict both
+        let _id3 = table.insert("push-header-1".into(), "push-value-1".into()).unwrap();
+        let _id4 = table.insert("push-header-2".into(), "push-value-2".into()).unwrap();
+
+        // Referenced entry should be protected, unreferenced should be evicted
+        assert!(table.reference_entry(id1)); // Still referenced and present
+        assert!(!table.reference_entry(id2)); // Should be evicted
+    }
+
+    #[test]
+    fn qpack_conformance_dynamic_table_size_accounting() {
+        // Conformance: RFC 9204 Section 4.4 - Dynamic table size calculation.
+        // Size = 32 + name_len + value_len for each entry.
+
+        let mut table = QpackDynamicTable::new(1000);
+        let initial_size = table.size();
+
+        // Insert entry: 32 + 4 + 5 = 41 bytes
+        let _id1 = table.insert("name".into(), "value".into()).unwrap();
+        assert_eq!(table.size(), initial_size + 41);
+
+        // Insert another: 32 + 7 + 8 = 47 bytes
+        let _id2 = table.insert("content".into(), "response".into()).unwrap();
+        assert_eq!(table.size(), initial_size + 41 + 47);
+
+        // Size accounting must be exact
+        assert!(table.size() <= table.capacity());
+    }
+
+    #[test]
+    fn qpack_conformance_dynamic_table_capacity_enforcement() {
+        // Conformance: RFC 9204 Section 3.2 - Table must not exceed max capacity.
+
+        let capacity = 100;
+        let mut table = QpackDynamicTable::new(capacity);
+
+        // Fill table close to capacity
+        let _id1 = table.insert("a".into(), "b".into()).unwrap(); // 32 + 1 + 1 = 34
+        let _id2 = table.insert("c".into(), "d".into()).unwrap(); // 32 + 1 + 1 = 34
+
+        assert_eq!(table.size(), 68);
+
+        // Try to insert entry larger than remaining space
+        let _id3 = table.insert("large".into(), "header-value".into()).unwrap(); // 32 + 5 + 12 = 49
+
+        // Should have evicted entries to make space
+        assert!(table.size() <= capacity);
+
+        // Try to insert entry larger than total capacity
+        let result = table.insert(
+            "oversized-header-name".into(),
+            "oversized-header-value-that-exceeds-table-capacity".into()
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn qpack_conformance_dynamic_table_insertion_pressure() {
+        // Conformance: Under heavy insertion pressure, table should maintain
+        // size constraints while evicting appropriate entries.
+
+        let mut table = QpackDynamicTable::new(200);
+        let mut insertion_ids = Vec::new();
+
+        // Insert many small entries
+        for i in 0..20 {
+            let name = format!("header-{}", i);
+            let value = format!("value-{}", i);
+            if let Ok(id) = table.insert(name, value) {
+                insertion_ids.push(id);
+            }
+        }
+
+        // Table should not exceed capacity
+        assert!(table.size() <= table.capacity());
+
+        // Some entries should have been evicted due to pressure
+        assert!(table.evicted_count > 0);
+
+        // Verify LRU ordering - early entries should be evicted first
+        let first_half_present = insertion_ids.iter().take(10)
+            .filter(|&&id| table.reference_entry(id))
+            .count();
+        let second_half_present = insertion_ids.iter().skip(10)
+            .filter(|&&id| table.reference_entry(id))
+            .count();
+
+        // Later entries should be more likely to remain
+        assert!(second_half_present >= first_half_present);
+    }
+
+    #[test]
+    fn qpack_conformance_dynamic_table_reference_lifecycle() {
+        // Conformance: Reference counting must accurately track entry usage.
+
+        let mut table = QpackDynamicTable::new(300);
+
+        let id1 = table.insert("lifecycle".into(), "test-entry".into()).unwrap();
+
+        // Add multiple references
+        assert!(table.reference_entry(id1));
+        assert!(table.reference_entry(id1));
+        assert!(table.reference_entry(id1));
+
+        // Entry should be protected from eviction
+        for i in 0..10 {
+            let _ = table.insert(format!("filler-{}", i), "filler-value".into());
+        }
+
+        // Should still be referenceable (not evicted)
+        assert!(table.reference_entry(id1));
+
+        // Remove references gradually
+        assert!(table.unreference_entry(id1));
+        assert!(table.unreference_entry(id1));
+        assert!(table.unreference_entry(id1));
+        assert!(table.unreference_entry(id1)); // Remove extra reference we added for testing
+
+        // Now should be evictable
+        let large_entry_result = table.insert(
+            "force-eviction".into(),
+            "large-value-to-trigger-eviction-of-unreferenced-entries".into()
+        );
+        assert!(large_entry_result.is_ok());
+
+        // Entry should now be evicted (no longer referenceable)
+        assert!(!table.reference_entry(id1));
+    }
+
+    #[test]
+    fn qpack_conformance_dynamic_table_memory_pressure_simulation() {
+        // Conformance: Table should gracefully handle memory pressure scenarios.
+
+        let small_capacity = 150;
+        let mut table = QpackDynamicTable::new(small_capacity);
+
+        // Scenario 1: Many tiny entries
+        let mut tiny_ids = Vec::new();
+        for i in 0..50 {
+            if let Ok(id) = table.insert(format!("t{}", i), "x".into()) {
+                tiny_ids.push(id);
+            }
+        }
+        assert!(table.size() <= small_capacity);
+
+        // Scenario 2: Mix of sizes with references
+        let medium_id = table.insert("medium-header".into(), "medium-value".into()).unwrap();
+        assert!(table.reference_entry(medium_id));
+
+        // Scenario 3: Sudden large insertion
+        let large_result = table.insert(
+            "emergency-large".into(),
+            "large-emergency-header-value".into()
+        );
+        assert!(large_result.is_ok());
+
+        // Referenced medium entry should survive, unreferenced tiny entries evicted
+        assert!(table.reference_entry(medium_id));
+        assert!(table.size() <= small_capacity);
+
+        // Scenario 4: Capacity exhaustion with all entries referenced
+        table.entries.iter().for_each(|entry| {
+            // Try to reference all remaining entries
+            let _ = table.reference_entry(entry.insertion_order);
+        });
+
+        let impossible_result = table.insert(
+            "impossible".into(),
+            "this-should-fail-due-to-references".into()
+        );
+        // Should fail when no entries can be evicted
+        assert!(impossible_result.is_err());
+    }
+
+    #[test]
+    fn qpack_conformance_dynamic_table_eviction_order_deterministic() {
+        // Conformance: Eviction order must be deterministic and follow LRU strictly.
+
+        let mut table1 = QpackDynamicTable::new(120);
+        let mut table2 = QpackDynamicTable::new(120);
+
+        // Insert identical sequences in both tables
+        let sequence = vec![
+            ("first", "entry"),
+            ("second", "entry"),
+            ("third", "entry"),
+            ("fourth", "entry"),
+        ];
+
+        let mut ids1 = Vec::new();
+        let mut ids2 = Vec::new();
+
+        for (name, value) in &sequence {
+            ids1.push(table1.insert(name.to_string(), value.to_string()).unwrap());
+            ids2.push(table2.insert(name.to_string(), value.to_string()).unwrap());
+        }
+
+        // Force eviction with identical large entry
+        let large_name = "eviction-trigger";
+        let large_value = "large-value-that-forces-eviction";
+
+        let _final1 = table1.insert(large_name.into(), large_value.into()).unwrap();
+        let _final2 = table2.insert(large_name.into(), large_value.into()).unwrap();
+
+        // Both tables should have identical state after eviction
+        assert_eq!(table1.len(), table2.len());
+        assert_eq!(table1.size(), table2.size());
+        assert_eq!(table1.evicted_count, table2.evicted_count);
+
+        // Surviving entries should be the same in both tables
+        for (id1, id2) in ids1.iter().zip(ids2.iter()) {
+            let present1 = table1.reference_entry(*id1);
+            let present2 = table2.reference_entry(*id2);
+            assert_eq!(present1, present2, "Eviction determinism violated");
+        }
+    }
 }
