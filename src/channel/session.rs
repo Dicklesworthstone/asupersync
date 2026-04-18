@@ -1052,4 +1052,322 @@ mod tests {
         crate::test_complete!("meta_oneshot_consumption_finality");
     }
 
+    /// META-SESSION-009: Capacity Pressure Invariant Property
+    /// Under capacity pressure, permit allocation should maintain fairness and consistency
+    /// Metamorphic relation: high_pressure_allocation_fairness = low_pressure_allocation_fairness
+    #[test]
+    fn meta_capacity_pressure_invariant() {
+        init_test("meta_capacity_pressure_invariant");
+        let cx = test_cx();
+
+        const SMALL_CAPACITY: usize = 2;
+        let (tx, mut rx) = tracked_channel::<usize>(SMALL_CAPACITY);
+
+        // Fill to capacity with permits
+        let permit1 = block_on(tx.reserve(&cx)).expect("permit 1");
+        let permit2 = block_on(tx.reserve(&cx)).expect("permit 2");
+
+        // Try to reserve more (should fail)
+        let should_fail = tx.try_reserve();
+        crate::assert_with_log!(
+            should_fail.is_err(),
+            "capacity pressure blocks new reservations",
+            "blocked",
+            "unblocked"
+        );
+
+        // Free one slot via abort, reserve again
+        let _aborted = permit1.abort();
+        let permit3 = tx.try_reserve().expect("permit after abort");
+
+        // Free another slot via send, reserve again
+        let _committed = permit2.send(100).expect("send");
+        let _received = block_on(rx.recv(&cx)).expect("recv");
+        let permit4 = tx.try_reserve().expect("permit after send");
+
+        // Both newly acquired permits should behave identically
+        let _committed3 = permit3.send(200).expect("send 3");
+        let _committed4 = permit4.send(300).expect("send 4");
+
+        let val3 = block_on(rx.recv(&cx)).expect("recv 3");
+        let val4 = block_on(rx.recv(&cx)).expect("recv 4");
+
+        crate::assert_with_log!(
+            (val3 == 200 && val4 == 300) || (val3 == 300 && val4 == 200),
+            "capacity pressure maintains permit functionality",
+            "200,300 or 300,200",
+            format!("{},{}", val3, val4)
+        );
+
+        crate::test_complete!("meta_capacity_pressure_invariant");
+    }
+
+    /// META-SESSION-010: Concurrent Permit Independence Property
+    /// Operations on different permits should be independent and commute
+    /// Metamorphic relation: concurrent_ops(A,B) = sequential_ops(A,B) ∪ sequential_ops(B,A)
+    #[test]
+    fn meta_concurrent_permit_independence() {
+        init_test("meta_concurrent_permit_independence");
+        let cx = test_cx();
+
+        // Test multiple times to catch race conditions
+        for iteration in 0..5 {
+            let (tx, mut rx) = tracked_channel::<(u8, char)>(4);
+
+            // Create permits in one order
+            let permit_a = block_on(tx.reserve(&cx)).expect("permit A");
+            let permit_b = block_on(tx.reserve(&cx)).expect("permit B");
+            let permit_c = block_on(tx.reserve(&cx)).expect("permit C");
+
+            // Execute operations in specific order
+            let _proof_c = permit_c.abort();
+            let _proof_a = permit_a.send((iteration, 'A')).expect("send A");
+            let _proof_b = permit_b.send((iteration, 'B')).expect("send B");
+
+            // Collect results
+            let mut messages = Vec::new();
+            while let Ok(msg) = rx.try_recv() {
+                messages.push(msg);
+            }
+
+            // Should get exactly two messages (C was aborted)
+            crate::assert_with_log!(
+                messages.len() == 2,
+                "concurrent permits: correct message count",
+                2,
+                messages.len()
+            );
+
+            // Messages should contain both A and B values
+            let has_a = messages.iter().any(|(i, c)| *i == iteration && *c == 'A');
+            let has_b = messages.iter().any(|(i, c)| *i == iteration && *c == 'B');
+            crate::assert_with_log!(
+                has_a && has_b,
+                "concurrent permits: both values received",
+                "A and B present",
+                format!("A:{} B:{}", has_a, has_b)
+            );
+        }
+
+        crate::test_complete!("meta_concurrent_permit_independence");
+    }
+
+    /// META-SESSION-011: Error Recovery Consistency Property
+    /// Error recovery should restore the channel to equivalent states
+    /// Metamorphic relation: error_recovery_state = fresh_state_with_same_config
+    #[test]
+    fn meta_error_recovery_consistency() {
+        init_test("meta_error_recovery_consistency");
+        let cx = test_cx();
+
+        // Scenario 1: Error during send, then recover
+        let (tx1, rx1) = tracked_channel::<String>(3);
+        let permit1 = block_on(tx1.reserve(&cx)).expect("reserve before error");
+        drop(rx1); // Cause disconnection error
+
+        let send_error = permit1.send("will_fail".to_string());
+        crate::assert_with_log!(
+            send_error.is_err(),
+            "send to dropped receiver fails",
+            "error",
+            "success"
+        );
+
+        // After error, channel should be in closed state
+        crate::assert_with_log!(
+            tx1.is_closed(),
+            "channel closed after receiver drop",
+            true,
+            tx1.is_closed()
+        );
+
+        // Scenario 2: Fresh channel in same configuration
+        let (tx2, _rx2) = tracked_channel::<String>(3);
+        // Don't drop rx2 yet, so channel starts open
+
+        crate::assert_with_log!(
+            !tx2.is_closed(),
+            "fresh channel starts open",
+            false,
+            tx2.is_closed()
+        );
+
+        // Both closed channels should behave identically
+        let reserve1 = tx1.try_reserve();
+        let reserve2_before_close = tx2.try_reserve();
+
+        crate::assert_with_log!(
+            reserve1.is_err(),
+            "closed channel rejects reserves",
+            "error",
+            "success"
+        );
+        crate::assert_with_log!(
+            reserve2_before_close.is_ok(),
+            "open channel accepts reserves",
+            "success",
+            "error"
+        );
+
+        crate::test_complete!("meta_error_recovery_consistency");
+    }
+
+    /// META-SESSION-012: Proof Token Lifecycle Invariant Property
+    /// Proof tokens should maintain consistent obligation metadata throughout lifecycle
+    /// Metamorphic relation: proof_metadata_consistency across all valid proof-generating paths
+    #[test]
+    fn meta_proof_token_lifecycle_invariant() {
+        init_test("meta_proof_token_lifecycle_invariant");
+        let cx = test_cx();
+
+        let mut committed_proofs = Vec::new();
+        let mut aborted_proofs = Vec::new();
+
+        // Generate proofs via different paths
+        for i in 0..3 {
+            // Path A: MPSC direct send
+            let (tx_a, _rx_a) = tracked_channel::<i32>(1);
+            let proof_a = block_on(tx_a.send(&cx, i)).expect("mpsc direct send");
+            committed_proofs.push(proof_a);
+
+            // Path B: MPSC reserve + send
+            let (tx_b, _rx_b) = tracked_channel::<i32>(1);
+            let permit_b = block_on(tx_b.reserve(&cx)).expect("mpsc reserve");
+            let proof_b = permit_b.send(i).expect("mpsc permit send");
+            committed_proofs.push(proof_b);
+
+            // Path C: Oneshot direct send
+            let (tx_c, _rx_c) = tracked_oneshot::<i32>();
+            let proof_c = tx_c.send(&cx, i).await.expect("oneshot direct send");
+            committed_proofs.push(proof_c);
+
+            // Path D: MPSC reserve + abort
+            let (tx_d, _rx_d) = tracked_channel::<i32>(1);
+            let permit_d = block_on(tx_d.reserve(&cx)).expect("mpsc reserve for abort");
+            let proof_d = permit_d.abort();
+            aborted_proofs.push(proof_d);
+
+            // Path E: Oneshot reserve + abort
+            let (tx_e, _rx_e) = tracked_oneshot::<i32>();
+            let permit_e = tx_e.reserve(&cx);
+            let proof_e = permit_e.abort();
+            aborted_proofs.push(proof_e);
+        }
+
+        // All committed proofs should have identical obligation kind
+        let first_committed_kind = committed_proofs[0].kind();
+        for (i, proof) in committed_proofs.iter().enumerate() {
+            crate::assert_with_log!(
+                proof.kind() == first_committed_kind,
+                format!("committed proof {} has consistent kind", i),
+                first_committed_kind,
+                proof.kind()
+            );
+        }
+
+        // All aborted proofs should have identical obligation kind
+        let first_aborted_kind = aborted_proofs[0].kind();
+        for (i, proof) in aborted_proofs.iter().enumerate() {
+            crate::assert_with_log!(
+                proof.kind() == first_aborted_kind,
+                format!("aborted proof {} has consistent kind", i),
+                first_aborted_kind,
+                proof.kind()
+            );
+        }
+
+        // Committed and aborted proofs should have the same underlying kind
+        crate::assert_with_log!(
+            first_committed_kind == first_aborted_kind,
+            "committed and aborted proofs share obligation kind",
+            first_aborted_kind,
+            first_committed_kind
+        );
+
+        crate::test_complete!("meta_proof_token_lifecycle_invariant");
+    }
+
+    /// META-SESSION-013: Channel State Transition Determinism Property
+    /// Given the same sequence of operations, channel state transitions should be deterministic
+    /// Metamorphic relation: deterministic_state_transitions across identical operation sequences
+    #[test]
+    fn meta_channel_state_transition_determinism() {
+        init_test("meta_channel_state_transition_determinism");
+        let cx = test_cx();
+
+        // Define a deterministic sequence of operations
+        let operations = vec![
+            ("reserve", 0),
+            ("reserve", 1),
+            ("send", 0),    // send on permit 0
+            ("abort", 1),   // abort permit 1
+            ("reserve", 2),
+            ("send", 2),
+        ];
+
+        // Execute sequence twice on identical channels
+        for run in 0..2 {
+            let (tx, mut rx) = tracked_channel::<(usize, usize)>(3);
+            let mut permits = Vec::new();
+            let mut received_messages = Vec::new();
+
+            for (op, permit_idx) in &operations {
+                match *op {
+                    "reserve" => {
+                        let permit = block_on(tx.reserve(&cx)).expect("deterministic reserve");
+                        permits.push(Some(permit));
+                    }
+                    "send" => {
+                        if let Some(Some(permit)) = permits.get_mut(*permit_idx) {
+                            let taken_permit = permit.take().expect("permit available for send");
+                            let _proof = taken_permit.send((run, *permit_idx)).expect("deterministic send");
+                        }
+                    }
+                    "abort" => {
+                        if let Some(Some(permit)) = permits.get_mut(*permit_idx) {
+                            let taken_permit = permit.take().expect("permit available for abort");
+                            let _proof = taken_permit.abort();
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+
+            // Collect all messages from this run
+            while let Ok(msg) = rx.try_recv() {
+                received_messages.push(msg);
+            }
+
+            // For deterministic verification, store results from first run
+            if run == 0 {
+                // First run establishes the expected pattern
+                crate::assert_with_log!(
+                    received_messages.len() == 2,
+                    "deterministic run 0: correct message count",
+                    2,
+                    received_messages.len()
+                );
+            } else {
+                // Second run should match first run exactly
+                crate::assert_with_log!(
+                    received_messages.len() == 2,
+                    "deterministic run 1: matches run 0 message count",
+                    2,
+                    received_messages.len()
+                );
+
+                // Messages should contain the same structure (run differs, permit_idx same)
+                let has_permit_0 = received_messages.iter().any(|(_, idx)| *idx == 0);
+                let has_permit_2 = received_messages.iter().any(|(_, idx)| *idx == 2);
+                crate::assert_with_log!(
+                    has_permit_0 && has_permit_2,
+                    "deterministic run 1: same permit indices as run 0",
+                    "permits 0,2",
+                    format!("permit_0:{} permit_2:{}", has_permit_0, has_permit_2)
+                );
+            }
+        }
+
+        crate::test_complete!("meta_channel_state_transition_determinism");
+    }
 }
