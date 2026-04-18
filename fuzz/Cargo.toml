@@ -183,6 +183,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "quic_streams"
+path = "fuzz_targets/quic_streams.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_gf256_operations"
 path = "fuzz_targets/gf256_operations.rs"
 test = false
