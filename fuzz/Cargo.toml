@@ -958,3 +958,10 @@ path = "fuzz_targets/tls_record.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dns_response"
+path = "fuzz_targets/dns_response.rs"
+test = false
+doc = false
+bench = false
