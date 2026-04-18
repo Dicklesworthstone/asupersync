@@ -11,7 +11,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = "..", features = ["tls", "postgres", "mysql", "kafka", "test-internals", "trace-compression"] }
+asupersync = { path = "..", features = ["tls", "postgres", "mysql", "kafka", "test-internals", "trace-compression", "io-uring"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 libc = "0.2"
@@ -906,6 +906,13 @@ bench = false
 [[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fs_uring"
+path = "fuzz_targets/fs_uring.rs"
 test = false
 doc = false
 bench = false
