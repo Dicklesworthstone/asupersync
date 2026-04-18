@@ -769,3 +769,10 @@ path = "fuzz_targets/length_delimited.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "postgres_scram"
+path = "fuzz_targets/postgres_scram.rs"
+test = false
+doc = false
+bench = false
