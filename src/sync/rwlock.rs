@@ -2563,7 +2563,7 @@ mod metamorphic_tests {
             let cancelable_lock = lock.clone();
             let mut cancelable_write_fut = OwnedRwLockWriteGuard::write(cancelable_lock, &cx);
 
-            let (cancel_waker, cancel_wake_count) = CountWaker::new();
+            let (cancel_waker, _cancel_wake_count) = CountWaker::new();
             let cancel_waker_obj = Waker::from(Arc::new(cancel_waker));
             let mut cancel_task_cx = Context::from_waker(&cancel_waker_obj);
 

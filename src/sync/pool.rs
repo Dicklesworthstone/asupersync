@@ -4945,9 +4945,3 @@ mod tests {
         Waker::from(Arc::new(NoopPoolWaker))
     }
 }
-elf>) {}
-        }
-
-        Waker::from(Arc::new(NoopPoolWaker))
-    }
-}

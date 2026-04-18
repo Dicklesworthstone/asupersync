@@ -1880,8 +1880,3 @@ mod tests {
         crate::test_complete!("oneshot_close_before_rearm_no_leak");
     }
 }
- );
-
-        crate::test_complete!("oneshot_close_before_rearm_no_leak");
-    }
-}

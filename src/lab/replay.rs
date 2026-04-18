@@ -2340,12 +2340,11 @@ mod tests {
             for i in 0..task_count {
                 runtime
                     .trace()
-                    .record_event(&crate::trace::TraceEvent::user_trace(
-                        (task_count + i) as u64,
-                        runtime.time(),
+                    .record_event(|id| crate::trace::TraceEvent::user_trace(
+                        id,
+                        runtime.now(),
                         format!("join_task_{}", i),
-                    ));
-            }
+                    ));            }
         }
     }
 
@@ -2882,9 +2881,9 @@ mod tests {
                     let event_id = region_id * 1000 + task_id + 200;
                     runtime
                         .trace()
-                        .record_event(&crate::trace::TraceEvent::user_trace(
-                            event_id as u64,
-                            runtime.time(),
+                        .record_event(|id| crate::trace::TraceEvent::user_trace(
+                            id,
+                            runtime.now(),
                             format!("join_region_{}_task_{}", region_id, task_id),
                         ));
                 }
@@ -2931,7 +2930,6 @@ mod tests {
         for (i, validation) in multi_validation.iter().enumerate() {
             assert!(validation.matched, "Multi-seed run {} failed validation", i);
         }
-
-        crate::test_complete!("metamorphic_composite_replay_invariants");
-    }
+crate::test_complete!("metamorphic_composite_replay_invariants");
+}
 }
