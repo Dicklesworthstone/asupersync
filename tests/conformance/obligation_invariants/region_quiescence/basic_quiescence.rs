@@ -514,6 +514,3 @@ mod tests {
         assert!(result.violations.is_empty());
     }
 }
-_empty());
-    }
-}
