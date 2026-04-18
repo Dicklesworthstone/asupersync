@@ -673,6 +673,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_rst_stream"
+path = "fuzz_targets/h2_rst_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "bytes_mut_freeze_split"
 path = "fuzz_targets/bytes_mut_freeze_split.rs"
 test = false
