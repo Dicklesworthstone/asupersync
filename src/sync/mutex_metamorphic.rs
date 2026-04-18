@@ -228,11 +228,11 @@ fn mr2_cancel_non_poisoning() {
         prop_assert!(try_result.is_ok(), "try_lock should succeed after cancel, got {:?}", try_result);
 
         let lab2 = LabRuntime::new(LabConfig::default());
-        let lock_result = lab2.block_on(async {
+        let lock_result = futures_lite::future::block_on(async {
             mutex.lock(&cx).await
         });
         match lock_result {
-            Ok(Ok(_guard)) => {
+            Ok(_guard) => {
                 // Expected: successful lock
             }
             other => {

@@ -4530,7 +4530,7 @@ mod tests {
 
         // Acquire first resource, remember its value
         let r1 = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire 1");
-        let original_value = *r1;
+        let original_value: u32 = *r1;
         r1.return_to_pool();
 
         // Acquire again - should get the same resource back
@@ -4734,17 +4734,15 @@ mod tests {
         ));
 
         // Test concurrent acquisition with limited pool size
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let cx = crate::cx::Cx::for_testing();
+        let num_tasks = 6; // More than pool capacity
+        let mut handles = Vec::new();
 
-        rt.block_on(async {
-            let cx = crate::cx::Cx::for_testing();
-            let num_tasks = 6; // More than pool capacity
-            let mut handles = Vec::new();
-
-            for i in 0..num_tasks {
-                let pool_clone = std::sync::Arc::clone(&pool);
-                let cx_clone = cx.clone();
-                let handle = tokio::spawn(async move {
+        for i in 0..num_tasks {
+            let pool_clone = std::sync::Arc::clone(&pool);
+            let cx_clone = cx.clone();
+            let handle = std::thread::spawn(move || {
+                futures_lite::future::block_on(async move {
                     // Each task tries to acquire, use briefly, then return
                     let resource = pool_clone.acquire(&cx_clone).await.unwrap();
 
@@ -4753,42 +4751,42 @@ mod tests {
 
                     resource.return_to_pool();
                     i // Return task ID
-                });
-                handles.push(handle);
-            }
+                })
+            });
+            handles.push(handle);
+        }
 
-            // All tasks should complete successfully despite serialization
-            let mut results = Vec::new();
-            for handle in handles {
-                let result = handle.await.unwrap();
-                results.push(result);
-            }
-            results.sort();
+        // All tasks should complete successfully despite serialization
+        let mut results = Vec::new();
+        for handle in handles {
+            let result = handle.join().unwrap();
+            results.push(result);
+        }
+        results.sort();
 
-            // Verify all tasks completed
-            let expected: Vec<_> = (0..num_tasks).collect();
-            crate::assert_with_log!(
-                results == expected,
-                "concurrent acquire serialization: all tasks completed",
-                expected,
-                results
-            );
+        // Verify all tasks completed
+        let expected: Vec<_> = (0..num_tasks).collect();
+        crate::assert_with_log!(
+            results == expected,
+            "concurrent acquire serialization: all tasks completed",
+            expected,
+            results
+        );
 
-            // Pool should be in consistent state
-            let final_stats = pool.stats();
-            crate::assert_with_log!(
-                final_stats.active == 0,
-                "serialization: no leaked active resources",
-                0usize,
-                final_stats.active
-            );
-            crate::assert_with_log!(
-                final_stats.total_acquisitions == num_tasks as u64,
-                "serialization: all acquisitions counted",
-                num_tasks as u32,
-                final_stats.total_acquisitions
-            );
-        });
+        // Pool should be in consistent state
+        let final_stats = pool.stats();
+        crate::assert_with_log!(
+            final_stats.active == 0,
+            "serialization: no leaked active resources",
+            0usize,
+            final_stats.active
+        );
+        crate::assert_with_log!(
+            final_stats.total_acquisitions == num_tasks as u64,
+            "serialization: all acquisitions counted",
+            num_tasks as u64,
+            final_stats.total_acquisitions
+        );
 
         crate::test_complete!("metamorphic_concurrent_acquire_serializes");
     }
@@ -4802,9 +4800,9 @@ mod tests {
 
         let run_sequence = || -> (Vec<u32>, Vec<u32>, Vec<u32>) {
             let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(3));
-            let runtime = crate::lab::runtime::LabRuntime::new(LabConfig::default());
+            let runtime = crate::lab::runtime::LabRuntime::new(crate::lab::LabConfig::default());
 
-            let (active_history, idle_history, total_history) = runtime.block_on(async {
+            let (active_history, idle_history, total_history) = futures_lite::future::block_on(async {
                 let cx = crate::cx::Cx::for_testing();
                 let mut active_trace = Vec::new();
                 let mut idle_trace = Vec::new();
@@ -4886,9 +4884,9 @@ mod tests {
         // Test determinism with timing-dependent operations
         let timed_sequence = || -> Vec<u32> {
             let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(2));
-            let runtime = crate::lab::runtime::LabRuntime::new(LabConfig::default());
+            let runtime = crate::lab::runtime::LabRuntime::new(crate::lab::LabConfig::default());
 
-            runtime.block_on(async {
+            futures_lite::future::block_on(async {
                 let cx = crate::cx::Cx::for_testing();
                 let mut acquisition_order = Vec::new();
 

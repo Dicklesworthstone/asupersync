@@ -1593,7 +1593,7 @@ mod tests {
             }
 
             if let Some(task) = stealing::steal_task(&stealers, &mut rng) {
-                let worker_id = task.task_gen() as usize;
+                let worker_id = task.arena_index().index() as usize;
                 *steal_counts.entry(worker_id).or_insert(0) += 1;
             }
         }
@@ -1650,7 +1650,7 @@ mod tests {
             let mut rng = DetRng::new(42 + trial as u64);
 
             if let Some(task) = stealing::steal_task(&stealers, &mut rng) {
-                let task_id = task.task_gen();
+                let task_id = task.arena_index().index();
                 if (100..200).contains(&task_id) {
                     heavy_chosen += 1;
                 } else if (200..300).contains(&task_id) {
@@ -1713,7 +1713,7 @@ mod tests {
             }
 
             if let Some(task) = stealing::steal_task(&stealers, &mut rng) {
-                let worker_id = (task.task_gen() as usize) % NUM_WORKERS;
+                let worker_id = (task.arena_index().index() as usize) % NUM_WORKERS;
                 visited_workers.insert(worker_id);
             }
 
@@ -1785,7 +1785,7 @@ mod tests {
                 }
 
                 if let Some(task) = stealing::steal_task(&stealers, &mut rng) {
-                    let target_worker = (task.task_gen() as usize) / 100;
+                    let target_worker = (task.arena_index().index() as usize) / 100;
                     *steal_distribution.entry(target_worker).or_insert(0) += 1;
                 }
             }
@@ -1882,7 +1882,7 @@ mod tests {
                 let stealers: Vec<_> = queues.iter().map(LocalQueue::stealer).collect();
 
                 if let Some(task) = stealing::steal_task(&stealers, &mut rng) {
-                    let worker_id = (task.task_gen() as usize) / 1000;
+                    let worker_id = (task.arena_index().index() as usize) / 1000;
                     *steal_counts.entry(worker_id).or_insert(0) += 1;
                 }
             }
@@ -1979,7 +1979,7 @@ mod tests {
                 let stealers: Vec<_> = queues.iter().map(LocalQueue::stealer).collect();
 
                 if let Some(task) = stealing::steal_task(&stealers, &mut rng) {
-                    let worker_id = (task.task_gen() as usize) / 100;
+                    let worker_id = (task.arena_index().index() as usize) / 100;
                     run_results.push(worker_id);
                 }
             }

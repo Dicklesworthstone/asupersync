@@ -576,7 +576,7 @@ fn mr4_cancel_propagation_consistency(
     // Simulate race execution with external cancellation
     let mut outcomes = vec![None; branch_count];
     let mut total_polls = 0;
-    let race_cancel_reason = CancelReason::explicit("test race cancellation");
+    let race_cancel_reason = CancelReason::user("test race cancellation");
 
     // Poll futures until we reach the cancellation point
     while total_polls < cancel_after_polls {

@@ -412,9 +412,9 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        fn test_config() -> Arc<crate::runtime::ShardedConfig> {
+        fn (*test_config()).clone() -> Arc<crate::runtime::ShardedConfig> {
             Arc::new(crate::runtime::ShardedConfig {
-                runtime: RuntimeConfig::default(),
+                
                 observability: None,
             })
         }
@@ -426,7 +426,7 @@ mod tests {
             let trace = TraceBufferHandle::new(1024);
             let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> =
                 Arc::new(NoOpMetrics);
-            let shards = ShardedState::new(trace, metrics, test_config());
+            let shards = ShardedState::new(trace, metrics, (*test_config()).clone());
 
             // Test single shard operations (Tasks only)
             {
@@ -476,7 +476,7 @@ mod tests {
             let trace = TraceBufferHandle::new(1024);
             let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> =
                 Arc::new(NoOpMetrics);
-            let shards = Arc::new(ShardedState::new(trace, metrics, test_config()));
+            let shards = Arc::new(ShardedState::new(trace, metrics, (*test_config()).clone()));
             let barrier = Arc::new(Barrier::new(4));
 
             let handles: Vec<_> = (0..4)
@@ -561,7 +561,7 @@ mod tests {
             let trace = TraceBufferHandle::new(1024);
             let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> =
                 Arc::new(NoOpMetrics);
-            let shards = Arc::new(ShardedState::new(trace, metrics, test_config()));
+            let shards = Arc::new(ShardedState::new(trace, metrics, (*test_config()).clone()));
             let barrier = Arc::new(Barrier::new(3));
 
             let handles: Vec<_> = (0..3)
@@ -721,7 +721,7 @@ mod tests {
             let trace = TraceBufferHandle::new(1024);
             let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> =
                 Arc::new(NoOpMetrics);
-            let shards = Arc::new(ShardedState::new(trace, metrics, test_config()));
+            let shards = Arc::new(ShardedState::new(trace, metrics, (*test_config()).clone()));
             let barrier = Arc::new(Barrier::new(4));
 
             // Track task IDs created across threads for verification

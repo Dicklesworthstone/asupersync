@@ -239,7 +239,13 @@ mod kqueue_impl {
                         buf.len(),
                     )
                 };
-                if ret <= 0 {
+                if ret < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                } else if ret == 0 {
                     break;
                 }
             }
@@ -331,6 +337,12 @@ mod kqueue_impl {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     "token already registered",
+                ));
+            }
+            if regs.values().any(|info| info.raw_fd == raw_fd) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "fd already registered",
                 ));
             }
 
@@ -594,13 +606,23 @@ mod kqueue_impl {
             {
                 // Write a byte to the wake pipe
                 let buf = [1u8];
-                let ret = unsafe {
-                    libc::write(
-                        self.wake_pipe.1,
-                        buf.as_ptr() as *const libc::c_void,
-                        buf.len(),
-                    )
-                };
+                let mut ret;
+                loop {
+                    ret = unsafe {
+                        libc::write(
+                            self.wake_pipe.1,
+                            buf.as_ptr() as *const libc::c_void,
+                            buf.len(),
+                        )
+                    };
+                    if ret < 0 {
+                        let err = io::Error::last_os_error();
+                        if err.kind() == io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                    }
+                    break;
+                }
 
                 if ret < 0 {
                     let err = io::Error::last_os_error();

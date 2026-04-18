@@ -8961,7 +8961,7 @@ mod tests {
                     for i in 0..child_count {
                         let child_name = format!("child_{}", i);
                         builder = builder.child(
-                            ChildSpec::new(&child_name, noop_start)
+                            ChildSpec::new(&*child_name, noop_start)
                                 .with_restart(SupervisionStrategy::Restart(
                                     RestartConfig::new(1, Duration::from_secs(1)) // Low budget for testing
                                         .with_escalation(escalation_policy),
@@ -9113,8 +9113,7 @@ mod tests {
             .with_restart_policy(RestartPolicy::OneForOne)
             .child(
                 ChildSpec::new("primary", noop_start).with_restart(SupervisionStrategy::Restart(
-                    RestartConfig::new(config.max_restarts, config.restart_window)
-                        .with_escalation(EscalationPolicy::Escalate)
+                    RestartConfig::new(config.max_restarts, config.restart_window, EscalationPolicy::Escalate)
                         .with_backoff(BackoffStrategy::Exponential {
                             initial: Duration::from_millis(100),
                             max: Duration::from_secs(5),
@@ -9124,8 +9123,7 @@ mod tests {
             )
             .child(
                 ChildSpec::new("secondary", noop_start).with_restart(SupervisionStrategy::Restart(
-                    RestartConfig::new(config.max_restarts, config.restart_window)
-                        .with_escalation(EscalationPolicy::Stop),
+                    RestartConfig::new(config.max_restarts, config.restart_window, EscalationPolicy::Stop),
                 )),
             )
             .child(ChildSpec::new("tertiary", noop_start).with_restart(

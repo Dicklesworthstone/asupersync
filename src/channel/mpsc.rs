@@ -2107,9 +2107,12 @@ pub mod backpressure_metamorphic {
         let mut runner = TestRunner::default();
         runner
             .run(&backpressure_config_strategy(), |config| {
-                let lab = LabRuntime::new(LabConfig::new(config.seed));
-                let result =
-                    lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
+                crate::lab::runtime::test(config.seed, |lab| {
+                    let root = lab.state.create_root_region(Budget::INFINITE);
+                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
+                        let cx = crate::cx::Cx::for_testing();
+                        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(root, Budget::INFINITE);
+                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         let (sender, mut receiver) = channel::<u32>(config.capacity);
 
                         // Baseline: empty channel should conserve capacity
@@ -2160,9 +2163,12 @@ pub mod backpressure_metamorphic {
                         }
 
                         Ok(())
-                    });
-
-                result.expect("MR1 capacity conservation test failed");
+                        }.await;
+                    }).unwrap();
+                    lab.scheduler.lock().schedule(test_task, 0);
+                    lab.run_until_quiescent_with_report();
+                });
+                Result::<(), &str>::Ok(()).expect("MR1 capacity conservation test failed");
                 Ok(())
             })
             .expect("Property test failed");
@@ -2179,8 +2185,12 @@ pub mod backpressure_metamorphic {
 
         let mut runner = TestRunner::default();
         runner.run(&backpressure_config_strategy(), |config| {
-        let lab = LabRuntime::new(LabConfig::new(config.seed));
-        let result = lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
+        crate::lab::runtime::test(config.seed, |lab| {
+                    let root = lab.state.create_root_region(Budget::INFINITE);
+                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
+                        let cx = crate::cx::Cx::for_testing();
+                        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(root, Budget::INFINITE);
+                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
             let (sender, mut receiver) = channel::<u32>(config.capacity);
             let sent_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
             let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -2234,9 +2244,12 @@ pub mod backpressure_metamorphic {
             }
 
             Ok(())
-        });
-
-        result.expect("MR2 FIFO ordering test failed");
+                        }.await;
+                    }).unwrap();
+                    lab.scheduler.lock().schedule(test_task, 0);
+                    lab.run_until_quiescent_with_report();
+                });
+                Result::<(), &str>::Ok(()).expect("MR2 FIFO ordering test failed");
             Ok(())
         }).expect("Property test failed");
     }
@@ -2253,9 +2266,12 @@ pub mod backpressure_metamorphic {
         let mut runner = TestRunner::default();
         runner
             .run(&backpressure_config_strategy(), |config| {
-                let lab = LabRuntime::new(LabConfig::new(config.seed));
-                let result =
-                    lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
+                crate::lab::runtime::test(config.seed, |lab| {
+                    let root = lab.state.create_root_region(Budget::INFINITE);
+                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
+                        let cx = crate::cx::Cx::for_testing();
+                        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(root, Budget::INFINITE);
+                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         // Path 1: reserve then send
                         let (sender1, mut receiver1) = channel::<u32>(config.capacity);
                         let received1 = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -2307,9 +2323,12 @@ pub mod backpressure_metamorphic {
                         );
 
                         Ok(())
-                    });
-
-                result.expect("MR3 reserve-send equivalence test failed");
+                        }.await;
+                    }).unwrap();
+                    lab.scheduler.lock().schedule(test_task, 0);
+                    lab.run_until_quiescent_with_report();
+                });
+                Result::<(), &str>::Ok(()).expect("MR3 reserve-send equivalence test failed");
                 Ok(())
             })
             .expect("Property test failed");
@@ -2331,9 +2350,12 @@ pub mod backpressure_metamorphic {
                     return Ok(()); // Skip if cancellation not meaningful
                 }
 
-                let lab = LabRuntime::new(LabConfig::new(config.seed));
-                let result =
-                    lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
+                crate::lab::runtime::test(config.seed, |lab| {
+                    let root = lab.state.create_root_region(Budget::INFINITE);
+                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
+                        let cx = crate::cx::Cx::for_testing();
+                        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(root, Budget::INFINITE);
+                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         let (sender, _receiver) = channel::<u32>(config.capacity);
 
                         // Fill channel to force reserves to block
@@ -2361,7 +2383,7 @@ pub mod backpressure_metamorphic {
                         }
 
                         // Cancel some operations
-                        scope.cancel(CancelReason::explicit("test cancellation"));
+                        scope.cancel(CancelReason::user("test cancellation"));
 
                         // Collect results
                         for handle in reserve_handles {
@@ -2380,9 +2402,12 @@ pub mod backpressure_metamorphic {
                         );
 
                         Ok(())
-                    });
-
-                result.expect("MR4 cancellation idempotence test failed");
+                        }.await;
+                    }).unwrap();
+                    lab.scheduler.lock().schedule(test_task, 0);
+                    lab.run_until_quiescent_with_report();
+                });
+                Result::<(), &str>::Ok(()).expect("MR4 cancellation idempotence test failed");
                 Ok(())
             })
             .expect("Property test failed");
@@ -2403,9 +2428,12 @@ pub mod backpressure_metamorphic {
                     return Ok(()); // Skip if eviction not meaningful
                 }
 
-                let lab = LabRuntime::new(LabConfig::new(config.seed));
-                let result =
-                    lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
+                crate::lab::runtime::test(config.seed, |lab| {
+                    let root = lab.state.create_root_region(Budget::INFINITE);
+                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
+                        let cx = crate::cx::Cx::for_testing();
+                        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(root, Budget::INFINITE);
+                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         let (sender, mut receiver) = channel::<u32>(config.capacity);
 
                         // Fill channel completely
@@ -2444,9 +2472,12 @@ pub mod backpressure_metamorphic {
                         );
 
                         Ok(())
-                    });
-
-                result.expect("MR5 eviction policy test failed");
+                        }.await;
+                    }).unwrap();
+                    lab.scheduler.lock().schedule(test_task, 0);
+                    lab.run_until_quiescent_with_report();
+                });
+                Result::<(), &str>::Ok(()).expect("MR5 eviction policy test failed");
                 Ok(())
             })
             .expect("Property test failed");
@@ -2463,9 +2494,12 @@ pub mod backpressure_metamorphic {
         let mut runner = TestRunner::default();
         runner
             .run(&backpressure_config_strategy(), |config| {
-                let lab = LabRuntime::new(LabConfig::new(config.seed));
-                let result =
-                    lab.spawn_test_scope(Budget::with_millis(5000), move |cx, scope| async move {
+                crate::lab::runtime::test(config.seed, |lab| {
+                    let root = lab.state.create_root_region(Budget::INFINITE);
+                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
+                        let cx = crate::cx::Cx::for_testing();
+                        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(root, Budget::INFINITE);
+                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         let (sender, receiver) = channel::<u32>(config.capacity);
 
                         // Fill channel
@@ -2523,9 +2557,12 @@ pub mod backpressure_metamorphic {
                         );
 
                         Ok(())
-                    });
-
-                result.expect("MR6 receiver drain test failed");
+                        }.await;
+                    }).unwrap();
+                    lab.scheduler.lock().schedule(test_task, 0);
+                    lab.run_until_quiescent_with_report();
+                });
+                Result::<(), &str>::Ok(()).expect("MR6 receiver drain test failed");
                 Ok(())
             })
             .expect("Property test failed");
@@ -2542,9 +2579,12 @@ pub mod backpressure_metamorphic {
         let mut runner = TestRunner::default();
         runner
             .run(&backpressure_config_strategy(), |config| {
-                let lab = LabRuntime::new(LabConfig::new(config.seed));
-                let result =
-                    lab.spawn_test_scope(Budget::with_millis(10000), move |cx, scope| async move {
+                crate::lab::runtime::test(config.seed, |lab| {
+                    let root = lab.state.create_root_region(Budget::INFINITE);
+                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
+                        let cx = crate::cx::Cx::for_testing();
+                        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(root, Budget::INFINITE);
+                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         let (sender, mut receiver) = channel::<u32>(config.capacity);
                         let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
                         let sent_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -2626,9 +2666,12 @@ pub mod backpressure_metamorphic {
                         }
 
                         Ok(())
-                    });
-
-                result.expect("Composite backpressure properties test failed");
+                        }.await;
+                    }).unwrap();
+                    lab.scheduler.lock().schedule(test_task, 0);
+                    lab.run_until_quiescent_with_report();
+                });
+                Result::<(), &str>::Ok(()).expect("Composite backpressure properties test failed");
                 Ok(())
             })
             .expect("Property test failed");

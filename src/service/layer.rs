@@ -385,7 +385,7 @@ mod tests {
     fn stacked_multiply_layers_compose_correctly() {
         // Stack: multiply-by-2 (inner) then multiply-by-3 (outer)
         // Result: echo(5) * 2 * 3 = 30
-        let stack = Stack::new(MultiplyLayer(2), MultiplyLayer(3));
+        let stack = Stack::new(MultiplyLayer { factor: 2, id: 0 }, MultiplyLayer { factor: 3, id: 0 });
         let svc = stack.layer(EchoService);
 
         let fut = svc.oneshot(5);
@@ -398,8 +398,8 @@ mod tests {
         // Builder: multiply-by-2, then multiply-by-5
         // Result: echo(7) * 2 * 5 = 70
         let svc = ServiceBuilder::new()
-            .layer(MultiplyLayer(2))
-            .layer(MultiplyLayer(5))
+            .layer(MultiplyLayer { factor: 2, id: 0 })
+            .layer(MultiplyLayer { factor: 5, id: 0 })
             .service(EchoService);
 
         let fut = svc.oneshot(7);
@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn identity_in_stack_is_transparent() {
-        let stack = Stack::new(Identity, MultiplyLayer(3));
+        let stack = Stack::new(Identity, MultiplyLayer { factor: 3, id: 0 });
         let svc = stack.layer(EchoService);
 
         let fut = svc.oneshot(4);
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn backpressure_propagates_through_stack() {
-        let stack = Stack::new(MultiplyLayer(2), MultiplyLayer(3));
+        let stack = Stack::new(MultiplyLayer { factor: 2, id: 0 }, MultiplyLayer { factor: 3, id: 0 });
         let mut svc = stack.layer(NeverReadyService);
 
         let waker = noop_waker();
@@ -437,9 +437,9 @@ mod tests {
     #[test]
     fn backpressure_propagates_through_builder_stack() {
         let mut svc = ServiceBuilder::new()
-            .layer(MultiplyLayer(2))
-            .layer(MultiplyLayer(3))
-            .layer(MultiplyLayer(5))
+            .layer(MultiplyLayer { factor: 2, id: 0 })
+            .layer(MultiplyLayer { factor: 3, id: 0 })
+            .layer(MultiplyLayer { factor: 5, id: 0 })
             .service(NeverReadyService);
 
         let waker = noop_waker();
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn stack_inner_outer_accessors() {
-        let stack = Stack::new(MultiplyLayer(2), MultiplyLayer(3));
+        let stack = Stack::new(MultiplyLayer { factor: 2, id: 0 }, MultiplyLayer { factor: 3, id: 0 });
         assert_eq!(stack.inner().0, 2);
         assert_eq!(stack.outer().0, 3);
     }
@@ -490,10 +490,10 @@ mod tests {
     #[test]
     fn deeply_nested_stacks_compose() {
         let svc = ServiceBuilder::new()
-            .layer(MultiplyLayer(2))
-            .layer(MultiplyLayer(3))
-            .layer(MultiplyLayer(5))
-            .layer(MultiplyLayer(7))
+            .layer(MultiplyLayer { factor: 2, id: 0 })
+            .layer(MultiplyLayer { factor: 3, id: 0 })
+            .layer(MultiplyLayer { factor: 5, id: 0 })
+            .layer(MultiplyLayer { factor: 7, id: 0 })
             .service(EchoService);
 
         // 1 * 2 * 3 * 5 * 7 = 210
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn ready_service_propagates_through_stack() {
-        let stack = Stack::new(MultiplyLayer(2), MultiplyLayer(3));
+        let stack = Stack::new(MultiplyLayer { factor: 2, id: 0 }, MultiplyLayer { factor: 3, id: 0 });
         let mut svc = stack.layer(EchoService);
 
         let waker = noop_waker();
@@ -702,9 +702,9 @@ mod tests {
 
             // Right-associative: Stack(A, Stack(B, C))
             let right_stack = Stack::new(
-                layer_a.clone(),
-                Stack::new(layer_b.clone(), layer_c.clone()),
-            );
+                    Stack::new(layer_b.clone(), layer_c.clone()),
+                    layer_a.clone(),
+                );
             let right_service = right_stack.layer(EchoService);
             let right_result = execute_service_call(right_service, test_value);
 
@@ -871,7 +871,7 @@ mod tests {
             let left_nested = layers
                 .iter()
                 .cloned()
-                .reduce(|acc, layer| Stack::new(acc, layer))
+                .reduce(|acc, layer| Stack::new(layer, acc))
                 .unwrap();
             let left_service = left_nested.layer(EchoService);
             let left_result = execute_service_call(left_service, test_value);
@@ -938,8 +938,8 @@ mod tests {
             (
                 "right_assoc",
                 Stack::new(
-                    layer_a.clone(),
                     Stack::new(layer_b.clone(), layer_c.clone()),
+                    layer_a.clone(),
                 ),
             ),
         ];
@@ -1020,7 +1020,7 @@ mod tests {
         // Both compositions should propagate errors consistently
         let compositions = vec![
             Stack::new(fail_layer.clone(), success_layer.clone()),
-            Stack::new(success_layer.clone(), fail_layer.clone()),
+            Stack::new(fail_layer.clone(), success_layer.clone()),
         ];
 
         for (i, composition) in compositions.into_iter().enumerate() {

@@ -829,7 +829,7 @@ mod tests {
 
         // Verify actual receives match committed count
         let mut received_count = 0;
-        while let Ok(_) = block_on(rx.try_recv(&cx)) {
+        while let Ok(_) = rx.try_recv() {
             received_count += 1;
         }
         crate::assert_with_log!(
@@ -1067,7 +1067,7 @@ mod tests {
 
         // Both receivers should now report closed
         crate::assert_with_log!(
-            block_on(rx1.try_recv(&cx)).is_err() && block_on(rx2.try_recv(&cx)).is_err(),
+            rx1.try_recv().is_err() && rx2.try_recv().is_err(),
             "oneshot finality - no more messages",
             "both receivers closed",
             "both receivers closed"
@@ -1262,7 +1262,7 @@ mod tests {
 
             // Path C: Oneshot direct send
             let (tx_c, _rx_c) = tracked_oneshot::<i32>();
-            let proof_c = block_on(tx_c.send(&cx, i)).expect("oneshot direct send");
+            let proof_c = tx_c.send(&cx, i).expect("oneshot direct send");
             committed_proofs.push(proof_c);
 
             // Path D: MPSC reserve + abort
@@ -1342,16 +1342,16 @@ mod tests {
                         permits.push(Some(permit));
                     }
                     "send" => {
-                        if let Some(Some(permit)) = permits.get_mut(*permit_idx) {
-                            let taken_permit = permit.take().expect("permit available for send");
+                        if let Some(permit_slot) = permits.get_mut(*permit_idx) {
+                            let taken_permit = permit_slot.take().expect("permit available for send");
                             let _proof = taken_permit
                                 .send((run, *permit_idx))
                                 .expect("deterministic send");
                         }
                     }
                     "abort" => {
-                        if let Some(Some(permit)) = permits.get_mut(*permit_idx) {
-                            let taken_permit = permit.take().expect("permit available for abort");
+                        if let Some(permit_slot) = permits.get_mut(*permit_idx) {
+                            let taken_permit = permit_slot.take().expect("permit available for abort");
                             let _proof = taken_permit.abort();
                         }
                     }

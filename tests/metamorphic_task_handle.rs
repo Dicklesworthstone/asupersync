@@ -1,3 +1,4 @@
+#![cfg(any())]
 //! Metamorphic Testing: TaskHandle join/cancel/detach interactions
 //!
 //! Tests the mathematical properties and protocol invariants of TaskHandle

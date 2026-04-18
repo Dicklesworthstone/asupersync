@@ -219,7 +219,7 @@ where
     F: FnOnce(Arc<GlobalOnceCellState>) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let lab_config = LabConfig::new().with_seed(config.seed);
+    let lab_config = LabConfig::default().with_seed(config.seed);
     let lab = LabRuntime::new(lab_config);
 
     futures_lite::future::block_on(async {
@@ -240,11 +240,12 @@ mod metamorphic_initialization_idempotence {
     fn test_concurrent_init_convergence() {
         let config = OnceCellTestConfig::basic(5, vec![10, 20, 30, 40, 50], 12345);
 
-        let summary = run_once_cell_test(&config, |global_state, config| async move {
+        let init_values = config.init_values.clone();
+        let summary = run_once_cell_test(&config, |global_state| async move {
             let cell = Arc::new(OnceCell::new());
 
             // Try multiple sequential initializations with different values
-            for (i, &value) in config.init_values.iter().enumerate() {
+            for (_i, &value) in init_values.iter().enumerate() {
                 match cell.set(value) {
                     Ok(()) => global_state.successful_inits.fetch_add(1, Ordering::SeqCst),
                     Err(_) => global_state.failed_inits.fetch_add(1, Ordering::SeqCst),
@@ -255,17 +256,17 @@ mod metamorphic_initialization_idempotence {
             assert_eq!(global_state.successful_inits.load(Ordering::SeqCst), 1);
             assert_eq!(
                 global_state.failed_inits.load(Ordering::SeqCst),
-                config.init_values.len() - 1
+                init_values.len() - 1
             );
 
             // Verify cell is initialized with one of the expected values
             assert!(cell.is_initialized());
             let final_value = cell.get().expect("cell should be initialized");
             assert!(
-                config.init_values.contains(final_value),
+                init_values.contains(final_value),
                 "Final value {} should be one of the attempted values: {:?}",
                 final_value,
-                config.init_values
+                init_values
             );
         });
 
@@ -290,7 +291,7 @@ mod metamorphic_initialization_idempotence {
                     .collect();
                 let config = OnceCellTestConfig::basic(num_initializers, values.clone(), seed);
 
-                let summary = run_once_cell_test(&config, |global_state, config| async move {
+                let summary = run_once_cell_test(&config, |global_state| async move {
                     let cell = Arc::new(OnceCell::new());
 
                     // Try get_or_init with different functions sequentially
@@ -324,7 +325,7 @@ mod metamorphic_set_get_equivalence {
     fn test_set_vs_with_value_equivalence() {
         let config = OnceCellTestConfig::basic(1, vec![42], 67890);
 
-        let summary1 = run_once_cell_test(&config, |global_state, config| async move {
+        let summary1 = run_once_cell_test(&config, |global_state| async move {
             let cell = OnceCell::new();
             let _ = cell.set(42);
 
@@ -332,7 +333,7 @@ mod metamorphic_set_get_equivalence {
             let _ = reader.read_value(&cell).await;
         });
 
-        let summary2 = run_once_cell_test(&config, |global_state, config| async move {
+        let summary2 = run_once_cell_test(&config, |global_state| async move {
             let cell = OnceCell::with_value(42);
 
             let reader = TestReader::new(1, Arc::clone(&global_state));
@@ -349,7 +350,7 @@ mod metamorphic_set_get_equivalence {
     fn test_set_then_get_or_init_equivalence() {
         let config = OnceCellTestConfig::basic(2, vec![100, 200], 11111);
 
-        let summary = run_once_cell_test(&config, |global_state, config| async move {
+        let summary = run_once_cell_test(&config, |global_state| async move {
             let cell = Arc::new(OnceCell::new());
 
             // First: set with value 100
@@ -381,17 +382,19 @@ mod metamorphic_concurrent_convergence {
     fn test_concurrent_readers_and_initializers() {
         let config = OnceCellTestConfig::basic(3, vec![1, 2, 3], 22222).with_readers(5);
 
-        let summary = run_once_cell_test(&config, |global_state, config| async move {
+        let init_values = config.init_values.clone();
+        let num_readers = config.num_readers;
+        let summary = run_once_cell_test(&config, |global_state| async move {
             let cell = Arc::new(OnceCell::new());
 
             // Try multiple initializers sequentially (first wins)
-            for (i, &value) in config.init_values.iter().enumerate() {
+            for (_i, &value) in init_values.iter().enumerate() {
                 let result = cell.get_or_init(|| async { value }).await;
                 global_state.record_observed_value(*result);
             }
 
             // Test multiple readers
-            for i in 0..config.num_readers {
+            for i in 0..num_readers {
                 let reader = TestReader::new(i as u32, Arc::clone(&global_state));
                 let _ = reader.read_value(&*cell).await;
             }
@@ -424,7 +427,7 @@ mod metamorphic_cancellation_restart {
     fn test_cancelled_init_allows_restart() {
         let config = OnceCellTestConfig::basic(2, vec![50, 60], 33333).with_cancellation();
 
-        let summary = run_once_cell_test(&config, |global_state, config| async move {
+        let summary = run_once_cell_test(&config, |global_state| async move {
             let cell = Arc::new(OnceCell::new());
 
             // Test cancellation scenario by attempting initialization, then trying set
@@ -473,7 +476,7 @@ mod metamorphic_state_monotonicity {
     fn test_state_monotonic_progression() {
         let config = OnceCellTestConfig::basic(1, vec![77], 44444);
 
-        run_once_cell_test(&config, |global_state, config| async move {
+        run_once_cell_test(&config, |global_state| async move {
             let cell = OnceCell::new();
 
             // Initially uninitialized
@@ -518,7 +521,7 @@ mod metamorphic_value_immutability {
     fn test_value_reference_stability() {
         let config = OnceCellTestConfig::basic(1, vec![88], 55555);
 
-        run_once_cell_test(&config, |global_state, config| async move {
+        run_once_cell_test(&config, |global_state| async move {
             let cell = OnceCell::with_value(88);
 
             // Get multiple references and verify they point to the same memory
@@ -546,7 +549,7 @@ mod metamorphic_value_immutability {
     fn test_concurrent_value_immutability() {
         let config = OnceCellTestConfig::basic(1, vec![99], 66666).with_readers(10);
 
-        let summary = run_once_cell_test(&config, |global_state, config| async move {
+        let summary = run_once_cell_test(&config, |global_state| async move {
             let cell = Arc::new(OnceCell::with_value(99));
 
             // Test many sequential readers
@@ -574,19 +577,21 @@ mod comprehensive_once_cell_metamorphic_tests {
             .with_readers(6)
             .with_cancellation();
 
-        let summary = run_once_cell_test(&config, |global_state, config| async move {
+        let init_values = config.init_values.clone();
+        let num_readers = config.num_readers;
+        let summary = run_once_cell_test(&config, |global_state| async move {
             let cell = Arc::new(OnceCell::new());
 
             // Test multiple metamorphic relations in one scenario
 
             // MR1 + MR3: Sequential initialization attempts (first wins)
-            for (i, &value) in config.init_values.iter().enumerate() {
+            for (_i, &value) in init_values.iter().enumerate() {
                 let result = cell.get_or_init(|| async { value }).await;
                 global_state.record_observed_value(*result);
             }
 
             // MR6: Multiple readers should see immutable value
-            for i in 0..config.num_readers {
+            for i in 0..num_readers {
                 let reader = TestReader::new(i as u32, Arc::clone(&global_state));
                 let _ = reader.read_value(&*cell).await;
             }
@@ -594,7 +599,7 @@ mod comprehensive_once_cell_metamorphic_tests {
             // MR5: Verify final state is stable
             assert!(cell.is_initialized());
             let final_value = cell.get().expect("cell should be initialized");
-            assert!(config.init_values.contains(final_value));
+            assert!(init_values.contains(final_value));
 
             // MR2: Verify set would fail on initialized cell
             assert!(cell.set(999).is_err());

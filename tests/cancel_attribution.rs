@@ -664,7 +664,7 @@ fn e2e_debugging_workflow() {
                 indent,
                 cause.kind,
                 cause.origin_region,
-                cause.message.unwrap_or("no message".to_string())
+                cause.message.as_deref().unwrap_or("no message")
             );
         }
 

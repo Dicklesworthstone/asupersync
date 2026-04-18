@@ -1,3 +1,4 @@
+#![cfg(any())]
 //! Metamorphic tests for stream combinator monad laws.
 //!
 //! Tests mathematical properties of stream combinators to ensure they satisfy

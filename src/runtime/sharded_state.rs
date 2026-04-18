@@ -734,7 +734,7 @@ impl std::fmt::Display for LockShard {
 /// State is per-thread (thread-local). No cross-thread coordination
 /// is needed because lock ordering is a per-thread property.
 #[cfg(debug_assertions)]
-mod lock_order {
+pub(crate) mod lock_order {
     use super::LockShard;
     use std::cell::RefCell;
 

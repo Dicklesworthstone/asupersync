@@ -495,7 +495,7 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
                 self.count = self.count.saturating_sub(removed);
                 all_wakers.extend(wakers);
             }
-            self.current = (target_tick_u64 % (SLOTS as u64)) as usize;
+            self.current = ((target_tick_u64 + 1) % (SLOTS as u64)) as usize;
         } else {
             let target_slot = (target_tick_u64 % (SLOTS as u64)) as usize;
 
@@ -511,9 +511,10 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
             let (wakers, removed) = self.slots[self.current].collect_expired(now);
             self.count = self.count.saturating_sub(removed);
             all_wakers.extend(wakers);
+            self.current = (self.current + 1) % SLOTS;
         }
 
-        self.current_tick = target_tick_u64;
+        self.current_tick = target_tick_u64 + 1;
         all_wakers
     }
 
@@ -778,13 +779,14 @@ impl HierarchicalTimerWheel {
             drain_level!(self.level2);
             drain_level!(self.level3);
 
-            self.current_tick = target_tick;
-            self.level0.cursor = (target_tick % LEVEL0_SLOTS as u64) as usize;
+            let next_tick = target_tick + 1;
+            self.current_tick = next_tick;
+            self.level0.cursor = (next_tick % LEVEL0_SLOTS as u64) as usize;
             self.level1.cursor =
-                ((target_tick / LEVEL0_SLOTS as u64) % LEVEL1_SLOTS as u64) as usize;
-            self.level2.cursor = ((target_tick / (LEVEL0_SLOTS * LEVEL1_SLOTS) as u64)
+                ((next_tick / LEVEL0_SLOTS as u64) % LEVEL1_SLOTS as u64) as usize;
+            self.level2.cursor = ((next_tick / (LEVEL0_SLOTS * LEVEL1_SLOTS) as u64)
                 % LEVEL2_SLOTS as u64) as usize;
-            self.level3.cursor = ((target_tick
+            self.level3.cursor = ((next_tick
                 / (LEVEL0_SLOTS * LEVEL1_SLOTS * LEVEL2_SLOTS) as u64)
                 % LEVEL3_SLOTS as u64) as usize;
 
@@ -797,6 +799,13 @@ impl HierarchicalTimerWheel {
                 self.count += 1;
             }
 
+            return wakers;
+        }
+
+        if ticks_to_advance == 0 {
+            let (mut current, removed) = self.level0.slots[self.level0.cursor].collect_expired(now);
+            self.count = self.count.saturating_sub(removed);
+            wakers.append(&mut current);
             return wakers;
         }
 
@@ -817,10 +826,8 @@ impl HierarchicalTimerWheel {
             wakers.append(&mut tick_wakers);
         }
 
-        // One more pass to flush any expired entries in the current slot.
-        let (mut current, removed) = self.level0.slots[self.level0.cursor].collect_expired(now);
-        self.count = self.count.saturating_sub(removed);
-        wakers.append(&mut current);
+        let mut tick_wakers = self.tick(now);
+        wakers.append(&mut tick_wakers);
 
         wakers
     }

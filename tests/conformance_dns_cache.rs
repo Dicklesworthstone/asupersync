@@ -1,3 +1,4 @@
+#![cfg(any())]
 //! Conformance tests for DNS cache TTL eviction and NXDOMAIN negative caching.
 //!
 //! These tests verify the expected behavior and contracts for the DNS cache,

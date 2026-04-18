@@ -49,7 +49,7 @@ fn mr1_panic_poisoning_consistency_integration() {
         let cx = create_test_context(1, 1);
         let lab = LabRuntime::new(LabConfig::default());
 
-        futures_lite::future::block_on(async {
+        futures_lite::future::block_on::<()>(async {
             let mut guard = mutex_clone.lock(&cx).await.expect("lock should succeed");
             guard.counter += 1;
             panic!("deliberate panic to test poisoning");
@@ -126,7 +126,7 @@ fn mr2_cancel_non_poisoning_integration() {
 
     let cx2 = create_test_context(2, 1);
     let lab2 = LabRuntime::new(LabConfig::default());
-    let lock_result = lab2.block_on(async { mutex.lock(&cx2).await });
+    let lock_result = futures_lite::future::block_on(async { mutex.lock(&cx2).await });
     assert!(
         lock_result.is_ok(),
         "async lock should succeed after cancel, got {:?}",
@@ -150,9 +150,9 @@ fn mr4_concurrent_poison_consistency_integration() {
 
         let handle = std::thread::spawn(move || {
             // Small stagger
-            std::thread::sleep(std::time::Duration::from_millis(i * 10));
+            std::thread::sleep(std::time::Duration::from_millis((i as u64) * 10));
 
-            let cx = create_test_context(i + 10, i + 10);
+            let cx = create_test_context((i as u32) + 10, (i as u32) + 10);
             let result = futures_lite::future::block_on(async { mutex_clone.lock(&cx).await });
             results_clone.lock().unwrap().push((i, result));
         });
@@ -167,7 +167,7 @@ fn mr4_concurrent_poison_consistency_integration() {
         let cx = create_test_context(1, 1);
         let lab = LabRuntime::new(LabConfig::default());
 
-        futures_lite::future::block_on(async {
+        futures_lite::future::block_on::<()>(async {
             let _guard = mutex_for_poison
                 .lock(&cx)
                 .await
@@ -225,7 +225,7 @@ fn comprehensive_metamorphic_integration() {
         let cx = create_test_context(1, 1);
         let lab = LabRuntime::new(LabConfig::default());
 
-        futures_lite::future::block_on(async {
+        futures_lite::future::block_on::<()>(async {
             let _guard = mutex1_clone.lock(&cx).await.expect("lock");
             panic!("test poison");
         })
@@ -245,8 +245,7 @@ fn comprehensive_metamorphic_integration() {
         let _guard = mutex2.lock(&cx).await.expect("clean lock");
         cx.set_cancel_requested(true);
         // Guard drops normally, shouldn't poison
-    })
-    .expect("cancel test should not panic");
+    });
 
     assert!(!mutex2.is_poisoned());
     assert!(mutex2.try_lock().is_ok());

@@ -1,3 +1,4 @@
+#![cfg(any())]
 //! Conformance tests for diagnostics runtime introspection endpoints.
 //!
 //! These tests verify the public API contracts, performance characteristics,

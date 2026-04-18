@@ -807,7 +807,7 @@ mod tests {
 
             // MR2: Spawned tasks should observe cancellation
             assert!(
-                task_cancelled.load(Ordering::SeqCst) || outcome.is_cancelled(),
+                task_cancelled.load(Ordering::SeqCst) || _outcome.is_cancelled(),
                 "Spawned tasks should receive cancellation signal"
             );
         }

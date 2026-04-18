@@ -453,7 +453,8 @@ mod tests {
     use std::cell::Cell;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Condvar, Mutex as StdMutex, mpsc};
+    use std::sync::{Arc, Condvar, Mutex as StdMutex};
+    use std::sync::mpsc;
     use std::thread;
 
     thread_local! {
@@ -750,7 +751,7 @@ mod tests {
             .lock()
             .expect("discovery handle lock poisoned") = Some(Arc::clone(&discovery));
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::unbounded();
         let discovery_for_thread = Arc::clone(&discovery);
         let worker = thread::spawn(move || {
             let result = discovery_for_thread.poll_discover();
@@ -780,7 +781,7 @@ mod tests {
     #[test]
     fn dns_discovery_stale_concurrent_resolution_cannot_clobber_newer_state() {
         init_test("dns_discovery_stale_concurrent_resolution_cannot_clobber_newer_state");
-        let (first_started_tx, first_started_rx) = mpsc::channel();
+        let (first_started_tx, first_started_rx) = mpsc::unbounded();
         let release_first = Arc::new((StdMutex::new(false), Condvar::new()));
         let release_first_for_resolver = Arc::clone(&release_first);
         let call_index = Arc::new(AtomicUsize::new(0));
@@ -846,7 +847,7 @@ mod tests {
     #[test]
     fn dns_discovery_stale_concurrent_resolution_still_reports_error_to_caller() {
         init_test("dns_discovery_stale_concurrent_resolution_still_reports_error_to_caller");
-        let (first_started_tx, first_started_rx) = mpsc::channel();
+        let (first_started_tx, first_started_rx) = mpsc::unbounded();
         let release_first = Arc::new((StdMutex::new(false), Condvar::new()));
         let release_first_for_resolver = Arc::clone(&release_first);
         let call_index = Arc::new(AtomicUsize::new(0));
@@ -908,7 +909,7 @@ mod tests {
     #[test]
     fn dns_discovery_older_success_still_applies_after_newer_failure() {
         init_test("dns_discovery_older_success_still_applies_after_newer_failure");
-        let (first_started_tx, first_started_rx) = mpsc::channel();
+        let (first_started_tx, first_started_rx) = mpsc::unbounded();
         let release_first = Arc::new((StdMutex::new(false), Condvar::new()));
         let release_first_for_resolver = Arc::clone(&release_first);
         let call_index = Arc::new(AtomicUsize::new(0));
@@ -1252,8 +1253,8 @@ mod tests {
     fn golden_test_dns_refresh_vs_inflight_request_ordering() {
         init_test("golden_test_dns_refresh_vs_inflight_request_ordering");
 
-        let (first_started_tx, first_started_rx) = mpsc::channel();
-        let (complete_first_tx, complete_first_rx) = mpsc::channel();
+        let (first_started_tx, first_started_rx) = mpsc::unbounded();
+        let (complete_first_tx, complete_first_rx) = mpsc::unbounded();
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_resolver = Arc::clone(&call_count);
 
@@ -1479,8 +1480,8 @@ mod tests {
     fn golden_test_race_free_endpoint_lookup() {
         init_test("golden_test_race_free_endpoint_lookup");
 
-        let (resolution_started_tx, resolution_started_rx) = mpsc::channel();
-        let (continue_resolution_tx, continue_resolution_rx) = mpsc::channel();
+        let (resolution_started_tx, resolution_started_rx) = mpsc::unbounded();
+        let (continue_resolution_tx, continue_resolution_rx) = mpsc::unbounded();
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_resolver = Arc::clone(&call_count);
 
@@ -1609,8 +1610,8 @@ mod tests {
 
         let resolution_count = Arc::new(AtomicUsize::new(0));
         let resolution_count_for_resolver = Arc::clone(&resolution_count);
-        let (all_started_tx, all_started_rx) = mpsc::channel();
-        let (proceed_tx, proceed_rx) = mpsc::channel();
+        let (all_started_tx, all_started_rx) = mpsc::unbounded();
+        let (proceed_tx, proceed_rx) = mpsc::unbounded();
         let worker_count = Arc::new(AtomicUsize::new(0));
         let worker_count_for_resolver = Arc::clone(&worker_count);
 

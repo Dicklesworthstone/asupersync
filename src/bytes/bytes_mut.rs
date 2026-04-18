@@ -27,6 +27,7 @@ use std::ops::{Deref, DerefMut, RangeBounds};
 /// let frozen = buf.freeze();
 /// assert_eq!(&frozen[..], b"hello world");
 /// ```
+#[derive(Clone)]
 pub struct BytesMut {
     /// The backing storage.
     data: Vec<u8>,
