@@ -343,7 +343,7 @@ fn generate_test_tasks(config: &EdfMetamorphicConfig) -> Vec<EdfTestTask> {
         let deadline = Time::from_millis(deadline_ms);
 
         // Generate resource requirements
-        let num_resources = rng.gen_range(1..=(config.num_resources.min(3) as u64));
+        let num_resources = rng.gen_range(1..(config.num_resources.min(3) as u64 + 1));
         let mut required_resources = Vec::new();
         for _ in 0..num_resources {
             let resource_id = ResourceId::new(rng.gen_range(0..config.num_resources as u64));

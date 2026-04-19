@@ -317,9 +317,11 @@ impl Reactor for EpollReactor {
                         "token not registered",
                     ))
                 }
-                Some(libc::EBADF) => {
-                    // EBADF means the target fd is closed. We must remove it to
-                    // prevent leaking the token if the fd was concurrently reused.
+                Some(libc::EBADF) if unsafe { fcntl(raw_fd, F_GETFD) } == -1 => {
+                    // Determine whether the target fd itself is valid so EBADF can be
+                    // interpreted correctly (target closed vs reactor poller invalid).
+                    // Evaluated AFTER the modify attempt to prevent TOCTOU race.
+                    // We must remove it to prevent leaking the token if the fd was concurrently reused.
                     let info = entry.remove();
                     fds.remove(&info.raw_fd);
                     Err(io::Error::new(
@@ -1122,7 +1124,80 @@ mod tests {
         crate::test_complete!("deregister_hard_delete_failure_preserves_bookkeeping_for_retry");
     }
 
+    
     #[test]
+    fn modify_failure_preserves_bookkeeping_when_poller_fd_closed() {
+        init_test("modify_failure_preserves_bookkeeping_when_poller_fd_closed");
+        let reactor = EpollReactor::new().expect("failed to create reactor");
+        let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
+        let fd_reuse_min = next_fd_reuse_test_min_fd();
+
+        let token = Token::new(79);
+        let registered_fd = sock1.as_raw_fd();
+        reactor
+            .register(&sock1, token, Interest::READABLE)
+            .expect("register failed");
+
+        let poller_fd = reactor.poller.as_raw_fd();
+        let saved_poller_fd = dup_fd_at_least(poller_fd, fd_reuse_min);
+        let mut poller_restore = FdRestoreGuard::new(poller_fd, saved_poller_fd);
+        
+        // Close the poller fd to cause EBADF on modify
+        let close_result = unsafe { libc::close(poller_fd) };
+        crate::assert_with_log!(
+            close_result == 0,
+            "close poller fd",
+            0,
+            close_result
+        );
+
+        let err = reactor
+            .modify(token, Interest::WRITABLE)
+            .expect_err("modify should fail when poller fd is closed");
+        let errno = err
+            .raw_os_error()
+            .expect("poller close should preserve errno");
+        crate::assert_with_log!(
+            errno == libc::EBADF,
+            "closed poller yields EBADF",
+            libc::EBADF,
+            errno
+        );
+
+        let state = reactor.state.lock();
+        crate::assert_with_log!(
+            state.tokens.contains_key(&token),
+            "token bookkeeping preserved after modify EBADF from closed poller",
+            true,
+            state.tokens.contains_key(&token)
+        );
+        crate::assert_with_log!(
+            state.fds.get(&registered_fd) == Some(&token),
+            "fd bookkeeping preserved after modify EBADF from closed poller",
+            true,
+            state.fds.get(&registered_fd) == Some(&token)
+        );
+        drop(state);
+
+        let (restore_result, close_saved) = poller_restore.restore();
+        crate::assert_with_log!(
+            restore_result == poller_fd,
+            "restore poller fd",
+            poller_fd,
+            restore_result
+        );
+        crate::assert_with_log!(close_saved == 0, "close saved poller fd", 0, close_saved);
+
+        reactor
+            .modify(token, Interest::WRITABLE)
+            .expect("retry modify after poller restore failed");
+        
+        // Cleanup
+        reactor.deregister(token).expect("deregister failed");
+        crate::test_complete!("modify_failure_preserves_bookkeeping_when_poller_fd_closed");
+    }
+
+#[test]
     fn modify_closed_fd_cleans_stale_bookkeeping_for_fd_reuse() {
         init_test("modify_closed_fd_cleans_stale_bookkeeping_for_fd_reuse");
         let reactor = EpollReactor::new().expect("failed to create reactor");
