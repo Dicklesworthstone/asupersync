@@ -19,14 +19,15 @@
 //! with LabRuntime for deterministic execution and comprehensive scenario coverage
 //! including concurrent initialization, cancellation patterns, and state verification.
 
+#![allow(dead_code)]
+
 use crate::lab::{LabConfig, LabRuntime};
 use crate::sync::OnceCell;
-use std::future::{Future, pending, ready};
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
-use std::time::Duration;
 
 /// Configuration for OnceCell metamorphic tests.
 #[derive(Debug, Clone)]
@@ -278,7 +279,6 @@ mod metamorphic_initialization_idempotence {
     /// Property-based test for initialization idempotence with random configurations.
     #[test]
     fn test_init_idempotence_property() {
-        use proptest::strategy::Strategy;
         use proptest::test_runner::TestRunner;
 
         let strategy = (1usize..=8, 1u32..=1000, 0u64..1000);

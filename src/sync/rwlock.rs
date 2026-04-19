@@ -319,6 +319,44 @@ impl<T> RwLock<T> {
     }
 
     #[inline]
+    fn queued_waiter_wakers(state: &State) -> SmallVec<[Waker; 4]> {
+        let mut wakers = SmallVec::new();
+        wakers.extend(
+            state
+                .reader_waiters
+                .iter()
+                .map(|waiter| waiter.waker.clone()),
+        );
+        wakers.extend(state.writer_queue.iter().map(|waiter| waiter.waker.clone()));
+        wakers
+    }
+
+    #[inline]
+    fn reader_arrived_before_writer(reader_id: u64, writer_id: u64) -> bool {
+        reader_id.wrapping_sub(writer_id).cast_signed() < 0
+    }
+
+    #[inline]
+    fn take_eligible_reader_waiters(state: &mut State) -> SmallVec<[Waker; 4]> {
+        let Some(first_writer) = state.writer_queue.front() else {
+            return Self::drain_reader_waiters(state);
+        };
+
+        let first_writer_id = first_writer.id;
+        let mut wakers = SmallVec::new();
+        while state
+            .reader_waiters
+            .front()
+            .is_some_and(|reader| Self::reader_arrived_before_writer(reader.id, first_writer_id))
+        {
+            if let Some(waiter) = state.reader_waiters.pop_front() {
+                wakers.push(waiter.waker);
+            }
+        }
+        wakers
+    }
+
+    #[inline]
     fn should_wake_writer(state: &State) -> bool {
         if state.writer_queue.is_empty() {
             return false;
@@ -330,7 +368,9 @@ impl<T> RwLock<T> {
         // Both queues are non-empty. Wake whichever waiter arrived first.
         // Wrapping arithmetic keeps ordering stable across waiter-id wraparound.
         match (state.writer_queue.front(), state.reader_waiters.front()) {
-            (Some(writer), Some(reader)) => writer.id.wrapping_sub(reader.id).cast_signed() < 0,
+            (Some(writer), Some(reader)) => {
+                !Self::reader_arrived_before_writer(reader.id, writer.id)
+            }
             _ => false,
         }
     }
@@ -361,18 +401,27 @@ impl<T> RwLock<T> {
             let mut state = self.state.lock();
             state.writer_active = false;
 
-            let wake_writer = Self::should_wake_writer(&state);
-            if wake_writer {
-                let waker = Self::pop_writer_waiter(&mut state);
-                if waker.is_some() {
-                    state.writer_active = true;
-                }
-                (waker, SmallVec::new())
-            } else {
-                let wakers = Self::drain_reader_waiters(&mut state);
-                state.readers += wakers.len();
+            if self.is_poisoned() {
+                let wakers = Self::queued_waiter_wakers(&state);
                 drop(state);
                 (None, wakers)
+            } else {
+                let wake_writer = Self::should_wake_writer(&state);
+                if wake_writer {
+                    let waker = Self::pop_writer_waiter(&mut state);
+                    if waker.is_some() {
+                        state.writer_active = true;
+                    }
+                    (waker, SmallVec::new())
+                } else {
+                    // Only readers older than the first queued writer can proceed.
+                    // Younger readers must remain queued behind that writer to
+                    // preserve the lock's documented writer-preference policy.
+                    let wakers = Self::take_eligible_reader_waiters(&mut state);
+                    state.readers += wakers.len();
+                    drop(state);
+                    (None, wakers)
+                }
             }
         };
         if let Some(waker) = writer_waker {
@@ -421,6 +470,7 @@ impl<T> RwLock<T> {
         }
 
         let waiter_id = waiter_id.take();
+        let poisoned = self.is_poisoned();
         let (writer_waker, reader_wakers) = {
             let mut state = self.state.lock();
             let result = if let Some(waiter_id) = waiter_id {
@@ -428,9 +478,13 @@ impl<T> RwLock<T> {
                     state.writer_queue.remove(pos);
                     state.writer_waiters = state.writer_waiters.saturating_sub(1);
                     if state.writer_waiters == 0 && !state.writer_active {
-                        let wakers = Self::drain_reader_waiters(&mut state);
-                        state.readers += wakers.len();
-                        (None, wakers)
+                        if poisoned {
+                            (None, SmallVec::<[Waker; 4]>::new())
+                        } else {
+                            let wakers = Self::drain_reader_waiters(&mut state);
+                            state.readers += wakers.len();
+                            (None, wakers)
+                        }
                     } else {
                         (None, SmallVec::<[Waker; 4]>::new())
                     }
@@ -439,26 +493,34 @@ impl<T> RwLock<T> {
                     state.writer_waiters = state.writer_waiters.saturating_sub(1);
                     state.writer_active = false;
 
-                    let wake_writer = Self::should_wake_writer(&state);
-                    if wake_writer {
-                        let waker = Self::pop_writer_waiter(&mut state);
-                        if waker.is_some() {
-                            state.writer_active = true;
-                        }
-                        (waker, SmallVec::<[Waker; 4]>::new())
+                    if poisoned {
+                        (None, SmallVec::<[Waker; 4]>::new())
                     } else {
-                        let wakers = Self::drain_reader_waiters(&mut state);
-                        state.readers += wakers.len();
-                        (None, wakers)
+                        let wake_writer = Self::should_wake_writer(&state);
+                        if wake_writer {
+                            let waker = Self::pop_writer_waiter(&mut state);
+                            if waker.is_some() {
+                                state.writer_active = true;
+                            }
+                            (waker, SmallVec::<[Waker; 4]>::new())
+                        } else {
+                            let wakers = Self::take_eligible_reader_waiters(&mut state);
+                            state.readers += wakers.len();
+                            (None, wakers)
+                        }
                     }
                 }
             } else {
                 // We incremented writer_waiters but never enqueued successfully.
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
                 if state.writer_waiters == 0 && !state.writer_active {
-                    let wakers = Self::drain_reader_waiters(&mut state);
-                    state.readers += wakers.len();
-                    (None, wakers)
+                    if poisoned {
+                        (None, SmallVec::<[Waker; 4]>::new())
+                    } else {
+                        let wakers = Self::drain_reader_waiters(&mut state);
+                        state.readers += wakers.len();
+                        (None, wakers)
+                    }
                 } else {
                     (None, SmallVec::<[Waker; 4]>::new())
                 }
@@ -1021,6 +1083,7 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
 
 #[cfg(test)]
 #[allow(clippy::significant_drop_tightening)]
+#[allow(dead_code)]
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
@@ -1675,6 +1738,103 @@ mod tests {
     }
 
     #[test]
+    fn release_writer_does_not_wake_readers_younger_than_first_writer() {
+        init_test("release_writer_does_not_wake_readers_younger_than_first_writer");
+        let cx = test_cx();
+        let lock = RwLock::new(0_u32);
+
+        // Hold active writer so all later waiters queue.
+        let active_writer = write_blocking(&lock, &cx);
+
+        // Queue an older reader, then a writer, then a younger reader.
+        let mut older_reader_fut = lock.read(&cx);
+        let older_reader_pending = poll_once(&mut older_reader_fut).is_none();
+        crate::assert_with_log!(
+            older_reader_pending,
+            "older reader is pending",
+            true,
+            older_reader_pending
+        );
+
+        let mut writer_fut = lock.write(&cx);
+        let writer_pending = poll_once(&mut writer_fut).is_none();
+        crate::assert_with_log!(writer_pending, "writer is pending", true, writer_pending);
+
+        let mut younger_reader_fut = lock.read(&cx);
+        let younger_reader_pending = poll_once(&mut younger_reader_fut).is_none();
+        crate::assert_with_log!(
+            younger_reader_pending,
+            "younger reader is pending",
+            true,
+            younger_reader_pending
+        );
+
+        // The older reader should be granted first, but the younger reader
+        // must remain queued behind the writer.
+        drop(active_writer);
+
+        let older_reader_result = poll_once(&mut older_reader_fut);
+        let older_reader_acquired = matches!(older_reader_result, Some(Ok(_)));
+        crate::assert_with_log!(
+            older_reader_acquired,
+            "older reader acquires first",
+            true,
+            older_reader_acquired
+        );
+
+        let younger_reader_still_pending = poll_once(&mut younger_reader_fut).is_none();
+        crate::assert_with_log!(
+            younger_reader_still_pending,
+            "younger reader stays queued behind writer",
+            true,
+            younger_reader_still_pending
+        );
+
+        let writer_still_pending = poll_once(&mut writer_fut).is_none();
+        crate::assert_with_log!(
+            writer_still_pending,
+            "writer is still queued while older reader holds lock",
+            true,
+            writer_still_pending
+        );
+
+        if let Some(Ok(older_reader_guard)) = older_reader_result {
+            drop(older_reader_guard);
+        }
+
+        let writer_result = poll_once(&mut writer_fut);
+        let writer_acquired = matches!(writer_result, Some(Ok(_)));
+        crate::assert_with_log!(
+            writer_acquired,
+            "writer acquires before younger reader",
+            true,
+            writer_acquired
+        );
+
+        let younger_reader_still_pending = poll_once(&mut younger_reader_fut).is_none();
+        crate::assert_with_log!(
+            younger_reader_still_pending,
+            "younger reader remains queued while writer holds lock",
+            true,
+            younger_reader_still_pending
+        );
+
+        if let Some(Ok(writer_guard)) = writer_result {
+            drop(writer_guard);
+        }
+
+        let younger_reader_result = poll_once(&mut younger_reader_fut);
+        let younger_reader_acquired = matches!(younger_reader_result, Some(Ok(_)));
+        crate::assert_with_log!(
+            younger_reader_acquired,
+            "younger reader acquires after writer releases",
+            true,
+            younger_reader_acquired
+        );
+        crate::test_complete!("release_writer_does_not_wake_readers_younger_than_first_writer");
+    }
+
+    #[test]
     fn test_write_future_drop_wakes_readers_when_last_writer() {
         // When the last queued WriteFuture is dropped without acquiring,
         // pending readers must be woken.
@@ -2268,6 +2428,122 @@ mod tests {
         );
         crate::test_complete!("test_drop_queued_writer_wakes_readers_when_readers_active");
     }
+
+    #[test]
+    fn writer_panic_wakes_all_queued_waiters_without_pregranting_slots() {
+        init_test("writer_panic_wakes_all_queued_waiters_without_pregranting_slots");
+        let cx = test_cx();
+        let lock = RwLock::new(0_u32);
+
+        let active_writer = write_blocking(&lock, &cx);
+
+        let writer_wake_count = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        let writer_waker = Waker::from(StdArc::new(CountWaker(writer_wake_count.clone())));
+        let mut writer_task_cx = Context::from_waker(&writer_waker);
+        let mut writer_fut = lock.write(&cx);
+        let writer_pending = std::pin::Pin::new(&mut writer_fut)
+            .poll(&mut writer_task_cx)
+            .is_pending();
+        crate::assert_with_log!(
+            writer_pending,
+            "writer waiter queued before poison",
+            true,
+            writer_pending
+        );
+
+        let reader_wake_count = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader_waker = Waker::from(StdArc::new(CountWaker(reader_wake_count.clone())));
+        let mut reader_task_cx = Context::from_waker(&reader_waker);
+        let mut reader_fut = lock.read(&cx);
+        let reader_pending = std::pin::Pin::new(&mut reader_fut)
+            .poll(&mut reader_task_cx)
+            .is_pending();
+        crate::assert_with_log!(
+            reader_pending,
+            "reader waiter queued before poison",
+            true,
+            reader_pending
+        );
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = active_writer;
+            panic!("poison rwlock");
+        }));
+        crate::assert_with_log!(
+            panic_result.is_err(),
+            "writer panic poisons the lock",
+            true,
+            panic_result.is_err()
+        );
+
+        let state = lock.debug_state();
+        crate::assert_with_log!(
+            !state.writer_active && state.readers == 0,
+            "poison handoff does not pregrant reader or writer slots",
+            true,
+            !state.writer_active && state.readers == 0
+        );
+        crate::assert_with_log!(
+            state.writer_waiters == 1
+                && state.writer_queue.len() == 1
+                && state.reader_waiters.len() == 1,
+            "poison handoff leaves queued waiters to fail closed on poll",
+            true,
+            state.writer_waiters == 1
+                && state.writer_queue.len() == 1
+                && state.reader_waiters.len() == 1
+        );
+
+        let writer_woken = writer_wake_count.load(AtomicOrdering::SeqCst) > 0;
+        let reader_woken = reader_wake_count.load(AtomicOrdering::SeqCst) > 0;
+        crate::assert_with_log!(
+            writer_woken,
+            "queued writer is woken on poison",
+            true,
+            writer_woken
+        );
+        crate::assert_with_log!(
+            reader_woken,
+            "queued reader is also woken on poison",
+            true,
+            reader_woken
+        );
+
+        let writer_result = std::pin::Pin::new(&mut writer_fut).poll(&mut writer_task_cx);
+        let writer_poisoned = matches!(writer_result, Poll::Ready(Err(RwLockError::Poisoned)));
+        crate::assert_with_log!(
+            writer_poisoned,
+            "queued writer fails closed with poison",
+            true,
+            writer_poisoned
+        );
+
+        let reader_result = std::pin::Pin::new(&mut reader_fut).poll(&mut reader_task_cx);
+        let reader_poisoned = matches!(reader_result, Poll::Ready(Err(RwLockError::Poisoned)));
+        crate::assert_with_log!(
+            reader_poisoned,
+            "queued reader fails closed with poison",
+            true,
+            reader_poisoned
+        );
+
+        let final_state = lock.debug_state();
+        crate::assert_with_log!(
+            !final_state.writer_active
+                && final_state.readers == 0
+                && final_state.writer_waiters == 0
+                && final_state.writer_queue.is_empty()
+                && final_state.reader_waiters.is_empty(),
+            "poisoned waiters clean themselves out without leaking reservations",
+            true,
+            !final_state.writer_active
+                && final_state.readers == 0
+                && final_state.writer_waiters == 0
+                && final_state.writer_queue.is_empty()
+                && final_state.reader_waiters.is_empty()
+        );
+        crate::test_complete!("writer_panic_wakes_all_queued_waiters_without_pregranting_slots");
+    }
 }
 
 // ============================================================================
@@ -2290,7 +2566,6 @@ mod metamorphic_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
-    use std::time::{Duration, Instant};
 
     use proptest::prelude::*;
 
@@ -2352,60 +2627,17 @@ mod metamorphic_tests {
     #[derive(Debug)]
     struct RwLockTestHarness<T> {
         lock: Arc<RwLock<T>>,
-        runtime: Arc<LabRuntime>,
     }
 
     impl<T> RwLockTestHarness<T> {
         fn new(value: T) -> Self {
             Self {
                 lock: Arc::new(RwLock::new(value)),
-                runtime: Arc::new(LabRuntime::new(LabConfig::default())),
             }
         }
 
         fn lock(&self) -> Arc<RwLock<T>> {
             self.lock.clone()
-        }
-    }
-
-    /// Result of a lock operation attempt.
-    #[derive(Debug, Clone)]
-    enum LockOpResult {
-        Success(Duration),
-        Blocked,
-        Cancelled,
-        Error,
-    }
-
-    /// Execute a read operation and measure its timing.
-    async fn execute_read_op<T: Send + Sync + 'static>(
-        lock: Arc<RwLock<T>>,
-        cx: &Cx,
-    ) -> LockOpResult {
-        let start = Instant::now();
-        match lock.read(cx).await {
-            Ok(_guard) => {
-                let duration = start.elapsed();
-                LockOpResult::Success(duration)
-            }
-            Err(RwLockError::Cancelled) => LockOpResult::Cancelled,
-            Err(_) => LockOpResult::Error,
-        }
-    }
-
-    /// Execute a write operation and measure its timing.
-    async fn execute_write_op<T: Send + Sync + 'static>(
-        lock: Arc<RwLock<T>>,
-        cx: &Cx,
-    ) -> LockOpResult {
-        let start = Instant::now();
-        match lock.write(cx).await {
-            Ok(_guard) => {
-                let duration = start.elapsed();
-                LockOpResult::Success(duration)
-            }
-            Err(RwLockError::Cancelled) => LockOpResult::Cancelled,
-            Err(_) => LockOpResult::Error,
         }
     }
 
@@ -2431,26 +2663,7 @@ mod metamorphic_tests {
             // Establish initial state: acquire write lock to block all subsequent operations
             let write_guard = block_on(lock.write(&cx)).expect("Initial write should succeed");
 
-            // Create multiple reader futures (these should block due to active writer)
-            let mut reader_results = Vec::new();
-            for _ in 0..num_readers {
-                let lock_clone = lock.clone();
-                let (count_waker, wake_count) = CountWaker::new();
-                let waker = Waker::from(Arc::new(count_waker));
-                let mut task_cx = Context::from_waker(&waker);
-
-                // Use owned future to avoid lifetime issues
-                let mut read_fut = OwnedRwLockReadGuard::read(lock_clone, &cx);
-                let poll_result = Pin::new(&mut read_fut).poll(&mut task_cx);
-                prop_assert!(
-                    poll_result.is_pending(),
-                    "MR1 VIOLATION: Reader acquired lock while writer active"
-                );
-
-                reader_results.push((read_fut, wake_count));
-            }
-
-            // Now queue a writer (this should have preference over waiting readers)
+            // Queue a writer first. This writer should block all later-arriving readers.
             let writer_lock = lock.clone();
             let mut write_fut = OwnedRwLockWriteGuard::write(writer_lock, &cx);
             let (writer_waker, writer_wake_count) = CountWaker::new();
@@ -2463,6 +2676,26 @@ mod metamorphic_tests {
                 "MR1 VIOLATION: Second writer should be pending while first writer active"
             );
 
+            // Create multiple reader futures after the queued writer.
+            // These should remain blocked behind the writer turn.
+            let mut reader_results = Vec::new();
+            for _ in 0..num_readers {
+                let lock_clone = lock.clone();
+                let (count_waker, wake_count) = CountWaker::new();
+                let waker = Waker::from(Arc::new(count_waker));
+                let mut task_cx = Context::from_waker(&waker);
+
+                // Use owned future to avoid lifetime issues
+                let mut read_fut = OwnedRwLockReadGuard::read(lock_clone, &cx);
+                let poll_result = Pin::new(&mut read_fut).poll(&mut task_cx);
+                prop_assert!(
+                    poll_result.is_pending(),
+                    "MR1 VIOLATION: Reader acquired lock while writer was active or queued"
+                );
+
+                reader_results.push((read_fut, wake_count));
+            }
+
             // Release the initial write lock
             drop(write_guard);
 
@@ -2471,6 +2704,14 @@ mod metamorphic_tests {
                 writer_wake_count.load(Ordering::SeqCst) > 0,
                 "MR1 VIOLATION: Queued writer was not woken when lock released"
             );
+
+            for (_, wake_count) in &reader_results {
+                prop_assert_eq!(
+                    wake_count.load(Ordering::SeqCst),
+                    0,
+                    "MR1 VIOLATION: Reader was woken before the older queued writer"
+                );
+            }
 
             // Complete the queued writer
             let writer_result = Pin::new(&mut write_fut).poll(&mut writer_task_cx);
@@ -2481,12 +2722,12 @@ mod metamorphic_tests {
         }
     }
 
-    /// MR2: Reader Concurrency Efficiency (Multiplicative, Score: 7.8)
-    /// Property: N concurrent readers complete in O(1) cumulative acquire time
-    /// Catches: False reader serialization, lock contention bugs, scalability issues
+    /// MR2: Reader Concurrency Capacity (Multiplicative, Score: 7.8)
+    /// Property: N readers can coexist without queueing or writer admission
+    /// Catches: False reader serialization, leaked waiters, accidental writer barging
     proptest! {
         #[test]
-        fn mr_reader_concurrency_efficiency(
+        fn mr_reader_concurrency_capacity(
             num_readers in 2usize..12,
             _seed in any::<u64>(),
         ) {
@@ -2502,15 +2743,6 @@ mod metamorphic_tests {
                 "MR2 SETUP VIOLATION: Lock should be available for reads"
             );
 
-            // Measure time for single reader acquisition
-            let single_start = Instant::now();
-            let _single_guard = block_on(lock.read(&cx))
-                .expect("Single reader should succeed");
-            let single_time = single_start.elapsed();
-            drop(_single_guard);
-
-            // Measure time for concurrent readers
-            let concurrent_start = Instant::now();
             let mut read_guards = Vec::new();
 
             for _ in 0..num_readers {
@@ -2519,23 +2751,46 @@ mod metamorphic_tests {
                 read_guards.push(guard);
             }
 
-            let concurrent_time = concurrent_start.elapsed();
-
-            // METAMORPHIC ASSERTION: Concurrent readers shouldn't take much longer than single reader
-            // Allow some overhead but should be roughly O(1), not O(N)
-            let efficiency_ratio = concurrent_time.as_nanos() as f64 / single_time.as_nanos() as f64;
-            let max_allowed_ratio = (num_readers as f64).sqrt() * 2.0; // Allow sqrt(N) overhead
-
-            prop_assert!(
-                efficiency_ratio <= max_allowed_ratio,
-                "MR2 VIOLATION: Concurrent readers too slow. Ratio: {:.2}, Max allowed: {:.2}, Readers: {}",
-                efficiency_ratio, max_allowed_ratio, num_readers
-            );
-
             prop_assert!(
                 read_guards.len() == num_readers,
                 "MR2 VIOLATION: Not all concurrent readers succeeded. Got {}, expected {}",
                 read_guards.len(), num_readers
+            );
+
+            let state = lock.debug_state();
+            prop_assert_eq!(
+                state.readers,
+                num_readers,
+                "MR2 VIOLATION: Reader count mismatch while guards are held"
+            );
+            prop_assert!(
+                !state.writer_active && state.writer_waiters == 0,
+                "MR2 VIOLATION: Writer state should remain idle while only readers hold the lock"
+            );
+            prop_assert!(
+                state.reader_waiters.is_empty() && state.writer_queue.is_empty(),
+                "MR2 VIOLATION: Reader-only acquisition should not enqueue waiters"
+            );
+
+            let extra_reader = lock.try_read();
+            prop_assert!(
+                extra_reader.is_ok(),
+                "MR2 VIOLATION: Additional readers should still acquire immediately"
+            );
+            drop(extra_reader);
+
+            let writer_try_result = lock.try_write();
+            prop_assert!(
+                matches!(writer_try_result, Err(TryWriteError::Locked)),
+                "MR2 VIOLATION: Writer barged in while readers were active"
+            );
+
+            drop(read_guards);
+
+            let post_read_writer_try = lock.try_write();
+            prop_assert!(
+                post_read_writer_try.is_ok(),
+                "MR2 VIOLATION: Writer could not acquire after all readers released"
             );
         }
     }

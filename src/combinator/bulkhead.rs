@@ -288,23 +288,23 @@ impl Bulkhead {
     /// Queued operations hold priority once they enter the FIFO wait queue.
     #[must_use]
     pub fn try_acquire(&self, weight: u32) -> Option<BulkheadPermit<'_>> {
-        // Prevent barging if there are queued operations.
-        // Acquire ordering synchronizes with the Release in enqueue/cancel,
-        // ensuring we observe the queue entry that was pushed before the
-        // counter increment.
+        // Fast-path rejection when a published waiter already exists.
         if self.pending_queue_count.load(Ordering::Acquire) > 0 {
+            return None;
+        }
+
+        // Serialize against queue mutation so a waiter cannot slip into the
+        // queue after our counter check but before we consume permits. This
+        // closes the barging window where enqueue has pushed the waiter but has
+        // not published `pending_queue_count` yet.
+        let queue = self.queue.read();
+        if queue.iter().any(|entry| entry.result.is_none()) {
             return None;
         }
 
         let mut available = self.available_permits.load(Ordering::Acquire);
         loop {
             if available < weight {
-                return None;
-            }
-
-            // Re-check pending count inside the CAS loop to prevent TOCTOU races
-            // where an enqueue happens right after our initial check.
-            if self.pending_queue_count.load(Ordering::Acquire) > 0 {
                 return None;
             }
 
@@ -989,6 +989,38 @@ mod tests {
         assert!(
             claimed.is_some(),
             "queued entry should be claimable after process_queue"
+        );
+    }
+
+    #[test]
+    fn try_acquire_observes_waiter_before_counter_publish() {
+        let bh = Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 1,
+            max_queue: 10,
+            queue_timeout: Duration::from_secs(60),
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+        {
+            let mut queue = bh.queue.write();
+            queue.push_back(QueueEntry {
+                id: 42,
+                weight: 1,
+                enqueued_at_millis: now.as_millis(),
+                deadline_millis: now.as_millis().saturating_add(60_000),
+                result: None,
+            });
+        }
+
+        assert!(
+            bh.try_acquire(1).is_none(),
+            "direct acquisition must not barge ahead of a waiter that is already in the queue"
+        );
+        assert_eq!(
+            bh.available(),
+            1,
+            "failed barging attempt must not consume a permit"
         );
     }
 
@@ -1828,8 +1860,6 @@ mod tests {
     #[test]
     fn conf_isolation_overflow_recovery_isolated() {
         // CONF-BULKHEAD-003: Recovery from overflow in one bulkhead doesn't affect others
-        use std::thread;
-
         let bh_overloaded = Arc::new(Bulkhead::new(BulkheadPolicy {
             name: "overloaded".into(),
             max_concurrent: 1,
@@ -1854,7 +1884,7 @@ mod tests {
         assert!(matches!(overflow, Err(BulkheadError::QueueFull)));
 
         // 2. Stable service operating normally
-        let stable_p1 = bh_stable.try_acquire(1).unwrap();
+        let _stable_p1 = bh_stable.try_acquire(1).unwrap();
         let _stable_q1 = bh_stable.enqueue(1, now).unwrap();
         assert_eq!(bh_stable.available(), 1);
 

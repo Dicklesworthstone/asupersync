@@ -18,15 +18,17 @@
 //! with LabRuntime for deterministic execution and comprehensive scenario coverage
 //! including nested timeouts, concurrent cancellation, and boundary conditions.
 
-use crate::cx::{Cx, Scope};
+#![allow(dead_code)]
+
+use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
 use crate::time::timeout;
 use crate::types::{CancelReason, Time};
 use futures::future;
-use std::future::{Future, ready};
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -116,7 +118,6 @@ impl TimeoutTestConfig {
 }
 
 /// Test operation that can be configured for various timeout scenarios.
-
 struct TestOperation {
     /// Unique identifier for this operation.
     id: u32,
@@ -326,7 +327,7 @@ mod metamorphic_timeout_nesting {
                             .operation_completed
                             .fetch_add(1, Ordering::SeqCst);
                     }
-                    Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
+                    Ok(Ok(Err(_)) | Err(_)) | Err(_) => {
                         // Timeout occurred
                         global_state
                             .timeouts_detected
@@ -402,7 +403,6 @@ mod metamorphic_timeout_nesting {
     /// Property-based test for timeout nesting algebra with random configurations.
     #[test]
     fn test_timeout_nesting_property() {
-        use proptest::strategy::Strategy;
         use proptest::test_runner::TestRunner;
 
         let strategy = (1u64..=100, 1u64..=100, 1u64..=200, 0u64..1000);
@@ -490,50 +490,28 @@ mod metamorphic_cancel_timeout_precedence {
                 if let Some(cx) = Cx::current() {
                     let now = cx.now();
 
-                    // Start the timeout operation
-                    let timeout_future = timeout(now, Duration::from_millis(timeout_ms), operation);
-
-                    // Use Scope to enable cancellation testing
-                    let result = Scope::new()
-                        .run(|scope| async move {
-                            // Schedule cancellation after delay
-                            if cancel_delay_ms > 0 {
-                                scope.spawn(async move {
-                                    // Simulate delay before cancellation
-                                    let mut polls = 0;
-                                    while polls < cancel_delay_ms {
-                                        // Simple busy wait to simulate delay
-                                        polls += 1;
-                                    }
-                                    // Cancellation would be triggered here in real scenario
-                                });
-                            }
-
-                            // Wait for timeout or completion
-                            match timeout_future.await {
-                                Ok(Ok(_)) => {
-                                    global_state
-                                        .operation_completed
-                                        .fetch_add(1, Ordering::SeqCst);
-                                    "completed"
-                                }
-                                Ok(Err(_)) => {
-                                    // This represents cancellation by the operation
-                                    global_state
-                                        .external_cancels_detected
-                                        .fetch_add(1, Ordering::SeqCst);
-                                    "cancelled"
-                                }
-                                Err(_) => {
-                                    // This represents timeout
-                                    global_state
-                                        .timeouts_detected
-                                        .fetch_add(1, Ordering::SeqCst);
-                                    "timeout"
-                                }
-                            }
-                        })
-                        .await;
+                    // This test models precedence at the outcome level. It does
+                    // not inject a real external cancellation signal yet, so the
+                    // authoritative behavior here is simply the observed timeout
+                    // result for the configured operation.
+                    let _cancel_delay_ms = cancel_delay_ms;
+                    match timeout(now, Duration::from_millis(timeout_ms), operation).await {
+                        Ok(Ok(_)) => {
+                            global_state
+                                .operation_completed
+                                .fetch_add(1, Ordering::SeqCst);
+                        }
+                        Ok(Err(_)) => {
+                            global_state
+                                .external_cancels_detected
+                                .fetch_add(1, Ordering::SeqCst);
+                        }
+                        Err(_) => {
+                            global_state
+                                .timeouts_detected
+                                .fetch_add(1, Ordering::SeqCst);
+                        }
+                    };
 
                     // In this test, we're verifying the precedence conceptually
                     // The actual implementation would require integration with the
@@ -684,7 +662,7 @@ mod metamorphic_zero_duration_rejection {
                         Ok(Err(_)) | Err(_) => global_state
                             .timeouts_detected
                             .fetch_add(1, Ordering::SeqCst),
-                    }
+                    };
                 }
             });
 
@@ -731,7 +709,7 @@ mod metamorphic_deterministic_replay {
                         _ => global_state
                             .timeouts_detected
                             .fetch_add(1, Ordering::SeqCst),
-                    }
+                    };
                 }
             });
 
@@ -784,7 +762,7 @@ mod metamorphic_deterministic_replay {
                         _ => global_state
                             .timeouts_detected
                             .fetch_add(1, Ordering::SeqCst),
-                    }
+                    };
                 }
             });
 
@@ -835,7 +813,7 @@ mod metamorphic_integration {
                     Ok(Err(_)) | Err(_) => global_state
                         .timeouts_detected
                         .fetch_add(1, Ordering::SeqCst),
-                }
+                };
             }
         });
 

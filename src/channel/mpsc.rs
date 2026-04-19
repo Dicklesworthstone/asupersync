@@ -277,6 +277,36 @@ impl<T> Sender<T> {
         }
     }
 
+    /// Seals the receiver side of the channel from the sender side.
+    ///
+    /// Existing queued messages remain available to the receiver, but no new
+    /// reservations or sends will succeed. Pending senders and receivers are
+    /// woken so shutdown protocols cannot stall behind a full mailbox.
+    pub(crate) fn close_receiver(&self) {
+        let (send_wakers, recv_waker) = {
+            let mut inner = self.shared.inner.lock();
+            if self.shared.receiver_dropped.load(Ordering::Relaxed) {
+                return;
+            }
+            self.shared.receiver_dropped.store(true, Ordering::Release);
+            let send_wakers: SmallVec<[Waker; 4]> = inner
+                .send_wakers
+                .drain(..)
+                .map(|waiter| waiter.waker)
+                .collect();
+            let recv_waker = inner.recv_waker.take();
+            drop(inner);
+            (send_wakers, recv_waker)
+        };
+
+        for waker in send_wakers {
+            waker.wake();
+        }
+        if let Some(waker) = recv_waker {
+            waker.wake();
+        }
+    }
+
     /// Returns the channel's capacity.
     #[inline]
     #[must_use]
@@ -686,6 +716,10 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Receiver<T> {
 }
 
 impl<T> Receiver<T> {
+    pub(crate) fn clear_recv_waker(&mut self) {
+        self.shared.inner.lock().recv_waker = None;
+    }
+
     /// Closes the channel, preventing any further messages from being sent.
     ///
     /// Existing messages in the queue remain available for receiving.
@@ -2015,16 +2049,11 @@ mod tests {
 #[cfg(test)]
 pub mod backpressure_metamorphic {
     use super::*;
-    use crate::cx::{Cx, Scope};
-    use crate::lab::{LabConfig, LabRuntime};
-    use crate::types::{Budget, CancelReason, Outcome, Time};
-    use crate::util::{DetEntropy, DetRng};
+    use crate::types::{Budget, CancelReason};
     use proptest::prelude::*;
-    use std::collections::{HashMap, VecDeque};
-    use std::future::{pending, ready};
+    use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Configuration for MPSC backpressure metamorphic tests.
     #[derive(Debug, Clone)]
@@ -2101,7 +2130,6 @@ pub mod backpressure_metamorphic {
     /// This must hold at all times regardless of backpressure state.
     #[test]
     fn mr1_capacity_conservation_invariant() {
-        use proptest::strategy::Strategy;
         use proptest::test_runner::TestRunner;
 
         let mut runner = TestRunner::default();
@@ -2110,8 +2138,7 @@ pub mod backpressure_metamorphic {
                 crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
                     let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
-                        let cx = crate::cx::Cx::for_testing();
-                        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(root, Budget::INFINITE);
+                        let _cx = crate::cx::Cx::for_testing();
                         let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         let (sender, mut receiver) = channel::<u32>(config.capacity);
 
@@ -2166,9 +2193,8 @@ pub mod backpressure_metamorphic {
                         }.await;
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    lab.run_until_quiescent_with_report();
+                    let _ = lab.run_until_quiescent_with_report();
                 });
-                Result::<(), &str>::Ok(()).expect("MR1 capacity conservation test failed");
                 Ok(())
             })
             .expect("Property test failed");
@@ -2180,16 +2206,15 @@ pub mod backpressure_metamorphic {
     /// Even with blocking, eviction, or cancellation, FIFO ordering must be preserved.
     #[test]
     fn mr2_fifo_ordering_preservation() {
-        use proptest::strategy::Strategy;
         use proptest::test_runner::TestRunner;
 
         let mut runner = TestRunner::default();
-        runner.run(&backpressure_config_strategy(), |config| {
-        crate::lab::runtime::test(config.seed, |lab| {
+        runner
+            .run(&backpressure_config_strategy(), |config| {
+                crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
                     let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
                         let cx = crate::cx::Cx::for_testing();
-                        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(root, Budget::INFINITE);
                         let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
             let (sender, mut receiver) = channel::<u32>(config.capacity);
             let sent_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -2197,11 +2222,12 @@ pub mod backpressure_metamorphic {
 
             // Single sender to ensure clear ordering
             let sent_ref = Arc::clone(&sent_messages);
+            let send_cx = cx.clone();
             let send_handle = std::thread::spawn(move || {
                     futures_lite::future::block_on(async move {
                 for i in 0..config.messages_per_sender {
                     let value = i as u32;
-                    match sender.send(&cx, value).await {
+                    match sender.send(&send_cx, value).await {
                         Ok(()) => {
                             sent_ref.lock().push(value);
                         },
@@ -2209,15 +2235,15 @@ pub mod backpressure_metamorphic {
                         Err(_) => {}, // Other errors don't affect ordering
                     }
                 }
-                Ok(())
                 })});
 
             // Receiver collects all messages
             let recv_ref = Arc::clone(&received_messages);
+            let recv_cx = cx.clone();
             let recv_handle = std::thread::spawn(move || {
                     futures_lite::future::block_on(async move {
                 loop {
-                    match receiver.recv(&cx).await {
+                    match receiver.recv(&recv_cx).await {
                         Ok(value) => {
                             recv_ref.lock().push(value);
                         },
@@ -2225,11 +2251,10 @@ pub mod backpressure_metamorphic {
                         Err(_) => {},
                     }
                 }
-                Ok(())
                 })});
 
-            let send_outcome = send_handle.join().unwrap();
-            let recv_outcome = recv_handle.join().unwrap();
+            send_handle.join().unwrap();
+            recv_handle.join().unwrap();
 
             // Compare ordering
             let sent = sent_messages.lock().clone();
@@ -2249,11 +2274,11 @@ pub mod backpressure_metamorphic {
                         }.await;
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    lab.run_until_quiescent_with_report();
+                    let _ = lab.run_until_quiescent_with_report();
                 });
-                Result::<(), &str>::Ok(()).expect("MR2 FIFO ordering test failed");
-            Ok(())
-        }).expect("Property test failed");
+                Ok(())
+            })
+            .expect("Property test failed");
     }
 
     /// MR3: Reserve-Send Equivalence
@@ -2262,7 +2287,6 @@ pub mod backpressure_metamorphic {
     /// Both paths should have identical observable effects.
     #[test]
     fn mr3_reserve_send_equivalence() {
-        use proptest::strategy::Strategy;
         use proptest::test_runner::TestRunner;
 
         let mut runner = TestRunner::default();
@@ -2272,19 +2296,18 @@ pub mod backpressure_metamorphic {
                     let root = lab.state.create_root_region(Budget::INFINITE);
                     let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
                         let cx = crate::cx::Cx::for_testing();
-                        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(root, Budget::INFINITE);
                         let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         // Path 1: reserve then send
                         let (sender1, mut receiver1) = channel::<u32>(config.capacity);
                         let received1 = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
                         let recv1_ref = Arc::clone(&received1);
+                        let recv1_cx = cx.clone();
                         let recv1_handle = std::thread::spawn(move || {
                     futures_lite::future::block_on(async move {
-                            while let Ok(value) = receiver1.recv(&cx).await {
+                            while let Ok(value) = receiver1.recv(&recv1_cx).await {
                                 recv1_ref.lock().push(value);
                             }
-                            Ok(())
                 })});
 
                         // Send via reserve/send
@@ -2294,19 +2317,19 @@ pub mod backpressure_metamorphic {
                             }
                         }
                         drop(sender1);
-                        let _ = recv1_handle.join().unwrap();
+                        recv1_handle.join().unwrap();
 
                         // Path 2: direct send
                         let (sender2, mut receiver2) = channel::<u32>(config.capacity);
                         let received2 = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
                         let recv2_ref = Arc::clone(&received2);
+                        let recv2_cx = cx.clone();
                         let recv2_handle = std::thread::spawn(move || {
                     futures_lite::future::block_on(async move {
-                            while let Ok(value) = receiver2.recv(&cx).await {
+                            while let Ok(value) = receiver2.recv(&recv2_cx).await {
                                 recv2_ref.lock().push(value);
                             }
-                            Ok(())
                 })});
 
                         // Send via try_send
@@ -2314,7 +2337,7 @@ pub mod backpressure_metamorphic {
                             let _ = sender2.try_send(i as u32);
                         }
                         drop(sender2);
-                        let _ = recv2_handle.join().unwrap();
+                        recv2_handle.join().unwrap();
 
                         // Results should be equivalent
                         let result1 = received1.lock().clone();
@@ -2330,9 +2353,8 @@ pub mod backpressure_metamorphic {
                         }.await;
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    lab.run_until_quiescent_with_report();
+                    let _ = lab.run_until_quiescent_with_report();
                 });
-                Result::<(), &str>::Ok(()).expect("MR3 reserve-send equivalence test failed");
                 Ok(())
             })
             .expect("Property test failed");
@@ -2344,7 +2366,6 @@ pub mod backpressure_metamorphic {
     /// Capacity conservation must hold even with cancellation.
     #[test]
     fn mr4_cancellation_idempotence() {
-        use proptest::strategy::Strategy;
         use proptest::test_runner::TestRunner;
 
         let mut runner = TestRunner::default();
@@ -2360,13 +2381,9 @@ pub mod backpressure_metamorphic {
                         .state
                         .create_task(root, Budget::INFINITE, async move {
                             let cx = crate::cx::Cx::for_testing();
-                            let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
-                                root,
-                                Budget::INFINITE,
-                            );
                             let _test_res: Result<(), proptest::test_runner::TestCaseError> =
                                 async {
-                                    let (sender, _receiver) = channel::<u32>(config.capacity);
+                                    let (sender, mut receiver) = channel::<u32>(config.capacity);
 
                                     // Fill channel to force reserves to block
                                     for i in 0..config.capacity {
@@ -2376,30 +2393,40 @@ pub mod backpressure_metamorphic {
                                     let initial_state = observe_channel_state(&sender);
 
                                     // Create multiple reserves that will block
+                                    let cancelled_count = Arc::new(AtomicUsize::new(0));
                                     let mut reserve_handles = Vec::new();
                                     for i in 0..config.sender_count {
                                         let sender_clone = sender.clone();
+                                        let cancelled_clone = Arc::clone(&cancelled_count);
+                                        let reserve_cx = cx.clone();
                                         let handle = std::thread::spawn(move || {
                                             futures_lite::future::block_on(async move {
-                                                match sender_clone.reserve(&cx).await {
+                                                match sender_clone.reserve(&reserve_cx).await {
+                                                    Err(SendError::Cancelled(_)) => {
+                                                        cancelled_clone.fetch_add(1, Ordering::SeqCst);
+                                                    }
                                                     Ok(permit) => {
                                                         permit.send(i as u32);
-                                                        Ok(true) // Successfully sent
                                                     }
-                                                    Err(SendError::Cancelled(_)) => Ok(false), // Cancelled
-                                                    Err(_) => Ok(false), // Other error
+                                                    Err(other) => {
+                                                        panic!(
+                                                            "reserve observed unexpected outcome after cancellation: {other:?}"
+                                                        );
+                                                    }
                                                 }
                                             })
                                         });
                                         reserve_handles.push(handle);
                                     }
 
-                                    // Cancel some operations
-                                    scope.cancel(CancelReason::user("test cancellation"));
+                                    // Reserve futures observe cancellation via the shared Cx, but
+                                    // blocked senders need one capacity transition to be re-polled.
+                                    cx.set_cancel_reason(CancelReason::user("test cancellation"));
+                                    let _ = receiver.try_recv();
 
                                     // Collect results
                                     for handle in reserve_handles {
-                                        let _ = handle.join().unwrap(); // Ignore individual results
+                                        handle.join().unwrap();
                                     }
 
                                     let final_state = observe_channel_state(&sender);
@@ -2412,6 +2439,10 @@ pub mod backpressure_metamorphic {
                                         initial_state,
                                         final_state
                                     );
+                                    assert!(
+                                        cancelled_count.load(Ordering::SeqCst) > 0,
+                                        "cancellation MR failed to observe any cancelled reserves"
+                                    );
 
                                     Ok(())
                                 }
@@ -2419,9 +2450,8 @@ pub mod backpressure_metamorphic {
                         })
                         .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    lab.run_until_quiescent_with_report();
+                    let _ = lab.run_until_quiescent_with_report();
                 });
-                Result::<(), &str>::Ok(()).expect("MR4 cancellation idempotence test failed");
                 Ok(())
             })
             .expect("Property test failed");
@@ -2432,7 +2462,6 @@ pub mod backpressure_metamorphic {
     /// Property: send_evict_oldest removes oldest message while preserving FIFO for remaining.
     #[test]
     fn mr5_eviction_policy_correctness() {
-        use proptest::strategy::Strategy;
         use proptest::test_runner::TestRunner;
 
         let mut runner = TestRunner::default();
@@ -2445,8 +2474,7 @@ pub mod backpressure_metamorphic {
                 crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
                     let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
-                        let cx = crate::cx::Cx::for_testing();
-                        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(root, Budget::INFINITE);
+                        let _cx = crate::cx::Cx::for_testing();
                         let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         let (sender, mut receiver) = channel::<u32>(config.capacity);
 
@@ -2489,9 +2517,8 @@ pub mod backpressure_metamorphic {
                         }.await;
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    lab.run_until_quiescent_with_report();
+                    let _ = lab.run_until_quiescent_with_report();
                 });
-                Result::<(), &str>::Ok(()).expect("MR5 eviction policy test failed");
                 Ok(())
             })
             .expect("Property test failed");
@@ -2502,7 +2529,6 @@ pub mod backpressure_metamorphic {
     /// Property: Dropping receiver unblocks all pending sends with Disconnected.
     #[test]
     fn mr6_receiver_drain_correctness() {
-        use proptest::strategy::Strategy;
         use proptest::test_runner::TestRunner;
 
         let mut runner = TestRunner::default();
@@ -2514,10 +2540,6 @@ pub mod backpressure_metamorphic {
                         .state
                         .create_task(root, Budget::INFINITE, async move {
                             let cx = crate::cx::Cx::for_testing();
-                            let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
-                                root,
-                                Budget::INFINITE,
-                            );
                             let _test_res: Result<(), proptest::test_runner::TestCaseError> =
                                 async {
                                     let (sender, receiver) = channel::<u32>(config.capacity);
@@ -2531,19 +2553,19 @@ pub mod backpressure_metamorphic {
                                     let disconnected_count = Arc::new(AtomicUsize::new(0));
                                     let mut reserve_handles = Vec::new();
 
-                                    for i in 0..config.sender_count {
+                                    for _i in 0..config.sender_count {
                                         let sender_clone = sender.clone();
                                         let counter_clone = Arc::clone(&disconnected_count);
+                                        let reserve_cx = cx.clone();
                                         let handle = std::thread::spawn(move || {
                                             futures_lite::future::block_on(async move {
-                                                match sender_clone.reserve(&cx).await {
+                                                match sender_clone.reserve(&reserve_cx).await {
                                                     Err(SendError::Disconnected(_)) => {
                                                         counter_clone
                                                             .fetch_add(1, Ordering::SeqCst);
                                                     }
                                                     _ => {}
                                                 }
-                                                Ok(())
                                             })
                                         });
                                         reserve_handles.push(handle);
@@ -2561,7 +2583,7 @@ pub mod backpressure_metamorphic {
 
                                     // Wait for all reserves to complete
                                     for handle in reserve_handles {
-                                        let _ = handle.join().unwrap();
+                                        handle.join().unwrap();
                                     }
 
                                     // All queued senders should have been disconnected
@@ -2585,9 +2607,8 @@ pub mod backpressure_metamorphic {
                         })
                         .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    lab.run_until_quiescent_with_report();
+                    let _ = lab.run_until_quiescent_with_report();
                 });
-                Result::<(), &str>::Ok(()).expect("MR6 receiver drain test failed");
                 Ok(())
             })
             .expect("Property test failed");
@@ -2598,7 +2619,6 @@ pub mod backpressure_metamorphic {
     /// Tests multiple properties in combination to catch interaction bugs.
     #[test]
     fn composite_backpressure_properties() {
-        use proptest::strategy::Strategy;
         use proptest::test_runner::TestRunner;
 
         let mut runner = TestRunner::default();
@@ -2608,7 +2628,6 @@ pub mod backpressure_metamorphic {
                     let root = lab.state.create_root_region(Budget::INFINITE);
                     let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
                         let cx = crate::cx::Cx::for_testing();
-                        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(root, Budget::INFINITE);
                         let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         let (sender, mut receiver) = channel::<u32>(config.capacity);
                         let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -2616,12 +2635,12 @@ pub mod backpressure_metamorphic {
 
                         // MR1 + MR2: Capacity conservation + FIFO under mixed load
                         let recv_ref = Arc::clone(&received_messages);
+                        let recv_cx = cx.clone();
                         let recv_handle = std::thread::spawn(move || {
                     futures_lite::future::block_on(async move {
-                            while let Ok(value) = receiver.recv(&cx).await {
+                            while let Ok(value) = receiver.recv(&recv_cx).await {
                                 recv_ref.lock().push(value);
                             }
-                            Ok(())
                 })});
 
                         // Multiple senders with different patterns
@@ -2629,11 +2648,12 @@ pub mod backpressure_metamorphic {
                         for sender_id in 0..config.sender_count {
                             let sender_clone = sender.clone();
                             let sent_ref = Arc::clone(&sent_messages);
+                            let send_cx = cx.clone();
                             let handle = std::thread::spawn(move || {
                     futures_lite::future::block_on(async move {
                                 for i in 0..config.messages_per_sender {
                                     let value = (sender_id * 1000 + i) as u32;
-                                    match sender_clone.send(&cx, value).await {
+                                    match sender_clone.send(&send_cx, value).await {
                                         Ok(()) => {
                                             sent_ref.lock().push((sender_id, value));
                                         }
@@ -2649,18 +2669,17 @@ pub mod backpressure_metamorphic {
                                         "Capacity conservation violated during concurrent sends"
                                     );
                                 }
-                                Ok(())
                 })});
                             send_handles.push(handle);
                         }
 
                         // Complete all sends
                         for handle in send_handles {
-                            let _ = handle.join().unwrap();
+                            handle.join().unwrap();
                         }
                         drop(sender);
 
-                        let _ = recv_handle.join().unwrap();
+                        recv_handle.join().unwrap();
 
                         // MR2: Verify ordering within each sender
                         let sent = sent_messages.lock().clone();
@@ -2696,9 +2715,8 @@ pub mod backpressure_metamorphic {
                         }.await;
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    lab.run_until_quiescent_with_report();
+                    let _ = lab.run_until_quiescent_with_report();
                 });
-                Result::<(), &str>::Ok(()).expect("Composite backpressure properties test failed");
                 Ok(())
             })
             .expect("Property test failed");

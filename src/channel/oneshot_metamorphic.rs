@@ -23,6 +23,8 @@
 //! - Value delivery is atomic (all-or-nothing)
 //! - Error handling preserves original values for recovery
 
+#![allow(dead_code)]
+
 use crate::channel::oneshot::{self, RecvError, SendError, TryRecvError};
 use crate::types::Budget;
 use crate::util::ArenaIndex;

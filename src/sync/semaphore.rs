@@ -97,17 +97,41 @@ struct SemaphoreState {
     waiters: VecDeque<Waiter>,
     /// Next waiter id for de-duplication.
     next_waiter_id: u64,
+    /// Whether waiter IDs have wrapped and now require collision checks.
+    waiter_ids_wrapped: bool,
 }
 
 #[derive(Debug)]
 struct Waiter {
     id: u64,
+    count: usize,
     waker: Waker,
 }
 
 #[inline]
-fn front_waiter_waker(state: &SemaphoreState) -> Option<Waker> {
-    state.waiters.front().map(|waiter| waiter.waker.clone())
+fn waiter_waker_if_runnable(state: &SemaphoreState, index: usize) -> Option<Waker> {
+    let waiter = state.waiters.get(index)?;
+    (state.permits >= waiter.count).then(|| waiter.waker.clone())
+}
+
+#[inline]
+fn front_waiter_waker_if_runnable(state: &SemaphoreState) -> Option<Waker> {
+    waiter_waker_if_runnable(state, 0)
+}
+
+#[inline]
+fn allocate_waiter_id(state: &mut SemaphoreState) -> u64 {
+    loop {
+        let id = state.next_waiter_id;
+        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+        if state.next_waiter_id == 0 {
+            state.waiter_ids_wrapped = true;
+        }
+
+        if !state.waiter_ids_wrapped || !state.waiters.iter().any(|waiter| waiter.id == id) {
+            return id;
+        }
+    }
 }
 
 #[inline]
@@ -119,12 +143,9 @@ fn remove_waiter_and_take_next_waker(state: &mut SemaphoreState, waiter_id: u64)
     {
         // Exception safety: Clone the next waker before popping ourselves so that
         // if clone() panics, our waiter remains in the queue for Drop cleanup.
-        let next_waker = state.waiters.get(1).map(|w| w.waker.clone());
+        let next_waker = waiter_waker_if_runnable(state, 1);
         state.waiters.pop_front();
-
-        // Only pass the baton if there are actually permits available.
-        // Otherwise, we just cause a cascade of spurious wakeups.
-        if state.permits > 0 { next_waker } else { None }
+        next_waker
     } else {
         // Non-front waiter: targeted removal stops at first match instead of
         // scanning the entire deque like retain() would.
@@ -146,6 +167,7 @@ impl Semaphore {
                 closed: false,
                 waiters: VecDeque::with_capacity(4),
                 next_waiter_id: 0,
+                waiter_ids_wrapped: false,
             }),
             permits_shadow: AtomicUsize::new(permits),
             closed_shadow: AtomicBool::new(false),
@@ -256,7 +278,7 @@ impl Semaphore {
         // Only wake the first waiter since FIFO ordering means only it can acquire.
         // Waking all waiters wastes CPU when only the front can make progress.
         // If the first waiter acquires and releases, it will wake the next.
-        let waiter_to_wake = front_waiter_waker(&state);
+        let waiter_to_wake = front_waiter_waker_if_runnable(&state);
         drop(state);
         if let Some(waiter) = waiter_to_wake {
             waiter.wake();
@@ -324,8 +346,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
         let waiter_id = if let Some(id) = self.waiter_id {
             id
         } else {
-            let id = state.next_waiter_id;
-            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+            let id = allocate_waiter_id(&mut state);
             self.waiter_id = Some(id);
             id
         };
@@ -355,17 +376,17 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             // at the front of the queue or the queue is empty. We can just pop
             // the front instead of scanning the whole deque with retain (O(N)).
             if !state.waiters.is_empty() {
+                debug_assert_eq!(
+                    state.waiters.front().map(|waiter| waiter.id),
+                    Some(waiter_id)
+                );
                 state.waiters.pop_front();
             }
 
             // Wake next waiter if there are still permits available.
             // Without this, add_permits(N) where N satisfies multiple waiters
             // would only wake the first, leaving others sleeping indefinitely.
-            let next_waker = if state.permits > 0 {
-                front_waiter_waker(&state)
-            } else {
-                None
-            };
+            let next_waker = front_waiter_waker_if_runnable(&state);
             drop(state);
             // Clear waiter_id after releasing state guard to avoid borrow conflicts.
             self.waiter_id = None;
@@ -388,12 +409,14 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             .iter_mut()
             .find(|waiter| waiter.id == waiter_id)
         {
+            debug_assert_eq!(existing.count, self.count);
             if !existing.waker.will_wake(context.waker()) {
                 existing.waker.clone_from(context.waker());
             }
         } else {
             state.waiters.push_back(Waiter {
                 id: waiter_id,
+                count: self.count,
                 waker: context.waker().clone(),
             });
         }
@@ -456,11 +479,13 @@ impl SemaphorePermit<'_> {
 
 impl Drop for SemaphorePermit<'_> {
     fn drop(&mut self) {
+        if let Some(obligation) = self.obligation.take() {
+            let _proof = obligation.commit();
+        }
         if self.count > 0 {
             self.semaphore.add_permits(self.count);
         }
-        // Obligation token will automatically panic if leaked when it drops.
-        // Normal usage should call commit() to avoid the panic.
+        // Ordinary RAII drop is the normal release path for semaphore permits.
     }
 }
 
@@ -546,8 +571,9 @@ impl OwnedSemaphorePermit {
     #[inline]
     pub fn forget(mut self) {
         self.count = 0;
-        // TODO: If obligation tracking is enabled, abort the obligation instead of committing
-        self.obligation = None;
+        if let Some(obligation) = self.obligation.take() {
+            let _proof = obligation.abort();
+        }
     }
 
     /// Commits the permit explicitly, releasing it back to the semaphore.
@@ -561,18 +587,11 @@ impl OwnedSemaphorePermit {
 
 impl Drop for OwnedSemaphorePermit {
     fn drop(&mut self) {
+        if let Some(obligation) = self.obligation.take() {
+            let _proof = obligation.commit();
+        }
         if self.count > 0 {
             self.semaphore.add_permits(self.count);
-        }
-
-        // TODO: Commit obligation if tracking is enabled
-        // Currently we don't have access to runtime state in Drop,
-        // so this will need to be implemented when runtime integration is complete
-        if let Some(_obligation_id) = self.obligation.take() {
-            // When runtime integration is complete:
-            // 1. Get current runtime handle
-            // 2. Access runtime state
-            // 3. Call state.commit_obligation(obligation_id)
         }
     }
 }
@@ -667,8 +686,7 @@ impl Future for OwnedAcquireFuture {
         let waiter_id = if let Some(id) = this.waiter_id {
             id
         } else {
-            let id = state.next_waiter_id;
-            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+            let id = allocate_waiter_id(&mut state);
             this.waiter_id = Some(id);
             id
         };
@@ -694,17 +712,17 @@ impl Future for OwnedAcquireFuture {
 
             // Optimization: O(1) removal instead of O(N) retain
             if !state.waiters.is_empty() {
+                debug_assert_eq!(
+                    state.waiters.front().map(|waiter| waiter.id),
+                    Some(waiter_id)
+                );
                 state.waiters.pop_front();
             }
 
             // Wake next waiter if there are still permits available.
             // Without this, add_permits(N) where N satisfies multiple waiters
             // would only wake the first, leaving others sleeping indefinitely.
-            let next_waker = if state.permits > 0 {
-                front_waiter_waker(&state)
-            } else {
-                None
-            };
+            let next_waker = front_waiter_waker_if_runnable(&state);
             drop(state);
             // Prevent redundant Drop cleanup after releasing state guard.
             this.waiter_id = None;
@@ -727,12 +745,14 @@ impl Future for OwnedAcquireFuture {
             .iter_mut()
             .find(|waiter| waiter.id == waiter_id)
         {
+            debug_assert_eq!(existing.count, this.count);
             if !existing.waker.will_wake(context.waker()) {
                 existing.waker.clone_from(context.waker());
             }
         } else {
             state.waiters.push_back(Waiter {
                 id: waiter_id,
+                count: this.count,
                 waker: context.waker().clone(),
             });
         }
@@ -1610,6 +1630,103 @@ mod tests {
     }
 
     #[test]
+    fn insufficient_add_permits_does_not_spuriously_wake_front_waiter() {
+        init_test("insufficient_add_permits_does_not_spuriously_wake_front_waiter");
+        let cx = test_cx();
+        let sem = Semaphore::new(0);
+
+        let wakes = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&wakes));
+
+        let mut fut = sem.acquire(&cx, 2);
+        let pending = poll_once_with_waker(&mut fut, &waker).is_none();
+        crate::assert_with_log!(pending, "waiter pending", true, pending);
+
+        sem.add_permits(1);
+        let wake_count = wakes.count();
+        crate::assert_with_log!(wake_count == 0, "no spurious wake", 0usize, wake_count);
+
+        sem.add_permits(1);
+        let wake_count = wakes.count();
+        crate::assert_with_log!(
+            wake_count > 0,
+            "wake after enough permits",
+            true,
+            wake_count > 0
+        );
+
+        let permit = poll_once_with_waker(&mut fut, &waker)
+            .expect("acquire ready")
+            .expect("acquire ok");
+        crate::assert_with_log!(permit.count() == 2, "permit count", 2usize, permit.count());
+        drop(permit);
+        crate::test_complete!("insufficient_add_permits_does_not_spuriously_wake_front_waiter");
+    }
+
+    #[test]
+    fn cancelling_front_waiter_only_batons_when_next_is_runnable() {
+        init_test("cancelling_front_waiter_only_batons_when_next_is_runnable");
+        let cx1 = test_cx();
+        let cx2 = test_cx();
+        let sem = Semaphore::new(0);
+
+        let w1 = CountingWaker::new();
+        let w2 = CountingWaker::new();
+        let waker1 = Waker::from(Arc::clone(&w1));
+        let waker2 = Waker::from(Arc::clone(&w2));
+
+        let mut fut1 = sem.acquire(&cx1, 2);
+        let mut fut2 = sem.acquire(&cx2, 2);
+        let pending1 = poll_once_with_waker(&mut fut1, &waker1).is_none();
+        let pending2 = poll_once_with_waker(&mut fut2, &waker2).is_none();
+        crate::assert_with_log!(pending1, "fut1 pending", true, pending1);
+        crate::assert_with_log!(pending2, "fut2 pending", true, pending2);
+
+        sem.add_permits(1);
+        let wake_count = w2.count();
+        crate::assert_with_log!(
+            wake_count == 0,
+            "next waiter not woken before runnable",
+            0usize,
+            wake_count
+        );
+
+        cx1.set_cancel_requested(true);
+        let result1 = poll_once_with_waker(&mut fut1, &waker1);
+        let cancelled = matches!(result1, Some(Err(AcquireError::Cancelled)));
+        crate::assert_with_log!(cancelled, "front waiter cancelled", true, cancelled);
+
+        let wake_count = w2.count();
+        crate::assert_with_log!(
+            wake_count == 0,
+            "next waiter still not woken after cancel",
+            0usize,
+            wake_count
+        );
+
+        sem.add_permits(1);
+        let wake_count = w2.count();
+        crate::assert_with_log!(
+            wake_count > 0,
+            "next waiter woken once runnable",
+            true,
+            wake_count > 0
+        );
+
+        let permit2 = poll_once_with_waker(&mut fut2, &waker2)
+            .expect("acquire ready")
+            .expect("acquire ok");
+        crate::assert_with_log!(
+            permit2.count() == 2,
+            "permit count",
+            2usize,
+            permit2.count()
+        );
+        drop(permit2);
+        crate::test_complete!("cancelling_front_waiter_only_batons_when_next_is_runnable");
+    }
+
+    #[test]
     fn drop_front_waiter_wakes_next() {
         init_test("drop_front_waiter_wakes_next");
         let cx1 = test_cx();
@@ -1662,6 +1779,68 @@ mod tests {
         let w2_woken = w2.count() > 0;
         crate::assert_with_log!(w2_woken, "updated waker woken", true, w2_woken);
         crate::test_complete!("waker_update_on_repoll");
+    }
+
+    #[test]
+    fn waiter_id_wraparound_avoids_live_queue_collisions() {
+        init_test("waiter_id_wraparound_avoids_live_queue_collisions");
+        let cx1 = test_cx();
+        let cx2 = test_cx();
+        let sem = Semaphore::new(0);
+
+        {
+            let mut state = sem.state.lock();
+            state.next_waiter_id = u64::MAX;
+        }
+
+        let mut fut1 = sem.acquire(&cx1, 1);
+        let mut fut2 = sem.acquire(&cx2, 1);
+        let pending1 = poll_once(&mut fut1).is_none();
+        let pending2 = poll_once(&mut fut2).is_none();
+        crate::assert_with_log!(pending1, "fut1 pending", true, pending1);
+        crate::assert_with_log!(pending2, "fut2 pending", true, pending2);
+
+        {
+            let state = sem.state.lock();
+            let ids: Vec<u64> = state.waiters.iter().map(|waiter| waiter.id).collect();
+            crate::assert_with_log!(ids.len() == 2, "two waiters queued", 2usize, ids.len());
+            crate::assert_with_log!(
+                ids[0] == u64::MAX,
+                "first waiter gets MAX id",
+                u64::MAX,
+                ids[0]
+            );
+            crate::assert_with_log!(
+                ids[1] != ids[0],
+                "waiter ids unique",
+                true,
+                ids[1] != ids[0]
+            );
+            crate::assert_with_log!(
+                state.waiter_ids_wrapped,
+                "waiter ids marked wrapped",
+                true,
+                state.waiter_ids_wrapped
+            );
+        }
+
+        cx1.set_cancel_requested(true);
+        let result1 = poll_once(&mut fut1);
+        let cancelled = matches!(result1, Some(Err(AcquireError::Cancelled)));
+        crate::assert_with_log!(cancelled, "front waiter cancelled", true, cancelled);
+
+        sem.add_permits(1);
+        let permit2 = poll_once(&mut fut2)
+            .expect("second waiter ready")
+            .expect("second waiter acquired");
+        crate::assert_with_log!(
+            permit2.count() == 1,
+            "permit count",
+            1usize,
+            permit2.count()
+        );
+        drop(permit2);
+        crate::test_complete!("waiter_id_wraparound_avoids_live_queue_collisions");
     }
 
     // ── Invariant: zero-permit semaphore acquire blocks then wakes ─────
@@ -1791,8 +1970,8 @@ mod tests {
     // =========================================================================
 
     /// MR1: No permit underflow - permit count never goes negative
-    /// Property: available_permits() >= 0 always holds, regardless of concurrent
-    /// acquire/release/cancel operations.
+    /// Property: failed or cancelled acquires do not consume permits, and
+    /// dropping permits restores the exact expected count.
     #[test]
     fn metamorphic_no_permit_underflow() {
         init_test("metamorphic_no_permit_underflow");
@@ -1801,23 +1980,12 @@ mod tests {
 
         // Initial state check
         let initial = sem.available_permits();
-        crate::assert_with_log!(
-            initial >= 0,
-            "initial permits non-negative",
-            true,
-            initial >= 0
-        );
+        crate::assert_with_log!(initial == 3, "initial permit count", 3usize, initial);
 
         // Acquire permits up to limit
         let p1 = sem.try_acquire(1).expect("acquire 1");
         let p2 = sem.try_acquire(2).expect("acquire 2");
         let remaining = sem.available_permits();
-        crate::assert_with_log!(
-            remaining >= 0,
-            "after acquiring all permits",
-            true,
-            remaining >= 0
-        );
         crate::assert_with_log!(
             remaining == 0,
             "exactly 0 permits remaining",
@@ -1834,12 +2002,6 @@ mod tests {
             overflow.is_err()
         );
         let still_zero = sem.available_permits();
-        crate::assert_with_log!(
-            still_zero >= 0,
-            "no underflow after failed acquire",
-            true,
-            still_zero >= 0
-        );
         crate::assert_with_log!(still_zero == 0, "permits still zero", 0usize, still_zero);
 
         // Set up async acquire that will be cancelled
@@ -1862,14 +2024,8 @@ mod tests {
             result.is_some()
         );
 
-        // Permit count should still be non-negative after cancellation
+        // Cancelled acquires must not consume permits.
         let after_cancel = sem.available_permits();
-        crate::assert_with_log!(
-            after_cancel >= 0,
-            "permits non-negative after cancel",
-            true,
-            after_cancel >= 0
-        );
         crate::assert_with_log!(
             after_cancel == 0,
             "permits unchanged by cancel",
@@ -1880,22 +2036,10 @@ mod tests {
         // Release permits and verify no underflow
         drop(p1);
         let after_drop1 = sem.available_permits();
-        crate::assert_with_log!(
-            after_drop1 >= 0,
-            "no underflow after drop 1",
-            true,
-            after_drop1 >= 0
-        );
         crate::assert_with_log!(after_drop1 == 1, "one permit released", 1usize, after_drop1);
 
         drop(p2);
         let after_drop2 = sem.available_permits();
-        crate::assert_with_log!(
-            after_drop2 >= 0,
-            "no underflow after drop 2",
-            true,
-            after_drop2 >= 0
-        );
         crate::assert_with_log!(
             after_drop2 == 3,
             "all permits released",
@@ -2381,5 +2525,38 @@ mod tests {
         owned_permit.commit();
 
         crate::test_complete!("test_semaphore_permit_obligation_structure");
+    }
+
+    #[test]
+    fn dropping_semaphore_permit_releases_capacity_without_panic() {
+        init_test("dropping_semaphore_permit_releases_capacity_without_panic");
+        let sem = Semaphore::new(1);
+
+        let permit = sem.try_acquire(1).expect("should acquire permit");
+        let unavailable = sem.available_permits();
+        crate::assert_with_log!(unavailable == 0, "capacity consumed", 0usize, unavailable);
+
+        drop(permit);
+
+        let available = sem.available_permits();
+        crate::assert_with_log!(available == 1, "capacity restored", 1usize, available);
+        crate::test_complete!("dropping_semaphore_permit_releases_capacity_without_panic");
+    }
+
+    #[test]
+    fn dropping_owned_semaphore_permit_releases_capacity_without_panic() {
+        init_test("dropping_owned_semaphore_permit_releases_capacity_without_panic");
+        let sem = Arc::new(Semaphore::new(1));
+
+        let permit =
+            OwnedSemaphorePermit::try_acquire(Arc::clone(&sem), 1).expect("should acquire permit");
+        let unavailable = sem.available_permits();
+        crate::assert_with_log!(unavailable == 0, "capacity consumed", 0usize, unavailable);
+
+        drop(permit);
+
+        let available = sem.available_permits();
+        crate::assert_with_log!(available == 1, "capacity restored", 1usize, available);
+        crate::test_complete!("dropping_owned_semaphore_permit_releases_capacity_without_panic");
     }
 }

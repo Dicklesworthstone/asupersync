@@ -116,7 +116,7 @@ pub struct ModifyError;
 
 impl std::fmt::Display for ModifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "watch channel has no receivers")
+        write!(f, "modifying a closed watch channel")
     }
 }
 
@@ -507,8 +507,12 @@ impl<T> Receiver<T> {
 
     /// Returns a reference to the current value.
     ///
-    /// This does NOT update `seen_version`. Use `mark_seen()` after
-    /// if you want to acknowledge seeing the value.
+    /// This does NOT update `seen_version`.
+    ///
+    /// If you need the returned snapshot and the acknowledgement to refer to
+    /// the same version, use [`Receiver::borrow_and_update`] instead.
+    /// Calling [`Receiver::mark_seen`] later acknowledges whatever version is
+    /// current at that later instant and can therefore skip an intervening send.
     #[inline]
     #[must_use]
     pub fn borrow(&self) -> Ref<'_, T> {
@@ -558,8 +562,13 @@ impl<T> Receiver<T> {
 
     /// Marks the current value as seen.
     ///
-    /// After this call, `changed()` will only return when a newer
-    /// value is available.
+    /// This acknowledges the latest currently published version, not a
+    /// previously borrowed snapshot. If you need snapshot-aligned
+    /// acknowledgement, use [`Receiver::borrow_and_update`] or
+    /// [`Receiver::borrow_and_update_clone`].
+    ///
+    /// After this call, `changed()` will only return when a newer value is
+    /// available.
     #[inline]
     pub fn mark_seen(&mut self) {
         self.seen_version = self.inner.current_version();
@@ -1846,6 +1855,19 @@ mod tests {
         assert_eq!(copied, cloned);
     }
 
+    #[test]
+    fn modify_error_display_matches_closed_sender_semantics() {
+        init_test("modify_error_display_matches_closed_sender_semantics");
+        let text = ModifyError.to_string();
+        crate::assert_with_log!(
+            text == "modifying a closed watch channel",
+            "display",
+            "modifying a closed watch channel",
+            text
+        );
+        crate::test_complete!("modify_error_display_matches_closed_sender_semantics");
+    }
+
     // =========================================================================
     // Metamorphic watch channel consistency tests (bead asupersync-8jjrl0)
     // =========================================================================
@@ -1947,12 +1969,13 @@ mod tests {
             );
         }
 
-        // Version should not have changed from the borrow
+        // Version should not have changed from the borrow. The preceding
+        // borrow_and_update observed version 12 after the final send(1234).
         let version_after_borrow = rx.seen_version;
         crate::assert_with_log!(
-            version_after_borrow == 11, // 10 sends + initial
+            version_after_borrow == 12,
             "version unchanged by borrow",
-            11u64,
+            12u64,
             version_after_borrow
         );
 
@@ -2094,6 +2117,89 @@ mod tests {
         crate::test_complete!("metamorphic_receiver_isolation");
     }
 
+    #[test]
+    fn borrow_and_update_acknowledges_the_snapshot_it_returns() {
+        init_test("borrow_and_update_acknowledges_the_snapshot_it_returns");
+        let (tx, mut rx) = channel(10u32);
+
+        tx.send(20).expect("send failed");
+        let current_version = tx.inner.current_version();
+        let snapshot_value = {
+            let snapshot = rx.borrow_and_update();
+            *snapshot
+        };
+
+        crate::assert_with_log!(
+            snapshot_value == 20,
+            "snapshot value",
+            20u32,
+            snapshot_value
+        );
+        crate::assert_with_log!(
+            rx.seen_version() == current_version,
+            "borrow_and_update aligns seen version",
+            current_version,
+            rx.seen_version()
+        );
+
+        let changed = rx.has_changed();
+        crate::assert_with_log!(
+            !changed,
+            "no unread change after snapshot-aligned ack",
+            false,
+            changed
+        );
+
+        tx.send(30).expect("send failed");
+        let changed = rx.has_changed();
+        crate::assert_with_log!(changed, "new send becomes visible", true, changed);
+        crate::test_complete!("borrow_and_update_acknowledges_the_snapshot_it_returns");
+    }
+
+    #[test]
+    fn mark_seen_acknowledges_latest_version_not_prior_borrow_snapshot() {
+        init_test("mark_seen_acknowledges_latest_version_not_prior_borrow_snapshot");
+        let (tx, mut rx) = channel(1u32);
+
+        tx.send(2).expect("send failed");
+        let borrowed_snapshot = rx.borrow().clone_inner();
+        crate::assert_with_log!(
+            borrowed_snapshot == 2,
+            "borrowed snapshot before later send",
+            2u32,
+            borrowed_snapshot
+        );
+
+        tx.send(3).expect("send failed");
+        rx.mark_seen();
+
+        let seen_version = rx.seen_version();
+        let current_version = tx.inner.current_version();
+        crate::assert_with_log!(
+            seen_version == current_version,
+            "mark_seen advances to current version",
+            current_version,
+            seen_version
+        );
+
+        let changed = rx.has_changed();
+        crate::assert_with_log!(
+            !changed,
+            "mark_seen cleared both pending versions",
+            false,
+            changed
+        );
+
+        let latest = *rx.borrow();
+        crate::assert_with_log!(
+            latest == 3,
+            "latest borrow reflects post-mark version",
+            3u32,
+            latest
+        );
+        crate::test_complete!("mark_seen_acknowledges_latest_version_not_prior_borrow_snapshot");
+    }
+
     /// MR3: changed() exactness - returns Ok(()) exactly once per distinct send,
     /// never stutters. Property: count(changed() == Ok(())) == count(distinct sends)
     #[test]
@@ -2174,57 +2280,76 @@ mod tests {
             change_count
         );
 
-        // Transform: Rapid sends - each should still trigger exactly once
+        // Transform: Rapid sends coalesce into a single observable change.
         for i in 10..15 {
             tx.send(i).expect("send failed");
         }
 
-        // Should be able to observe all 5 rapid sends via changed()
-        for i in 10..15 {
-            let change = poll_changed(&mut rx);
-            crate::assert_with_log!(
-                change.is_ok(),
-                &format!("rapid send {} detected", i),
-                true,
-                change.is_ok()
-            );
-        }
+        let rapid_change = poll_changed(&mut rx);
+        crate::assert_with_log!(
+            rapid_change.is_ok(),
+            "coalesced rapid burst detected",
+            true,
+            rapid_change.is_ok()
+        );
 
         let final_version = rx.seen_version();
         crate::assert_with_log!(
-            final_version == 9,
-            "final version after all sends",
-            9u64,
+            final_version == 10,
+            "rapid burst advances to latest version",
+            10u64,
             final_version
         );
+        crate::assert_with_log!(
+            *rx.borrow() == 14,
+            "rapid burst exposes latest value",
+            14i32,
+            *rx.borrow()
+        );
 
-        // Transform: Send same value multiple times - each should still trigger changed()
+        let mut pending_after_burst = rx.changed(&cx);
+        let burst_waker = Waker::noop();
+        let mut burst_cx = Context::from_waker(burst_waker);
+        let burst_poll = Pin::new(&mut pending_after_burst).poll(&mut burst_cx);
+        crate::assert_with_log!(
+            matches!(burst_poll, Poll::Pending),
+            "no second notification after coalesced burst",
+            true,
+            matches!(burst_poll, Poll::Pending)
+        );
+        drop(pending_after_burst);
+
+        // Transform: Same-value sends still bump the version, but they also
+        // coalesce when observed after the burst.
         tx.send(999).expect("send failed");
         tx.send(999).expect("send failed"); // Same value
         tx.send(999).expect("send failed"); // Same value again
 
-        let change_dup1 = poll_changed(&mut rx);
-        let change_dup2 = poll_changed(&mut rx);
-        let change_dup3 = poll_changed(&mut rx);
+        let duplicate_burst = poll_changed(&mut rx);
+        crate::assert_with_log!(
+            duplicate_burst.is_ok(),
+            "duplicate-value burst detected",
+            true,
+            duplicate_burst.is_ok()
+        );
+        crate::assert_with_log!(
+            rx.seen_version() == 13,
+            "duplicate sends still advance version",
+            13u64,
+            rx.seen_version()
+        );
 
+        let mut pending_after_duplicates = rx.changed(&cx);
+        let duplicate_waker = Waker::noop();
+        let mut duplicate_cx = Context::from_waker(duplicate_waker);
+        let duplicate_poll = Pin::new(&mut pending_after_duplicates).poll(&mut duplicate_cx);
         crate::assert_with_log!(
-            change_dup1.is_ok(),
-            "first duplicate change",
+            matches!(duplicate_poll, Poll::Pending),
+            "duplicate burst also coalesces to one notification",
             true,
-            change_dup1.is_ok()
+            matches!(duplicate_poll, Poll::Pending)
         );
-        crate::assert_with_log!(
-            change_dup2.is_ok(),
-            "second duplicate change",
-            true,
-            change_dup2.is_ok()
-        );
-        crate::assert_with_log!(
-            change_dup3.is_ok(),
-            "third duplicate change",
-            true,
-            change_dup3.is_ok()
-        );
+        drop(pending_after_duplicates);
 
         let final_value = rx.borrow_and_update();
         crate::assert_with_log!(
@@ -2373,15 +2498,26 @@ mod tests {
         // Drop sender
         drop(tx2);
 
-        // rx5's pending changes should now be reported as Closed
+        // rx5 still has one unseen value. Close must surface that final update
+        // before returning Closed on the next wait.
         let mut future5 = rx5.changed(&cx);
         let result5 = poll_ready(&mut future5);
         drop(future5);
         crate::assert_with_log!(
-            matches!(result5, Err(RecvError::Closed)),
-            "rx5 pending changed() returns Closed",
+            matches!(result5, Ok(())),
+            "rx5 receives final unseen update before Closed",
             true,
-            matches!(result5, Err(RecvError::Closed))
+            matches!(result5, Ok(()))
+        );
+
+        let mut future5_closed = rx5.changed(&cx);
+        let result5_closed = poll_ready(&mut future5_closed);
+        drop(future5_closed);
+        crate::assert_with_log!(
+            matches!(result5_closed, Err(RecvError::Closed)),
+            "rx5 returns Closed after draining final value",
+            true,
+            matches!(result5_closed, Err(RecvError::Closed))
         );
 
         // But rx5 should still be able to read the last value

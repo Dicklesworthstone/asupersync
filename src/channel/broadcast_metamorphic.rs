@@ -325,7 +325,10 @@ mod tests {
 
             // New receiver should either get a message or be empty (not corrupted)
             prop_assert!(
-                matches!(new_receiver_result, Ok(_) | Err(TryRecvError::Empty) | Err(TryRecvError::Lagged(_))),
+                matches!(
+                    new_receiver_result,
+                    Ok(_) | Err(TryRecvError::Empty | TryRecvError::Lagged(_))
+                ),
                 "MR3 VIOLATION: new receiver creation failed: {:?}",
                 new_receiver_result
             );

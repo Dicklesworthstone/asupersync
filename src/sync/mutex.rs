@@ -101,6 +101,8 @@ struct MutexState {
     locked: bool,
     /// Queue of waiters.
     waiters: VecDeque<Waiter>,
+    /// Waiter that has been granted the next turn but has not yet resumed.
+    granted_waiter: Option<u64>,
     /// Monotonic counter for waiter identity.
     next_waiter_id: u64,
 }
@@ -122,6 +124,7 @@ impl<T> Mutex<T> {
             state: ParkingMutex::new(MutexState {
                 locked: false,
                 waiters: VecDeque::with_capacity(4),
+                granted_waiter: None,
                 next_waiter_id: 0,
             }),
         }
@@ -166,7 +169,7 @@ impl<T> Mutex<T> {
         if self.is_poisoned() {
             return Err(TryLockError::Poisoned);
         }
-        if state.locked {
+        if state.locked || state.granted_waiter.is_some() || !state.waiters.is_empty() {
             return Err(TryLockError::Locked);
         }
 
@@ -203,7 +206,13 @@ impl<T> Mutex<T> {
         let waker_to_wake = {
             let mut state = self.state.lock();
             state.locked = false;
-            state.waiters.pop_front().map(|w| w.waker)
+            if let Some(waiter) = state.waiters.pop_front() {
+                state.granted_waiter = Some(waiter.id);
+                Some(waiter.waker)
+            } else {
+                state.granted_waiter = None;
+                None
+            }
         };
         // Wake outside the lock
         if let Some(waker) = waker_to_wake {
@@ -229,27 +238,42 @@ pub struct LockFuture<'a, 'b, T> {
 
 impl<T> LockFuture<'_, '_, T> {
     #[inline]
+    fn grant_next_waiter(state: &mut MutexState) -> Option<Waker> {
+        if let Some(waiter) = state.waiters.pop_front() {
+            state.granted_waiter = Some(waiter.id);
+            Some(waiter.waker)
+        } else {
+            state.granted_waiter = None;
+            None
+        }
+    }
+
+    #[inline]
     fn cleanup_waiter(&mut self) {
         if let Some(waiter_id) = self.waiter_id.take() {
             let waker_to_wake = {
                 let mut state = self.mutex.state.lock();
 
-                let pos = state.waiters.iter().position(|w| w.id == waiter_id);
-
-                // Only the waiter at the head of the queue (or a waiter that was
-                // dequeued and thus holds the baton) has the right to wake the next
-                // waiter. If we are deeper in the queue, we just remove ourselves.
-                let is_head = pos == Some(0);
-                let has_baton = pos.is_none();
-
-                if let Some(p) = pos {
-                    state.waiters.remove(p);
-                }
-
-                if !state.locked && (is_head || has_baton) {
-                    state.waiters.front().map(|w| w.waker.clone())
+                if state.granted_waiter == Some(waiter_id) {
+                    state.granted_waiter = None;
+                    if !state.locked {
+                        Self::grant_next_waiter(&mut state)
+                    } else {
+                        None
+                    }
                 } else {
-                    None
+                    let pos = state.waiters.iter().position(|w| w.id == waiter_id);
+                    let is_head = pos == Some(0);
+
+                    if let Some(p) = pos {
+                        state.waiters.remove(p);
+                    }
+
+                    if !state.locked && state.granted_waiter.is_none() && is_head {
+                        Self::grant_next_waiter(&mut state)
+                    } else {
+                        None
+                    }
                 }
             };
 
@@ -286,20 +310,34 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             return Poll::Ready(Err(LockError::Poisoned));
         }
 
-        if !state.locked {
-            // Acquire lock
-            state.locked = true;
-
-            // Remove ourselves from the queue if we were still in it,
-            // to prevent our stale record from eating future wakeups.
-            if let Some(id) = self.waiter_id {
-                if let Some(pos) = state.waiters.iter().position(|w| w.id == id) {
-                    state.waiters.remove(pos);
+        if let Some(waiter_id) = self.waiter_id {
+            if state.granted_waiter == Some(waiter_id) {
+                if !state.locked {
+                    state.granted_waiter = None;
+                    state.locked = true;
+                    self.waiter_id = None;
+                    self.completed = true;
+                    return Poll::Ready(Ok(MutexGuard { mutex: self.mutex }));
                 }
-            }
 
-            // Clear waiter_id so Drop doesn't uselessly lock and search the queue
-            self.waiter_id = None;
+                // Another caller stole the lock before we resumed. Re-register
+                // ourselves at the front to preserve our turn.
+                state.granted_waiter = None;
+                let new_id = state.next_waiter_id;
+                state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+                state.waiters.push_front(Waiter {
+                    waker: context.waker().clone(),
+                    id: new_id,
+                });
+                drop(state);
+                self.waiter_id = Some(new_id);
+                return Poll::Pending;
+            }
+        }
+
+        if !state.locked && state.granted_waiter.is_none() && self.waiter_id.is_none() {
+            // Acquire lock immediately only when nobody else already owns the turn.
+            state.locked = true;
             self.completed = true;
             return Poll::Ready(Ok(MutexGuard { mutex: self.mutex }));
         }
@@ -314,7 +352,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
                     existing.waker.clone_from(context.waker());
                 }
             } else {
-                // Was dequeued by unlock() but someone stole the lock.
+                // Was dequeued earlier but is no longer the granted waiter.
                 // Re-register at the FRONT to preserve FIFO fairness.
                 let new_id = state.next_waiter_id;
                 state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
@@ -415,7 +453,7 @@ impl<T> OwnedMutexGuard<T> {
             if mutex.is_poisoned() {
                 return Err(TryLockError::Poisoned);
             }
-            if state.locked {
+            if state.locked || state.granted_waiter.is_some() || !state.waiters.is_empty() {
                 return Err(TryLockError::Locked);
             }
             state.locked = true;
@@ -820,8 +858,8 @@ mod tests {
     }
 
     #[test]
-    fn try_lock_steal_does_not_lose_waiter() {
-        init_test("try_lock_steal_does_not_lose_waiter");
+    fn try_lock_does_not_bypass_granted_waiter() {
+        init_test("try_lock_does_not_bypass_granted_waiter");
         let cx = test_cx();
         let mutex = Mutex::new(0u32);
 
@@ -836,23 +874,166 @@ mod tests {
         // Release — unlock wakes the waiter (noop waker, no actual schedule).
         drop(guard);
 
-        // Steal the lock before the waiter can poll.
-        let steal_guard = mutex.try_lock().expect("steal should succeed");
+        // A synchronous try_lock must not bypass the already-granted waiter turn.
+        let steal_blocked = matches!(mutex.try_lock(), Err(TryLockError::Locked));
+        crate::assert_with_log!(
+            steal_blocked,
+            "try_lock blocked by granted waiter",
+            true,
+            steal_blocked
+        );
 
-        // Waiter polls: lock is busy (stolen). It re-registers at the front.
-        let pending = poll_once(&mut fut_w).is_none();
-        crate::assert_with_log!(pending, "waiter blocked by steal", true, pending);
-
-        // Release stolen lock.
-        drop(steal_guard);
-
-        // Waiter should now acquire.
+        // The granted waiter should now acquire.
         let guard_w = poll_once(&mut fut_w)
             .expect("should complete")
             .expect("no error");
-        crate::assert_with_log!(*guard_w == 0, "waiter acquired after steal", 0u32, *guard_w);
+        crate::assert_with_log!(
+            *guard_w == 0,
+            "granted waiter acquired before try_lock",
+            0u32,
+            *guard_w
+        );
 
-        crate::test_complete!("try_lock_steal_does_not_lose_waiter");
+        crate::test_complete!("try_lock_does_not_bypass_granted_waiter");
+    }
+
+    #[test]
+    fn owned_try_lock_does_not_bypass_granted_waiter() {
+        init_test("owned_try_lock_does_not_bypass_granted_waiter");
+        let cx = test_cx();
+        let mutex = Arc::new(Mutex::new(9u32));
+
+        let mut fut_hold = mutex.as_ref().lock(&cx);
+        let guard = poll_once(&mut fut_hold).expect("immediate").expect("lock");
+
+        let mut fut_waiter = mutex.as_ref().lock(&cx);
+        let waiter_pending = poll_once(&mut fut_waiter).is_none();
+        crate::assert_with_log!(waiter_pending, "waiter queued", true, waiter_pending);
+
+        drop(guard);
+
+        let owned_blocked = matches!(
+            OwnedMutexGuard::try_lock(Arc::clone(&mutex)),
+            Err(TryLockError::Locked)
+        );
+        crate::assert_with_log!(
+            owned_blocked,
+            "owned try_lock blocked by granted waiter",
+            true,
+            owned_blocked
+        );
+
+        let waiter_guard = poll_once(&mut fut_waiter)
+            .expect("granted waiter acquires")
+            .expect("no error");
+        crate::assert_with_log!(
+            *waiter_guard == 9,
+            "granted waiter acquired before owned try_lock",
+            9u32,
+            *waiter_guard
+        );
+
+        crate::test_complete!("owned_try_lock_does_not_bypass_granted_waiter");
+    }
+
+    #[test]
+    fn cancel_head_waiter_does_not_skip_granted_predecessor() {
+        init_test("cancel_head_waiter_does_not_skip_granted_predecessor");
+        let cx1 = test_cx();
+        let cx2 = Cx::new(
+            RegionId::from_arena(ArenaIndex::new(0, 6)),
+            TaskId::from_arena(ArenaIndex::new(0, 6)),
+            Budget::INFINITE,
+        );
+        let cx3 = test_cx();
+        let mutex = Mutex::new(0u32);
+
+        let mut fut_hold = mutex.lock(&cx1);
+        let guard = poll_once(&mut fut_hold).expect("immediate").expect("lock");
+
+        let mut fut1 = mutex.lock(&cx1);
+        let _ = poll_once(&mut fut1);
+        let mut fut2 = mutex.lock(&cx2);
+        let _ = poll_once(&mut fut2);
+        let mut fut3 = mutex.lock(&cx3);
+        let _ = poll_once(&mut fut3);
+
+        drop(guard);
+
+        cx2.set_cancel_requested(true);
+        let result2 = poll_once(&mut fut2);
+        let cancelled = matches!(result2, Some(Err(LockError::Cancelled)));
+        crate::assert_with_log!(cancelled, "head waiter cancelled", true, cancelled);
+
+        let third_pending = poll_once(&mut fut3).is_none();
+        crate::assert_with_log!(
+            third_pending,
+            "third waiter stays pending behind granted predecessor",
+            true,
+            third_pending
+        );
+
+        let guard1 = poll_once(&mut fut1)
+            .expect("granted predecessor acquires")
+            .expect("no error");
+        crate::assert_with_log!(
+            *guard1 == 0,
+            "granted predecessor acquires first",
+            0u32,
+            *guard1
+        );
+
+        crate::test_complete!("cancel_head_waiter_does_not_skip_granted_predecessor");
+    }
+
+    #[test]
+    fn new_waiter_does_not_bypass_granted_waiter() {
+        init_test("new_waiter_does_not_bypass_granted_waiter");
+        let cx1 = test_cx();
+        let cx2 = test_cx();
+        let mutex = Mutex::new(7u32);
+
+        let mut fut_hold = mutex.lock(&cx1);
+        let guard = poll_once(&mut fut_hold).expect("immediate").expect("lock");
+
+        let mut older_waiter = mutex.lock(&cx1);
+        let older_pending = poll_once(&mut older_waiter).is_none();
+        crate::assert_with_log!(older_pending, "older waiter queued", true, older_pending);
+
+        drop(guard);
+
+        let mut newer_waiter = mutex.lock(&cx2);
+        let newer_pending = poll_once(&mut newer_waiter).is_none();
+        crate::assert_with_log!(
+            newer_pending,
+            "new waiter cannot bypass granted waiter",
+            true,
+            newer_pending
+        );
+
+        let older_guard = poll_once(&mut older_waiter)
+            .expect("older waiter acquires")
+            .expect("no error");
+        crate::assert_with_log!(
+            *older_guard == 7,
+            "older waiter acquires",
+            7u32,
+            *older_guard
+        );
+
+        drop(older_guard);
+
+        let newer_guard = poll_once(&mut newer_waiter)
+            .expect("newer waiter acquires after older waiter")
+            .expect("no error");
+        crate::assert_with_log!(
+            *newer_guard == 7,
+            "newer waiter acquires second",
+            7u32,
+            *newer_guard
+        );
+
+        crate::test_complete!("new_waiter_does_not_bypass_granted_waiter");
     }
 
     #[test]

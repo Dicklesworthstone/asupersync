@@ -371,11 +371,13 @@ impl Notified<'_> {
 
     #[inline]
     fn poll_init(&mut self, cx: &Context<'_>) -> Poll<()> {
-        // Lock-free fast path: observe broadcast generation bump.
-        let current_gen = self.notify.generation.load(Ordering::Acquire);
-        if current_gen != self.initial_generation {
-            return self.mark_done();
-        }
+        // A waiter only starts "waiting" on first poll, not when the future is
+        // constructed. Capture the current broadcast generation now so
+        // notify_waiters() remains edge-triggered for already-polled waiters
+        // instead of spuriously waking futures that were created earlier but
+        // never polled.
+        let observed_generation = self.notify.generation.load(Ordering::Acquire);
+        self.initial_generation = observed_generation;
 
         // Lock-free fast path: consume a stored notify token.
         if self.try_consume_stored_notification() {
@@ -387,7 +389,7 @@ impl Notified<'_> {
 
         // Re-check conditions under waiter lock to close races with concurrent notifiers.
         let current_gen = self.notify.generation.load(Ordering::Acquire);
-        if current_gen != self.initial_generation {
+        if current_gen != observed_generation {
             drop(waiters);
             return self.mark_done();
         }
@@ -400,7 +402,7 @@ impl Notified<'_> {
         let index = waiters.insert(WaiterEntry {
             waker: Some(cx.waker().clone()),
             notified: false,
-            generation: self.initial_generation,
+            generation: observed_generation,
         });
         self.waiter_index = Some(index);
         self.state = NotifiedState::Waiting;
@@ -1204,6 +1206,31 @@ mod tests {
             pending
         );
         crate::test_complete!("notify_waiters_does_not_store_token_when_no_waiters");
+    }
+
+    #[test]
+    fn notify_waiters_does_not_wake_unpolled_future_created_before_broadcast() {
+        init_test("notify_waiters_does_not_wake_unpolled_future_created_before_broadcast");
+        let notify = Notify::new();
+
+        let mut fut = notify.notified();
+
+        // A future created before the broadcast is not yet waiting until its
+        // first poll registers it.
+        notify.notify_waiters();
+
+        let pending = poll_once(&mut fut).is_pending();
+        crate::assert_with_log!(
+            pending,
+            "broadcast must not wake an unpolled future",
+            true,
+            pending
+        );
+        drop(fut);
+
+        crate::test_complete!(
+            "notify_waiters_does_not_wake_unpolled_future_created_before_broadcast"
+        );
     }
 
     #[test]

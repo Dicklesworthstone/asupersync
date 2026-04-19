@@ -32,18 +32,15 @@
 //! concurrency levels, and systematic exploration of failure injection
 //! scenarios to verify invariants hold across all execution paths.
 
-use crate::combinator::bulkhead::{
-    Bulkhead, BulkheadError, BulkheadMetrics, BulkheadPermit, BulkheadPolicy, BulkheadPolicyBuilder,
-};
-use crate::types::{Budget, RegionId, TaskId, Time};
-use crate::util::{ArenaIndex, DetRng};
+#![allow(dead_code)]
+
+use crate::combinator::bulkhead::{Bulkhead, BulkheadError, BulkheadPolicy};
+use crate::types::Time;
+use crate::util::DetRng;
 use proptest::prelude::*;
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::task::{Context, Poll, Waker};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 // ============================================================================
@@ -404,8 +401,7 @@ fn mr2_rejection_accuracy(
             None => {
                 // Try to enqueue
                 let now = Time::from_millis(0);
-                let queue_timeout = Duration::from_millis(50);
-                match bulkhead.enqueue(1, now, queue_timeout) {
+                match bulkhead.enqueue(1, now) {
                     Ok(_entry_id) => {
                         // Successfully queued
                     }

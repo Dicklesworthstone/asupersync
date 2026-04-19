@@ -28,9 +28,9 @@
 //! explore different execution interleavings and verify invariants hold across
 //! all possible schedules.
 
-use crate::combinator::race::{RaceWinner, race2_outcomes};
-use crate::cx::{Cx, Scope};
-use crate::runtime::RuntimeState;
+#![allow(dead_code)]
+
+use crate::cx::Cx;
 use crate::types::cancel::CancelReason;
 use crate::types::{Budget, Outcome, RegionId, TaskId};
 use crate::util::{ArenaIndex, DetRng};
@@ -40,7 +40,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
 
 // ============================================================================
 // Test Infrastructure
@@ -736,8 +735,6 @@ mod tests {
     /// Comprehensive integration test combining all MRs
     #[test]
     fn test_race_metamorphic_integration() {
-        use crate::runtime::RuntimeState;
-
         let global_state = GlobalTestState::new();
 
         // Test scenario: 4-way race with various conditions

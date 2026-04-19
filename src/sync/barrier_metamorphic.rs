@@ -18,11 +18,12 @@
 //! with configurable test scenarios including party counts, cancellation patterns,
 //! spurious wakeup injection, and concurrent execution patterns.
 
+#![allow(dead_code)]
+
 use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
-use crate::sync::{Barrier, BarrierWaitError, BarrierWaitResult};
-use crate::types::{Budget, TaskId};
-use crate::util::{DetEntropy, DetRng};
+use crate::sync::{Barrier, BarrierWaitError};
+use crate::types::Budget;
 use parking_lot::Mutex;
 use proptest::prelude::*;
 use std::collections::HashMap;
