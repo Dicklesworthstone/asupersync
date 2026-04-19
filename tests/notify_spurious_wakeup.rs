@@ -37,3 +37,19 @@ fn notify_waiters_spurious_wakeup_bug() {
     println!("fut2 is ready: {is_ready}");
     assert!(!is_ready, "fut2 was spuriously woken!");
 }
+
+#[test]
+fn notify_waiters_does_not_wake_unpolled_future_created_before_broadcast() {
+    let notify = Notify::new();
+
+    let mut fut = notify.notified();
+
+    // A future created before the broadcast is not yet waiting until its
+    // first poll registers it.
+    notify.notify_waiters();
+
+    assert!(
+        poll_once(&mut fut).is_pending(),
+        "broadcast spuriously woke an unpolled future"
+    );
+}

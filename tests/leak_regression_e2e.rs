@@ -658,8 +658,8 @@ fn graded_obligation_clean_commit() {
     init_test_logging();
     let ob = GradedObligation::reserve(ObligationKind::SendPermit, "test-commit");
     let proof = ob.resolve(Resolution::Commit);
-    assert_eq!(proof.kind, ObligationKind::SendPermit);
-    assert_eq!(proof.resolution, Resolution::Commit);
+    assert_eq!(proof.kind(), ObligationKind::SendPermit);
+    assert_eq!(proof.resolution(), Resolution::Commit);
 }
 
 #[test]
@@ -667,8 +667,8 @@ fn graded_obligation_clean_abort() {
     init_test_logging();
     let ob = GradedObligation::reserve(ObligationKind::Lease, "test-abort");
     let proof = ob.resolve(Resolution::Abort);
-    assert_eq!(proof.kind, ObligationKind::Lease);
-    assert_eq!(proof.resolution, Resolution::Abort);
+    assert_eq!(proof.kind(), ObligationKind::Lease);
+    assert_eq!(proof.resolution(), Resolution::Abort);
 }
 
 #[test]
@@ -706,8 +706,8 @@ fn graded_scope_clean_close() {
 
     assert_eq!(scope.outstanding(), 0);
     let proof = scope.close().expect("should close cleanly");
-    assert_eq!(proof.total_reserved, 4);
-    assert_eq!(proof.total_resolved, 4);
+    assert_eq!(proof.total_reserved(), 4);
+    assert_eq!(proof.total_resolved(), 4);
 }
 
 #[test]
@@ -752,8 +752,8 @@ fn graded_scope_stress_many_obligations() {
     assert_eq!(scope.outstanding(), 0);
     let proof = scope.close().expect("should close cleanly");
     let expected = u32::try_from(n).expect("n fits u32");
-    assert_eq!(proof.total_reserved, expected);
-    assert_eq!(proof.total_resolved, expected);
+    assert_eq!(proof.total_reserved(), expected);
+    assert_eq!(proof.total_resolved(), expected);
 }
 
 // ===========================================================================
@@ -971,8 +971,8 @@ fn graded_scope_empty_close() {
     init_test_logging();
     let scope = GradedScope::open("empty");
     let proof = scope.close().expect("empty scope should close");
-    assert_eq!(proof.total_reserved, 0);
-    assert_eq!(proof.total_resolved, 0);
+    assert_eq!(proof.total_reserved(), 0);
+    assert_eq!(proof.total_resolved(), 0);
 }
 
 // ===========================================================================

@@ -9,20 +9,8 @@ use asupersync::lab::LabRuntime;
 use asupersync::types::Budget;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Wake, Waker};
+use std::task::Context;
 use std::time::Duration;
-
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-    fn wake_by_ref(self: &Arc<Self>) {}
-}
-
-fn noop_waker() -> Waker {
-    Waker::from(Arc::new(NoopWaker))
-}
 
 #[derive(Debug)]
 struct TestServer;
@@ -100,8 +88,7 @@ fn test_call_future_dropped_mid_flight_prevents_obligation_leak() {
 
             // We poll it once then drop it
             let mut pinned = Box::pin(call_fut);
-            let waker = noop_waker();
-            let mut std_cx = Context::from_waker(&waker);
+            let mut std_cx = Context::from_waker(std::task::Waker::noop());
             let _ = std::future::Future::poll(pinned.as_mut(), &mut std_cx);
 
             drop(pinned); // Drops the mid-flight send future! Should NOT panic if obligation is managed properly.

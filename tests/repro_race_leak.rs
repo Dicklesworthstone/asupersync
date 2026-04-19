@@ -61,12 +61,6 @@ impl Drop for DroppableFuture {
     }
 }
 
-struct NoopWaker;
-
-impl std::task::Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
-
 #[test]
 fn repro_race_leak() {
     init_test_logging();
@@ -115,7 +109,7 @@ fn repro_race_leak() {
         // Here we simulate the executor.
 
         // Create a waker
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = Waker::noop().clone();
         let mut ctx = Context::from_waker(&waker);
 
         // Poll tasks once to get them started

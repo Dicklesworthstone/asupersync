@@ -1,16 +1,11 @@
 #![allow(missing_docs)]
 use asupersync::time::TimerWheel;
 use asupersync::types::Time;
-use std::sync::Arc;
 use std::task::Waker;
 
 #[test]
 fn test_cascade_bug() {
-    struct NoopWaker;
-    impl std::task::Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-    let waker = Waker::from(Arc::new(NoopWaker));
+    let waker = Waker::noop().clone();
 
     let mut wheel = TimerWheel::new_at(Time::from_nanos(0));
 

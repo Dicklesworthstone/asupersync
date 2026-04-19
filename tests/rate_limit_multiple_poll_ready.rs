@@ -19,11 +19,7 @@ impl Service<i32> for EchoService {
 }
 
 fn noop_waker() -> Waker {
-    struct NoopWaker;
-    impl std::task::Wake for NoopWaker {
-        fn wake(self: std::sync::Arc<Self>) {}
-    }
-    Waker::from(std::sync::Arc::new(NoopWaker))
+    Waker::noop().clone()
 }
 
 #[test]

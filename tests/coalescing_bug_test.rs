@@ -1,17 +1,11 @@
 #![allow(missing_docs)]
 use asupersync::time::{CoalescingConfig, TimerWheel, TimerWheelConfig};
 use asupersync::types::Time;
-use std::sync::Arc;
-use std::task::Waker;
 use std::time::Duration;
 
 #[test]
 fn test_coalescing_group_size_bug() {
-    struct NoopWaker;
-    impl std::task::Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-    let waker = Waker::from(Arc::new(NoopWaker));
+    let waker = std::task::Waker::noop().clone();
 
     // Coalescing window: 10ms
     let config = CoalescingConfig::enabled_with_window(Duration::from_millis(10));

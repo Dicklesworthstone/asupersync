@@ -30,12 +30,8 @@ fn test_cx() -> asupersync::cx::Cx {
 }
 
 fn block_on<F: Future>(f: F) -> F::Output {
-    struct NoopWaker;
-    impl std::task::Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-    let waker = Waker::from(Arc::new(NoopWaker));
-    let mut cx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
     let mut pinned = Box::pin(f);
     loop {
         match pinned.as_mut().poll(&mut cx) {
