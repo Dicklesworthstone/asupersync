@@ -42,10 +42,10 @@ use crate::bytes::Bytes;
 use crate::cx::Cx;
 use crate::lab::network::{Fault, HostId, NetworkConfig, SimulatedNetwork};
 use crate::remote::{
-    CancelRequest, IdempotencyKey, IdempotencyRequestFingerprint, IdempotencyStore,
-    LeaseRenewal, MessageEnvelope, NodeId, RemoteCap, RemoteError, RemoteMessage,
-    RemoteOutcome, RemoteRuntime, RemoteTaskId, RemoteTaskState, ResultDelivery, SpawnAck,
-    SpawnAckStatus, SpawnRejectReason, SpawnRequest,
+    CancelRequest, IdempotencyKey, IdempotencyRequestFingerprint, IdempotencyStore, LeaseRenewal,
+    MessageEnvelope, NodeId, RemoteCap, RemoteError, RemoteMessage, RemoteOutcome, RemoteRuntime,
+    RemoteTaskId, RemoteTaskState, ResultDelivery, SpawnAck, SpawnAckStatus, SpawnRejectReason,
+    SpawnRequest,
 };
 use crate::trace::distributed::{CausalTracker, LogicalTime, VectorClock};
 use crate::types::Time;
@@ -344,12 +344,8 @@ impl SimNode {
         }
 
         // Record for idempotency
-        self.dedup.record(
-            req.idempotency_key,
-            req.remote_task_id,
-            request,
-            now,
-        );
+        self.dedup
+            .record(req.idempotency_key, req.remote_task_id, request, now);
 
         // Accept the spawn
         let task = RunningTask {

@@ -517,6 +517,10 @@ pub enum LedgerEvent {
     DecisionRecorded {
         /// Decision label.
         label: String,
+        /// Confidence score recorded with the decision.
+        confidence: f64,
+        /// Fallback label recorded with the decision.
+        fallback_label: String,
         /// Whether the decision was within budget.
         within_budget: bool,
     },
@@ -565,6 +569,14 @@ pub struct ControllerRegistry {
 }
 
 impl ControllerRegistry {
+    fn snapshot_version_supported(
+        current: SnapshotVersion,
+        min: SnapshotVersion,
+        max: SnapshotVersion,
+    ) -> bool {
+        current.major == min.major && current.major == max.major && min <= current && current <= max
+    }
+
     fn set_controller_mode_state(controller: &mut RegisteredController, mode: ControllerMode) {
         if controller.mode == ControllerMode::Hold && mode != ControllerMode::Hold {
             controller.held_from_mode = None;
@@ -663,9 +675,7 @@ impl ControllerRegistry {
         if reg.min_version > reg.max_version {
             return Err(RegistrationError::InvertedVersionRange);
         }
-        if !SNAPSHOT_VERSION.is_compatible_with(&reg.min_version)
-            || SNAPSHOT_VERSION.major != reg.max_version.major
-        {
+        if !Self::snapshot_version_supported(SNAPSHOT_VERSION, reg.min_version, reg.max_version) {
             return Err(RegistrationError::IncompatibleVersion {
                 current: SNAPSHOT_VERSION,
                 min: reg.min_version,
@@ -798,6 +808,8 @@ impl ControllerRegistry {
             Some(decision.snapshot_id),
             LedgerEvent::DecisionRecorded {
                 label: decision.label.clone(),
+                confidence: decision.confidence,
+                fallback_label: decision.fallback_label.clone(),
                 within_budget,
             },
         );
@@ -1275,6 +1287,18 @@ mod tests {
             registry.register(reg2).unwrap_err(),
             RegistrationError::IncompatibleVersion { .. }
         ));
+    }
+
+    #[test]
+    fn snapshot_version_supported_enforces_upper_minor_bound() {
+        let current = SnapshotVersion { major: 1, minor: 2 };
+        let min = SnapshotVersion { major: 1, minor: 0 };
+        let max = SnapshotVersion { major: 1, minor: 1 };
+
+        assert!(
+            !ControllerRegistry::snapshot_version_supported(current, min, max),
+            "future snapshot minor versions must respect the declared max bound"
+        );
     }
 
     #[test]
@@ -1837,8 +1861,49 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert!(matches!(
             &entries[1].event,
-            LedgerEvent::DecisionRecorded { label, within_budget: true } if label == "adjust-streak"
+            LedgerEvent::DecisionRecorded {
+                label,
+                confidence,
+                fallback_label,
+                within_budget: true,
+            } if label == "adjust-streak" && (*confidence - 0.9).abs() < f64::EPSILON && fallback_label == "noop"
         ));
+    }
+
+    #[test]
+    fn evidence_ledger_records_decision_metadata() {
+        let mut registry = ControllerRegistry::new();
+        let id = registry
+            .register(test_registration("decision-metadata"))
+            .unwrap();
+        let snap_id = registry.next_snapshot_id();
+        let decision = ControllerDecision {
+            controller_id: id,
+            snapshot_id: snap_id,
+            label: "retune-queue".to_string(),
+            payload: serde_json::json!({ "limit": 8 }),
+            confidence: 0.42,
+            fallback_label: "shadow-default".to_string(),
+        };
+
+        assert!(registry.record_decision(&decision));
+
+        let entries = registry.controller_ledger(id);
+        let event = &entries[1].event;
+        match event {
+            LedgerEvent::DecisionRecorded {
+                label,
+                confidence,
+                fallback_label,
+                within_budget,
+            } => {
+                assert_eq!(label, "retune-queue");
+                assert!((*confidence - 0.42).abs() < f64::EPSILON);
+                assert_eq!(fallback_label, "shadow-default");
+                assert!(*within_budget);
+            }
+            other => panic!("unexpected ledger event: {other:?}"),
+        }
     }
 
     #[test]

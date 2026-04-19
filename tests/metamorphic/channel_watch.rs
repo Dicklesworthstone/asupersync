@@ -65,9 +65,11 @@ proptest! {
             tx.send(*value).expect("send must succeed");
             prop_assert!(rx.has_changed());
 
-            let mut changed = rx.changed(&cx);
-            poll_ready(&mut changed)
-                .expect("send before changed should make future ready");
+            {
+                let mut changed = rx.changed(&cx);
+                poll_ready(&mut changed)
+                    .expect("send before changed should make future ready");
+            }
 
             let observed = *rx.borrow_and_update();
             prop_assert_eq!(observed, *value);
@@ -96,9 +98,11 @@ proptest! {
         prop_assert_eq!(*rx.borrow(), third);
 
         tx.send(first).expect("send follow-up");
-        let mut changed = rx.changed(&cx);
-        poll_ready(&mut changed)
-            .expect("follow-up send should make changed ready");
+        {
+            let mut changed = rx.changed(&cx);
+            poll_ready(&mut changed)
+                .expect("follow-up send should make changed ready");
+        }
         prop_assert_eq!(*rx.borrow_and_update(), first);
     }
 
@@ -110,9 +114,11 @@ proptest! {
 
         for value in values.iter().skip(1).take(values.len().saturating_sub(2)) {
             tx.send(*value).expect("historical send must succeed");
-            let mut changed = early_rx.changed(&cx1);
-            poll_ready(&mut changed)
-                .expect("historical send should make changed ready");
+            {
+                let mut changed = early_rx.changed(&cx1);
+                poll_ready(&mut changed)
+                    .expect("historical send should make changed ready");
+            }
             prop_assert_eq!(*early_rx.borrow_and_update(), *value);
         }
 
@@ -128,12 +134,16 @@ proptest! {
 
         tx.send(current).expect("future send must succeed");
 
-        let mut early_changed = early_rx.changed(&cx1);
-        poll_ready(&mut early_changed)
-            .expect("future send should wake early rx");
-        let mut late_changed = late_rx.changed(&cx2);
-        poll_ready(&mut late_changed)
-            .expect("future send should wake late rx");
+        {
+            let mut early_changed = early_rx.changed(&cx1);
+            poll_ready(&mut early_changed)
+                .expect("future send should wake early rx");
+        }
+        {
+            let mut late_changed = late_rx.changed(&cx2);
+            poll_ready(&mut late_changed)
+                .expect("future send should wake late rx");
+        }
 
         prop_assert_eq!(*early_rx.borrow_and_update(), current);
         prop_assert_eq!(*late_rx.borrow_and_update(), current);
