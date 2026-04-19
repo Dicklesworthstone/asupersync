@@ -51,6 +51,7 @@ use std::time::Duration;
 /// handle into permanent shutdown state.
 static SQLITE_POOL: OnceLock<BlockingPool> = OnceLock::new();
 const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
+const DEFAULT_STATEMENT_CACHE_CAPACITY: usize = 64;
 
 fn get_sqlite_pool() -> BlockingPoolHandle {
     SQLITE_POOL.get_or_init(|| BlockingPool::new(1, 4)).handle()
@@ -68,7 +69,37 @@ fn configure_connection_defaults(
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
     }
+    conn.set_prepared_statement_cache_capacity(DEFAULT_STATEMENT_CACHE_CAPACITY);
     Ok(())
+}
+
+fn rollback_orphaned_transaction(
+    conn: &rusqlite::Connection,
+    needs_rollback: &AtomicBool,
+) -> Result<(), SqliteError> {
+    if !needs_rollback.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    if conn.is_autocommit() {
+        needs_rollback.store(false, Ordering::Release);
+        return Ok(());
+    }
+
+    match conn.execute_batch("ROLLBACK") {
+        Ok(()) => {
+            needs_rollback.store(false, Ordering::Release);
+            Ok(())
+        }
+        Err(e) => {
+            if conn.is_autocommit() {
+                needs_rollback.store(false, Ordering::Release);
+                Ok(())
+            } else {
+                Err(SqliteError::Sqlite(e.to_string()))
+            }
+        }
+    }
 }
 
 /// Error type for SQLite operations.
@@ -448,6 +479,62 @@ impl fmt::Debug for SqliteConnection {
 }
 
 impl SqliteConnection {
+    async fn run_connection_op<R, F>(
+        &self,
+        cx: &Cx,
+        op_name: &'static str,
+        f: F,
+    ) -> Outcome<R, SqliteError>
+    where
+        R: Send + 'static,
+        F: FnOnce(&rusqlite::Connection) -> Result<R, SqliteError> + Send + 'static,
+    {
+        let inner = Arc::clone(&self.inner);
+        let (tx, mut rx) = crate::channel::oneshot::channel();
+        let permit = tx.reserve(cx);
+
+        let handle = self.pool.spawn(move || {
+            let result = (|| {
+                let guard = inner.lock();
+                let conn = guard.get()?;
+                let result = f(conn);
+                drop(guard);
+                result
+            })();
+            let _ = permit.send(result);
+        });
+
+        match rx.recv(cx).await {
+            Ok(Ok(result)) => Outcome::Ok(result),
+            Ok(Err(e)) => Outcome::Err(e),
+            Err(crate::channel::oneshot::RecvError::Cancelled) => {
+                handle.cancel();
+                Outcome::Cancelled(
+                    cx.cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("cancelled")),
+                )
+            }
+            Err(crate::channel::oneshot::RecvError::Closed) => Outcome::Err(SqliteError::Sqlite(
+                format!("failed to receive result for {op_name}"),
+            )),
+            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
+                unreachable!("{op_name} awaits a fresh oneshot recv future")
+            }
+        }
+    }
+
+    async fn drain_orphaned_transaction(&self, cx: &Cx) -> Outcome<(), SqliteError> {
+        if !self.needs_rollback.load(Ordering::Acquire) {
+            return Outcome::Ok(());
+        }
+
+        let needs_rollback = Arc::clone(&self.needs_rollback);
+        self.run_connection_op(cx, "sqlite rollback cleanup", move |conn| {
+            rollback_orphaned_transaction(conn, needs_rollback.as_ref())
+        })
+        .await
+    }
+
     /// Opens a SQLite database at the given path.
     ///
     /// # Cancellation
@@ -576,55 +663,30 @@ impl SqliteConnection {
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
             );
         }
+        match self.drain_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
 
-        let inner = Arc::clone(&self.inner);
-        let needs_rollback = Arc::clone(&self.needs_rollback);
         let sql = sql.to_string();
         let params: Vec<SqliteValue> = params.to_vec();
+        self.run_connection_op(cx, "sqlite execute", move |conn| {
+            let params_refs: Vec<&dyn rusqlite::ToSql> =
+                params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
 
-        let (tx, mut rx) = crate::channel::oneshot::channel();
-        let permit = tx.reserve(cx);
-
-        let handle = self.pool.spawn(move || {
-            let result = (|| {
-                let guard = inner.lock();
-                if needs_rollback.swap(false, Ordering::AcqRel) {
-                    if let Ok(conn) = guard.get() {
-                        let _ = conn.execute("ROLLBACK", []);
-                    }
-                }
-                let conn = guard.get()?;
-
-                let params_refs: Vec<&dyn rusqlite::ToSql> =
-                    params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-
-                let res = conn
-                    .execute(&sql, params_refs.as_slice())
-                    .map(|n| n as u64)
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()));
-                drop(guard);
-                res
-            })();
-            let _ = permit.send(result);
-        });
-
-        match rx.recv(cx).await {
-            Ok(Ok(n)) => Outcome::Ok(n),
-            Ok(Err(e)) => Outcome::Err(e),
-            Err(crate::channel::oneshot::RecvError::Cancelled) => {
-                handle.cancel();
-                Outcome::Cancelled(
-                    cx.cancel_reason()
-                        .unwrap_or_else(|| CancelReason::user("cancelled")),
-                )
-            }
-            Err(crate::channel::oneshot::RecvError::Closed) => {
-                Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
-            }
-            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
-                unreachable!("SQLite execute awaits a fresh oneshot recv future")
-            }
-        }
+            conn.execute(&sql, params_refs.as_slice())
+                .map(|n| n as u64)
+                .map_err(|e| SqliteError::Sqlite(e.to_string()))
+        })
+        .await
     }
 
     /// Executes a batch of SQL statements.
@@ -639,49 +701,25 @@ impl SqliteConnection {
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
             );
         }
-
-        let inner = Arc::clone(&self.inner);
-        let needs_rollback = Arc::clone(&self.needs_rollback);
-        let sql = sql.to_string();
-
-        let (tx, mut rx) = crate::channel::oneshot::channel();
-        let permit = tx.reserve(cx);
-
-        let handle = self.pool.spawn(move || {
-            let result = (|| {
-                let guard = inner.lock();
-                if needs_rollback.swap(false, Ordering::AcqRel) {
-                    if let Ok(conn) = guard.get() {
-                        let _ = conn.execute("ROLLBACK", []);
-                    }
-                }
-                let conn = guard.get()?;
-                let res = conn
-                    .execute_batch(&sql)
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()));
-                drop(guard);
-                res
-            })();
-            let _ = permit.send(result);
-        });
-
-        match rx.recv(cx).await {
-            Ok(Ok(())) => Outcome::Ok(()),
-            Ok(Err(e)) => Outcome::Err(e),
-            Err(crate::channel::oneshot::RecvError::Cancelled) => {
-                handle.cancel();
-                Outcome::Cancelled(
-                    cx.cancel_reason()
-                        .unwrap_or_else(|| CancelReason::user("cancelled")),
-                )
-            }
-            Err(crate::channel::oneshot::RecvError::Closed) => {
-                Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
-            }
-            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
-                unreachable!("SQLite execute_batch awaits a fresh oneshot recv future")
-            }
+        match self.drain_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
         }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+
+        let sql = sql.to_string();
+        self.run_connection_op(cx, "sqlite execute_batch", move |conn| {
+            conn.execute_batch(&sql)
+                .map_err(|e| SqliteError::Sqlite(e.to_string()))
+        })
+        .await
     }
 
     /// Executes a query and returns all rows.
@@ -701,90 +739,65 @@ impl SqliteConnection {
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
             );
         }
+        match self.drain_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
 
-        let inner = Arc::clone(&self.inner);
-        let needs_rollback = Arc::clone(&self.needs_rollback);
         let sql = sql.to_string();
         let params: Vec<SqliteValue> = params.to_vec();
+        self.run_connection_op(cx, "sqlite query", move |conn| {
+            let params_refs: Vec<&dyn rusqlite::ToSql> =
+                params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
 
-        let (tx, mut rx) = crate::channel::oneshot::channel();
-        let permit = tx.reserve(cx);
+            let mut stmt = conn
+                .prepare_cached(&sql)
+                .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
-        let handle = self.pool.spawn(move || {
-            let result = (|| {
-                let guard = inner.lock();
-                if needs_rollback.swap(false, Ordering::AcqRel) {
-                    if let Ok(conn) = guard.get() {
-                        let _ = conn.execute("ROLLBACK", []);
-                    }
+            let column_names: Vec<String> = stmt
+                .column_names()
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect();
+            let columns: BTreeMap<String, usize> = column_names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), i))
+                .collect();
+            let columns = Arc::new(columns);
+
+            let column_count = stmt.column_count();
+            let mut rows = stmt
+                .query(params_refs.as_slice())
+                .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+
+            let mut result = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| SqliteError::Sqlite(e.to_string()))?
+            {
+                let mut values = Vec::with_capacity(column_count);
+                for i in 0..column_count {
+                    let value = row
+                        .get_ref(i)
+                        .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+                    values.push(convert_value(value));
                 }
-                let conn = guard.get()?;
-
-                let params_refs: Vec<&dyn rusqlite::ToSql> =
-                    params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-
-                let mut stmt = conn
-                    .prepare(&sql)
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-
-                // Build column map
-                let column_names: Vec<String> = stmt
-                    .column_names()
-                    .iter()
-                    .map(std::string::ToString::to_string)
-                    .collect();
-                let columns: BTreeMap<String, usize> = column_names
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| (name.clone(), i))
-                    .collect();
-                let columns = Arc::new(columns);
-
-                let column_count = stmt.column_count();
-
-                let mut rows = stmt
-                    .query(params_refs.as_slice())
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-
-                let mut result = Vec::new();
-                while let Some(row) = rows
-                    .next()
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?
-                {
-                    let mut values = Vec::with_capacity(column_count);
-                    for i in 0..column_count {
-                        let value = row
-                            .get_ref(i)
-                            .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-                        values.push(convert_value(value));
-                    }
-                    result.push(SqliteRow::new(Arc::clone(&columns), values));
-                }
-                drop(rows);
-                drop(stmt);
-                drop(guard);
-                Ok(result)
-            })();
-            let _ = permit.send(result);
-        });
-
-        match rx.recv(cx).await {
-            Ok(Ok(rows)) => Outcome::Ok(rows),
-            Ok(Err(e)) => Outcome::Err(e),
-            Err(crate::channel::oneshot::RecvError::Cancelled) => {
-                handle.cancel();
-                Outcome::Cancelled(
-                    cx.cancel_reason()
-                        .unwrap_or_else(|| CancelReason::user("cancelled")),
-                )
+                result.push(SqliteRow::new(Arc::clone(&columns), values));
             }
-            Err(crate::channel::oneshot::RecvError::Closed) => {
-                Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
-            }
-            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
-                unreachable!("SQLite query awaits a fresh oneshot recv future")
-            }
-        }
+            drop(rows);
+            drop(stmt);
+            Ok(result)
+        })
+        .await
     }
 
     /// Executes a query and returns the first row, if any.
@@ -804,92 +817,69 @@ impl SqliteConnection {
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
             );
         }
+        match self.drain_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
 
-        let inner = Arc::clone(&self.inner);
-        let needs_rollback = Arc::clone(&self.needs_rollback);
         let sql = sql.to_string();
         let params: Vec<SqliteValue> = params.to_vec();
+        self.run_connection_op(cx, "sqlite query_row", move |conn| {
+            let params_refs: Vec<&dyn rusqlite::ToSql> =
+                params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
 
-        let (tx, mut rx) = crate::channel::oneshot::channel();
-        let permit = tx.reserve(cx);
+            let mut stmt = conn
+                .prepare_cached(&sql)
+                .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
-        let handle = self.pool.spawn(move || {
-            let result = (|| {
-                let guard = inner.lock();
-                if needs_rollback.swap(false, Ordering::AcqRel) {
-                    if let Ok(conn) = guard.get() {
-                        let _ = conn.execute("ROLLBACK", []);
-                    }
-                }
-                let conn = guard.get()?;
+            let column_count = stmt.column_count();
+            let column_names: Vec<String> = stmt
+                .column_names()
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect();
 
-                let params_refs: Vec<&dyn rusqlite::ToSql> =
-                    params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+            let mut rows = stmt
+                .query(params_refs.as_slice())
+                .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
-                let mut stmt = conn
-                    .prepare(&sql)
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+            let row_opt = rows
+                .next()
+                .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
-                let column_count = stmt.column_count();
-                let column_names: Vec<String> = stmt
-                    .column_names()
+            let result = if let Some(row) = row_opt {
+                let columns: BTreeMap<String, usize> = column_names
                     .iter()
-                    .map(std::string::ToString::to_string)
+                    .enumerate()
+                    .map(|(i, name)| (name.clone(), i))
                     .collect();
+                let columns = Arc::new(columns);
 
-                let mut rows = stmt
-                    .query(params_refs.as_slice())
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+                let mut values = Vec::with_capacity(column_count);
+                for i in 0..column_count {
+                    let value = row
+                        .get_ref(i)
+                        .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+                    values.push(convert_value(value));
+                }
+                Some(SqliteRow::new(columns, values))
+            } else {
+                None
+            };
 
-                let row_opt = rows
-                    .next()
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-
-                let result = if let Some(row) = row_opt {
-                    let columns: BTreeMap<String, usize> = column_names
-                        .iter()
-                        .enumerate()
-                        .map(|(i, name)| (name.clone(), i))
-                        .collect();
-                    let columns = Arc::new(columns);
-
-                    let mut values = Vec::with_capacity(column_count);
-                    for i in 0..column_count {
-                        let value = row
-                            .get_ref(i)
-                            .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-                        values.push(convert_value(value));
-                    }
-                    Some(SqliteRow::new(columns, values))
-                } else {
-                    None
-                };
-
-                drop(rows);
-                drop(stmt);
-                drop(guard);
-                Ok(result)
-            })();
-            let _ = permit.send(result);
-        });
-
-        match rx.recv(cx).await {
-            Ok(Ok(row)) => Outcome::Ok(row),
-            Ok(Err(e)) => Outcome::Err(e),
-            Err(crate::channel::oneshot::RecvError::Cancelled) => {
-                handle.cancel();
-                Outcome::Cancelled(
-                    cx.cancel_reason()
-                        .unwrap_or_else(|| CancelReason::user("cancelled")),
-                )
-            }
-            Err(crate::channel::oneshot::RecvError::Closed) => {
-                Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
-            }
-            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
-                unreachable!("SQLite query_row awaits a fresh oneshot recv future")
-            }
-        }
+            drop(rows);
+            drop(stmt);
+            Ok(result)
+        })
+        .await
     }
 
     /// Begins a new transaction.
@@ -951,51 +941,29 @@ impl SqliteConnection {
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
             );
         }
-
-        let inner = Arc::clone(&self.inner);
-        let needs_rollback = Arc::clone(&self.needs_rollback);
-        let (tx, mut rx) = crate::channel::oneshot::channel();
-        let permit = tx.reserve(cx);
-
-        let handle = self.pool.spawn(move || {
-            let result = (|| {
-                let guard = inner.lock();
-                if needs_rollback.swap(false, Ordering::AcqRel) {
-                    if let Ok(conn) = guard.get() {
-                        let _ = conn.execute("ROLLBACK", []);
-                    }
-                }
-                let conn = guard.get()?;
-                conn.busy_timeout(timeout)
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-                drop(guard);
-                Ok(())
-            })();
-            let _ = permit.send(result);
-        });
-
-        match rx.recv(cx).await {
-            Ok(Ok(())) => Outcome::Ok(()),
-            Ok(Err(e)) => Outcome::Err(e),
-            Err(crate::channel::oneshot::RecvError::Cancelled) => {
-                handle.cancel();
-                Outcome::Cancelled(
-                    cx.cancel_reason()
-                        .unwrap_or_else(|| CancelReason::user("cancelled")),
-                )
-            }
-            Err(crate::channel::oneshot::RecvError::Closed) => {
-                Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
-            }
-            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
-                unreachable!("SQLite set_busy_timeout awaits a fresh oneshot recv future")
-            }
+        match self.drain_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
         }
+        self.run_connection_op(cx, "sqlite set_busy_timeout", move |conn| {
+            conn.busy_timeout(timeout)
+                .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+            Ok(())
+        })
+        .await
     }
 
     /// Closes the connection.
     pub fn close(&self) -> Result<(), SqliteError> {
-        self.inner.lock().close();
+        let mut guard = self.inner.lock();
+        if let Some(conn) = guard.conn.as_ref() {
+            let _ = rollback_orphaned_transaction(conn, self.needs_rollback.as_ref());
+            conn.flush_prepared_statement_cache();
+        }
+        self.needs_rollback.store(false, Ordering::Release);
+        guard.close();
         Ok(())
     }
 
@@ -1084,21 +1052,23 @@ impl SqliteTransaction<'_> {
 
 impl Drop for SqliteTransaction<'_> {
     fn drop(&mut self) {
-        if !self.finished {
+        if !self.finished
+            && self
+                .conn
+                .needs_rollback
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
             // Asynchronously enqueue a rollback via an atomic flag so we don't
             // block the async executor thread waiting for the connection lock.
             // We also explicitly spawn a task to drain the rollback immediately if
             // the connection is otherwise idle, preventing lock starvation for the database.
-            self.conn.needs_rollback.store(true, Ordering::Release);
-
             let inner = Arc::clone(&self.conn.inner);
             let needs_rollback = Arc::clone(&self.conn.needs_rollback);
             self.conn.pool.spawn(move || {
                 let guard = inner.lock();
-                if needs_rollback.swap(false, Ordering::AcqRel) {
-                    if let Ok(conn) = guard.get() {
-                        let _ = conn.execute("ROLLBACK", []);
-                    }
+                if let Ok(conn) = guard.get() {
+                    let _ = rollback_orphaned_transaction(conn, needs_rollback.as_ref());
                 }
             });
         }
@@ -1626,6 +1596,145 @@ mod tests {
     }
 
     #[test]
+    fn transaction_drop_preserves_foreign_key_cascade_consistency() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            match conn
+                .execute_batch(
+                    &cx,
+                    "
+                    CREATE TABLE parent (id INTEGER PRIMARY KEY);
+                    CREATE TABLE child (
+                        id INTEGER PRIMARY KEY,
+                        parent_id INTEGER NOT NULL REFERENCES parent(id) ON DELETE CASCADE
+                    );
+                    INSERT INTO parent(id) VALUES (1);
+                    INSERT INTO child(id, parent_id) VALUES (10, 1);
+                    ",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("schema setup failed: {other:?}"),
+            }
+
+            let Outcome::Ok(tx) = conn.begin_immediate(&cx).await else {
+                panic!("begin_immediate failed");
+            };
+
+            match tx
+                .execute(&cx, "DELETE FROM parent WHERE id = 1", &[])
+                .await
+            {
+                Outcome::Ok(1) => {}
+                other => panic!("delete in transaction failed: {other:?}"),
+            }
+
+            drop(tx);
+
+            let parent_rows = match conn.query(&cx, "SELECT COUNT(*) FROM parent", &[]).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("parent count failed: {other:?}"),
+            };
+            let child_rows = match conn.query(&cx, "SELECT COUNT(*) FROM child", &[]).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("child count failed: {other:?}"),
+            };
+
+            assert_eq!(parent_rows[0].get_idx(0).unwrap().as_integer(), Some(1));
+            assert_eq!(child_rows[0].get_idx(0).unwrap().as_integer(), Some(1));
+
+            match conn
+                .execute(&cx, "DELETE FROM parent WHERE id = 1", &[])
+                .await
+            {
+                Outcome::Ok(1) => {}
+                other => panic!("post-rollback delete failed: {other:?}"),
+            }
+
+            let child_rows = match conn.query(&cx, "SELECT COUNT(*) FROM child", &[]).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("child recount failed: {other:?}"),
+            };
+            assert_eq!(child_rows[0].get_idx(0).unwrap().as_integer(), Some(0));
+        });
+    }
+
+    #[test]
+    fn cached_statements_remain_usable_after_schema_change() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            {
+                let guard = conn.inner.lock();
+                let raw = guard.get().expect("connection open");
+                raw.set_prepared_statement_cache_capacity(1);
+            }
+
+            match conn
+                .execute_batch(
+                    &cx,
+                    "
+                    CREATE TABLE t (id INTEGER PRIMARY KEY, value TEXT);
+                    INSERT INTO t(value) VALUES ('before');
+                    ",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("initial schema setup failed: {other:?}"),
+            }
+
+            match conn
+                .query(&cx, "SELECT value FROM t WHERE id = 1", &[])
+                .await
+            {
+                Outcome::Ok(rows) => assert_eq!(rows[0].get_str("value").unwrap(), "before"),
+                other => panic!("initial cached query failed: {other:?}"),
+            }
+
+            match conn.query(&cx, "SELECT id FROM t WHERE id = 1", &[]).await {
+                Outcome::Ok(rows) => assert_eq!(rows[0].get_i64("id").unwrap(), 1),
+                other => panic!("second cached query failed: {other:?}"),
+            }
+
+            match conn
+                .execute_batch(
+                    &cx,
+                    "
+                    DROP TABLE t;
+                    CREATE TABLE t (id INTEGER PRIMARY KEY, value TEXT);
+                    INSERT INTO t(value) VALUES ('after');
+                    ",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("schema rebuild failed: {other:?}"),
+            }
+
+            match conn
+                .query(&cx, "SELECT value FROM t WHERE id = 1", &[])
+                .await
+            {
+                Outcome::Ok(rows) => assert_eq!(rows[0].get_str("value").unwrap(), "after"),
+                other => panic!("cached query after schema change failed: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
     fn busy_timeout_produces_lock_error_under_write_contention() {
         let cx = create_test_cx();
         let dir = tempdir().unwrap();
@@ -1730,6 +1839,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     mod pragma_journal_mode_conformance {
         use super::*;
+        use crate::test_utils::run_test_with_cx;
         use std::fs;
         use std::path::PathBuf;
         use tempfile::TempDir;
@@ -1770,8 +1880,9 @@ mod tests {
                 rows[0]
                     .get_idx(0)
                     .unwrap()
-                    .as_string()
+                    .as_text()
                     .unwrap_or_else(|| panic!("journal_mode should return a string"))
+                    .to_owned()
             }
 
             /// Helper to set journal mode and return the result.
@@ -1781,13 +1892,19 @@ mod tests {
                 mode: &str,
             ) -> Outcome<String, SqliteError> {
                 let sql = format!("PRAGMA journal_mode = {}", mode);
-                let rows = conn.query(cx, &sql, &[]).await?;
-
-                Ok(rows[0]
-                    .get_idx(0)
-                    .unwrap()
-                    .as_string()
-                    .unwrap_or_else(|| panic!("journal_mode pragma should return a string")))
+                match conn.query(cx, &sql, &[]).await {
+                    Outcome::Ok(rows) => Outcome::Ok(
+                        rows[0]
+                            .get_idx(0)
+                            .unwrap()
+                            .as_text()
+                            .unwrap_or_else(|| panic!("journal_mode pragma should return a string"))
+                            .to_owned(),
+                    ),
+                    Outcome::Err(err) => Outcome::Err(err),
+                    Outcome::Cancelled(cancelled) => Outcome::Cancelled(cancelled),
+                    Outcome::Panicked(payload) => Outcome::Panicked(payload),
+                }
             }
 
             /// Create test table and insert test data.
@@ -1825,7 +1942,7 @@ mod tests {
 
         #[test]
         fn delete_to_wal_mode_transition_conformance() {
-            run_test(async move |cx| {
+            run_test_with_cx(|cx| async move {
                 let test_data = JournalModeTestData::new();
 
                 // Open connection - should default to DELETE mode
@@ -1884,7 +2001,7 @@ mod tests {
                     .execute(
                         &cx,
                         "INSERT INTO test_data (value) VALUES (?)",
-                        &["wal_data"],
+                        &[SqliteValue::Text("wal_data".to_owned())],
                     )
                     .await
                 {
@@ -1895,13 +2012,13 @@ mod tests {
                 JournalModeTestData::verify_test_data(&conn, &cx, 4).await;
 
                 // Close connection
-                conn.close().await;
+                conn.close().unwrap();
             });
         }
 
         #[test]
         fn wal_to_truncate_mode_transition_conformance() {
-            run_test(async move |cx| {
+            run_test_with_cx(|cx| async move {
                 let test_data = JournalModeTestData::new();
 
                 let conn = match SqliteConnection::open(&cx, test_data.get_db_path()).await {
@@ -1953,7 +2070,7 @@ mod tests {
                     .execute(
                         &cx,
                         "INSERT INTO test_data (value) VALUES (?)",
-                        &["truncate_data"],
+                        &[SqliteValue::Text("truncate_data".to_owned())],
                     )
                     .await
                 {
@@ -1963,13 +2080,13 @@ mod tests {
 
                 JournalModeTestData::verify_test_data(&conn, &cx, 4).await;
 
-                conn.close().await;
+                conn.close().unwrap();
             });
         }
 
         #[test]
         fn memory_mode_persistence_loss_conformance() {
-            run_test(async move |cx| {
+            run_test_with_cx(|cx| async move {
                 // Test with in-memory database
                 let conn = match SqliteConnection::open_in_memory(&cx).await {
                     Outcome::Ok(conn) => conn,
@@ -2009,7 +2126,7 @@ mod tests {
                 };
 
                 // Close connection abruptly without commit (simulating crash)
-                conn.close().await;
+                conn.close().unwrap();
 
                 // Reopen in-memory database - all data should be lost
                 let new_conn = match SqliteConnection::open_in_memory(&cx).await {
@@ -2036,13 +2153,13 @@ mod tests {
                     other => panic!("Failed to query sqlite_master: {other:?}"),
                 }
 
-                new_conn.close().await;
+                new_conn.close().unwrap();
             });
         }
 
         #[test]
         fn off_mode_atomicity_absence_conformance() {
-            run_test(async move |cx| {
+            run_test_with_cx(|cx| async move {
                 let test_data = JournalModeTestData::new();
 
                 let conn = match SqliteConnection::open(&cx, test_data.get_db_path()).await {
@@ -2144,22 +2261,19 @@ mod tests {
                 // In OFF mode, no journal files should exist
                 assert_eq!(journal_files, 0, "OFF mode should not create journal files");
 
-                conn.close().await;
+                conn.close().unwrap();
             });
         }
 
         #[test]
         fn unsupported_mode_fallback_conformance() {
-            run_test(async move |cx| {
+            run_test_with_cx(|cx| async move {
                 let test_data = JournalModeTestData::new();
 
                 let conn = match SqliteConnection::open(&cx, test_data.get_db_path()).await {
                     Outcome::Ok(conn) => conn,
                     other => panic!("Failed to open connection: {other:?}"),
                 };
-
-                // Get initial mode
-                let initial_mode = JournalModeTestData::get_journal_mode(&conn, &cx).await;
 
                 // Try to set an invalid/unsupported journal mode
                 let invalid_modes = ["INVALID", "BOGUS", "NONEXISTENT"];
@@ -2208,13 +2322,13 @@ mod tests {
                 JournalModeTestData::setup_test_data(&conn, &cx).await;
                 JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
 
-                conn.close().await;
+                conn.close().unwrap();
             });
         }
 
         #[test]
         fn journal_mode_persistence_across_connections_conformance() {
-            run_test(async move |cx| {
+            run_test_with_cx(|cx| async move {
                 let test_data = JournalModeTestData::new();
 
                 // First connection: set WAL mode
@@ -2233,7 +2347,7 @@ mod tests {
                     // Create test data
                     JournalModeTestData::setup_test_data(&conn, &cx).await;
 
-                    conn.close().await;
+                    conn.close().unwrap();
                 }
 
                 // Second connection: verify WAL mode persists
@@ -2254,14 +2368,14 @@ mod tests {
                     // Verify data persisted
                     JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
 
-                    conn.close().await;
+                    conn.close().unwrap();
                 }
             });
         }
 
         #[test]
         fn journal_mode_concurrent_access_conformance() {
-            run_test(async move |cx| {
+            run_test_with_cx(|cx| async move {
                 let test_data = JournalModeTestData::new();
 
                 // Set WAL mode which supports concurrent readers
@@ -2292,7 +2406,7 @@ mod tests {
                     .execute(
                         &cx,
                         "INSERT INTO test_data (value) VALUES (?)",
-                        &["concurrent_write"],
+                        &[SqliteValue::Text("concurrent_write".to_owned())],
                     )
                     .await
                 {
@@ -2303,14 +2417,14 @@ mod tests {
                 // Reader should eventually see the new data
                 JournalModeTestData::verify_test_data(&conn, &cx, 4).await;
 
-                reader_conn.close().await;
-                conn.close().await;
+                reader_conn.close().unwrap();
+                conn.close().unwrap();
             });
         }
 
         #[test]
         fn journal_mode_edge_cases_conformance() {
-            run_test(async move |cx| {
+            run_test_with_cx(|cx| async move {
                 let test_data = JournalModeTestData::new();
 
                 let conn = match SqliteConnection::open(&cx, test_data.get_db_path()).await {
@@ -2364,7 +2478,7 @@ mod tests {
                     other => panic!("Failed to set to current mode: {other:?}"),
                 }
 
-                conn.close().await;
+                conn.close().unwrap();
             });
         }
     }

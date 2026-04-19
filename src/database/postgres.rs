@@ -639,11 +639,25 @@ impl<T: ToSql + ?Sized> ToSql for &T {
 impl FromSql for bool {
     fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
         match format {
-            Format::Binary => Ok(data.first() == Some(&1)),
+            Format::Binary => match data {
+                [0] => Ok(false),
+                [1] => Ok(true),
+                [value] => Err(PgError::Protocol(format!(
+                    "bool requires 0 or 1 in binary format, got {value}"
+                ))),
+                _ => Err(PgError::Protocol(format!(
+                    "bool requires exactly 1 byte, got {}",
+                    data.len()
+                ))),
+            },
             Format::Text => {
                 let s = std::str::from_utf8(data)
                     .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))?;
-                Ok(matches!(s, "t" | "true" | "1" | "yes" | "on"))
+                match s {
+                    "t" | "true" | "1" | "yes" | "on" => Ok(true),
+                    "f" | "false" | "0" | "no" | "off" => Ok(false),
+                    _ => Err(PgError::Protocol(format!("invalid bool text: {s}"))),
+                }
             }
         }
     }
@@ -854,6 +868,40 @@ fn pg_value_to_text_bytes(val: &PgValue) -> Vec<u8> {
     }
 }
 
+fn pg_value_to_wire_bytes(val: &PgValue, oid: u32, format: Format) -> Result<Vec<u8>, PgError> {
+    Ok(match format {
+        Format::Text => match val {
+            PgValue::Bytes(bytes) if oid == oid::BYTEA => {
+                let mut out = Vec::with_capacity(2 + bytes.len() * 2);
+                out.extend_from_slice(b"\\x");
+                out.extend_from_slice(hex::encode(bytes).as_bytes());
+                out
+            }
+            _ => pg_value_to_text_bytes(val),
+        },
+        Format::Binary => match val {
+            PgValue::Null => unreachable!("caller must handle NULL"),
+            PgValue::Bool(v) => vec![u8::from(*v)],
+            PgValue::Int2(v) => v.to_be_bytes().to_vec(),
+            PgValue::Int4(v) => v.to_be_bytes().to_vec(),
+            PgValue::Int8(v) => v.to_be_bytes().to_vec(),
+            PgValue::Float4(v) => v.to_be_bytes().to_vec(),
+            PgValue::Float8(v) => v.to_be_bytes().to_vec(),
+            PgValue::Text(text) => {
+                if oid == oid::JSONB {
+                    let mut out = Vec::with_capacity(text.len() + 1);
+                    out.push(1);
+                    out.extend_from_slice(text.as_bytes());
+                    out
+                } else {
+                    text.as_bytes().to_vec()
+                }
+            }
+            PgValue::Bytes(bytes) => bytes.clone(),
+        },
+    })
+}
+
 /// A row from a PostgreSQL query result.
 #[derive(Debug, Clone)]
 pub struct PgRow {
@@ -886,41 +934,57 @@ impl PgRow {
 
     /// Get an i32 value by column name.
     pub fn get_i32(&self, column: &str) -> Result<i32, PgError> {
-        let val = self.get(column)?;
+        let idx = *self
+            .column_indices
+            .get(column)
+            .ok_or_else(|| PgError::ColumnNotFound(column.to_string()))?;
+        let val = &self.values[idx];
         val.as_i32().ok_or_else(|| PgError::TypeConversion {
             column: column.to_string(),
             expected: "i32",
-            actual_oid: 0,
+            actual_oid: self.columns.get(idx).map_or(0, |col| col.type_oid),
         })
     }
 
     /// Get an i64 value by column name.
     pub fn get_i64(&self, column: &str) -> Result<i64, PgError> {
-        let val = self.get(column)?;
+        let idx = *self
+            .column_indices
+            .get(column)
+            .ok_or_else(|| PgError::ColumnNotFound(column.to_string()))?;
+        let val = &self.values[idx];
         val.as_i64().ok_or_else(|| PgError::TypeConversion {
             column: column.to_string(),
             expected: "i64",
-            actual_oid: 0,
+            actual_oid: self.columns.get(idx).map_or(0, |col| col.type_oid),
         })
     }
 
     /// Get a string value by column name.
     pub fn get_str(&self, column: &str) -> Result<&str, PgError> {
-        let val = self.get(column)?;
+        let idx = *self
+            .column_indices
+            .get(column)
+            .ok_or_else(|| PgError::ColumnNotFound(column.to_string()))?;
+        let val = &self.values[idx];
         val.as_str().ok_or_else(|| PgError::TypeConversion {
             column: column.to_string(),
             expected: "string",
-            actual_oid: 0,
+            actual_oid: self.columns.get(idx).map_or(0, |col| col.type_oid),
         })
     }
 
     /// Get a bool value by column name.
     pub fn get_bool(&self, column: &str) -> Result<bool, PgError> {
-        let val = self.get(column)?;
+        let idx = *self
+            .column_indices
+            .get(column)
+            .ok_or_else(|| PgError::ColumnNotFound(column.to_string()))?;
+        let val = &self.values[idx];
         val.as_bool().ok_or_else(|| PgError::TypeConversion {
             column: column.to_string(),
             expected: "bool",
-            actual_oid: 0,
+            actual_oid: self.columns.get(idx).map_or(0, |col| col.type_oid),
         })
     }
 
@@ -945,8 +1009,8 @@ impl PgRow {
     /// Get a typed value by column name using the [`FromSql`] trait.
     ///
     /// This works for rows from both the Simple Query and Extended Query
-    /// protocols. For Simple Query rows, values are re-encoded to text-format
-    /// bytes before calling [`FromSql::from_sql`].
+    /// protocols and preserves the original wire format of each column where
+    /// possible when re-decoding through [`FromSql::from_sql`].
     ///
     /// ```ignore
     /// let id: i32 = row.get_typed("id")?;
@@ -963,8 +1027,13 @@ impl PgRow {
         if val.is_null() {
             return T::from_sql_null();
         }
-        let bytes = pg_value_to_text_bytes(val);
-        T::from_sql(&bytes, col.type_oid, Format::Text)
+        let format = if col.format_code == 1 {
+            Format::Binary
+        } else {
+            Format::Text
+        };
+        let bytes = pg_value_to_wire_bytes(val, col.type_oid, format)?;
+        T::from_sql(&bytes, col.type_oid, format)
     }
 
     /// Get a typed value by column index using the [`FromSql`] trait.
@@ -980,8 +1049,13 @@ impl PgRow {
         if val.is_null() {
             return T::from_sql_null();
         }
-        let bytes = pg_value_to_text_bytes(val);
-        T::from_sql(&bytes, col.type_oid, Format::Text)
+        let format = if col.format_code == 1 {
+            Format::Binary
+        } else {
+            Format::Text
+        };
+        let bytes = pg_value_to_wire_bytes(val, col.type_oid, format)?;
+        T::from_sql(&bytes, col.type_oid, format)
     }
 }
 
@@ -1586,6 +1660,9 @@ impl PgConnectOptions {
         let (auth_host, database) = auth_host_db
             .rsplit_once('/')
             .ok_or_else(|| PgError::InvalidUrl("missing database name".to_string()))?;
+        if database.is_empty() {
+            return Err(PgError::InvalidUrl("missing database name".to_string()));
+        }
 
         // Split auth@host
         let (user, password, host_port) = if let Some((auth, host)) = auth_host.rsplit_once('@') {
@@ -1602,21 +1679,38 @@ impl PgConnectOptions {
             // IPv6 literal: [::1]:5432
             if let Some((bracket_host, rest)) = host_port.split_once(']') {
                 let h = bracket_host.trim_start_matches('[');
-                let p = rest
-                    .strip_prefix(':')
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(5432u16);
+                let p = if rest.is_empty() {
+                    5432u16
+                } else if let Some(port_str) = rest.strip_prefix(':') {
+                    port_str
+                        .parse()
+                        .map_err(|_| PgError::InvalidUrl(format!("invalid port: {port_str}")))?
+                } else {
+                    return Err(PgError::InvalidUrl(format!(
+                        "invalid host/port segment: {host_port}"
+                    )));
+                };
                 (h, p)
             } else {
-                (host_port, 5432)
+                return Err(PgError::InvalidUrl(format!(
+                    "invalid IPv6 host literal: {host_port}"
+                )));
             }
         } else if host_port.matches(':').count() > 1 {
             (host_port, 5432)
         } else {
-            host_port
-                .rsplit_once(':')
-                .map_or((host_port, 5432), |(h, p)| (h, p.parse().unwrap_or(5432)))
+            match host_port.rsplit_once(':') {
+                Some((h, p)) => (
+                    h,
+                    p.parse()
+                        .map_err(|_| PgError::InvalidUrl(format!("invalid port: {p}")))?,
+                ),
+                None => (host_port, 5432),
+            }
         };
+        if host.is_empty() {
+            return Err(PgError::InvalidUrl("missing host".to_string()));
+        }
 
         // Parse query parameters
         let mut ssl_mode = SslMode::Prefer;
@@ -1641,9 +1735,10 @@ impl PgConnectOptions {
                         application_name = Some(percent_decode(value));
                     }
                     "connect_timeout" => {
-                        if let Ok(secs) = value.parse::<u64>() {
-                            connect_timeout = Some(std::time::Duration::from_secs(secs));
-                        }
+                        let secs = value.parse::<u64>().map_err(|_| {
+                            PgError::InvalidUrl(format!("invalid connect_timeout: {value}"))
+                        })?;
+                        connect_timeout = Some(std::time::Duration::from_secs(secs));
                     }
                     _ => {} // ignore unknown parameters
                 }
@@ -1817,7 +1912,88 @@ fn cancelled_reason(cx: &Cx) -> CancelReason {
         .unwrap_or_else(|| CancelReason::user("cancelled"))
 }
 
+fn unexpected_backend_message(context: &str, msg_type: u8) -> PgError {
+    let rendered = if msg_type.is_ascii_graphic() {
+        format!("'{}'", char::from(msg_type))
+    } else {
+        format!("0x{msg_type:02X}")
+    };
+    PgError::Protocol(format!(
+        "unexpected backend message in {context}: {rendered}"
+    ))
+}
+
+fn row_returning_execute_error(api: &str, query_api: &str) -> PgError {
+    PgError::Protocol(format!(
+        "{api} cannot consume row-returning statements; use {query_api} instead"
+    ))
+}
+
+#[inline]
+fn cancelled_error(cx: &Cx) -> PgError {
+    PgError::Cancelled(cancelled_reason(cx))
+}
+
+#[inline]
+fn outcome_from_error<T>(err: PgError) -> Outcome<T, PgError> {
+    match err {
+        PgError::Cancelled(reason) => Outcome::Cancelled(reason),
+        other => Outcome::Err(other),
+    }
+}
+
 impl PgConnection {
+    #[inline]
+    fn abort_in_flight_exchange(&mut self) {
+        let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+        self.inner.closed = true;
+    }
+
+    #[inline]
+    fn fail_in_flight<T>(&mut self, err: PgError) -> Outcome<T, PgError> {
+        self.abort_in_flight_exchange();
+        outcome_from_error(err)
+    }
+
+    #[inline]
+    async fn ensure_no_orphaned_transaction(&mut self, cx: &Cx) -> Outcome<(), PgError> {
+        match self.clear_orphaned_transaction(cx).await {
+            Ok(()) => Outcome::Ok(()),
+            Err(err) => outcome_from_error(err),
+        }
+    }
+
+    fn handle_parameter_status(&mut self, data: &[u8]) -> Result<(), PgError> {
+        let mut reader = MessageReader::new(data);
+        let name = reader.read_cstring()?.to_string();
+        let value = reader.read_cstring()?.to_string();
+        self.inner.parameters.insert(name, value);
+        Ok(())
+    }
+
+    fn handle_notification_response(&mut self, data: &[u8]) -> Result<(), PgError> {
+        let mut reader = MessageReader::new(data);
+        let _process_id = reader.read_i32()?;
+        let _channel = reader.read_cstring()?;
+        let _payload = reader.read_cstring()?;
+        Ok(())
+    }
+
+    fn handle_async_backend_message(&mut self, msg_type: u8, data: &[u8]) -> Result<bool, PgError> {
+        match msg_type {
+            b'N' => Ok(true),
+            b'S' => {
+                self.handle_parameter_status(data)?;
+                Ok(true)
+            }
+            b'A' => {
+                self.handle_notification_response(data)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     async fn connect_tcp_with<F, Fut>(
         options: &PgConnectOptions,
         connect: F,
@@ -1880,10 +2056,11 @@ impl PgConnection {
             SslMode::Disable => PgStream::Plain(tcp_stream),
             #[cfg(feature = "tls")]
             SslMode::Prefer | SslMode::Require => {
-                match Self::negotiate_tls(tcp_stream, &options).await {
+                match Self::negotiate_tls(cx, tcp_stream, &options).await {
                     Ok(s) => s,
+                    Err(PgError::Cancelled(reason)) => return Outcome::Cancelled(reason),
                     Err(e) if options.ssl_mode == SslMode::Require => {
-                        return Outcome::Err(e);
+                        return outcome_from_error(e);
                     }
                     Err(_) => {
                         // Prefer mode: TLS failed, reconnect without TLS.
@@ -1919,8 +2096,8 @@ impl PgConnection {
         };
 
         // Send startup message
-        if let Err(e) = conn.send_startup(&options).await {
-            return Outcome::Err(e);
+        if let Err(e) = conn.send_startup(cx, &options).await {
+            return outcome_from_error(e);
         }
 
         if cx.checkpoint().is_err() {
@@ -1950,8 +2127,7 @@ impl PgConnection {
     fn cancel_in_flight<T>(&mut self, cx: &Cx) -> Outcome<T, PgError> {
         // Once a caller cancels mid-flight we can't safely continue decoding
         // protocol messages for subsequent operations, so close this connection.
-        let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
-        self.inner.closed = true;
+        self.abort_in_flight_exchange();
         Outcome::Cancelled(cancelled_reason(cx))
     }
 
@@ -1962,6 +2138,7 @@ impl PgConnection {
     /// - `N`: server refuses TLS.
     #[cfg(feature = "tls")]
     async fn negotiate_tls(
+        cx: &Cx,
         mut tcp: TcpStream,
         options: &PgConnectOptions,
     ) -> Result<PgStream, PgError> {
@@ -1980,17 +2157,17 @@ impl PgConnection {
         {
             let mut pos = 0;
             while pos < ssl_request.len() {
-                let written = std::future::poll_fn(|cx| {
-                    if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                        return Poll::Ready(Err(std::io::Error::new(
-                            std::io::ErrorKind::Interrupted,
-                            "cancelled",
-                        )));
+                let written = std::future::poll_fn(|task_cx| {
+                    if cx.checkpoint().is_err() {
+                        return Poll::Ready(Err(cancelled_error(cx)));
                     }
-                    Pin::new(&mut tcp).poll_write(cx, &ssl_request[pos..])
+                    match Pin::new(&mut tcp).poll_write(task_cx, &ssl_request[pos..]) {
+                        Poll::Ready(Ok(written)) => Poll::Ready(Ok(written)),
+                        Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
+                        Poll::Pending => Poll::Pending,
+                    }
                 })
-                .await
-                .map_err(PgError::Io)?;
+                .await?;
                 if written == 0 {
                     return Err(PgError::Io(io::Error::new(
                         io::ErrorKind::WriteZero,
@@ -2005,17 +2182,17 @@ impl PgConnection {
         let mut response = [0u8; 1];
         {
             let mut read_buf = ReadBuf::new(&mut response);
-            std::future::poll_fn(|cx| {
-                if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "cancelled",
-                    )));
+            std::future::poll_fn(|task_cx| {
+                if cx.checkpoint().is_err() {
+                    return Poll::Ready(Err(cancelled_error(cx)));
                 }
-                Pin::new(&mut tcp).poll_read(cx, &mut read_buf)
+                match Pin::new(&mut tcp).poll_read(task_cx, &mut read_buf) {
+                    Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+                    Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
+                    Poll::Pending => Poll::Pending,
+                }
             })
-            .await
-            .map_err(PgError::Io)?;
+            .await?;
             if read_buf.filled().is_empty() {
                 return Err(PgError::Io(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -2053,7 +2230,7 @@ impl PgConnection {
     }
 
     /// Send the startup message.
-    async fn send_startup(&mut self, options: &PgConnectOptions) -> Result<(), PgError> {
+    async fn send_startup(&mut self, cx: &Cx, options: &PgConnectOptions) -> Result<(), PgError> {
         let mut buf = MessageBuffer::new();
 
         // Protocol version 3.0
@@ -2075,7 +2252,7 @@ impl PgConnection {
         buf.write_byte(0);
 
         let msg = buf.build_startup_message()?;
-        self.write_all(&msg).await?;
+        self.write_all(cx, &msg).await?;
 
         Ok(())
     }
@@ -2087,7 +2264,7 @@ impl PgConnection {
                 return Err(PgError::Cancelled(cancelled_reason(cx)));
             }
 
-            let (msg_type, data) = self.read_message().await?;
+            let (msg_type, data) = self.read_message(cx).await?;
 
             match msg_type {
                 b'R' => {
@@ -2105,7 +2282,7 @@ impl PgConnection {
                             let password = options.password.as_ref().ok_or_else(|| {
                                 PgError::AuthenticationFailed("password required".to_string())
                             })?;
-                            self.send_password(password).await?;
+                            self.send_password(cx, password).await?;
                         }
                         5 => {
                             // AuthenticationMD5Password
@@ -2113,7 +2290,7 @@ impl PgConnection {
                             let password = options.password.as_ref().ok_or_else(|| {
                                 PgError::AuthenticationFailed("password required".to_string())
                             })?;
-                            self.send_md5_password(&options.user, password, salt)
+                            self.send_md5_password(cx, &options.user, password, salt)
                                 .await?;
                         }
                         10 => {
@@ -2192,14 +2369,14 @@ impl PgConnection {
         buf.write_i32(client_first_len);
         buf.write_bytes(&client_first);
         let msg = buf.build_message(FrontendMessage::Password as u8)?;
-        self.write_all(&msg).await?;
+        self.write_all(cx, &msg).await?;
 
         if cx.checkpoint().is_err() {
             return Err(PgError::Cancelled(cancelled_reason(cx)));
         }
 
         // Receive SASLContinue
-        let (msg_type, data) = self.read_message().await?;
+        let (msg_type, data) = self.read_message(cx).await?;
         if msg_type == b'E' {
             return Err(self.parse_error_response(&data)?);
         }
@@ -2225,14 +2402,14 @@ impl PgConnection {
         let mut buf = MessageBuffer::new();
         buf.write_bytes(&client_final);
         let msg = buf.build_message(FrontendMessage::Password as u8)?;
-        self.write_all(&msg).await?;
+        self.write_all(cx, &msg).await?;
 
         if cx.checkpoint().is_err() {
             return Err(PgError::Cancelled(cancelled_reason(cx)));
         }
 
         // Receive SASLFinal
-        let (msg_type, data) = self.read_message().await?;
+        let (msg_type, data) = self.read_message(cx).await?;
         if msg_type == b'E' {
             return Err(self.parse_error_response(&data)?);
         }
@@ -2261,7 +2438,7 @@ impl PgConnection {
         }
 
         // Wait for AuthenticationOk
-        let (msg_type, data) = self.read_message().await?;
+        let (msg_type, data) = self.read_message(cx).await?;
         if msg_type == b'E' {
             return Err(self.parse_error_response(&data)?);
         }
@@ -2284,11 +2461,11 @@ impl PgConnection {
     }
 
     /// Send cleartext password.
-    async fn send_password(&mut self, password: &str) -> Result<(), PgError> {
+    async fn send_password(&mut self, cx: &Cx, password: &str) -> Result<(), PgError> {
         let mut buf = MessageBuffer::new();
         buf.write_cstring(password);
         let msg = buf.build_message(FrontendMessage::Password as u8)?;
-        self.write_all(&msg).await?;
+        self.write_all(cx, &msg).await?;
         Ok(())
     }
 
@@ -2296,6 +2473,7 @@ impl PgConnection {
     #[allow(clippy::unused_async)]
     async fn send_md5_password(
         &mut self,
+        _cx: &Cx,
         _user: &str,
         _password: &str,
         _salt: &[u8],
@@ -2315,7 +2493,7 @@ impl PgConnection {
                 return Err(PgError::Cancelled(cancelled_reason(cx)));
             }
 
-            let (msg_type, data) = self.read_message().await?;
+            let (msg_type, data) = self.read_message(cx).await?;
 
             match msg_type {
                 b'K' => {
@@ -2326,10 +2504,12 @@ impl PgConnection {
                 }
                 b'S' => {
                     // ParameterStatus
-                    let mut reader = MessageReader::new(&data);
-                    let name = reader.read_cstring()?.to_string();
-                    let value = reader.read_cstring()?.to_string();
-                    self.inner.parameters.insert(name, value);
+                    self.handle_parameter_status(&data)?;
+                }
+                b'A' => {
+                    // NotificationResponse can arrive asynchronously once the
+                    // session is established; consume it without desyncing.
+                    self.handle_notification_response(&data)?;
                 }
                 b'Z' => {
                     // ReadyForQuery
@@ -2345,7 +2525,7 @@ impl PgConnection {
                     // NoticeResponse - log but continue
                 }
                 _ => {
-                    // Unexpected message - log warning
+                    return Err(unexpected_backend_message("startup sequence", msg_type));
                 }
             }
         }
@@ -2368,8 +2548,11 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
-        if let Err(e) = self.clear_orphaned_transaction(cx).await {
-            return Outcome::Err(e);
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         // Send Query message
@@ -2385,8 +2568,8 @@ impl PgConnection {
         // connection stays closed and prevents protocol desynchronization.
         self.inner.closed = true;
 
-        if let Err(e) = self.write_all(&msg).await {
-            return Outcome::Err(e);
+        if let Err(e) = self.write_all(cx, &msg).await {
+            return self.fail_in_flight(e);
         }
 
         // Process responses
@@ -2399,9 +2582,9 @@ impl PgConnection {
                 return self.cancel_in_flight(cx);
             }
 
-            let (msg_type, data) = match self.read_message().await {
+            let (msg_type, data) = match self.read_message(cx).await {
                 Ok(m) => m,
-                Err(e) => return Outcome::Err(e),
+                Err(e) => return self.fail_in_flight(e),
             };
 
             match msg_type {
@@ -2412,35 +2595,41 @@ impl PgConnection {
                             columns = Some(Arc::new(cols));
                             column_indices = Some(Arc::new(indices));
                         }
-                        Err(e) => return Outcome::Err(e),
+                        Err(e) => return self.fail_in_flight(e),
                     }
                 }
                 b'D' => {
                     // DataRow — enforce max_result_rows to prevent OOM from
                     // runaway queries or a malicious server.
                     if rows.len() >= self.inner.max_result_rows {
-                        self.inner.closed = true;
-                        return Outcome::Err(PgError::Protocol(format!(
+                        return self.fail_in_flight(PgError::Protocol(format!(
                             "result set exceeded {} row limit",
                             self.inner.max_result_rows,
                         )));
                     }
-                    if let (Some(cols), Some(indices)) = (&columns, &column_indices) {
-                        match self.parse_data_row(&data, cols) {
-                            Ok(values) => {
-                                rows.push(PgRow {
-                                    columns: Arc::clone(cols),
-                                    column_indices: Arc::clone(indices),
-                                    values,
-                                });
-                            }
-                            Err(e) => return Outcome::Err(e),
+                    let (Some(cols), Some(indices)) = (&columns, &column_indices) else {
+                        return self.fail_in_flight(PgError::Protocol(
+                            "received DataRow before RowDescription in simple query response"
+                                .to_string(),
+                        ));
+                    };
+                    match self.parse_data_row(&data, cols) {
+                        Ok(values) => {
+                            rows.push(PgRow {
+                                columns: Arc::clone(cols),
+                                column_indices: Arc::clone(indices),
+                                values,
+                            });
                         }
+                        Err(e) => return self.fail_in_flight(e),
                     }
                 }
                 b'C' => {
                     // CommandComplete
                     // Continue to ReadyForQuery
+                }
+                b'I' => {
+                    // EmptyQueryResponse
                 }
                 b'Z' => {
                     // ReadyForQuery — protocol exchange completed cleanly.
@@ -2453,11 +2642,16 @@ impl PgConnection {
                 b'E' => {
                     return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
                 }
-                b'N' => {
-                    // NoticeResponse - ignore
-                }
                 _ => {
-                    // Unknown message type
+                    match self.handle_async_backend_message(msg_type, &data) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(e) => return self.fail_in_flight(e),
+                    }
+                    return self.fail_in_flight(unexpected_backend_message(
+                        "simple query response",
+                        msg_type,
+                    ));
                 }
             }
         }
@@ -2494,8 +2688,11 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
-        if let Err(e) = self.clear_orphaned_transaction(cx).await {
-            return Outcome::Err(e);
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         // Send Query message
@@ -2511,21 +2708,22 @@ impl PgConnection {
         // connection stays closed and prevents protocol desynchronization.
         self.inner.closed = true;
 
-        if let Err(e) = self.write_all(&msg).await {
-            return Outcome::Err(e);
+        if let Err(e) = self.write_all(cx, &msg).await {
+            return self.fail_in_flight(e);
         }
 
         // Process responses
         let mut affected_rows = 0u64;
+        let mut saw_row_response = false;
 
         loop {
             if cx.checkpoint().is_err() {
                 return self.cancel_in_flight(cx);
             }
 
-            let (msg_type, data) = match self.read_message().await {
+            let (msg_type, data) = match self.read_message(cx).await {
                 Ok(m) => m,
-                Err(e) => return Outcome::Err(e),
+                Err(e) => return self.fail_in_flight(e),
             };
 
             match msg_type {
@@ -2542,7 +2740,13 @@ impl PgConnection {
                     }
                 }
                 b'T' | b'D' => {
-                    // RowDescription, DataRow - skip for execute
+                    // `execute()` is command-oriented and must not silently
+                    // discard row-producing responses such as `SELECT` or
+                    // `INSERT ... RETURNING`.
+                    saw_row_response = true;
+                }
+                b'I' => {
+                    // EmptyQueryResponse
                 }
                 b'Z' => {
                     // ReadyForQuery — protocol exchange completed cleanly.
@@ -2550,15 +2754,25 @@ impl PgConnection {
                     if !data.is_empty() {
                         self.inner.transaction_status = data[0];
                     }
+                    if saw_row_response {
+                        return Outcome::Err(row_returning_execute_error("execute()", "query()"));
+                    }
                     break;
                 }
                 b'E' => {
                     return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
                 }
-                b'N' => {
-                    // NoticeResponse - ignore
+                _ => {
+                    match self.handle_async_backend_message(msg_type, &data) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(e) => return self.fail_in_flight(e),
+                    }
+                    return self.fail_in_flight(unexpected_backend_message(
+                        "simple execute response",
+                        msg_type,
+                    ));
                 }
-                _ => {}
             }
         }
 
@@ -2604,7 +2818,7 @@ impl PgConnection {
 
         // Send Terminate message
         let msg = [FrontendMessage::Terminate as u8, 0, 0, 0, 4]; // Type + length (4)
-        let _ = self.write_all(&msg).await;
+        let _ = self.write_all_unchecked(&msg).await;
 
         let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
 
@@ -2678,8 +2892,11 @@ impl PgConnection {
         combined.extend_from_slice(&execute);
         combined.extend_from_slice(&sync);
 
-        if let Err(e) = self.clear_orphaned_transaction(cx).await {
-            return Outcome::Err(e);
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         // Mark closed before the protocol exchange so that if this future is
@@ -2687,8 +2904,8 @@ impl PgConnection {
         // prevents protocol desynchronization.
         self.inner.closed = true;
 
-        if let Err(e) = self.write_all(&combined).await {
-            return Outcome::Err(e);
+        if let Err(e) = self.write_all(cx, &combined).await {
+            return self.fail_in_flight(e);
         }
 
         self.read_extended_query_results(cx).await
@@ -2765,8 +2982,11 @@ impl PgConnection {
         combined.extend_from_slice(&execute);
         combined.extend_from_slice(&sync);
 
-        if let Err(e) = self.clear_orphaned_transaction(cx).await {
-            return Outcome::Err(e);
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         // Mark closed before the protocol exchange so that if this future is
@@ -2774,8 +2994,8 @@ impl PgConnection {
         // prevents protocol desynchronization.
         self.inner.closed = true;
 
-        if let Err(e) = self.write_all(&combined).await {
-            return Outcome::Err(e);
+        if let Err(e) = self.write_all(cx, &combined).await {
+            return self.fail_in_flight(e);
         }
 
         self.read_extended_execute_results(cx).await
@@ -2806,8 +3026,11 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
-        if let Err(e) = self.clear_orphaned_transaction(cx).await {
-            return Outcome::Err(e);
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         let stmt_name = format!("__asupersync_s{}", self.inner.next_stmt_id);
@@ -2836,8 +3059,8 @@ impl PgConnection {
         // Mark closed before the protocol exchange to prevent desync on cancel.
         self.inner.closed = true;
 
-        if let Err(e) = self.write_all(&combined).await {
-            return Outcome::Err(e);
+        if let Err(e) = self.write_all(cx, &combined).await {
+            return self.fail_in_flight(e);
         }
 
         // Read ParseComplete, ParameterDescription, RowDescription?, ReadyForQuery.
@@ -2849,9 +3072,9 @@ impl PgConnection {
                 return self.cancel_in_flight(cx);
             }
 
-            let (msg_type, data) = match self.read_message().await {
+            let (msg_type, data) = match self.read_message(cx).await {
                 Ok(m) => m,
-                Err(e) => return Outcome::Err(e),
+                Err(e) => return self.fail_in_flight(e),
             };
 
             match msg_type {
@@ -2860,14 +3083,14 @@ impl PgConnection {
                     // ParameterDescription
                     match Self::parse_parameter_description(&data) {
                         Ok(oids) => param_oids = oids,
-                        Err(e) => return Outcome::Err(e),
+                        Err(e) => return self.fail_in_flight(e),
                     }
                 }
                 b'T' => {
                     // RowDescription
                     match self.parse_row_description(&data) {
                         Ok((cols, _)) => columns = cols,
-                        Err(e) => return Outcome::Err(e),
+                        Err(e) => return self.fail_in_flight(e),
                     }
                 }
                 b'n' => { /* NoData — statement returns no columns */ }
@@ -2882,8 +3105,17 @@ impl PgConnection {
                 b'E' => {
                     return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
                 }
-                b'N' => { /* NoticeResponse */ }
-                _ => { /* ignore */ }
+                _ => {
+                    match self.handle_async_backend_message(msg_type, &data) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(e) => return self.fail_in_flight(e),
+                    }
+                    return self.fail_in_flight(unexpected_backend_message(
+                        "prepared statement setup",
+                        msg_type,
+                    ));
+                }
             }
         }
 
@@ -2935,15 +3167,18 @@ impl PgConnection {
         combined.extend_from_slice(&execute);
         combined.extend_from_slice(&sync);
 
-        if let Err(e) = self.clear_orphaned_transaction(cx).await {
-            return Outcome::Err(e);
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         // Mark closed before the protocol exchange to prevent desync on cancel.
         self.inner.closed = true;
 
-        if let Err(e) = self.write_all(&combined).await {
-            return Outcome::Err(e);
+        if let Err(e) = self.write_all(cx, &combined).await {
+            return self.fail_in_flight(e);
         }
 
         self.read_extended_query_results(cx).await
@@ -2985,15 +3220,18 @@ impl PgConnection {
         combined.extend_from_slice(&execute);
         combined.extend_from_slice(&sync);
 
-        if let Err(e) = self.clear_orphaned_transaction(cx).await {
-            return Outcome::Err(e);
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         // Mark closed before the protocol exchange to prevent desync on cancel.
         self.inner.closed = true;
 
-        if let Err(e) = self.write_all(&combined).await {
-            return Outcome::Err(e);
+        if let Err(e) = self.write_all(cx, &combined).await {
+            return self.fail_in_flight(e);
         }
 
         self.read_extended_execute_results(cx).await
@@ -3011,8 +3249,11 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
-        if let Err(e) = self.clear_orphaned_transaction(cx).await {
-            return Outcome::Err(e);
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         let close = match build_close_msg(b'S', &stmt.name) {
@@ -3031,8 +3272,8 @@ impl PgConnection {
         // Mark closed before the protocol exchange to prevent desync on cancel.
         self.inner.closed = true;
 
-        if let Err(e) = self.write_all(&combined).await {
-            return Outcome::Err(e);
+        if let Err(e) = self.write_all(cx, &combined).await {
+            return self.fail_in_flight(e);
         }
 
         loop {
@@ -3040,9 +3281,9 @@ impl PgConnection {
                 return self.cancel_in_flight(cx);
             }
 
-            let (msg_type, data) = match self.read_message().await {
+            let (msg_type, data) = match self.read_message(cx).await {
                 Ok(m) => m,
-                Err(e) => return Outcome::Err(e),
+                Err(e) => return self.fail_in_flight(e),
             };
             match msg_type {
                 b'3' => { /* CloseComplete */ }
@@ -3057,8 +3298,17 @@ impl PgConnection {
                 b'E' => {
                     return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
                 }
-                b'N' => {}
-                _ => {}
+                _ => {
+                    match self.handle_async_backend_message(msg_type, &data) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(e) => return self.fail_in_flight(e),
+                    }
+                    return self.fail_in_flight(unexpected_backend_message(
+                        "close statement response",
+                        msg_type,
+                    ));
+                }
             }
         }
 
@@ -3088,7 +3338,7 @@ impl PgConnection {
         buf.write_cstring("ROLLBACK");
         let msg = buf.build_message(FrontendMessage::Query as u8)?;
 
-        if let Err(e) = self.write_all(&msg).await {
+        if let Err(e) = self.write_all(cx, &msg).await {
             let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
             return Err(e);
         }
@@ -3098,9 +3348,7 @@ impl PgConnection {
             // itself is the priority operation and a drain failure at that
             // point is non-fatal.
             let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
-            if let Some(cx) = crate::cx::Cx::current() {
-                cx.trace(&format!("Failed to drain after ROLLBACK: {e}"));
-            }
+            cx.trace(&format!("Failed to drain after ROLLBACK: {e}"));
             return Err(e);
         }
 
@@ -3115,17 +3363,11 @@ impl PgConnection {
     ///
     /// The flush is necessary for TLS streams which may buffer outgoing
     /// data until explicitly flushed.
-    async fn write_all(&mut self, data: &[u8]) -> Result<(), PgError> {
+    async fn write_all_unchecked(&mut self, data: &[u8]) -> Result<(), PgError> {
         let mut pos = 0;
         while pos < data.len() {
-            let written = std::future::poll_fn(|cx| {
-                if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "cancelled",
-                    )));
-                }
-                Pin::new(&mut self.inner.stream).poll_write(cx, &data[pos..])
+            let written = std::future::poll_fn(|task_cx| {
+                Pin::new(&mut self.inner.stream).poll_write(task_cx, &data[pos..])
             })
             .await
             .map_err(PgError::Io)?;
@@ -3138,36 +3380,67 @@ impl PgConnection {
             }
             pos += written;
         }
-        std::future::poll_fn(|cx| {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "cancelled",
+        std::future::poll_fn(|task_cx| Pin::new(&mut self.inner.stream).poll_flush(task_cx))
+            .await
+            .map_err(PgError::Io)?;
+        Ok(())
+    }
+
+    /// Write data to the stream using async I/O and flush with explicit
+    /// cancellation checks from the caller-provided capability context.
+    async fn write_all(&mut self, cx: &Cx, data: &[u8]) -> Result<(), PgError> {
+        let mut pos = 0;
+        while pos < data.len() {
+            let written = std::future::poll_fn(|task_cx| {
+                if cx.checkpoint().is_err() {
+                    return Poll::Ready(Err(cancelled_error(cx)));
+                }
+                match Pin::new(&mut self.inner.stream).poll_write(task_cx, &data[pos..]) {
+                    Poll::Ready(Ok(written)) => Poll::Ready(Ok(written)),
+                    Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await?;
+
+            if written == 0 {
+                return Err(PgError::Io(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write data",
                 )));
             }
-            Pin::new(&mut self.inner.stream).poll_flush(cx)
+            pos += written;
+        }
+        std::future::poll_fn(|task_cx| {
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(cancelled_error(cx)));
+            }
+            match Pin::new(&mut self.inner.stream).poll_flush(task_cx) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
+                Poll::Pending => Poll::Pending,
+            }
         })
-        .await
-        .map_err(PgError::Io)?;
+        .await?;
         Ok(())
     }
 
     /// Read exactly `len` bytes from the stream.
-    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), PgError> {
+    async fn read_exact(&mut self, cx: &Cx, buf: &mut [u8]) -> Result<(), PgError> {
         let mut pos = 0;
         while pos < buf.len() {
             let mut read_buf = ReadBuf::new(&mut buf[pos..]);
-            std::future::poll_fn(|cx| {
-                if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "cancelled",
-                    )));
+            std::future::poll_fn(|task_cx| {
+                if cx.checkpoint().is_err() {
+                    return Poll::Ready(Err(cancelled_error(cx)));
                 }
-                Pin::new(&mut self.inner.stream).poll_read(cx, &mut read_buf)
+                match Pin::new(&mut self.inner.stream).poll_read(task_cx, &mut read_buf) {
+                    Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+                    Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
+                    Poll::Pending => Poll::Pending,
+                }
             })
-            .await
-            .map_err(PgError::Io)?;
+            .await?;
 
             let n = read_buf.filled().len();
             if n == 0 {
@@ -3182,15 +3455,15 @@ impl PgConnection {
     }
 
     /// Read a complete message from the stream.
-    async fn read_message(&mut self) -> Result<(u8, Vec<u8>), PgError> {
+    async fn read_message(&mut self, cx: &Cx) -> Result<(u8, Vec<u8>), PgError> {
         // Read message type (1 byte)
         let mut type_buf = [0u8; 1];
-        self.read_exact(&mut type_buf).await?;
+        self.read_exact(cx, &mut type_buf).await?;
         let msg_type = type_buf[0];
 
         // Read length (4 bytes, includes itself)
         let mut len_buf = [0u8; 4];
-        self.read_exact(&mut len_buf).await?;
+        self.read_exact(cx, &mut len_buf).await?;
         let len_i32 = i32::from_be_bytes(len_buf);
 
         // Practical PostgreSQL message limit. The protocol allows up to 2 GiB
@@ -3210,7 +3483,7 @@ impl PgConnection {
         let body_len = len - 4;
         let mut body = vec![0u8; body_len];
         if body_len > 0 {
-            self.read_exact(&mut body).await?;
+            self.read_exact(cx, &mut body).await?;
         }
 
         Ok((msg_type, body))
@@ -3295,12 +3568,20 @@ impl PgConnection {
                     let type_oid = col.map_or(oid::TEXT, |c| c.type_oid);
                     let format = col.map_or(0, |c| c.format_code);
 
-                    let value = if format == 0 {
-                        // Text format
-                        self.parse_text_value(data, type_oid)?
-                    } else {
-                        // Binary format
-                        self.parse_binary_value(data, type_oid)?
+                    let value = match format {
+                        0 => {
+                            // Text format
+                            self.parse_text_value(data, type_oid)?
+                        }
+                        1 => {
+                            // Binary format
+                            self.parse_binary_value(data, type_oid)?
+                        }
+                        _ => {
+                            return Err(PgError::Protocol(format!(
+                                "invalid format code in DataRow column {i}: {format}"
+                            )));
+                        }
                     };
                     values.push(value);
                 }
@@ -3316,7 +3597,7 @@ impl PgConnection {
             .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))?;
 
         Ok(match type_oid {
-            oid::BOOL => PgValue::Bool(s == "t"),
+            oid::BOOL => PgValue::Bool(bool::from_sql(data, type_oid, Format::Text)?),
             oid::INT2 => PgValue::Int2(
                 s.parse()
                     .map_err(|e| PgError::Protocol(format!("invalid int2: {e}")))?,
@@ -3354,13 +3635,7 @@ impl PgConnection {
     /// Parse a binary-format value.
     fn parse_binary_value(&self, data: &[u8], type_oid: u32) -> Result<PgValue, PgError> {
         Ok(match type_oid {
-            oid::BOOL if data.len() == 1 => PgValue::Bool(data[0] != 0),
-            oid::BOOL => {
-                return Err(PgError::Protocol(format!(
-                    "BOOL requires exactly 1 byte, got {}",
-                    data.len()
-                )));
-            }
+            oid::BOOL => PgValue::Bool(bool::from_sql(data, type_oid, Format::Binary)?),
             oid::INT2 if data.len() == 2 => PgValue::Int2(i16::from_be_bytes([data[0], data[1]])),
             oid::INT2 => {
                 return Err(PgError::Protocol(format!(
@@ -3471,9 +3746,12 @@ impl PgConnection {
         let server_err = self.parse_error_response(data).unwrap_or_else(|e| e);
         match self.drain_to_ready(cx).await {
             Ok(()) => server_err,
+            Err(PgError::Cancelled(reason)) => {
+                self.abort_in_flight_exchange();
+                PgError::Cancelled(reason)
+            }
             Err(drain_err) => {
-                let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
-                self.inner.closed = true;
+                self.abort_in_flight_exchange();
                 PgError::Protocol(format!(
                     "{server_err}; additionally failed to drain to ReadyForQuery: {drain_err}"
                 ))
@@ -3512,9 +3790,9 @@ impl PgConnection {
                 return self.cancel_in_flight(cx);
             }
 
-            let (msg_type, data) = match self.read_message().await {
+            let (msg_type, data) = match self.read_message(cx).await {
                 Ok(m) => m,
-                Err(e) => return Outcome::Err(e),
+                Err(e) => return self.fail_in_flight(e),
             };
 
             match msg_type {
@@ -3524,28 +3802,31 @@ impl PgConnection {
                         columns = Some(Arc::new(cols));
                         column_indices = Some(Arc::new(indices));
                     }
-                    Err(e) => return Outcome::Err(e),
+                    Err(e) => return self.fail_in_flight(e),
                 },
                 b'n' => { /* NoData */ }
                 b'D' => {
                     if rows.len() >= self.inner.max_result_rows {
-                        self.inner.closed = true;
-                        return Outcome::Err(PgError::Protocol(format!(
+                        return self.fail_in_flight(PgError::Protocol(format!(
                             "result set exceeded {} row limit",
                             self.inner.max_result_rows,
                         )));
                     }
-                    if let (Some(cols), Some(indices)) = (&columns, &column_indices) {
-                        match self.parse_data_row(&data, cols) {
-                            Ok(values) => {
-                                rows.push(PgRow {
-                                    columns: Arc::clone(cols),
-                                    column_indices: Arc::clone(indices),
-                                    values,
-                                });
-                            }
-                            Err(e) => return Outcome::Err(e),
+                    let (Some(cols), Some(indices)) = (&columns, &column_indices) else {
+                        return self.fail_in_flight(PgError::Protocol(
+                            "received DataRow before RowDescription in extended query response"
+                                .to_string(),
+                        ));
+                    };
+                    match self.parse_data_row(&data, cols) {
+                        Ok(values) => {
+                            rows.push(PgRow {
+                                columns: Arc::clone(cols),
+                                column_indices: Arc::clone(indices),
+                                values,
+                            });
                         }
+                        Err(e) => return self.fail_in_flight(e),
                     }
                 }
                 b'C' | b's' => { /* CommandComplete / PortalSuspended */ }
@@ -3560,8 +3841,17 @@ impl PgConnection {
                 b'E' => {
                     return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
                 }
-                b'N' => { /* NoticeResponse */ }
-                _ => {}
+                _ => {
+                    match self.handle_async_backend_message(msg_type, &data) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(e) => return self.fail_in_flight(e),
+                    }
+                    return self.fail_in_flight(unexpected_backend_message(
+                        "extended query response",
+                        msg_type,
+                    ));
+                }
             }
         }
 
@@ -3571,15 +3861,16 @@ impl PgConnection {
     /// Read results from Extended Query Protocol (execute/command path).
     async fn read_extended_execute_results(&mut self, cx: &Cx) -> Outcome<u64, PgError> {
         let mut affected_rows = 0u64;
+        let mut saw_row_response = false;
 
         loop {
             if cx.checkpoint().is_err() {
                 return self.cancel_in_flight(cx);
             }
 
-            let (msg_type, data) = match self.read_message().await {
+            let (msg_type, data) = match self.read_message(cx).await {
                 Ok(m) => m,
-                Err(e) => return Outcome::Err(e),
+                Err(e) => return self.fail_in_flight(e),
             };
 
             match msg_type {
@@ -3594,20 +3885,40 @@ impl PgConnection {
                         }
                     }
                 }
-                b'T' | b'D' | b'n' | b's' => { /* skip */ }
+                b'T' | b'D' => {
+                    // `execute_params()` / `execute_prepared()` must not
+                    // silently drop row sets from `SELECT` or `... RETURNING`.
+                    saw_row_response = true;
+                }
+                b'n' | b's' => { /* NoData / PortalSuspended */ }
                 b'Z' => {
                     // ReadyForQuery — protocol exchange completed cleanly.
                     self.inner.closed = false;
                     if !data.is_empty() {
                         self.inner.transaction_status = data[0];
                     }
+                    if saw_row_response {
+                        return Outcome::Err(row_returning_execute_error(
+                            "execute-style APIs",
+                            "query-style APIs",
+                        ));
+                    }
                     break;
                 }
                 b'E' => {
                     return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
                 }
-                b'N' => {}
-                _ => {}
+                _ => {
+                    match self.handle_async_backend_message(msg_type, &data) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(e) => return self.fail_in_flight(e),
+                    }
+                    return self.fail_in_flight(unexpected_backend_message(
+                        "extended execute response",
+                        msg_type,
+                    ));
+                }
             }
         }
 
@@ -3623,7 +3934,7 @@ impl PgConnection {
             if cx.checkpoint().is_err() {
                 return Err(PgError::Cancelled(cancelled_reason(cx)));
             }
-            let (msg_type, data) = self.read_message().await?;
+            let (msg_type, data) = self.read_message(cx).await?;
             if msg_type == b'Z' {
                 self.inner.closed = false;
                 if !data.is_empty() {
@@ -3895,6 +4206,16 @@ mod hex {
 
         Ok(result)
     }
+
+    pub fn encode(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            out.push(char::from(HEX[(byte >> 4) as usize]));
+            out.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -3924,6 +4245,28 @@ mod tests {
             Outcome::Err(err) => panic!("expected cancellation, got error: {err}"),
             Outcome::Ok(_) => panic!("expected cancellation, got success"),
             Outcome::Panicked(payload) => panic!("unexpected panic outcome: {payload:?}"),
+        }
+    }
+
+    #[test]
+    fn low_level_write_all_uses_explicit_cx_for_cancellation() {
+        let mut conn = make_test_connection();
+        let cx = cancelled_cx();
+
+        match run(conn.write_all(&cx, b"hello")).unwrap_err() {
+            PgError::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
+            other => panic!("expected Cancelled, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn low_level_read_message_uses_explicit_cx_for_cancellation() {
+        let mut conn = make_test_connection();
+        let cx = cancelled_cx();
+
+        match run(conn.read_message(&cx)).unwrap_err() {
+            PgError::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
+            other => panic!("expected Cancelled, got: {other}"),
         }
     }
 
@@ -4024,6 +4367,51 @@ mod tests {
         )
     }
 
+    fn backend_message(msg_type: u8, body: &[u8]) -> Vec<u8> {
+        let len = i32::try_from(body.len() + 4).expect("test backend message length fits");
+        let mut msg = Vec::with_capacity(1 + 4 + body.len());
+        msg.push(msg_type);
+        msg.extend_from_slice(&len.to_be_bytes());
+        msg.extend_from_slice(body);
+        msg
+    }
+
+    fn ready_for_query(status: u8) -> Vec<u8> {
+        backend_message(b'Z', &[status])
+    }
+
+    fn single_text_row_description() -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1i16.to_be_bytes());
+        body.extend_from_slice(b"value\0");
+        body.extend_from_slice(&0i32.to_be_bytes());
+        body.extend_from_slice(&0i16.to_be_bytes());
+        body.extend_from_slice(&(oid::TEXT as i32).to_be_bytes());
+        body.extend_from_slice(&(-1i16).to_be_bytes());
+        body.extend_from_slice(&(-1i32).to_be_bytes());
+        body.extend_from_slice(&0i16.to_be_bytes());
+        backend_message(b'T', &body)
+    }
+
+    fn parameter_status_message(name: &str, value: &str) -> Vec<u8> {
+        let mut body = Vec::with_capacity(name.len() + value.len() + 2);
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(value.as_bytes());
+        body.push(0);
+        backend_message(b'S', &body)
+    }
+
+    fn notification_response_message(process_id: i32, channel: &str, payload: &str) -> Vec<u8> {
+        let mut body = Vec::with_capacity(4 + channel.len() + payload.len() + 2);
+        body.extend_from_slice(&process_id.to_be_bytes());
+        body.extend_from_slice(channel.as_bytes());
+        body.push(0);
+        body.extend_from_slice(payload.as_bytes());
+        body.push(0);
+        backend_message(b'A', &body)
+    }
+
     #[test]
     fn cancelled_commit_marks_connection_for_rollback() {
         let mut conn = make_test_connection();
@@ -4056,6 +4444,40 @@ mod tests {
 
         assert_user_cancelled(outcome);
         assert!(conn.inner.needs_rollback);
+    }
+
+    #[test]
+    fn ensure_no_orphaned_transaction_maps_cancellation_to_outcome() {
+        let mut conn = make_test_connection();
+        conn.inner.needs_rollback = true;
+        let cx = cancelled_cx();
+
+        let outcome = run(conn.ensure_no_orphaned_transaction(&cx));
+
+        assert_user_cancelled(outcome);
+        assert!(
+            conn.inner.closed,
+            "cancelled rollback should leave connection closed"
+        );
+        assert!(
+            conn.inner.needs_rollback,
+            "cancelled rollback should preserve the rollback-needed marker"
+        );
+    }
+
+    #[test]
+    fn ensure_no_orphaned_transaction_is_noop_without_pending_rollback() {
+        let mut conn = make_test_connection();
+        let cx = cancelled_cx();
+
+        let outcome = run(conn.ensure_no_orphaned_transaction(&cx));
+
+        match outcome {
+            Outcome::Ok(()) => {}
+            other => panic!("expected orphan-cleanup noop, got: {other:?}"),
+        }
+        assert!(!conn.inner.closed);
+        assert!(!conn.inner.needs_rollback);
     }
 
     #[test]
@@ -4108,6 +4530,28 @@ mod tests {
         match result.unwrap_err() {
             PgError::Protocol(msg) => {
                 assert!(msg.contains("negative column length"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn parse_data_row_rejects_invalid_format_code() {
+        let conn = make_test_connection();
+        let data: Vec<u8> = vec![0x00, 0x01, 0x00, 0x00, 0x00, 0x01, b'x'];
+        let columns = vec![PgColumn {
+            name: "col".to_string(),
+            table_oid: 0,
+            column_id: 0,
+            type_oid: oid::TEXT,
+            type_size: -1,
+            type_modifier: -1,
+            format_code: 2,
+        }];
+        let result = conn.parse_data_row(&data, &columns);
+        match result.unwrap_err() {
+            PgError::Protocol(msg) => {
+                assert!(msg.contains("invalid format code"), "got: {msg}");
             }
             other => panic!("expected Protocol error, got: {other}"),
         }
@@ -4172,6 +4616,47 @@ mod tests {
         let opts = PgConnectOptions::parse("postgres://user@host/db").unwrap();
         assert_eq!(opts.port, 5432);
         assert_eq!(opts.host, "host");
+    }
+
+    #[test]
+    fn connect_options_rejects_invalid_port() {
+        let result = PgConnectOptions::parse("postgres://user@host:not-a-port/db");
+        match result.unwrap_err() {
+            PgError::InvalidUrl(msg) => assert!(msg.contains("invalid port"), "got: {msg}"),
+            other => panic!("expected InvalidUrl, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn connect_options_rejects_invalid_connect_timeout() {
+        let result =
+            PgConnectOptions::parse("postgres://user@host/db?connect_timeout=not-a-number");
+        match result.unwrap_err() {
+            PgError::InvalidUrl(msg) => {
+                assert!(msg.contains("invalid connect_timeout"), "got: {msg}");
+            }
+            other => panic!("expected InvalidUrl, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn connect_options_rejects_empty_database_component() {
+        let result = PgConnectOptions::parse("postgres://user@host/");
+        match result.unwrap_err() {
+            PgError::InvalidUrl(msg) => {
+                assert!(msg.contains("database"), "got: {msg}");
+            }
+            other => panic!("expected InvalidUrl, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn connect_options_rejects_invalid_ipv6_literal() {
+        let result = PgConnectOptions::parse("postgres://user@[::1:5432/db");
+        match result.unwrap_err() {
+            PgError::InvalidUrl(msg) => assert!(msg.contains("IPv6"), "got: {msg}"),
+            other => panic!("expected InvalidUrl, got: {other}"),
+        }
     }
 
     // ================================================================
@@ -4312,15 +4797,58 @@ mod tests {
 
     #[test]
     fn pg_row_typed_getters_match_and_mismatch() {
-        let row = make_test_row(
-            &["i", "b", "s", "big"],
-            vec![
+        let row = PgRow {
+            columns: Arc::new(vec![
+                PgColumn {
+                    name: "i".to_string(),
+                    table_oid: 0,
+                    column_id: 0,
+                    type_oid: oid::INT4,
+                    type_size: 4,
+                    type_modifier: -1,
+                    format_code: 1,
+                },
+                PgColumn {
+                    name: "b".to_string(),
+                    table_oid: 0,
+                    column_id: 0,
+                    type_oid: oid::BOOL,
+                    type_size: 1,
+                    type_modifier: -1,
+                    format_code: 1,
+                },
+                PgColumn {
+                    name: "s".to_string(),
+                    table_oid: 0,
+                    column_id: 0,
+                    type_oid: oid::TEXT,
+                    type_size: -1,
+                    type_modifier: -1,
+                    format_code: 0,
+                },
+                PgColumn {
+                    name: "big".to_string(),
+                    table_oid: 0,
+                    column_id: 0,
+                    type_oid: oid::INT8,
+                    type_size: 8,
+                    type_modifier: -1,
+                    format_code: 1,
+                },
+            ]),
+            column_indices: Arc::new(BTreeMap::from([
+                ("i".to_string(), 0),
+                ("b".to_string(), 1),
+                ("s".to_string(), 2),
+                ("big".to_string(), 3),
+            ])),
+            values: vec![
                 PgValue::Int4(42),
                 PgValue::Bool(false),
                 PgValue::Text("hello".to_string()),
                 PgValue::Int8(99),
             ],
-        );
+        };
         assert_eq!(row.get_i32("i").unwrap(), 42);
         assert!(!row.get_bool("b").unwrap());
         assert_eq!(row.get_str("s").unwrap(), "hello");
@@ -4329,10 +4857,43 @@ mod tests {
         // Type mismatch: i32 on a bool column
         match row.get_i32("b").unwrap_err() {
             PgError::TypeConversion {
-                column, expected, ..
+                column,
+                expected,
+                actual_oid,
             } => {
                 assert_eq!(column, "b");
                 assert_eq!(expected, "i32");
+                assert_eq!(actual_oid, oid::BOOL);
+            }
+            other => panic!("expected TypeConversion, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn pg_row_typed_getters_use_real_column_oid_for_other_mismatches() {
+        let row = PgRow {
+            columns: Arc::new(vec![PgColumn {
+                name: "count".to_string(),
+                table_oid: 0,
+                column_id: 0,
+                type_oid: oid::INT8,
+                type_size: 8,
+                type_modifier: -1,
+                format_code: 1,
+            }]),
+            column_indices: Arc::new(BTreeMap::from([("count".to_string(), 0)])),
+            values: vec![PgValue::Int8(7)],
+        };
+
+        match row.get_bool("count").unwrap_err() {
+            PgError::TypeConversion {
+                column,
+                expected,
+                actual_oid,
+            } => {
+                assert_eq!(column, "count");
+                assert_eq!(expected, "bool");
+                assert_eq!(actual_oid, oid::INT8);
             }
             other => panic!("expected TypeConversion, got: {other}"),
         }
@@ -4571,6 +5132,7 @@ mod tests {
             conn.parse_text_value(b"f", oid::BOOL).unwrap(),
             PgValue::Bool(false)
         );
+        assert!(conn.parse_text_value(b"maybe", oid::BOOL).is_err());
     }
 
     #[test]
@@ -4680,6 +5242,8 @@ mod tests {
             conn.parse_binary_value(&[0], oid::BOOL).unwrap(),
             PgValue::Bool(false)
         );
+        assert!(conn.parse_binary_value(&[2], oid::BOOL).is_err());
+        assert!(conn.parse_binary_value(&[], oid::BOOL).is_err());
     }
 
     #[test]
@@ -4856,6 +5420,76 @@ mod tests {
                     msg.contains("failed to drain to ReadyForQuery"),
                     "missing drain failure context: {msg}"
                 );
+            }
+            other => panic!("expected Protocol error, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn read_exact_observes_cancellation_while_pending() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = crate::cx::Cx::for_testing();
+        let cancel_cx = cx.clone();
+
+        let wake_writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cancel_cx.cancel_fast(CancelKind::User);
+            std::io::Write::write_all(&mut peer, b"x").expect("wake pending read");
+        });
+
+        let mut buf = [0u8; 1];
+        match run(conn.read_exact(&cx, &mut buf)) {
+            Err(PgError::Cancelled(reason)) => assert_eq!(reason.kind, CancelKind::User),
+            other => panic!("expected Cancelled, got: {other:?}"),
+        }
+        assert_eq!(buf, [0]);
+
+        wake_writer.join().expect("wake writer should exit cleanly");
+    }
+
+    #[test]
+    fn parse_error_and_drain_preserves_cancellation_and_closes_connection() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        conn.inner.closed = true;
+
+        let mut data = Vec::new();
+        data.push(b'C');
+        data.extend_from_slice(b"XX000\0");
+        data.push(b'M');
+        data.extend_from_slice(b"boom\0");
+        data.push(0);
+
+        let cx = crate::cx::Cx::for_testing();
+        let cancel_cx = cx.clone();
+        let wake_writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cancel_cx.cancel_fast(CancelKind::User);
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                .expect("wake pending drain");
+        });
+
+        match run(conn.parse_error_and_drain(&cx, &data)) {
+            PgError::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
+            other => panic!("expected Cancelled, got: {other}"),
+        }
+        assert!(conn.inner.closed);
+
+        wake_writer.join().expect("wake writer should exit cleanly");
+    }
+
+    #[test]
+    fn wait_for_ready_rejects_unexpected_message() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let data_row = backend_message(b'D', &0i16.to_be_bytes());
+        std::io::Write::write_all(&mut peer, &data_row).unwrap();
+        std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+        let cx = crate::cx::Cx::for_testing();
+        let err = run(conn.wait_for_ready(&cx)).expect_err("unexpected message must fail");
+        match err {
+            PgError::Protocol(msg) => {
+                assert!(msg.contains("startup sequence"), "got: {msg}");
+                assert!(msg.contains("'D'"), "got: {msg}");
             }
             other => panic!("expected Protocol error, got: {other}"),
         }
@@ -5106,11 +5740,16 @@ mod tests {
         // Binary
         assert!(bool::from_sql(&[1], oid::BOOL, Format::Binary).unwrap());
         assert!(!bool::from_sql(&[0], oid::BOOL, Format::Binary).unwrap());
+        assert!(bool::from_sql(&[2], oid::BOOL, Format::Binary).is_err());
+        assert!(bool::from_sql(&[], oid::BOOL, Format::Binary).is_err());
         // Text
         assert!(bool::from_sql(b"t", oid::BOOL, Format::Text).unwrap());
         assert!(bool::from_sql(b"true", oid::BOOL, Format::Text).unwrap());
         assert!(!bool::from_sql(b"f", oid::BOOL, Format::Text).unwrap());
         assert!(!bool::from_sql(b"false", oid::BOOL, Format::Text).unwrap());
+        assert!(!bool::from_sql(b"0", oid::BOOL, Format::Text).unwrap());
+        assert!(!bool::from_sql(b"off", oid::BOOL, Format::Text).unwrap());
+        assert!(bool::from_sql(b"maybe", oid::BOOL, Format::Text).is_err());
         assert!(bool::accepts(oid::BOOL));
         assert!(!bool::accepts(oid::INT4));
     }
@@ -5425,6 +6064,54 @@ mod tests {
     }
 
     #[test]
+    fn pg_row_get_typed_preserves_binary_bytea_format() {
+        let columns = Arc::new(vec![PgColumn {
+            name: "payload".to_string(),
+            table_oid: 0,
+            column_id: 0,
+            type_oid: oid::BYTEA,
+            type_size: -1,
+            type_modifier: -1,
+            format_code: 1,
+        }]);
+        let mut indices = BTreeMap::new();
+        indices.insert("payload".to_string(), 0);
+        let expected = vec![0xde, 0xad, 0x00, 0xff];
+        let row = PgRow {
+            columns,
+            column_indices: Arc::new(indices),
+            values: vec![PgValue::Bytes(expected.clone())],
+        };
+
+        let payload: Vec<u8> = row.get_typed("payload").unwrap();
+        assert_eq!(payload, expected);
+    }
+
+    #[test]
+    fn pg_row_get_typed_text_bytea_handles_non_utf8_bytes() {
+        let columns = Arc::new(vec![PgColumn {
+            name: "payload".to_string(),
+            table_oid: 0,
+            column_id: 0,
+            type_oid: oid::BYTEA,
+            type_size: -1,
+            type_modifier: -1,
+            format_code: 0,
+        }]);
+        let mut indices = BTreeMap::new();
+        indices.insert("payload".to_string(), 0);
+        let expected = vec![0xff, 0x00, 0x7f, 0x80];
+        let row = PgRow {
+            columns,
+            column_indices: Arc::new(indices),
+            values: vec![PgValue::Bytes(expected.clone())],
+        };
+
+        let payload: Vec<u8> = row.get_typed("payload").unwrap();
+        assert_eq!(payload, expected);
+    }
+
+    #[test]
     fn pg_row_get_typed_column_not_found() {
         let columns = Arc::new(vec![]);
         let row = PgRow {
@@ -5642,6 +6329,42 @@ mod tests {
         assert_eq!(opts.ssl_mode, SslMode::Prefer);
     }
 
+    #[cfg(feature = "tls")]
+    #[test]
+    fn prefer_tls_cancellation_is_not_swallowed_by_plaintext_fallback() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let cx = Cx::for_testing();
+        let cancel_cx = cx.clone();
+
+        let accept_thread = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept first connection");
+            cancel_cx.cancel_fast(CancelKind::User);
+            drop(stream);
+        });
+
+        let options = PgConnectOptions {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            database: "testdb".to_string(),
+            user: "user".to_string(),
+            password: Some("secret".to_string()),
+            application_name: None,
+            connect_timeout: Some(std::time::Duration::from_secs(1)),
+            ssl_mode: SslMode::Prefer,
+        };
+
+        match run(PgConnection::connect_with_options(&cx, options)) {
+            Outcome::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
+            other => panic!("expected cancellation, got {other:?}"),
+        }
+
+        accept_thread
+            .join()
+            .expect("accept helper should exit cleanly");
+    }
+
     #[test]
     fn parse_application_name_from_url() {
         let opts = PgConnectOptions::parse(
@@ -5749,6 +6472,114 @@ mod tests {
         assert!(execute_conn.inner.closed);
     }
 
+    #[test]
+    fn query_rejects_datarow_before_row_description() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let data_row = backend_message(b'D', &0i16.to_be_bytes());
+        std::io::Write::write_all(&mut peer, &data_row).unwrap();
+        std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+        let cx = crate::cx::Cx::for_testing();
+        match run(conn.query(&cx, "SELECT 1")) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("DataRow before RowDescription"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+        assert!(conn.inner.closed);
+    }
+
+    #[test]
+    fn query_tolerates_async_notification_response() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let notify = notification_response_message(42, "jobs", "done");
+        let command_complete = backend_message(b'C', b"SELECT 0\0");
+        std::io::Write::write_all(&mut peer, &notify).unwrap();
+        std::io::Write::write_all(&mut peer, &command_complete).unwrap();
+        std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+        let cx = crate::cx::Cx::for_testing();
+        match run(conn.query(&cx, "SELECT 1")) {
+            Outcome::Ok(rows) => assert!(rows.is_empty(), "unexpected rows: {rows:?}"),
+            other => panic!("expected successful query, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_updates_parameter_status_from_async_message() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let parameter_status = parameter_status_message("application_name", "asupersync-test");
+        let command_complete = backend_message(b'C', b"SET\0");
+        std::io::Write::write_all(&mut peer, &parameter_status).unwrap();
+        std::io::Write::write_all(&mut peer, &command_complete).unwrap();
+        std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+        let cx = crate::cx::Cx::for_testing();
+        match run(conn.execute(&cx, "SET application_name = 'asupersync-test'")) {
+            Outcome::Ok(affected) => assert_eq!(affected, 0),
+            other => panic!("expected successful execute, got {other:?}"),
+        }
+        assert_eq!(conn.parameter("application_name"), Some("asupersync-test"));
+    }
+
+    #[test]
+    fn execute_rejects_row_returning_response() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let row_description = single_text_row_description();
+        let command_complete = backend_message(b'C', b"SELECT 0\0");
+        std::io::Write::write_all(&mut peer, &row_description).unwrap();
+        std::io::Write::write_all(&mut peer, &command_complete).unwrap();
+        std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+        let cx = crate::cx::Cx::for_testing();
+        match run(conn.execute(&cx, "SELECT 1")) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("execute()"), "got: {msg}");
+                assert!(msg.contains("query()"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+        assert!(!conn.inner.closed);
+        assert_eq!(conn.inner.transaction_status, b'I');
+    }
+
+    #[test]
+    fn extended_query_rejects_datarow_before_row_description() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let data_row = backend_message(b'D', &0i16.to_be_bytes());
+        std::io::Write::write_all(&mut peer, &data_row).unwrap();
+        std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+        let cx = crate::cx::Cx::for_testing();
+        match run(conn.read_extended_query_results(&cx)) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("DataRow before RowDescription"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extended_execute_rejects_row_returning_response() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let row_description = single_text_row_description();
+        let command_complete = backend_message(b'C', b"SELECT 0\0");
+        std::io::Write::write_all(&mut peer, &row_description).unwrap();
+        std::io::Write::write_all(&mut peer, &command_complete).unwrap();
+        std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+        let cx = crate::cx::Cx::for_testing();
+        match run(conn.read_extended_execute_results(&cx)) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("execute-style APIs"), "got: {msg}");
+                assert!(msg.contains("query-style APIs"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+        assert!(!conn.inner.closed);
+        assert_eq!(conn.inner.transaction_status, b'I');
+    }
+
     // ================================================================
     // COPY Protocol Conformance Tests
     // ================================================================
@@ -5756,7 +6587,7 @@ mod tests {
     #[cfg(feature = "postgres")]
     mod copy_protocol_conformance {
         use super::*;
-        use std::io::Cursor;
+        use std::io::{Cursor, Read};
 
         /// Test data for COPY protocol conformance.
         struct CopyTestData {
