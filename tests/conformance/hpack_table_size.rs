@@ -28,15 +28,14 @@
 //! - Size reduction MAY trigger entry eviction to fit new limit
 //! - Encoder MUST signal size changes via SETTINGS frame acknowledgment
 
-use asupersync::bytes::{BufMut, Bytes, BytesMut};
+use asupersync::bytes::BytesMut;
 use asupersync::http::h2::{
     error::{ErrorCode, H2Error},
-    hpack::{DEFAULT_MAX_TABLE_SIZE, Decoder, DynamicTable, Encoder, Header},
+    hpack::{DEFAULT_MAX_TABLE_SIZE, Decoder, Encoder, Header},
 };
-use asupersync::lab::runtime::LabRuntime;
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Test categories for HPACK table size update conformance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,8 +79,6 @@ struct MockHpackContext {
     settings_ack_received: bool,
     /// Timestamp when SETTINGS was sent.
     settings_sent_time: Option<Instant>,
-    /// Current dynamic table usage before size update.
-    table_usage_before_update: usize,
 }
 
 impl MockHpackContext {
@@ -93,13 +90,12 @@ impl MockHpackContext {
             settings_table_size: DEFAULT_MAX_TABLE_SIZE,
             settings_ack_received: false,
             settings_sent_time: None,
-            table_usage_before_update: 0,
         }
     }
 
     /// Create a context with specific table size.
     fn with_table_size(table_size: usize) -> Self {
-        let mut encoder = Encoder::new();
+        let encoder = Encoder::new();
         let mut decoder = Decoder::with_max_size(table_size);
         decoder.set_allowed_table_size(table_size);
 
@@ -109,7 +105,6 @@ impl MockHpackContext {
             settings_table_size: table_size,
             settings_ack_received: false,
             settings_sent_time: None,
-            table_usage_before_update: 0,
         }
     }
 
@@ -153,9 +148,12 @@ impl MockHpackContext {
 
     /// Get current dynamic table usage.
     fn table_usage(&self) -> usize {
-        // This would need to be exposed from the decoder in a real implementation
-        // For testing, we'll track it separately
-        self.table_usage_before_update
+        self.decoder.dynamic_table_size()
+    }
+
+    /// Get the decoder's current dynamic table size limit.
+    fn table_max_size(&self) -> usize {
+        self.decoder.dynamic_table_max_size()
     }
 }
 
@@ -229,7 +227,6 @@ mod conformance_tests {
     #[test]
     fn mr1_settings_ack_required() {
         proptest!(|(table_size in arb_table_size())| {
-            let start_time = Instant::now();
             let mut context = MockHpackContext::new();
 
             // SETTINGS_HEADER_TABLE_SIZE exchange should require ACK
@@ -257,25 +254,21 @@ mod conformance_tests {
     fn mr2_size_update_precedes_encoded_block() {
         proptest!(|(new_size in arb_table_size(), headers in arb_headers())| {
             let mut context = MockHpackContext::with_table_size(4096);
+            let new_size = new_size.min(4096);
 
-            // Test 1: Size update BEFORE headers (valid)
+            // Drive the actual SETTINGS -> encoder transition so the encoder
+            // applies the same table bound it advertises on the wire.
+            context
+                .exchange_settings(new_size)
+                .expect("SETTINGS exchange should succeed");
+
             let mut valid_block = BytesMut::new();
-
-            // Add size update first
-            let size_update = MockHpackContext::encode_size_update(new_size.min(4096));
-            valid_block.extend_from_slice(&size_update);
-
-            // Then add encoded headers
-            let mut encoder = Encoder::new();
-            encoder.encode(&headers, &mut valid_block);
+            context.encoder.encode(&headers, &mut valid_block);
 
             let mut valid_bytes = valid_block.freeze();
             let valid_result = context.decoder.decode(&mut valid_bytes);
-
-            if new_size <= 4096 {
-                prop_assert!(valid_result.is_ok(),
-                    "Valid ordering (size update first) should succeed, got: {:?}", valid_result);
-            }
+            prop_assert!(valid_result.is_ok(),
+                "Valid ordering (size update first) should succeed, got: {:?}", valid_result);
 
             // Test 2: Headers BEFORE size update (invalid - would violate RFC if we tried)
             // RFC 7541 Section 4.2: size updates only permitted at beginning of header block
@@ -314,8 +307,8 @@ mod conformance_tests {
             prop_assert!(result.is_ok(),
                 "Multiple size updates should be valid, got: {:?}", result);
 
-            // The final table size should be the last update value
-            // (This would need dynamic table inspection in a real test)
+            prop_assert_eq!(context.table_max_size(), size3.min(max_allowed),
+                "Decoder should apply the last size update in the prefix sequence");
         });
     }
 
@@ -343,7 +336,7 @@ mod conformance_tests {
 
             if let Err(error) = result {
                 // Should be a compression error due to bounds violation
-                prop_assert!(matches!(error, H2Error::Compression(_)),
+                prop_assert!(error.code == ErrorCode::CompressionError,
                     "Expected compression error for oversized update, got: {:?}", error);
             }
         });
@@ -357,7 +350,7 @@ mod conformance_tests {
         proptest!(|(
             initial_size in 2048usize..8192,
             headers in arb_headers(),
-            new_size_factor in 2usize..5
+            slack in 0usize..1024
         )| {
             let mut context = MockHpackContext::with_table_size(initial_size);
 
@@ -365,21 +358,20 @@ mod conformance_tests {
             context.populate_table(&headers);
             let usage_before = context.table_usage();
 
-            // Set new size that's larger than current usage
-            let new_size = usage_before * new_size_factor;
+            // Keep the resize within the current SETTINGS limit while remaining
+            // large enough to preserve the current table contents.
+            let new_size = usage_before.saturating_add(slack).min(initial_size);
 
-            if new_size <= initial_size {
-                // Create size update that should preserve all entries
-                let size_update = MockHpackContext::encode_size_update(new_size);
-                let mut update_bytes = size_update.freeze();
+            let size_update = MockHpackContext::encode_size_update(new_size);
+            let mut update_bytes = size_update.freeze();
 
-                let result = context.decoder.decode(&mut update_bytes);
-                prop_assert!(result.is_ok(),
-                    "Size update preserving entries should succeed: {:?}", result);
-
-                // In a real implementation, we'd verify that no entries were evicted
-                // by checking the dynamic table contents before and after
-            }
+            let result = context.decoder.decode(&mut update_bytes);
+            prop_assert!(result.is_ok(),
+                "Size update preserving entries should succeed: {:?}", result);
+            prop_assert_eq!(context.table_max_size(), new_size,
+                "Decoder should adopt the new table size limit");
+            prop_assert_eq!(context.table_usage(), usage_before,
+                "Resizing above current usage must not evict entries");
         });
     }
 
@@ -403,6 +395,7 @@ mod conformance_tests {
 
         let mut encoded = BytesMut::new();
         context.encoder.encode(&test_headers, &mut encoded);
+        let first_byte = encoded[0];
 
         // Step 3: Decoder should accept the size update + headers
         let mut encoded_bytes = encoded.freeze();
@@ -410,6 +403,14 @@ mod conformance_tests {
             .decoder
             .decode(&mut encoded_bytes)
             .expect("Decoding with size update failed");
+
+        assert_eq!(
+            first_byte & 0xe0,
+            0x20,
+            "header block must start with the dynamic table size update"
+        );
+        assert_eq!(context.decoder.allowed_table_size(), new_size);
+        assert_eq!(context.table_max_size(), new_size);
 
         // Verify headers were decoded correctly
         assert_eq!(test_headers.len(), decoded.len());
@@ -438,6 +439,7 @@ mod conformance_tests {
                 size,
                 result
             );
+            assert_eq!(context.table_max_size(), size);
         }
     }
 
@@ -460,11 +462,12 @@ mod conformance_tests {
         let mut invalid_bytes = invalid_block.freeze();
         let result = context.decoder.decode(&mut invalid_bytes);
 
-        // This should be accepted because our decoder processes all size updates first
-        // The spec allows implementations to be tolerant of this case
         assert!(
-            result.is_ok(),
-            "Mixed headers and size updates should be handled gracefully"
+            matches!(
+                result,
+                Err(ref err) if err.code == ErrorCode::CompressionError
+            ),
+            "Mixed headers and size updates must be rejected with COMPRESSION_ERROR"
         );
     }
 }

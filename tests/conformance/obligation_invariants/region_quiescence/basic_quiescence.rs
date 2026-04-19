@@ -19,7 +19,7 @@ use crate::conformance::obligation_invariants::src::{
     },
     obligation_tracker::{InvariantViolationType, ObligationTracker},
 };
-use asupersync::runtime::{ObligationId, RegionId};
+use asupersync::types::{ObligationId, RegionId, Time};
 
 /// Test basic region quiescence - region waits for obligations
 pub struct BasicRegionQuiescenceTest;
@@ -46,12 +46,14 @@ impl ObligationInvariantTest for BasicRegionQuiescenceTest {
             let test_start = std::time::Instant::now();
 
             // Create region
-            let region_id = RegionId(500);
+            let region_id = RegionId::new_for_test(500, 0);
             ctx.tracker.track_region_creation(region_id, None);
             metrics.regions_created += 1;
 
             // Create obligations
-            let obligation_ids: Vec<_> = (0..5).map(|i| ObligationId(500 + i)).collect();
+            let obligation_ids: Vec<_> = (0..5)
+                .map(|i| ObligationId::new_for_test(500 + i as u32, 0))
+                .collect();
             for &obligation_id in &obligation_ids {
                 ctx.tracker
                     .track_obligation_creation(obligation_id, region_id);
@@ -66,7 +68,7 @@ impl ObligationInvariantTest for BasicRegionQuiescenceTest {
             // Resolve obligations one by one
             for &obligation_id in &obligation_ids {
                 // Brief delay to simulate work
-                sleep(Duration::from_millis(1)).await;
+                sleep(Time::from_millis(0), Duration::from_millis(1)).await;
                 ctx.tracker.track_obligation_resolution(obligation_id);
                 metrics.obligations_resolved += 1;
             }
@@ -129,13 +131,13 @@ impl ObligationInvariantTest for NestedRegionQuiescenceTest {
             let test_start = std::time::Instant::now();
 
             // Create parent region
-            let parent_region = RegionId(600);
+            let parent_region = RegionId::new_for_test(600, 0);
             ctx.tracker.track_region_creation(parent_region, None);
             metrics.regions_created += 1;
 
             // Create child regions
-            let child_region1 = RegionId(601);
-            let child_region2 = RegionId(602);
+            let child_region1 = RegionId::new_for_test(601, 0);
+            let child_region2 = RegionId::new_for_test(602, 0);
             ctx.tracker
                 .track_region_creation(child_region1, Some(parent_region));
             ctx.tracker
@@ -143,9 +145,9 @@ impl ObligationInvariantTest for NestedRegionQuiescenceTest {
             metrics.regions_created += 2;
 
             // Create obligations in different regions
-            let parent_obligation = ObligationId(600);
-            let child1_obligation = ObligationId(601);
-            let child2_obligation = ObligationId(602);
+            let parent_obligation = ObligationId::new_for_test(600, 0);
+            let child1_obligation = ObligationId::new_for_test(601, 0);
+            let child2_obligation = ObligationId::new_for_test(602, 0);
 
             ctx.tracker
                 .track_obligation_creation(parent_obligation, parent_region);
@@ -248,13 +250,13 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
             let test_start = std::time::Instant::now();
 
             // Create region
-            let region_id = RegionId(700);
+            let region_id = RegionId::new_for_test(700, 0);
             ctx.tracker.track_region_creation(region_id, None);
             metrics.regions_created += 1;
 
             // Create obligations but don't resolve them
             for i in 0..3 {
-                let obligation_id = ObligationId(700 + i);
+                let obligation_id = ObligationId::new_for_test(700 + i as u32, 0);
                 ctx.tracker
                     .track_obligation_creation(obligation_id, region_id);
                 metrics.obligations_created += 1;
@@ -273,7 +275,7 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
 
             // Clean up by resolving obligations
             for i in 0..3 {
-                let obligation_id = ObligationId(700 + i);
+                let obligation_id = ObligationId::new_for_test(700 + i as u32, 0);
                 ctx.tracker.track_obligation_resolution(obligation_id);
                 metrics.obligations_resolved += 1;
             }
@@ -441,6 +443,7 @@ mod tests {
     use crate::conformance::obligation_invariants::src::invariant_harness::{
         InvariantTestConfig, ObligationInvariantHarness,
     };
+    use futures_lite::future::block_on;
 
     #[test]
     fn test_basic_quiescence() {
@@ -449,7 +452,7 @@ mod tests {
         let mut harness = ObligationInvariantHarness::new(config);
 
         let test = BasicRegionQuiescenceTest;
-        let result = harness.run_test(test);
+        let result = block_on(harness.run_test(test));
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());
@@ -462,7 +465,7 @@ mod tests {
         let mut harness = ObligationInvariantHarness::new(config);
 
         let test = NestedRegionQuiescenceTest;
-        let result = harness.run_test(test);
+        let result = block_on(harness.run_test(test));
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());
@@ -475,7 +478,7 @@ mod tests {
         let mut harness = ObligationInvariantHarness::new(config);
 
         let test = RegionCloseWithActiveObligationsTest;
-        let result = harness.run_test(test);
+        let result = block_on(harness.run_test(test));
 
         // This is a negative test, so we expect it to pass by detecting the violation
         assert_eq!(result.outcome, TestOutcome::Pass);
@@ -495,7 +498,7 @@ mod tests {
         let mut harness = ObligationInvariantHarness::new(config);
 
         let test = ConcurrentRegionClosureTest;
-        let result = harness.run_test(test);
+        let result = block_on(harness.run_test(test));
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());

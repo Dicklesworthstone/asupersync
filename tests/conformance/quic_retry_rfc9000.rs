@@ -57,7 +57,7 @@ pub struct QuicRetryConformanceResult {
 }
 
 /// Conformance test categories for QUIC Retry packets.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TestCategory {
     /// Retry packet format validation
     PacketFormat,

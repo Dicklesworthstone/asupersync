@@ -12,6 +12,25 @@ use std::time::Instant;
 pub struct HpackErrorTester;
 
 impl HpackErrorTester {
+    fn encode_table_size_update(size: usize) -> Vec<u8> {
+        let mut buf = BytesMut::new();
+        let max_value = (1 << 5) - 1;
+
+        if size < max_value {
+            buf.put_u8(0x20 | size as u8);
+        } else {
+            buf.put_u8(0x20 | max_value as u8);
+            let mut remaining = size - max_value;
+            while remaining >= 128 {
+                buf.put_u8((remaining & 0x7f) as u8 | 0x80);
+                remaining >>= 7;
+            }
+            buf.put_u8(remaining as u8);
+        }
+
+        buf.to_vec()
+    }
+
     /// Run all error handling conformance tests.
     pub fn run_all_error_tests() -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
@@ -210,24 +229,31 @@ impl HpackErrorTester {
 
         // Test size update that exceeds allowed limit
         // RFC 7541 Section 4.2: size updates must not exceed SETTINGS_HEADER_TABLE_SIZE
-        let oversized_update = vec![
-            0x3f, 0xff, 0x80, 0x01, // Size update to 65536 + 16384 = very large
-        ];
+        let oversized_update = Self::encode_table_size_update(8192);
 
         let mut decoder = Decoder::new();
-        // Note: Would need to set allowed table size limit first via SETTINGS
+        decoder.set_allowed_table_size(4096);
 
         let mut src = Bytes::copy_from_slice(&oversized_update);
         let result = decoder.decode(&mut src);
 
-        // For now, mark as expected failure since we need SETTINGS integration
+        let verdict = if result.is_err() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
+
         ConformanceTestResult {
             test_id: "ERR-SIZE-1".to_string(),
             description: "Dynamic table size violation handling".to_string(),
             category: TestCategory::DynamicTable,
             requirement_level: RequirementLevel::Must,
-            verdict: TestVerdict::ExpectedFailure,
-            error_message: Some("Table size limit enforcement not fully implemented".to_string()),
+            verdict: verdict.clone(),
+            error_message: if verdict == TestVerdict::Fail {
+                Some("Oversized dynamic table size update should be rejected".to_string())
+            } else {
+                None
+            },
             execution_time_ms: start_time.elapsed().as_millis() as u64,
         }
     }
@@ -556,9 +582,9 @@ impl HpackEdgeCaseTester {
 
         // Test table size updates at boundaries (0, 1, max)
         let boundary_sizes = vec![
-            vec![0x20],             // Size 0
-            vec![0x21],             // Size 1
-            vec![0x3f, 0x80, 0x1f], // Size 4096 (if properly encoded)
+            Self::encode_table_size_update(0),
+            Self::encode_table_size_update(1),
+            Self::encode_table_size_update(4096),
         ];
 
         let mut success_count = 0;

@@ -49,7 +49,7 @@ pub struct MySqlStmtConformanceResult {
 }
 
 /// Conformance test categories for MySQL prepared statements.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TestCategory {
     PacketFormat,
     ParameterTypes,
@@ -937,7 +937,11 @@ impl MySqlStmtConformanceHarness {
             assert_eq!(execute_packet2[0], 0x17);
 
             // Verify data is different
-            assert_ne!(data1, data2, "Data should be different between executions");
+            assert_ne!(
+                data1.as_slice(),
+                data2.as_slice(),
+                "Data should be different between executions"
+            );
 
             // Long data parameters should be reset after each execution
             // This is implicit in the protocol - each execute resets long data
@@ -1218,13 +1222,10 @@ impl MySqlStmtConformanceHarness {
         let result = std::panic::catch_unwind(|| {
             // Test binary value encoding for different types
             let test_values = vec![
-                (MySqlType::Tiny, 255i8.to_le_bytes().to_vec()),
-                (MySqlType::Short, 65535i16.to_le_bytes().to_vec()),
-                (MySqlType::Long, 2147483647i32.to_le_bytes().to_vec()),
-                (
-                    MySqlType::LongLong,
-                    9223372036854775807i64.to_le_bytes().to_vec(),
-                ),
+                (MySqlType::Tiny, i8::MAX.to_le_bytes().to_vec()),
+                (MySqlType::Short, i16::MAX.to_le_bytes().to_vec()),
+                (MySqlType::Long, i32::MAX.to_le_bytes().to_vec()),
+                (MySqlType::LongLong, i64::MAX.to_le_bytes().to_vec()),
                 (MySqlType::Float, 3.14f32.to_le_bytes().to_vec()),
                 (
                     MySqlType::Double,
@@ -1277,10 +1278,10 @@ impl MySqlStmtConformanceHarness {
     fn test_length_encoded_values(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test length-encoded values in binary result sets
-            let test_cases = vec![
-                (b"", vec![0x00]),                                    // Empty string
-                (b"a", vec![0x01, b'a']),                             // Single char
-                (b"hello", vec![0x05, b'h', b'e', b'l', b'l', b'o']), // Short string
+            let test_cases: Vec<(&[u8], Vec<u8>)> = vec![
+                (&b""[..], vec![0x00]),                                    // Empty string
+                (&b"a"[..], vec![0x01, b'a']),                             // Single char
+                (&b"hello"[..], vec![0x05, b'h', b'e', b'l', b'l', b'o']), // Short string
             ];
 
             for (input, expected) in test_cases {

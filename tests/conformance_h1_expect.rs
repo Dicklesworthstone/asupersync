@@ -4,7 +4,7 @@
 
 #[cfg(test)]
 mod tests {
-    use asupersync::http::h1::types::{Method, Request, RequestBuilder, Response, Version};
+    use asupersync::http::h1::types::{Method, RequestBuilder, Response, Version};
 
     /// Test basic Expect: 100-continue classification
     #[test]
@@ -81,7 +81,7 @@ mod tests {
         let has_if_none_match = req
             .headers
             .iter()
-            .any(|(name, value)| name.eq_ignore_ascii_case("if-none-match"));
+            .any(|(name, _value)| name.eq_ignore_ascii_case("if-none-match"));
 
         assert!(has_expect, "Request should have Expect: 100-continue");
         assert!(has_if_none_match, "Request should have If-None-Match");

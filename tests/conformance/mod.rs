@@ -69,6 +69,7 @@ pub use cancel_dag_determinism::{
 pub use mysql_stmt_prepare_execute::{
     MySqlStmtConformanceHarness, MySqlStmtConformanceResult, TestCategory as MySqlTestCategory,
 };
+#[cfg(feature = "deterministic-mode")]
 pub use obligation_lifecycle_metamorphic::{
     ObligationLifecycleMetamorphicHarness, ObligationLifecycleMetamorphicResult,
     TestCategory as ObligationLifecycleTestCategory,
@@ -79,13 +80,16 @@ pub use postgres_logical_replication::{
 pub use quic_retry_rfc9000::{
     QuicRetryConformanceHarness, QuicRetryConformanceResult, TestCategory as QuicTestCategory,
 };
+#[cfg(feature = "deterministic-mode")]
 pub use race_loser_drain_metamorphic::{
     RaceLoserDrainMetamorphicHarness, RaceLoserDrainMetamorphicResult,
     TestCategory as RaceLoserDrainTestCategory,
 };
+#[cfg(feature = "tls")]
 pub use tls_0rtt_replay_rfc8446::{
     TestCategory as Tls0RttTestCategory, Tls0RttConformanceHarness, Tls0RttConformanceResult,
 };
+#[cfg(feature = "deterministic-mode")]
 pub use trace_replay_idempotency_metamorphic::{
     TestCategory as TraceReplayTestCategory, TraceReplayIdempotencyMetamorphicHarness,
     TraceReplayIdempotencyMetamorphicResult,
@@ -101,8 +105,8 @@ pub use quic_connection_migration_rfc9000::{
     TestCategory as QuicConnectionMigrationTestCategory,
 };
 pub use websocket_extension_negotiation_rfc6455::{
-    TestCategory as WsExtensionTestCategory, WsConformanceResult as WsExtensionConformanceResult,
-    WsExtensionConformanceHarness,
+    TestCategory as WsExtensionTestCategory, WsExtensionConformanceHarness,
+    WsExtensionConformanceResult,
 };
 
 // Unified test categories for all conformance suites
@@ -231,11 +235,13 @@ pub enum TestCategory {
     DagBudgetExhaustion,
     DependencyTopology,
     // Obligation lifecycle metamorphic categories
-    ObligationLifecycle,
     CommitAbortSymmetry,
-    LeakInvariants,
-    SnapshotRestore,
-    ParallelCommits,
+    SequentialConsistency,
+    ObligationInvariant,
+    SnapshotRestoration,
+    ParallelCommutation,
+    LeakPrevention,
+    RecoveryProtocol,
     // Trace replay idempotency metamorphic categories
     ReplayFidelity,
     IdempotentReplay,
@@ -632,20 +638,26 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                 test_id: r.test_id,
                 description: r.description,
                 category: match r.category {
-                    obligation_lifecycle_metamorphic::TestCategory::ObligationLifecycle => {
-                        TestCategory::ObligationLifecycle
-                    }
                     obligation_lifecycle_metamorphic::TestCategory::CommitAbortSymmetry => {
                         TestCategory::CommitAbortSymmetry
                     }
-                    obligation_lifecycle_metamorphic::TestCategory::LeakInvariants => {
-                        TestCategory::LeakInvariants
+                    obligation_lifecycle_metamorphic::TestCategory::SequentialConsistency => {
+                        TestCategory::SequentialConsistency
                     }
-                    obligation_lifecycle_metamorphic::TestCategory::SnapshotRestore => {
-                        TestCategory::SnapshotRestore
+                    obligation_lifecycle_metamorphic::TestCategory::ObligationInvariant => {
+                        TestCategory::ObligationInvariant
                     }
-                    obligation_lifecycle_metamorphic::TestCategory::ParallelCommits => {
-                        TestCategory::ParallelCommits
+                    obligation_lifecycle_metamorphic::TestCategory::SnapshotRestoration => {
+                        TestCategory::SnapshotRestoration
+                    }
+                    obligation_lifecycle_metamorphic::TestCategory::ParallelCommutation => {
+                        TestCategory::ParallelCommutation
+                    }
+                    obligation_lifecycle_metamorphic::TestCategory::LeakPrevention => {
+                        TestCategory::LeakPrevention
+                    }
+                    obligation_lifecycle_metamorphic::TestCategory::RecoveryProtocol => {
+                        TestCategory::RecoveryProtocol
                     }
                 },
                 requirement_level: match r.requirement_level {
@@ -1499,27 +1511,26 @@ mod tests {
         );
 
         // Check for expected test categories
-        let categories: std::collections::HashSet<_> =
-            results.iter().map(|r| &r.category).collect();
+        let has_category = |category| results.iter().any(|r| r.category == category);
 
         assert!(
-            categories.contains(&cancel_dag_determinism::TestCategory::DagSerialization),
+            has_category(cancel_dag_determinism::TestCategory::DagSerialization),
             "Should test DAG serialization determinism"
         );
         assert!(
-            categories.contains(&cancel_dag_determinism::TestCategory::CancellationOrdering),
+            has_category(cancel_dag_determinism::TestCategory::CancellationOrdering),
             "Should test cancellation ordering preservation"
         );
         assert!(
-            categories.contains(&cancel_dag_determinism::TestCategory::FinalizerLogging),
+            has_category(cancel_dag_determinism::TestCategory::FinalizerLogging),
             "Should test finalizer logging consistency"
         );
         assert!(
-            categories.contains(&cancel_dag_determinism::TestCategory::BudgetExhaustion),
+            has_category(cancel_dag_determinism::TestCategory::BudgetExhaustion),
             "Should test budget exhaustion determinism"
         );
         assert!(
-            categories.contains(&cancel_dag_determinism::TestCategory::DependencyTopology),
+            has_category(cancel_dag_determinism::TestCategory::DependencyTopology),
             "Should test dependency topology ordering"
         );
 
@@ -1556,30 +1567,35 @@ mod tests {
         );
 
         // Check for expected test categories
-        let categories: std::collections::HashSet<_> =
-            results.iter().map(|r| &r.category).collect();
+        let has_category = |category| results.iter().any(|r| r.category == category);
 
         assert!(
-            categories
-                .contains(&obligation_lifecycle_metamorphic::TestCategory::ObligationLifecycle),
-            "Should test obligation lifecycle properties"
-        );
-        assert!(
-            categories
-                .contains(&obligation_lifecycle_metamorphic::TestCategory::CommitAbortSymmetry),
+            has_category(obligation_lifecycle_metamorphic::TestCategory::CommitAbortSymmetry),
             "Should test commit-abort symmetry"
         );
         assert!(
-            categories.contains(&obligation_lifecycle_metamorphic::TestCategory::LeakInvariants),
-            "Should test obligation leak invariants"
+            has_category(obligation_lifecycle_metamorphic::TestCategory::SequentialConsistency),
+            "Should test sequential consistency properties"
         );
         assert!(
-            categories.contains(&obligation_lifecycle_metamorphic::TestCategory::SnapshotRestore),
+            has_category(obligation_lifecycle_metamorphic::TestCategory::ObligationInvariant),
+            "Should test obligation invariants"
+        );
+        assert!(
+            has_category(obligation_lifecycle_metamorphic::TestCategory::SnapshotRestoration),
             "Should test snapshot-restore preservation"
         );
         assert!(
-            categories.contains(&obligation_lifecycle_metamorphic::TestCategory::ParallelCommits),
+            has_category(obligation_lifecycle_metamorphic::TestCategory::ParallelCommutation),
             "Should test parallel commit commutativity"
+        );
+        assert!(
+            has_category(obligation_lifecycle_metamorphic::TestCategory::LeakPrevention),
+            "Should test leak prevention"
+        );
+        assert!(
+            has_category(obligation_lifecycle_metamorphic::TestCategory::RecoveryProtocol),
+            "Should test recovery protocol handling"
         );
 
         // Verify we have appropriate requirement levels
@@ -1634,33 +1650,26 @@ mod tests {
         );
 
         // Check for expected test categories
-        let categories: std::collections::HashSet<_> =
-            results.iter().map(|r| &r.category).collect();
+        let has_category = |category| results.iter().any(|r| r.category == category);
 
         assert!(
-            categories
-                .contains(&trace_replay_idempotency_metamorphic::TestCategory::ReplayFidelity),
+            has_category(trace_replay_idempotency_metamorphic::TestCategory::ReplayFidelity),
             "Should test replay fidelity"
         );
         assert!(
-            categories
-                .contains(&trace_replay_idempotency_metamorphic::TestCategory::IdempotentReplay),
+            has_category(trace_replay_idempotency_metamorphic::TestCategory::IdempotentReplay),
             "Should test idempotent replay"
         );
         assert!(
-            categories
-                .contains(&trace_replay_idempotency_metamorphic::TestCategory::TruncationHandling),
+            has_category(trace_replay_idempotency_metamorphic::TestCategory::TruncationHandling),
             "Should test truncation handling"
         );
         assert!(
-            categories.contains(
-                &trace_replay_idempotency_metamorphic::TestCategory::EpochBoundaryOrdering
-            ),
+            has_category(trace_replay_idempotency_metamorphic::TestCategory::EpochBoundaryOrdering),
             "Should test epoch boundary ordering"
         );
         assert!(
-            categories
-                .contains(&trace_replay_idempotency_metamorphic::TestCategory::CrossRegionJoining),
+            has_category(trace_replay_idempotency_metamorphic::TestCategory::CrossRegionJoining),
             "Should test cross-region joining"
         );
 
@@ -1733,27 +1742,26 @@ mod tests {
         );
 
         // Check for expected test categories
-        let categories: std::collections::HashSet<_> =
-            results.iter().map(|r| &r.category).collect();
+        let has_category = |category| results.iter().any(|r| r.category == category);
 
         assert!(
-            categories.contains(&race_loser_drain_metamorphic::TestCategory::RaceCommutativity),
+            has_category(race_loser_drain_metamorphic::TestCategory::RaceCommutativity),
             "Should test race commutativity"
         );
         assert!(
-            categories.contains(&race_loser_drain_metamorphic::TestCategory::LoserCancellation),
+            has_category(race_loser_drain_metamorphic::TestCategory::LoserCancellation),
             "Should test loser cancellation"
         );
         assert!(
-            categories.contains(&race_loser_drain_metamorphic::TestCategory::BudgetExhaustion),
+            has_category(race_loser_drain_metamorphic::TestCategory::BudgetExhaustion),
             "Should test budget exhaustion handling"
         );
         assert!(
-            categories.contains(&race_loser_drain_metamorphic::TestCategory::FinalizerInvocation),
+            has_category(race_loser_drain_metamorphic::TestCategory::FinalizerInvocation),
             "Should test finalizer invocation"
         );
         assert!(
-            categories.contains(&race_loser_drain_metamorphic::TestCategory::RegionQuiescence),
+            has_category(race_loser_drain_metamorphic::TestCategory::RegionQuiescence),
             "Should test region quiescence"
         );
 
@@ -2014,9 +2022,9 @@ mod tests {
             "Missing grpc-status trailer placement test"
         );
 
-        // Requirement 2: grpc-message base64-encoded for non-ASCII
+        // Requirement 2: grpc-message reserved-character encoding
         assert!(
-            test_ids.contains("grpc_message_base64_encoding_non_ascii"),
+            test_ids.contains("grpc_message_percent_encoding_reserved_chars"),
             "Missing grpc-message encoding test"
         );
 

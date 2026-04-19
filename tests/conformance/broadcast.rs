@@ -140,7 +140,7 @@ impl BroadcastState {
 
 #[test]
 fn test_mr1_subscribe_returns_only_values_sent_after_subscribe() {
-    proptest!(|(messages_before: message_sequence_strategy(), messages_after: message_sequence_strategy())| {
+    proptest!(|(messages_before in message_sequence_strategy(), messages_after in message_sequence_strategy())| {
         let cx = test_cx();
         let (sender, receiver) = broadcast::channel::<TestMessage>(10);
 
@@ -166,7 +166,7 @@ fn test_mr1_subscribe_returns_only_values_sent_after_subscribe() {
         }
 
         // MR1: Subscribe semantics - new receiver only gets post-subscribe messages
-        prop_assert_eq!(new_received, messages_after);
+        prop_assert_eq!(&new_received, &messages_after);
 
         // MR1 Inverse: If no messages sent after subscribe, new receiver gets nothing
         if messages_after.is_empty() {

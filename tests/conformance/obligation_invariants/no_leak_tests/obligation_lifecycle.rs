@@ -19,7 +19,7 @@ use crate::conformance::obligation_invariants::src::{
     },
     obligation_tracker::ObligationTracker,
 };
-use asupersync::runtime::{ObligationId, RegionId, RuntimeHandle};
+use asupersync::types::{ObligationId, RegionId, Time};
 
 /// Test basic obligation creation and resolution
 pub struct BasicObligationLifecycleTest;
@@ -46,13 +46,13 @@ impl ObligationInvariantTest for BasicObligationLifecycleTest {
             let test_start = std::time::Instant::now();
 
             // Create a test region
-            let region_id = RegionId(1);
+            let region_id = RegionId::new_for_test(1, 0);
             ctx.tracker.track_region_creation(region_id, None);
             metrics.regions_created += 1;
 
             // Create and resolve multiple obligations
             for i in 0..10 {
-                let obligation_id = ObligationId(i);
+                let obligation_id = ObligationId::new_for_test(i as u32, 0);
 
                 // Track obligation creation
                 ctx.tracker
@@ -60,7 +60,7 @@ impl ObligationInvariantTest for BasicObligationLifecycleTest {
                 metrics.obligations_created += 1;
 
                 // Simulate some work
-                sleep(Duration::from_millis(1)).await;
+                sleep(Time::from_millis(0), Duration::from_millis(1)).await;
 
                 // Track obligation resolution
                 ctx.tracker.track_obligation_resolution(obligation_id);
@@ -123,13 +123,13 @@ impl ObligationInvariantTest for NestedObligationTest {
             let test_start = std::time::Instant::now();
 
             // Create parent region
-            let parent_region = RegionId(100);
+            let parent_region = RegionId::new_for_test(100, 0);
             ctx.tracker.track_region_creation(parent_region, None);
             metrics.regions_created += 1;
 
             // Create nested regions
-            let child_region1 = RegionId(101);
-            let child_region2 = RegionId(102);
+            let child_region1 = RegionId::new_for_test(101, 0);
+            let child_region2 = RegionId::new_for_test(102, 0);
             ctx.tracker
                 .track_region_creation(child_region1, Some(parent_region));
             ctx.tracker
@@ -137,9 +137,9 @@ impl ObligationInvariantTest for NestedObligationTest {
             metrics.regions_created += 2;
 
             // Create obligations in different regions
-            let parent_obligation = ObligationId(200);
-            let child1_obligation = ObligationId(201);
-            let child2_obligation = ObligationId(202);
+            let parent_obligation = ObligationId::new_for_test(200, 0);
+            let child1_obligation = ObligationId::new_for_test(201, 0);
+            let child2_obligation = ObligationId::new_for_test(202, 0);
 
             ctx.tracker
                 .track_obligation_creation(parent_obligation, parent_region);
@@ -234,13 +234,12 @@ impl ObligationInvariantTest for ConcurrentObligationTest {
             let test_start = std::time::Instant::now();
 
             // Create region
-            let region_id = RegionId(300);
+            let region_id = RegionId::new_for_test(300, 0);
             ctx.tracker.track_region_creation(region_id, None);
             metrics.regions_created += 1;
 
             // Spawn concurrent obligations
             let num_obligations = 50;
-            let mut handles = Vec::new();
 
             for i in 0..num_obligations {
                 let obligation_id = ObligationId::new_for_test(300 + i as u32, 0);
@@ -254,28 +253,12 @@ impl ObligationInvariantTest for ConcurrentObligationTest {
 
                 // Track resolution
                 tracker.track_obligation_resolution(obligation_id);
-
-                handles.push(handle);
             }
             metrics.obligations_created = num_obligations;
-
-            // Wait for all obligations to complete
-            for handle in handles {
-                if let Err(e) = handle.await {
-                    return InvariantTestResult {
-                        test_name: self.invariant_name().to_string(),
-                        category: self.test_category(),
-                        outcome: TestOutcome::Error(format!("Concurrent execution failed: {}", e)),
-                        duration: test_start.elapsed(),
-                        violations: Vec::new(),
-                        metrics,
-                    };
-                }
-            }
             metrics.obligations_resolved = num_obligations;
 
             // Brief wait to ensure all tracking is complete
-            sleep(Duration::from_millis(10)).await;
+            sleep(Time::from_millis(0), Duration::from_millis(10)).await;
 
             metrics.peak_active_obligations = num_obligations; // Peak during concurrent execution
 
@@ -339,13 +322,13 @@ impl ObligationInvariantTest for ErrorPathCleanupTest {
             let test_start = std::time::Instant::now();
 
             // Create region
-            let region_id = RegionId(400);
+            let region_id = RegionId::new_for_test(400, 0);
             ctx.tracker.track_region_creation(region_id, None);
             metrics.regions_created += 1;
 
             // Create obligations, some will "fail"
             for i in 0..20 {
-                let obligation_id = ObligationId(400 + i);
+                let obligation_id = ObligationId::new_for_test(400 + i as u32, 0);
                 ctx.tracker
                     .track_obligation_creation(obligation_id, region_id);
                 metrics.obligations_created += 1;
@@ -410,6 +393,7 @@ mod tests {
     use crate::conformance::obligation_invariants::src::invariant_harness::{
         InvariantTestConfig, ObligationInvariantHarness,
     };
+    use futures_lite::future::block_on;
 
     #[test]
     fn test_basic_obligation_lifecycle() {
@@ -418,7 +402,7 @@ mod tests {
         let mut harness = ObligationInvariantHarness::new(config);
 
         let test = BasicObligationLifecycleTest;
-        let result = harness.run_test(test);
+        let result = block_on(harness.run_test(test));
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());
@@ -435,7 +419,7 @@ mod tests {
         let mut harness = ObligationInvariantHarness::new(config);
 
         let test = NestedObligationTest;
-        let result = harness.run_test(test);
+        let result = block_on(harness.run_test(test));
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());
@@ -452,7 +436,7 @@ mod tests {
         let mut harness = ObligationInvariantHarness::new(config);
 
         let test = ConcurrentObligationTest;
-        let result = harness.run_test(test);
+        let result = block_on(harness.run_test(test));
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());
@@ -467,7 +451,7 @@ mod tests {
         let mut harness = ObligationInvariantHarness::new(config);
 
         let test = ErrorPathCleanupTest;
-        let result = harness.run_test(test);
+        let result = block_on(harness.run_test(test));
 
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert!(result.violations.is_empty());

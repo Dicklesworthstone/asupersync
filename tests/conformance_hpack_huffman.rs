@@ -7,7 +7,7 @@
 //! - Invalid Huffman sequences rejected
 //! - Static table size accounting does not charge dynamic table
 
-use asupersync::bytes::{BufMut, BytesMut};
+use asupersync::bytes::BytesMut;
 use asupersync::http::h2::hpack::{Decoder, Encoder, Header};
 
 /// Test that all ASCII bytes can be encoded and decoded through Huffman roundtrip

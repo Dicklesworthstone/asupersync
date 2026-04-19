@@ -5,7 +5,7 @@
 //! systematically validate:
 //!
 //! - grpc-status in trailers (not headers)
-//! - grpc-message base64-encoded for non-ASCII characters
+//! - grpc-message percent-encoded for reserved characters
 //! - trailer-only responses for errors before any DATA frames
 //! - RST_STREAM with NO_ERROR after trailers
 //! - grpc-timeout header H[1-99]<unit> units U=H,M,S,m,u,n parsing
@@ -24,7 +24,7 @@
 //!
 //! HTTP/2 HEADERS frame (trailers):
 //! grpc-status: 0
-//! grpc-message: (optional, base64-encoded if non-ASCII)
+//! grpc-message: (optional, percent-encoded for `%`, CR, and LF)
 //! ```
 //!
 //! **Error Response Pattern:**
@@ -35,13 +35,13 @@
 //!
 //! HTTP/2 HEADERS frame (trailers, no DATA):
 //! grpc-status: 5
-//! grpc-message: bm90Zm91bmQ%3D  // "notfound" base64-encoded
+//! grpc-message: line1%0Aline2%25failed
 //! ```
 //!
 //! # Critical Requirements
 //!
 //! - **MUST** send grpc-status in trailers, not initial headers (RFC 9113)
-//! - **MUST** base64-encode grpc-message for non-ASCII (gRPC spec)
+//! - **MUST** percent-encode reserved grpc-message characters
 //! - **MUST** support trailer-only responses for immediate errors
 //! - **SHOULD** send RST_STREAM with NO_ERROR after complete response
 //! - **MUST** parse grpc-timeout header format correctly
@@ -60,6 +60,13 @@ mod grpc_trailer_conformance_tests {
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
+    fn encode_grpc_message(message: &str) -> String {
+        message
+            .replace('%', "%25")
+            .replace('\r', "%0D")
+            .replace('\n', "%0A")
+    }
+
     /// Test result for a single gRPC trailer forwarding conformance requirement.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct GrpcTrailerConformanceResult {
@@ -73,7 +80,7 @@ mod grpc_trailer_conformance_tests {
     }
 
     /// Conformance test categories for gRPC trailer forwarding.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum TestCategory {
         /// grpc-status trailer placement
         StatusTrailerPlacement,
@@ -130,7 +137,7 @@ mod grpc_trailer_conformance_tests {
                 initial_headers,
                 data_frames: Vec::new(),
                 trailers: Metadata::new(),
-                status: Status::new(Code::Ok),
+                status: Status::ok(),
                 has_rst_stream: false,
                 rst_stream_error_code: None,
             }
@@ -165,17 +172,11 @@ mod grpc_trailer_conformance_tests {
         pub fn build_response(&mut self) {
             // Per gRPC spec: grpc-status MUST be in trailers, not initial headers
             self.trailers
-                .insert("grpc-status", &self.status.code() as &dyn ToString);
+                .insert("grpc-status", self.status.code().as_i32().to_string());
 
             if !self.status.message().is_empty() {
-                // Base64-encode grpc-message if it contains non-ASCII
-                let message = self.status.message();
-                if message.is_ascii() {
-                    self.trailers.insert("grpc-message", message);
-                } else {
-                    let encoded = base64::encode(message.as_bytes());
-                    self.trailers.insert("grpc-message", &encoded);
-                }
+                self.trailers
+                    .insert("grpc-message", encode_grpc_message(self.status.message()));
             }
         }
 
@@ -230,7 +231,7 @@ mod grpc_trailer_conformance_tests {
             results.push(self.test_grpc_status_required_in_trailers());
 
             // gRPC spec: Message encoding requirements
-            results.push(self.test_grpc_message_base64_encoding_non_ascii());
+            results.push(self.test_grpc_message_percent_encoding_reserved_chars());
             results.push(self.test_grpc_message_ascii_encoding());
             results.push(self.test_grpc_message_empty_handling());
 
@@ -261,7 +262,7 @@ mod grpc_trailer_conformance_tests {
         fn test_grpc_status_in_trailers_not_headers(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new().with_status(Status::new(Code::Ok));
+            let mut response = MockGrpcResponse::new().with_status(Status::ok());
 
             // Erroneously place grpc-status in initial headers
             response.initial_headers.insert("grpc-status", "0");
@@ -294,7 +295,7 @@ mod grpc_trailer_conformance_tests {
         fn test_grpc_status_required_in_trailers(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new().with_status(Status::new(Code::Ok));
+            let response = MockGrpcResponse::new().with_status(Status::ok());
 
             // Don't call build_response() to simulate missing grpc-status
             let verdict = match response.validate_trailer_placement() {
@@ -319,51 +320,41 @@ mod grpc_trailer_conformance_tests {
             }
         }
 
-        /// Test: grpc-message base64-encoded for non-ASCII characters.
-        fn test_grpc_message_base64_encoding_non_ascii(&self) -> GrpcTrailerConformanceResult {
+        /// Test: grpc-message percent-encodes reserved characters.
+        fn test_grpc_message_percent_encoding_reserved_chars(
+            &self,
+        ) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let non_ascii_message = "错误消息"; // Chinese error message
-            let mut response = MockGrpcResponse::new().with_status(Status::with_message(
-                Code::InvalidArgument,
-                non_ascii_message,
-            ));
+            let message = "invalid\r\nrequest 100%";
+            let mut response =
+                MockGrpcResponse::new().with_status(Status::new(Code::InvalidArgument, message));
 
             response.build_response();
 
             let grpc_message = response.trailers.get("grpc-message");
             let verdict = if let Some(MetadataValue::Ascii(encoded)) = grpc_message {
-                // Verify it's base64-encoded (not the original non-ASCII string)
-                if encoded != non_ascii_message {
-                    // Try to decode and check if it matches original
-                    if let Ok(decoded) = base64::decode(encoded) {
-                        if String::from_utf8(decoded)
-                            .map(|s| s == non_ascii_message)
-                            .unwrap_or(false)
-                        {
-                            TestVerdict::Pass
-                        } else {
-                            TestVerdict::Fail
-                        }
-                    } else {
-                        TestVerdict::Fail
-                    }
+                if encoded == "invalid%0D%0Arequest 100%25" && !encoded.contains(['\r', '\n']) {
+                    TestVerdict::Pass
                 } else {
-                    TestVerdict::Fail // Raw non-ASCII string, not encoded
+                    TestVerdict::Fail
                 }
             } else {
                 TestVerdict::Fail
             };
 
             let error_message = if verdict == TestVerdict::Fail {
-                Some("grpc-message with non-ASCII characters must be base64-encoded".to_string())
+                Some(
+                    "grpc-message must percent-encode reserved characters before forwarding"
+                        .to_string(),
+                )
             } else {
                 None
             };
 
             GrpcTrailerConformanceResult {
-                test_id: "grpc_message_base64_encoding_non_ascii".to_string(),
-                description: "grpc-message base64-encoded for non-ASCII characters".to_string(),
+                test_id: "grpc_message_percent_encoding_reserved_chars".to_string(),
+                description: "grpc-message percent-encoding for reserved characters".to_string(),
                 category: TestCategory::MessageEncoding,
                 requirement_level: RequirementLevel::Must,
                 verdict,
@@ -372,13 +363,13 @@ mod grpc_trailer_conformance_tests {
             }
         }
 
-        /// Test: grpc-message ASCII encoding (not base64).
+        /// Test: grpc-message ASCII forwarding without extra encoding.
         fn test_grpc_message_ascii_encoding(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
             let ascii_message = "not found";
-            let mut response = MockGrpcResponse::new()
-                .with_status(Status::with_message(Code::NotFound, ascii_message));
+            let mut response =
+                MockGrpcResponse::new().with_status(Status::new(Code::NotFound, ascii_message));
 
             response.build_response();
 
@@ -394,14 +385,17 @@ mod grpc_trailer_conformance_tests {
             };
 
             let error_message = if verdict == TestVerdict::Fail {
-                Some("grpc-message with ASCII characters should not be base64-encoded".to_string())
+                Some(
+                    "grpc-message without reserved characters should be forwarded verbatim"
+                        .to_string(),
+                )
             } else {
                 None
             };
 
             GrpcTrailerConformanceResult {
                 test_id: "grpc_message_ascii_encoding".to_string(),
-                description: "grpc-message ASCII encoding (not base64)".to_string(),
+                description: "grpc-message ASCII forwarding without extra encoding".to_string(),
                 category: TestCategory::MessageEncoding,
                 requirement_level: RequirementLevel::Must,
                 verdict,
@@ -414,7 +408,7 @@ mod grpc_trailer_conformance_tests {
         fn test_grpc_message_empty_handling(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new().with_status(Status::new(Code::Ok)); // No message
+            let mut response = MockGrpcResponse::new().with_status(Status::ok()); // No message
 
             response.build_response();
 
@@ -448,7 +442,7 @@ mod grpc_trailer_conformance_tests {
             let start = Instant::now();
 
             let mut response = MockGrpcResponse::new()
-                .with_status(Status::with_message(Code::Unauthenticated, "invalid token"));
+                .with_status(Status::new(Code::Unauthenticated, "invalid token"));
 
             // Don't add any data frames for immediate error
             response.build_response();
@@ -483,7 +477,7 @@ mod grpc_trailer_conformance_tests {
             let start = Instant::now();
 
             let mut response = MockGrpcResponse::new()
-                .with_status(Status::with_message(Code::InvalidArgument, "bad request"));
+                .with_status(Status::new(Code::InvalidArgument, "bad request"));
 
             response.build_response();
 
@@ -528,7 +522,7 @@ mod grpc_trailer_conformance_tests {
             let start = Instant::now();
 
             let response = MockGrpcResponse::new()
-                .with_status(Status::new(Code::Ok))
+                .with_status(Status::ok())
                 .with_data_frame(Bytes::from("response data"))
                 .with_rst_stream(0); // NO_ERROR = 0
 
@@ -562,8 +556,8 @@ mod grpc_trailer_conformance_tests {
         fn test_rst_stream_not_sent_for_trailer_only(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let response = MockGrpcResponse::new()
-                .with_status(Status::with_message(Code::NotFound, "not found"));
+            let response =
+                MockGrpcResponse::new().with_status(Status::new(Code::NotFound, "not found"));
             // No RST_STREAM for trailer-only
 
             let verdict = if response.is_trailer_only() && !response.has_rst_stream {
@@ -748,7 +742,7 @@ mod grpc_trailer_conformance_tests {
             let start = Instant::now();
 
             let mut response = MockGrpcResponse::new()
-                .with_status(Status::new(Code::Ok))
+                .with_status(Status::ok())
                 .with_data_frame(Bytes::from("data"));
 
             response.build_response();
@@ -789,7 +783,7 @@ mod grpc_trailer_conformance_tests {
             let start = Instant::now();
 
             let mut response = MockGrpcResponse::new()
-                .with_status(Status::new(Code::Ok))
+                .with_status(Status::ok())
                 .with_data_frame(Bytes::from("first"))
                 .with_data_frame(Bytes::from("second"));
 
@@ -825,10 +819,8 @@ mod grpc_trailer_conformance_tests {
         fn test_error_response_trailer_forwarding(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new().with_status(Status::with_message(
-                Code::Internal,
-                "database connection failed",
-            ));
+            let mut response = MockGrpcResponse::new()
+                .with_status(Status::new(Code::Internal, "database connection failed"));
 
             response.build_response();
 
@@ -878,42 +870,41 @@ mod grpc_trailer_conformance_tests {
         }
     }
 
-    // Helper function for base64 operations
-    mod base64 {
-        use base64::Engine;
-
-        pub fn encode(input: &[u8]) -> String {
-            base64::engine::general_purpose::STANDARD.encode(input)
-        }
-
-        pub fn decode(input: &str) -> Result<Vec<u8>, ()> {
-            base64::engine::general_purpose::STANDARD
-                .decode(input)
-                .map_err(|_| ())
-        }
-    }
-
     /// Re-export types for conformance system integration.
     pub use GrpcTrailerConformanceResult as GrpcConformanceResult;
 }
 
+pub use grpc_trailer_conformance_tests::{
+    GrpcConformanceResult, GrpcTrailerConformanceHarness, RequirementLevel, TestCategory,
+    TestVerdict,
+};
+
 // Tests that always run regardless of features
 #[test]
 fn grpc_trailer_conformance_suite_availability() {
-    println!("✓ gRPC trailer forwarding conformance test suite is available");
-    println!(
-        "✓ Covers: status trailer placement, message encoding, timeout parsing, RST_STREAM handling"
+    let harness = GrpcTrailerConformanceHarness::new();
+    let results = harness.run_all_tests();
+
+    assert!(
+        !results.is_empty(),
+        "gRPC trailer forwarding conformance suite should expose test cases"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|result| result.category == TestCategory::StatusTrailerPlacement),
+        "suite should cover grpc-status trailer placement"
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::grpc_trailer_conformance_tests::*;
+    use asupersync::grpc::status::{Code, Status};
 
     #[test]
     fn test_mock_grpc_response() {
-        let mut mock =
-            MockGrpcResponse::new().with_status(Status::with_message(Code::Ok, "success"));
+        let mut mock = MockGrpcResponse::new().with_status(Status::new(Code::Ok, "success"));
 
         mock.build_response();
 
@@ -951,7 +942,7 @@ mod tests {
 
     #[test]
     fn test_trailer_placement_validation() {
-        let mut response = MockGrpcResponse::new().with_status(Status::new(Code::Ok));
+        let mut response = MockGrpcResponse::new().with_status(Status::ok());
 
         // Valid: grpc-status in trailers only
         response.build_response();

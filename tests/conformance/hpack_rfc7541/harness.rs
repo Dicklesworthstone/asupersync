@@ -3,6 +3,7 @@
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::hpack::{Decoder, Encoder, Header};
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 /// Conformance test requirement level per RFC keywords.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -313,17 +314,43 @@ impl ConformanceTest for DynamicTableSizeUpdateTest {
     }
 
     fn run(&self, _harness: &HpackConformanceHarness) -> ConformanceTestResult {
-        // Note: This test would require access to encoder internals
-        // to verify size update frames are emitted. For now, mark as expected failure.
+        let start_time = Instant::now();
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+        encoder.set_max_table_size(256);
+
+        let headers = vec![Header::new(":method", "GET")];
+        let mut encoded = BytesMut::new();
+        encoder.encode(&headers, &mut encoded);
+
+        let mut decoder = Decoder::new();
+        decoder.set_allowed_table_size(256);
+        let mut src = encoded.freeze();
+        let decoded = decoder.decode(&mut src);
+
+        let verdict = if encoded.first().is_some_and(|byte| byte & 0xe0 == 0x20)
+            && matches!(decoded.as_ref(), Ok(decoded_headers) if *decoded_headers == headers)
+        {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
 
         ConformanceTestResult {
             test_id: self.id().to_string(),
             description: self.description().to_string(),
             category: self.category(),
             requirement_level: self.requirement_level(),
-            verdict: TestVerdict::ExpectedFailure,
-            error_message: Some("Internal table state not accessible for verification".to_string()),
-            execution_time_ms: 0,
+            verdict: verdict.clone(),
+            error_message: if verdict == TestVerdict::Fail {
+                Some(
+                    "encoder failed to emit a dynamic table size update that the decoder could consume"
+                        .to_string(),
+                )
+            } else {
+                None
+            },
+            execution_time_ms: start_time.elapsed().as_millis() as u64,
         }
     }
 }

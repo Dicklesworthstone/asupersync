@@ -868,3 +868,9 @@ fn tls_0rtt_conformance_suite_availability() {
         println!("  Run with: cargo test --features tls tls_0rtt_conformance");
     }
 }
+
+#[cfg(feature = "tls")]
+pub use tls_0rtt_tests::{
+    RequirementLevel, TestCategory, TestVerdict, Tls0RttConformanceHarness,
+    Tls0RttConformanceResult,
+};

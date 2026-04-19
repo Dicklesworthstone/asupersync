@@ -4,10 +4,9 @@
 //! focusing on chunked transfer-encoding edge cases and compliance.
 
 use asupersync::bytes::BytesMut;
-use asupersync::codec::{Decoder, Encoder};
+use asupersync::codec::Decoder;
 use asupersync::http::h1::codec::{Http1Codec, HttpError};
-use asupersync::http::h1::types::{Request, Response};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Requirement levels per RFC 2119.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

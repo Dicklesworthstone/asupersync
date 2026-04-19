@@ -668,8 +668,6 @@ mod linux_io_uring_tests {
 
 #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
 mod fallback_tests {
-    use std::io;
-
     #[test]
     fn test_buffer_pool_operations_unsupported_on_non_linux() {
         // On non-Linux platforms, registered buffer pool operations

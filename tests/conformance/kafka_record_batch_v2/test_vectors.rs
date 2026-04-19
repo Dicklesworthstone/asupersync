@@ -138,7 +138,7 @@ pub fn compressed_record_batch_gzip() -> Kip98TestVector {
             ),
         )
         .with_timestamp_delta(i * 10)
-        .with_offset_delta(i);
+        .with_offset_delta(i as i32);
 
         batch.add_record(record);
     }
@@ -248,7 +248,7 @@ pub fn offset_relationship() -> Kip98TestVector {
             Some(format!("offset-value-{}", i).into_bytes()),
         )
         .with_timestamp_delta(i * 5)
-        .with_offset_delta(i);
+        .with_offset_delta(i as i32);
 
         batch.add_record(record);
     }

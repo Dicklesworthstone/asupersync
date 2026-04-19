@@ -4,7 +4,7 @@
 //! per RFC 9112 Section 7.1, including chunk extensions, trailer fields,
 //! and error conditions.
 
-use super::harness::{H1ConformanceHarness, TestVerdict};
+use super::harness::H1ConformanceHarness;
 
 /// Test chunk extension parsing with various forms.
 #[test]

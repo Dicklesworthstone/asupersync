@@ -525,11 +525,7 @@ fn capture_connection_state(connection: &Connection) -> CapturedConnectionState 
         last_stream_id: 0,             // Would need access to internal state
         active_stream_count: 0,        // Would need access to stream store
         stream_states: HashMap::new(), // Would need access to individual streams
-        pending_frame_count: if connection.has_pending_frames() {
-            1
-        } else {
-            0
-        },
+        pending_frame_count: usize::from(connection.has_pending_frames()),
     }
 }
 

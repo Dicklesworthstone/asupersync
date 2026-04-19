@@ -1220,3 +1220,9 @@ fn race_loser_drain_metamorphic_suite_availability() {
         );
     }
 }
+
+#[cfg(feature = "deterministic-mode")]
+pub use race_loser_drain_metamorphic_tests::{
+    RaceLoserDrainMetamorphicHarness, RaceLoserDrainMetamorphicResult, RequirementLevel,
+    TestCategory, TestVerdict,
+};

@@ -31,13 +31,8 @@
 //! - **SHOULD** compose multiple extensions without conflicts
 //! - **MAY** optimize extension parameter values within spec limits
 
-use asupersync::net::websocket::{
-    WsUrl,
-    handshake::{ClientHandshake, HandshakeError, HandshakeResult, ServerHandshake},
-};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Test result for a single extension negotiation conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,7 +47,7 @@ pub struct WsExtensionConformanceResult {
 }
 
 /// Conformance test categories for WebSocket extension negotiation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TestCategory {
     /// Sec-WebSocket-Extensions header processing
     ExtensionHeaderProcessing,
@@ -121,8 +116,8 @@ impl MockExtensionNegotiation {
 
     /// Set negotiated extensions result.
     pub fn with_negotiated(mut self, extensions: Vec<String>) -> Self {
-        self.negotiated_extensions = extensions;
         self.negotiation_successful = !extensions.is_empty();
+        self.negotiated_extensions = extensions;
         self
     }
 

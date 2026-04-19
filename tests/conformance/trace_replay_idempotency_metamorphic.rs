@@ -29,13 +29,30 @@ mod trace_replay_idempotency_metamorphic_tests {
     use proptest::prelude::*;
     use std::collections::HashMap;
     use std::io::Write;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use tempfile::TempDir;
 
     /// Metamorphic test harness for trace replay idempotency properties.
     pub struct TraceReplayIdempotencyMetamorphicHarness {
         config: LabConfig,
+    }
+
+    struct TraceFileHandle {
+        _temp_dir: TempDir,
+        path: PathBuf,
+    }
+
+    impl TraceFileHandle {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl AsRef<Path> for TraceFileHandle {
+        fn as_ref(&self) -> &Path {
+            self.path()
+        }
     }
 
     /// Test category for trace replay idempotency metamorphic tests.
@@ -174,7 +191,7 @@ mod trace_replay_idempotency_metamorphic_tests {
             metadata: &TraceMetadata,
             events: &[ReplayEvent],
             config: TraceFileConfig,
-        ) -> Result<PathBuf, TraceFileError> {
+        ) -> Result<TraceFileHandle, TraceFileError> {
             let temp_dir = TempDir::new().map_err(|e| TraceFileError::Io(e))?;
             let path = temp_dir.path().join("test_trace.bin");
 
@@ -187,16 +204,16 @@ mod trace_replay_idempotency_metamorphic_tests {
 
             writer.finish()?;
 
-            // Keep temp_dir alive by moving it to a static location
-            std::mem::forget(temp_dir);
-
-            Ok(path)
+            Ok(TraceFileHandle {
+                _temp_dir: temp_dir,
+                path,
+            })
         }
 
         /// Reads events from a trace file.
         fn read_trace_file(
             &self,
-            path: &PathBuf,
+            path: &Path,
         ) -> Result<(TraceMetadata, Vec<ReplayEvent>), TraceFileError> {
             let reader = TraceReader::open(path)?;
             let metadata = reader.metadata().clone();
@@ -205,11 +222,20 @@ mod trace_replay_idempotency_metamorphic_tests {
             Ok((metadata, events))
         }
 
+        fn run_metamorphic_test<F>(&self, test_name: &str, test_fn: F) -> Result<(), String>
+        where
+            F: FnOnce(&LabConfig) -> Result<(), proptest::test_runner::TestCaseError>,
+        {
+            test_fn(&self.config)
+                .map_err(|test_error| format!("Test {} failed: {}", test_name, test_error))
+        }
+
         /// MR1: replay(record(execution)) ≡ execution for deterministic runs
         fn run_replay_fidelity_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, event_count in 10usize..100)| {
+            let test_result = self.run_metamorphic_test("replay_fidelity", |_| {
+                proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, event_count in 10usize..100)| {
                 let metadata = TraceMetadata::new(seed);
                 let original_events = self.create_sample_trace(seed, event_count);
 
@@ -219,7 +245,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                     .map_err(|e| TestCaseError::fail(format!("Failed to write trace: {}", e)))?;
 
                 // Replay from trace file
-                let (replayed_metadata, replayed_events) = self.read_trace_file(&trace_path)
+                let (replayed_metadata, replayed_events) = self.read_trace_file(trace_path.path())
                     .map_err(|e| TestCaseError::fail(format!("Failed to read trace: {}", e)))?;
 
                 // Verify metadata fidelity
@@ -234,6 +260,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                 }
 
                 Ok(())
+                })
             });
 
             let execution_time_ms = start.elapsed().as_millis() as u64;
@@ -266,7 +293,8 @@ mod trace_replay_idempotency_metamorphic_tests {
         fn run_idempotent_replay_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, event_count in 10usize..100)| {
+            let test_result = self.run_metamorphic_test("idempotent_replay", |_| {
+                proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, event_count in 10usize..100)| {
                 let metadata = TraceMetadata::new(seed);
                 let original_events = self.create_sample_trace(seed, event_count);
 
@@ -275,14 +303,14 @@ mod trace_replay_idempotency_metamorphic_tests {
                 let trace1_path = self.write_trace_file(&metadata, &original_events, config)
                     .map_err(|e| TestCaseError::fail(format!("Failed first write: {}", e)))?;
 
-                let (replayed_metadata1, replayed_events1) = self.read_trace_file(&trace1_path)
+                let (replayed_metadata1, replayed_events1) = self.read_trace_file(trace1_path.path())
                     .map_err(|e| TestCaseError::fail(format!("Failed first read: {}", e)))?;
 
                 // Second record-replay cycle (replay the replayed events)
                 let trace2_path = self.write_trace_file(&replayed_metadata1, &replayed_events1, config)
                     .map_err(|e| TestCaseError::fail(format!("Failed second write: {}", e)))?;
 
-                let (replayed_metadata2, replayed_events2) = self.read_trace_file(&trace2_path)
+                let (replayed_metadata2, replayed_events2) = self.read_trace_file(trace2_path.path())
                     .map_err(|e| TestCaseError::fail(format!("Failed second read: {}", e)))?;
 
                 // Verify idempotency: replay(replay(x)) = replay(x)
@@ -298,6 +326,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                 prop_assert_eq!(trace1_bytes, trace2_bytes, "Trace files are not byte-identical after second replay");
 
                 Ok(())
+                })
             });
 
             let execution_time_ms = start.elapsed().as_millis() as u64;
@@ -328,7 +357,8 @@ mod trace_replay_idempotency_metamorphic_tests {
         fn run_truncation_handling_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(500), |(seed in 0u64..1000, event_count in 20usize..100, truncate_at in 50usize..90)| {
+            let test_result = self.run_metamorphic_test("truncation_handling", |_| {
+                proptest!(ProptestConfig::with_cases(500), |(seed in 0u64..1000, event_count in 20usize..100, truncate_at in 50usize..90)| {
                 let metadata = TraceMetadata::new(seed);
                 let original_events = self.create_sample_trace(seed, event_count);
 
@@ -338,7 +368,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                     .map_err(|e| TestCaseError::fail(format!("Failed to write full trace: {}", e)))?;
 
                 // Read the file and truncate it at random position
-                let full_bytes = std::fs::read(&full_trace_path)
+                let full_bytes = std::fs::read(full_trace_path.path())
                     .map_err(|e| TestCaseError::fail(format!("Failed to read full trace bytes: {}", e)))?;
 
                 if truncate_at < full_bytes.len() {
@@ -371,10 +401,10 @@ mod trace_replay_idempotency_metamorphic_tests {
                         }
                     }
 
-                    std::mem::forget(temp_dir);
                 }
 
                 Ok(())
+                })
             });
 
             let execution_time_ms = start.elapsed().as_millis() as u64;
@@ -409,7 +439,8 @@ mod trace_replay_idempotency_metamorphic_tests {
         fn run_epoch_boundary_ordering_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, epoch_count in 3usize..10)| {
+            let test_result = self.run_metamorphic_test("epoch_boundary_ordering", |_| {
+                proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, epoch_count in 3usize..10)| {
                 let metadata = TraceMetadata::new(seed);
                 let mut events = Vec::new();
 
@@ -453,7 +484,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                 let trace_path = self.write_trace_file(&metadata, &events, config)
                     .map_err(|e| TestCaseError::fail(format!("Failed to write trace: {}", e)))?;
 
-                let (_, replayed_events) = self.read_trace_file(&trace_path)
+                let (_, replayed_events) = self.read_trace_file(trace_path.path())
                     .map_err(|e| TestCaseError::fail(format!("Failed to read trace: {}", e)))?;
 
                 // Verify temporal ordering is preserved
@@ -487,6 +518,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                 }
 
                 Ok(())
+                })
             });
 
             let execution_time_ms = start.elapsed().as_millis() as u64;
@@ -519,7 +551,8 @@ mod trace_replay_idempotency_metamorphic_tests {
         fn run_cross_region_joining_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, region_count in 2usize..6, events_per_region in 5usize..15)| {
+            let test_result = self.run_metamorphic_test("cross_region_joining", |_| {
+                proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, region_count in 2usize..6, events_per_region in 5usize..15)| {
                 let metadata = TraceMetadata::new(seed);
                 let mut events = Vec::new();
 
@@ -578,7 +611,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                 let trace_path = self.write_trace_file(&metadata, &events, config)
                     .map_err(|e| TestCaseError::fail(format!("Failed to write trace: {}", e)))?;
 
-                let (_, replayed_events) = self.read_trace_file(&trace_path)
+                let (_, replayed_events) = self.read_trace_file(trace_path.path())
                     .map_err(|e| TestCaseError::fail(format!("Failed to read trace: {}", e)))?;
 
                 // Verify cross-region joining correctness
@@ -613,6 +646,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                 prop_assert_eq!(events.len(), replayed_events.len(), "Total event count changed");
 
                 Ok(())
+                })
             });
 
             let execution_time_ms = start.elapsed().as_millis() as u64;
@@ -661,9 +695,9 @@ mod trace_replay_idempotency_metamorphic_tests {
                     .map_err(|e| TestCaseError::fail(format!("Failed to write compressed: {}", e)))?;
 
                 // Read both back
-                let (uncompressed_meta, uncompressed_events) = self.read_trace_file(&uncompressed_path)
+                let (uncompressed_meta, uncompressed_events) = self.read_trace_file(uncompressed_path.path())
                     .map_err(|e| TestCaseError::fail(format!("Failed to read uncompressed: {}", e)))?;
-                let (compressed_meta, compressed_events) = self.read_trace_file(&compressed_path)
+                let (compressed_meta, compressed_events) = self.read_trace_file(compressed_path.path())
                     .map_err(|e| TestCaseError::fail(format!("Failed to read compressed: {}", e)))?;
 
                 // Verify compression roundtrip preserves data
@@ -704,7 +738,8 @@ mod trace_replay_idempotency_metamorphic_tests {
         fn run_metadata_consistency_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000)| {
+            let test_result = self.run_metamorphic_test("metadata_consistency", |_| {
+                proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000)| {
                 let original_metadata = TraceMetadata::new(seed)
                     .with_config_hash(0x123456789ABCDEF0)
                     .with_description("test trace for metadata consistency");
@@ -720,7 +755,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                     let trace_path = self.write_trace_file(&current_metadata, &current_events, config)
                         .map_err(|e| TestCaseError::fail(format!("Failed to write iteration {}: {}", iteration, e)))?;
 
-                    let (read_metadata, read_events) = self.read_trace_file(&trace_path)
+                    let (read_metadata, read_events) = self.read_trace_file(trace_path.path())
                         .map_err(|e| TestCaseError::fail(format!("Failed to read iteration {}: {}", iteration, e)))?;
 
                     // Verify metadata is preserved
@@ -734,6 +769,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                 }
 
                 Ok(())
+                })
             });
 
             let execution_time_ms = start.elapsed().as_millis() as u64;
@@ -766,7 +802,8 @@ mod trace_replay_idempotency_metamorphic_tests {
         ) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, event_count in 20usize..100)| {
+            let test_result = self.run_metamorphic_test("event_ordering_preservation", |_| {
+                proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, event_count in 20usize..100)| {
                 let metadata = TraceMetadata::new(seed);
                 let mut events = self.create_sample_trace(seed, event_count);
 
@@ -784,7 +821,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                 let trace_path = self.write_trace_file(&metadata, &events, config)
                     .map_err(|e| TestCaseError::fail(format!("Failed to write trace: {}", e)))?;
 
-                let (_, replayed_events) = self.read_trace_file(&trace_path)
+                let (_, replayed_events) = self.read_trace_file(trace_path.path())
                     .map_err(|e| TestCaseError::fail(format!("Failed to read trace: {}", e)))?;
 
                 // Verify strict event ordering preservation
@@ -808,6 +845,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                 }
 
                 Ok(())
+                })
             });
 
             let execution_time_ms = start.elapsed().as_millis() as u64;
@@ -842,7 +880,8 @@ mod trace_replay_idempotency_metamorphic_tests {
 
             // This is a simpler test since we can't easily create invalid schema versions
             // But we can verify current schema consistency
-            let test_result = proptest!(ProptestConfig::with_cases(100), |(seed in 0u64..1000)| {
+            let test_result = self.run_metamorphic_test("schema_version_compatibility", |_| {
+                proptest!(ProptestConfig::with_cases(100), |(seed in 0u64..1000)| {
                 let metadata = TraceMetadata::new(seed);
                 let events = self.create_sample_trace(seed, 30);
 
@@ -858,7 +897,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                 let trace_path = self.write_trace_file(&metadata, &events, config)
                     .map_err(|e| TestCaseError::fail(format!("Failed to write trace: {}", e)))?;
 
-                let (read_metadata, _) = self.read_trace_file(&trace_path)
+                let (read_metadata, _) = self.read_trace_file(trace_path.path())
                     .map_err(|e| TestCaseError::fail(format!("Failed to read trace: {}", e)))?;
 
                 // Verify compatibility is preserved
@@ -868,6 +907,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                     "Schema version should be preserved");
 
                 Ok(())
+                })
             });
 
             let execution_time_ms = start.elapsed().as_millis() as u64;
@@ -898,7 +938,8 @@ mod trace_replay_idempotency_metamorphic_tests {
         fn run_concurrent_region_replay_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(500), |(seed in 0u64..1000)| {
+            let test_result = self.run_metamorphic_test("concurrent_region_replay", |_| {
+                proptest!(ProptestConfig::with_cases(500), |(seed in 0u64..1000)| {
                 let metadata = TraceMetadata::new(seed);
                 let mut events = Vec::new();
 
@@ -962,7 +1003,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                     let trace_path = self.write_trace_file(&metadata, &events, config)
                         .map_err(|e| TestCaseError::fail(format!("Failed to write replay {}: {}", replay_num, e)))?;
 
-                    let (_, replayed_events) = self.read_trace_file(&trace_path)
+                    let (_, replayed_events) = self.read_trace_file(trace_path.path())
                         .map_err(|e| TestCaseError::fail(format!("Failed to read replay {}: {}", replay_num, e)))?;
 
                     all_replays.push(replayed_events);
@@ -974,6 +1015,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                 }
 
                 Ok(())
+                })
             });
 
             let execution_time_ms = start.elapsed().as_millis() as u64;
@@ -1006,7 +1048,8 @@ mod trace_replay_idempotency_metamorphic_tests {
         ) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(500), |(seed in 0u64..1000, event_count in 50usize..200)| {
+            let test_result = self.run_metamorphic_test("streaming_vs_batch_equivalence", |_| {
+                proptest!(ProptestConfig::with_cases(500), |(seed in 0u64..1000, event_count in 50usize..200)| {
                 let metadata = TraceMetadata::new(seed);
                 let events = self.create_sample_trace(seed, event_count);
 
@@ -1015,7 +1058,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                     .map_err(|e| TestCaseError::fail(format!("Failed to write trace: {}", e)))?;
 
                 // Read via batch method (all at once)
-                let (batch_metadata, batch_events) = self.read_trace_file(&trace_path)
+                let (batch_metadata, batch_events) = self.read_trace_file(trace_path.path())
                     .map_err(|e| TestCaseError::fail(format!("Failed batch read: {}", e)))?;
 
                 // Read via streaming method (one by one)
@@ -1036,6 +1079,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                 }
 
                 Ok(())
+                })
             });
 
             let execution_time_ms = start.elapsed().as_millis() as u64;
@@ -1068,7 +1112,8 @@ mod trace_replay_idempotency_metamorphic_tests {
         ) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000)| {
+            let test_result = self.run_metamorphic_test("temporal_causality_preservation", |_| {
+                proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000)| {
                 let metadata = TraceMetadata::new(seed);
                 let mut events = Vec::new();
 
@@ -1148,7 +1193,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                 let trace_path = self.write_trace_file(&metadata, &events, config)
                     .map_err(|e| TestCaseError::fail(format!("Failed to write trace: {}", e)))?;
 
-                let (_, replayed_events) = self.read_trace_file(&trace_path)
+                let (_, replayed_events) = self.read_trace_file(trace_path.path())
                     .map_err(|e| TestCaseError::fail(format!("Failed to read trace: {}", e)))?;
 
                 // Verify causality is preserved in replay
@@ -1195,6 +1240,7 @@ mod trace_replay_idempotency_metamorphic_tests {
                 }
 
                 Ok(())
+                })
             });
 
             let execution_time_ms = start.elapsed().as_millis() as u64;
@@ -1251,5 +1297,69 @@ fn trace_replay_idempotency_metamorphic_suite_availability() {
         println!(
             "  Run with: cargo test --features deterministic-mode trace_replay_idempotency_metamorphic"
         );
+    }
+}
+
+#[cfg(feature = "deterministic-mode")]
+pub use trace_replay_idempotency_metamorphic_tests::{
+    RequirementLevel, TestCategory, TestVerdict, TraceReplayIdempotencyMetamorphicHarness,
+    TraceReplayIdempotencyMetamorphicResult,
+};
+
+#[cfg(not(feature = "deterministic-mode"))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestCategory {
+    ReplayFidelity,
+    IdempotentReplay,
+    TruncationHandling,
+    EpochBoundaryOrdering,
+    CrossRegionJoining,
+}
+
+#[cfg(not(feature = "deterministic-mode"))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementLevel {
+    Must,
+    Should,
+    May,
+}
+
+#[cfg(not(feature = "deterministic-mode"))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestVerdict {
+    Pass,
+    Fail,
+    Skipped,
+    ExpectedFailure,
+}
+
+#[cfg(not(feature = "deterministic-mode"))]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TraceReplayIdempotencyMetamorphicResult {
+    pub test_id: String,
+    pub description: String,
+    pub category: TestCategory,
+    pub requirement_level: RequirementLevel,
+    pub verdict: TestVerdict,
+    pub error_message: Option<String>,
+    pub execution_time_ms: u64,
+}
+
+#[cfg(not(feature = "deterministic-mode"))]
+pub struct TraceReplayIdempotencyMetamorphicHarness;
+
+#[cfg(not(feature = "deterministic-mode"))]
+impl TraceReplayIdempotencyMetamorphicHarness {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    #[must_use]
+    pub fn run_all_tests(&self) -> Vec<TraceReplayIdempotencyMetamorphicResult> {
+        Vec::new()
     }
 }

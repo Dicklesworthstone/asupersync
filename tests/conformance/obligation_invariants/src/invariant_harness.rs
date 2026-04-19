@@ -522,7 +522,7 @@ mod tests {
         }
 
         // Use futures executor to run async test in sync context
-        let result = futures::executor::block_on(harness.run_test(PassingTest));
+        let result = futures_lite::future::block_on(harness.run_test(PassingTest));
         assert_eq!(result.outcome, TestOutcome::Pass);
         assert_eq!(result.test_name, "passing_test");
     }

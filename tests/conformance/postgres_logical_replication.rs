@@ -50,7 +50,7 @@ pub struct PgLogicalReplicationResult {
 }
 
 /// Conformance test categories for PostgreSQL logical replication.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TestCategory {
     TransactionBoundaries,
     TupleFormat,

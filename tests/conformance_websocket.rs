@@ -136,7 +136,7 @@ fn test_rfc6455_sec_websocket_key_validation() {
         );
 
         let request = HttpRequest::parse(request_data.as_bytes())
-            .expect(&format!("Valid request {} should parse", i));
+            .unwrap_or_else(|_| panic!("Valid request {} should parse", i));
 
         let result = server.accept(&request);
         assert!(
@@ -181,7 +181,7 @@ fn test_rfc6455_sec_websocket_key_validation() {
         );
 
         let request = HttpRequest::parse(request_data.as_bytes())
-            .expect(&format!("Request should parse for {}", description));
+            .unwrap_or_else(|_| panic!("Request should parse for {}", description));
 
         let result = server.accept(&request);
         assert!(
@@ -247,7 +247,7 @@ fn test_rfc6455_sec_websocket_version_must_be_13() {
         );
 
         let request = HttpRequest::parse(request_data.as_bytes())
-            .expect(&format!("Request should parse for {}", description));
+            .unwrap_or_else(|_| panic!("Request should parse for {}", description));
 
         let result = server.accept(&request);
         assert!(
@@ -580,15 +580,15 @@ fn test_rfc6455_subprotocol_negotiation() {
             protocol_header
         );
 
-        let request = HttpRequest::parse(request_data.as_bytes()).expect(&format!(
-            "Protocol header '{}' should parse",
-            protocol_header
-        ));
+        let request = HttpRequest::parse(request_data.as_bytes())
+            .unwrap_or_else(|_| panic!("Protocol header '{}' should parse", protocol_header));
 
-        let accept = server_chat.accept(&request).expect(&format!(
-            "Protocol negotiation should succeed for '{}'",
-            protocol_header
-        ));
+        let accept = server_chat.accept(&request).unwrap_or_else(|_| {
+            panic!(
+                "Protocol negotiation should succeed for '{}'",
+                protocol_header
+            )
+        });
 
         assert_eq!(
             accept.protocol,
@@ -849,10 +849,8 @@ fn test_rfc6455_status_101_switching_protocols() {
             status_code, status_text
         );
 
-        let response = HttpResponse::parse(invalid_response.as_bytes()).expect(&format!(
-            "Response with status {} should parse",
-            status_code
-        ));
+        let response = HttpResponse::parse(invalid_response.as_bytes())
+            .unwrap_or_else(|_| panic!("Response with status {} should parse", status_code));
 
         let validation_result = client_with_test_key.validate_response(&response);
         assert!(
@@ -907,7 +905,7 @@ fn test_rfc6455_status_101_switching_protocols() {
 
     for (response_data, expected_header, description) in missing_header_tests {
         let response = HttpResponse::parse(response_data.as_bytes())
-            .expect(&format!("Response should parse: {}", description));
+            .unwrap_or_else(|_| panic!("Response should parse: {}", description));
 
         let validation_result = client_simple.validate_response(&response);
         assert!(

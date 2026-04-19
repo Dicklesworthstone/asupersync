@@ -3,7 +3,7 @@
 //! Contains known-good test cases from RFC examples and edge cases
 //! that implementations should handle correctly.
 
-use super::harness::{DecodedRequest, H1ConformanceHarness};
+use super::harness::H1ConformanceHarness;
 
 /// RFC 9112 Example chunked request from Section 7.1.
 pub const RFC9112_EXAMPLE_CHUNKED: &[u8] = concat!(

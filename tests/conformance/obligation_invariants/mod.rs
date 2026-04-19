@@ -33,8 +33,9 @@ pub mod temporal_safety {
 
 // Re-export main testing infrastructure
 pub use src::{
-    InvariantTestCategory, InvariantTestConfig, InvariantTestResult, ObligationInvariantHarness,
-    ObligationInvariantTest, ObligationTracker, TestOutcome,
+    InvariantTestCategory, InvariantTestConfig, InvariantTestResult, InvariantViolationType,
+    ObligationInvariantHarness, ObligationInvariantTest, ObligationTracker, ResourceHandle,
+    TestOutcome, WakerHandle,
 };
 
 // Re-export specific test implementations

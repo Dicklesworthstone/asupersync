@@ -14,5 +14,5 @@ pub use invariant_harness::{
 };
 pub use obligation_tracker::{
     InvariantViolation, InvariantViolationType, ObligationMetadata, ObligationTracker,
-    ResourceHandle, ResourceTracker,
+    ResourceHandle, ResourceTracker, WakerHandle,
 };

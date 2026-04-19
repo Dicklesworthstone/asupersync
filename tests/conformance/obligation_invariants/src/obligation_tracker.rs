@@ -187,9 +187,7 @@ impl ObligationTracker {
     pub fn track_obligation_resolution(&self, obligation_id: ObligationId) {
         let mut inner = self.inner.lock().unwrap();
 
-        if let Some(metadata) = inner.active_obligations.get_mut(&obligation_id) {
-            metadata.state = ObligationState::Resolved;
-
+        if let Some(metadata) = inner.active_obligations.remove(&obligation_id) {
             // Validate resource cleanup
             if !metadata.resources.is_empty() {
                 let violation = InvariantViolation {
@@ -199,16 +197,13 @@ impl ObligationTracker {
                     detection_time: Instant::now(),
                     description: format!(
                         "Obligation {} resolved with {} uncleaned resources",
-                        obligation_id.0,
+                        obligation_id,
                         metadata.resources.len()
                     ),
                     stack_trace: None,
                 };
                 inner.invariant_violations.push(violation);
             }
-
-            // Remove from active tracking
-            inner.active_obligations.remove(&obligation_id);
 
             // Remove from parent region
             if let Some(region) = inner
@@ -292,7 +287,7 @@ impl ObligationTracker {
                     detection_time: Instant::now(),
                     description: format!(
                         "Region {} close initiated with {} active obligations",
-                        region_id.0, active_count
+                        region_id, active_count
                     ),
                     stack_trace: None,
                 };
@@ -317,7 +312,7 @@ impl ObligationTracker {
                     detection_time: Instant::now(),
                     description: format!(
                         "Region {} closed with {} unresolved obligations",
-                        region_id.0,
+                        region_id,
                         region.obligations.len()
                     ),
                     stack_trace: None,
@@ -484,7 +479,7 @@ impl ObligationTracker {
                         detection_time: Instant::now(),
                         description: format!(
                             "Obligation {} active for {:?}, potential leak",
-                            obligation_id.0, age
+                            obligation_id, age
                         ),
                         stack_trace: None,
                     });
@@ -506,7 +501,7 @@ impl ObligationTracker {
                     detection_time: Instant::now(),
                     description: format!(
                         "Obligation {} has {} leaked resources after completion",
-                        obligation_id.0,
+                        obligation_id,
                         metadata.resources.len()
                     ),
                     stack_trace: None,

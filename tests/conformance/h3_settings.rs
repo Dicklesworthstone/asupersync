@@ -12,19 +12,18 @@ use proptest::prelude::*;
 use std::collections::HashMap;
 
 use asupersync::http::h3_native::{
-    H3ConnectionState, H3ConnectionConfig, H3ControlState, H3Frame, H3NativeError,
-    H3QpackMode, H3Settings, UnknownSetting,
-    H3_SETTING_QPACK_MAX_TABLE_CAPACITY, H3_SETTING_MAX_FIELD_SECTION_SIZE,
-    H3_SETTING_QPACK_BLOCKED_STREAMS, H3_SETTING_ENABLE_CONNECT_PROTOCOL,
-    H3_SETTING_H3_DATAGRAM
+    H3_SETTING_ENABLE_CONNECT_PROTOCOL, H3_SETTING_H3_DATAGRAM, H3_SETTING_MAX_FIELD_SECTION_SIZE,
+    H3_SETTING_QPACK_BLOCKED_STREAMS, H3_SETTING_QPACK_MAX_TABLE_CAPACITY, H3ConnectionConfig,
+    H3ConnectionState, H3ControlState, H3Frame, H3NativeError, H3QpackMode, H3Settings,
+    UnknownSetting,
 };
 
 /// GREASE setting identifiers for testing unknown setting tolerance.
 /// These follow the pattern for HTTP/3 GREASE values.
 const GREASE_SETTINGS: &[u64] = &[
-    0x15, 0x2A, 0x3F, 0x54, 0x69, 0x7E, 0x93, 0xA8, 0xBD, 0xD2, 0xE7, 0xFC,
-    0x111, 0x126, 0x13B, 0x150, 0x165, 0x17A, 0x18F, 0x1A4, 0x1B9, 0x1CE,
-    0x1E3, 0x1F8, 0x20D, 0x222, 0x237, 0x24C, 0x261, 0x276, 0x28B, 0x2A0,
+    0x15, 0x2A, 0x3F, 0x54, 0x69, 0x7E, 0x93, 0xA8, 0xBD, 0xD2, 0xE7, 0xFC, 0x111, 0x126, 0x13B,
+    0x150, 0x165, 0x17A, 0x18F, 0x1A4, 0x1B9, 0x1CE, 0x1E3, 0x1F8, 0x20D, 0x222, 0x237, 0x24C,
+    0x261, 0x276, 0x28B, 0x2A0,
 ];
 
 /// Maximum reasonable field section size for testing (1MB)
@@ -57,16 +56,24 @@ impl Arbitrary for SettingsTestCase {
             arbitrary_qpack_mode(),
             any::<bool>(),
         )
-        .prop_map(|(settings, unknown_settings, include_duplicates, qpack_mode, test_control_stream_only)| {
-            SettingsTestCase {
-                settings,
-                unknown_settings,
-                include_duplicates,
-                qpack_mode,
-                test_control_stream_only,
-            }
-        })
-        .boxed()
+            .prop_map(
+                |(
+                    settings,
+                    unknown_settings,
+                    include_duplicates,
+                    qpack_mode,
+                    test_control_stream_only,
+                )| {
+                    SettingsTestCase {
+                        settings,
+                        unknown_settings,
+                        include_duplicates,
+                        qpack_mode,
+                        test_control_stream_only,
+                    }
+                },
+            )
+            .boxed()
     }
 }
 
@@ -74,37 +81,48 @@ fn arbitrary_h3_settings() -> BoxedStrategy<H3Settings> {
     (
         prop::option::of(0u64..=65536), // qpack_max_table_capacity
         prop::option::of(1u64..=MAX_REASONABLE_FIELD_SECTION_SIZE), // max_field_section_size
-        prop::option::of(0u64..=1000), // qpack_blocked_streams
+        prop::option::of(0u64..=1000),  // qpack_blocked_streams
         prop::option::of(any::<bool>()), // enable_connect_protocol
         prop::option::of(any::<bool>()), // h3_datagram
     )
-    .prop_map(|(qpack_max_table_capacity, max_field_section_size, qpack_blocked_streams, enable_connect_protocol, h3_datagram)| {
-        H3Settings {
-            qpack_max_table_capacity,
-            max_field_section_size,
-            qpack_blocked_streams,
-            enable_connect_protocol,
-            h3_datagram,
-            unknown: Vec::new(), // Will be filled separately
-        }
-    })
-    .boxed()
+        .prop_map(
+            |(
+                qpack_max_table_capacity,
+                max_field_section_size,
+                qpack_blocked_streams,
+                enable_connect_protocol,
+                h3_datagram,
+            )| {
+                H3Settings {
+                    qpack_max_table_capacity,
+                    max_field_section_size,
+                    qpack_blocked_streams,
+                    enable_connect_protocol,
+                    h3_datagram,
+                    unknown: Vec::new(), // Will be filled separately
+                }
+            },
+        )
+        .boxed()
 }
 
 fn arbitrary_unknown_setting() -> BoxedStrategy<UnknownSetting> {
     prop_oneof![
         // GREASE values
-        prop::sample::select(GREASE_SETTINGS.to_vec()).prop_map(|id| UnknownSetting { id, value: 0 }),
+        prop::sample::select(GREASE_SETTINGS.to_vec())
+            .prop_map(|id| UnknownSetting { id, value: 0 }),
         // Random unknown settings (avoiding known setting IDs)
         (0x100u64..=0xFFFF, 0u64..=0xFFFF).prop_map(|(id, value)| UnknownSetting { id, value }),
-    ].boxed()
+    ]
+    .boxed()
 }
 
 fn arbitrary_qpack_mode() -> BoxedStrategy<H3QpackMode> {
     prop_oneof![
         Just(H3QpackMode::StaticOnly),
         Just(H3QpackMode::DynamicTableAllowed),
-    ].boxed()
+    ]
+    .boxed()
 }
 
 /// MR1: QPACK Parameter Consistency
@@ -124,7 +142,10 @@ fn mr_qpack_parameter_consistency(test_case: &SettingsTestCase) {
     if table_capacity == 0 && blocked_streams > 0 {
         // This configuration is logically inconsistent but allowed by spec
         // We test that it's handled gracefully
-        let config = H3ConnectionConfig { qpack_mode: test_case.qpack_mode };
+        let config = H3ConnectionConfig {
+            qpack_mode: test_case.qpack_mode,
+            ..H3ConnectionConfig::default()
+        };
         let mut connection = H3ConnectionState::new();
         connection.set_config(config);
 
@@ -134,7 +155,10 @@ fn mr_qpack_parameter_consistency(test_case: &SettingsTestCase) {
 
     // Test StaticOnly mode enforcement
     if test_case.qpack_mode == H3QpackMode::StaticOnly {
-        let config = H3ConnectionConfig { qpack_mode: H3QpackMode::StaticOnly };
+        let config = H3ConnectionConfig {
+            qpack_mode: H3QpackMode::StaticOnly,
+            ..H3ConnectionConfig::default()
+        };
         let mut connection = H3ConnectionState::new();
         connection.set_config(config);
 
@@ -163,10 +187,12 @@ fn mr_qpack_parameter_consistency(test_case: &SettingsTestCase) {
 
     // Test encode/decode round-trip preservation
     let mut encoded_payload = Vec::new();
-    settings.encode_payload(&mut encoded_payload).expect("Encoding should succeed");
+    settings
+        .encode_payload(&mut encoded_payload)
+        .expect("Encoding should succeed");
 
-    let decoded_settings = H3Settings::decode_payload(&encoded_payload)
-        .expect("Decoding should succeed");
+    let decoded_settings =
+        H3Settings::decode_payload(&encoded_payload).expect("Decoding should succeed");
 
     assert_eq!(
         settings.qpack_max_table_capacity, decoded_settings.qpack_max_table_capacity,
@@ -191,10 +217,12 @@ fn mr_max_field_section_size_enforcement(test_case: &SettingsTestCase) {
     if let Some(max_size) = settings.max_field_section_size {
         // Test encode/decode preservation
         let mut encoded_payload = Vec::new();
-        settings.encode_payload(&mut encoded_payload).expect("Encoding should succeed");
+        settings
+            .encode_payload(&mut encoded_payload)
+            .expect("Encoding should succeed");
 
-        let decoded_settings = H3Settings::decode_payload(&encoded_payload)
-            .expect("Decoding should succeed");
+        let decoded_settings =
+            H3Settings::decode_payload(&encoded_payload).expect("Decoding should succeed");
 
         assert_eq!(
             settings.max_field_section_size, decoded_settings.max_field_section_size,
@@ -213,14 +241,18 @@ fn mr_max_field_section_size_enforcement(test_case: &SettingsTestCase) {
         }
 
         // Test connection state respects the setting
-        let config = H3ConnectionConfig { qpack_mode: test_case.qpack_mode };
+        let config = H3ConnectionConfig {
+            qpack_mode: test_case.qpack_mode,
+            ..H3ConnectionConfig::default()
+        };
         let mut connection = H3ConnectionState::new();
         connection.set_config(config);
 
         let result = connection.on_control_frame(&H3Frame::Settings(settings.clone()));
         assert!(
             result.is_ok(),
-            "Valid max_field_section_size should be accepted: {:?}", result
+            "Valid max_field_section_size should be accepted: {:?}",
+            result
         );
     }
 }
@@ -272,10 +304,15 @@ fn mr_control_stream_only_restriction(test_case: &SettingsTestCase) {
     );
 
     match non_settings_result.unwrap_err() {
-        H3NativeError::ControlProtocol(msg) if msg.contains("first remote control frame must be SETTINGS") => {
+        H3NativeError::ControlProtocol(msg)
+            if msg.contains("first remote control frame must be SETTINGS") =>
+        {
             // Expected error
         }
-        other_error => panic!("Expected first frame SETTINGS error, got: {:?}", other_error),
+        other_error => panic!(
+            "Expected first frame SETTINGS error, got: {:?}",
+            other_error
+        ),
     }
 }
 
@@ -319,7 +356,8 @@ fn mr_duplicate_settings_rejection(test_case: &SettingsTestCase) {
         let decode_result = H3Settings::decode_payload(&payload);
         assert!(
             decode_result.is_err(),
-            "Duplicate setting ID 0x{:x} should be rejected", setting_id
+            "Duplicate setting ID 0x{:x} should be rejected",
+            setting_id
         );
 
         match decode_result.unwrap_err() {
@@ -391,7 +429,8 @@ fn mr_grease_value_tolerance(test_case: &SettingsTestCase) {
 
     // Verify GREASE/unknown settings are preserved
     assert_eq!(
-        decoded_settings.unknown.len(), grease_settings.len(),
+        decoded_settings.unknown.len(),
+        grease_settings.len(),
         "Number of unknown settings should be preserved"
     );
 
@@ -412,14 +451,18 @@ fn mr_grease_value_tolerance(test_case: &SettingsTestCase) {
     );
 
     // Test connection accepts GREASE values gracefully
-    let config = H3ConnectionConfig { qpack_mode: test_case.qpack_mode };
+    let config = H3ConnectionConfig {
+        qpack_mode: test_case.qpack_mode,
+        ..H3ConnectionConfig::default()
+    };
     let mut connection = H3ConnectionState::new();
     connection.set_config(config);
 
     let result = connection.on_control_frame(&H3Frame::Settings(decoded_settings));
     assert!(
         result.is_ok(),
-        "Connection should accept SETTINGS with GREASE values: {:?}", result
+        "Connection should accept SETTINGS with GREASE values: {:?}",
+        result
     );
 
     // Test that GREASE values don't interfere with known settings processing
@@ -483,7 +526,9 @@ mod rfc_9114_settings_tests {
         };
 
         let mut payload = Vec::new();
-        settings.encode_payload(&mut payload).expect("Encoding should succeed");
+        settings
+            .encode_payload(&mut payload)
+            .expect("Encoding should succeed");
 
         let decoded = H3Settings::decode_payload(&payload).expect("Decoding should succeed");
         assert_eq!(settings, decoded, "Settings should round-trip correctly");
@@ -495,7 +540,8 @@ mod rfc_9114_settings_tests {
         let mut payload = Vec::new();
 
         // Encode invalid boolean value (2) for ENABLE_CONNECT_PROTOCOL
-        asupersync::net::quic_core::encode_varint(H3_SETTING_ENABLE_CONNECT_PROTOCOL, &mut payload).unwrap();
+        asupersync::net::quic_core::encode_varint(H3_SETTING_ENABLE_CONNECT_PROTOCOL, &mut payload)
+            .unwrap();
         asupersync::net::quic_core::encode_varint(2u64, &mut payload).unwrap();
 
         let result = H3Settings::decode_payload(&payload);
@@ -527,30 +573,45 @@ mod rfc_9114_settings_tests {
         };
 
         let mut payload1 = Vec::new();
-        settings1.encode_payload(&mut payload1).expect("Encoding 1 should succeed");
+        settings1
+            .encode_payload(&mut payload1)
+            .expect("Encoding 1 should succeed");
 
         let mut payload2 = Vec::new();
-        settings2.encode_payload(&mut payload2).expect("Encoding 2 should succeed");
+        settings2
+            .encode_payload(&mut payload2)
+            .expect("Encoding 2 should succeed");
 
         let decoded1 = H3Settings::decode_payload(&payload1).expect("Decoding 1 should succeed");
         let decoded2 = H3Settings::decode_payload(&payload2).expect("Decoding 2 should succeed");
 
         // Both should have same logical content regardless of encoding order
-        assert_eq!(decoded1.max_field_section_size, decoded2.max_field_section_size);
-        assert_eq!(decoded1.qpack_max_table_capacity, decoded2.qpack_max_table_capacity);
+        assert_eq!(
+            decoded1.max_field_section_size,
+            decoded2.max_field_section_size
+        );
+        assert_eq!(
+            decoded1.qpack_max_table_capacity,
+            decoded2.qpack_max_table_capacity
+        );
     }
 
     #[test]
     fn rfc_9114_settings_unknown_preservation() {
         // Unknown settings must be preserved for future extensibility
-        let unknown_setting = UnknownSetting { id: 0xDEAD, value: 0xBEEF };
+        let unknown_setting = UnknownSetting {
+            id: 0xDEAD,
+            value: 0xBEEF,
+        };
         let settings = H3Settings {
             unknown: vec![unknown_setting.clone()],
             ..Default::default()
         };
 
         let mut payload = Vec::new();
-        settings.encode_payload(&mut payload).expect("Encoding should succeed");
+        settings
+            .encode_payload(&mut payload)
+            .expect("Encoding should succeed");
 
         let decoded = H3Settings::decode_payload(&payload).expect("Decoding should succeed");
 

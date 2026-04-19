@@ -61,7 +61,7 @@ pub struct H2ConformanceResult {
 }
 
 /// Conformance test categories for HTTP/2 frames.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TestCategory {
     /// RST_STREAM frame format validation
     RstStreamFormat,

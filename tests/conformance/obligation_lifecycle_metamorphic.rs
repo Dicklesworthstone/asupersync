@@ -13,19 +13,15 @@
 
 #[cfg(feature = "deterministic-mode")]
 mod obligation_lifecycle_metamorphic_tests {
-    use asupersync::cx::Cx;
     use asupersync::lab::config::LabConfig;
-    use asupersync::lab::runtime::LabRuntime;
-    use asupersync::obligation::ledger::{
-        LeakedObligation, LedgerStats, ObligationLedger, ObligationToken,
+    use asupersync::obligation::ledger::{LeakedObligation, LedgerStats, ObligationLedger};
+    use asupersync::record::{
+        ObligationAbortReason, ObligationKind, ObligationState, SourceLocation,
     };
-    use asupersync::obligation::recovery::{RecoveryConfig, RecoveryProtocol};
-    use asupersync::record::{ObligationAbortReason, ObligationKind, ObligationRecord};
-    use asupersync::types::{Budget, ObligationId, RegionId, TaskId, Time};
+    use asupersync::types::{ObligationId, RegionId, TaskId, Time};
     use asupersync::util::ArenaIndex;
     use proptest::prelude::*;
-    use std::collections::{BTreeMap, HashMap, HashSet};
-    use std::sync::Arc;
+    use std::collections::HashSet;
 
     /// Metamorphic test harness for obligation lifecycle properties.
     pub struct ObligationLifecycleMetamorphicHarness {
@@ -85,17 +81,6 @@ mod obligation_lifecycle_metamorphic_tests {
             region_id: RegionId,
             kind: ObligationKind,
         },
-        Commit {
-            obligation_id: ObligationId,
-        },
-        Abort {
-            obligation_id: ObligationId,
-            reason: ObligationAbortReason,
-        },
-        AbortById {
-            obligation_id: ObligationId,
-            reason: ObligationAbortReason,
-        },
     }
 
     /// Obligation system state snapshot for metamorphic testing.
@@ -106,6 +91,11 @@ mod obligation_lifecycle_metamorphic_tests {
         pub committed_obligations: HashSet<ObligationId>,
         pub aborted_obligations: HashSet<ObligationId>,
         pub leaked_obligations: Vec<LeakedObligation>,
+    }
+
+    #[track_caller]
+    fn source_location() -> SourceLocation {
+        SourceLocation::from_panic_location(std::panic::Location::caller())
     }
 
     impl ObligationLifecycleMetamorphicHarness {
@@ -171,10 +161,10 @@ mod obligation_lifecycle_metamorphic_tests {
                     task_id in any::<u32>().prop_map(|x| TaskId::from_arena(ArenaIndex::new(0, x))),
                     region_id in any::<u32>().prop_map(|x| RegionId::from_arena(ArenaIndex::new(0, x))),
                     kind in prop_oneof![
-                        Just(ObligationKind::Send),
+                        Just(ObligationKind::SendPermit),
                         Just(ObligationKind::Ack),
                         Just(ObligationKind::Lease),
-                        Just(ObligationKind::Io),
+                        Just(ObligationKind::IoOp),
                     ]
                 )| {
                     iterations += 1;
@@ -184,19 +174,23 @@ mod obligation_lifecycle_metamorphic_tests {
                     let mut ledger2 = ObligationLedger::new();
 
                     // Acquire obligation in both ledgers
-                    let token1 = ledger1.acquire(
+                    let token1 = ledger1.acquire_with_context(
+                        kind,
                         task_id,
                         region_id,
-                        kind,
                         Time::from_nanos(100),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
-                    let token2 = ledger2.acquire(
+                    let token2 = ledger2.acquire_with_context(
+                        kind,
                         task_id,
                         region_id,
-                        kind,
                         Time::from_nanos(100),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
 
                     // Path 1: abort then try to commit (should be no-op after abort)
@@ -247,12 +241,14 @@ mod obligation_lifecycle_metamorphic_tests {
                     let mut ledger = ObligationLedger::new();
 
                     // Acquire obligation
-                    let token = ledger.acquire(
+                    let token = ledger.acquire_with_context(
+                        ObligationKind::SendPermit,
                         task_id,
                         region_id,
-                        ObligationKind::Send,
                         Time::from_nanos(100),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
 
                     let obligation_id = token.id();
@@ -297,7 +293,7 @@ mod obligation_lifecycle_metamorphic_tests {
                             (any::<u32>(), any::<u32>()).prop_map(|(t, r)| ObligationOp::Acquire {
                                 task_id: TaskId::from_arena(ArenaIndex::new(0, t % 100)),
                                 region_id: RegionId::from_arena(ArenaIndex::new(0, r % 10)),
-                                kind: ObligationKind::Send,
+                                kind: ObligationKind::SendPermit,
                             }),
                         ],
                         1..20
@@ -313,12 +309,14 @@ mod obligation_lifecycle_metamorphic_tests {
                     for op in operations {
                         match op {
                             ObligationOp::Acquire { task_id, region_id, kind } => {
-                                let token = ledger.acquire(
+                                let token = ledger.acquire_with_context(
+                                    kind,
                                     task_id,
                                     region_id,
-                                    kind,
                                     Time::from_nanos(100),
-                                    crate::record::SourceLocation::caller(),
+                                    source_location(),
+                                    None,
+                                    None,
                                 );
                                 active_tokens.push(token);
                                 issued_count += 1;
@@ -390,30 +388,61 @@ mod obligation_lifecycle_metamorphic_tests {
                         let task_id = TaskId::from_arena(ArenaIndex::new(0, task_ids[i % task_ids.len()] % 100));
                         let region_id = RegionId::from_arena(ArenaIndex::new(0, region_ids[i % region_ids.len()] % 10));
 
-                        let token = ledger.acquire(
+                        let token = ledger.acquire_with_context(
+                            ObligationKind::Ack,
                             task_id,
                             region_id,
-                            ObligationKind::Ack,
                             Time::from_nanos(100 + i as u64),
-                            crate::record::SourceLocation::caller(),
+                            source_location(),
+                            None,
+                            None,
                         );
                         tokens.push(token);
                     }
 
                     let original_stats = ledger.stats();
-                    let original_pending_count = ledger.count_pending_for_region(
-                        RegionId::from_arena(ArenaIndex::new(0, region_ids[0] % 10))
-                    );
+                    let snapshot_region =
+                        RegionId::from_arena(ArenaIndex::new(0, region_ids[0] % 10));
+                    let original_pending_count = ledger.pending_for_region(snapshot_region);
 
                     // Simulate snapshot and restore by checking state consistency
                     // (In a real implementation, this would involve serialization/deserialization)
-                    let snapshot_stats = ledger.stats();
+                    let snapshot = ObligationSnapshot {
+                        stats: ledger.stats(),
+                        pending_obligations: ledger
+                            .iter()
+                            .filter(|(_, record)| record.is_pending())
+                            .map(|(id, _)| *id)
+                            .collect(),
+                        committed_obligations: ledger
+                            .iter()
+                            .filter(|(_, record)| record.state == ObligationState::Committed)
+                            .map(|(id, _)| *id)
+                            .collect(),
+                        aborted_obligations: ledger
+                            .iter()
+                            .filter(|(_, record)| record.state == ObligationState::Aborted)
+                            .map(|(id, _)| *id)
+                            .collect(),
+                        leaked_obligations: ledger.check_leaks().leaked,
+                    };
 
                     // Verify snapshot preserves state
-                    prop_assert_eq!(original_stats.total_acquired, snapshot_stats.total_acquired);
-                    prop_assert_eq!(original_stats.pending, snapshot_stats.pending);
-                    prop_assert_eq!(original_stats.total_committed, snapshot_stats.total_committed);
-                    prop_assert_eq!(original_stats.total_aborted, snapshot_stats.total_aborted);
+                    prop_assert_eq!(original_stats.total_acquired, snapshot.stats.total_acquired);
+                    prop_assert_eq!(original_stats.pending, snapshot.stats.pending);
+                    prop_assert_eq!(
+                        original_stats.total_committed,
+                        snapshot.stats.total_committed
+                    );
+                    prop_assert_eq!(
+                        original_stats.total_aborted,
+                        snapshot.stats.total_aborted
+                    );
+                    prop_assert_eq!(snapshot.pending_obligations.len(), tokens.len());
+                    prop_assert_eq!(original_pending_count, ledger.pending_for_region(snapshot_region));
+                    prop_assert!(snapshot.committed_obligations.is_empty());
+                    prop_assert!(snapshot.aborted_obligations.is_empty());
+                    prop_assert_eq!(snapshot.leaked_obligations.len(), tokens.len());
 
                     // Clean up tokens
                     for (i, token) in tokens.into_iter().enumerate() {
@@ -466,19 +495,23 @@ mod obligation_lifecycle_metamorphic_tests {
 
                     // Test Path 1: A then B
                     let mut ledger1 = ObligationLedger::new();
-                    let token_a1 = ledger1.acquire(
+                    let token_a1 = ledger1.acquire_with_context(
+                        ObligationKind::SendPermit,
                         task_id_a,
                         region_id_a,
-                        ObligationKind::Send,
                         Time::from_nanos(100),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
-                    let token_b1 = ledger1.acquire(
+                    let token_b1 = ledger1.acquire_with_context(
+                        ObligationKind::Lease,
                         task_id_b,
                         region_id_b,
-                        ObligationKind::Lease,
                         Time::from_nanos(100),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
 
                     ledger1.commit(token_a1, Time::from_nanos(200));
@@ -486,19 +519,23 @@ mod obligation_lifecycle_metamorphic_tests {
 
                     // Test Path 2: B then A
                     let mut ledger2 = ObligationLedger::new();
-                    let token_a2 = ledger2.acquire(
+                    let token_a2 = ledger2.acquire_with_context(
+                        ObligationKind::SendPermit,
                         task_id_a,
                         region_id_a,
-                        ObligationKind::Send,
                         Time::from_nanos(100),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
-                    let token_b2 = ledger2.acquire(
+                    let token_b2 = ledger2.acquire_with_context(
+                        ObligationKind::Lease,
                         task_id_b,
                         region_id_b,
-                        ObligationKind::Lease,
                         Time::from_nanos(100),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
 
                     ledger2.commit(token_b2, Time::from_nanos(200));
@@ -547,24 +584,28 @@ mod obligation_lifecycle_metamorphic_tests {
 
                     // Path 1: Single acquire-abort
                     let mut ledger1 = ObligationLedger::new();
-                    let token1 = ledger1.acquire(
+                    let token1 = ledger1.acquire_with_context(
+                        ObligationKind::IoOp,
                         task_id,
                         region_id,
-                        ObligationKind::Io,
                         Time::from_nanos(100),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
                     ledger1.abort(token1, Time::from_nanos(200), ObligationAbortReason::Cancel);
 
                     // Path 2: Multiple acquire-abort (should be equivalent)
                     let mut ledger2 = ObligationLedger::new();
                     for _ in 0..3 {
-                        let token = ledger2.acquire(
+                        let token = ledger2.acquire_with_context(
+                            ObligationKind::IoOp,
                             task_id,
                             region_id,
-                            ObligationKind::Io,
                             Time::from_nanos(100),
-                            crate::record::SourceLocation::caller(),
+                            source_location(),
+                            None,
+                            None,
                         );
                         ledger2.abort(token, Time::from_nanos(200), ObligationAbortReason::Cancel);
                     }
@@ -617,24 +658,28 @@ mod obligation_lifecycle_metamorphic_tests {
 
                     // Path 1: Single acquire-commit
                     let mut ledger1 = ObligationLedger::new();
-                    let token1 = ledger1.acquire(
+                    let token1 = ledger1.acquire_with_context(
+                        ObligationKind::Lease,
                         task_id,
                         region_id,
-                        ObligationKind::Lease,
                         Time::from_nanos(100),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
                     ledger1.commit(token1, Time::from_nanos(200));
 
                     // Path 2: Multiple acquire-commit (should be equivalent in final shape)
                     let mut ledger2 = ObligationLedger::new();
                     for _ in 0..3 {
-                        let token = ledger2.acquire(
+                        let token = ledger2.acquire_with_context(
+                            ObligationKind::Lease,
                             task_id,
                             region_id,
-                            ObligationKind::Lease,
                             Time::from_nanos(100),
-                            crate::record::SourceLocation::caller(),
+                            source_location(),
+                            None,
+                            None,
                         );
                         ledger2.commit(token, Time::from_nanos(200));
                     }
@@ -694,20 +739,24 @@ mod obligation_lifecycle_metamorphic_tests {
                     let mut ledger = ObligationLedger::new();
 
                     // Interleaved operations from different tasks
-                    let token_1 = ledger.acquire(
+                    let token_1 = ledger.acquire_with_context(
+                        ObligationKind::SendPermit,
                         task_id_1,
                         region_id,
-                        ObligationKind::Send,
                         Time::from_nanos(100),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
 
-                    let token_2 = ledger.acquire(
+                    let token_2 = ledger.acquire_with_context(
+                        ObligationKind::Ack,
                         task_id_2,
                         region_id,
-                        ObligationKind::Ack,
                         Time::from_nanos(150),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
 
                     // Resolve in reverse order
@@ -763,25 +812,29 @@ mod obligation_lifecycle_metamorphic_tests {
                     let mut ledger = ObligationLedger::new();
 
                     // Create obligations in different regions
-                    let token_1 = ledger.acquire(
+                    let token_1 = ledger.acquire_with_context(
+                        ObligationKind::Lease,
                         task_id,
                         region_id_1,
-                        ObligationKind::Lease,
                         Time::from_nanos(100),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
 
-                    let token_2 = ledger.acquire(
+                    let token_2 = ledger.acquire_with_context(
+                        ObligationKind::IoOp,
                         task_id,
                         region_id_2,
-                        ObligationKind::Io,
                         Time::from_nanos(100),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
 
                     // Check region-specific counts
-                    let count_region_1 = ledger.count_pending_for_region(region_id_1);
-                    let count_region_2 = ledger.count_pending_for_region(region_id_2);
+                    let count_region_1 = ledger.pending_for_region(region_id_1);
+                    let count_region_2 = ledger.pending_for_region(region_id_2);
 
                     prop_assert_eq!(count_region_1, 1);
                     prop_assert_eq!(count_region_2, 1);
@@ -790,8 +843,8 @@ mod obligation_lifecycle_metamorphic_tests {
                     ledger.commit(token_1, Time::from_nanos(200));
 
                     // Verify region isolation: committing in region 1 doesn't affect region 2
-                    let count_region_1_after = ledger.count_pending_for_region(region_id_1);
-                    let count_region_2_after = ledger.count_pending_for_region(region_id_2);
+                    let count_region_1_after = ledger.pending_for_region(region_id_1);
+                    let count_region_2_after = ledger.pending_for_region(region_id_2);
 
                     prop_assert_eq!(count_region_1_after, 0);
                     prop_assert_eq!(count_region_2_after, 1);
@@ -839,12 +892,14 @@ mod obligation_lifecycle_metamorphic_tests {
 
                     // Acquire multiple tokens
                     for i in 0..num_tokens {
-                        let token = ledger.acquire(
+                        let token = ledger.acquire_with_context(
+                            ObligationKind::SendPermit,
                             task_id,
                             region_id,
-                            ObligationKind::Send,
                             Time::from_nanos(100 + i as u64),
-                            crate::record::SourceLocation::caller(),
+                            source_location(),
+                            None,
+                            None,
                         );
                         tokens.push(token);
                     }
@@ -906,12 +961,14 @@ mod obligation_lifecycle_metamorphic_tests {
                     let mut ledger = ObligationLedger::new();
 
                     // Create obligation
-                    let token = ledger.acquire(
+                    let token = ledger.acquire_with_context(
+                        ObligationKind::Ack,
                         task_id,
                         region_id,
-                        ObligationKind::Ack,
                         Time::from_nanos(100),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
 
                     // Immediately resolve - simulates normal path
@@ -964,12 +1021,14 @@ mod obligation_lifecycle_metamorphic_tests {
                     let mut ledger = ObligationLedger::new();
 
                     // Acquire at earlier time
-                    let token = ledger.acquire(
+                    let token = ledger.acquire_with_context(
+                        ObligationKind::SendPermit,
                         task_id,
                         region_id,
-                        ObligationKind::Send,
                         Time::from_nanos(100),
-                        crate::record::SourceLocation::caller(),
+                        source_location(),
+                        None,
+                        None,
                     );
 
                     // Commit at later time
@@ -1082,12 +1141,14 @@ mod obligation_lifecycle_metamorphic_tests {
             let task_id = TaskId::from_arena(ArenaIndex::new(0, 1));
             let region_id = RegionId::from_arena(ArenaIndex::new(0, 1));
 
-            let token = ledger.acquire(
+            let token = ledger.acquire_with_context(
+                ObligationKind::SendPermit,
                 task_id,
                 region_id,
-                ObligationKind::Send,
                 Time::from_nanos(100),
-                crate::record::SourceLocation::caller(),
+                source_location(),
+                None,
+                None,
             );
 
             let stats_before = ledger.stats();
@@ -1122,3 +1183,9 @@ fn obligation_lifecycle_metamorphic_suite_availability() {
         );
     }
 }
+
+#[cfg(feature = "deterministic-mode")]
+pub use obligation_lifecycle_metamorphic_tests::{
+    ObligationLifecycleMetamorphicHarness, ObligationLifecycleMetamorphicResult, RequirementLevel,
+    TestCategory, TestVerdict,
+};

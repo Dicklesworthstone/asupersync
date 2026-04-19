@@ -854,9 +854,9 @@ fn h2_alpn_conformance_suite_availability() {
         );
     }
 
-    #[cfg(not(all(feature = "tls", feature = "http2")))]
+    #[cfg(not(feature = "tls"))]
     {
-        println!("⚠ HTTP/2 ALPN conformance tests require --features tls,http2");
-        println!("  Run with: cargo test --features tls,http2 h2_alpn_conformance");
+        println!("⚠ HTTP/2 ALPN conformance tests require --features tls");
+        println!("  Run with: cargo test --features tls h2_alpn_conformance");
     }
 }

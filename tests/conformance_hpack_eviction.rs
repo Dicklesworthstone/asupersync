@@ -7,7 +7,7 @@
 //! - Multiple resize SIGNAL bits processed in order
 //! - Table entry size calculation matches RFC formula (name.len + value.len + 32)
 
-use asupersync::bytes::{BufMut, BytesMut};
+use asupersync::bytes::BytesMut;
 use asupersync::http::h2::hpack::{Decoder, Encoder, Header};
 
 /// Helper function to encode an integer using HPACK integer encoding
