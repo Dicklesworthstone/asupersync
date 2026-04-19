@@ -1,5 +1,4 @@
-//! Metamorphic tests for `io::copy` streaming invariants.
-
+/// Metamorphic tests for `io::copy` streaming invariants.
 use asupersync::io::{
     AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter, ReadBuf, copy, copy_buf,
     copy_with_progress,
@@ -214,8 +213,10 @@ proptest! {
         let prefix_after_drop = writer.snapshot();
         let prefix_len = prefix_after_drop.len();
 
-        prop_assert_eq!(prefix_after_drop.clone(), data[..prefix_len].to_vec());
-        let _ = completed;
+        prop_assert_eq!(prefix_after_drop, data[..prefix_len].to_vec());
+        if completed {
+            prop_assert_eq!(prefix_len, data.len());
+        }
     }
 
     #[test]

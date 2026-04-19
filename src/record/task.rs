@@ -555,6 +555,8 @@ impl TaskRecord {
             }
             TaskState::Created | TaskState::Running => {
                 let prev_state = self.state_name();
+                #[cfg(not(feature = "tracing-integration"))]
+                let _ = prev_state;
                 let requested_reason = reason.clone();
                 if self.cancel_epoch == 0 {
                     self.cancel_epoch = 1;

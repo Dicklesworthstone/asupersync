@@ -379,7 +379,6 @@ impl RegionStateEpochGC {
 
         // Direct cleanup of region state
         for &task_id in task_ids {
-            #[cfg(not(feature = "tracing-integration"))]
             let _ = task_id;
             // task_table.remove_task(task_id);
             // obligation_table.cleanup_task_obligations(task_id);

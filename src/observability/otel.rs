@@ -191,6 +191,10 @@ impl CardinalityTracker {
         let hash = Self::hash_labels(labels);
         let seen = self.seen.read();
 
+        if max_cardinality == 0 {
+            return seen.get(metric).is_none_or(|set| !set.contains(&hash));
+        }
+
         if let Some(set) = seen.get(metric) {
             if set.contains(&hash) {
                 return false; // Already seen
@@ -206,6 +210,27 @@ impl CardinalityTracker {
         let hash = Self::hash_labels(labels);
         let mut seen = self.seen.write();
         seen.entry(metric.to_string()).or_default().insert(hash);
+    }
+
+    /// Atomically check whether a new label set would exceed cardinality and
+    /// record it if allowed.
+    ///
+    /// Returns `true` when the limit would be exceeded and the label set was
+    /// not recorded.
+    fn check_and_record(&self, metric: &str, labels: &[KeyValue], max_cardinality: usize) -> bool {
+        let hash = Self::hash_labels(labels);
+        let mut seen = self.seen.write();
+        let set = seen.entry(metric.to_string()).or_default();
+
+        if set.contains(&hash) {
+            return false;
+        }
+        if set.len() >= max_cardinality {
+            return true;
+        }
+
+        set.insert(hash);
+        false
     }
 
     /// Increment overflow counter.
@@ -841,10 +866,9 @@ impl OtelMetrics {
             .cloned()
             .collect();
 
-        // Check cardinality
         if self
             .cardinality_tracker
-            .would_exceed(metric, &filtered, self.config.max_cardinality)
+            .check_and_record(metric, &filtered, self.config.max_cardinality)
         {
             self.cardinality_tracker.record_overflow();
 
@@ -856,7 +880,13 @@ impl OtelMetrics {
                         .into_iter()
                         .map(|kv| KeyValue::new(kv.key, "other"))
                         .collect();
-                    self.cardinality_tracker.record(metric, &aggregated);
+                    if self.cardinality_tracker.check_and_record(
+                        metric,
+                        &aggregated,
+                        self.config.max_cardinality,
+                    ) {
+                        return None;
+                    }
                     return Some(aggregated);
                 }
                 CardinalityOverflow::Warn => {
@@ -864,12 +894,10 @@ impl OtelMetrics {
                         metric = metric,
                         "cardinality limit reached for metric"
                     );
+                    self.cardinality_tracker.record(metric, &filtered);
                 }
             }
         }
-
-        // Record this label combination
-        self.cardinality_tracker.record(metric, &filtered);
         Some(filtered)
     }
 
@@ -1080,6 +1108,7 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::path::Path;
+    use std::sync::{Arc, Barrier};
 
     const EXPECTED_METRICS: &[&str] = &[
         "asupersync.tasks.spawned",
@@ -1318,6 +1347,45 @@ mod tests {
     }
 
     #[test]
+    fn cardinality_limit_zero_rejects_new_series() {
+        let tracker = CardinalityTracker::new();
+        let labels = [KeyValue::new("id", "first")];
+        assert!(
+            tracker.would_exceed("test", &labels, 0),
+            "zero-cardinality budget must reject unseen label sets"
+        );
+        assert!(tracker.check_and_record("test", &labels, 0));
+        assert_eq!(tracker.cardinality("test"), 0);
+    }
+
+    #[test]
+    fn cardinality_enforcement_is_atomic_under_concurrency() {
+        let tracker = Arc::new(CardinalityTracker::new());
+        let barrier = Arc::new(Barrier::new(8));
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let tracker = Arc::clone(&tracker);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let labels = [KeyValue::new("id", i.to_string())];
+                    barrier.wait();
+                    !tracker.check_and_record("test", &labels, 1)
+                })
+            })
+            .collect();
+
+        let accepted = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("thread join"))
+            .filter(|accepted| *accepted)
+            .count();
+
+        assert_eq!(accepted, 1, "exactly one series should fit under max=1");
+        assert_eq!(tracker.cardinality("test"), 1);
+    }
+
+    #[test]
     fn cardinality_label_order_is_ignored() {
         let tracker = CardinalityTracker::new();
 
@@ -1360,6 +1428,36 @@ mod tests {
         let filtered = filtered.unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].key.as_str(), "outcome");
+
+        provider.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn aggregate_overflow_does_not_exceed_configured_budget() {
+        let exporter = OtelInMemoryExporter::default();
+        let reader = PeriodicReader::builder(exporter).build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let meter = provider.meter("asupersync");
+
+        let config = MetricsConfig::new()
+            .with_max_cardinality(1)
+            .with_overflow_strategy(CardinalityOverflow::Aggregate);
+        let metrics = OtelMetrics::new_with_config(meter, config);
+
+        let first = [KeyValue::new("task_type", "fast")];
+        let second = [KeyValue::new("task_type", "slow")];
+
+        let first_labels = metrics
+            .check_cardinality("test.metric", &first)
+            .expect("first label set should fit");
+        assert_eq!(first_labels, first);
+        assert_eq!(metrics.cardinality_tracker.cardinality("test.metric"), 1);
+
+        assert!(
+            metrics.check_cardinality("test.metric", &second).is_none(),
+            "aggregate overflow must not create a second series beyond the configured cap"
+        );
+        assert_eq!(metrics.cardinality_tracker.cardinality("test.metric"), 1);
 
         provider.shutdown().expect("shutdown");
     }
@@ -1629,9 +1727,10 @@ pub mod span_semantics {
     };
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     static NEXT_TEST_SPAN_SEED: AtomicU64 = AtomicU64::new(1);
+    static NEXT_TEST_TIME_TICK: AtomicU64 = AtomicU64::new(1);
 
     fn next_test_trace_id() -> TraceId {
         let seed = NEXT_TEST_SPAN_SEED.fetch_add(1, Ordering::Relaxed);
@@ -1688,6 +1787,11 @@ pub mod span_semantics {
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^ (z >> 31)
+    }
+
+    fn next_test_time() -> SystemTime {
+        let tick = NEXT_TEST_TIME_TICK.fetch_add(1, Ordering::Relaxed);
+        UNIX_EPOCH + Duration::from_nanos(tick)
     }
 
     fn truncate_value(value: &str, max_len: Option<usize>) -> String {
@@ -1905,7 +2009,7 @@ pub mod span_semantics {
                 context,
                 name: name.to_string(),
                 kind,
-                start_time: SystemTime::now(),
+                start_time: next_test_time(),
                 end_time: None,
                 attributes: HashMap::new(),
                 events: Vec::new(),
@@ -1941,7 +2045,7 @@ pub mod span_semantics {
             }
             let event = SpanEvent {
                 name: name.to_string(),
-                timestamp: SystemTime::now(),
+                timestamp: next_test_time(),
                 attributes,
             };
             self.events.push(event);
@@ -1967,7 +2071,7 @@ pub mod span_semantics {
         /// End the span.
         pub fn end(&mut self) {
             if self.end_time.is_none() {
-                self.end_time = Some(SystemTime::now());
+                self.end_time = Some(next_test_time());
             }
         }
 
@@ -2704,6 +2808,25 @@ pub mod span_semantics {
             span.add_event("one", HashMap::new());
             span.add_event("two", HashMap::new());
             assert_eq!(span.events.len(), 1);
+        }
+
+        #[test]
+        fn test_span_timestamps_are_monotonic() {
+            let mut span = TestSpan::new("test", SpanKind::Internal);
+            let start_time = span.start_time;
+
+            span.add_event("first", HashMap::new());
+            span.add_event("second", HashMap::new());
+            span.end();
+
+            let first_event = &span.events[0];
+            let second_event = &span.events[1];
+            let end_time = span.end_time.expect("span end time");
+
+            assert!(first_event.timestamp >= start_time);
+            assert!(second_event.timestamp >= first_event.timestamp);
+            assert!(end_time >= second_event.timestamp);
+            assert!(span.duration().is_some());
         }
 
         #[test]

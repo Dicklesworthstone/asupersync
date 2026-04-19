@@ -1602,7 +1602,7 @@ mod tests {
     #[cfg(feature = "kafka")]
     use futures_lite::future;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::atomic::AtomicUsize;
     #[cfg(feature = "kafka")]
     use std::task::{Context, Wake, Waker};
 

@@ -2070,7 +2070,6 @@ impl RuntimeState {
     /// }
     /// ```
     #[allow(clippy::too_many_lines)]
-    #[allow(clippy::used_underscore_binding)]
     pub fn cancel_request(
         &mut self,
         region_id: RegionId,
@@ -2153,10 +2152,12 @@ impl RuntimeState {
             });
             self.metrics.cancellation_requested(rid, region_reason.kind);
 
-            if let Some(_parent) = node.parent {
+            if let Some(parent) = node.parent {
+                #[cfg(not(feature = "tracing-integration"))]
+                let _ = parent;
                 let span = trace_span!(
                     "cancel_propagate_region",
-                    from_region = ?_parent,
+                    from_region = ?parent,
                     to_region = ?rid,
                     depth = node.depth,
                     cancel_kind = ?region_reason.kind,
@@ -2165,7 +2166,7 @@ impl RuntimeState {
                 span.follows_from(&root_span);
                 let _guard = span.enter();
                 trace!(
-                    from_region = ?_parent,
+                    from_region = ?parent,
                     to_region = ?rid,
                     depth = node.depth,
                     cancel_kind = ?region_reason.kind,
@@ -2227,7 +2228,9 @@ impl RuntimeState {
                     let newly_cancelled =
                         task.request_cancel_with_budget(task_reason.clone(), task_budget);
                     let already_cancelling = task.state.is_cancelling();
-                    let _cancel_kind = task.cancel_reason().map(|r| r.kind);
+                    let cancel_kind = task.cancel_reason().map(|r| r.kind);
+                    #[cfg(not(feature = "tracing-integration"))]
+                    let _ = cancel_kind;
                     if newly_cancelled {
                         self.record_task_trace_event(task_id, |seq| {
                             TraceEvent::cancel_request(seq, now, task_id, rid, task_reason.clone())
@@ -2238,7 +2241,7 @@ impl RuntimeState {
                         from_region = ?rid,
                         to_task = ?task_id,
                         depth = node.depth,
-                        cancel_kind = ?_cancel_kind,
+                        cancel_kind = ?cancel_kind,
                         chain_depth = task_reason.chain_depth()
                     );
                     span.follows_from(&root_span);

@@ -14,6 +14,12 @@ use std::collections::BTreeMap;
 pub struct FuzzConfig {
     /// Base seed for the fuzz campaign.
     pub base_seed: u64,
+    /// Deterministic entropy seed reused across iterations.
+    ///
+    /// This is intentionally decoupled from the per-iteration schedule seed so
+    /// a fuzz campaign can vary scheduler decisions without also mutating any
+    /// entropy-driven behavior inside the lab runtime.
+    pub entropy_seed: u64,
     /// Number of fuzz iterations.
     pub iterations: usize,
     /// Maximum steps per iteration before timeout.
@@ -32,6 +38,7 @@ impl FuzzConfig {
     pub fn new(base_seed: u64, iterations: usize) -> Self {
         Self {
             base_seed,
+            entropy_seed: base_seed,
             iterations,
             max_steps: 100_000,
             worker_count: 1,
@@ -44,6 +51,13 @@ impl FuzzConfig {
     #[must_use]
     pub fn worker_count(mut self, count: usize) -> Self {
         self.worker_count = count;
+        self
+    }
+
+    /// Set the deterministic entropy seed reused across iterations.
+    #[must_use]
+    pub fn entropy_seed(mut self, seed: u64) -> Self {
+        self.entropy_seed = seed;
         self
     }
 
@@ -67,13 +81,22 @@ impl FuzzConfig {
 pub struct FuzzFinding {
     /// The seed that triggered the violation.
     pub seed: u64,
-    /// Steps taken before the violation.
+    /// Deterministic entropy seed used for the failing replay run.
+    pub entropy_seed: u64,
+    /// Steps taken by the replay seed that this finding describes.
+    ///
+    /// When minimization succeeds this corresponds to the minimized replay
+    /// seed, not the original campaign seed.
     pub steps: u64,
-    /// The violations found.
+    /// The violation details for the replay seed that this finding describes.
+    ///
+    /// When minimization succeeds these violations come from the minimized
+    /// replay seed so they stay consistent with the stored certificate hash
+    /// and trace fingerprint.
     pub violations: Vec<InvariantViolation>,
-    /// Certificate hash for the schedule that triggered the violation.
+    /// Certificate hash for the replay seed's schedule.
     pub certificate_hash: u64,
-    /// Canonical normalized trace fingerprint for this failing run.
+    /// Canonical normalized trace fingerprint for the replay seed's failing run.
     pub trace_fingerprint: u64,
     /// Minimized seed (if minimization succeeded).
     pub minimized_seed: Option<u64>,
@@ -84,6 +107,8 @@ pub struct FuzzFinding {
 pub struct FuzzReport {
     /// Total iterations run.
     pub iterations: usize,
+    /// Deterministic entropy seed reused across the campaign.
+    pub entropy_seed: u64,
     /// Findings (seeds that triggered violations).
     pub findings: Vec<FuzzFinding>,
     /// Violation counts by category.
@@ -99,6 +124,8 @@ pub struct FuzzRegressionCase {
     pub seed: u64,
     /// Replay seed to use for regression checks (minimized when available).
     pub replay_seed: u64,
+    /// Deterministic entropy seed required to replay this case faithfully.
+    pub entropy_seed: u64,
     /// Scheduler certificate hash from the failing run.
     pub certificate_hash: u64,
     /// Canonical normalized trace fingerprint for the failing run.
@@ -114,6 +141,8 @@ pub struct FuzzRegressionCorpus {
     pub schema_version: u32,
     /// Base seed used for this fuzz campaign.
     pub base_seed: u64,
+    /// Deterministic entropy seed reused across this fuzz campaign.
+    pub entropy_seed: u64,
     /// Number of iterations executed by the campaign.
     pub iterations: usize,
     /// Cases sorted in deterministic replay order.
@@ -192,6 +221,7 @@ impl FuzzReport {
                 FuzzRegressionCase {
                     seed: finding.seed,
                     replay_seed,
+                    entropy_seed: finding.entropy_seed,
                     certificate_hash: finding.certificate_hash,
                     trace_fingerprint: finding.trace_fingerprint,
                     violation_categories: sorted_violation_categories(&finding.violations),
@@ -211,6 +241,7 @@ impl FuzzReport {
         FuzzRegressionCorpus {
             schema_version: 1,
             base_seed,
+            entropy_seed: self.entropy_seed,
             iterations: self.iterations,
             cases,
         }
@@ -291,19 +322,29 @@ impl FuzzHarness {
                     None
                 };
 
-                let (minimized_seed, certificate_hash, trace_fingerprint) = match minimized {
-                    Some((min_seed, ref min_res)) => (
-                        Some(min_seed),
-                        min_res.certificate_hash,
-                        min_res.trace_fingerprint,
-                    ),
-                    None => (None, result.certificate_hash, result.trace_fingerprint),
-                };
+                let (minimized_seed, steps, violations, certificate_hash, trace_fingerprint) =
+                    match minimized {
+                        Some((min_seed, ref min_res)) => (
+                            Some(min_seed),
+                            min_res.steps,
+                            min_res.violations.clone(),
+                            min_res.certificate_hash,
+                            min_res.trace_fingerprint,
+                        ),
+                        None => (
+                            None,
+                            result.steps,
+                            result.violations.clone(),
+                            result.certificate_hash,
+                            result.trace_fingerprint,
+                        ),
+                    };
 
                 findings.push(FuzzFinding {
                     seed,
-                    steps: result.steps,
-                    violations: result.violations,
+                    entropy_seed: self.config.entropy_seed,
+                    steps,
+                    violations,
                     certificate_hash,
                     trace_fingerprint,
                     minimized_seed,
@@ -313,6 +354,7 @@ impl FuzzHarness {
 
         FuzzReport {
             iterations: self.config.iterations,
+            entropy_seed: self.config.entropy_seed,
             findings,
             violation_counts,
             unique_certificates: certificate_hashes.len(),
@@ -325,6 +367,7 @@ impl FuzzHarness {
     {
         let mut lab_config = LabConfig::new(seed);
         lab_config = lab_config.worker_count(self.config.worker_count);
+        lab_config = lab_config.entropy_seed(self.config.entropy_seed);
         lab_config = lab_config.max_steps(self.config.max_steps);
 
         let mut runtime = LabRuntime::new(lab_config);
@@ -496,8 +539,10 @@ mod tests {
     fn fuzz_report_seed_accessors() {
         let report = FuzzReport {
             iterations: 5,
+            entropy_seed: 99,
             findings: vec![FuzzFinding {
                 seed: 42,
+                entropy_seed: 99,
                 steps: 10,
                 violations: vec![],
                 certificate_hash: 123,
@@ -543,6 +588,7 @@ mod tests {
         let dbg = format!("{cfg:?}");
         assert!(dbg.contains("FuzzConfig"), "{dbg}");
         assert_eq!(cfg.base_seed, 42);
+        assert_eq!(cfg.entropy_seed, 42);
         assert_eq!(cfg.iterations, 100);
         assert_eq!(cfg.max_steps, 100_000);
         assert_eq!(cfg.worker_count, 1);
@@ -557,6 +603,7 @@ mod tests {
     fn fuzz_finding_debug_clone() {
         let finding = FuzzFinding {
             seed: 99,
+            entropy_seed: 7,
             steps: 500,
             violations: vec![],
             certificate_hash: 12345,
@@ -567,6 +614,7 @@ mod tests {
         assert!(dbg.contains("FuzzFinding"), "{dbg}");
         let cloned = finding;
         assert_eq!(cloned.seed, 99);
+        assert_eq!(cloned.entropy_seed, 7);
         assert_eq!(cloned.steps, 500);
         assert_eq!(cloned.certificate_hash, 12345);
         assert_eq!(cloned.trace_fingerprint, 67890);
@@ -574,9 +622,31 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_harness_keeps_entropy_seed_stable_across_iterations() {
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = std::sync::Arc::clone(&observed);
+        let harness = FuzzHarness::new(FuzzConfig::new(7, 3));
+
+        harness.run(move |runtime| {
+            captured
+                .lock()
+                .expect("lock observed seeds")
+                .push((runtime.config().seed, runtime.config().entropy_seed));
+        });
+
+        let observed = observed.lock().expect("lock observed seeds");
+        assert_eq!(
+            observed.as_slice(),
+            &[(7, 7), (8, 7), (9, 7)],
+            "campaign iterations must vary schedule seed without mutating entropy seed"
+        );
+    }
+
+    #[test]
     fn fuzz_report_debug_empty() {
         let report = FuzzReport {
             iterations: 0,
+            entropy_seed: 55,
             findings: vec![],
             violation_counts: BTreeMap::new(),
             unique_certificates: 0,
@@ -592,9 +662,11 @@ mod tests {
     fn regression_corpus_is_sorted_and_minimized() {
         let report = FuzzReport {
             iterations: 3,
+            entropy_seed: 0x7777,
             findings: vec![
                 FuzzFinding {
                     seed: 44,
+                    entropy_seed: 0x7777,
                     steps: 100,
                     violations: vec![
                         InvariantViolation::QuiescenceViolation,
@@ -606,6 +678,7 @@ mod tests {
                 },
                 FuzzFinding {
                     seed: 13,
+                    entropy_seed: 0x7777,
                     steps: 200,
                     violations: vec![InvariantViolation::Futurelock {
                         task: crate::types::TaskId::new_for_test(1, 0),
@@ -625,6 +698,7 @@ mod tests {
         let corpus = report.to_regression_corpus(1234);
         assert_eq!(corpus.schema_version, 1);
         assert_eq!(corpus.base_seed, 1234);
+        assert_eq!(corpus.entropy_seed, 0x7777);
         assert_eq!(corpus.iterations, 3);
         assert_eq!(corpus.cases.len(), 2);
 
@@ -748,8 +822,10 @@ mod tests {
     fn fuzz_report_promotes_findings_into_replayable_scenarios() {
         let report = FuzzReport {
             iterations: 1,
+            entropy_seed: 0x44,
             findings: vec![FuzzFinding {
                 seed: 0xABCD,
+                entropy_seed: 0x44,
                 steps: 10,
                 violations: vec![InvariantViolation::TaskLeak { count: 1 }],
                 certificate_hash: 0x101,
@@ -773,10 +849,12 @@ mod tests {
         let corpus = FuzzRegressionCorpus {
             schema_version: 1,
             base_seed: 0xCAFE,
+            entropy_seed: 0x77,
             iterations: 2,
             cases: vec![FuzzRegressionCase {
                 seed: 0x10,
                 replay_seed: 0x08,
+                entropy_seed: 0x77,
                 certificate_hash: 0x111,
                 trace_fingerprint: 0x222,
                 violation_categories: vec!["task_leak".to_string()],
@@ -790,8 +868,72 @@ mod tests {
         assert_eq!(promoted[0].original_seed, 0x10);
         assert_eq!(promoted[0].replay_seed, 0x08);
         assert_eq!(
+            promoted[0].identity.seed_plan.entropy_seed_override,
+            Some(0x77)
+        );
+        assert_eq!(
             promoted[0].violation_categories,
             vec!["task_leak".to_string()]
+        );
+    }
+
+    #[test]
+    fn minimized_findings_keep_violation_payload_consistent_with_replay_seed() {
+        let harness = FuzzHarness::new(FuzzConfig::new(20, 1));
+        let scenario = |runtime: &mut LabRuntime| {
+            let seed = runtime.config().seed;
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+
+            let leak_count = if seed >= 20 { 2 } else { 1 };
+            for _ in 0..leak_count {
+                let _leaked = runtime
+                    .state
+                    .create_task(region, Budget::INFINITE, async {})
+                    .expect("create leaked task");
+            }
+        };
+
+        let report = harness.run(scenario);
+        let finding = report
+            .findings
+            .first()
+            .expect("campaign should surface a minimized finding");
+        assert_eq!(finding.minimized_seed, Some(0));
+
+        let replay = harness.run_single(0, &scenario);
+        assert_eq!(finding.steps, replay.steps);
+        assert_eq!(finding.violations, replay.violations);
+        assert_eq!(finding.certificate_hash, replay.certificate_hash);
+        assert_eq!(finding.trace_fingerprint, replay.trace_fingerprint);
+        assert_eq!(
+            finding.violations,
+            vec![InvariantViolation::TaskLeak { count: 1 }]
+        );
+    }
+
+    #[test]
+    fn promoted_regression_scenarios_preserve_entropy_seed_override() {
+        let report = FuzzReport {
+            iterations: 1,
+            entropy_seed: 0xBADA,
+            findings: vec![FuzzFinding {
+                seed: 0x20,
+                entropy_seed: 0xBADA,
+                steps: 4,
+                violations: vec![InvariantViolation::TaskLeak { count: 1 }],
+                certificate_hash: 0xAB,
+                trace_fingerprint: 0xCD,
+                minimized_seed: Some(0x02),
+            }],
+            violation_counts: BTreeMap::from([("task_leak".to_string(), 1)]),
+            unique_certificates: 1,
+        };
+
+        let promoted = report.to_promoted_regression_scenarios(0x20, "scheduler.surface", "v1");
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(
+            promoted[0].identity.seed_plan.entropy_seed_override,
+            Some(0xBADA)
         );
     }
 }

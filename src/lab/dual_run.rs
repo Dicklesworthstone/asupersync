@@ -3369,8 +3369,12 @@ pub fn promote_fuzz_finding(
         &description,
         replay_seed,
     )
+    .with_seed_plan(
+        SeedPlan::inherit(replay_seed, scenario_id.clone()).with_entropy_seed(finding.entropy_seed),
+    )
     .with_metadata("promoted_from", "fuzz_finding")
     .with_metadata("original_seed", format!("0x{:X}", finding.seed))
+    .with_metadata("entropy_seed", format!("0x{:X}", finding.entropy_seed))
     .with_metadata(
         "trace_fingerprint",
         format!("0x{:X}", finding.trace_fingerprint),
@@ -3423,8 +3427,13 @@ pub fn promote_regression_case(
         &description,
         case.replay_seed,
     )
+    .with_seed_plan(
+        SeedPlan::inherit(case.replay_seed, scenario_id.clone())
+            .with_entropy_seed(case.entropy_seed),
+    )
     .with_metadata("promoted_from", "regression_case")
     .with_metadata("original_seed", format!("0x{:X}", case.seed))
+    .with_metadata("entropy_seed", format!("0x{:X}", case.entropy_seed))
     .with_metadata(
         "trace_fingerprint",
         format!("0x{:X}", case.trace_fingerprint),
@@ -3464,6 +3473,10 @@ pub fn promote_regression_corpus(
             promoted.identity.metadata.insert(
                 "campaign_base_seed".to_string(),
                 format!("0x{:X}", corpus.base_seed),
+            );
+            promoted.identity.metadata.insert(
+                "campaign_entropy_seed".to_string(),
+                format!("0x{:X}", corpus.entropy_seed),
             );
             promoted
                 .identity
@@ -6519,6 +6532,7 @@ mod tests {
     fn make_test_fuzz_finding(seed: u64) -> crate::lab::fuzz::FuzzFinding {
         crate::lab::fuzz::FuzzFinding {
             seed,
+            entropy_seed: 0xFACE,
             steps: 500,
             violations: vec![],
             certificate_hash: 0xABCD,
@@ -6537,6 +6551,10 @@ mod tests {
         assert_eq!(promoted.replay_seed, 0xDEAD + 1); // minimized
         assert_eq!(promoted.original_seed, 0xDEAD);
         assert_eq!(promoted.identity.seed_plan.canonical_seed, 0xDEAD + 1);
+        assert_eq!(
+            promoted.identity.seed_plan.entropy_seed_override,
+            Some(0xFACE)
+        );
         assert_eq!(promoted.identity.phase, Phase::Phase1);
         assert!(promoted.identity.metadata.contains_key("promoted_from"));
         crate::test_complete!("promote_fuzz_finding_basic");
@@ -6649,6 +6667,7 @@ mod tests {
         let case = crate::lab::fuzz::FuzzRegressionCase {
             seed: 0xDEAD,
             replay_seed: 0xBEEF,
+            entropy_seed: 0xCAFE,
             certificate_hash: 0x1111,
             trace_fingerprint: 0x2222,
             violation_categories: vec!["obligation_leak".to_string()],
@@ -6656,6 +6675,10 @@ mod tests {
         let promoted = promote_regression_case(&case, "obligation", "v1");
         assert!(promoted.identity.scenario_id.contains("regression"));
         assert_eq!(promoted.replay_seed, 0xBEEF);
+        assert_eq!(
+            promoted.identity.seed_plan.entropy_seed_override,
+            Some(0xCAFE)
+        );
         assert_eq!(promoted.violation_categories, vec!["obligation_leak"]);
         crate::test_complete!("promote_regression_case_basic");
     }
@@ -6666,11 +6689,13 @@ mod tests {
         let corpus = crate::lab::fuzz::FuzzRegressionCorpus {
             schema_version: 1,
             base_seed: 42,
+            entropy_seed: 0x777,
             iterations: 1000,
             cases: vec![
                 crate::lab::fuzz::FuzzRegressionCase {
                     seed: 1,
                     replay_seed: 10,
+                    entropy_seed: 0x777,
                     certificate_hash: 0,
                     trace_fingerprint: 0,
                     violation_categories: vec!["a".to_string()],
@@ -6678,6 +6703,7 @@ mod tests {
                 crate::lab::fuzz::FuzzRegressionCase {
                     seed: 2,
                     replay_seed: 20,
+                    entropy_seed: 0x777,
                     certificate_hash: 0,
                     trace_fingerprint: 0,
                     violation_categories: vec!["b".to_string()],
@@ -6691,6 +6717,14 @@ mod tests {
         assert_eq!(promoted[0].campaign_base_seed, Some(42));
         assert_eq!(promoted[0].campaign_iteration, Some(0));
         assert_eq!(promoted[1].campaign_iteration, Some(1));
+        assert_eq!(
+            promoted[0].identity.seed_plan.entropy_seed_override,
+            Some(0x777)
+        );
+        assert_eq!(
+            promoted[0].identity.metadata.get("campaign_entropy_seed"),
+            Some(&"0x777".to_string())
+        );
         crate::test_complete!("promote_regression_corpus_preserves_order");
     }
 
@@ -6716,10 +6750,12 @@ mod tests {
         let corpus = crate::lab::fuzz::FuzzRegressionCorpus {
             schema_version: 1,
             base_seed: 0x2A,
+            entropy_seed: 0x2B,
             iterations: 3,
             cases: vec![crate::lab::fuzz::FuzzRegressionCase {
                 seed: 0x10,
                 replay_seed: 0x11,
+                entropy_seed: 0x2B,
                 certificate_hash: 0x2222,
                 trace_fingerprint: 0x3333,
                 violation_categories: vec!["obligation_leak".to_string()],

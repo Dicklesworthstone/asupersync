@@ -33,9 +33,11 @@
 use arbitrary::Arbitrary;
 use asupersync::messaging::kafka::*;
 use asupersync::messaging::kafka_consumer::*;
+use asupersync::time::{timeout, wall_now};
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::cx::Cx;
+use std::future::Future;
 use std::time::Duration;
 
 /// Maximum message size to prevent memory exhaustion.
@@ -50,6 +52,13 @@ const MAX_TOPICS: usize = 100;
 
 /// Maximum string length for topics, keys, values.
 const MAX_STRING_LENGTH: usize = 10 * 1024; // 10KB
+
+/// Hard ceiling for any broker-facing operation in the fuzz harness.
+///
+/// Without a local timeout, producer delivery can inherit librdkafka's much
+/// longer delivery timeout and stall a single fuzz iteration for minutes when
+/// no broker is reachable.
+const MAX_OPERATION_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Fuzzed Kafka configuration parameters.
 #[derive(Debug, Clone, Arbitrary)]
@@ -423,6 +432,15 @@ fn sanitize_message(msg: &KafkaMessageFuzz) -> KafkaMessageFuzz {
     }
 }
 
+async fn run_bounded<F, T>(future: F) -> Option<T>
+where
+    F: Future<Output = T>,
+{
+    timeout(wall_now(), MAX_OPERATION_TIMEOUT, future)
+        .await
+        .ok()
+}
+
 async fn fuzz_producer_send(config: &KafkaConfigFuzz, message: &KafkaMessageFuzz, cx: &Cx) {
     let producer_config = build_producer_config(config);
 
@@ -438,15 +456,14 @@ async fn fuzz_producer_send(config: &KafkaConfigFuzz, message: &KafkaMessageFuzz
     let sanitized_msg = sanitize_message(message);
 
     // Test basic send
-    let _ = producer
-        .send(
-            cx,
-            &sanitized_msg.topic,
-            sanitized_msg.key.as_deref(),
-            &sanitized_msg.payload,
-            sanitized_msg.partition,
-        )
-        .await;
+    let _ = run_bounded(producer.send(
+        cx,
+        &sanitized_msg.topic,
+        sanitized_msg.key.as_deref(),
+        &sanitized_msg.payload,
+        sanitized_msg.partition,
+    ))
+    .await;
 
     // Test send with headers if present
     if !sanitized_msg.headers.is_empty() {
@@ -456,22 +473,21 @@ async fn fuzz_producer_send(config: &KafkaConfigFuzz, message: &KafkaMessageFuzz
             .map(|(k, v)| (k.as_str(), v.as_slice()))
             .collect();
 
-        let _ = producer
-            .send_with_headers(
-                cx,
-                &sanitized_msg.topic,
-                sanitized_msg.key.as_deref(),
-                &sanitized_msg.payload,
-                &headers,
-            )
-            .await;
+        let _ = run_bounded(producer.send_with_headers(
+            cx,
+            &sanitized_msg.topic,
+            sanitized_msg.key.as_deref(),
+            &sanitized_msg.payload,
+            &headers,
+        ))
+        .await;
     }
 
     // Test flush
-    let _ = producer.flush(cx, Duration::from_millis(100)).await;
+    let _ = run_bounded(producer.flush(cx, Duration::from_millis(100))).await;
 
     // Test close
-    let _ = producer.close(cx, Duration::from_millis(100)).await;
+    let _ = run_bounded(producer.close(cx, Duration::from_millis(100))).await;
 }
 
 async fn fuzz_producer_batch(config: &KafkaConfigFuzz, messages: &[KafkaMessageFuzz], cx: &Cx) {
@@ -485,19 +501,18 @@ async fn fuzz_producer_batch(config: &KafkaConfigFuzz, messages: &[KafkaMessageF
     for message in messages.iter().take(100) {
         // Limit batch size
         let sanitized_msg = sanitize_message(message);
-        let _ = producer
-            .send(
-                cx,
-                &sanitized_msg.topic,
-                sanitized_msg.key.as_deref(),
-                &sanitized_msg.payload,
-                sanitized_msg.partition,
-            )
-            .await;
+        let _ = run_bounded(producer.send(
+            cx,
+            &sanitized_msg.topic,
+            sanitized_msg.key.as_deref(),
+            &sanitized_msg.payload,
+            sanitized_msg.partition,
+        ))
+        .await;
     }
 
-    let _ = producer.flush(cx, Duration::from_millis(1000)).await;
-    let _ = producer.close(cx, Duration::from_millis(100)).await;
+    let _ = run_bounded(producer.flush(cx, Duration::from_millis(1000))).await;
+    let _ = run_bounded(producer.close(cx, Duration::from_millis(100))).await;
 }
 
 async fn fuzz_transactional(
@@ -518,30 +533,29 @@ async fn fuzz_transactional(
     };
 
     // Test transaction begin
-    let tx = match producer.begin_transaction(cx).await {
-        Ok(tx) => tx,
-        Err(_) => return, // Connection/config error, test passed
+    let tx = match run_bounded(producer.begin_transaction(cx)).await {
+        Some(Ok(tx)) => tx,
+        Some(Err(_)) | None => return,
     };
 
     // Send messages within transaction
     for message in messages.iter().take(50) {
         // Limit for performance
         let sanitized_msg = sanitize_message(message);
-        let _ = tx
-            .send(
-                cx,
-                &sanitized_msg.topic,
-                sanitized_msg.key.as_deref(),
-                &sanitized_msg.payload,
-            )
-            .await;
+        let _ = run_bounded(tx.send(
+            cx,
+            &sanitized_msg.topic,
+            sanitized_msg.key.as_deref(),
+            &sanitized_msg.payload,
+        ))
+        .await;
     }
 
     // Test commit or abort based on fuzz input
     if should_commit {
-        let _ = tx.commit(cx).await;
+        let _ = run_bounded(tx.commit(cx)).await;
     } else {
-        let _ = tx.abort(cx).await;
+        let _ = run_bounded(tx.abort(cx)).await;
     }
 }
 
@@ -570,14 +584,14 @@ async fn fuzz_consumer_poll(
 
     if !sanitized_topics.is_empty() {
         let topic_refs: Vec<&str> = sanitized_topics.iter().map(String::as_str).collect();
-        let _ = consumer.subscribe(cx, &topic_refs).await;
+        let _ = run_bounded(consumer.subscribe(cx, &topic_refs)).await;
 
         // Test poll operation
         let timeout = Duration::from_millis(poll_timeout_ms.min(5000)); // Limit timeout
-        let _ = consumer.poll(cx, timeout).await;
+        let _ = run_bounded(consumer.poll(cx, timeout)).await;
     }
 
-    let _ = consumer.close(cx).await;
+    let _ = run_bounded(consumer.close(cx)).await;
 }
 
 async fn fuzz_consumer_seek_commit(
@@ -600,14 +614,14 @@ async fn fuzz_consumer_seek_commit(
 
     // Test seek operation
     let tpo = TopicPartitionOffset::new(sanitized_topic.clone(), bounded_partition, bounded_offset);
-    let _ = consumer.seek(cx, &tpo).await;
+    let _ = run_bounded(consumer.seek(cx, &tpo)).await;
 
     if should_commit {
         // Test commit operation
-        let _ = consumer.commit_offsets(cx, &[tpo]).await;
+        let _ = run_bounded(consumer.commit_offsets(cx, &[tpo])).await;
     }
 
-    let _ = consumer.close(cx).await;
+    let _ = run_bounded(consumer.close(cx)).await;
 }
 
 async fn fuzz_config_validation(config: &KafkaConfigFuzz) {
@@ -633,7 +647,7 @@ async fn fuzz_error_handling(
     let producer_config = build_producer_config(&extreme_config);
     if let Ok(producer) = KafkaProducer::new(producer_config) {
         // Try operations that should fail quickly
-        let _ = producer.send(cx, "test", None, b"test", None).await;
+        let _ = run_bounded(producer.send(cx, "test", None, b"test", None)).await;
     }
 }
 

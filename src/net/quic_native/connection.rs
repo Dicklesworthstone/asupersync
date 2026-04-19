@@ -39,6 +39,17 @@ pub enum NativeQuicConnectionError {
         /// Current congestion window.
         congestion_window: u64,
     },
+    /// Server anti-amplification limit would be exceeded before peer address validation.
+    AmplificationLimited {
+        /// Requested datagram bytes for the attempted send.
+        requested: u64,
+        /// Bytes already sent while amplification-limited.
+        bytes_sent: u64,
+        /// Bytes received from the peer while amplification-limited.
+        bytes_received: u64,
+        /// Maximum bytes permitted before validation.
+        limit: u64,
+    },
     /// Invalid operation for current connection state.
     InvalidState(&'static str),
 }
@@ -58,6 +69,15 @@ impl fmt::Display for NativeQuicConnectionError {
             } => write!(
                 f,
                 "congestion window exceeded: requested={requested}, in_flight={bytes_in_flight}, cwnd={congestion_window}"
+            ),
+            Self::AmplificationLimited {
+                requested,
+                bytes_sent,
+                bytes_received,
+                limit,
+            } => write!(
+                f,
+                "anti-amplification limit exceeded: requested={requested}, sent={bytes_sent}, received={bytes_received}, limit={limit}"
             ),
             Self::InvalidState(msg) => write!(f, "invalid native quic connection state: {msg}"),
         }
@@ -129,6 +149,7 @@ impl Default for NativeQuicConnectionConfig {
 /// Cx-integrated native QUIC connection machine.
 #[derive(Debug, Clone)]
 pub struct NativeQuicConnection {
+    role: StreamRole,
     tls: QuicTlsMachine,
     transport: QuicTransportMachine,
     streams: StreamTable,
@@ -137,6 +158,9 @@ pub struct NativeQuicConnection {
     active_path_id: u64,
     migration_events: u64,
     drain_timeout_micros: u64,
+    peer_address_validated: bool,
+    anti_amplification_bytes_received: u64,
+    anti_amplification_bytes_sent: u64,
 }
 
 impl NativeQuicConnection {
@@ -144,6 +168,7 @@ impl NativeQuicConnection {
     #[must_use]
     pub fn new(config: NativeQuicConnectionConfig) -> Self {
         Self {
+            role: config.role,
             tls: QuicTlsMachine::new(),
             transport: QuicTransportMachine::new(),
             streams: StreamTable::new_with_connection_limits(
@@ -160,6 +185,9 @@ impl NativeQuicConnection {
             active_path_id: 0,
             migration_events: 0,
             drain_timeout_micros: config.drain_timeout_micros,
+            peer_address_validated: config.role == StreamRole::Client,
+            anti_amplification_bytes_received: 0,
+            anti_amplification_bytes_sent: 0,
         }
     }
 
@@ -178,7 +206,9 @@ impl NativeQuicConnection {
     /// Whether 0-RTT application-data packets may be sent in current state.
     #[must_use]
     pub fn can_send_0rtt(&self) -> bool {
-        self.tls.can_send_0rtt() && self.transport.state() == QuicConnectionState::Handshaking
+        self.role == StreamRole::Client
+            && self.tls.can_send_0rtt()
+            && self.transport.state() == QuicConnectionState::Handshaking
     }
 
     /// Access TLS machine snapshot.
@@ -203,6 +233,10 @@ impl NativeQuicConnection {
     pub fn begin_handshake(&mut self, cx: &Cx) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         self.transport.begin_handshake()?;
+        if self.role == StreamRole::Server && self.anti_amplification_bytes_received == 0 {
+            // A valid QUIC client Initial datagram is padded to at least 1200 bytes.
+            self.anti_amplification_bytes_received = 1_200;
+        }
         Ok(())
     }
 
@@ -233,6 +267,7 @@ impl NativeQuicConnection {
         }
         self.transport.on_established()?;
         self.tls.on_handshake_confirmed()?;
+        self.peer_address_validated = true;
         Ok(())
     }
 
@@ -411,6 +446,11 @@ impl NativeQuicConnection {
     /// Enable session resumption/0-RTT mode for current handshake.
     pub fn enable_resumption_0rtt(&mut self, cx: &Cx) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
+        if self.role != StreamRole::Client {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "0-RTT resumption is client-only",
+            ));
+        }
         self.tls.enable_resumption();
         Ok(())
     }
@@ -430,6 +470,25 @@ impl NativeQuicConnection {
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         self.migration_disabled = disabled;
+        Ok(())
+    }
+
+    /// Credit bytes received from the peer before address validation completes.
+    pub fn on_datagram_received(
+        &mut self,
+        cx: &Cx,
+        bytes: u64,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.anti_amplification_bytes_received =
+            self.anti_amplification_bytes_received.saturating_add(bytes);
+        Ok(())
+    }
+
+    /// Mark the peer address as validated, lifting server anti-amplification limits.
+    pub fn validate_peer_address(&mut self, cx: &Cx) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.peer_address_validated = true;
         Ok(())
     }
 
@@ -489,6 +548,7 @@ impl NativeQuicConnection {
                 congestion_window: self.transport.congestion_window_bytes(),
             });
         }
+        self.ensure_anti_amplification_limit(bytes)?;
         let pn = self.next_packet_number(space)?;
         self.transport.on_packet_sent(SentPacketMeta {
             space,
@@ -498,6 +558,10 @@ impl NativeQuicConnection {
             in_flight,
             time_sent_micros,
         });
+        if self.role == StreamRole::Server && !self.peer_address_validated {
+            self.anti_amplification_bytes_sent =
+                self.anti_amplification_bytes_sent.saturating_add(bytes);
+        }
         Ok(pn)
     }
 
@@ -599,7 +663,7 @@ impl NativeQuicConnection {
                 "connection is closed",
             ));
         }
-        if !self.can_send_1rtt() {
+        if !(self.can_send_1rtt() || self.can_send_0rtt()) {
             return Err(NativeQuicConnectionError::InvalidState(
                 "1-RTT traffic not yet enabled",
             ));
@@ -632,9 +696,12 @@ impl NativeQuicConnection {
         &self,
         space: PacketNumberSpace,
     ) -> Result<(), NativeQuicConnectionError> {
-        if self.transport.state() == QuicConnectionState::Closed {
+        if matches!(
+            self.transport.state(),
+            QuicConnectionState::Draining | QuicConnectionState::Closed
+        ) {
             return Err(NativeQuicConnectionError::InvalidState(
-                "packet send requires non-closed connection state",
+                "packet send requires non-draining, non-closed connection state",
             ));
         }
         if matches!(space, PacketNumberSpace::ApplicationData)
@@ -668,6 +735,23 @@ impl NativeQuicConnection {
         }
         self.next_packet_numbers[idx] = out + 1;
         Ok(out)
+    }
+
+    fn ensure_anti_amplification_limit(&self, bytes: u64) -> Result<(), NativeQuicConnectionError> {
+        if self.role != StreamRole::Server || self.peer_address_validated {
+            return Ok(());
+        }
+        let limit = self.anti_amplification_bytes_received.saturating_mul(3);
+        let attempted = self.anti_amplification_bytes_sent.saturating_add(bytes);
+        if attempted > limit {
+            return Err(NativeQuicConnectionError::AmplificationLimited {
+                requested: bytes,
+                bytes_sent: self.anti_amplification_bytes_sent,
+                bytes_received: self.anti_amplification_bytes_received,
+                limit,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -811,7 +895,31 @@ mod tests {
         assert_eq!(
             err,
             NativeQuicConnectionError::InvalidState(
-                "packet send requires non-closed connection state"
+                "packet send requires non-draining, non-closed connection state"
+            )
+        );
+    }
+
+    #[test]
+    fn packet_send_is_rejected_after_begin_close_enters_draining() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        conn.begin_close(&cx, 50_000, 0x77).expect("begin close");
+
+        let err = conn
+            .on_packet_sent(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                1200,
+                true,
+                true,
+                50_100,
+            )
+            .expect_err("send after begin_close must fail");
+        assert_eq!(
+            err,
+            NativeQuicConnectionError::InvalidState(
+                "packet send requires non-draining, non-closed connection state"
             )
         );
     }
@@ -1141,6 +1249,91 @@ mod tests {
             )
             .expect("0-rtt appdata send");
         assert_eq!(pn, 0);
+    }
+
+    #[test]
+    fn client_can_open_and_write_stream_during_0rtt() {
+        let cx = test_cx();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        conn.begin_handshake(&cx).expect("begin");
+        conn.on_handshake_keys_available(&cx)
+            .expect("handshake keys");
+        conn.enable_resumption_0rtt(&cx).expect("enable 0-rtt");
+
+        let stream = conn.open_local_bidi(&cx).expect("open 0-rtt stream");
+        conn.write_stream(&cx, stream, 32)
+            .expect("write 0-rtt stream");
+    }
+
+    #[test]
+    fn server_cannot_enable_0rtt_resumption() {
+        let cx = test_cx();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig {
+            role: StreamRole::Server,
+            ..NativeQuicConnectionConfig::default()
+        });
+        conn.begin_handshake(&cx).expect("begin");
+        conn.on_handshake_keys_available(&cx)
+            .expect("handshake keys");
+
+        let err = conn
+            .enable_resumption_0rtt(&cx)
+            .expect_err("server must not opt into 0-rtt sending");
+        assert_eq!(
+            err,
+            NativeQuicConnectionError::InvalidState("0-RTT resumption is client-only")
+        );
+        assert!(!conn.can_send_0rtt());
+    }
+
+    #[test]
+    fn server_send_is_limited_by_anti_amplification_budget() {
+        let cx = test_cx();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig {
+            role: StreamRole::Server,
+            ..NativeQuicConnectionConfig::default()
+        });
+        conn.begin_handshake(&cx).expect("begin");
+
+        conn.on_packet_sent(&cx, PacketNumberSpace::Handshake, 1_200, true, true, 10_000)
+            .expect("first flight");
+        conn.on_packet_sent(&cx, PacketNumberSpace::Handshake, 1_200, true, true, 10_100)
+            .expect("second flight");
+        conn.on_packet_sent(&cx, PacketNumberSpace::Handshake, 1_200, true, true, 10_200)
+            .expect("third flight");
+
+        let err = conn
+            .on_packet_sent(&cx, PacketNumberSpace::Handshake, 1, true, true, 10_300)
+            .expect_err("fourth flight must exceed 3x limit");
+        assert_eq!(
+            err,
+            NativeQuicConnectionError::AmplificationLimited {
+                requested: 1,
+                bytes_sent: 3_600,
+                bytes_received: 1_200,
+                limit: 3_600,
+            }
+        );
+    }
+
+    #[test]
+    fn peer_address_validation_lifts_anti_amplification_limit() {
+        let cx = test_cx();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig {
+            role: StreamRole::Server,
+            ..NativeQuicConnectionConfig::default()
+        });
+        conn.begin_handshake(&cx).expect("begin");
+        conn.on_packet_sent(&cx, PacketNumberSpace::Handshake, 1_200, true, true, 10_000)
+            .expect("first flight");
+        conn.on_packet_sent(&cx, PacketNumberSpace::Handshake, 1_200, true, true, 10_100)
+            .expect("second flight");
+        conn.on_packet_sent(&cx, PacketNumberSpace::Handshake, 1_200, true, true, 10_200)
+            .expect("third flight");
+
+        conn.validate_peer_address(&cx).expect("validate");
+        conn.on_packet_sent(&cx, PacketNumberSpace::Handshake, 1_200, true, true, 10_300)
+            .expect("validated peer may exceed prior 3x limit");
     }
 
     #[test]
