@@ -22,7 +22,7 @@ Mapped to: `Actor` trait, `ActorHandle<A>`, `ActorRef<M>` in `src/actor.rs`.
 **GenServer (Generic Server)**
 A specialized actor pattern providing synchronous call (request-response) and asynchronous cast (fire-and-forget) message handling. GenServer wraps the `Actor` trait with a typed message protocol that distinguishes calls (which create a reply obligation) from casts (which do not).
 
-Status: Planned (bd-2fh3z). Will build on existing `Actor` + `oneshot` channel for reply.
+Status: Implemented. Mapped to `GenServer`, `GenServerHandle`, `Reply`, and `SystemMsg` in `src/gen_server.rs`.
 
 **Supervisor**
 A Spork process responsible for starting, monitoring, and restarting child processes according to a configured strategy. Supervisors form the backbone of fault tolerance. They are themselves region-owned and participate in the region's quiescence protocol.
@@ -44,12 +44,12 @@ Mapped to: `mpsc::channel<M>` in `src/channel/mpsc.rs`, configured via `MailboxC
 **Call**
 A synchronous request-response interaction with a GenServer. The caller sends a message and receives a reply. Calls create a *reply obligation*: the server must either reply or the obligation is detected as leaked. Calls are inherently bounded by the caller's budget (deadline, poll quota).
 
-Status: Planned. Will use `oneshot::channel` for reply delivery + `ObligationToken` for linearity.
+Status: Implemented. Uses tracked oneshot reply permits and obligation-aware send/abort paths in `src/gen_server.rs`.
 
 **Cast**
 An asynchronous fire-and-forget message to a GenServer. The sender does not wait for a reply. Casts flow through the mailbox with standard backpressure (bounded channel blocks when full). No reply obligation is created.
 
-Status: Planned. Maps directly to existing `ActorRef::send()`.
+Status: Implemented. Maps to `GenServerHandle::cast` / `try_cast` with bounded-mailbox backpressure in `src/gen_server.rs`.
 
 **Reply Obligation**
 A linear token created when a call message is received by a GenServer. The server *must* consume this token by sending a reply. If the token is dropped without reply (e.g., due to a bug or panic), the obligation system detects the leak. In lab mode, leaked reply obligations trigger a diagnostic; in production, the caller's oneshot receives an error.
@@ -66,7 +66,7 @@ Mapped to: Region parent-child relationship + `SupervisionDecision` in `src/supe
 **Monitoring**
 A unidirectional observation of another process's lifecycle. Monitors receive a notification when the monitored process terminates but are not themselves affected by the termination. This is a lighter-weight alternative to linking.
 
-Status: Planned. Will use a watch-style channel or callback registration on `ActorHandle::is_finished()`.
+Status: Implemented. Mapped to `MonitorRef`, `DownNotification`, and deterministic `SystemMsg::Down` delivery.
 
 **Supervision Strategy**
 The policy a supervisor follows when a child fails:
