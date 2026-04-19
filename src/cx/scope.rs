@@ -1388,7 +1388,7 @@ impl<P: Policy> Scope<'_, P> {
             self.budget,
             Some(child_observability),
             io_driver,
-            None,
+            parent_cx.io_cap_handle(),
             timer_driver,
             Some(child_entropy),
         )
@@ -1396,7 +1396,13 @@ impl<P: Policy> Scope<'_, P> {
         .with_registry_handle(parent_cx.registry_handle())
         .with_remote_cap_handle(parent_cx.remote_cap_handle())
         .with_blocking_pool_handle(parent_cx.blocking_pool_handle())
-        .with_evidence_sink(parent_cx.evidence_sink_handle());
+        .with_evidence_sink(parent_cx.evidence_sink_handle())
+        .with_macaroon_handle(parent_cx.macaroon_handle());
+        let child_cx = if let Some(pressure) = parent_cx.pressure_handle() {
+            child_cx.with_pressure(pressure)
+        } else {
+            child_cx
+        };
         child_cx.set_trace_buffer(state.trace_handle());
         let child_cx_full = child_cx.retype::<cap::All>();
 
@@ -1412,12 +1418,16 @@ impl<P: Policy> Scope<'_, P> {
     ) -> Result<TaskId, SpawnError> {
         use crate::util::ArenaIndex;
 
+        let now = state
+            .timer_driver()
+            .map_or(state.now, crate::time::TimerDriverHandle::now);
+
         // Create placeholder task record
         let idx = state.insert_task(TaskRecord::new_with_time(
             TaskId::from_arena(ArenaIndex::new(0, 0)), // placeholder ID
             self.region,
             self.budget,
-            state.now,
+            now,
         ));
 
         // Get the real task ID from the arena index
@@ -1527,7 +1537,7 @@ mod tests {
     use super::*;
     use crate::record::RegionLimits;
     use crate::runtime::RuntimeState;
-    use crate::types::{CancelKind, Outcome};
+    use crate::types::{CancelKind, Outcome, Time};
     use crate::util::ArenaIndex;
     use futures_lite::future::block_on;
     use std::sync::Arc;
@@ -1653,6 +1663,28 @@ mod tests {
     }
 
     #[test]
+    fn create_task_record_uses_runtime_timer_driver_time() {
+        let mut state = RuntimeState::new();
+        let clock = Arc::new(crate::time::VirtualClock::starting_at(Time::from_millis(
+            11,
+        )));
+        state.set_timer_driver(crate::time::TimerDriverHandle::with_virtual_clock(
+            clock.clone(),
+        ));
+
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        clock.advance(Time::from_millis(7).as_nanos());
+        let task_id = scope
+            .create_task_record(&mut state)
+            .expect("task record should be created");
+
+        let task = state.task(task_id).expect("task record");
+        assert_eq!(task.created_at, Time::from_millis(18));
+    }
+
+    #[test]
     fn spawn_blocking_inherits_runtime_timer_driver() {
         use std::task::{Context, Waker};
 
@@ -1766,7 +1798,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let local_ready = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let local_ready = Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new()));
         let _local_ready_guard =
             crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(1);
@@ -1814,7 +1846,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let local_ready = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let local_ready = Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new()));
         let _local_ready_guard =
             crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(1);
@@ -1831,7 +1863,9 @@ mod tests {
 
         let task_id = {
             let mut queue = local_ready.lock();
-            queue.remove(0)
+            queue
+                .pop_front()
+                .expect("local_ready should contain spawned task")
         };
 
         let mut join_fut = std::pin::pin!(handle.join(&cx));
@@ -2697,7 +2731,9 @@ mod tests {
                 let mut poll_cx = Context::from_waker(&waker);
                 if let std::task::Poll::Ready(outcome) = stored.poll(&mut poll_cx) {
                     if let Some(task) = state.task_mut(handle.task_id()) {
-                        task.complete(outcome);
+                        task.complete(outcome.map_err(|_| {
+                            crate::error::Error::new(crate::error::ErrorKind::Internal)
+                        }));
                     }
                     let _ = state.task_completed(handle.task_id());
                 }
@@ -2732,8 +2768,11 @@ mod tests {
     #[test]
     fn conformance_capability_inheritance() {
         // INVARIANT: Spawned tasks inherit capabilities from the parent Cx
+        use crate::cx::macaroon::MacaroonToken;
         use crate::cx::registry::RegistryHandle;
         use crate::remote::{NodeId, RemoteCap};
+        use crate::security::key::AuthKey;
+        use crate::types::SystemPressure;
         use std::sync::Arc;
         use std::task::{Context, Waker};
 
@@ -2750,10 +2789,28 @@ mod tests {
         let registry = crate::cx::NameRegistry::new();
         let registry_handle = RegistryHandle::new(Arc::new(registry));
         let parent_registry_arc = registry_handle.as_arc();
+        let parent_io_cap: Arc<dyn crate::io::IoCap> = Arc::new(crate::io::LabIoCap::new());
+        let parent_pressure = Arc::new(SystemPressure::new());
+        parent_pressure.set_headroom(0.25);
+        let auth_key = AuthKey::from_seed(7);
+        let token = MacaroonToken::mint(&auth_key, "scope:spawn", "cx/scope");
 
-        let parent_cx = test_cx()
-            .with_registry_handle(Some(registry_handle))
-            .with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("test-node")));
+        let parent_cx = Cx::new_with_io(
+            crate::types::RegionId::new_for_test(0, 0),
+            crate::types::TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            Some(Arc::clone(&parent_io_cap)),
+            None,
+        )
+        .with_registry_handle(Some(registry_handle))
+        .with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("test-node")))
+        .with_pressure(Arc::clone(&parent_pressure))
+        .with_macaroon(token);
+        let parent_macaroon = parent_cx
+            .macaroon_handle()
+            .expect("parent must retain macaroon capability");
 
         let mut handle = scope
             .spawn_registered(&mut state, &parent_cx, move |child_cx| async move {
@@ -2769,10 +2826,35 @@ mod tests {
                     .expect("child must inherit remote capability");
                 let node_name = child_remote.local_node().as_str().to_owned();
 
+                // Verify I/O capability inheritance
+                let child_io_cap = child_cx
+                    .io_cap_handle()
+                    .expect("child must inherit I/O capability");
+                let same_io_cap = Arc::ptr_eq(&child_io_cap, &parent_io_cap);
+
+                // Verify system pressure inheritance
+                let child_pressure = child_cx
+                    .pressure_handle()
+                    .expect("child must inherit system pressure");
+                let same_pressure = Arc::ptr_eq(&child_pressure, &parent_pressure);
+
+                // Verify macaroon inheritance
+                let child_macaroon = child_cx
+                    .macaroon_handle()
+                    .expect("child must inherit macaroon capability");
+                let same_macaroon = Arc::ptr_eq(&child_macaroon, &parent_macaroon);
+
                 // Verify timer capability inheritance (if parent has it)
                 let has_timer = child_cx.has_timer();
 
-                (same_registry, node_name, has_timer)
+                (
+                    same_registry,
+                    node_name,
+                    same_io_cap,
+                    same_pressure,
+                    same_macaroon,
+                    has_timer,
+                )
             })
             .unwrap();
 
@@ -2787,7 +2869,14 @@ mod tests {
 
         let mut join_fut = std::pin::pin!(handle.join(&parent_cx));
         match join_fut.as_mut().poll(&mut poll_cx) {
-            std::task::Poll::Ready(Ok((same_registry, node_name, has_timer))) => {
+            std::task::Poll::Ready(Ok((
+                same_registry,
+                node_name,
+                same_io_cap,
+                same_pressure,
+                same_macaroon,
+                has_timer,
+            ))) => {
                 assert!(
                     same_registry,
                     "child must inherit exact same registry instance"
@@ -2796,7 +2885,20 @@ mod tests {
                     node_name, "test-node",
                     "child must inherit remote capability"
                 );
-                // Timer inheritance depends on runtime setup, but should be consistent
+                assert!(same_io_cap, "child must inherit exact same I/O capability");
+                assert!(
+                    same_pressure,
+                    "child must inherit exact same system pressure handle"
+                );
+                assert!(
+                    same_macaroon,
+                    "child must inherit exact same macaroon capability"
+                );
+                assert_eq!(
+                    has_timer,
+                    parent_cx.has_timer(),
+                    "child timer capability should stay consistent with the runtime-backed parent"
+                );
             }
             other => panic!("capability inheritance test failed: {other:?}"),
         }

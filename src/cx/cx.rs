@@ -263,10 +263,16 @@ impl FullCx {
     /// Returns the current task context, if one is set.
     ///
     /// This is set by the runtime while polling a task.
+    ///
+    /// Returns `None` when no task context is installed and also during
+    /// thread-local teardown, where the ambient context is no longer
+    /// accessible.
     #[inline]
     #[must_use]
     pub fn current() -> Option<Self> {
-        CURRENT_CX.with(|slot| slot.borrow().clone())
+        CURRENT_CX
+            .try_with(|slot| slot.borrow().clone())
+            .unwrap_or(None)
     }
 
     /// Sets the current task context for the duration of the guard.
@@ -515,6 +521,17 @@ impl<Caps> Cx<Caps> {
     #[inline]
     pub fn pressure(&self) -> Option<&SystemPressure> {
         self.handles.pressure.as_deref()
+    }
+
+    /// Returns a cloned handle to the configured system pressure source, if any.
+    ///
+    /// This is `pub(crate)` so spawned child tasks can inherit the same shared
+    /// pressure state as their parent. Some build slices currently exercise
+    /// the inheritance path only behind optional runtime wiring/tests.
+    #[allow(dead_code)]
+    #[must_use]
+    pub(crate) fn pressure_handle(&self) -> Option<Arc<SystemPressure>> {
+        self.handles.pressure.clone()
     }
 
     /// Returns a cloned handle to the configured remote capability, if any.
@@ -993,6 +1010,19 @@ impl<Caps> Cx<Caps> {
         self.handles.io_cap.as_ref().map(AsRef::as_ref)
     }
 
+    /// Returns a cloned handle to the configured I/O capability, if any.
+    ///
+    /// This is `pub(crate)` so internal wiring can preserve I/O authority when
+    /// deriving child task contexts without requiring `Caps: HasIo` bounds.
+    /// Some build slices currently exercise the inheritance path only behind
+    /// optional runtime wiring/tests.
+    #[inline]
+    #[allow(dead_code)]
+    #[must_use]
+    pub(crate) fn io_cap_handle(&self) -> Option<Arc<dyn crate::io::IoCap>> {
+        self.handles.io_cap.clone()
+    }
+
     /// Returns true if I/O capability is available.
     ///
     /// Convenience method to check if I/O operations can be performed.
@@ -1256,9 +1286,35 @@ impl<Caps> Cx<Caps> {
     pub fn checkpoint(&self) -> Result<(), crate::error::Error> {
         let checkpoint_time = self.current_checkpoint_time();
         // Record progress checkpoint and check cancellation under a single lock
-        let (cancel_requested, mask_depth, task, region, budget, budget_baseline, cancel_reason) = {
+        let (
+            cancel_requested,
+            mask_depth,
+            task,
+            region,
+            budget,
+            budget_baseline,
+            cancel_reason,
+            budget_exhaustion,
+        ) = {
             let mut inner = self.inner.write();
             inner.checkpoint_state.record_at(checkpoint_time);
+            let budget_exhaustion = Self::checkpoint_budget_exhaustion(
+                inner.region,
+                inner.task,
+                inner.budget,
+                checkpoint_time,
+            );
+            if let Some((reason, _, _)) = &budget_exhaustion {
+                inner.cancel_requested = true;
+                inner
+                    .fast_cancel
+                    .store(true, std::sync::atomic::Ordering::Release);
+                if let Some(existing) = &mut inner.cancel_reason {
+                    existing.strengthen(reason);
+                } else {
+                    inner.cancel_reason = Some(reason.clone());
+                }
+            }
             if inner.cancel_requested && inner.mask_depth == 0 {
                 inner.cancel_acknowledged = true;
             }
@@ -1270,8 +1326,22 @@ impl<Caps> Cx<Caps> {
                 inner.budget,
                 inner.budget_baseline,
                 inner.cancel_reason.clone(),
+                budget_exhaustion.map(|(_, exhaustion_kind, deadline_remaining_ms)| {
+                    (exhaustion_kind, deadline_remaining_ms)
+                }),
             )
         };
+
+        if let Some((exhaustion_kind, deadline_remaining_ms)) = budget_exhaustion {
+            if let Some(ref sink) = self.handles.evidence_sink {
+                crate::evidence_sink::emit_budget_evidence(
+                    sink.as_ref(),
+                    exhaustion_kind,
+                    budget.poll_quota,
+                    deadline_remaining_ms,
+                );
+            }
+        }
 
         // Emit evidence for cancellation decisions observed at checkpoint.
         if cancel_requested && mask_depth == 0 {
@@ -1295,6 +1365,7 @@ impl<Caps> Cx<Caps> {
             region,
             budget,
             budget_baseline,
+            checkpoint_time,
             cancel_reason.as_ref(),
         )
     }
@@ -1326,11 +1397,37 @@ impl<Caps> Cx<Caps> {
     pub fn checkpoint_with(&self, msg: impl Into<String>) -> Result<(), crate::error::Error> {
         let checkpoint_time = self.current_checkpoint_time();
         // Record progress checkpoint and check cancellation under a single lock
-        let (cancel_requested, mask_depth, task, region, budget, budget_baseline, cancel_reason) = {
+        let (
+            cancel_requested,
+            mask_depth,
+            task,
+            region,
+            budget,
+            budget_baseline,
+            cancel_reason,
+            budget_exhaustion,
+        ) = {
             let mut inner = self.inner.write();
             inner
                 .checkpoint_state
                 .record_with_message_at(msg.into(), checkpoint_time);
+            let budget_exhaustion = Self::checkpoint_budget_exhaustion(
+                inner.region,
+                inner.task,
+                inner.budget,
+                checkpoint_time,
+            );
+            if let Some((reason, _, _)) = &budget_exhaustion {
+                inner.cancel_requested = true;
+                inner
+                    .fast_cancel
+                    .store(true, std::sync::atomic::Ordering::Release);
+                if let Some(existing) = &mut inner.cancel_reason {
+                    existing.strengthen(reason);
+                } else {
+                    inner.cancel_reason = Some(reason.clone());
+                }
+            }
             if inner.cancel_requested && inner.mask_depth == 0 {
                 inner.cancel_acknowledged = true;
             }
@@ -1342,8 +1439,22 @@ impl<Caps> Cx<Caps> {
                 inner.budget,
                 inner.budget_baseline,
                 inner.cancel_reason.clone(),
+                budget_exhaustion.map(|(_, exhaustion_kind, deadline_remaining_ms)| {
+                    (exhaustion_kind, deadline_remaining_ms)
+                }),
             )
         };
+
+        if let Some((exhaustion_kind, deadline_remaining_ms)) = budget_exhaustion {
+            if let Some(ref sink) = self.handles.evidence_sink {
+                crate::evidence_sink::emit_budget_evidence(
+                    sink.as_ref(),
+                    exhaustion_kind,
+                    budget.poll_quota,
+                    deadline_remaining_ms,
+                );
+            }
+        }
 
         // Emit evidence for cancellation decisions observed at checkpoint.
         if cancel_requested && mask_depth == 0 {
@@ -1367,6 +1478,7 @@ impl<Caps> Cx<Caps> {
             region,
             budget,
             budget_baseline,
+            checkpoint_time,
             cancel_reason.as_ref(),
         )
     }
@@ -1415,6 +1527,82 @@ impl<Caps> Cx<Caps> {
             .map_or_else(wall_clock_now, TimerDriverHandle::now)
     }
 
+    #[inline]
+    fn checkpoint_budget_exhaustion(
+        region: RegionId,
+        task: TaskId,
+        budget: Budget,
+        now: Time,
+    ) -> Option<(CancelReason, &'static str, Option<u64>)> {
+        let deadline_remaining_ms = budget
+            .remaining_time(now)
+            .map(Self::duration_millis_saturating);
+
+        let mut exhaustion = if budget.is_past_deadline(now) {
+            Some((
+                CancelReason::with_origin(CancelKind::Deadline, region, now).with_task(task),
+                "time",
+                deadline_remaining_ms,
+            ))
+        } else {
+            None
+        };
+
+        if budget.poll_quota == 0 {
+            let candidate =
+                CancelReason::with_origin(CancelKind::PollQuota, region, now).with_task(task);
+            match &mut exhaustion {
+                Some((existing, kind, _)) => {
+                    if existing.strengthen(&candidate) {
+                        *kind = "poll";
+                    }
+                }
+                None => exhaustion = Some((candidate, "poll", deadline_remaining_ms)),
+            }
+        }
+
+        if matches!(budget.cost_quota, Some(0)) {
+            let candidate =
+                CancelReason::with_origin(CancelKind::CostBudget, region, now).with_task(task);
+            match &mut exhaustion {
+                Some((existing, kind, _)) => {
+                    if existing.strengthen(&candidate) {
+                        *kind = "cost";
+                    }
+                }
+                None => exhaustion = Some((candidate, "cost", deadline_remaining_ms)),
+            }
+        }
+
+        exhaustion
+    }
+
+    #[inline]
+    fn checkpoint_budget_usage(
+        budget: Budget,
+        budget_baseline: Budget,
+        now: Time,
+    ) -> (Option<u32>, Option<u64>, Option<u64>) {
+        let polls_used = if budget_baseline.poll_quota == u32::MAX {
+            None
+        } else {
+            Some(budget_baseline.poll_quota.saturating_sub(budget.poll_quota))
+        };
+        let cost_used = match (budget_baseline.cost_quota, budget.cost_quota) {
+            (Some(baseline), Some(remaining)) => Some(baseline.saturating_sub(remaining)),
+            _ => None,
+        };
+        let time_remaining_ms = budget
+            .remaining_time(now)
+            .map(Self::duration_millis_saturating);
+        (polls_used, cost_used, time_remaining_ms)
+    }
+
+    #[inline]
+    fn duration_millis_saturating(duration: Duration) -> u64 {
+        u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+    }
+
     /// Internal: checks cancellation from extracted values.
     #[allow(clippy::result_large_err)]
     #[allow(clippy::too_many_arguments)]
@@ -1425,18 +1613,11 @@ impl<Caps> Cx<Caps> {
         region: RegionId,
         budget: Budget,
         budget_baseline: Budget,
+        checkpoint_time: Time,
         cancel_reason: Option<&CancelReason>,
     ) -> Result<(), crate::error::Error> {
-        let polls_used = if budget_baseline.poll_quota == u32::MAX {
-            None
-        } else {
-            Some(budget_baseline.poll_quota.saturating_sub(budget.poll_quota))
-        };
-        let cost_used = match (budget_baseline.cost_quota, budget.cost_quota) {
-            (Some(baseline), Some(remaining)) => Some(baseline.saturating_sub(remaining)),
-            _ => None,
-        };
-        let time_remaining = budget.deadline;
+        let (polls_used, cost_used, time_remaining_ms) =
+            Self::checkpoint_budget_usage(budget, budget_baseline, checkpoint_time);
 
         let _ = (
             &task,
@@ -1445,7 +1626,7 @@ impl<Caps> Cx<Caps> {
             &budget_baseline,
             &polls_used,
             &cost_used,
-            &time_remaining,
+            &time_remaining_ms,
         );
 
         trace!(
@@ -1453,8 +1634,7 @@ impl<Caps> Cx<Caps> {
             region_id = ?region,
             polls_used = ?polls_used,
             polls_remaining = budget.poll_quota,
-            time_remaining = ?time_remaining,
-            time_remaining_source = "deadline",
+            time_remaining_ms = ?time_remaining_ms,
             cost_used = ?cost_used,
             cost_remaining = ?budget.cost_quota,
             deadline = ?budget.deadline,
@@ -1889,13 +2069,21 @@ impl<Caps> Cx<Caps> {
     /// This API is intended for testing only. In production, cancellation signals
     /// are propagated by the runtime through the task tree.
     pub fn set_cancel_requested(&self, value: bool) {
-        let mut inner = self.inner.write();
-        inner.cancel_requested = value;
-        inner
-            .fast_cancel
-            .store(value, std::sync::atomic::Ordering::Release);
-        if !value {
-            inner.cancel_reason = None;
+        let waker = {
+            let mut inner = self.inner.write();
+            inner.cancel_requested = value;
+            inner
+                .fast_cancel
+                .store(value, std::sync::atomic::Ordering::Release);
+            if !value {
+                inner.cancel_reason = None;
+                None
+            } else {
+                inner.cancel_waker.clone()
+            }
+        };
+        if let Some(waker) = waker {
+            waker.wake();
         }
     }
 
@@ -2576,6 +2764,32 @@ mod tests {
     use crate::messaging::subject::SubjectPattern;
     use crate::trace::TraceBufferHandle;
     use crate::util::{ArenaIndex, DetEntropy};
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    static CURRENT_CX_DTOR_STATE: AtomicU8 = AtomicU8::new(0);
+
+    thread_local! {
+        static CURRENT_CX_DTOR_PROBE: CurrentCxDtorProbe = const { CurrentCxDtorProbe };
+    }
+
+    struct CurrentCxDtorProbe;
+
+    impl Drop for CurrentCxDtorProbe {
+        fn drop(&mut self) {
+            let state = match CURRENT_CX.try_with(|slot| slot.borrow().clone()) {
+                Ok(Some(_)) => 1,
+                Ok(None) => 2,
+                Err(_) => {
+                    if Cx::current().is_none() {
+                        3
+                    } else {
+                        4
+                    }
+                }
+            };
+            CURRENT_CX_DTOR_STATE.store(state, Ordering::SeqCst);
+        }
+    }
 
     fn test_cx() -> Cx {
         Cx::new(
@@ -2594,6 +2808,13 @@ mod tests {
             None,
             Some(Arc::new(DetEntropy::new(seed))),
         )
+    }
+
+    fn trace_message(event: &crate::trace::TraceEvent) -> &str {
+        match &event.data {
+            crate::trace::TraceData::Message(message) => message,
+            other => panic!("expected user trace message, got {other:?}"),
+        }
     }
 
     #[cfg(feature = "messaging-fabric")]
@@ -2694,6 +2915,29 @@ mod tests {
         assert!(
             cx.checkpoint().is_err(),
             "Cx remains masked after panic! mask_depth leaked."
+        );
+    }
+
+    #[test]
+    fn current_returns_none_during_thread_local_teardown() {
+        CURRENT_CX_DTOR_STATE.store(0, Ordering::SeqCst);
+
+        let join = std::thread::spawn(|| {
+            // Initialize the probe first so its destructor runs after CURRENT_CX
+            // and exercises ambient lookup during TLS teardown.
+            CURRENT_CX_DTOR_PROBE.with(|_| {});
+
+            let cx = test_cx();
+            let _guard = Cx::set_current(Some(cx));
+            assert!(Cx::current().is_some(), "current cx should be installed");
+        });
+
+        join.join()
+            .expect("thread-local teardown should not panic when reading Cx");
+        assert_eq!(
+            CURRENT_CX_DTOR_STATE.load(Ordering::SeqCst),
+            3,
+            "Cx::current() should fail closed once CURRENT_CX is unavailable"
         );
     }
 
@@ -3068,6 +3312,125 @@ mod tests {
         let state = cx.checkpoint_state();
         assert_eq!(state.checkpoint_count, 1);
         assert_eq!(state.last_message.as_deref(), Some("should fail"));
+    }
+
+    #[test]
+    fn checkpoint_deadline_exhaustion_sets_cancel_reason() {
+        let cx = Cx::for_testing_with_budget(Budget::new().with_deadline(Time::ZERO));
+
+        assert!(cx.checkpoint().is_err());
+        let reason = cx
+            .cancel_reason()
+            .expect("deadline exhaustion must set reason");
+        assert_eq!(reason.kind, CancelKind::Deadline);
+        assert!(cx.is_cancel_requested());
+    }
+
+    #[test]
+    fn checkpoint_poll_budget_exhaustion_sets_cancel_reason() {
+        let cx = Cx::for_testing_with_budget(Budget::new().with_poll_quota(0));
+
+        assert!(cx.checkpoint().is_err());
+        let reason = cx
+            .cancel_reason()
+            .expect("poll quota exhaustion must set reason");
+        assert_eq!(reason.kind, CancelKind::PollQuota);
+        assert!(cx.is_cancel_requested());
+    }
+
+    #[test]
+    fn checkpoint_cost_budget_exhaustion_sets_cancel_reason() {
+        let cx = Cx::for_testing_with_budget(Budget::new().with_cost_quota(0));
+
+        assert!(cx.checkpoint().is_err());
+        let reason = cx
+            .cancel_reason()
+            .expect("cost budget exhaustion must set reason");
+        assert_eq!(reason.kind, CancelKind::CostBudget);
+        assert!(cx.is_cancel_requested());
+    }
+
+    #[test]
+    fn masked_checkpoint_defers_budget_exhaustion() {
+        let cx = Cx::for_testing_with_budget(Budget::new().with_deadline(Time::ZERO));
+
+        cx.masked(|| {
+            assert!(
+                cx.checkpoint().is_ok(),
+                "budget exhaustion should defer while masked"
+            );
+        });
+
+        let reason = cx
+            .cancel_reason()
+            .expect("masked checkpoint should still record exhaustion reason");
+        assert_eq!(reason.kind, CancelKind::Deadline);
+        assert!(
+            cx.checkpoint().is_err(),
+            "deadline exhaustion should be observed after unmasking"
+        );
+    }
+
+    #[test]
+    fn checkpoint_budget_usage_reports_remaining_time_in_millis() {
+        let budget = Budget::new()
+            .with_deadline(Time::from_secs(10))
+            .with_poll_quota(3)
+            .with_cost_quota(7);
+        let baseline = Budget::new()
+            .with_deadline(Time::from_secs(20))
+            .with_poll_quota(5)
+            .with_cost_quota(11);
+
+        let (polls_used, cost_used, time_remaining_ms) =
+            Cx::<cap::All>::checkpoint_budget_usage(budget, baseline, Time::from_secs(7));
+
+        assert_eq!(polls_used, Some(2));
+        assert_eq!(cost_used, Some(4));
+        assert_eq!(time_remaining_ms, Some(3_000));
+    }
+
+    #[test]
+    fn set_cancel_requested_wakes_registered_cancel_waker() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Wake, Waker};
+
+        struct CountWaker(Arc<AtomicUsize>);
+
+        impl Wake for CountWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let cx = test_cx();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(CountWaker(Arc::clone(&wakes))));
+
+        {
+            let mut inner = cx.inner.write();
+            inner.cancel_waker = Some(waker);
+        }
+
+        cx.set_cancel_requested(true);
+
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            1,
+            "set_cancel_requested(true) must wake the registered cancel waker"
+        );
+
+        cx.set_cancel_requested(false);
+
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            1,
+            "clearing cancellation must not spuriously wake the cancel waker"
+        );
     }
 
     #[test]
@@ -3482,10 +3845,10 @@ mod tests {
         // For this test we verify causal ordering through logical time monotonicity
         for i in 1..times.len() {
             assert!(
-                times[i - 1].tick <= times[i].tick,
-                "Logical time should be monotonically increasing: {} > {}",
-                times[i - 1].tick,
-                times[i].tick
+                times[i - 1] <= times[i],
+                "Logical time should be monotonically increasing: {:?} > {:?}",
+                times[i - 1],
+                times[i]
             );
         }
     }
@@ -3536,9 +3899,12 @@ mod tests {
             // Note: We compare message content rather than exact logical time
             // as time implementation details may vary while maintaining determinism
             assert_eq!(
-                e1.message, e2.message,
+                trace_message(e1),
+                trace_message(e2),
                 "Trace message at index {} should be deterministic: '{}' vs '{}'",
-                i, e1.message, e2.message
+                i,
+                trace_message(e1),
+                trace_message(e2)
             );
         }
     }
@@ -3582,14 +3948,14 @@ mod tests {
         // Verify causal ordering preservation through logical time
         let logical_times: Vec<_> = events
             .iter()
-            .map(|e| e.logical_time.as_ref().expect("logical time").tick)
+            .map(|e| e.logical_time.as_ref().expect("logical time"))
             .collect();
 
         // Logical time should increase monotonically regardless of attenuation level
         for i in 1..logical_times.len() {
             assert!(
                 logical_times[i - 1] <= logical_times[i],
-                "Macaroon attenuation should preserve causal ordering: tick {} > {}",
+                "Macaroon attenuation should preserve causal ordering: tick {:?} > {:?}",
                 logical_times[i - 1],
                 logical_times[i]
             );
@@ -3628,7 +3994,7 @@ mod tests {
         // Verify no duplicate logical times (idempotence of time allocation)
         let mut logical_times: Vec<_> = events
             .iter()
-            .map(|e| e.logical_time.as_ref().expect("logical time").tick)
+            .map(|e| format!("{:?}", e.logical_time.as_ref().expect("logical time")))
             .collect();
         logical_times.sort_unstable();
         logical_times.dedup();
@@ -3664,13 +4030,13 @@ mod tests {
         // Verify logical time ordering is preserved across clone usage
         let logical_times: Vec<_> = events
             .iter()
-            .map(|e| e.logical_time.as_ref().expect("logical time").tick)
+            .map(|e| e.logical_time.as_ref().expect("logical time"))
             .collect();
 
         for i in 1..logical_times.len() {
             assert!(
                 logical_times[i - 1] <= logical_times[i],
-                "Clone should preserve logical time ordering: {} > {}",
+                "Clone should preserve logical time ordering: {:?} > {:?}",
                 logical_times[i - 1],
                 logical_times[i]
             );
@@ -3733,13 +4099,13 @@ mod tests {
         // 1. Logical time monotonicity (covers MR1, MR3, MR5)
         let logical_times: Vec<_> = events
             .iter()
-            .map(|e| e.logical_time.as_ref().expect("logical time").tick)
+            .map(|e| e.logical_time.as_ref().expect("logical time"))
             .collect();
 
         for i in 1..logical_times.len() {
             assert!(
                 logical_times[i - 1] <= logical_times[i],
-                "Composite trace ordering should preserve monotonicity: {} > {}",
+                "Composite trace ordering should preserve monotonicity: {:?} > {:?}",
                 logical_times[i - 1],
                 logical_times[i]
             );
@@ -3747,14 +4113,14 @@ mod tests {
 
         // 2. All traces recorded (MR4 budget idempotence equivalent)
         assert!(
-            events.iter().all(|e| !e.message.is_empty()),
+            events.iter().all(|e| !trace_message(e).is_empty()),
             "All traces should have non-empty messages"
         );
 
         // 3. Deterministic branching produces expected pattern (MR2)
         let branch_traces: Vec<_> = events
             .iter()
-            .filter(|e| e.message.contains("_branch_"))
+            .filter(|e| trace_message(e).contains("_branch_"))
             .collect();
         assert_eq!(
             branch_traces.len(),
