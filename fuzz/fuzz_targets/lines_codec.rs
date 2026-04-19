@@ -217,4 +217,115 @@ fuzz_target!(|input: FuzzInput| {
             let _ = newline_codec.decode(&mut test_buf);
         }
     }
+
+    // Test 7: Encode round-trip testing (missing from original)
+    // Property: decode→encode→decode round-trip invariance on valid frames
+    {
+        use asupersync::codec::Encoder;
+
+        let mut rt_codec = if let Some(max_len) = input.config.max_length {
+            LinesCodec::new_with_max_length(std::cmp::max(1, max_len as usize))
+        } else {
+            LinesCodec::new()
+        };
+
+        let mut decode_buf = BytesMut::from(&input.data[..]);
+        let mut decoded_lines = Vec::new();
+
+        // Decode all possible lines from input
+        let mut decode_iterations = 0;
+        const DECODE_MAX_ITERATIONS: usize = 100;
+
+        loop {
+            decode_iterations += 1;
+            if decode_iterations > DECODE_MAX_ITERATIONS {
+                break;
+            }
+
+            match rt_codec.decode(&mut decode_buf) {
+                Ok(Some(line)) => {
+                    decoded_lines.push(line);
+                    if decode_buf.is_empty() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+
+        // Handle any remaining data with decode_eof
+        if !decode_buf.is_empty() {
+            if let Ok(Some(final_line)) = rt_codec.decode_eof(&mut decode_buf) {
+                decoded_lines.push(final_line);
+            }
+        }
+
+        // Test round-trip: encode each decoded line and decode it back
+        for original_line in decoded_lines {
+            let mut encode_codec = LinesCodec::new();
+            let mut encode_buf = BytesMut::new();
+
+            // Encode the line
+            if let Ok(()) = encode_codec.encode(original_line.clone(), &mut encode_buf) {
+                // Now decode the encoded data back
+                let mut decode_codec = LinesCodec::new();
+
+                if let Ok(Some(roundtrip_line)) = decode_codec.decode(&mut encode_buf) {
+                    // Round-trip should preserve content (minus potential newline differences)
+                    let original_trimmed = original_line.trim_end_matches(&['\n', '\r'][..]);
+                    let roundtrip_trimmed = roundtrip_line.trim_end_matches(&['\n', '\r'][..]);
+
+                    assert_eq!(
+                        original_trimmed, roundtrip_trimmed,
+                        "Round-trip invariant violated: original={:?}, roundtrip={:?}",
+                        original_trimmed, roundtrip_trimmed
+                    );
+                }
+            }
+        }
+    }
+
+    // Test 8: Mixed newline handling validation (\n, \r\n, \r, bare CR, NUL)
+    {
+        let mixed_data = [
+            b"line1\n",
+            b"line2\r\n",
+            b"line3\r",
+            b"line4\x00with\x00nul\n",
+            b"line5", // No newline
+        ]
+        .concat();
+
+        let mut mixed_codec = LinesCodec::new();
+        let mut mixed_buf = BytesMut::from(&mixed_data[..]);
+
+        // Decode should handle all newline types gracefully
+        let mut mixed_lines = Vec::new();
+        let mut mixed_iterations = 0;
+        const MIXED_MAX_ITERATIONS: usize = 50;
+
+        loop {
+            mixed_iterations += 1;
+            if mixed_iterations > MIXED_MAX_ITERATIONS {
+                break;
+            }
+
+            match mixed_codec.decode(&mut mixed_buf) {
+                Ok(Some(line)) => {
+                    mixed_lines.push(line);
+                    if mixed_buf.is_empty() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break, // Invalid UTF-8 or oversized line
+            }
+        }
+
+        // Handle trailing data
+        if !mixed_buf.is_empty() {
+            let _ = mixed_codec.decode_eof(&mut mixed_buf);
+        }
+    }
 });
