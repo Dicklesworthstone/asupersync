@@ -179,8 +179,8 @@ impl ObligationTableEpochGC {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
-                obligation_id = _obligation_id,
-                metadata_size = _metadata.len(),
+                obligation_id = obligation_id,
+                metadata_size = metadata.len(),
                 "Direct obligation cleanup"
             );
         }
@@ -266,7 +266,7 @@ impl IODriverWakerEpochGC {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
-                waker_id = _waker_id,
+                waker_id = waker_id,
                 source = source,
                 "Direct waker cleanup"
             );
@@ -369,7 +369,7 @@ impl RegionStateEpochGC {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
-                region_id = _region_id.as_u64(),
+                region_id = region_id.as_u64(),
                 task_count = task_ids.len(),
                 "Direct region cleanup"
             );
@@ -465,7 +465,7 @@ impl TimerEpochGC {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
-                timer_id = _timer_id,
+                timer_id = timer_id,
                 timer_type = timer_type,
                 "Direct timer cleanup"
             );
@@ -582,9 +582,9 @@ impl ChannelEpochGC {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
-                channel_id = _channel_id,
+                channel_id = channel_id,
                 cleanup_type = cleanup_type,
-                data_size = _data.len(),
+                data_size = data.len(),
                 "Direct channel cleanup"
             );
         }
