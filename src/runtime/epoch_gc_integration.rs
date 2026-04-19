@@ -175,7 +175,7 @@ impl ObligationTableEpochGC {
     }
 
     /// Direct cleanup implementation for obligations.
-    fn direct_cleanup_obligation(&self, _obligation_id: u64, _metadata: &[u8]) {
+    fn direct_cleanup_obligation(&self, obligation_id: u64, metadata: &[u8]) {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
@@ -262,7 +262,7 @@ impl IODriverWakerEpochGC {
     }
 
     /// Direct cleanup implementation for wakers.
-    fn direct_cleanup_waker(&self, _waker_id: u64, source: &str) {
+    fn direct_cleanup_waker(&self, waker_id: u64, source: &str) {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(waker_id = waker_id, source = source, "Direct waker cleanup");
@@ -361,7 +361,7 @@ impl RegionStateEpochGC {
     }
 
     /// Direct cleanup implementation for regions.
-    fn direct_cleanup_region(&self, _region_id: RegionId, task_ids: &[TaskId]) {
+    fn direct_cleanup_region(&self, region_id: RegionId, task_ids: &[TaskId]) {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
@@ -372,7 +372,7 @@ impl RegionStateEpochGC {
         }
 
         // Direct cleanup of region state
-        for &_task_id in task_ids {
+        for &task_id in task_ids {
             // task_table.remove_task(task_id);
             // obligation_table.cleanup_task_obligations(task_id);
         }
@@ -457,7 +457,7 @@ impl TimerEpochGC {
     }
 
     /// Direct cleanup implementation for timers.
-    fn direct_cleanup_timer(&self, _timer_id: u64, timer_type: &str) {
+    fn direct_cleanup_timer(&self, timer_id: u64, timer_type: &str) {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
@@ -574,7 +574,7 @@ impl ChannelEpochGC {
     }
 
     /// Direct cleanup implementation for channels.
-    fn direct_cleanup_channel(&self, _channel_id: u64, cleanup_type: &str, _data: &[u8]) {
+    fn direct_cleanup_channel(&self, channel_id: u64, cleanup_type: &str, data: &[u8]) {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
