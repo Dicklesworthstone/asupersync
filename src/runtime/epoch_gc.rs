@@ -573,7 +573,7 @@ impl DeferredCleanupQueue {
     }
 
     /// Clean up an obligation.
-    fn cleanup_obligation(&self, id: u64) {
+    fn cleanup_obligation(&self, _id: u64) {
         // Integrate with obligation tracking system
         // Note: This is a simplified implementation - real integration would
         // require access to the ObligationTable and proper error handling
@@ -589,7 +589,7 @@ impl DeferredCleanupQueue {
     }
 
     /// Clean up a waker.
-    fn cleanup_waker(&self, waker_id: u64, source: &str) {
+    fn cleanup_waker(&self, _waker_id: u64, source: &str) {
         // Integrate with IO driver waker cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
@@ -620,7 +620,7 @@ impl DeferredCleanupQueue {
     }
 
     /// Clean up region state.
-    fn cleanup_region(&self, region_id: RegionId, task_ids: &[TaskId]) {
+    fn cleanup_region(&self, _region_id: RegionId, task_ids: &[TaskId]) {
         // Integrate with region table cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
@@ -630,7 +630,7 @@ impl DeferredCleanupQueue {
         );
 
         // Clean up region metadata and associated tasks
-        for &task_id in task_ids {
+        for &_task_id in task_ids {
             #[cfg(feature = "tracing-integration")]
             tracing::trace!(
                 task_id = task_id.as_u64(),
@@ -649,7 +649,7 @@ impl DeferredCleanupQueue {
     }
 
     /// Clean up a timer.
-    fn cleanup_timer(&self, timer_id: u64, timer_type: &str) {
+    fn cleanup_timer(&self, _timer_id: u64, timer_type: &str) {
         // Integrate with timer wheel cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
@@ -689,7 +689,7 @@ impl DeferredCleanupQueue {
     }
 
     /// Clean up channel state.
-    fn cleanup_channel(&self, channel_id: u64, cleanup_type: &str) {
+    fn cleanup_channel(&self, _channel_id: u64, cleanup_type: &str) {
         // Integrate with channel cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
