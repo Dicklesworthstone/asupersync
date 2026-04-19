@@ -2912,7 +2912,7 @@ impl Supervisor {
         region_id: RegionId,
         parent_region_id: Option<RegionId>,
         now: u64,
-        budget: Option<&Budget>,
+        budget: Option<&mut Budget>,
     ) -> (SupervisionDecision, BindingConstraint) {
         match &mut self.strategy {
             SupervisionStrategy::Stop => (
@@ -2927,8 +2927,8 @@ impl Supervisor {
                 let history = self.history.as_mut().expect("history exists for Restart");
 
                 // Check budget constraints if a budget is provided.
-                if let Some(budget) = budget {
-                    if let Err(refusal) = history.can_restart_with_budget(now, budget) {
+                if let Some(b) = budget {
+                    if let Err(refusal) = history.can_restart_with_budget(now, b) {
                         let constraint = match &refusal {
                             BudgetRefusal::WindowExhausted {
                                 max_restarts,
@@ -2980,6 +2980,9 @@ impl Supervisor {
                         };
 
                         return (decision, constraint);
+                    }
+                    if config.restart_cost > 0 {
+                        b.consume_cost(config.restart_cost);
                     }
                 } else if !history.can_restart(now) {
                     return (
@@ -3080,7 +3083,7 @@ impl Supervisor {
         parent_region_id: Option<RegionId>,
         outcome: &Outcome<(), ()>,
         now: u64,
-        budget: Option<&Budget>,
+        budget: Option<&mut Budget>,
     ) -> SupervisionDecision {
         let strategy_kind = match &self.strategy {
             SupervisionStrategy::Stop => "Stop",
@@ -4938,7 +4941,7 @@ mod tests {
             None,
             &Outcome::Err(()),
             0,
-            Some(&budget),
+            Some(&mut budget),
         );
 
         assert!(matches!(
@@ -4970,7 +4973,7 @@ mod tests {
             None,
             &Outcome::Err(()),
             0,
-            Some(&budget),
+            Some(&mut budget),
         );
 
         match decision {
@@ -6114,7 +6117,10 @@ mod tests {
             None,
             &Outcome::Err(()),
             2_000_000_000,
-            Some(&Budget::INFINITE),
+            {
+                let mut b = Budget::INFINITE;
+                Some(&mut b)
+            },
         );
 
         assert!(matches!(
@@ -7117,7 +7123,7 @@ mod tests {
             None,
             &Outcome::Err(()),
             1000,
-            Some(&budget),
+            Some(&mut budget),
         );
 
         let entry = &supervisor.evidence().entries()[0];
@@ -7149,7 +7155,7 @@ mod tests {
             None,
             &Outcome::Err(()),
             1000,
-            Some(&budget),
+            Some(&mut budget),
         );
 
         let entry = &supervisor.evidence().entries()[0];
@@ -7185,7 +7191,7 @@ mod tests {
             None,
             &Outcome::Err(()),
             now_nanos,
-            Some(&budget),
+            Some(&mut budget),
         );
 
         let entry = &supervisor.evidence().entries()[0];
@@ -7457,7 +7463,7 @@ mod tests {
             None,
             &Outcome::Err(()),
             1000,
-            Some(&budget),
+            Some(&mut budget),
         ); // restart
         sup_budget.on_failure_with_budget(
             test_task_id(),
@@ -7465,7 +7471,7 @@ mod tests {
             None,
             &Outcome::Err(()),
             2000,
-            Some(&budget),
+            Some(&mut budget),
         ); // exhausted
 
         // Both should produce WindowExhausted as the binding constraint
@@ -7667,7 +7673,7 @@ mod tests {
             None,
             &Outcome::Err(()),
             7_000,
-            Some(&budget),
+            Some(&mut budget),
         );
 
         let evidence = supervisor.generalized_evidence();

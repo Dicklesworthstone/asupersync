@@ -1,34 +1,45 @@
 import re
 
-with open('src/channel/mpsc.rs', 'r') as f:
+with open('src/supervision.rs', 'r') as f:
     content = f.read()
 
-# Replace start
-pattern_start = r'let lab = LabRuntime::new\(LabConfig::new\(config\.seed\)\);\s+let result =\s*lab\.spawn_test_scope\(Budget::with_millis\(\d+\), move \|cx, scope\| async move \{'
-replacement_start = r'''crate::lab::runtime::test(config.seed, |lab| {
-                    let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
-                        let cx = crate::cx::Cx::for_testing();
-                        let scope = crate::cx::Scope::<crate::cx::FailFast>::new(root, Budget::INFINITE);
-                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {'''
+# 1. Update signature of decide_err_with_budget
+content = content.replace(
+    'now: u64,\n        budget: Option<&Budget>,',
+    'now: u64,\n        mut budget: Option<&mut Budget>,'
+)
 
-content = re.sub(pattern_start, replacement_start, content)
+# 2. Update signature of on_failure_with_budget
+content = content.replace(
+    'now: u64,\n        budget: Option<&Budget>,',
+    'now: u64,\n        budget: Option<&mut Budget>,'
+)
 
-# Replace end
-# We look for:
-# Ok(())
-# });
-# result.expect(...)
-pattern_end = r'Ok\(\(\)\)\n\s*\}\);\n\n\s*result\.expect'
-replacement_end = r'''Ok(())
-                        }.await;
-                    }).unwrap();
-                    lab.scheduler.lock().schedule(test_task, 0);
-                    lab.run_until_quiescent_with_report();
-                });
-                Result::<(), &str>::Ok(()).expect'''
+# 3. Update the consumption logic
+old_logic = """                // Check budget constraints if a budget is provided.
+                if let Some(budget) = budget {
+                    if let Err(refusal) = history.can_restart_with_budget(now, budget) {"""
+new_logic = """                // Check budget constraints if a budget is provided.
+                if let Some(ref mut b) = budget {
+                    if let Err(refusal) = history.can_restart_with_budget(now, b) {"""
+content = content.replace(old_logic, new_logic)
 
-content = re.sub(pattern_end, replacement_end, content)
+old_logic_2 = """                        return (decision, constraint);
+                    }
+                } else if !history.can_restart(now) {"""
+new_logic_2 = """                        return (decision, constraint);
+                    }
+                    if config.restart_cost > 0 {
+                        b.consume_cost(config.restart_cost);
+                    }
+                } else if !history.can_restart(now) {"""
+content = content.replace(old_logic_2, new_logic_2)
 
-with open('src/channel/mpsc.rs', 'w') as f:
+# 4. Fix tests
+content = re.sub(r'Some\(&budget\)', 'Some(&mut budget)', content)
+
+# Fix Some(&Budget::INFINITE)
+content = re.sub(r'Some\(&Budget::INFINITE\)', '{ let mut b = Budget::INFINITE; Some(&mut b) }', content)
+
+with open('src/supervision.rs', 'w') as f:
     f.write(content)
