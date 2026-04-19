@@ -1231,3 +1231,10 @@ path = "fuzz_targets/qpack_decoder.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hpack_indexed"
+path = "fuzz_targets/hpack_indexed.rs"
+test = false
+doc = false
+bench = false
