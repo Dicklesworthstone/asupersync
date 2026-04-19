@@ -52,7 +52,7 @@ fn arb_description() -> impl Strategy<Value = Option<String>> {
         Just(Some("test io op".to_string())),
         Just(Some("metamorphic test".to_string())),
         Just(Some("cancel safety test".to_string())),
-        Just(Some("".to_string())),
+        Just(Some(String::new())),
     ]
 }
 
@@ -305,7 +305,7 @@ fn mr_resource_counting_invariant() {
         for (i, operation) in resolution_operations.into_iter().enumerate() {
             // Submit phase
             state.now = Time::from_nanos((i * 100) as u64);
-            let mut op = IoOp::submit(&mut state, task_id, root, Some(format!("op_{i}").into()))
+            let mut op = IoOp::submit(&mut state, task_id, root, Some(format!("op_{i}")))
                 .expect("submit should succeed");
             current_pending += 1;
 

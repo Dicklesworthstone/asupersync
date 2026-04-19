@@ -78,42 +78,9 @@ impl MockWaker {
     }
 
     fn to_waker(&self) -> Waker {
-        let woken = self.woken.clone();
-        let fire_time = self.fire_time.clone();
-
-        // Create a waker that records when it was woken and at what time
-        waker::noop_waker_ref().clone()
-    }
-}
-
-// Simple noop waker implementation
-mod waker {
-    use std::task::{RawWaker, RawWakerVTable, Waker};
-
-    unsafe fn noop_clone(_: *const ()) -> RawWaker {
-        noop_raw_waker()
-    }
-
-    unsafe fn noop_wake(_: *const ()) {}
-
-    unsafe fn noop_wake_by_ref(_: *const ()) {}
-
-    unsafe fn noop_drop(_: *const ()) {}
-
-    const NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
-        noop_clone,
-        noop_wake,
-        noop_wake_by_ref,
-        noop_drop,
-    );
-
-    fn noop_raw_waker() -> RawWaker {
-        RawWaker::new(std::ptr::null(), &NOOP_WAKER_VTABLE)
-    }
-
-    pub fn noop_waker_ref() -> &'static Waker {
-        // Safety: The RawWaker implementation is correct for noop operations
-        unsafe { std::mem::transmute(&noop_raw_waker()) }
+        // These metamorphic tests only need a stable no-op waker.
+        let _ = (&self.woken, &self.fire_time);
+        Waker::noop().clone()
     }
 }
 

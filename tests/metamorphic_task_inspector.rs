@@ -10,16 +10,20 @@
 //! 4. Wire format round-trip consistency (serialization)
 //! 5. Summary consistency between snapshot and inspector
 
-use asupersync::cx::Cx;
 use asupersync::lab::LabRuntime;
 use asupersync::observability::{TaskInspector, TaskInspectorConfig, TaskStateInfo};
 use asupersync::runtime::RuntimeState;
-use asupersync::types::Budget;
+use asupersync::types::{Budget, CancelReason};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[allow(clippy::arc_with_non_send_sync)]
+fn shared_state(state: RuntimeState) -> Arc<RuntimeState> {
+    Arc::new(state)
+}
 
 /// MR1: Snapshot Completeness - snapshot captures all active tasks.
 ///
@@ -46,7 +50,7 @@ fn mr1_snapshot_completeness() -> TestResult {
     runtime.run_until_quiescent();
 
     // Create inspector by transferring ownership of the state
-    let inspector = TaskInspector::new(Arc::new(runtime.state), None);
+    let inspector = TaskInspector::new(shared_state(runtime.state), None);
 
     // Get snapshot and manual count
     let snapshot = inspector.wire_snapshot();
@@ -82,36 +86,34 @@ fn mr1_snapshot_completeness() -> TestResult {
 fn mr2_cancellation_state_consistency() -> TestResult {
     let mut state = RuntimeState::new();
     let region = state.create_root_region(Budget::INFINITE);
-    let cancel_cx = Cx::for_testing();
-    let waiter_cx = cancel_cx.clone();
 
     // Create some tasks that respect cancellation
-    let (_task1, _) = state.create_task(region, Budget::INFINITE, async move {
-        // Simple task that checks cancellation status
-        let _cancelled = waiter_cx.is_cancel_requested();
-    })?;
+    let (_task1, _handle1) = state.create_task(region, Budget::INFINITE, async move {})?;
 
-    let (_task2, _) = state.create_task(region, Budget::INFINITE, async {
+    let (_task2, _handle2) = state.create_task(region, Budget::INFINITE, async {
         // Another task
     })?;
 
-    let inspector = TaskInspector::new(Arc::new(state), None);
+    let mut shared = shared_state(state);
 
     // Take first snapshot
-    let snapshot1 = inspector.wire_snapshot();
+    let snapshot1 = TaskInspector::new(shared.clone(), None).wire_snapshot();
 
-    // Trigger cancellation
-    cancel_cx.set_cancel_requested(true);
+    // Trigger actual runtime cancellation on the region that owns the tasks.
+    let tasks_to_cancel = Arc::get_mut(&mut shared)
+        .expect("snapshot inspector should not retain the state")
+        .cancel_request(region, &CancelReason::timeout(), None);
 
     // Take second snapshot
-    let snapshot2 = inspector.wire_snapshot();
+    let snapshot2 = TaskInspector::new(shared, None).wire_snapshot();
 
-    // MR: cancelling_count_after >= cancelling_count_before (they could be the same if tasks complete quickly)
+    // MR: actual cancel propagation moves both tasks into a cancellation phase.
     assert!(
-        snapshot2.summary.cancelling >= snapshot1.summary.cancelling,
-        "Cancellation consistency violated: after={}, before={}",
+        snapshot2.summary.cancelling == snapshot1.summary.cancelling + tasks_to_cancel.len(),
+        "Cancellation consistency violated: after={}, before={}, requested={}",
         snapshot2.summary.cancelling,
-        snapshot1.summary.cancelling
+        snapshot1.summary.cancelling,
+        tasks_to_cancel.len()
     );
 
     // Additional invariant: total tasks should remain the same
@@ -137,7 +139,7 @@ fn mr3_concurrent_snapshots_commutativity() -> TestResult {
         // Simple task
     })?;
 
-    let inspector = TaskInspector::new(Arc::new(state), None);
+    let inspector = TaskInspector::new(shared_state(state), None);
 
     // Take two snapshots at the same logical time
     let snapshot1 = inspector.wire_snapshot();
@@ -190,7 +192,7 @@ fn mr4_wire_format_round_trip() -> TestResult {
         // This will complete quickly
     })?;
 
-    let inspector = TaskInspector::new(Arc::new(state), None);
+    let inspector = TaskInspector::new(shared_state(state), None);
     let snapshot = inspector.wire_snapshot();
     let snapshot_json = snapshot.to_json()?;
 
@@ -224,7 +226,7 @@ fn mr5_summary_consistency() -> TestResult {
         // Second task
     })?;
 
-    let inspector = TaskInspector::new(Arc::new(state), None);
+    let inspector = TaskInspector::new(shared_state(state), None);
 
     let snapshot = inspector.wire_snapshot();
     let summary = inspector.summary();
@@ -271,7 +273,7 @@ fn mr6_task_count_conservation() -> TestResult {
         // This completes immediately
     })?;
 
-    let inspector = TaskInspector::new(Arc::new(state), None);
+    let inspector = TaskInspector::new(shared_state(state), None);
 
     let snapshot = inspector.wire_snapshot();
     let all_tasks = inspector.list_tasks();
@@ -309,7 +311,7 @@ fn mr6_task_count_conservation() -> TestResult {
 fn mr7_schema_version_consistency() -> TestResult {
     // Test with empty state first
     let state1 = RuntimeState::new();
-    let inspector1 = TaskInspector::new(Arc::new(state1), None);
+    let inspector1 = TaskInspector::new(shared_state(state1), None);
     let snapshot1 = inspector1.wire_snapshot();
 
     // Test with state that has tasks
@@ -319,7 +321,7 @@ fn mr7_schema_version_consistency() -> TestResult {
         // Task for schema consistency test
     })?;
 
-    let inspector2 = TaskInspector::new(Arc::new(state2), None);
+    let inspector2 = TaskInspector::new(shared_state(state2), None);
     let snapshot2 = inspector2.wire_snapshot();
 
     // MR: Schema version consistency

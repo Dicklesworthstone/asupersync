@@ -11,21 +11,25 @@
 //! 4. Concurrent reconnect serialized (no race conditions in reconnection)
 //! 5. LabRuntime determinism (consistent behavior under deterministic execution)
 
-use asupersync::runtime::builder::RuntimeBuilder;
+use asupersync::cx::Cx;
 use asupersync::service::Service;
 use asupersync::service::reconnect::{MakeService, Reconnect};
 use asupersync::service::retry::{ExponentialBackoff, JitterStrategy, Policy};
+use asupersync::time::{TimerDriverHandle, VirtualClock};
+use asupersync::types::{Budget, RegionId, TaskId};
 use proptest::prelude::*;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 /// Generate arbitrary jitter strategies for testing
 fn arb_jitter_strategy() -> impl Strategy<Value = JitterStrategy> {
     prop_oneof![
+        Just(JitterStrategy::None),
         Just(JitterStrategy::Full),
         Just(JitterStrategy::Equal),
         Just(JitterStrategy::Decorrelated),
@@ -45,6 +49,141 @@ fn arb_max_delay() -> impl Strategy<Value = u64> {
 /// Generate arbitrary retry counts
 fn arb_retry_count() -> impl Strategy<Value = usize> {
     1usize..=10usize
+}
+
+fn millis_to_nanos(ms: u64) -> u64 {
+    Duration::from_millis(ms)
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn setup_retry_test_cx() -> (Arc<VirtualClock>, TimerDriverHandle, impl Drop) {
+    let clock = Arc::new(VirtualClock::new());
+    let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+    let cx = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 0),
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE,
+        None,
+        None,
+        None,
+        Some(timer.clone()),
+        None,
+    );
+    let guard = Cx::set_current(Some(cx));
+    (clock, timer, guard)
+}
+
+fn capped_exponential_delay(base_delay: u64, attempt: usize, max_delay: u64) -> u64 {
+    base_delay
+        .saturating_mul(1_u64.checked_shl(attempt as u32).unwrap_or(u64::MAX))
+        .min(max_delay)
+}
+
+fn delay_bounds_ms(
+    jitter: JitterStrategy,
+    base_delay: u64,
+    max_delay: u64,
+    attempt: usize,
+    last_delay_ms: u64,
+) -> (u64, u64) {
+    match jitter {
+        JitterStrategy::None => {
+            let delay = capped_exponential_delay(base_delay, attempt, max_delay);
+            (delay, delay)
+        }
+        JitterStrategy::Full => (0, capped_exponential_delay(base_delay, attempt, max_delay)),
+        JitterStrategy::Equal => {
+            let delay = capped_exponential_delay(base_delay, attempt, max_delay);
+            (delay / 2, delay)
+        }
+        JitterStrategy::Decorrelated => {
+            let upper = last_delay_ms
+                .saturating_mul(3)
+                .min(max_delay)
+                .max(base_delay);
+            (base_delay.min(upper), upper)
+        }
+    }
+}
+
+fn poll_retry_after_advance(
+    policy: &ExponentialBackoff<u32>,
+    error: &TestError,
+    advance_ms: u64,
+) -> Poll<ExponentialBackoff<u32>> {
+    let (clock, timer, _guard) = setup_retry_test_cx();
+    let error_result = Result::<&u32, &TestError>::Err(error);
+    let mut future = policy
+        .retry(&42u32, error_result)
+        .expect("retry should be available within configured bounds");
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+
+    match future.as_mut().poll(&mut cx) {
+        Poll::Ready(next_policy) => Poll::Ready(next_policy),
+        Poll::Pending => {
+            if advance_ms > 0 {
+                clock.advance(millis_to_nanos(advance_ms));
+            }
+            let _ = timer.process_timers();
+            future.as_mut().poll(&mut cx)
+        }
+    }
+}
+
+fn exact_retry_delay_ms(
+    policy: &ExponentialBackoff<u32>,
+    error: &TestError,
+    lower_bound_ms: u64,
+    upper_bound_ms: u64,
+) -> u64 {
+    if lower_bound_ms > 0 {
+        let before_lower = poll_retry_after_advance(policy, error, lower_bound_ms - 1);
+        assert!(
+            before_lower.is_pending(),
+            "retry resolved before lower bound {lower_bound_ms}ms for {:?}",
+            policy.jitter()
+        );
+    }
+
+    if let Poll::Ready(_) = poll_retry_after_advance(policy, error, 0) {
+        assert_eq!(
+            lower_bound_ms, 0,
+            "immediate readiness only valid when the lower bound is zero"
+        );
+        return 0;
+    }
+
+    let mut low = lower_bound_ms.max(1);
+    let mut high = upper_bound_ms.max(low);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match poll_retry_after_advance(policy, error, mid) {
+            Poll::Ready(_) => high = mid,
+            Poll::Pending => low = mid + 1,
+        }
+    }
+
+    low
+}
+
+fn execute_retry_attempt(
+    policy: &ExponentialBackoff<u32>,
+    error: &TestError,
+    lower_bound_ms: u64,
+    upper_bound_ms: u64,
+) -> (ExponentialBackoff<u32>, u64) {
+    let delay_ms = exact_retry_delay_ms(policy, error, lower_bound_ms, upper_bound_ms);
+    assert!(
+        delay_ms >= lower_bound_ms && delay_ms <= upper_bound_ms,
+        "delay {delay_ms}ms should stay within [{lower_bound_ms}, {upper_bound_ms}]"
+    );
+
+    match poll_retry_after_advance(policy, error, delay_ms) {
+        Poll::Ready(next_policy) => (next_policy, delay_ms),
+        Poll::Pending => panic!("retry should complete once virtual time reaches {delay_ms}ms"),
+    }
 }
 
 /// Simple test error type that implements std::error::Error
@@ -78,14 +217,6 @@ impl TestService {
 
     fn fail(&self) {
         self.should_fail.store(true, Ordering::Release);
-    }
-
-    fn succeed(&self) {
-        self.should_fail.store(false, Ordering::Release);
-    }
-
-    fn call_count(&self) -> usize {
-        self.call_count.load(Ordering::Acquire)
     }
 }
 
@@ -147,10 +278,6 @@ impl TestServiceMaker {
     fn creation_count(&self) -> usize {
         self.creation_count.load(Ordering::Acquire)
     }
-
-    fn get_created_services(&self) -> Vec<TestService> {
-        self.created_services.lock().unwrap().clone()
-    }
 }
 
 impl MakeService for TestServiceMaker {
@@ -189,7 +316,8 @@ fn mr_reconnect_attempts_converge_with_backoff() {
             .with_max_delay(max_delay);
 
         let mut attempts = Vec::new();
-        let error_result = Result::<&u32, &TestError>::Err(&TestError("retry error".to_string()));
+        let error = TestError("retry error".to_string());
+        let mut last_delay_ms = base_delay;
 
         // Simulate retry attempts
         for attempt_num in 0..max_retries + 2 {
@@ -197,12 +325,17 @@ fn mr_reconnect_attempts_converge_with_backoff() {
             attempts.push(current_attempt);
 
             // Try to get retry future - should succeed if under max_retries
-            if let Some(retry_future) = policy.retry(&42u32, error_result) {
-                // Create a simple async runtime to execute the future
-                let runtime = RuntimeBuilder::current_thread()
-                    .build()
-                    .expect("failed to build test runtime");
-                let new_policy = runtime.block_on(retry_future);
+            if current_attempt < max_retries {
+                let (lower_bound, upper_bound) = delay_bounds_ms(
+                    jitter,
+                    base_delay,
+                    max_delay,
+                    current_attempt,
+                    last_delay_ms,
+                );
+                let (new_policy, delay_ms) =
+                    execute_retry_attempt(&policy, &error, lower_bound, upper_bound);
+                last_delay_ms = delay_ms.max(1);
                 policy = new_policy;
             } else {
                 // No more retries available - should happen after max_retries attempts
@@ -216,7 +349,7 @@ fn mr_reconnect_attempts_converge_with_backoff() {
             }
 
             // Safety check to avoid infinite loops in tests
-            if attempt_num >= max_retries + 1 {
+            if attempt_num > max_retries {
                 break;
             }
         }
@@ -266,73 +399,28 @@ fn mr_jitter_bounds_respected() {
 
         let mut policy = ExponentialBackoff::<u32>::new(max_retries, base_delay, jitter)
             .with_max_delay(max_delay);
-
-        let error_result =
-            Result::<&u32, &TestError>::Err(&TestError("jitter test error".to_string()));
+        let error = TestError("jitter test error".to_string());
         let mut observed_delays = Vec::new();
+        let mut last_delay_ms = base_delay;
 
-        // Collect delays from multiple retry attempts
-        for _attempt_num in 0..max_retries.min(5) {
-            // Limit attempts for performance
-            if let Some(retry_future) = policy.retry(&42u32, error_result) {
-                // Use a simple async runtime to measure the delay
-                let runtime = RuntimeBuilder::current_thread()
-                    .build()
-                    .expect("failed to build test runtime");
-                let start = std::time::Instant::now();
-                let new_policy = runtime.block_on(retry_future);
-                let elapsed = start.elapsed().as_millis() as u64;
-
-                observed_delays.push(elapsed);
-                policy = new_policy;
-            } else {
-                break; // No more retries available
-            }
+        for attempt in 0..max_retries.min(5) {
+            let (lower_bound, upper_bound) =
+                delay_bounds_ms(jitter, base_delay, max_delay, attempt, last_delay_ms);
+            let (new_policy, delay_ms) =
+                execute_retry_attempt(&policy, &error, lower_bound, upper_bound);
+            observed_delays.push(delay_ms);
+            last_delay_ms = delay_ms.max(1);
+            policy = new_policy;
         }
 
-        // Verify all observed delays are reasonable (not zero, not extremely large)
-        for delay in &observed_delays {
-            // Delay should be at least some minimum (we expect jitter, not zero delay)
-            if *delay == 0 {
-                continue; // Zero delays are acceptable for some jitter strategies
-            }
-
-            // Delay should not exceed max_delay by a large margin (allow some tolerance)
-            if *delay > max_delay * 2 {
-                eprintln!(
-                    "Delay {} exceeds max_delay {} by too much",
-                    delay, max_delay
-                );
-                return false;
-            }
-
-            // Delay should not be unreasonably large
-            if *delay > 60_000 {
-                eprintln!("Delay {} exceeds reasonable maximum", delay);
-                return false;
-            }
-        }
-
-        // Check exponential growth pattern for non-decorrelated strategies
         match jitter {
-            JitterStrategy::Full | JitterStrategy::Equal => {
-                // Should see some variation in delays (not all identical)
-                if observed_delays.len() > 1 {
-                    let first = observed_delays[0];
-                    let all_identical = observed_delays.iter().all(|&d| d == first);
-                    if all_identical && first > 0 {
-                        // This could indicate broken jitter
-                        eprintln!("All delays are identical: {:?}", observed_delays);
-                    }
-                }
-            }
-            JitterStrategy::Decorrelated => {
-                // Decorrelated jitter should show some relationship to previous delays
-                // but exact bounds checking is complex, so we just verify reasonableness
+            JitterStrategy::None => observed_delays.iter().enumerate().all(|(attempt, &delay)| {
+                delay == capped_exponential_delay(base_delay, attempt, max_delay)
+            }),
+            JitterStrategy::Full | JitterStrategy::Equal | JitterStrategy::Decorrelated => {
+                observed_delays.iter().all(|&delay| delay <= max_delay)
             }
         }
-
-        true
     }
 
     proptest!(|(
@@ -504,30 +592,22 @@ fn mr_lab_runtime_determinism() {
             return true; // Skip invalid cases
         }
 
-        // Since we're testing determinism, we need to ensure identical conditions
+        // Since we're testing determinism, we need to ensure identical conditions.
         let run_backoff_sequence = || -> Vec<u64> {
             let mut policy = ExponentialBackoff::<u32>::new(max_retries, base_delay, jitter)
                 .with_max_delay(30_000);
-
+            let error = TestError("determinism test".to_string());
             let mut delays = Vec::new();
-            let error_result =
-                Result::<&u32, &TestError>::Err(&TestError("determinism test".to_string()));
+            let mut last_delay_ms = base_delay;
 
-            for _attempt in 0..max_retries.min(3) {
-                // Limit attempts for performance
-                if let Some(retry_future) = policy.retry(&42u32, error_result) {
-                    let runtime = RuntimeBuilder::current_thread()
-                        .build()
-                        .expect("failed to build test runtime");
-                    let start = std::time::Instant::now();
-                    let new_policy = runtime.block_on(retry_future);
-                    let elapsed = start.elapsed().as_millis() as u64;
-
-                    delays.push(elapsed);
-                    policy = new_policy;
-                } else {
-                    break;
-                }
+            for attempt in 0..max_retries.min(3) {
+                let (lower_bound, upper_bound) =
+                    delay_bounds_ms(jitter, base_delay, 30_000, attempt, last_delay_ms);
+                let (new_policy, delay_ms) =
+                    execute_retry_attempt(&policy, &error, lower_bound, upper_bound);
+                delays.push(delay_ms);
+                last_delay_ms = delay_ms.max(1);
+                policy = new_policy;
             }
 
             delays
@@ -538,39 +618,7 @@ fn mr_lab_runtime_determinism() {
         let run2 = run_backoff_sequence();
         let run3 = run_backoff_sequence();
 
-        // For deterministic jitter strategies, results should be more predictable
-        match jitter {
-            JitterStrategy::Full | JitterStrategy::Decorrelated => {
-                // These strategies use randomness, so we focus on structural properties
-                // All runs should have the same number of attempts
-                let structure_consistent = run1.len() == run2.len() && run2.len() == run3.len();
-
-                // All delays should be reasonable (not zero, not excessive)
-                let all_reasonable = [&run1, &run2, &run3]
-                    .iter()
-                    .all(|run| run.iter().all(|&delay| delay > 0 && delay <= 30_000));
-
-                structure_consistent && all_reasonable
-            }
-            JitterStrategy::Equal => {
-                // Equal jitter has bounds but still uses some randomness
-                // Check that delays are within expected bounds and structurally consistent
-                let lengths_match = run1.len() == run2.len() && run2.len() == run3.len();
-
-                // All delays should be reasonable for equal jitter
-                let bounds_respected = [&run1, &run2, &run3].iter().all(|run| {
-                    run.iter().enumerate().all(|(i, &delay)| {
-                        let min_expected = base_delay / 2; // Equal jitter minimum is base/2
-                        let max_expected = base_delay
-                            .saturating_mul(1u64.saturating_pow(i as u32 + 1))
-                            .min(30_000);
-                        delay >= min_expected && delay <= max_expected
-                    })
-                });
-
-                lengths_match && bounds_respected
-            }
-        }
+        run1 == run2 && run2 == run3
     }
 
     proptest!(|(
@@ -623,54 +671,42 @@ mod tests {
         // Test specific known cases to verify bounds logic using public interface
         let mut full_jitter =
             ExponentialBackoff::<u32>::new(10, 100, JitterStrategy::Full).with_max_delay(30_000);
+        let error = TestError("manual test".to_string());
+        let mut last_delay_ms = 100;
 
-        let error_result = Result::<&u32, &TestError>::Err(&TestError("manual test".to_string()));
-
-        // Execute retry attempts to observe delay patterns
         for attempt in 0..3 {
-            if let Some(retry_future) = full_jitter.retry(&42u32, error_result) {
-                let runtime = RuntimeBuilder::current_thread()
-                    .build()
-                    .expect("failed to build test runtime");
-                let start = std::time::Instant::now();
-                full_jitter = runtime.block_on(retry_future);
-                let delay = start.elapsed().as_millis() as u64;
-
-                // For full jitter, delay should be reasonable
-                assert!(
-                    delay <= 5000,
-                    "Full jitter delay {} should be reasonable for attempt {}",
-                    delay,
-                    attempt
-                );
-            } else {
-                break;
-            }
+            let (lower_bound, upper_bound) =
+                delay_bounds_ms(JitterStrategy::Full, 100, 30_000, attempt, last_delay_ms);
+            let (next_policy, delay_ms) =
+                execute_retry_attempt(&full_jitter, &error, lower_bound, upper_bound);
+            assert!(
+                delay_ms <= capped_exponential_delay(100, attempt, 30_000),
+                "Full jitter delay {} should stay within attempt {} bounds",
+                delay_ms,
+                attempt
+            );
+            last_delay_ms = delay_ms.max(1);
+            full_jitter = next_policy;
         }
 
         let mut equal_jitter =
             ExponentialBackoff::<u32>::new(10, 100, JitterStrategy::Equal).with_max_delay(30_000);
+        let mut last_delay_ms = 100;
 
-        // Test equal jitter bounds
         for attempt in 0..2 {
-            if let Some(retry_future) = equal_jitter.retry(&42u32, error_result) {
-                let runtime = RuntimeBuilder::current_thread()
-                    .build()
-                    .expect("failed to build test runtime");
-                let start = std::time::Instant::now();
-                equal_jitter = runtime.block_on(retry_future);
-                let delay = start.elapsed().as_millis() as u64;
-
-                // For equal jitter, delay should be in a reasonable range
-                assert!(
-                    delay <= 1000,
-                    "Equal jitter delay {} should be reasonable for attempt {}",
-                    delay,
-                    attempt
-                );
-            } else {
-                break;
-            }
+            let (lower_bound, upper_bound) =
+                delay_bounds_ms(JitterStrategy::Equal, 100, 30_000, attempt, last_delay_ms);
+            let (next_policy, delay_ms) =
+                execute_retry_attempt(&equal_jitter, &error, lower_bound, upper_bound);
+            let capped_delay = capped_exponential_delay(100, attempt, 30_000);
+            assert!(
+                delay_ms >= capped_delay / 2 && delay_ms <= capped_delay,
+                "Equal jitter delay {} should stay within attempt {} bounds",
+                delay_ms,
+                attempt
+            );
+            last_delay_ms = delay_ms.max(1);
+            equal_jitter = next_policy;
         }
     }
 }

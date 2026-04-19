@@ -21,6 +21,9 @@
 //! Metamorphic testing validates invariant relationships between inputs/outputs
 //! without needing to predict exact outcomes.
 
+#[path = "metamorphic/channel_watch.rs"]
+mod channel_watch;
+
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
 use asupersync::runtime::RuntimeBuilder;
@@ -28,16 +31,15 @@ use asupersync::runtime::RuntimeBuilder;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Test message type with sequence numbers for ordering validation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TestMessage {
-    pub seq: u64,
-    pub content: String,
-    pub sender_id: u32,
+struct TestMessage {
+    seq: u64,
+    content: String,
+    sender_id: u32,
 }
 
 impl TestMessage {
-    pub fn new(seq: u64, content: impl Into<String>, sender_id: u32) -> Self {
+    fn new(seq: u64, content: impl Into<String>, sender_id: u32) -> Self {
         Self {
             seq,
             content: content.into(),
@@ -46,42 +48,25 @@ impl TestMessage {
     }
 }
 
-/// Channel operation types for behavioral testing.
 #[derive(Debug, Clone)]
-pub enum ChannelOp {
-    Send {
-        msg: TestMessage,
-        timeout_ms: Option<u64>,
-    },
-    Recv {
-        timeout_ms: Option<u64>,
-    },
-    TryRecv,
-    CheckClosed,
-    Clone,
+struct MRResult {
+    relation_name: String,
+    input_description: String,
+    expected_property: String,
+    actual_outcome: String,
+    passed: bool,
+    violation_details: Option<String>,
+    messages_processed: u64,
+    test_duration_ms: u64,
 }
 
-/// Metamorphic relation test result.
-#[derive(Debug, Clone)]
-pub struct MRResult {
-    pub relation_name: String,
-    pub input_description: String,
-    pub expected_property: String,
-    pub actual_outcome: String,
-    pub passed: bool,
-    pub violation_details: Option<String>,
-    pub messages_processed: u64,
-    pub test_duration_ms: u64,
-}
-
-/// Metamorphic testing harness for all channel types.
-pub struct ChannelMetamorphicHarness {
+struct ChannelMetamorphicHarness {
     violation_count: Arc<AtomicUsize>,
 }
 
 impl ChannelMetamorphicHarness {
     /// Create new harness for metamorphic testing.
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             violation_count: Arc::new(AtomicUsize::new(0)),
         }
@@ -220,11 +205,8 @@ impl ChannelMetamorphicHarness {
         }
 
         // Receive phase - drain all available messages
-        loop {
-            match rx.try_recv() {
-                Ok(_) => recv_count += 1,
-                Err(_) => break, // No more messages or channel closed
-            }
+        while let Ok(_) = rx.try_recv() {
+            recv_count += 1;
         }
 
         // Verify conservation law
@@ -270,18 +252,20 @@ impl ChannelMetamorphicHarness {
 
         // Send via original
         let cx = Cx::for_testing();
-        let mut sent_via_original = false;
-        if let Ok(permit) = tx.reserve(&cx).await {
+        let sent_via_original = if let Ok(permit) = tx.reserve(&cx).await {
             permit.send(test_msg.clone());
-            sent_via_original = true;
-        }
+            true
+        } else {
+            false
+        };
 
         // Send via clone
-        let mut sent_via_clone = false;
-        if let Ok(permit) = tx_clone.reserve(&cx).await {
+        let sent_via_clone = if let Ok(permit) = tx_clone.reserve(&cx).await {
             permit.send(test_msg.clone());
-            sent_via_clone = true;
-        }
+            true
+        } else {
+            false
+        };
 
         // Receive both messages
         let mut received_count = 0;
@@ -393,26 +377,28 @@ impl ChannelMetamorphicHarness {
     }
 
     /// Get total number of metamorphic relation violations detected.
-    pub fn violation_count(&self) -> usize {
+    fn violation_count(&self) -> usize {
         self.violation_count.load(Ordering::Relaxed)
     }
 
     /// Generate summary report of all metamorphic test results.
-    pub fn generate_summary_report(results: &[MRResult]) -> String {
+    fn generate_summary_report(results: &[MRResult]) -> String {
         let total_tests = results.len();
         let passed_tests = results.iter().filter(|r| r.passed).count();
         let failed_tests = total_tests - passed_tests;
         let total_messages = results.iter().map(|r| r.messages_processed).sum::<u64>();
+        let success_rate = if total_tests == 0 {
+            100.0
+        } else {
+            (passed_tests as f64 / total_tests as f64) * 100.0
+        };
 
         let mut report = String::new();
         report.push_str("=== METAMORPHIC TESTING SUMMARY REPORT ===\n\n");
         report.push_str(&format!("Total Tests: {}\n", total_tests));
         report.push_str(&format!("Passed: {}\n", passed_tests));
         report.push_str(&format!("Failed: {}\n", failed_tests));
-        report.push_str(&format!(
-            "Success Rate: {:.2}%\n",
-            (passed_tests as f64 / total_tests as f64) * 100.0
-        ));
+        report.push_str(&format!("Success Rate: {:.2}%\n", success_rate));
         report.push_str(&format!("Messages Processed: {}\n\n", total_messages));
 
         report.push_str("=== DETAILED RESULTS ===\n");
@@ -457,18 +443,15 @@ mod tests {
             // Verify all tests executed
             assert!(!results.is_empty(), "No metamorphic tests executed");
 
-            // Print summary report
             let report = ChannelMetamorphicHarness::generate_summary_report(&results);
-            println!("\n{}", report);
 
             // Check for violations
             let violation_count = harness.violation_count();
-            if violation_count > 0 {
-                panic!(
-                    "Metamorphic relations violated: {} failures detected",
-                    violation_count
-                );
-            }
+            assert_eq!(
+                violation_count, 0,
+                "Metamorphic relations violated: {} failures detected\n{}",
+                violation_count, report
+            );
 
             // All tests should pass
             for result in &results {

@@ -61,16 +61,11 @@
 
 use proptest::prelude::*;
 use std::future::Future;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
-use asupersync::channel::session::{
-    TrackedOneshotSender, TrackedSender, tracked_channel, tracked_oneshot,
-};
+use asupersync::channel::session::{tracked_channel, tracked_oneshot};
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::cx::Cx;
-use asupersync::obligation::graded::{AbortedProof, CommittedProof, SendPermit};
 use asupersync::types::Budget;
 use asupersync::util::ArenaIndex;
 use asupersync::{RegionId, TaskId};
@@ -85,11 +80,7 @@ fn test_cx() -> Cx {
 }
 
 fn block_on<F: Future>(f: F) -> F::Output {
-    struct NoopWaker;
-    impl std::task::Wake for NoopWaker {
-        fn wake(self: std::sync::Arc<Self>) {}
-    }
-    let waker = Waker::from(std::sync::Arc::new(NoopWaker));
+    let waker = Waker::noop().clone();
     let mut cx = Context::from_waker(&waker);
     let mut pinned = Box::pin(f);
     loop {
@@ -139,7 +130,15 @@ proptest! {
         (capacity, operations) in channel_operation_sequence()
     ) {
         let cx = test_cx();
-        let (tx, mut rx) = tracked_channel::<i32>(capacity);
+        // This test uses a single-threaded `block_on` harness with no concurrent
+        // receiver, so `send()` must never rely on backpressure wakeups to make
+        // progress. Size the channel for the worst-case buffered send volume.
+        let max_buffered_messages = operations
+            .iter()
+            .filter(|op| matches!(op, ChannelOp::ReserveSend(_) | ChannelOp::DirectSend(_)))
+            .count()
+            .max(1);
+        let (tx, mut rx) = tracked_channel::<i32>(capacity.max(max_buffered_messages));
 
         let mut reserve_count = 0;
         let mut send_count = 0;
@@ -207,7 +206,8 @@ proptest! {
     #[test]
     fn mr2_proof_type_preservation_mpsc(values in prop::collection::vec(any::<i32>(), 1..=10)) {
         let cx = test_cx();
-        let (tx, _rx) = tracked_channel::<i32>(values.len() + 1);
+        // Each iteration enqueues two messages before any receive occurs.
+        let (tx, _rx) = tracked_channel::<i32>(values.len().saturating_mul(2).max(1));
 
         for value in values {
             // Test reserve→send path
@@ -252,7 +252,6 @@ proptest! {
 proptest! {
     #[test]
     fn mr3_channel_state_consistency(capacity in 1usize..=10) {
-        let cx = test_cx();
         let (tx, _rx) = tracked_channel::<i32>(capacity);
 
         // Original state: should be able to reserve up to capacity
@@ -446,9 +445,9 @@ proptest! {
             extracted_received.push(block_on(tracked_rx.recv(&cx)).unwrap());
         }
 
-        prop_assert_eq!(raw_received, extracted_received,
+        prop_assert_eq!(raw_received.as_slice(), extracted_received.as_slice(),
             "Reference semantics violated: raw ≠ extracted behavior");
-        prop_assert_eq!(raw_received, values,
+        prop_assert_eq!(raw_received.as_slice(), values.as_slice(),
             "Reference semantics violated: values not preserved");
     }
 }
@@ -463,14 +462,13 @@ proptest! {
         capacity in 1usize..=10,
         attempt_count in 1usize..=50
     ) {
-        let cx = test_cx();
         let (tx, _rx) = tracked_channel::<i32>(capacity);
 
         let mut successful_reserves = 0;
         let mut permits = Vec::new();
 
         // Attempt more reserves than capacity allows
-        for i in 0..attempt_count {
+        for _ in 0..attempt_count {
             match tx.try_reserve() {
                 Ok(permit) => {
                     successful_reserves += 1;
@@ -530,7 +528,6 @@ proptest! {
 
 #[test]
 fn mr10_drop_safety_mpsc_panic() {
-    let cx = test_cx();
     let (tx, _rx) = tracked_channel::<i32>(1);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -608,7 +605,12 @@ proptest! {
         (capacity, operations) in channel_operation_sequence()
     ) {
         let cx = test_cx();
-        let (tx, mut rx) = tracked_channel::<i32>(capacity);
+        let max_buffered_messages = operations
+            .iter()
+            .filter(|op| matches!(op, ChannelOp::ReserveSend(_) | ChannelOp::DirectSend(_)))
+            .count()
+            .max(1);
+        let (tx, mut rx) = tracked_channel::<i32>(capacity.max(max_buffered_messages));
 
         let mut reserve_count = 0;
         let mut send_count = 0;
@@ -654,11 +656,11 @@ proptest! {
             "Compound test: obligation conservation violated");
 
         let mut received_values = Vec::new();
-        while let Ok(value) = block_on(rx.try_recv()) {
+        while let Ok(value) = rx.try_recv() {
             received_values.push(value);
         }
 
-        prop_assert_eq!(received_values, sent_values,
+        prop_assert_eq!(received_values.as_slice(), sent_values.as_slice(),
             "Compound test: value preservation violated");
         prop_assert_eq!(received_values.len(), send_count,
             "Compound test: send count mismatch");

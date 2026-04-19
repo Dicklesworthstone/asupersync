@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 #![cfg(any())]
 //! Metamorphic tests for stream combinator monad laws.
 //!
@@ -11,21 +12,14 @@ use proptest::prelude::*;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 // ============================================================================
 // Test Infrastructure
 // ============================================================================
 
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn noop_waker() -> Waker {
-    Waker::from(Arc::new(NoopWaker))
+    Waker::noop().clone()
 }
 
 /// Helper to collect all items from a stream.

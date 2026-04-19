@@ -21,19 +21,19 @@
 //! 5. **MR5: Cancel-streak adaptive EXP3 stabilization**
 //!    Property: Adaptive cancel-streak policy should converge to stable reward values
 
+use crate::cx::Cx;
 use crate::lab::runtime::LabRuntime;
+use crate::runtime::RuntimeState;
 use crate::runtime::scheduler::three_lane::{
-    PreemptionMetrics, ThreeLaneScheduler, FairnessMonitor, StarvationStats,
+    FairnessMonitor, PreemptionMetrics, StarvationStats, ThreeLaneScheduler,
 };
-use crate::runtime::{RuntimeState};
 use crate::sync::ContendedMutex;
 use crate::types::{Budget, Outcome, TaskId, Time};
-use crate::cx::Cx;
 use crate::{region, spawn};
 use proptest::prelude::*;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Test configuration for different load scenarios
@@ -149,12 +149,13 @@ impl SchedulerFairnessResults {
             return false;
         }
 
-        let avg_completion_time = completion_times.iter().sum::<u64>() / completion_times.len() as u64;
+        let avg_completion_time =
+            completion_times.iter().sum::<u64>() / completion_times.len() as u64;
         let bound = avg_completion_time * 10;
 
         // MR2 succeeds if all tasks complete within bounded time
-        completion_times.iter().all(|&time| time <= bound) &&
-            self.starvation_stats.currently_starved_tasks == 0
+        completion_times.iter().all(|&time| time <= bound)
+            && self.starvation_stats.currently_starved_tasks == 0
     }
 
     /// Check MR3: yield_now fairness
@@ -188,7 +189,10 @@ impl SchedulerFairnessResults {
         // Group tasks by priority and calculate completion rates
         let mut priority_groups: HashMap<u8, Vec<&TaskTrace>> = HashMap::new();
         for trace in &self.task_traces {
-            priority_groups.entry(trace.priority).or_default().push(trace);
+            priority_groups
+                .entry(trace.priority)
+                .or_default()
+                .push(trace);
         }
 
         if priority_groups.len() < 2 {
@@ -199,7 +203,10 @@ impl SchedulerFairnessResults {
         let mut priority_rates: Vec<(u8, f64)> = priority_groups
             .into_iter()
             .map(|(priority, traces)| {
-                let completed = traces.iter().filter(|t| t.completion_time.is_some()).count();
+                let completed = traces
+                    .iter()
+                    .filter(|t| t.completion_time.is_some())
+                    .count();
                 let total = traces.len();
                 (priority, completed as f64 / total as f64)
             })
@@ -310,7 +317,8 @@ impl SchedulerFairnessHarness {
 
             for _ in 0..work_chunks {
                 // Simulate CPU work
-                crate::time::sleep(chunk_duration).await;
+                let now = Cx::current().map_or(Time::ZERO, |cx| cx.now());
+                crate::time::sleep(now, chunk_duration).await;
                 poll_count += 1;
 
                 // Optionally yield to other tasks
@@ -320,7 +328,7 @@ impl SchedulerFairnessHarness {
                 }
 
                 // Check for cancellation
-                if Cx::current().is_cancel_requested() {
+                if Cx::current().is_some_and(|cx| cx.is_cancel_requested()) {
                     let completion_time = Time::now();
                     {
                         let mut traces = task_traces.lock().unwrap();
@@ -369,18 +377,21 @@ impl SchedulerFairnessHarness {
             for i in 0..self.config.task_count {
                 let task_id = TaskId::new_for_test(1, i as u32);
                 let priority = self.calculate_task_priority(i);
-                traces.insert(task_id, TaskTrace {
+                traces.insert(
                     task_id,
-                    spawn_order: i,
-                    completion_order: None,
-                    spawn_time: start_time,
-                    start_time: None,
-                    completion_time: None,
-                    priority,
-                    was_cancelled: false,
-                    poll_count: 0,
-                    yield_count: 0,
-                });
+                    TaskTrace {
+                        task_id,
+                        spawn_order: i,
+                        completion_order: None,
+                        spawn_time: start_time,
+                        start_time: None,
+                        completion_time: None,
+                        priority,
+                        was_cancelled: false,
+                        poll_count: 0,
+                        yield_count: 0,
+                    },
+                );
             }
         }
 
@@ -404,13 +415,15 @@ impl SchedulerFairnessHarness {
                 handles.push(handle);
 
                 // Add small stagger to ensure spawn ordering
-                crate::time::sleep(Duration::from_nanos(1000)).await;
+                let now = Cx::current().map_or(Time::ZERO, |cx| cx.now());
+                crate::time::sleep(now, Duration::from_nanos(1000)).await;
             }
 
             // Wait for all tasks to complete or timeout
             let mut results = Vec::new();
             for handle in handles {
-                match crate::time::timeout(Duration::from_secs(30), handle).await {
+                let now = Cx::current().map_or(Time::ZERO, |cx| cx.now());
+                match crate::time::timeout(now, Duration::from_secs(30), handle).await {
                     Ok(result) => results.push(result),
                     Err(_) => break, // Timeout
                 }
@@ -725,9 +738,11 @@ fn stress_test_scheduler_fairness_high_contention() {
             "Stress test failed: priority inversion under high contention"
         );
 
-        println!("Stress test completed: {}/{} tasks finished in {}ms",
-                results.completion_order.len(),
-                results.task_traces.len(),
-                results.total_runtime_ns / 1_000_000);
+        println!(
+            "Stress test completed: {}/{} tasks finished in {}ms",
+            results.completion_order.len(),
+            results.task_traces.len(),
+            results.total_runtime_ns / 1_000_000
+        );
     });
 }

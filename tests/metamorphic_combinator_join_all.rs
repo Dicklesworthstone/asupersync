@@ -99,9 +99,7 @@ fn test_cx() -> Cx {
 #[test]
 fn mr1_order_preservation() {
     proptest!(|(specs in prop::collection::vec(any::<FutureSpec>(), 1..=8))| {
-        future::block_on(async {
-            let cx = test_cx();
-
+        let result = future::block_on(async {
             // Create a test runtime environment with direct task creation
             let mut tasks = Vec::new();
             for spec in &specs {
@@ -143,6 +141,7 @@ fn mr1_order_preservation() {
 
             Ok(())
         });
+        result.expect("mr1_order_preservation failed");
     });
 }
 
@@ -150,7 +149,7 @@ fn mr1_order_preservation() {
 #[test]
 fn mr2_error_propagation() {
     proptest!(|(specs in prop::collection::vec(any::<FutureSpec>(), 1..=6))| {
-        future::block_on(async {
+        let result = future::block_on(async {
             let cx = test_cx();
 
             // Count expected errors and successes
@@ -198,6 +197,7 @@ fn mr2_error_propagation() {
 
             Ok(())
         });
+        result.expect("mr2_error_propagation failed");
     });
 }
 
@@ -205,7 +205,7 @@ fn mr2_error_propagation() {
 #[test]
 fn mr3_result_count_conservation() {
     proptest!(|(specs in prop::collection::vec(any::<FutureSpec>(), 0..=10))| {
-        future::block_on(async {
+        let result = future::block_on(async {
             let cx = test_cx();
 
             // Execute all futures
@@ -221,6 +221,7 @@ fn mr3_result_count_conservation() {
 
             Ok(())
         });
+        result.expect("mr3_result_count_conservation failed");
     });
 }
 
@@ -228,7 +229,7 @@ fn mr3_result_count_conservation() {
 #[test]
 fn mr4_delay_equivalence() {
     proptest!(|(base_specs in prop::collection::vec(any::<FutureSpec>(), 1..=5))| {
-        future::block_on(async {
+        let result = future::block_on(async {
             let cx = test_cx();
 
             // Convert some immediate specs to delayed and vice versa
@@ -263,6 +264,7 @@ fn mr4_delay_equivalence() {
 
             Ok(())
         });
+        result.expect("mr4_delay_equivalence failed");
     });
 }
 
@@ -284,7 +286,7 @@ fn mr5_empty_input() {
 #[test]
 fn mr_composite_order_error_count() {
     proptest!(|(specs in prop::collection::vec(any::<FutureSpec>(), 2..=6))| {
-        future::block_on(async {
+        let result = future::block_on(async {
             let cx = test_cx();
 
             if specs.len() < 2 {
@@ -334,6 +336,7 @@ fn mr_composite_order_error_count() {
 
             Ok(())
         });
+        result.expect("mr_composite_order_error_count failed");
     });
 }
 
@@ -341,7 +344,7 @@ fn mr_composite_order_error_count() {
 #[test]
 fn mr_single_future_join() {
     proptest!(|(spec in any::<FutureSpec>())| {
-        future::block_on(async {
+        let result = future::block_on(async {
             let cx = test_cx();
 
             let result = spec.to_future(&cx).await;
@@ -364,5 +367,6 @@ fn mr_single_future_join() {
 
             Ok(())
         });
+        result.expect("mr_single_future_join failed");
     });
 }

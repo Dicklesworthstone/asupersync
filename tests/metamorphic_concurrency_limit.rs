@@ -386,7 +386,8 @@ fn mr_composite_scaling() {
 }
 
 /// Metamorphic Relation 7: Lyapunov Bounded Permits (Bounded)
-/// Available permits should never exceed max_concurrency or go below 0
+/// Available permits should never exceed max_concurrency, and a fresh limiter
+/// should start with full capacity.
 #[test]
 fn mr_lyapunov_bounded_permits() {
     let max_permits = 5;
@@ -419,5 +420,9 @@ fn mr_lyapunov_bounded_permits() {
     // Verify bounds maintained
     let limited_service_after = layer.layer(CountingService::new(0));
     assert!(limited_service_after.available() <= max_permits);
-    assert!(limited_service_after.available() >= 0);
+    assert_eq!(
+        limited_service_after.available(),
+        max_permits,
+        "Fresh limiter should restore full capacity"
+    );
 }

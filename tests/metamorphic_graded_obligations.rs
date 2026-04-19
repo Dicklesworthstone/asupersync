@@ -103,9 +103,9 @@ fn mr_scope_accounting() {
         if expected_final == 0 {
             prop_assert!(close_result.is_ok(), "Scope with zero outstanding should close successfully");
             if let Ok(proof) = close_result {
-                prop_assert_eq!(proof.total_reserved, expected_reserved,
+                prop_assert_eq!(proof.total_reserved(), expected_reserved,
                     "Proof reserved count mismatch");
-                prop_assert_eq!(proof.total_resolved, expected_resolved,
+                prop_assert_eq!(proof.total_resolved(), expected_resolved,
                     "Proof resolved count mismatch");
             }
         } else {
@@ -135,10 +135,10 @@ fn mr_resolution_idempotence() {
         let proof = obligation.resolve(resolution);
 
         // MR: Proof should match the resolution type and kind
-        prop_assert_eq!(proof.kind, kind,
-            "Proof kind {} does not match obligation kind {}", proof.kind, kind);
-        prop_assert_eq!(proof.resolution, resolution,
-            "Proof resolution {:?} does not match requested {:?}", proof.resolution, resolution);
+        prop_assert_eq!(proof.kind(), kind,
+            "Proof kind {} does not match obligation kind {}", proof.kind(), kind);
+        prop_assert_eq!(proof.resolution(), resolution,
+            "Proof resolution {:?} does not match requested {:?}", proof.resolution(), resolution);
 
         // MR: Proof should display correctly
         let proof_string = format!("{}", proof);
@@ -201,9 +201,9 @@ fn mr_resource_conservation() {
 
         // MR: Resolved proofs should all be valid
         for (i, proof) in resolved_proofs.iter().enumerate() {
-            prop_assert_eq!(proof.kind, ObligationKind::SendPermit,
+            prop_assert_eq!(proof.kind(), ObligationKind::SendPermit,
                 "Proof {} should have correct kind", i);
-            prop_assert_eq!(proof.resolution, Resolution::Commit,
+            prop_assert_eq!(proof.resolution(), Resolution::Commit,
                 "Proof {} should have correct resolution", i);
         }
 
@@ -262,11 +262,11 @@ fn mr_zero_leak_invariant() {
                 "Scope with zero outstanding ({}) should close successfully", expected_outstanding);
 
             if let Ok(proof) = close_result {
-                prop_assert_eq!(proof.total_reserved, reserve_count,
+                prop_assert_eq!(proof.total_reserved(), reserve_count,
                     "Proof reserved count mismatch");
-                prop_assert_eq!(proof.total_resolved, resolve_count,
+                prop_assert_eq!(proof.total_resolved(), resolve_count,
                     "Proof resolved count mismatch");
-                prop_assert!(proof.label == "leak_test",
+                prop_assert!(proof.label() == "leak_test",
                     "Proof label should match scope label");
             }
         } else {
@@ -311,10 +311,10 @@ fn mr_proof_token_validity() {
         let proof = obligation.resolve(resolution);
 
         // MR: Proof should faithfully represent the resolution
-        prop_assert_eq!(proof.kind, original_kind,
-            "Proof kind {} should match original {}", proof.kind, original_kind);
-        prop_assert_eq!(proof.resolution, resolution,
-            "Proof resolution {:?} should match requested {:?}", proof.resolution, resolution);
+        prop_assert_eq!(proof.kind(), original_kind,
+            "Proof kind {} should match original {}", proof.kind(), original_kind);
+        prop_assert_eq!(proof.resolution(), resolution,
+            "Proof resolution {:?} should match requested {:?}", proof.resolution(), resolution);
 
         // MR: Proof should be displayable and contain relevant information
         let proof_display = format!("{}", proof);
@@ -324,9 +324,8 @@ fn mr_proof_token_validity() {
         let proof_debug = format!("{:?}", proof);
         prop_assert!(proof_debug.len() > 0, "Proof should have non-empty debug representation");
 
-        // MR: Proof should be cloneable and equality should work
-        let proof_clone = proof.clone();
-        prop_assert_eq!(proof, proof_clone, "Proof should be cloneable and equal to clone");
+        prop_assert!(proof_display.contains(&original_kind.to_string()),
+            "Display should preserve proof kind");
     });
 }
 
