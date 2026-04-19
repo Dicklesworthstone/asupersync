@@ -525,6 +525,33 @@ impl NoLeakProver {
         region: RegionId,
         time: Time,
     ) {
+        if let Some(closed_at) = self
+            .region_counters
+            .get(&region)
+            .filter(|counter| counter.closed)
+            .and_then(|counter| counter.closed_at)
+        {
+            self.counterexamples.push(LeakCounterexample {
+                property: LivenessProperty::RegionQuiescence,
+                subject: ProofSubject::Region(region),
+                time,
+                description: format!(
+                    "reserve({obligation:?}) in closed region {region:?} \
+                     after close at t={closed_at}"
+                ),
+            });
+            self.steps.push(ProofStep {
+                property: LivenessProperty::RegionQuiescence,
+                subject: ProofSubject::Region(region),
+                time,
+                verified: false,
+                description: format!(
+                    "region {region:?} accepted reserve after closing at t={closed_at}"
+                ),
+            });
+            return;
+        }
+
         let before = self.ghost_counter;
 
         // Check: obligation should not already exist.
@@ -611,6 +638,80 @@ impl NoLeakProver {
             return;
         };
 
+        if ghost.kind != kind {
+            self.counterexamples.push(LeakCounterexample {
+                property: LivenessProperty::CounterDecrement,
+                subject: ProofSubject::Obligation(obligation),
+                time,
+                description: format!(
+                    "{path}({obligation:?}) kind mismatch: reserved as {}, resolved as {}",
+                    ghost.kind, kind,
+                ),
+            });
+            self.steps.push(ProofStep {
+                property: LivenessProperty::CounterDecrement,
+                subject: ProofSubject::Obligation(obligation),
+                time,
+                verified: false,
+                description: format!(
+                    "kind mismatch prevented resolution: reserved={}, resolved={}",
+                    ghost.kind, kind,
+                ),
+            });
+            return;
+        }
+
+        if ghost.region != region {
+            self.counterexamples.push(LeakCounterexample {
+                property: LivenessProperty::CounterDecrement,
+                subject: ProofSubject::Obligation(obligation),
+                time,
+                description: format!(
+                    "{path}({obligation:?}) region mismatch: reserved in {:?}, resolved in {:?}",
+                    ghost.region, region,
+                ),
+            });
+            self.steps.push(ProofStep {
+                property: LivenessProperty::CounterDecrement,
+                subject: ProofSubject::Obligation(obligation),
+                time,
+                verified: false,
+                description: format!(
+                    "region mismatch prevented resolution: reserved={:?}, resolved={:?}",
+                    ghost.region, region,
+                ),
+            });
+            return;
+        }
+
+        if let Some(closed_at) = self
+            .region_counters
+            .get(&ghost.region)
+            .filter(|counter| counter.closed)
+            .and_then(|counter| counter.closed_at)
+        {
+            self.counterexamples.push(LeakCounterexample {
+                property: LivenessProperty::RegionQuiescence,
+                subject: ProofSubject::Region(ghost.region),
+                time,
+                description: format!(
+                    "{path}({obligation:?}) in closed region {:?} after close at t={closed_at}",
+                    ghost.region,
+                ),
+            });
+            self.steps.push(ProofStep {
+                property: LivenessProperty::RegionQuiescence,
+                subject: ProofSubject::Region(ghost.region),
+                time,
+                verified: false,
+                description: format!(
+                    "region {:?} accepted resolution after closing at t={closed_at}",
+                    ghost.region,
+                ),
+            });
+            return;
+        }
+
         let before = self.ghost_counter;
         let holder = ghost.holder;
         let ghost_region = ghost.region;
@@ -671,11 +772,6 @@ impl NoLeakProver {
                 ),
             });
         }
-
-        // Kind/region agreement (informational; the no-aliasing proof
-        // handles this as a hard failure).
-        let _ = kind;
-        let _ = region;
     }
 
     /// Handle region close: verify zero pending (quiescence).
@@ -1278,6 +1374,97 @@ mod tests {
         let verified = result.is_verified();
         crate::assert_with_log!(!verified, "duplicate reserve detected", false, verified);
         crate::test_complete!("mutation_duplicate_reserve");
+    }
+
+    #[test]
+    fn rejects_resolve_kind_mismatch() {
+        init_test("rejects_resolve_kind_mismatch");
+        let events = vec![
+            reserve_ev(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            commit_ev(5, o(0), r(0), ObligationKind::Lease),
+        ];
+
+        let mut prover = NoLeakProver::new();
+        let result = prover.check(&events);
+        let verified = result.is_verified();
+        crate::assert_with_log!(!verified, "kind mismatch rejected", false, verified);
+        let mismatch_count = result
+            .counterexamples_of(LivenessProperty::CounterDecrement)
+            .filter(|ce| ce.description.contains("kind mismatch"))
+            .count();
+        crate::assert_with_log!(mismatch_count == 1, "kind mismatch CE", 1, mismatch_count);
+        crate::test_complete!("rejects_resolve_kind_mismatch");
+    }
+
+    #[test]
+    fn rejects_resolve_region_mismatch() {
+        init_test("rejects_resolve_region_mismatch");
+        let events = vec![
+            reserve_ev(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            commit_ev(5, o(0), r(1), ObligationKind::SendPermit),
+        ];
+
+        let mut prover = NoLeakProver::new();
+        let result = prover.check(&events);
+        let verified = result.is_verified();
+        crate::assert_with_log!(!verified, "region mismatch rejected", false, verified);
+        let mismatch_count = result
+            .counterexamples_of(LivenessProperty::CounterDecrement)
+            .filter(|ce| ce.description.contains("region mismatch"))
+            .count();
+        crate::assert_with_log!(mismatch_count == 1, "region mismatch CE", 1, mismatch_count);
+        crate::test_complete!("rejects_resolve_region_mismatch");
+    }
+
+    #[test]
+    fn rejects_reserve_after_region_close() {
+        init_test("rejects_reserve_after_region_close");
+        let events = vec![
+            close_ev(0, r(0)),
+            reserve_ev(5, o(0), ObligationKind::SendPermit, t(0), r(0)),
+        ];
+
+        let mut prover = NoLeakProver::new();
+        let result = prover.check(&events);
+        let verified = result.is_verified();
+        crate::assert_with_log!(!verified, "reserve-after-close rejected", false, verified);
+        let quiescence_count = result
+            .counterexamples_of(LivenessProperty::RegionQuiescence)
+            .filter(|ce| ce.description.contains("reserve"))
+            .count();
+        crate::assert_with_log!(
+            quiescence_count == 1,
+            "reserve-after-close CE",
+            1,
+            quiescence_count
+        );
+        crate::test_complete!("rejects_reserve_after_region_close");
+    }
+
+    #[test]
+    fn rejects_resolve_after_region_close() {
+        init_test("rejects_resolve_after_region_close");
+        let events = vec![
+            reserve_ev(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            close_ev(5, r(0)),
+            commit_ev(10, o(0), r(0), ObligationKind::SendPermit),
+        ];
+
+        let mut prover = NoLeakProver::new();
+        let result = prover.check(&events);
+        let verified = result.is_verified();
+        crate::assert_with_log!(!verified, "resolve-after-close rejected", false, verified);
+        let quiescence_count = result
+            .counterexamples_of(LivenessProperty::RegionQuiescence)
+            .filter(|ce| ce.description.contains("closed region"))
+            .count();
+        crate::assert_with_log!(
+            quiescence_count >= 2,
+            "close + resolve-after-close CE",
+            true,
+            quiescence_count >= 2
+        );
+        crate::test_complete!("rejects_resolve_after_region_close");
     }
 
     // ========================================================================

@@ -157,7 +157,7 @@ impl fmt::Display for ComputationName {
 /// The caller is responsible for serialization. The runtime treats this as
 /// opaque bytes. The remote node deserializes using the computation's
 /// expected schema.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteInput {
     data: Vec<u8>,
 }
@@ -1257,7 +1257,7 @@ impl Lease {
     /// Returns the remaining time before expiry, or zero if expired.
     #[must_use]
     pub fn remaining(&self, now: Time) -> Duration {
-        if now >= self.expires_at {
+        if self.state != LeaseState::Active || now >= self.expires_at {
             Duration::ZERO
         } else {
             let nanos = self.expires_at.duration_since(now);
@@ -1345,8 +1345,8 @@ pub struct IdempotencyRecord {
     pub key: IdempotencyKey,
     /// The remote task ID assigned to this request.
     pub remote_task_id: RemoteTaskId,
-    /// The computation that was requested.
-    pub computation: ComputationName,
+    /// Stable fingerprint of the semantic request guarded by this key.
+    pub request: IdempotencyRequestFingerprint,
     /// When this record was created.
     pub created_at: Time,
     /// When this record expires (for eviction).
@@ -1364,6 +1364,68 @@ pub enum DedupDecision {
     Duplicate(IdempotencyRecord),
     /// Conflict — same key but different parameters. Reject.
     Conflict,
+}
+
+/// Stable fingerprint of the semantic spawn request guarded by an
+/// [`IdempotencyKey`].
+///
+/// Remote task IDs are intentionally excluded because they are assigned per
+/// delivery attempt. Every other spawn parameter that changes the remote
+/// computation contract must match for the key to be considered a duplicate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdempotencyRequestFingerprint {
+    /// The computation that was requested.
+    pub computation: ComputationName,
+    /// Serialized input payload.
+    pub input: RemoteInput,
+    /// Requested lease duration.
+    pub lease: Duration,
+    /// Optional remote budget ceiling.
+    pub budget: Option<Budget>,
+    /// Origin node that issued the request.
+    pub origin_node: NodeId,
+    /// Origin region that owns the remote work.
+    pub origin_region: RegionId,
+    /// Origin task that initiated the remote work.
+    pub origin_task: TaskId,
+}
+
+impl IdempotencyRequestFingerprint {
+    /// Creates a new request fingerprint.
+    #[must_use]
+    pub fn new(
+        computation: ComputationName,
+        input: RemoteInput,
+        lease: Duration,
+        budget: Option<Budget>,
+        origin_node: NodeId,
+        origin_region: RegionId,
+        origin_task: TaskId,
+    ) -> Self {
+        Self {
+            computation,
+            input,
+            lease,
+            budget,
+            origin_node,
+            origin_region,
+            origin_task,
+        }
+    }
+
+    /// Builds a request fingerprint from a spawn request.
+    #[must_use]
+    pub fn from_spawn_request(request: &SpawnRequest) -> Self {
+        Self {
+            computation: request.computation.clone(),
+            input: request.input.clone(),
+            lease: request.lease,
+            budget: request.budget,
+            origin_node: request.origin_node.clone(),
+            origin_region: request.origin_region,
+            origin_task: request.origin_task,
+        }
+    }
 }
 
 /// Store for tracking idempotent request deduplication.
@@ -1410,7 +1472,7 @@ impl IdempotencyStore {
     pub fn check(
         &mut self,
         key: &IdempotencyKey,
-        computation: &ComputationName,
+        request: &IdempotencyRequestFingerprint,
         now: Time,
     ) -> DedupDecision {
         let Some(record) = self.entries.get(key).cloned() else {
@@ -1422,7 +1484,7 @@ impl IdempotencyStore {
             return DedupDecision::New;
         }
 
-        if record.computation == *computation {
+        if record.request == *request {
             DedupDecision::Duplicate(record)
         } else {
             DedupDecision::Conflict
@@ -1437,7 +1499,7 @@ impl IdempotencyStore {
         &mut self,
         key: IdempotencyKey,
         remote_task_id: RemoteTaskId,
-        computation: ComputationName,
+        request: IdempotencyRequestFingerprint,
         now: Time,
     ) -> bool {
         use std::collections::hash_map::Entry;
@@ -1447,7 +1509,7 @@ impl IdempotencyStore {
                 e.insert(IdempotencyRecord {
                     key,
                     remote_task_id,
-                    computation,
+                    request,
                     created_at: now,
                     expires_at,
                     outcome: None,
@@ -2626,6 +2688,18 @@ mod tests {
             LogicalTime::Lamport(time) => time.raw(),
             other => panic!("expected Lamport logical time, got {other:?}"),
         }
+    }
+
+    fn test_request_fingerprint(name: &str) -> IdempotencyRequestFingerprint {
+        IdempotencyRequestFingerprint::new(
+            ComputationName::new(name),
+            RemoteInput::empty(),
+            Duration::from_secs(30),
+            None,
+            NodeId::new("origin"),
+            RegionId::testing_default(),
+            TaskId::testing_default(),
+        )
     }
 
     #[test]
@@ -4553,6 +4627,23 @@ mod tests {
     }
 
     #[test]
+    fn lease_remaining_after_release_is_zero_even_before_original_expiry() {
+        let now = Time::from_secs(10);
+        let mut lease = Lease::new(
+            test_obligation_id(),
+            test_region_id(),
+            test_task_id(),
+            Duration::from_secs(30),
+            now,
+        );
+
+        lease.release(Time::from_secs(20)).unwrap();
+
+        assert_eq!(lease.remaining(Time::from_secs(20)), Duration::ZERO);
+        assert_eq!(lease.remaining(Time::from_secs(25)), Duration::ZERO);
+    }
+
+    #[test]
     fn lease_double_release_fails() {
         let now = Time::from_secs(10);
         let mut lease = Lease::new(
@@ -4605,6 +4696,23 @@ mod tests {
     }
 
     #[test]
+    fn lease_remaining_after_mark_expired_is_zero_before_wall_clock_expiry() {
+        let now = Time::from_secs(10);
+        let mut lease = Lease::new(
+            test_obligation_id(),
+            test_region_id(),
+            test_task_id(),
+            Duration::from_secs(30),
+            now,
+        );
+
+        lease.mark_expired().unwrap();
+
+        assert_eq!(lease.remaining(Time::from_secs(15)), Duration::ZERO);
+        assert_eq!(lease.remaining(Time::from_secs(39)), Duration::ZERO);
+    }
+
+    #[test]
     fn lease_mark_expired_after_release_fails() {
         let now = Time::from_secs(10);
         let mut lease = Lease::new(
@@ -4647,15 +4755,11 @@ mod tests {
         assert!(store.is_empty());
 
         let key = IdempotencyKey::from_raw(1);
-        let decision = store.check(&key, &ComputationName::new("encode"), Time::from_secs(10));
+        let request = test_request_fingerprint("encode");
+        let decision = store.check(&key, &request, Time::from_secs(10));
         assert!(matches!(decision, DedupDecision::New));
 
-        let inserted = store.record(
-            key,
-            RemoteTaskId::next(),
-            ComputationName::new("encode"),
-            Time::from_secs(10),
-        );
+        let inserted = store.record(key, RemoteTaskId::next(), request, Time::from_secs(10));
         assert!(inserted);
         assert_eq!(store.len(), 1);
     }
@@ -4664,16 +4768,16 @@ mod tests {
     fn idempotency_store_duplicate_detection() {
         let mut store = IdempotencyStore::new(Duration::from_secs(300));
         let key = IdempotencyKey::from_raw(42);
-        let comp = ComputationName::new("encode");
+        let request = test_request_fingerprint("encode");
 
-        store.record(key, RemoteTaskId::next(), comp.clone(), Time::from_secs(10));
+        store.record(key, RemoteTaskId::next(), request.clone(), Time::from_secs(10));
 
         // Same key, same computation → Duplicate
-        let decision = store.check(&key, &comp, Time::from_secs(20));
+        let decision = store.check(&key, &request, Time::from_secs(20));
         assert!(matches!(decision, DedupDecision::Duplicate(_)));
 
         // Trying to record again returns false
-        let inserted = store.record(key, RemoteTaskId::next(), comp, Time::from_secs(20));
+        let inserted = store.record(key, RemoteTaskId::next(), request, Time::from_secs(20));
         assert!(!inserted);
         assert_eq!(store.len(), 1);
     }
@@ -4686,12 +4790,16 @@ mod tests {
         store.record(
             key,
             RemoteTaskId::next(),
-            ComputationName::new("encode"),
+            test_request_fingerprint("encode"),
             Time::from_secs(10),
         );
 
         // Same key, DIFFERENT computation → Conflict
-        let decision = store.check(&key, &ComputationName::new("decode"), Time::from_secs(20));
+        let decision = store.check(
+            &key,
+            &test_request_fingerprint("decode"),
+            Time::from_secs(20),
+        );
         assert!(matches!(decision, DedupDecision::Conflict));
     }
 
@@ -4703,7 +4811,7 @@ mod tests {
         store.record(
             key,
             RemoteTaskId::next(),
-            ComputationName::new("work"),
+            test_request_fingerprint("work"),
             Time::from_secs(10),
         );
 
@@ -4712,7 +4820,7 @@ mod tests {
         assert!(updated);
 
         // Check returns duplicate with outcome
-        let decision = store.check(&key, &ComputationName::new("work"), Time::from_secs(20));
+        let decision = store.check(&key, &test_request_fingerprint("work"), Time::from_secs(20));
         assert!(matches!(decision, DedupDecision::Duplicate(_)));
         if let DedupDecision::Duplicate(record) = decision {
             assert!(record.outcome.is_some());
@@ -4738,7 +4846,7 @@ mod tests {
         store.record(
             IdempotencyKey::from_raw(1),
             RemoteTaskId::next(),
-            ComputationName::new("a"),
+            test_request_fingerprint("a"),
             Time::from_secs(10),
         );
 
@@ -4746,7 +4854,7 @@ mod tests {
         store.record(
             IdempotencyKey::from_raw(2),
             RemoteTaskId::next(),
-            ComputationName::new("b"),
+            test_request_fingerprint("b"),
             Time::from_secs(50),
         );
         assert_eq!(store.len(), 2);
@@ -4759,7 +4867,7 @@ mod tests {
         // Key 2 is still there
         let decision = store.check(
             &IdempotencyKey::from_raw(2),
-            &ComputationName::new("b"),
+            &test_request_fingerprint("b"),
             Time::from_secs(80),
         );
         assert!(matches!(decision, DedupDecision::Duplicate(_)));
@@ -4767,7 +4875,7 @@ mod tests {
         // Key 1 is gone
         let decision = store.check(
             &IdempotencyKey::from_raw(1),
-            &ComputationName::new("a"),
+            &test_request_fingerprint("a"),
             Time::from_secs(80),
         );
         assert!(matches!(decision, DedupDecision::New));
@@ -4780,11 +4888,15 @@ mod tests {
         store.record(
             key,
             RemoteTaskId::next(),
-            ComputationName::new("encode"),
+            test_request_fingerprint("encode"),
             Time::from_secs(10),
         );
 
-        let decision = store.check(&key, &ComputationName::new("decode"), Time::from_secs(80));
+        let decision = store.check(
+            &key,
+            &test_request_fingerprint("decode"),
+            Time::from_secs(80),
+        );
         assert!(
             matches!(decision, DedupDecision::New),
             "expired keys must not survive as stale conflicts"

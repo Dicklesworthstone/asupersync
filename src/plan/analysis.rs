@@ -47,10 +47,10 @@ impl ObligationSafety {
     pub fn join(self, other: Self) -> Self {
         use ObligationSafety::{Clean, Leaked, MayLeak, Unknown};
         match (self, other) {
+            (Unknown, _) | (_, Unknown) => Unknown,
             (Clean, Clean) => Clean,
             (Leaked, _) | (_, Leaked) => Leaked,
             (MayLeak, _) | (_, MayLeak) => MayLeak,
-            (Unknown, _) | (_, Unknown) => Unknown,
         }
     }
 
@@ -97,10 +97,10 @@ impl CancelSafety {
     pub fn join(self, other: Self) -> Self {
         use CancelSafety::{MayOrphan, Orphan, Safe, Unknown};
         match (self, other) {
+            (Unknown, _) | (_, Unknown) => Unknown,
             (Safe, Safe) => Safe,
             (Orphan, _) | (_, Orphan) => Orphan,
             (MayOrphan, _) | (_, MayOrphan) => MayOrphan,
-            (Unknown, _) | (_, Unknown) => Unknown,
         }
     }
 
@@ -299,10 +299,7 @@ impl BudgetEffect {
     pub fn parallel(self, other: Self) -> Self {
         Self {
             min_polls: self.min_polls.min(other.min_polls),
-            max_polls: match (self.max_polls, other.max_polls) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                _ => None,
-            },
+            max_polls: parallel_max_polls(self.max_polls, other.max_polls),
             has_deadline: self.has_deadline || other.has_deadline,
             parallelism: self.parallelism.saturating_add(other.parallelism),
             // In a race, the tightest deadline applies
@@ -370,6 +367,15 @@ impl BudgetEffect {
         } else {
             None
         }
+    }
+}
+
+#[inline]
+fn parallel_max_polls(lhs: Option<u32>, rhs: Option<u32>) -> Option<u32> {
+    match (lhs, rhs) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
     }
 }
 
@@ -865,7 +871,7 @@ impl PlanAnalyzer {
                     .unwrap_or(0);
                 let max_polls = child_analyses
                     .iter()
-                    .try_fold(0u32, |acc, a| a.budget.max_polls.map(|m| acc.max(m)));
+                    .fold(None, |acc, a| parallel_max_polls(acc, a.budget.max_polls));
                 let has_deadline = child_analyses.iter().any(|a| a.budget.has_deadline);
                 let parallelism = child_analyses
                     .iter()
@@ -2395,6 +2401,67 @@ mod tests {
         // Parallel: both take min (tightest)
         assert_eq!(combined.min_deadline, DeadlineMicros::from_micros(100));
         assert_eq!(combined.max_deadline, DeadlineMicros::from_micros(100));
+    }
+
+    #[test]
+    fn obligation_safety_join_keeps_unknown_state() {
+        assert_eq!(
+            ObligationSafety::Unknown.join(ObligationSafety::Leaked),
+            ObligationSafety::Unknown
+        );
+        assert_eq!(
+            ObligationSafety::MayLeak.join(ObligationSafety::Unknown),
+            ObligationSafety::Unknown
+        );
+    }
+
+    #[test]
+    fn cancel_safety_join_keeps_unknown_state() {
+        assert_eq!(
+            CancelSafety::Unknown.join(CancelSafety::Orphan),
+            CancelSafety::Unknown
+        );
+        assert_eq!(
+            CancelSafety::MayOrphan.join(CancelSafety::Unknown),
+            CancelSafety::Unknown
+        );
+    }
+
+    #[test]
+    fn budget_effect_parallel_prefers_bounded_winner() {
+        let bounded = BudgetEffect {
+            min_polls: 2,
+            max_polls: Some(5),
+            has_deadline: false,
+            parallelism: 1,
+            min_deadline: DeadlineMicros::UNBOUNDED,
+            max_deadline: DeadlineMicros::UNBOUNDED,
+        };
+        let unbounded = BudgetEffect {
+            min_polls: 1,
+            max_polls: None,
+            has_deadline: false,
+            parallelism: 1,
+            min_deadline: DeadlineMicros::UNBOUNDED,
+            max_deadline: DeadlineMicros::UNBOUNDED,
+        };
+
+        let combined = bounded.parallel(unbounded);
+        assert_eq!(combined.max_polls, Some(5));
+    }
+
+    #[test]
+    fn race_analysis_keeps_bounded_upper_bound_with_unknown_sibling() {
+        let mut dag = PlanDag::new();
+        let winner = dag.leaf("winner");
+        let unknown = PlanId::new(999);
+        let race = dag.race(vec![winner, unknown]);
+        dag.set_root(race);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let node = analysis.get(race).expect("race analyzed");
+        assert_eq!(node.budget.min_polls, 0);
+        assert_eq!(node.budget.max_polls, Some(1));
     }
 
     #[test]
