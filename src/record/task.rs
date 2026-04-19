@@ -554,7 +554,7 @@ impl TaskRecord {
                 false
             }
             TaskState::Created | TaskState::Running => {
-                let _prev_state = self.state_name();
+                let prev_state = self.state_name();
                 let requested_reason = reason.clone();
                 if self.cancel_epoch == 0 {
                     self.cancel_epoch = 1;
@@ -564,7 +564,7 @@ impl TaskRecord {
                 crate::tracing_compat::debug!(
                     task_id = ?self.id,
                     region_id = ?self.owner,
-                    old_state = _prev_state,
+                    old_state = prev_state,
                     new_state = "CancelRequested",
                     cancel_kind = ?reason.kind,
                     cleanup_poll_quota = cleanup_budget.poll_quota,

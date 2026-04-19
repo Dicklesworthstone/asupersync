@@ -489,10 +489,10 @@ impl Budget {
                 }
                 true
             }
-            Some(_remaining) => {
+            Some(remaining) => {
                 trace!(
                     cost_requested = cost,
-                    cost_remaining = _remaining,
+                    cost_remaining = remaining,
                     "budget cost consume failed: insufficient quota"
                 );
                 false

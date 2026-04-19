@@ -2426,8 +2426,8 @@ impl RuntimeState {
         debug!(
             task_id = ?task_id,
             region_id = ?owner,
-            outcome_kind = _outcome_kind,
-            waiter_count = _waiter_count,
+            outcome_kind = outcome_kind,
+            waiter_count = waiter_count,
             "task cleanup from runtime state"
         );
 
