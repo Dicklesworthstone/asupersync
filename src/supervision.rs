@@ -480,6 +480,7 @@ impl SupervisionConfig {
     /// Enable storm detection with the given threshold (restarts/second).
     #[must_use]
     pub fn with_storm_threshold(mut self, threshold: f64) -> Self {
+        validate_storm_threshold(threshold);
         self.storm_threshold = Some(threshold);
         self
     }
@@ -752,6 +753,13 @@ pub enum SupervisorCompileError {
         /// Dependency name that was not present in the child set.
         depends_on: ChildName,
     },
+    /// An eagerly-started child depends on a deferred child.
+    DeferredDependency {
+        /// Child name.
+        child: ChildName,
+        /// Deferred dependency that cannot satisfy eager boot ordering.
+        depends_on: ChildName,
+    },
     /// Dependency graph contains a cycle.
     CycleDetected {
         /// Remaining nodes with non-zero in-degree (sorted).
@@ -765,6 +773,12 @@ impl std::fmt::Display for SupervisorCompileError {
             Self::DuplicateChildName(name) => write!(f, "duplicate child name: {name}"),
             Self::UnknownDependency { child, depends_on } => {
                 write!(f, "child {child} depends on unknown child {depends_on}")
+            }
+            Self::DeferredDependency { child, depends_on } => {
+                write!(
+                    f,
+                    "child {child} is start_immediately but depends on deferred child {depends_on}"
+                )
             }
             Self::CycleDetected { remaining } => {
                 write!(f, "dependency cycle detected among children: ")?;
@@ -798,6 +812,19 @@ pub enum SupervisorSpawnError {
         /// is returned for caller awareness / logging.
         region: RegionId,
     },
+    /// A required child could not boot because one of its eager dependencies
+    /// failed or was skipped during the same supervisor boot.
+    DependencyUnavailable {
+        /// Child that could not be started.
+        child: ChildName,
+        /// Direct dependency that was unavailable.
+        dependency: ChildName,
+        /// Root-cause start failure for that dependency, when available.
+        dependency_error: Option<SpawnError>,
+        /// Region that was created for the supervisor. It has been closed but
+        /// is returned for caller awareness / logging.
+        region: RegionId,
+    },
 }
 
 impl std::fmt::Display for SupervisorSpawnError {
@@ -812,6 +839,21 @@ impl std::fmt::Display for SupervisorSpawnError {
                     "child start failed: child={child} region={region:?} err={err}"
                 )
             }
+            Self::DependencyUnavailable {
+                child,
+                dependency,
+                dependency_error,
+                region,
+            } => match dependency_error {
+                Some(err) => write!(
+                    f,
+                    "child start blocked: child={child} dependency={dependency} region={region:?} cause={err}"
+                ),
+                None => write!(
+                    f,
+                    "child start blocked: child={child} dependency={dependency} region={region:?}"
+                ),
+            },
         }
     }
 }
@@ -1169,6 +1211,12 @@ impl CompiledSupervisor {
                         depends_on: dep.clone(),
                     });
                 };
+                if child.start_immediately && !builder.children[dep_idx].start_immediately {
+                    return Err(SupervisorCompileError::DeferredDependency {
+                        child: child.name.clone(),
+                        depends_on: dep.clone(),
+                    });
+                }
                 indeg[idx] += 1;
                 out[dep_idx].push(idx);
             }
@@ -1305,6 +1353,11 @@ impl CompiledSupervisor {
     /// dependencies-first restart) that can be wired into the runtime's cancel protocol:
     /// request cancel for each child in `cancel_order`, fully drain/quiesce, then restart in
     /// `restart_order`.
+    ///
+    /// This plan excludes deferred siblings that were never booted by the
+    /// supervisor's initial `start_immediately` pass. If a runtime later boots
+    /// deferred children dynamically, it must layer concrete live-child
+    /// knowledge on top when deciding whether they participate in a restart.
     #[must_use]
     pub fn restart_plan_for_failure<E>(
         &self,
@@ -1331,40 +1384,36 @@ impl CompiledSupervisor {
     #[must_use]
     fn restart_plan_for_idx(&self, failed_child_idx: usize) -> Option<SupervisorRestartPlan> {
         let failed_pos = self.start_pos_for_child_idx(failed_child_idx)?;
+
         let total = self.start_order.len();
-        let count = match self.restart_policy {
-            RestartPolicy::OneForOne => 1,
-            RestartPolicy::OneForAll => total,
-            RestartPolicy::RestForOne => total.saturating_sub(failed_pos),
-        };
+        let affected_positions = match self.restart_policy {
+            RestartPolicy::OneForOne => vec![failed_pos],
+            RestartPolicy::OneForAll => (0..total).collect(),
+            RestartPolicy::RestForOne => (failed_pos..total).collect(),
+        }
+        .into_iter()
+        .filter(|&pos| {
+            let child_idx = self.start_order[pos];
+            let child = &self.children[child_idx];
+            child.start_immediately || child_idx == failed_child_idx
+        })
+        .collect::<Vec<_>>();
+
+        if affected_positions.is_empty() {
+            return None;
+        }
 
         // Hot-path allocation gate: construct orders directly without an
-        // intermediate positions Vec, while preserving deterministic order.
-        let mut cancel_order = Vec::with_capacity(count);
-        let mut restart_order = Vec::with_capacity(count);
+        // intermediate positions Vec of child names, while preserving
+        // deterministic order.
+        let mut cancel_order = Vec::with_capacity(affected_positions.len());
+        let mut restart_order = Vec::with_capacity(affected_positions.len());
 
-        match self.restart_policy {
-            RestartPolicy::OneForOne => {
-                let name = self.children[self.start_order[failed_pos]].name.clone();
-                cancel_order.push(name.clone());
-                restart_order.push(name);
-            }
-            RestartPolicy::OneForAll => {
-                for pos in (0..total).rev() {
-                    cancel_order.push(self.children[self.start_order[pos]].name.clone());
-                }
-                for pos in 0..total {
-                    restart_order.push(self.children[self.start_order[pos]].name.clone());
-                }
-            }
-            RestartPolicy::RestForOne => {
-                for pos in (failed_pos..total).rev() {
-                    cancel_order.push(self.children[self.start_order[pos]].name.clone());
-                }
-                for pos in failed_pos..total {
-                    restart_order.push(self.children[self.start_order[pos]].name.clone());
-                }
-            }
+        for &pos in affected_positions.iter().rev() {
+            cancel_order.push(self.children[self.start_order[pos]].name.clone());
+        }
+        for &pos in &affected_positions {
+            restart_order.push(self.children[self.start_order[pos]].name.clone());
         }
 
         Some(SupervisorRestartPlan {
@@ -1423,6 +1472,9 @@ impl CompiledSupervisor {
     /// all `start_immediately` children in the compiled order.
     ///
     /// This method establishes the **region-owned structure** and deterministic start ordering.
+    /// Runtime dependency availability is also enforced: if an eager dependency fails or is
+    /// skipped during boot, its eager dependents are skipped as well, and any required dependent
+    /// turns the whole boot into a deterministic supervisor spawn failure.
     /// Restart semantics are specified by [`RestartPolicy`] and computed by
     /// [`CompiledSupervisor::restart_plan_for`]; wiring it into a live restart loop is layered
     /// on top by follow-up beads (bd-1yv7a, bd-35iz1).
@@ -1442,39 +1494,102 @@ impl CompiledSupervisor {
         let scope: crate::cx::Scope<'static, crate::types::policy::FailFast> =
             crate::cx::Scope::<crate::types::policy::FailFast>::new(region, effective_budget);
 
+        #[derive(Clone)]
+        enum BootState {
+            NotStarted,
+            Deferred,
+            Started,
+            Failed(SpawnError),
+            DependencyUnavailable {
+                dependency_error: Option<SpawnError>,
+            },
+        }
+
+        fn abort_supervisor_boot(state: &mut RuntimeState, region: RegionId) {
+            let _ = state.cancel_request(region, &crate::types::CancelReason::shutdown(), None);
+            if let Some(r) = state.region(region) {
+                r.begin_close(None);
+            }
+            state.advance_region_state(region);
+        }
+
+        let child_index_by_name = self
+            .children
+            .iter()
+            .enumerate()
+            .map(|(idx, child)| (child.name.clone(), idx))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut boot_states = vec![BootState::NotStarted; self.children.len()];
         let mut started = Vec::new();
         for &idx in &self.start_order {
-            let child = &mut self.children[idx];
-            if !child.start_immediately {
+            let (child_name, child_required, child_dependencies, start_immediately) = {
+                let child = &self.children[idx];
+                (
+                    child.name.clone(),
+                    child.required,
+                    child.depends_on.clone(),
+                    child.start_immediately,
+                )
+            };
+
+            if !start_immediately {
+                boot_states[idx] = BootState::Deferred;
                 continue;
             }
+
+            let dependency_unavailable = child_dependencies.iter().find_map(|dependency| {
+                let dep_idx = *child_index_by_name
+                    .get(dependency)
+                    .expect("compiled supervisor dependency index missing");
+                match &boot_states[dep_idx] {
+                    BootState::Started => None,
+                    BootState::Failed(err) => Some((dependency.clone(), Some(err.clone()))),
+                    BootState::DependencyUnavailable { dependency_error } => {
+                        Some((dependency.clone(), dependency_error.clone()))
+                    }
+                    BootState::NotStarted | BootState::Deferred => Some((dependency.clone(), None)),
+                }
+            });
+
+            if let Some((dependency, dependency_error)) = dependency_unavailable {
+                cx.trace("supervisor_child_start_blocked_dependency");
+                if child_required {
+                    abort_supervisor_boot(state, region);
+                    return Err(SupervisorSpawnError::DependencyUnavailable {
+                        child: child_name,
+                        dependency,
+                        dependency_error,
+                        region,
+                    });
+                }
+                boot_states[idx] = BootState::DependencyUnavailable { dependency_error };
+                continue;
+            }
+
+            let child = &mut self.children[idx];
             match child.start.start(&scope, state, cx) {
                 Ok(task_id) => started.push(StartedChild {
-                    name: child.name.clone(),
+                    name: child_name.clone(),
                     task_id,
                 }),
                 Err(err) => {
+                    boot_states[idx] = BootState::Failed(err.clone());
                     cx.trace("supervisor_child_start_failed");
-                    if child.required {
+                    if child_required {
                         // Drive the full cancel cascade so any already-started
                         // children transition into cancellation instead of
                         // remaining live under a failed supervisor boot.
-                        let _ = state.cancel_request(
-                            region,
-                            &crate::types::CancelReason::shutdown(),
-                            None,
-                        );
-                        if let Some(r) = state.region(region) {
-                            r.begin_close(None);
-                        }
-                        state.advance_region_state(region);
+                        abort_supervisor_boot(state, region);
                         return Err(SupervisorSpawnError::ChildStartFailed {
-                            child: child.name.clone(),
+                            child: child_name,
                             err,
                             region,
                         });
                     }
                 }
+            }
+            if matches!(boot_states[idx], BootState::NotStarted) {
+                boot_states[idx] = BootState::Started;
             }
         }
 
@@ -1807,6 +1922,7 @@ impl RestartIntensityWindow {
     /// * `storm_threshold` - Restarts per second above which a storm is flagged
     #[must_use]
     pub fn new(window: Duration, storm_threshold: f64) -> Self {
+        validate_storm_threshold(storm_threshold);
         Self {
             timestamps: Vec::new(),
             window,
@@ -2016,6 +2132,7 @@ impl RestartStormMonitor {
     /// The tolerance ensures E[LR] ≤ 1 under H0, making the e-process a
     /// non-negative supermartingale.
     pub fn observe_intensity(&mut self, intensity: f64) -> crate::obligation::eprocess::AlertState {
+        let was_alert = self.is_alert();
         self.observations += 1;
 
         let ratio = intensity / self.config.expected_rate;
@@ -2038,7 +2155,10 @@ impl RestartStormMonitor {
             self.peak_e_value = self.e_value;
         }
 
-        if self.e_value >= self.threshold && self.observations >= self.config.min_observations {
+        if !was_alert
+            && self.e_value >= self.threshold
+            && self.observations >= self.config.min_observations
+        {
             self.alert_count += 1;
         }
 
@@ -2195,6 +2315,9 @@ pub struct RestartTrackerConfig {
     pub storm_threshold: Option<f64>,
     /// E-process monitor config (only used when `storm_threshold` is set).
     pub storm_monitor: StormMonitorConfig,
+    /// Whether the tracker should derive the monitor's expected rate from the
+    /// configured storm threshold.
+    auto_align_storm_expected_rate: bool,
 }
 
 impl RestartTrackerConfig {
@@ -2205,20 +2328,26 @@ impl RestartTrackerConfig {
             restart,
             storm_threshold: None,
             storm_monitor: StormMonitorConfig::default(),
+            auto_align_storm_expected_rate: true,
         }
     }
 
     /// Enable storm detection with the given threshold and default e-process config.
     #[must_use]
     pub fn with_storm_detection(mut self, threshold: f64) -> Self {
+        validate_storm_threshold(threshold);
         self.storm_threshold = Some(threshold);
         self
     }
 
     /// Set a custom e-process monitor config for storm detection.
+    ///
+    /// This disables the default threshold-derived expected-rate inference so
+    /// the supplied monitor configuration is preserved exactly.
     #[must_use]
     pub fn with_storm_monitor(mut self, config: StormMonitorConfig) -> Self {
         self.storm_monitor = config;
+        self.auto_align_storm_expected_rate = false;
         self
     }
 }
@@ -2284,7 +2413,13 @@ impl RestartTracker {
         let (intensity, storm) = match config.storm_threshold {
             Some(threshold) => (
                 Some(RestartIntensityWindow::new(window, threshold)),
-                Some(RestartStormMonitor::new(config.storm_monitor)),
+                Some(RestartStormMonitor::new({
+                    let mut storm_monitor = config.storm_monitor;
+                    if config.auto_align_storm_expected_rate {
+                        storm_monitor.expected_rate = threshold / storm_monitor.tolerance;
+                    }
+                    storm_monitor
+                })),
             ),
             None => (None, None),
         };
@@ -2401,6 +2536,13 @@ impl RestartTracker {
             storm.reset();
         }
     }
+}
+
+fn validate_storm_threshold(threshold: f64) {
+    assert!(
+        threshold.is_finite() && threshold > 0.0,
+        "storm threshold must be finite and > 0, got {threshold}"
+    );
 }
 
 /// Decision made by the supervision system.
@@ -3366,8 +3508,8 @@ impl MonitorTable {
         let Some(entry) = self.monitors.remove(&mref) else {
             return false;
         };
-        Self::remove_from_vec(self.by_monitored.get_mut(&entry.monitored), mref);
-        Self::remove_from_vec(self.by_region.get_mut(&entry.watcher_region), mref);
+        Self::remove_from_index(&mut self.by_monitored, entry.monitored, mref);
+        Self::remove_from_index(&mut self.by_region, entry.watcher_region, mref);
         true
     }
 
@@ -3386,7 +3528,7 @@ impl MonitorTable {
 
         for mref in refs {
             if let Some(entry) = self.monitors.remove(&mref) {
-                Self::remove_from_vec(self.by_region.get_mut(&entry.watcher_region), mref);
+                Self::remove_from_index(&mut self.by_region, entry.watcher_region, mref);
                 downs.push(Down {
                     monitored: task,
                     reason: reason.clone(),
@@ -3431,7 +3573,7 @@ impl MonitorTable {
         let count = refs.len();
         for mref in refs {
             if let Some(entry) = self.monitors.remove(&mref) {
-                Self::remove_from_vec(self.by_monitored.get_mut(&entry.monitored), mref);
+                Self::remove_from_index(&mut self.by_monitored, entry.monitored, mref);
             }
         }
         count
@@ -3468,11 +3610,20 @@ impl MonitorTable {
     }
 
     /// Helper: remove a `MonitorRef` from a sorted `Vec`.
-    fn remove_from_vec(vec: Option<&mut Vec<MonitorRef>>, mref: MonitorRef) {
-        if let Some(v) = vec {
-            if let Ok(pos) = v.binary_search(&mref) {
-                v.remove(pos);
+    fn remove_from_index<K>(index: &mut BTreeMap<K, Vec<MonitorRef>>, key: K, mref: MonitorRef)
+    where
+        K: Ord + Copy,
+    {
+        let remove_bucket = if let Some(bucket) = index.get_mut(&key) {
+            if let Ok(pos) = bucket.binary_search(&mref) {
+                bucket.remove(pos);
             }
+            bucket.is_empty()
+        } else {
+            false
+        };
+        if remove_bucket {
+            index.remove(&key);
         }
     }
 }
@@ -4829,7 +4980,7 @@ mod tests {
         let history = RestartHistory::new(config);
 
         // Budget with insufficient cost
-        let budget = Budget::new().with_cost_quota(50);
+        let mut budget = Budget::new().with_cost_quota(50);
 
         let result = history.can_restart_with_budget(0, &budget);
         assert!(matches!(
@@ -4933,7 +5084,7 @@ mod tests {
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // Budget with insufficient cost
-        let budget = Budget::new().with_cost_quota(50);
+        let mut budget = Budget::new().with_cost_quota(50);
 
         let decision = supervisor.on_failure_with_budget(
             test_task_id(),
@@ -4965,7 +5116,7 @@ mod tests {
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // Budget with sufficient resources
-        let budget = Budget::new().with_cost_quota(1000);
+        let mut budget = Budget::new().with_cost_quota(1000);
 
         let decision = supervisor.on_failure_with_budget(
             test_task_id(),
@@ -5487,6 +5638,36 @@ mod tests {
         assert!(table.is_empty());
 
         crate::test_complete!("cleanup_region_releases_monitors");
+    }
+
+    #[test]
+    fn monitor_reverse_indexes_prune_empty_buckets() {
+        init_test("monitor_reverse_indexes_prune_empty_buckets");
+
+        let mut table = MonitorTable::new();
+        let region = region_id(7, 0);
+        let watcher = task_id(3, 0);
+        let monitored = task_id(5, 0);
+
+        let mref = table.monitor(watcher, region, monitored);
+        assert_eq!(table.by_monitored.len(), 1);
+        assert_eq!(table.by_region.len(), 1);
+
+        assert!(table.demonitor(mref));
+        assert!(table.by_monitored.is_empty());
+        assert!(table.by_region.is_empty());
+
+        let _mref = table.monitor(watcher, region, monitored);
+        let _downs = table.notify_down(monitored, &Outcome::Ok(()), Time::ZERO);
+        assert!(table.by_monitored.is_empty());
+        assert!(table.by_region.is_empty());
+
+        let _mref = table.monitor(watcher, region, monitored);
+        assert_eq!(table.cleanup_region(region), 1);
+        assert!(table.by_monitored.is_empty());
+        assert!(table.by_region.is_empty());
+
+        crate::test_complete!("monitor_reverse_indexes_prune_empty_buckets");
     }
 
     #[test]
@@ -6111,16 +6292,14 @@ mod tests {
         history.record_restart(1_000_000_000);
         history.record_restart(2_000_000_000);
 
+        let mut budget = Budget::INFINITE;
         let decision = supervisor.on_failure_with_budget(
             test_task_id(),
             test_region_id(),
             None,
             &Outcome::Err(()),
             2_000_000_000,
-            {
-                let mut b = Budget::INFINITE;
-                Some(&mut b)
-            },
+            Some(&mut budget),
         );
 
         assert!(matches!(
@@ -6425,6 +6604,96 @@ mod tests {
         crate::test_complete!("conformance_spawn_dependency_ordered_start");
     }
 
+    #[test]
+    fn deferred_children_are_skipped_at_boot_and_stay_out_of_sibling_restart_plans() {
+        init_test("deferred_children_are_skipped_at_boot_and_stay_out_of_sibling_restart_plans");
+
+        let compiled = SupervisorBuilder::new("sup")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(
+                ChildSpec::new("db", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(
+                ChildSpec::new("cache", noop_start)
+                    .depends_on("db")
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(
+                ChildSpec::new("deferred", noop_start)
+                    .depends_on("cache")
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default()))
+                    .with_start_immediately(false),
+            )
+            .compile()
+            .expect("compile");
+
+        let err: Outcome<(), ()> = Outcome::Err(());
+        let plan = compiled
+            .restart_plan_for_failure("cache", &err)
+            .expect("compiled restart planning should cover started siblings");
+
+        assert_eq!(
+            plan.cancel_order,
+            vec![ChildName::from("cache"), ChildName::from("db")]
+        );
+        assert_eq!(
+            plan.restart_order,
+            vec![ChildName::from("db"), ChildName::from("cache")]
+        );
+
+        let mut state = RuntimeState::new();
+        let parent = state.create_root_region(Budget::INFINITE);
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+        let handle = compiled
+            .spawn(&mut state, &cx, parent, Budget::INFINITE)
+            .expect("spawn");
+
+        assert_eq!(handle.started.len(), 2);
+        assert_eq!(handle.started[0].name, "db");
+        assert_eq!(handle.started[1].name, "cache");
+
+        crate::test_complete!(
+            "deferred_children_are_skipped_at_boot_and_stay_out_of_sibling_restart_plans"
+        );
+    }
+
+    #[test]
+    fn failed_deferred_child_remains_in_restart_plan() {
+        init_test("failed_deferred_child_remains_in_restart_plan");
+
+        let compiled = SupervisorBuilder::new("sup")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(
+                ChildSpec::new("db", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(
+                ChildSpec::new("deferred", noop_start)
+                    .depends_on("db")
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default()))
+                    .with_start_immediately(false),
+            )
+            .compile()
+            .expect("compile");
+
+        let err: Outcome<(), ()> = Outcome::Err(());
+        let plan = compiled
+            .restart_plan_for_failure("deferred", &err)
+            .expect("the failed child itself should remain restartable");
+
+        assert_eq!(
+            plan.cancel_order,
+            vec![ChildName::from("deferred"), ChildName::from("db")]
+        );
+        assert_eq!(
+            plan.restart_order,
+            vec![ChildName::from("db"), ChildName::from("deferred")]
+        );
+
+        crate::test_complete!("failed_deferred_child_remains_in_restart_plan");
+    }
+
     /// Conformance: non-required child start failure doesn't fail the supervisor.
     /// Required child failure does fail the supervisor.
     #[test]
@@ -6501,10 +6770,201 @@ mod tests {
                 SupervisorSpawnError::RegionCreate(_) => {
                     unreachable!("expected ChildStartFailed, got RegionCreate");
                 }
+                SupervisorSpawnError::DependencyUnavailable { .. } => {
+                    unreachable!("expected ChildStartFailed, got DependencyUnavailable");
+                }
             }
         }
 
         crate::test_complete!("conformance_spawn_required_vs_optional_child_failure");
+    }
+
+    #[test]
+    fn optional_dependency_failure_skips_eager_dependents() {
+        #[allow(clippy::unnecessary_wraps)]
+        fn failing_start(
+            _scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+            _state: &mut RuntimeState,
+            _cx: &crate::cx::Cx,
+        ) -> Result<TaskId, SpawnError> {
+            Err(SpawnError::RegionClosed(test_region_id()))
+        }
+
+        init_test("optional_dependency_failure_skips_eager_dependents");
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let compiled = SupervisorBuilder::new("sup")
+            .child(ChildSpec::new("db", failing_start).with_required(false))
+            .child(
+                ChildSpec::new(
+                    "worker",
+                    LoggingStart {
+                        name: "worker",
+                        log: Arc::clone(&log),
+                    },
+                )
+                .depends_on("db")
+                .with_required(false),
+            )
+            .child(ChildSpec::new(
+                "metrics",
+                LoggingStart {
+                    name: "metrics",
+                    log: Arc::clone(&log),
+                },
+            ))
+            .compile()
+            .expect("compile");
+
+        let mut state = RuntimeState::new();
+        let parent = state.create_root_region(Budget::INFINITE);
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+        let handle = compiled
+            .spawn(&mut state, &cx, parent, Budget::INFINITE)
+            .expect("optional dependency failure should not fail supervisor");
+
+        let started: Vec<String> = log.lock().clone();
+        assert_eq!(started, vec!["metrics"]);
+        assert_eq!(handle.started.len(), 1);
+        assert_eq!(handle.started[0].name, "metrics");
+
+        crate::test_complete!("optional_dependency_failure_skips_eager_dependents");
+    }
+
+    #[test]
+    fn required_child_with_failed_dependency_fails_supervisor_boot() {
+        #[allow(clippy::unnecessary_wraps)]
+        fn failing_start(
+            _scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+            _state: &mut RuntimeState,
+            _cx: &crate::cx::Cx,
+        ) -> Result<TaskId, SpawnError> {
+            Err(SpawnError::RegionClosed(test_region_id()))
+        }
+
+        init_test("required_child_with_failed_dependency_fails_supervisor_boot");
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let compiled = SupervisorBuilder::new("sup")
+            .child(ChildSpec::new("db", failing_start).with_required(false))
+            .child(ChildSpec::new("api", noop_start).depends_on("db"))
+            .child(ChildSpec::new(
+                "metrics",
+                LoggingStart {
+                    name: "metrics",
+                    log: Arc::clone(&log),
+                },
+            ))
+            .compile()
+            .expect("compile");
+
+        let mut state = RuntimeState::new();
+        let parent = state.create_root_region(Budget::INFINITE);
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+        let err = compiled
+            .spawn(&mut state, &cx, parent, Budget::INFINITE)
+            .expect_err("required dependent with failed dependency should fail boot");
+
+        let (region, dependency_error) = match err {
+            SupervisorSpawnError::DependencyUnavailable {
+                child,
+                dependency,
+                dependency_error,
+                region,
+            } => {
+                assert_eq!(child, "api");
+                assert_eq!(dependency, "db");
+                (region, dependency_error)
+            }
+            SupervisorSpawnError::RegionCreate(_) => {
+                panic!("expected DependencyUnavailable, got RegionCreate")
+            }
+            SupervisorSpawnError::ChildStartFailed { .. } => {
+                panic!("expected DependencyUnavailable, got ChildStartFailed")
+            }
+        };
+
+        assert!(
+            matches!(dependency_error, Some(SpawnError::RegionClosed(_))),
+            "dependency root cause should preserve the original start failure"
+        );
+
+        let record = state
+            .region(region)
+            .expect("supervisor region should still be tracked after boot failure");
+        let started_task = *record
+            .task_ids()
+            .first()
+            .expect("independent child should have started before boot failed");
+        let task = state
+            .task(started_task)
+            .expect("started child task should exist");
+        assert!(
+            task.state.is_cancelling(),
+            "already-started sibling should be cancelled when boot fails on dependency availability"
+        );
+        assert_eq!(log.lock().as_slice(), ["metrics"]);
+
+        crate::test_complete!("required_child_with_failed_dependency_fails_supervisor_boot");
+    }
+
+    #[test]
+    fn transitive_dependency_unavailable_reports_direct_dependency() {
+        #[allow(clippy::unnecessary_wraps)]
+        fn failing_start(
+            _scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+            _state: &mut RuntimeState,
+            _cx: &crate::cx::Cx,
+        ) -> Result<TaskId, SpawnError> {
+            Err(SpawnError::RegionClosed(test_region_id()))
+        }
+
+        init_test("transitive_dependency_unavailable_reports_direct_dependency");
+
+        let compiled = SupervisorBuilder::new("sup")
+            .child(ChildSpec::new("db", failing_start).with_required(false))
+            .child(
+                ChildSpec::new("api", noop_start)
+                    .depends_on("db")
+                    .with_required(false),
+            )
+            .child(ChildSpec::new("frontend", noop_start).depends_on("api"))
+            .compile()
+            .expect("compile");
+
+        let mut state = RuntimeState::new();
+        let parent = state.create_root_region(Budget::INFINITE);
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+        let err = compiled
+            .spawn(&mut state, &cx, parent, Budget::INFINITE)
+            .expect_err("required transitive dependent should fail boot");
+
+        match err {
+            SupervisorSpawnError::DependencyUnavailable {
+                child,
+                dependency,
+                dependency_error,
+                ..
+            } => {
+                assert_eq!(child, "frontend");
+                assert_eq!(
+                    dependency, "api",
+                    "direct blocker should be reported even when the root cause is transitive"
+                );
+                assert!(
+                    matches!(dependency_error, Some(SpawnError::RegionClosed(_))),
+                    "root-cause spawn error should still be preserved"
+                );
+            }
+            SupervisorSpawnError::RegionCreate(_) => {
+                panic!("expected DependencyUnavailable, got RegionCreate")
+            }
+            SupervisorSpawnError::ChildStartFailed { .. } => {
+                panic!("expected DependencyUnavailable, got ChildStartFailed")
+            }
+        }
+
+        crate::test_complete!("transitive_dependency_unavailable_reports_direct_dependency");
     }
 
     #[test]
@@ -6548,6 +7008,9 @@ mod tests {
             }
             SupervisorSpawnError::RegionCreate(_) => {
                 panic!("expected ChildStartFailed, got RegionCreate")
+            }
+            SupervisorSpawnError::DependencyUnavailable { .. } => {
+                panic!("expected ChildStartFailed, got DependencyUnavailable")
             }
         };
 
@@ -6698,6 +7161,12 @@ mod tests {
         crate::test_complete!("conformance_intensity_storm_threshold_boundary");
     }
 
+    #[test]
+    #[should_panic(expected = "storm threshold must be finite and > 0")]
+    fn intensity_window_zero_threshold_panics() {
+        let _window = RestartIntensityWindow::new(Duration::from_secs(1), 0.0);
+    }
+
     /// Conformance: compile detects duplicate child names.
     #[test]
     fn conformance_compile_rejects_duplicate_names() {
@@ -6732,6 +7201,26 @@ mod tests {
         ));
 
         crate::test_complete!("conformance_compile_rejects_unknown_dependency");
+    }
+
+    #[test]
+    fn conformance_compile_rejects_immediate_child_with_deferred_dependency() {
+        init_test("conformance_compile_rejects_immediate_child_with_deferred_dependency");
+
+        let builder = SupervisorBuilder::new("sup")
+            .child(ChildSpec::new("db", noop_start).with_start_immediately(false))
+            .child(ChildSpec::new("api", noop_start).depends_on("db"));
+
+        let result = builder.compile();
+        assert!(matches!(
+            result,
+            Err(SupervisorCompileError::DeferredDependency { ref child, ref depends_on })
+                if child == "api" && depends_on == "db"
+        ));
+
+        crate::test_complete!(
+            "conformance_compile_rejects_immediate_child_with_deferred_dependency"
+        );
     }
 
     /// Conformance: compile detects dependency cycles.
@@ -7113,7 +7602,7 @@ mod tests {
         let config = RestartConfig::new(5, Duration::from_mins(1)).with_restart_cost(100);
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
-        let budget = Budget {
+        let mut budget = Budget {
             cost_quota: Some(50),
             ..Budget::INFINITE
         };
@@ -7145,7 +7634,7 @@ mod tests {
         let config = RestartConfig::new(5, Duration::from_mins(1)).with_min_polls(10);
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
-        let budget = Budget {
+        let mut budget = Budget {
             poll_quota: 5,
             ..Budget::INFINITE
         };
@@ -7181,7 +7670,7 @@ mod tests {
         // Budget deadline is 5 seconds from now but we need 10 seconds minimum
         let now_nanos = 1_000_000_000u64; // 1 second
         let deadline_nanos = 6_000_000_000u64; // 6 seconds (5 seconds remaining)
-        let budget = Budget {
+        let mut budget = Budget {
             deadline: Some(Time::from_nanos(deadline_nanos)),
             ..Budget::INFINITE
         };
@@ -7456,7 +7945,7 @@ mod tests {
 
         // With budget (sufficient): exhaust via can_restart_with_budget
         let mut sup_budget = Supervisor::new(SupervisionStrategy::Restart(config));
-        let budget = Budget::INFINITE;
+        let mut budget = Budget::INFINITE;
         sup_budget.on_failure_with_budget(
             test_task_id(),
             test_region_id(),
@@ -7666,7 +8155,7 @@ mod tests {
         let region = RegionId::from_arena(ArenaIndex::new(0, 0));
 
         // Budget with only 10 cost remaining — insufficient for restart_cost=100.
-        let budget = Budget::new().with_cost_quota(10);
+        let mut budget = Budget::new().with_cost_quota(10);
         supervisor.on_failure_with_budget(
             task,
             region,
@@ -7828,6 +8317,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "storm threshold must be finite and > 0")]
+    fn tracker_config_nan_threshold_panics() {
+        let _config = RestartTrackerConfig::from_restart(RestartConfig::default())
+            .with_storm_detection(f64::NAN);
+    }
+
+    #[test]
     fn storm_monitor_normal_intensity_stays_clear() {
         init_test("storm_monitor_normal_intensity_stays_clear");
         let mut monitor = RestartStormMonitor::new(StormMonitorConfig {
@@ -7869,6 +8365,54 @@ mod tests {
         assert!(monitor.alert_count() > 0);
         assert!(monitor.e_value() >= monitor.threshold());
         crate::test_complete!("storm_monitor_high_intensity_triggers_alert");
+    }
+
+    #[test]
+    fn storm_monitor_alert_count_tracks_transitions_not_samples() {
+        init_test("storm_monitor_alert_count_tracks_transitions_not_samples");
+        let mut monitor = RestartStormMonitor::new(StormMonitorConfig {
+            alpha: 0.01,
+            expected_rate: 0.05,
+            min_observations: 3,
+            tolerance: 1.2,
+        });
+
+        for _ in 0..10 {
+            monitor.observe_intensity(5.0);
+        }
+
+        assert!(
+            monitor.is_alert(),
+            "sustained storm should enter alert state"
+        );
+        assert_eq!(
+            monitor.alert_count(),
+            1,
+            "alert_count should increment once when the monitor first crosses into alert"
+        );
+
+        for _ in 0..10 {
+            monitor.observe_intensity(5.0);
+        }
+
+        assert_eq!(
+            monitor.alert_count(),
+            1,
+            "additional samples while already alert must not inflate alert_count"
+        );
+
+        monitor.reset();
+        for _ in 0..10 {
+            monitor.observe_intensity(5.0);
+        }
+
+        assert_eq!(
+            monitor.alert_count(),
+            1,
+            "after reset, the next alert transition should be counted once again"
+        );
+
+        crate::test_complete!("storm_monitor_alert_count_tracks_transitions_not_samples");
     }
 
     #[test]
@@ -8006,6 +8550,77 @@ mod tests {
         assert!((config.expected_rate - 0.05).abs() < f64::EPSILON);
         assert_eq!(config.min_observations, 3);
         crate::test_complete!("storm_monitor_config_default");
+    }
+
+    #[test]
+    fn restart_tracker_aligns_default_storm_monitor_with_threshold() {
+        init_test("restart_tracker_aligns_default_storm_monitor_with_threshold");
+
+        let config =
+            RestartTrackerConfig::from_restart(RestartConfig::new(10, Duration::from_secs(1)))
+                .with_storm_detection(2.0);
+        let mut tracker = RestartTracker::new(config);
+
+        tracker.record(0);
+        tracker.record(500_000_000);
+        tracker.record(900_000_000);
+
+        assert!(
+            tracker.is_intensity_storm(900_000_000),
+            "intensity threshold should trip once three restarts land inside one second"
+        );
+        assert!(
+            tracker.is_storm(),
+            "default e-process monitor should align with the configured threshold"
+        );
+
+        crate::test_complete!("restart_tracker_aligns_default_storm_monitor_with_threshold");
+    }
+
+    #[test]
+    fn restart_tracker_preserves_explicit_monitor_rate_across_builder_order() {
+        init_test("restart_tracker_preserves_explicit_monitor_rate_across_builder_order");
+
+        let explicit_monitor = StormMonitorConfig {
+            alpha: 0.01,
+            expected_rate: StormMonitorConfig::default().expected_rate,
+            min_observations: 1,
+            tolerance: 1.2,
+        };
+
+        let build_tracker = |threshold_first: bool| {
+            let config = if threshold_first {
+                RestartTrackerConfig::from_restart(RestartConfig::new(10, Duration::from_secs(10)))
+                    .with_storm_detection(2.0)
+                    .with_storm_monitor(explicit_monitor)
+            } else {
+                RestartTrackerConfig::from_restart(RestartConfig::new(10, Duration::from_secs(10)))
+                    .with_storm_monitor(explicit_monitor)
+                    .with_storm_detection(2.0)
+            };
+            let mut tracker = RestartTracker::new(config);
+            tracker.record(0);
+            tracker
+                .storm_snapshot()
+                .expect("storm detection enabled")
+                .e_value
+        };
+
+        let threshold_then_monitor = build_tracker(true);
+        let monitor_then_threshold = build_tracker(false);
+
+        assert!(
+            threshold_then_monitor > 1.0,
+            "explicit expected_rate=0.05 should be preserved instead of being rewritten from threshold"
+        );
+        assert!(
+            (threshold_then_monitor - monitor_then_threshold).abs() < f64::EPSILON,
+            "builder order must not change explicit storm monitor behavior"
+        );
+
+        crate::test_complete!(
+            "restart_tracker_preserves_explicit_monitor_rate_across_builder_order"
+        );
     }
 
     // ========================================================================
@@ -8470,8 +9085,6 @@ mod tests {
         max_restarts: u32,
         /// Restart window for rate limiting tests
         restart_window: Duration,
-        /// Storm threshold for intensity testing
-        storm_threshold: Option<f64>,
     }
 
     impl Default for SupervisionMetamorphicConfig {
@@ -8480,7 +9093,6 @@ mod tests {
                 child_count: 5,
                 max_restarts: 3,
                 restart_window: Duration::from_mins(1),
-                storm_threshold: Some(2.0), // 2 restarts/second
             }
         }
     }
@@ -8489,7 +9101,6 @@ mod tests {
     trait SupervisionDetRngExt {
         fn gen_range(&mut self, range: std::ops::Range<usize>) -> usize;
         fn choose<'a, T>(&mut self, items: &'a [T]) -> &'a T;
-        fn shuffle<T>(&mut self, slice: &mut [T]);
     }
 
     impl SupervisionDetRngExt for crate::util::det_rng::DetRng {
@@ -8505,13 +9116,6 @@ mod tests {
             let idx = self.gen_range(0..items.len());
             &items[idx]
         }
-
-        fn shuffle<T>(&mut self, slice: &mut [T]) {
-            for i in (1..slice.len()).rev() {
-                let j = self.gen_range(0..i + 1);
-                slice.swap(i, j);
-            }
-        }
     }
 
     /// Mock start function for metamorphic testing
@@ -8524,22 +9128,6 @@ mod tests {
         use crate::util::ArenaIndex;
         let arena_idx = ArenaIndex::new(42, 0);
         Ok(TaskId::from_arena(arena_idx))
-    }
-
-    /// Generate supervision config for testing different scenarios
-    fn generate_supervision_config(
-        config: &SupervisionMetamorphicConfig,
-        restart_policy: RestartPolicy,
-        rng: &mut crate::util::det_rng::DetRng,
-    ) -> SupervisionConfig {
-        SupervisionConfig {
-            restart_policy,
-            max_restarts: config.max_restarts,
-            restart_window: config.restart_window,
-            backoff: BackoffStrategy::Fixed(Duration::from_millis(rng.gen_range(10..100) as u64)),
-            escalation: *rng.choose(&[EscalationPolicy::Stop, EscalationPolicy::Escalate]),
-            storm_threshold: config.storm_threshold,
-        }
     }
 
     /// Create supervisor builder with test children
@@ -8574,11 +9162,8 @@ mod tests {
     fn metamorphic_one_for_one_vs_one_for_all_restart_scope() {
         init_test("metamorphic_one_for_one_vs_one_for_all_restart_scope");
 
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
+        const SEED: u64 = 0xA11C_E001_0000_0001;
+        let mut rng = crate::util::det_rng::DetRng::new(SEED);
 
         let config = SupervisionMetamorphicConfig::default();
 
@@ -8667,12 +9252,6 @@ mod tests {
     fn metamorphic_restart_budget_exhaustion_invariance() {
         init_test("metamorphic_restart_budget_exhaustion_invariance");
 
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
-
         // Test that restart budget exhaustion behaves consistently regardless of:
         // 1. Which child fails first
         // 2. The order of failures
@@ -8682,7 +9261,6 @@ mod tests {
             child_count: 3,
             max_restarts: 2, // Low limit for easier exhaustion testing
             restart_window: Duration::from_secs(60),
-            storm_threshold: None, // Disable storm detection for this test
         };
 
         for &restart_policy in &[RestartPolicy::OneForOne, RestartPolicy::OneForAll] {
@@ -8724,7 +9302,7 @@ mod tests {
                 vec!["child_1", "child_0", "child_2"],
             ];
 
-            for (seq_idx, sequence) in failure_sequences.iter().enumerate() {
+            for sequence in &failure_sequences {
                 // Each child should produce restart plans initially
                 for &child_name in sequence {
                     let plan = supervisor.restart_plan_for_failure(child_name, &err_outcome);
@@ -8763,16 +9341,8 @@ mod tests {
     fn metamorphic_child_failure_isolation() {
         init_test("metamorphic_child_failure_isolation");
 
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
-
         // MR: Under OneForOne policy, failure of child A should not affect
         // the restart plan for independent failure of child B
-
-        let config = SupervisionMetamorphicConfig::default();
 
         let supervisor = SupervisorBuilder::new("isolation_test")
             .with_restart_policy(RestartPolicy::OneForOne)
@@ -8841,12 +9411,6 @@ mod tests {
     #[test]
     fn metamorphic_restart_policy_commutativity() {
         init_test("metamorphic_restart_policy_commutativity");
-
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
 
         // MR: Under OneForAll policy, the restart plan should be identical regardless
         // of which child fails (all children are restarted anyway)
@@ -8943,12 +9507,6 @@ mod tests {
     fn metamorphic_escalation_policy_consistency() {
         init_test("metamorphic_escalation_policy_consistency");
 
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
-
         // MR: Escalation policy should behave consistently regardless of:
         // 1. The restart policy (OneForOne vs OneForAll)
         // 2. Which child triggers the escalation
@@ -8958,7 +9516,7 @@ mod tests {
         let restart_policies = [RestartPolicy::OneForOne, RestartPolicy::OneForAll];
         let child_counts = [1, 3, 5];
 
-        for &escalation_policy in &escalation_policies {
+        for &_escalation_policy in &escalation_policies {
             for &restart_policy in &restart_policies {
                 for &child_count in &child_counts {
                     let mut builder = SupervisorBuilder::new("escalation_test")
@@ -9097,12 +9655,6 @@ mod tests {
     fn metamorphic_composite_supervision_invariants() {
         init_test("metamorphic_composite_supervision_invariants");
 
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
-
         // MR: Combining multiple metamorphic properties should preserve all individual properties
         // Test: OneForOne + Escalation + Budget limits + Deterministic ordering
 
@@ -9110,7 +9662,6 @@ mod tests {
             child_count: 3,
             max_restarts: 2,
             restart_window: Duration::from_secs(30),
-            storm_threshold: Some(1.5),
         };
 
         // Create supervisor with composite configuration

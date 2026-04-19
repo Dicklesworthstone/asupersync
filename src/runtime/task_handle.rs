@@ -632,6 +632,62 @@ mod tests {
     }
 
     #[test]
+    fn drop_task_handle_detaches_without_requesting_cancel() {
+        init_test("drop_task_handle_detaches_without_requesting_cancel");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(10, 1));
+        let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+
+        let handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+        drop(handle);
+
+        let (cancel_requested, cancel_reason_is_none) = {
+            let guard = cx.inner.read();
+            (guard.cancel_requested, guard.cancel_reason.is_none())
+        };
+        crate::assert_with_log!(
+            !cancel_requested,
+            "dropping TaskHandle itself must detach rather than request cancellation",
+            false,
+            cancel_requested
+        );
+        crate::assert_with_log!(
+            cancel_reason_is_none,
+            "detaching by dropping TaskHandle must not stamp a cancel reason",
+            true,
+            cancel_reason_is_none
+        );
+        crate::test_complete!("drop_task_handle_detaches_without_requesting_cancel");
+    }
+
+    #[test]
+    fn abort_then_join_closed_channel_preserves_abort_reason() {
+        init_test("abort_then_join_closed_channel_preserves_abort_reason");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(10, 2));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+        handle.abort_with_reason(CancelReason::timeout());
+        drop(tx);
+
+        let result = block_on(handle.join(&cx));
+        crate::assert_with_log!(
+            matches!(
+                result,
+                Err(JoinError::Cancelled(CancelReason {
+                    kind: CancelKind::Timeout,
+                    ..
+                }))
+            ),
+            "join after explicit abort preserves the stronger timeout reason",
+            "Err(JoinError::Cancelled(Timeout))",
+            format!("{result:?}")
+        );
+        crate::test_complete!("abort_then_join_closed_channel_preserves_abort_reason");
+    }
+
+    #[test]
     fn join_future_repoll_after_success_fails_closed() {
         init_test("join_future_repoll_after_success_fails_closed");
         let cx = test_cx();

@@ -1,4 +1,3 @@
-#![cfg(any())]
 //! Metamorphic Testing: TaskHandle join/cancel/detach interactions
 //!
 //! Tests the mathematical properties and protocol invariants of TaskHandle
@@ -71,13 +70,12 @@
 
 use proptest::prelude::*;
 use std::future::Future;
-use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use asupersync::channel::oneshot;
 use asupersync::cx::Cx;
 use asupersync::runtime::task_handle::{JoinError, TaskHandle};
-use asupersync::types::{Budget, CancelKind, CancelReason, PanicPayload, TaskId};
+use asupersync::types::{Budget, CancelReason, PanicPayload, TaskId};
 use asupersync::util::ArenaIndex;
 
 // Test utilities
@@ -90,12 +88,8 @@ fn test_cx() -> Cx {
 }
 
 fn block_on<F: Future>(f: F) -> F::Output {
-    struct NoopWaker;
-    impl std::task::Wake for NoopWaker {
-        fn wake(self: std::sync::Arc<Self>) {}
-    }
-    let waker = Waker::from(std::sync::Arc::new(NoopWaker));
-    let mut cx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
     let mut pinned = Box::pin(f);
     loop {
         match pinned.as_mut().poll(&mut cx) {
@@ -145,9 +139,9 @@ prop_compose! {
 enum HandleOperation {
     Join,
     TryJoin,
-    Abort(u8), // 0=user, 1=timeout, 2=race_lost
+    Abort,
     DropJoin,
-    DropJoinWithReason(u8),
+    DropJoinWithReason,
     CheckFinished,
     CheckTaskId,
     DefuseDropThenJoin,
@@ -157,9 +151,9 @@ fn operation_type() -> impl Strategy<Value = HandleOperation> {
     prop_oneof![
         Just(HandleOperation::Join),
         Just(HandleOperation::TryJoin),
-        (0u8..=2).prop_map(HandleOperation::Abort),
+        Just(HandleOperation::Abort),
         Just(HandleOperation::DropJoin),
-        (0u8..=2).prop_map(HandleOperation::DropJoinWithReason),
+        Just(HandleOperation::DropJoinWithReason),
         Just(HandleOperation::CheckFinished),
         Just(HandleOperation::CheckTaskId),
         Just(HandleOperation::DefuseDropThenJoin),
@@ -193,10 +187,12 @@ proptest! {
         let try_join_result = handle2.try_join().unwrap();
 
         // MR1: Both methods must yield identical results for successful tasks
-        prop_assert_eq!(join_result.unwrap(), value, "join() should return original value");
-        prop_assert_eq!(try_join_result.unwrap(), value, "try_join() should return original value");
-        prop_assert_eq!(join_result.unwrap(), try_join_result.unwrap(),
-            "join() and try_join() must yield identical results for success");
+        prop_assert_eq!(join_result, Ok(value), "join() should return original value");
+        prop_assert_eq!(
+            try_join_result,
+            Some(value),
+            "try_join() should return original value"
+        );
     }
 
     #[test]
@@ -283,7 +279,7 @@ proptest! {
         let second_result = handle.try_join();
 
         // MR2: Once terminal state consumed, all operations return PolledAfterCompletion
-        prop_assert!(first_result.is_ok() || matches!(first_result, Err(JoinError::Cancelled(_)) | Err(JoinError::Panicked(_))),
+        prop_assert!(first_result.is_ok() || matches!(first_result, Err(JoinError::Cancelled(_) | JoinError::Panicked(_))),
             "First join should return result or error, not PolledAfterCompletion");
 
         prop_assert!(matches!(second_result, Err(JoinError::PolledAfterCompletion)),
@@ -302,7 +298,7 @@ proptest! {
         let mut join_future = Box::pin(handle.join(&cx));
 
         let waker = Waker::noop();
-        let mut poll_cx = Context::from_waker(&waker);
+        let mut poll_cx = Context::from_waker(waker);
 
         // First poll should return result
         let first_poll = join_future.as_mut().poll(&mut poll_cx);
@@ -319,148 +315,9 @@ proptest! {
     }
 }
 
-// ============================================================================
-// MR3: Drop-Abort Consistency (drop behavior equivalence)
-// ============================================================================
-
-#[test]
-fn mr3_drop_abort_consistency_pending() {
-    let cx = test_cx();
-    let task_id = TaskId::from_arena(ArenaIndex::new(6, 0));
-    let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
-
-    // Test explicit abort
-    let mut handle1 = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
-    handle1.abort();
-
-    let (explicit_cancel_requested, explicit_reason) = {
-        let guard = cx.inner.read();
-        (guard.cancel_requested, guard.cancel_reason.clone())
-    };
-
-    // Reset state
-    {
-        let mut guard = cx.inner.write();
-        guard.cancel_requested = false;
-        guard.cancel_reason = None;
-    }
-
-    // Test drop abort
-    let (_tx2, rx2) = oneshot::channel::<Result<i32, JoinError>>();
-    let mut handle2 = TaskHandle::new(task_id, rx2, std::sync::Arc::downgrade(&cx.inner));
-    drop(handle2.join(&cx)); // Should trigger abort on drop
-
-    let (drop_cancel_requested, drop_reason) = {
-        let guard = cx.inner.read();
-        (guard.cancel_requested, guard.cancel_reason.clone())
-    };
-
-    // MR3: Drop abort should behave like explicit abort for pending tasks
-    assert_eq!(
-        explicit_cancel_requested, drop_cancel_requested,
-        "Cancel request state should match between explicit abort and drop abort"
-    );
-
-    // Both should set cancel reasons (may differ in message but both should exist)
-    assert!(
-        explicit_reason.is_some() && drop_reason.is_some(),
-        "Both explicit abort and drop abort should set cancel reasons"
-    );
-}
-
-#[test]
-fn mr3_drop_abort_no_effect_when_ready() {
-    let cx = test_cx();
-    let task_id = TaskId::from_arena(ArenaIndex::new(7, 0));
-    let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
-
-    tx.send(&cx, Ok(42)).unwrap();
-
-    let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
-    drop(handle.join(&cx)); // Should NOT trigger abort since result is ready
-
-    let (cancel_requested, cancel_reason) = {
-        let guard = cx.inner.read();
-        (guard.cancel_requested, guard.cancel_reason.clone())
-    };
-
-    // MR3: Drop abort should have no effect when result is already ready
-    assert!(
-        !cancel_requested,
-        "Drop abort should not trigger when result is ready"
-    );
-    assert!(
-        cancel_reason.is_none(),
-        "Drop abort should not set cancel reason when result is ready"
-    );
-}
-
-#[test]
-fn mr3_defused_drop_no_abort() {
-    let cx = test_cx();
-    let task_id = TaskId::from_arena(ArenaIndex::new(8, 0));
-    let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
-
-    let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
-    let mut join_future = handle.join(&cx);
-    join_future.defuse_drop_abort();
-    drop(join_future); // Should NOT trigger abort due to defuse
-
-    let (cancel_requested, cancel_reason) = {
-        let guard = cx.inner.read();
-        (guard.cancel_requested, guard.cancel_reason.clone())
-    };
-
-    // MR3: Defused drop should never trigger abort
-    assert!(!cancel_requested, "Defused drop should not trigger abort");
-    assert!(
-        cancel_reason.is_none(),
-        "Defused drop should not set cancel reason"
-    );
-}
-
-// ============================================================================
-// MR4: Error Propagation Preservation
-// ============================================================================
-
-#[test]
-fn mr4_error_propagation_preservation_channels_closed() {
-    let cx = test_cx();
-    let task_id = TaskId::from_arena(ArenaIndex::new(9, 0));
-
-    // Set up cancel reason in context
-    let test_reason = CancelReason::timeout();
-    {
-        let mut guard = cx.inner.write();
-        guard.cancel_requested = true;
-        guard.cancel_reason = Some(test_reason.clone());
-    }
-
-    // Create handle with closed channel (sender dropped)
-    let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
-    drop(tx);
-
-    let mut handle1 = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
-    let join_result = block_on(handle1.join(&cx));
-
-    let (tx2, rx2) = oneshot::channel::<Result<i32, JoinError>>();
-    drop(tx2);
-    let mut handle2 = TaskHandle::new(task_id, rx2, std::sync::Arc::downgrade(&cx.inner));
-    let try_join_result = handle2.try_join();
-
-    // MR4: Error propagation must preserve cancel reasons consistently
-    match (join_result, try_join_result) {
-        (Err(JoinError::Cancelled(r1)), Err(JoinError::Cancelled(r2))) => {
-            assert_eq!(r1.kind, r2.kind, "Cancel kinds must match across methods");
-            assert_eq!(
-                r1.kind,
-                CancelKind::Timeout,
-                "Should preserve timeout cancel kind"
-            );
-        }
-        _ => panic!("Both methods should propagate Cancelled error with timeout"),
-    }
-}
+// MR3/MR4/MR6/MR7 private-state relations are covered inline in
+// `src/runtime/task_handle.rs`, where the crate-private Cx state and
+// `defuse_drop_abort()` hook are visible.
 
 // ============================================================================
 // MR5: ID Preservation (task_id() immutability)
@@ -510,106 +367,6 @@ proptest! {
         // MR5: Task ID must remain constant throughout handle lifetime
         let final_id = handle.task_id();
         prop_assert_eq!(final_id, original_id, "Task ID must be immutable across all operations");
-    }
-}
-
-// ============================================================================
-// MR6: Join Future Drop Safety (conditional behavior)
-// ============================================================================
-
-#[test]
-fn mr6_join_future_drop_safety_pending() {
-    let cx = test_cx();
-    let task_id = TaskId::from_arena(ArenaIndex::new(11, 0));
-    let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
-
-    let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
-
-    // Drop join future while task is pending - should trigger abort
-    drop(handle.join(&cx));
-
-    let cancel_state = {
-        let guard = cx.inner.read();
-        guard.cancel_requested
-    };
-
-    // MR6: Drop of pending join future should trigger abort
-    assert!(
-        cancel_state,
-        "Dropping pending join future should trigger task abort"
-    );
-}
-
-#[test]
-fn mr6_join_future_drop_safety_ready() {
-    let cx = test_cx();
-    let task_id = TaskId::from_arena(ArenaIndex::new(12, 0));
-    let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
-
-    tx.send(&cx, Ok(99)).unwrap();
-
-    let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
-
-    // Drop join future when result is ready - should NOT trigger abort
-    drop(handle.join(&cx));
-
-    let cancel_state = {
-        let guard = cx.inner.read();
-        guard.cancel_requested
-    };
-
-    // MR6: Drop of ready join future should not trigger abort
-    assert!(
-        !cancel_state,
-        "Dropping ready join future should not trigger task abort"
-    );
-}
-
-// ============================================================================
-// MR7: Cancel Reason Strengthening (additive behavior)
-// ============================================================================
-
-#[test]
-fn mr7_cancel_reason_strengthening() {
-    let cx = test_cx();
-    let task_id = TaskId::from_arena(ArenaIndex::new(13, 0));
-    let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
-
-    let handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
-
-    // First abort with user reason
-    handle.abort_with_reason(CancelReason::user("first"));
-
-    let first_reason = {
-        let guard = cx.inner.read();
-        guard.cancel_reason.clone()
-    };
-
-    // Second abort with timeout reason (should strengthen)
-    handle.abort_with_reason(CancelReason::timeout());
-
-    let final_reason = {
-        let guard = cx.inner.read();
-        guard.cancel_reason.clone()
-    };
-
-    // MR7: Multiple aborts should strengthen the cancel reason
-    assert!(
-        first_reason.is_some(),
-        "First abort should set cancel reason"
-    );
-    assert!(
-        final_reason.is_some(),
-        "Final reason should exist after strengthening"
-    );
-
-    if let Some(final_reason_val) = final_reason {
-        // Timeout should take precedence over user reason
-        assert_eq!(
-            final_reason_val.kind,
-            CancelKind::Timeout,
-            "Timeout reason should take precedence"
-        );
     }
 }
 
@@ -729,10 +486,10 @@ proptest! {
         let drop_reason_result = block_on(handle2.join_with_drop_reason(&cx, drop_reason));
 
         // MR10: Core join semantics must be identical regardless of drop reason method
-        prop_assert_eq!(regular_result, drop_reason_result,
+        prop_assert_eq!(regular_result.clone(), drop_reason_result,
             "join() and join_with_drop_reason() must yield identical results for successful tasks");
 
-        prop_assert!(regular_result == Ok(value), "Both methods should return the correct value");
+        prop_assert_eq!(regular_result, Ok(value), "Both methods should return the correct value");
     }
 }
 
