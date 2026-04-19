@@ -26,7 +26,7 @@ use std::io;
 use std::os::fd::RawFd;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 fn init_test(test_name: &str) {
     init_test_logging();
@@ -93,14 +93,8 @@ impl std::os::fd::AsRawFd for TestFdSource {
     }
 }
 
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn noop_waker() -> Waker {
-    Waker::from(Arc::new(NoopWaker))
+    Waker::noop().clone()
 }
 
 // ============================================================================

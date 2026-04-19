@@ -11,22 +11,15 @@ use common::{init_test_logging, test_proptest_config};
 use proptest::prelude::*;
 use proptest::strategy::Strategy;
 use proptest::{prop_assert, prop_assert_eq, prop_oneof, proptest};
-use std::sync::Arc;
-use std::task::{Wake, Waker};
+use std::task::Waker;
 use std::time::Duration;
 
 // ============================================================================
 // Helpers
 // ============================================================================
 
-/// Noop waker for timer registration.
-struct NoopWaker;
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn noop_waker() -> Waker {
-    Waker::from(Arc::new(NoopWaker))
+    Waker::noop().clone()
 }
 
 // ============================================================================

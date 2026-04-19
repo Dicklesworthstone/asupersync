@@ -27,7 +27,6 @@ use asupersync::types::{Budget, Time};
 use common::*;
 use proptest::prelude::*;
 use std::future::Future;
-use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 // ============================================================================
@@ -40,12 +39,8 @@ fn test_cx() -> Cx {
 
 /// Minimal block_on for synchronous proptest usage.
 fn block_on<F: Future>(f: F) -> F::Output {
-    struct NoopWaker;
-    impl std::task::Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-    let waker = Waker::from(Arc::new(NoopWaker));
-    let mut ctx = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut ctx = Context::from_waker(waker);
     let mut pinned = Box::pin(f);
     // Property tests only exercise non-blocking paths, so a few polls suffice.
     for _ in 0..10_000 {

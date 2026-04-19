@@ -103,8 +103,8 @@ fn graded_obligation_commit_no_panic() {
     assert!(!ob.is_resolved());
     assert_eq!(ob.kind(), ObligationKind::SendPermit);
     let proof = ob.resolve(Resolution::Commit);
-    assert_eq!(proof.kind, ObligationKind::SendPermit);
-    assert_eq!(proof.resolution, Resolution::Commit);
+    assert_eq!(proof.kind(), ObligationKind::SendPermit);
+    assert_eq!(proof.resolution(), Resolution::Commit);
 
     test_complete!("graded_obligation_commit_no_panic");
 }
@@ -116,7 +116,7 @@ fn graded_obligation_abort_no_panic() {
 
     let ob = GradedObligation::reserve(ObligationKind::Lease, "lease");
     let proof = ob.resolve(Resolution::Abort);
-    assert_eq!(proof.resolution, Resolution::Abort);
+    assert_eq!(proof.resolution(), Resolution::Abort);
 
     test_complete!("graded_obligation_abort_no_panic");
 }
@@ -197,8 +197,8 @@ fn committed_proof_bridges_to_resolved() {
     let token: SendPermitToken = ObligationToken::reserve("bridge");
     let committed = token.commit();
     let resolved = committed.into_resolved_proof();
-    assert_eq!(resolved.kind, ObligationKind::SendPermit);
-    assert_eq!(resolved.resolution, Resolution::Commit);
+    assert_eq!(resolved.kind(), ObligationKind::SendPermit);
+    assert_eq!(resolved.resolution(), Resolution::Commit);
 
     test_complete!("committed_proof_bridges_to_resolved");
 }
@@ -211,8 +211,8 @@ fn aborted_proof_bridges_to_resolved() {
     let token: AckToken = ObligationToken::reserve("bridge");
     let aborted = token.abort();
     let resolved = aborted.into_resolved_proof();
-    assert_eq!(resolved.kind, ObligationKind::Ack);
-    assert_eq!(resolved.resolution, Resolution::Abort);
+    assert_eq!(resolved.kind(), ObligationKind::Ack);
+    assert_eq!(resolved.resolution(), Resolution::Abort);
 
     test_complete!("aborted_proof_bridges_to_resolved");
 }
@@ -231,8 +231,8 @@ fn graded_scope_balanced_closes() {
     scope.on_resolve();
     assert_eq!(scope.outstanding(), 0);
     let proof = scope.close().expect("should close cleanly");
-    assert_eq!(proof.total_reserved, 2);
-    assert_eq!(proof.total_resolved, 2);
+    assert_eq!(proof.total_reserved(), 2);
+    assert_eq!(proof.total_resolved(), 2);
 
     test_complete!("graded_scope_balanced_closes");
 }
@@ -265,7 +265,7 @@ fn graded_scope_empty_closes_cleanly() {
 
     let scope = GradedScope::open("empty");
     let proof = scope.close().expect("empty scope should close");
-    assert_eq!(proof.total_reserved, 0);
+    assert_eq!(proof.total_reserved(), 0);
 
     test_complete!("graded_scope_empty_closes_cleanly");
 }
@@ -297,7 +297,7 @@ fn scope_reserve_and_commit_token() {
     assert_eq!(proof.kind(), ObligationKind::SendPermit);
 
     let scope_proof = scope.close().expect("should close");
-    assert_eq!(scope_proof.total_reserved, 1);
+    assert_eq!(scope_proof.total_reserved(), 1);
 
     test_complete!("scope_reserve_and_commit_token");
 }
@@ -313,7 +313,7 @@ fn scope_reserve_and_abort_token() {
     assert_eq!(proof.kind(), ObligationKind::Ack);
 
     let scope_proof = scope.close().expect("should close");
-    assert_eq!(scope_proof.total_reserved, 1);
+    assert_eq!(scope_proof.total_reserved(), 1);
 
     test_complete!("scope_reserve_and_abort_token");
 }
@@ -338,8 +338,8 @@ fn scope_multiple_token_kinds() {
 
     assert_eq!(scope.outstanding(), 0);
     let proof = scope.close().expect("should close");
-    assert_eq!(proof.total_reserved, 4);
-    assert_eq!(proof.total_resolved, 4);
+    assert_eq!(proof.total_reserved(), 4);
+    assert_eq!(proof.total_resolved(), 4);
 
     test_complete!("scope_multiple_token_kinds");
 }

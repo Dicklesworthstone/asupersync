@@ -298,8 +298,8 @@ proptest! {
     ) {
         let ob = GradedObligation::reserve(kind, "prop-test");
         let proof = ob.resolve(resolution);
-        prop_assert_eq!(proof.kind, kind);
-        prop_assert_eq!(proof.resolution, resolution);
+        prop_assert_eq!(proof.kind(), kind);
+        prop_assert_eq!(proof.resolution(), resolution);
     }
 
     /// GradedScope with matching reserve/resolve counts closes cleanly.
@@ -317,8 +317,8 @@ proptest! {
         let result = scope.close();
         prop_assert!(result.is_ok(), "balanced scope should close cleanly");
         let proof = result.unwrap();
-        prop_assert_eq!(proof.total_reserved, n);
-        prop_assert_eq!(proof.total_resolved, n);
+        prop_assert_eq!(proof.total_reserved(), n);
+        prop_assert_eq!(proof.total_resolved(), n);
     }
 
     /// GradedScope with unbalanced counts returns error on close.

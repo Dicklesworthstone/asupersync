@@ -491,8 +491,8 @@ fn wasm_graded_obligation_commit() {
     assert_eq!(ob.description(), "browser fetch permit");
 
     let proof = ob.resolve(Resolution::Commit);
-    assert_eq!(proof.kind, ObligationKind::SendPermit);
-    assert_eq!(proof.resolution, Resolution::Commit);
+    assert_eq!(proof.kind(), ObligationKind::SendPermit);
+    assert_eq!(proof.resolution(), Resolution::Commit);
 }
 
 /// GradedObligation abort lifecycle.
@@ -500,7 +500,7 @@ fn wasm_graded_obligation_commit() {
 fn wasm_graded_obligation_abort() {
     let ob = GradedObligation::reserve(ObligationKind::Lease, "browser websocket lease");
     let proof = ob.resolve(Resolution::Abort);
-    assert_eq!(proof.resolution, Resolution::Abort);
+    assert_eq!(proof.resolution(), Resolution::Abort);
 }
 
 /// GradedObligation into_raw escape hatch (for browser FFI interop).
@@ -542,8 +542,8 @@ fn wasm_graded_scope_clean_lifecycle() {
 
     assert_eq!(scope.outstanding(), 0, "No outstanding obligations");
     let proof = scope.close().expect("Scope should close cleanly");
-    assert_eq!(proof.total_reserved, 3);
-    assert_eq!(proof.total_resolved, 3);
+    assert_eq!(proof.total_reserved(), 3);
+    assert_eq!(proof.total_resolved(), 3);
 }
 
 /// GradedScope detects leaked obligations at scope exit.

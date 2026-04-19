@@ -82,14 +82,6 @@ fn init_test(name: &str) {
 // Test Service Types
 // =============================================================================
 
-/// A no-op waker for deterministic polling.
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-    fn wake_by_ref(self: &Arc<Self>) {}
-}
-
 struct CountingWaker(AtomicUsize);
 
 impl CountingWaker {
@@ -113,7 +105,7 @@ impl Wake for CountingWaker {
 }
 
 fn noop_waker() -> Waker {
-    Arc::new(NoopWaker).into()
+    Waker::noop().clone()
 }
 
 /// A simple service that echoes the request doubled.
