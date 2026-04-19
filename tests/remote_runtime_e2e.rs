@@ -730,7 +730,12 @@ fn idempotency_store_conflict_detection() {
         store.check(&key, &request_a, Time::ZERO),
         DedupDecision::New
     ));
-    store.record(key, RemoteTaskId::from_raw(1), request_a.clone(), Time::ZERO);
+    store.record(
+        key,
+        RemoteTaskId::from_raw(1),
+        request_a.clone(),
+        Time::ZERO,
+    );
 
     // Same key, same computation → duplicate.
     assert!(matches!(

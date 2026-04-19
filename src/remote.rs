@@ -4770,7 +4770,12 @@ mod tests {
         let key = IdempotencyKey::from_raw(42);
         let request = test_request_fingerprint("encode");
 
-        store.record(key, RemoteTaskId::next(), request.clone(), Time::from_secs(10));
+        store.record(
+            key,
+            RemoteTaskId::next(),
+            request.clone(),
+            Time::from_secs(10),
+        );
 
         // Same key, same computation → Duplicate
         let decision = store.check(&key, &request, Time::from_secs(20));
@@ -5277,7 +5282,12 @@ mod tests {
         let request = test_request_fingerprint("work");
 
         // Record at t=10 (expires at t=70)
-        store.record(key, RemoteTaskId::next(), request.clone(), Time::from_secs(10));
+        store.record(
+            key,
+            RemoteTaskId::next(),
+            request.clone(),
+            Time::from_secs(10),
+        );
         // Complete with success
         store.complete(&key, RemoteOutcome::Success(vec![42]));
         assert_eq!(store.len(), 1);
@@ -5300,7 +5310,12 @@ mod tests {
         let key = IdempotencyKey::from_raw(77);
         let request = test_request_fingerprint("fragile_op");
 
-        store.record(key, RemoteTaskId::next(), request.clone(), Time::from_secs(10));
+        store.record(
+            key,
+            RemoteTaskId::next(),
+            request.clone(),
+            Time::from_secs(10),
+        );
         store.complete(&key, RemoteOutcome::Failed("disk full".into()));
 
         let decision = store.check(&key, &request, Time::from_secs(20));
@@ -5328,7 +5343,12 @@ mod tests {
         let key = IdempotencyKey::from_raw(88);
         let request = test_request_fingerprint("retry_op");
 
-        store.record(key, RemoteTaskId::next(), request.clone(), Time::from_secs(10));
+        store.record(
+            key,
+            RemoteTaskId::next(),
+            request.clone(),
+            Time::from_secs(10),
+        );
 
         // First complete: Failed
         store.complete(&key, RemoteOutcome::Failed("transient".into()));
