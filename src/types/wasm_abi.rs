@@ -10,7 +10,7 @@
 //! - Deterministic fingerprinting for ABI drift detection
 
 use crate::types::{CancelPhase, CancelReason, Outcome};
-use crate::util::det_hash::{BTreeMap, DetHasher};
+use crate::util::det_hash::{BTreeMap, DetHashSet, DetHasher};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -226,6 +226,22 @@ pub enum WasmAbiPayloadShape {
     CancelRequestV1,
     FetchRequestV1,
     OutcomeEnvelopeV1,
+}
+
+impl WasmAbiPayloadShape {
+    /// Stable snake_case name for structured logs and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::HandleRefV1 => "handle_ref_v1",
+            Self::ScopeEnterRequestV1 => "scope_enter_request_v1",
+            Self::SpawnRequestV1 => "spawn_request_v1",
+            Self::CancelRequestV1 => "cancel_request_v1",
+            Self::FetchRequestV1 => "fetch_request_v1",
+            Self::OutcomeEnvelopeV1 => "outcome_envelope_v1",
+        }
+    }
 }
 
 /// Contract signature tuple for one ABI symbol.
@@ -588,6 +604,21 @@ pub enum WasmBoundaryState {
     Closed,
 }
 
+impl WasmBoundaryState {
+    /// Stable snake_case name for structured logs and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unbound => "unbound",
+            Self::Bound => "bound",
+            Self::Active => "active",
+            Self::Cancelling => "cancelling",
+            Self::Draining => "draining",
+            Self::Closed => "closed",
+        }
+    }
+}
+
 /// Error emitted when a boundary state transition violates contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum WasmBoundaryTransitionError {
@@ -664,15 +695,9 @@ impl WasmAbiBoundaryEvent {
         let mut fields = BTreeMap::new();
         fields.insert("abi_version", self.abi_version.to_string());
         fields.insert("symbol", self.symbol.as_str().to_string());
-        fields.insert(
-            "payload_shape",
-            format!("{:?}", self.payload_shape).to_lowercase(),
-        );
-        fields.insert(
-            "state_from",
-            format!("{:?}", self.state_from).to_lowercase(),
-        );
-        fields.insert("state_to", format!("{:?}", self.state_to).to_lowercase());
+        fields.insert("payload_shape", self.payload_shape.as_str().to_string());
+        fields.insert("state_from", self.state_from.as_str().to_string());
+        fields.insert("state_to", self.state_to.as_str().to_string());
         fields.insert(
             "compatibility",
             self.compatibility.decision_name().to_string(),
@@ -865,6 +890,14 @@ pub enum WasmHandleError {
         /// Number of non-released descendants still attached to this handle.
         live_descendants: usize,
     },
+    /// Ownership graph contains a cycle instead of a strict tree/forest.
+    #[error("ownership cycle detected while traversing slot {slot} from parent slot {parent_slot}")]
+    OwnershipCycle {
+        /// Descendant slot that re-entered the active traversal stack.
+        slot: u32,
+        /// Parent slot from which the cycle edge was observed.
+        parent_slot: u32,
+    },
     /// Boundary state transition was not legal under contract.
     #[error("invalid state transition for slot {slot}: {from:?} -> {to:?}")]
     InvalidStateTransition {
@@ -976,25 +1009,47 @@ impl WasmHandleTable {
     }
 
     /// Returns owned descendants in deterministic post-order.
-    #[must_use]
-    pub fn descendants_postorder(&self, root: &WasmHandleRef) -> Vec<WasmHandleRef> {
+    ///
+    /// The ownership graph must remain acyclic. If a caller mutates handle
+    /// parents into a cycle through the public entry API, traversal fails
+    /// with `OwnershipCycle` instead of recursing indefinitely during close.
+    pub fn descendants_postorder(
+        &self,
+        root: &WasmHandleRef,
+    ) -> Result<Vec<WasmHandleRef>, WasmHandleError> {
         fn visit(
             table: &WasmHandleTable,
             parent: WasmHandleRef,
+            visiting: &mut DetHashSet<WasmHandleRef>,
+            visited: &mut DetHashSet<WasmHandleRef>,
             descendants: &mut Vec<WasmHandleRef>,
-        ) {
+        ) -> Result<(), WasmHandleError> {
+            visiting.insert(parent);
             for entry in table.slots.iter().flatten() {
                 if entry.parent == Some(parent) && entry.ownership != WasmHandleOwnership::Released
                 {
-                    visit(table, entry.handle, descendants);
+                    if visiting.contains(&entry.handle) {
+                        return Err(WasmHandleError::OwnershipCycle {
+                            slot: entry.handle.slot,
+                            parent_slot: parent.slot,
+                        });
+                    }
+                    if visited.insert(entry.handle) {
+                        visit(table, entry.handle, visiting, visited, descendants)?;
+                    }
                     descendants.push(entry.handle);
                 }
             }
+            let removed = visiting.remove(&parent);
+            debug_assert!(removed);
+            Ok(())
         }
 
         let mut descendants = Vec::new();
-        visit(self, *root, &mut descendants);
-        descendants
+        let mut visiting = DetHashSet::default();
+        let mut visited = DetHashSet::default();
+        visit(self, *root, &mut visiting, &mut visited, &mut descendants)?;
+        Ok(descendants)
     }
 
     /// Looks up an entry by handle, validating generation.
@@ -1133,7 +1188,7 @@ impl WasmHandleTable {
                 state: entry.state,
             });
         }
-        let live_descendants = self.descendants_postorder(handle).len();
+        let live_descendants = self.descendants_postorder(handle)?.len();
         if live_descendants != 0 {
             return Err(WasmHandleError::ReleaseWithLiveDescendants {
                 slot: handle.slot,
@@ -1640,11 +1695,44 @@ impl WasmExportDispatcher {
         &mut self,
         root: &WasmHandleRef,
     ) -> Result<WasmBoundaryState, WasmDispatchError> {
-        let descendants = self.handles.descendants_postorder(root);
+        let descendants = self
+            .handles
+            .descendants_postorder(root)
+            .map_err(WasmDispatchError::Handle)?;
         for descendant in descendants {
             self.drain_and_release_handle(&descendant)?;
         }
         self.drain_and_release_handle(root)
+    }
+
+    fn require_active_runtime_or_region_handle(
+        &self,
+        handle: &WasmHandleRef,
+        symbol: WasmAbiSymbol,
+        role: &'static str,
+    ) -> Result<(), WasmDispatchError> {
+        let entry = self
+            .handles
+            .get(handle)
+            .map_err(WasmDispatchError::Handle)?;
+        if entry.state != WasmBoundaryState::Active {
+            return Err(WasmDispatchError::InvalidState {
+                state: entry.state,
+                symbol,
+            });
+        }
+        if !matches!(
+            entry.handle.kind,
+            WasmHandleKind::Region | WasmHandleKind::Runtime
+        ) {
+            return Err(WasmDispatchError::InvalidRequest {
+                reason: format!(
+                    "{role} requires Region or Runtime handle, got {:?}",
+                    entry.handle.kind
+                ),
+            });
+        }
+        Ok(())
     }
 
     // ----- Symbol implementations -----
@@ -1720,17 +1808,11 @@ impl WasmExportDispatcher {
         self.dispatch_count += 1;
         let compat = self.check_compat(consumer_version)?;
 
-        // Validate parent handle exists and is active
-        let parent_entry = self
-            .handles
-            .get(&request.parent)
-            .map_err(WasmDispatchError::Handle)?;
-        if parent_entry.state != WasmBoundaryState::Active {
-            return Err(WasmDispatchError::InvalidState {
-                state: parent_entry.state,
-                symbol: WasmAbiSymbol::ScopeEnter,
-            });
-        }
+        self.require_active_runtime_or_region_handle(
+            &request.parent,
+            WasmAbiSymbol::ScopeEnter,
+            "scope_enter parent",
+        )?;
 
         let handle = self
             .handles
@@ -1791,27 +1873,11 @@ impl WasmExportDispatcher {
         self.dispatch_count += 1;
         let compat = self.check_compat(consumer_version)?;
 
-        // Validate scope handle
-        let scope_entry = self
-            .handles
-            .get(&request.scope)
-            .map_err(WasmDispatchError::Handle)?;
-        if scope_entry.state != WasmBoundaryState::Active {
-            return Err(WasmDispatchError::InvalidState {
-                state: scope_entry.state,
-                symbol: WasmAbiSymbol::TaskSpawn,
-            });
-        }
-        if scope_entry.handle.kind != WasmHandleKind::Region
-            && scope_entry.handle.kind != WasmHandleKind::Runtime
-        {
-            return Err(WasmDispatchError::InvalidRequest {
-                reason: format!(
-                    "task_spawn requires Region or Runtime scope, got {:?}",
-                    scope_entry.handle.kind
-                ),
-            });
-        }
+        self.require_active_runtime_or_region_handle(
+            &request.scope,
+            WasmAbiSymbol::TaskSpawn,
+            "task_spawn scope",
+        )?;
 
         let handle = self
             .handles
@@ -1950,17 +2016,11 @@ impl WasmExportDispatcher {
         self.dispatch_count += 1;
         let compat = self.check_compat(consumer_version)?;
 
-        // Validate scope handle
-        let scope_entry = self
-            .handles
-            .get(&request.scope)
-            .map_err(WasmDispatchError::Handle)?;
-        if scope_entry.state != WasmBoundaryState::Active {
-            return Err(WasmDispatchError::InvalidState {
-                state: scope_entry.state,
-                symbol: WasmAbiSymbol::FetchRequest,
-            });
-        }
+        self.require_active_runtime_or_region_handle(
+            &request.scope,
+            WasmAbiSymbol::FetchRequest,
+            "fetch_request scope",
+        )?;
 
         // Validate URL is non-empty
         if request.url.is_empty() {
@@ -2595,6 +2655,14 @@ pub struct ReactProviderState {
 }
 
 impl ReactProviderState {
+    fn owns_scope_handle(&self, scope: WasmHandleRef) -> bool {
+        self.root_scope_handle == Some(scope) || self.child_scopes.contains(&scope)
+    }
+
+    fn tracks_task_handle(&self, task: &WasmHandleRef) -> bool {
+        self.active_tasks.contains(task)
+    }
+
     /// Creates a new provider state in `Pending` phase.
     #[must_use]
     pub fn new(config: ReactProviderConfig) -> Self {
@@ -2718,6 +2786,7 @@ impl ReactProviderState {
         let cv = self.config.consumer_version;
 
         // 1. Cancel all active tasks
+        let mut remaining_tasks = Vec::new();
         for task in std::mem::take(&mut self.active_tasks) {
             // Best-effort cancel — task may already be closed
             if self.dispatcher.handles().get(&task).is_ok() {
@@ -2755,28 +2824,40 @@ impl ReactProviderState {
                     );
                 }
             }
+            if self.dispatcher.handles().get(&task).is_ok() {
+                remaining_tasks.push(task);
+            }
         }
+        self.active_tasks = remaining_tasks;
 
         // 2. Close child scopes (inner-first / LIFO for structured concurrency)
+        let mut remaining_child_scopes = Vec::new();
         let child_scopes: Vec<_> = self.child_scopes.drain(..).rev().collect();
         for scope in child_scopes {
             if self.dispatcher.handles().get(&scope).is_ok() {
                 let _ = self.dispatcher.scope_close(&scope, cv);
             }
+            if self.dispatcher.handles().get(&scope).is_ok() {
+                remaining_child_scopes.push(scope);
+            }
         }
+        remaining_child_scopes.reverse();
+        self.child_scopes = remaining_child_scopes;
 
         // 3. Close root scope
-        if let Some(scope) = self.root_scope_handle.take() {
+        if let Some(scope) = self.root_scope_handle {
             if self.dispatcher.handles().get(&scope).is_ok() {
                 self.dispatcher.scope_close(&scope, cv)?;
             }
+            self.root_scope_handle = None;
         }
 
         // 4. Close runtime
-        if let Some(rt) = self.runtime_handle.take() {
+        if let Some(rt) = self.runtime_handle {
             if self.dispatcher.handles().get(&rt).is_ok() {
                 self.dispatcher.runtime_close(&rt, cv)?;
             }
+            self.runtime_handle = None;
         }
 
         Ok(())
@@ -2825,6 +2906,11 @@ impl ReactProviderState {
                 symbol: WasmAbiSymbol::TaskSpawn,
             });
         }
+        if !self.owns_scope_handle(scope) {
+            return Err(WasmDispatchError::InvalidRequest {
+                reason: "scope not owned by provider".to_string(),
+            });
+        }
         let task = self.dispatcher.spawn(
             {
                 let mut b = WasmTaskSpawnBuilder::new(scope);
@@ -2845,9 +2931,18 @@ impl ReactProviderState {
         task: &WasmHandleRef,
         outcome: WasmAbiOutcomeEnvelope,
     ) -> Result<WasmAbiOutcomeEnvelope, WasmDispatchError> {
-        self.active_tasks.retain(|t| t != task);
-        self.dispatcher
-            .task_join(task, outcome, self.config.consumer_version)
+        if !self.tracks_task_handle(task) {
+            return Err(WasmDispatchError::InvalidRequest {
+                reason: "task not tracked by provider".to_string(),
+            });
+        }
+        let result = self
+            .dispatcher
+            .task_join(task, outcome, self.config.consumer_version);
+        if result.is_ok() {
+            self.active_tasks.retain(|t| t != task);
+        }
+        result
     }
 
     /// Returns a diagnostic snapshot of the provider state.
@@ -3493,7 +3588,9 @@ pub fn is_valid_bootstrap_transition(from: NextjsBootstrapPhase, to: NextjsBoots
             NextjsBootstrapPhase::Hydrating
         ) | (
             NextjsBootstrapPhase::Hydrating,
-            NextjsBootstrapPhase::Hydrated | NextjsBootstrapPhase::RuntimeFailed
+            NextjsBootstrapPhase::Hydrated
+                | NextjsBootstrapPhase::RuntimeFailed
+                | NextjsBootstrapPhase::ServerRendered
         ) | (
             NextjsBootstrapPhase::Hydrated,
             NextjsBootstrapPhase::RuntimeReady
@@ -3742,6 +3839,12 @@ impl NextjsBootstrapState {
 
     /// Retries bootstrap after a previous runtime failure.
     pub fn retry_after_failure(&mut self) -> Result<bool, NextjsBootstrapTransitionError> {
+        if self.phase != NextjsBootstrapPhase::RuntimeFailed {
+            return Err(NextjsBootstrapTransitionError {
+                from: self.phase,
+                to: NextjsBootstrapPhase::Hydrating,
+            });
+        }
         self.transition(
             NextjsBootstrapPhase::Hydrating,
             NextjsBootstrapTrigger::RetryAfterFailure,
@@ -3809,6 +3912,13 @@ impl NextjsBootstrapState {
 
         if to == NextjsBootstrapPhase::Hydrating && from != NextjsBootstrapPhase::Hydrating {
             self.hydration_cycle_count = self.hydration_cycle_count.saturating_add(1);
+        }
+        if matches!(
+            to,
+            NextjsBootstrapPhase::Hydrating | NextjsBootstrapPhase::ServerRendered
+        ) && from != to
+        {
+            self.last_failure = None;
         }
         if to == NextjsBootstrapPhase::RuntimeReady && from != NextjsBootstrapPhase::RuntimeReady {
             self.runtime_generation = self.runtime_generation.saturating_add(1);
@@ -4425,6 +4535,12 @@ mod tests {
             fields.get("compatibility_consumer_minor"),
             Some(&"0".to_string())
         );
+        assert_eq!(
+            fields.get("payload_shape"),
+            Some(&"fetch_request_v1".to_string())
+        );
+        assert_eq!(fields.get("state_from"), Some(&"active".to_string()));
+        assert_eq!(fields.get("state_to"), Some(&"cancelling".to_string()));
     }
 
     #[test]
@@ -4718,6 +4834,24 @@ mod tests {
     }
 
     #[test]
+    fn handle_table_descendants_postorder_rejects_parent_cycles() {
+        let mut table = WasmHandleTable::new();
+        let root = table.allocate(WasmHandleKind::Runtime);
+        let child = table.allocate_with_parent(WasmHandleKind::Region, Some(root));
+
+        table.get_mut(&root).unwrap().parent = Some(child);
+
+        let err = table.descendants_postorder(&root).unwrap_err();
+        assert_eq!(
+            err,
+            WasmHandleError::OwnershipCycle {
+                slot: root.slot,
+                parent_slot: child.slot,
+            }
+        );
+    }
+
+    #[test]
     fn buffer_transfer_mode_copy_is_default() {
         assert!(WasmBufferTransferMode::Copy.is_copy());
         assert!(!WasmBufferTransferMode::Transfer.is_copy());
@@ -4938,6 +5072,42 @@ mod tests {
     }
 
     #[test]
+    fn dispatcher_scope_close_rejects_ownership_cycles_in_handle_graph() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+        let outer = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: rt,
+                    label: Some("outer".to_string()),
+                },
+                None,
+            )
+            .unwrap();
+        let inner = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: outer,
+                    label: Some("inner".to_string()),
+                },
+                None,
+            )
+            .unwrap();
+
+        d.handles_mut().get_mut(&outer).unwrap().parent = Some(inner);
+
+        let err = d.scope_close(&outer, None).unwrap_err();
+        assert_eq!(
+            err,
+            WasmDispatchError::Handle(WasmHandleError::OwnershipCycle {
+                slot: outer.slot,
+                parent_slot: inner.slot,
+            })
+        );
+        assert_eq!(d.handles().live_count(), 3);
+    }
+
+    #[test]
     fn dispatcher_task_spawn_join_lifecycle() {
         let mut d = WasmExportDispatcher::new();
         let rt = d.runtime_create(None).unwrap();
@@ -5118,6 +5288,62 @@ mod tests {
                     scope: task,
                     label: None,
                     cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, WasmDispatchError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn dispatcher_scope_enter_wrong_parent_kind_rejected() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+        let task = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope: rt,
+                    label: Some("worker".to_string()),
+                    cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        let err = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: task,
+                    label: Some("illegal-child".to_string()),
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, WasmDispatchError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn dispatcher_fetch_request_wrong_scope_kind_rejected() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+        let task = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope: rt,
+                    label: Some("worker".to_string()),
+                    cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        let err = d
+            .fetch_request(
+                &WasmFetchRequest {
+                    scope: task,
+                    url: "https://example.com/data".to_string(),
+                    method: "GET".to_string(),
+                    body: None,
                 },
                 None,
             )
@@ -6041,6 +6267,22 @@ mod tests {
     }
 
     #[test]
+    fn provider_clean_remount_remains_valid_without_strict_mode_resilience() {
+        let mut provider = ReactProviderState::new(ReactProviderConfig {
+            strict_mode_resilient: false,
+            ..Default::default()
+        });
+
+        provider.mount().unwrap();
+        let first_rt = provider.runtime_handle().unwrap();
+        provider.unmount().unwrap();
+
+        provider.mount().unwrap();
+        assert_eq!(provider.phase(), ReactProviderPhase::Ready);
+        assert_ne!(provider.runtime_handle().unwrap(), first_rt);
+    }
+
+    #[test]
     fn provider_child_scopes_tracked() {
         let mut provider = ReactProviderState::new(ReactProviderConfig::default());
         provider.mount().unwrap();
@@ -6082,6 +6324,103 @@ mod tests {
     }
 
     #[test]
+    fn provider_complete_task_error_keeps_task_tracked_for_cleanup() {
+        let mut provider = ReactProviderState::new(ReactProviderConfig::default());
+        provider.mount().unwrap();
+        let root_scope = provider.root_scope_handle().unwrap();
+
+        let task = provider.spawn_task(root_scope, Some("fetch-user")).unwrap();
+        assert_eq!(provider.snapshot().active_task_count, 1);
+
+        let bogus = WasmHandleRef {
+            generation: task.generation.wrapping_add(1),
+            ..task
+        };
+
+        let err = provider
+            .complete_task(
+                &bogus,
+                WasmAbiOutcomeEnvelope::Ok {
+                    value: WasmAbiValue::I64(42),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, WasmDispatchError::Handle(_)));
+        assert_eq!(provider.snapshot().active_task_count, 1);
+
+        provider.unmount().unwrap();
+    }
+
+    #[test]
+    fn provider_rejects_spawning_into_foreign_scope() {
+        let mut owner = ReactProviderState::new(ReactProviderConfig::default());
+        let mut intruder = ReactProviderState::new(ReactProviderConfig {
+            label: "intruder".to_string(),
+            ..Default::default()
+        });
+        owner.mount().unwrap();
+        intruder.mount().unwrap();
+
+        let foreign_scope = owner.root_scope_handle().unwrap();
+        let err = intruder
+            .spawn_task(foreign_scope, Some("cross-provider-task"))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            WasmDispatchError::InvalidRequest { ref reason }
+                if reason == "scope not owned by provider"
+        ));
+        assert_eq!(intruder.snapshot().active_task_count, 0);
+        assert_eq!(owner.snapshot().active_task_count, 0);
+
+        intruder.unmount().unwrap();
+        owner.unmount().unwrap();
+    }
+
+    #[test]
+    fn provider_rejects_completing_foreign_task() {
+        let mut owner = ReactProviderState::new(ReactProviderConfig::default());
+        let mut intruder = ReactProviderState::new(ReactProviderConfig {
+            label: "intruder".to_string(),
+            ..Default::default()
+        });
+        owner.mount().unwrap();
+        intruder.mount().unwrap();
+
+        let owner_root = owner.root_scope_handle().unwrap();
+        let foreign_task = owner.spawn_task(owner_root, Some("owner-task")).unwrap();
+
+        let err = intruder
+            .complete_task(
+                &foreign_task,
+                WasmAbiOutcomeEnvelope::Ok {
+                    value: WasmAbiValue::I64(42),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            WasmDispatchError::InvalidRequest { ref reason }
+                if reason == "task not tracked by provider"
+        ));
+        assert_eq!(owner.snapshot().active_task_count, 1);
+        assert_eq!(intruder.snapshot().active_task_count, 0);
+
+        let joined = owner
+            .complete_task(
+                &foreign_task,
+                WasmAbiOutcomeEnvelope::Ok {
+                    value: WasmAbiValue::I64(7),
+                },
+            )
+            .unwrap();
+        assert_eq!(joined.ok_value(), Some(&WasmAbiValue::I64(7)));
+
+        intruder.unmount().unwrap();
+        owner.unmount().unwrap();
+    }
+
+    #[test]
     fn provider_unmount_cancels_active_tasks() {
         let mut provider = ReactProviderState::new(ReactProviderConfig::default());
         provider.mount().unwrap();
@@ -6095,6 +6434,43 @@ mod tests {
         // Unmount should cancel tasks, not leak them
         provider.unmount().unwrap();
         assert_eq!(provider.phase(), ReactProviderPhase::Disposed);
+    }
+
+    #[test]
+    fn provider_unmount_failure_preserves_live_handles_for_retry() {
+        let mut provider = ReactProviderState::new(ReactProviderConfig::default());
+        provider.mount().unwrap();
+        let runtime = provider.runtime_handle().unwrap();
+        let root_scope = provider.root_scope_handle().unwrap();
+        let child_scope = provider.create_child_scope(Some("child")).unwrap();
+        let task = provider.spawn_task(root_scope, Some("fetch-user")).unwrap();
+
+        provider.config.consumer_version = Some(WasmAbiVersion { major: 2, minor: 0 });
+        let err = provider.unmount().unwrap_err();
+        assert!(matches!(err, WasmDispatchError::Incompatible { .. }));
+        assert_eq!(provider.phase(), ReactProviderPhase::Failed);
+
+        let snapshot = provider.snapshot();
+        assert_eq!(snapshot.active_task_count, 1);
+        assert_eq!(snapshot.child_scope_count, 1);
+        assert_eq!(snapshot.runtime_handle, Some(runtime));
+        assert_eq!(snapshot.root_scope_handle, Some(root_scope));
+        assert!(provider.dispatcher.handles().get(&task).is_ok());
+        assert!(provider.dispatcher.handles().get(&child_scope).is_ok());
+        assert!(provider.dispatcher.handles().get(&root_scope).is_ok());
+        assert!(provider.dispatcher.handles().get(&runtime).is_ok());
+
+        provider.config.consumer_version = None;
+        provider.do_unmount().unwrap();
+        let cleaned = provider.snapshot();
+        assert_eq!(cleaned.active_task_count, 0);
+        assert_eq!(cleaned.child_scope_count, 0);
+        assert!(cleaned.runtime_handle.is_none());
+        assert!(cleaned.root_scope_handle.is_none());
+        assert!(
+            provider.dispatcher.diagnostic_snapshot().is_clean(),
+            "retry cleanup should release all retained handles"
+        );
     }
 
     #[test]
@@ -6578,6 +6954,43 @@ mod tests {
         assert!(changed);
         assert_eq!(state.phase(), NextjsBootstrapPhase::Hydrating);
         assert_eq!(state.hydration_cycle_count(), 2);
+        assert_eq!(state.last_failure(), None);
+    }
+
+    #[test]
+    fn bootstrap_retry_requires_runtime_failed_phase() {
+        let mut state = NextjsBootstrapState::new();
+        state.start_hydration().expect("start hydration");
+        state.complete_hydration().expect("complete hydration");
+        state.mark_runtime_ready().expect("runtime ready");
+
+        let before_log = state.transition_log().to_vec();
+        let err = state.retry_after_failure().unwrap_err();
+        assert_eq!(
+            err,
+            NextjsBootstrapTransitionError {
+                from: NextjsBootstrapPhase::RuntimeReady,
+                to: NextjsBootstrapPhase::Hydrating,
+            }
+        );
+        assert_eq!(state.phase(), NextjsBootstrapPhase::RuntimeReady);
+        assert_eq!(state.hydration_cycle_count(), 1);
+        assert_eq!(state.runtime_generation(), 1);
+        assert_eq!(state.transition_log(), before_log.as_slice());
+    }
+
+    #[test]
+    fn bootstrap_retry_does_not_relabel_normal_rehydration_paths() {
+        let mut state = NextjsBootstrapState::new();
+        state.start_hydration().expect("start hydration");
+        state.complete_hydration().expect("complete hydration");
+        state.mark_runtime_ready().expect("runtime ready");
+
+        state.on_hot_reload().expect("hot reload");
+        let last = state.transition_log().last().expect("transition record");
+        assert_eq!(last.trigger, NextjsBootstrapTrigger::HotReload);
+        assert_eq!(last.from, NextjsBootstrapPhase::RuntimeReady);
+        assert_eq!(last.to, NextjsBootstrapPhase::Hydrating);
     }
 
     #[test]
@@ -6609,6 +7022,40 @@ mod tests {
         assert!(changed);
         assert_eq!(state.phase(), NextjsBootstrapPhase::ServerRendered);
         assert_eq!(state.navigation_count(), 1);
+        assert_eq!(state.last_failure(), None);
+    }
+
+    #[test]
+    fn bootstrap_state_hard_navigation_during_hydration_resets_cleanly() {
+        let mut state = NextjsBootstrapState::new();
+        state.start_hydration().expect("start hydration");
+
+        let changed = state
+            .on_navigation(NextjsNavigationType::HardNavigation)
+            .expect("hard navigation during hydration");
+        assert!(changed);
+        assert_eq!(state.phase(), NextjsBootstrapPhase::ServerRendered);
+        assert_eq!(state.navigation_count(), 1);
+        assert_eq!(state.hydration_cycle_count(), 1);
+        assert_eq!(state.last_failure(), None);
+    }
+
+    #[test]
+    fn bootstrap_state_hard_navigation_clears_previous_failure() {
+        let mut state = NextjsBootstrapState::new();
+        state.start_hydration().expect("start hydration");
+        state.complete_hydration().expect("complete hydration");
+        state
+            .mark_runtime_failed("module fetch failed")
+            .expect("mark failed");
+        assert_eq!(state.last_failure(), Some("module fetch failed"));
+
+        let changed = state
+            .on_navigation(NextjsNavigationType::HardNavigation)
+            .expect("hard navigation after failure");
+        assert!(changed);
+        assert_eq!(state.phase(), NextjsBootstrapPhase::ServerRendered);
+        assert_eq!(state.last_failure(), None);
     }
 
     #[test]
