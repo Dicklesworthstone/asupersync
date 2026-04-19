@@ -2075,21 +2075,21 @@ impl RuntimeState {
         &mut self,
         region_id: RegionId,
         reason: &CancelReason,
-        _source_task: Option<TaskId>,
+        source_task: Option<TaskId>,
     ) -> Vec<(TaskId, u8)> {
         // Use a modest initial capacity instead of scanning the entire task
         // arena for live_task_count(). The Vec will grow if needed, but avoids
         // the O(arena_capacity) scan just for a size hint.
         let mut tasks_to_cancel = Vec::with_capacity(32);
-        let _cleanup_budget = reason.cleanup_budget();
+        let cleanup_budget = reason.cleanup_budget();
         let root_span = debug_span!(
             "cancel_request",
             target_region = ?region_id,
             cancel_kind = ?reason.kind,
             cancel_message = ?reason.message,
-            cleanup_poll_quota = _cleanup_budget.poll_quota,
-            cleanup_priority = _cleanup_budget.priority,
-            source_task = ?_source_task
+            cleanup_poll_quota = cleanup_budget.poll_quota,
+            cleanup_priority = cleanup_budget.priority,
+            source_task = ?source_task
         );
         let _root_guard = root_span.enter();
 
@@ -2097,9 +2097,9 @@ impl RuntimeState {
             target_region = ?region_id,
             cancel_kind = ?reason.kind,
             cancel_message = ?reason.message,
-            cleanup_poll_quota = _cleanup_budget.poll_quota,
-            cleanup_priority = _cleanup_budget.priority,
-            source_task = ?_source_task,
+            cleanup_poll_quota = cleanup_budget.poll_quota,
+            cleanup_priority = cleanup_budget.priority,
+            source_task = ?source_task,
             "cancel request initiated"
         );
         let now = self.current_runtime_time();
@@ -2343,9 +2343,8 @@ impl RuntimeState {
     ///
     /// This checks if the owning region can advance its state.
     /// Returns the task's waiters that should be woken.
-    #[allow(clippy::used_underscore_binding)]
     pub fn task_completed(&mut self, task_id: TaskId) -> SmallVec<[TaskId; 4]> {
-        let (owner, completion, _outcome_kind) = {
+        let (owner, completion, outcome_kind) = {
             let Some(task) = self.task(task_id) else {
                 trace!(
                     task_id = ?task_id,
@@ -2398,7 +2397,7 @@ impl RuntimeState {
             .task_mut(task_id)
             .map(|task| std::mem::take(&mut task.waiters))
             .unwrap_or_default();
-        let _waiter_count = waiters.len();
+        let waiter_count = waiters.len();
 
         if !matches!(completion, TaskCompletionKind::Cancelled) {
             let leaks = self.collect_obligation_leaks_for_holder(task_id);
