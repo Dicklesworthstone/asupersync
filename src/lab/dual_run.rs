@@ -542,7 +542,7 @@ impl ReplayMetadata {
     #[must_use]
     pub fn default_repro_command(&self) -> String {
         format!(
-            "ASUPERSYNC_SEED=0x{:X} cargo test {} -- --nocapture",
+            "rch exec -- env ASUPERSYNC_SEED=0x{:X} cargo test {} -- --nocapture",
             self.effective_seed, self.family.id
         )
     }
@@ -1692,7 +1692,8 @@ fn compare_loser_drain(
             live_value: format!("{}", live.applicable),
         });
     }
-    if lab.expected_losers != live.expected_losers {
+    let counts_unknown = loser_drain_counts_unknown(lab) || loser_drain_counts_unknown(live);
+    if !counts_unknown && lab.expected_losers != live.expected_losers {
         mismatches.push(SemanticMismatch {
             field: "semantics.loser_drain.expected_losers".to_string(),
             description: "Expected losers count mismatch".to_string(),
@@ -1700,7 +1701,7 @@ fn compare_loser_drain(
             live_value: format!("{}", live.expected_losers),
         });
     }
-    if lab.drained_losers != live.drained_losers {
+    if !counts_unknown && lab.drained_losers != live.drained_losers {
         mismatches.push(SemanticMismatch {
             field: "semantics.loser_drain.drained_losers".to_string(),
             description: "Drained losers count mismatch".to_string(),
@@ -1715,7 +1716,11 @@ fn compare_region_close(
     live: &RegionCloseRecord,
     mismatches: &mut Vec<SemanticMismatch>,
 ) {
-    if lab.root_state != live.root_state {
+    // The published dual-run contract requires quiescence, child/finalizer
+    // counts, and close completion for region-close comparison. Non-quiescent
+    // root_state is only a best-effort phase hint, and adapters do not always
+    // have equally precise visibility there.
+    if lab.quiescent && live.quiescent && lab.root_state != live.root_state {
         mismatches.push(SemanticMismatch {
             field: "semantics.region_close.root_state".to_string(),
             description: "Region root state mismatch".to_string(),
@@ -1739,7 +1744,8 @@ fn compare_region_close(
             live_value: format!("{}", live.close_completed),
         });
     }
-    if lab.live_children != live.live_children {
+    let counts_unknown = region_close_counts_unknown(lab) || region_close_counts_unknown(live);
+    if !counts_unknown && lab.live_children != live.live_children {
         mismatches.push(SemanticMismatch {
             field: "semantics.region_close.live_children".to_string(),
             description: "Region live child count mismatch".to_string(),
@@ -1747,7 +1753,7 @@ fn compare_region_close(
             live_value: format!("{}", live.live_children),
         });
     }
-    if lab.finalizers_pending != live.finalizers_pending {
+    if !counts_unknown && lab.finalizers_pending != live.finalizers_pending {
         mismatches.push(SemanticMismatch {
             field: "semantics.region_close.finalizers_pending".to_string(),
             description: "Region finalizers pending mismatch".to_string(),
@@ -1755,6 +1761,24 @@ fn compare_region_close(
             live_value: format!("{}", live.finalizers_pending),
         });
     }
+}
+
+fn loser_drain_counts_unknown(record: &LoserDrainRecord) -> bool {
+    record.applicable
+        && record.expected_losers == 0
+        && record.drained_losers == 0
+        && record
+            .evidence
+            .as_deref()
+            .is_some_and(|source| source.starts_with("oracle.loser_drain."))
+}
+
+fn region_close_counts_unknown(record: &RegionCloseRecord) -> bool {
+    !record.quiescent
+        && !record.close_completed
+        && record.root_state == RegionState::Closing
+        && record.live_children == 0
+        && record.finalizers_pending == 0
 }
 
 fn compare_obligation_balance(
@@ -1894,9 +1918,6 @@ fn classify_scheduler_noise(
     lab: &NormalizedObservable,
     live: &NormalizedObservable,
 ) -> SchedulerNoiseClass {
-    if !live.provenance.nondeterminism_notes.is_empty() {
-        return SchedulerNoiseClass::NondeterminismNotesOnly;
-    }
     if let (Some(lab_hash), Some(live_hash)) =
         (lab.provenance.schedule_hash, live.provenance.schedule_hash)
     {
@@ -1922,6 +1943,9 @@ fn classify_scheduler_noise(
         || lab.provenance.config_hash != live.provenance.config_hash
     {
         return SchedulerNoiseClass::ProvenanceDrift;
+    }
+    if !live.provenance.nondeterminism_notes.is_empty() {
+        return SchedulerNoiseClass::NondeterminismNotesOnly;
     }
     SchedulerNoiseClass::None
 }
@@ -2260,6 +2284,15 @@ pub fn check_core_invariants(obs: &NormalizedObservable) -> Vec<String> {
     if obs.semantics.cancellation.requested && !obs.semantics.cancellation.cleanup_completed {
         violations.push(format!(
             "Cancellation cleanup incomplete: phase={:?}",
+            obs.semantics.cancellation.terminal_phase
+        ));
+    }
+    if obs.semantics.cancellation.requested
+        && obs.semantics.cancellation.cleanup_completed
+        && !obs.semantics.cancellation.finalization_completed
+    {
+        violations.push(format!(
+            "Cancellation finalization incomplete: phase={:?}",
             obs.semantics.cancellation.terminal_phase
         ));
     }
@@ -2635,7 +2668,8 @@ pub fn run_live_adapter(
     let nondeterminism_notes = witness.nondeterminism_notes().to_vec();
     let capture_manifest = witness.capture_manifest().clone();
     let semantics = witness.finalize();
-    let replay = ReplayMetadata::for_live(identity.family_id(), &identity.seed_plan);
+    let replay = ReplayMetadata::for_live(identity.family_id(), &identity.seed_plan)
+        .with_nondeterminism_notes(nondeterminism_notes.clone());
 
     #[cfg(feature = "tracing-integration")]
     tracing::info!(
@@ -2891,10 +2925,15 @@ pub fn capture_region_close(
 ) -> RegionCloseRecord {
     let quiescent = all_children_joined && all_finalizers_done;
     RegionCloseRecord {
+        // This helper is used once a close path is already under evaluation,
+        // so non-quiescent states should reflect drain/finalize progress rather
+        // than pretending the region is still open for new work.
         root_state: if quiescent {
             RegionState::Closed
+        } else if all_children_joined {
+            RegionState::Finalizing
         } else {
-            RegionState::Open
+            RegionState::Draining
         },
         quiescent,
         live_children: u32::from(!all_children_joined),
@@ -2999,7 +3038,7 @@ pub fn normalize_lab_report(
         root_state: if report.quiescent {
             RegionState::Closed
         } else {
-            RegionState::Open
+            RegionState::Closing
         },
         quiescent: report.quiescent,
         live_children: 0,
@@ -3116,11 +3155,16 @@ pub fn normalize_live_observable(
     identity: &DualRunScenarioIdentity,
     live_result: &LiveRunResult,
 ) -> NormalizedObservable {
+    let provenance = live_result
+        .metadata
+        .replay
+        .clone()
+        .with_nondeterminism_notes(live_result.metadata.nondeterminism_notes.clone());
     NormalizedObservable::new(
         identity,
         RuntimeKind::Live,
         live_result.semantics.clone(),
-        live_result.metadata.replay.clone(),
+        provenance,
     )
 }
 
@@ -3159,7 +3203,7 @@ impl PromotedFuzzScenario {
     #[must_use]
     pub fn repro_command(&self) -> String {
         format!(
-            "ASUPERSYNC_SEED=0x{:X} cargo test {} -- --nocapture",
+            "rch exec -- env ASUPERSYNC_SEED=0x{:X} cargo test {} -- --nocapture",
             self.replay_seed, self.identity.scenario_id
         )
     }
@@ -3256,7 +3300,7 @@ impl PromotedExplorationScenario {
     #[must_use]
     pub fn repro_command(&self) -> String {
         format!(
-            "ASUPERSYNC_SEED=0x{:X} cargo test {} -- --nocapture",
+            "rch exec -- env ASUPERSYNC_SEED=0x{:X} cargo test {} -- --nocapture",
             self.replay_seed, self.identity.scenario_id
         )
     }
@@ -4110,6 +4154,7 @@ mod tests {
         let plan = SeedPlan::inherit(0xDEAD, "lineage");
         let meta = ReplayMetadata::for_lab(family, &plan);
         let cmd = meta.default_repro_command();
+        assert!(cmd.contains("rch exec -- env ASUPERSYNC_SEED=0xDEAD"));
         assert!(cmd.contains("0xDEAD"));
         assert!(cmd.contains("cancel.race"));
         crate::test_complete!("replay_metadata_default_repro_command");
@@ -4720,6 +4765,136 @@ mod tests {
     }
 
     #[test]
+    fn compare_region_close_ignores_non_quiescent_root_state_hint_mismatch() {
+        init_test("compare_region_close_ignores_non_quiescent_root_state_hint_mismatch");
+        let mut lab_sem = make_happy_semantics();
+        lab_sem.region_close = RegionCloseRecord {
+            root_state: RegionState::Open,
+            quiescent: false,
+            live_children: 0,
+            finalizers_pending: 0,
+            close_completed: false,
+        };
+
+        let mut live_sem = make_happy_semantics();
+        live_sem.region_close = RegionCloseRecord {
+            root_state: RegionState::Finalizing,
+            quiescent: false,
+            live_children: 0,
+            finalizers_pending: 0,
+            close_completed: false,
+        };
+
+        let lab = make_observable(RuntimeKind::Lab, lab_sem);
+        let live = make_observable(RuntimeKind::Live, live_sem);
+        let plan = SeedPlan::inherit(42, "test");
+        let verdict = compare_observables(&lab, &live, SeedLineageRecord::from_plan(&plan));
+
+        assert!(verdict.passed);
+        assert!(
+            !verdict
+                .mismatches
+                .iter()
+                .any(|m| m.field == "semantics.region_close.root_state")
+        );
+        crate::test_complete!(
+            "compare_region_close_ignores_non_quiescent_root_state_hint_mismatch"
+        );
+    }
+
+    #[test]
+    fn compare_region_close_ignores_unknown_non_quiescent_lab_counts() {
+        init_test("compare_region_close_ignores_unknown_non_quiescent_lab_counts");
+        let mut lab_sem = make_happy_semantics();
+        lab_sem.region_close = RegionCloseRecord {
+            root_state: RegionState::Closing,
+            quiescent: false,
+            live_children: 0,
+            finalizers_pending: 0,
+            close_completed: false,
+        };
+
+        let mut live_sem = make_happy_semantics();
+        live_sem.region_close = RegionCloseRecord {
+            root_state: RegionState::Draining,
+            quiescent: false,
+            live_children: 1,
+            finalizers_pending: 0,
+            close_completed: false,
+        };
+
+        let lab = make_observable(RuntimeKind::Lab, lab_sem);
+        let live = make_observable(RuntimeKind::Live, live_sem);
+        let plan = SeedPlan::inherit(42, "test");
+        let verdict = compare_observables(&lab, &live, SeedLineageRecord::from_plan(&plan));
+
+        assert!(verdict.passed);
+        crate::test_complete!("compare_region_close_ignores_unknown_non_quiescent_lab_counts");
+    }
+
+    #[test]
+    fn compare_loser_drain_ignores_unknown_lab_counts_from_oracle_pass() {
+        init_test("compare_loser_drain_ignores_unknown_lab_counts_from_oracle_pass");
+        let mut lab_sem = make_happy_semantics();
+        lab_sem.loser_drain = LoserDrainRecord {
+            applicable: true,
+            expected_losers: 0,
+            drained_losers: 0,
+            status: DrainStatus::Complete,
+            evidence: Some("oracle.loser_drain.passed".to_string()),
+        };
+
+        let mut live_sem = make_happy_semantics();
+        live_sem.loser_drain = LoserDrainRecord::complete(2);
+
+        let lab = make_observable(RuntimeKind::Lab, lab_sem);
+        let live = make_observable(RuntimeKind::Live, live_sem);
+        let plan = SeedPlan::inherit(42, "test");
+        let verdict = compare_observables(&lab, &live, SeedLineageRecord::from_plan(&plan));
+
+        assert!(verdict.passed);
+        crate::test_complete!("compare_loser_drain_ignores_unknown_lab_counts_from_oracle_pass");
+    }
+
+    #[test]
+    fn compare_loser_drain_unknown_lab_counts_still_fail_on_status_mismatch() {
+        init_test("compare_loser_drain_unknown_lab_counts_still_fail_on_status_mismatch");
+        let mut lab_sem = make_happy_semantics();
+        lab_sem.loser_drain = LoserDrainRecord {
+            applicable: true,
+            expected_losers: 0,
+            drained_losers: 0,
+            status: DrainStatus::Complete,
+            evidence: Some("oracle.loser_drain.passed".to_string()),
+        };
+
+        let mut live_sem = make_happy_semantics();
+        live_sem.loser_drain = LoserDrainRecord {
+            applicable: true,
+            expected_losers: 2,
+            drained_losers: 1,
+            status: DrainStatus::Incomplete,
+            evidence: Some("task_handle.join".to_string()),
+        };
+
+        let lab = make_observable(RuntimeKind::Lab, lab_sem);
+        let live = make_observable(RuntimeKind::Live, live_sem);
+        let plan = SeedPlan::inherit(42, "test");
+        let verdict = compare_observables(&lab, &live, SeedLineageRecord::from_plan(&plan));
+
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .mismatches
+                .iter()
+                .any(|m| m.field == "semantics.loser_drain.status")
+        );
+        crate::test_complete!(
+            "compare_loser_drain_unknown_lab_counts_still_fail_on_status_mismatch"
+        );
+    }
+
+    #[test]
     fn compare_cancellation_mismatch() {
         init_test("compare_cancellation_mismatch");
         let mut lab_sem = make_happy_semantics();
@@ -4829,8 +5004,36 @@ mod tests {
         sem.cancellation.terminal_phase = CancelTerminalPhase::Cancelling;
         let obs = make_observable(RuntimeKind::Lab, sem);
         let violations = check_core_invariants(&obs);
-        assert!(violations.iter().any(|v| v.contains("Cancellation")));
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("Cancellation cleanup incomplete"))
+        );
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.contains("Cancellation finalization incomplete")),
+            "finalization should not be required before cleanup completes"
+        );
         crate::test_complete!("check_core_invariants_cancel_incomplete");
+    }
+
+    #[test]
+    fn check_core_invariants_cancel_finalization_incomplete() {
+        init_test("check_core_invariants_cancel_finalization_incomplete");
+        let mut sem = make_happy_semantics();
+        sem.cancellation.requested = true;
+        sem.cancellation.cleanup_completed = true;
+        sem.cancellation.finalization_completed = false;
+        sem.cancellation.terminal_phase = CancelTerminalPhase::Finalizing;
+        let obs = make_observable(RuntimeKind::Lab, sem);
+        let violations = check_core_invariants(&obs);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("Cancellation finalization incomplete"))
+        );
+        crate::test_complete!("check_core_invariants_cancel_finalization_incomplete");
     }
 
     // --- assert_semantics ---
@@ -5053,6 +5256,30 @@ mod tests {
             SchedulerNoiseClass::NondeterminismNotesOnly
         );
         crate::test_complete!("harness_noise_notes_classify_scheduler_noise");
+    }
+
+    #[test]
+    fn classify_scheduler_noise_prefers_hash_drift_over_notes() {
+        init_test("classify_scheduler_noise_prefers_hash_drift_over_notes");
+        let lab = make_observable(RuntimeKind::Lab, make_happy_semantics());
+        let mut live = make_observable(RuntimeKind::Live, make_happy_semantics());
+        let mut lab_prov = lab.provenance.clone();
+        lab_prov.schedule_hash = Some(0xAAAA);
+        let mut live_prov = live.provenance.clone();
+        live_prov.schedule_hash = Some(0xBBBB);
+        live_prov.nondeterminism_notes = vec!["thread scheduling".to_string()];
+
+        let lab = NormalizedObservable {
+            provenance: lab_prov,
+            ..lab
+        };
+        live.provenance = live_prov;
+
+        assert_eq!(
+            classify_scheduler_noise(&lab, &live),
+            SchedulerNoiseClass::ScheduleHashDrift
+        );
+        crate::test_complete!("classify_scheduler_noise_prefers_hash_drift_over_notes");
     }
 
     #[test]
@@ -5472,6 +5699,10 @@ mod tests {
             witness.note_nondeterminism("thread scheduling");
         });
         assert_eq!(result.metadata.nondeterminism_notes.len(), 2);
+        assert_eq!(
+            result.metadata.replay.nondeterminism_notes,
+            result.metadata.nondeterminism_notes
+        );
         crate::test_complete!("run_live_adapter_with_nondeterminism");
     }
 
@@ -5740,8 +5971,22 @@ mod tests {
         let r = capture_region_close(false, true);
         assert!(!r.quiescent);
         assert!(!r.close_completed);
+        assert_eq!(r.root_state, RegionState::Draining);
         assert_eq!(r.live_children, 1);
+        assert_eq!(r.finalizers_pending, 0);
         crate::test_complete!("capture_region_close_not_quiescent");
+    }
+
+    #[test]
+    fn capture_region_close_finalizing() {
+        init_test("capture_region_close_finalizing");
+        let r = capture_region_close(true, false);
+        assert!(!r.quiescent);
+        assert!(!r.close_completed);
+        assert_eq!(r.root_state, RegionState::Finalizing);
+        assert_eq!(r.live_children, 0);
+        assert_eq!(r.finalizers_pending, 1);
+        crate::test_complete!("capture_region_close_finalizing");
     }
 
     #[test]
@@ -6018,6 +6263,7 @@ mod tests {
         let (sem, _) = normalize_lab_report(&report, "test");
         assert!(!sem.region_close.quiescent);
         assert!(!sem.region_close.close_completed);
+        assert_eq!(sem.region_close.root_state, RegionState::Closing);
         crate::test_complete!("normalize_lab_report_not_quiescent");
     }
 
@@ -6041,11 +6287,13 @@ mod tests {
         let live_result = run_live_adapter(&ident, |_, witness| {
             witness.set_outcome(TerminalOutcome::ok());
             witness.record_counter("items", 5);
+            witness.note_nondeterminism("thread scheduling");
         });
         let obs = normalize_live_observable(&ident, &live_result);
         assert_eq!(obs.runtime_kind, RuntimeKind::Live);
         assert_eq!(obs.semantics.terminal_outcome.class, OutcomeClass::Ok);
         assert_eq!(obs.semantics.resource_surface.counters["items"], 5);
+        assert_eq!(obs.provenance.nondeterminism_notes, ["thread scheduling"]);
         crate::test_complete!("normalize_live_observable_from_result");
     }
 
@@ -6342,6 +6590,7 @@ mod tests {
         let finding = make_test_fuzz_finding(42);
         let promoted = promote_fuzz_finding(&finding, "drain", "v1");
         let cmd = promoted.repro_command();
+        assert!(cmd.contains("rch exec -- env ASUPERSYNC_SEED="));
         assert!(cmd.contains("ASUPERSYNC_SEED"));
         assert!(cmd.contains("cargo test"));
         crate::test_complete!("promote_fuzz_finding_repro_command");

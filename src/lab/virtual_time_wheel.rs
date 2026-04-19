@@ -303,11 +303,17 @@ impl VirtualTimerWheel {
     /// This is useful for waking tasks without modifying timer state.
     #[must_use]
     pub fn collect_wakers(&self, up_to_tick: u64) -> Vec<Waker> {
-        self.heap
+        let mut ready: Vec<_> = self
+            .heap
             .iter()
             .filter(|t| t.deadline <= up_to_tick && !self.cancelled.contains(&t.timer_id))
-            .map(|t| t.waker.clone())
-            .collect()
+            .collect();
+        ready.sort_by(|a, b| {
+            a.deadline
+                .cmp(&b.deadline)
+                .then_with(|| a.timer_id.cmp(&b.timer_id))
+        });
+        ready.into_iter().map(|t| t.waker.clone()).collect()
     }
 
     /// Clears all timers.
@@ -321,6 +327,7 @@ impl VirtualTimerWheel {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Wake;
 
@@ -342,6 +349,31 @@ mod tests {
         let counter = Arc::new(CountingWaker(AtomicUsize::new(0)));
         let waker = Waker::from(counter.clone());
         (counter, waker)
+    }
+
+    struct RecordingWaker {
+        id: usize,
+        wake_order: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl Wake for RecordingWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_order
+                .lock()
+                .expect("wake order lock")
+                .push(self.id);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wake_order
+                .lock()
+                .expect("wake order lock")
+                .push(self.id);
+        }
+    }
+
+    fn recording_waker(id: usize, wake_order: Arc<Mutex<Vec<usize>>>) -> Waker {
+        Waker::from(Arc::new(RecordingWaker { id, wake_order }))
     }
 
     #[test]
@@ -643,6 +675,36 @@ mod tests {
         assert_eq!(expired[2].timer_id, 0);
         assert_eq!(expired[3].deadline, 200);
         assert_eq!(expired[3].timer_id, 3);
+    }
+
+    #[test]
+    fn collect_wakers_preserves_deterministic_deadline_then_id_order() {
+        let mut wheel = VirtualTimerWheel::new();
+        let wake_order = Arc::new(Mutex::new(Vec::new()));
+
+        let h0 = wheel.insert(200, recording_waker(0, wake_order.clone()));
+        let h1 = wheel.insert(100, recording_waker(1, wake_order.clone()));
+        let h2 = wheel.insert(100, recording_waker(2, wake_order.clone()));
+        let h3 = wheel.insert(150, recording_waker(3, wake_order.clone()));
+
+        // Handles also prove insertion order and timer ids match.
+        assert_eq!(h0.timer_id(), 0);
+        assert_eq!(h1.timer_id(), 1);
+        assert_eq!(h2.timer_id(), 2);
+        assert_eq!(h3.timer_id(), 3);
+
+        let wakers = wheel.collect_wakers(200);
+        assert_eq!(wakers.len(), 4);
+        for waker in wakers {
+            waker.wake();
+        }
+
+        let order = wake_order.lock().expect("wake order lock").clone();
+        assert_eq!(
+            order,
+            vec![1, 2, 3, 0],
+            "collect_wakers must preserve deadline-then-id order"
+        );
     }
 
     #[test]

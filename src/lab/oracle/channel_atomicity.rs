@@ -393,15 +393,21 @@ impl ViolationRecord {
     }
 
     /// Emits a structured JSON log entry for this violation record.
+    #[allow(unused_variables)]
     pub fn emit_structured_log(&self) {
         let timestamp_millis = self
             .timestamp
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
 
-        eprintln!(
-            "{{\"type\":\"channel_atomicity_violation\",\"timestamp\":{},\"violation\":\"{}\",\"trace_id\":{:?},\"replay_command\":{:?}}}",
-            timestamp_millis, self.violation, self.trace_id, self.replay_command
+        crate::tracing_compat::error!(
+            violation_type = "channel_atomicity_violation",
+            timestamp_millis = timestamp_millis,
+            violation = %self.violation,
+            trace_id = ?self.trace_id,
+            replay_command = ?self.replay_command,
+            stack_trace = ?self.stack_trace,
+            "channel atomicity violation"
         );
     }
 
@@ -820,7 +826,12 @@ impl ChannelAtomicityOracle {
         // Apply enforcement mode
         match self.config.enforcement {
             EnforcementMode::Panic => panic!("Channel atomicity violation detected: {violation}"),
-            EnforcementMode::Warn => eprintln!("⚠️  Channel atomicity violation: {violation}"),
+            EnforcementMode::Warn => {
+                crate::tracing_compat::warn!(
+                    violation = %violation,
+                    "channel atomicity violation"
+                );
+            }
             EnforcementMode::Collect => {} // Just collect, no immediate action
         }
     }

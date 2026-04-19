@@ -375,15 +375,21 @@ impl ViolationRecord {
     }
 
     /// Emit a structured log entry for this violation record.
+    #[allow(unused_variables)]
     pub fn emit_structured_log(&self) {
         let timestamp_millis = self
             .timestamp
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
 
-        eprintln!(
-            "{{\"type\":\"waker_dedup_violation\",\"timestamp\":{},\"violation\":\"{}\",\"trace_id\":{:?},\"replay_command\":{:?}}}",
-            timestamp_millis, self.violation, self.trace_id, self.replay_command
+        crate::tracing_compat::error!(
+            violation_type = "waker_dedup_violation",
+            timestamp_millis = timestamp_millis,
+            violation = %self.violation,
+            trace_id = ?self.trace_id,
+            replay_command = ?self.replay_command,
+            stack_trace = ?self.stack_trace,
+            "waker deduplication violation"
         );
     }
 
@@ -802,7 +808,12 @@ impl WakerDedupOracle {
             EnforcementMode::Panic => {
                 panic!("Waker deduplication violation detected: {violation}")
             }
-            EnforcementMode::Warn => eprintln!("⚠️  Waker deduplication violation: {violation}"),
+            EnforcementMode::Warn => {
+                crate::tracing_compat::warn!(
+                    violation = %violation,
+                    "waker deduplication violation"
+                );
+            }
             EnforcementMode::Collect => {} // Just collect, no immediate action
         }
     }

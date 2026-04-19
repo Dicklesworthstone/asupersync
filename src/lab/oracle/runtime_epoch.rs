@@ -373,10 +373,14 @@ impl ModuleEpochState {
     }
 
     fn start_transition(&mut self, now: Time) {
-        self.transition_start_time = Some(now);
+        self.transition_start_time = Some(
+            self.transition_start_time
+                .map_or(now, |existing_start| existing_start.min(now)),
+        );
     }
 
-    fn complete_transition(&mut self, new_epoch: EpochId, now: Time) -> u64 {
+    fn complete_transition(&mut self, new_epoch: EpochId, now: Time) -> (EpochId, u64) {
+        let previous_epoch = self.current_epoch;
         let duration_ns = if let Some(start_time) = self.transition_start_time.take() {
             now.as_nanos().saturating_sub(start_time.as_nanos())
         } else {
@@ -393,7 +397,7 @@ impl ModuleEpochState {
 
         self.current_epoch = new_epoch;
         self.last_transition_time = now;
-        duration_ns
+        (previous_epoch, duration_ns)
     }
 
     fn is_transitioning(&self) -> bool {
@@ -469,12 +473,29 @@ impl RuntimeEpochOracle {
     pub fn notify_epoch_transition_start(
         &self,
         module: RuntimeModule,
-        _from_epoch: EpochId,
+        from_epoch: EpochId,
         now: Time,
     ) {
-        let mut states = self.module_states.write();
-        if let Some(state) = states.get_mut(&module) {
-            state.start_transition(now);
+        let violation = {
+            let mut states = self.module_states.write();
+            states.get_mut(&module).and_then(|state| {
+                if state.current_epoch != from_epoch {
+                    Some(RuntimeEpochViolation::MissedTransition {
+                        module,
+                        expected_epoch: state.current_epoch,
+                        actual_epoch: from_epoch,
+                        detected_at: now,
+                        stack_trace: self.capture_stack_trace(),
+                    })
+                } else {
+                    state.start_transition(now);
+                    None
+                }
+            })
+        };
+
+        if let Some(violation) = violation {
+            self.record_violation(violation);
         }
     }
 
@@ -485,22 +506,79 @@ impl RuntimeEpochOracle {
         to_epoch: EpochId,
         now: Time,
     ) {
-        self.transitions_tracked.fetch_add(1, Ordering::Relaxed);
+        enum TransitionOutcome {
+            Ignored,
+            Accepted {
+                from_epoch: EpochId,
+                duration_ns: u64,
+            },
+        }
 
-        let transition_duration = {
+        let expected_violation;
+        let outcome = {
             let mut states = self.module_states.write();
             if let Some(state) = states.get_mut(&module) {
-                state.complete_transition(to_epoch, now)
+                let current_epoch = state.current_epoch;
+                let expected_epoch = current_epoch.saturating_next();
+
+                if to_epoch == current_epoch {
+                    expected_violation = None;
+                    TransitionOutcome::Ignored
+                } else if to_epoch.is_before(current_epoch) {
+                    expected_violation = Some(RuntimeEpochViolation::OrderViolation {
+                        first_module: module,
+                        first_epoch: current_epoch,
+                        second_module: module,
+                        second_epoch: to_epoch,
+                        expected_order: "epoch transitions must be monotonically non-decreasing"
+                            .to_string(),
+                        detected_at: now,
+                        stack_trace: self.capture_stack_trace(),
+                    });
+                    TransitionOutcome::Ignored
+                } else {
+                    expected_violation = if to_epoch.is_after(expected_epoch) {
+                        Some(RuntimeEpochViolation::MissedTransition {
+                            module,
+                            expected_epoch,
+                            actual_epoch: to_epoch,
+                            detected_at: now,
+                            stack_trace: self.capture_stack_trace(),
+                        })
+                    } else {
+                        None
+                    };
+
+                    let (from_epoch, duration_ns) = state.complete_transition(to_epoch, now);
+                    TransitionOutcome::Accepted {
+                        from_epoch,
+                        duration_ns,
+                    }
+                }
             } else {
-                0
+                expected_violation = None;
+                TransitionOutcome::Ignored
             }
         };
 
-        // Check for slow transition violation
+        if let Some(violation) = expected_violation {
+            self.record_violation(violation);
+        }
+
+        let TransitionOutcome::Accepted {
+            from_epoch,
+            duration_ns: transition_duration,
+        } = outcome
+        else {
+            return;
+        };
+
+        self.transitions_tracked.fetch_add(1, Ordering::Relaxed);
+
         if transition_duration > self.config.max_transition_duration_ns {
             let violation = RuntimeEpochViolation::SlowTransition {
                 module,
-                from_epoch: EpochId::new(to_epoch.as_u64().saturating_sub(1)),
+                from_epoch,
                 to_epoch,
                 transition_duration_ns: transition_duration,
                 detected_at: now,
@@ -509,7 +587,6 @@ impl RuntimeEpochOracle {
             self.record_violation(violation);
         }
 
-        // Update global epoch to the maximum across all modules
         let max_epoch = {
             let states = self.module_states.read();
             states
@@ -965,5 +1042,162 @@ mod tests {
                     .any(|(module, _, _)| *module == expected_module)
             );
         }
+    }
+
+    #[test]
+    fn test_stale_transition_start_is_ignored_and_recorded() {
+        init_test_logging();
+
+        let config = RuntimeEpochConfig {
+            max_transition_duration_ns: 100,
+            ..Default::default()
+        };
+        let oracle = RuntimeEpochOracle::new(config);
+
+        oracle.notify_epoch_transition_complete(
+            RuntimeModule::Scheduler,
+            EpochId::new(2),
+            Time::from_nanos(10),
+        );
+        oracle.notify_epoch_transition_start(
+            RuntimeModule::Scheduler,
+            EpochId::new(1),
+            Time::from_nanos(20),
+        );
+
+        oracle.check_epoch_consistency(Time::from_nanos(1_000));
+
+        assert!(
+            !oracle
+                .get_recent_violations(4)
+                .iter()
+                .any(|violation| matches!(violation, RuntimeEpochViolation::SlowTransition { .. })),
+            "stale start witness must not manufacture an in-flight slow transition"
+        );
+        assert!(matches!(
+            oracle.get_recent_violations(1).first(),
+            Some(RuntimeEpochViolation::MissedTransition {
+                module: RuntimeModule::Scheduler,
+                expected_epoch,
+                actual_epoch,
+                ..
+            }) if *expected_epoch == EpochId::new(2) && *actual_epoch == EpochId::new(1)
+        ));
+    }
+
+    #[test]
+    fn test_backward_transition_completion_does_not_rewind_epoch() {
+        init_test_logging();
+
+        let oracle = RuntimeEpochOracle::with_default_config();
+
+        oracle.notify_epoch_transition_complete(
+            RuntimeModule::Scheduler,
+            EpochId::new(2),
+            Time::from_nanos(10),
+        );
+        oracle.notify_epoch_transition_complete(
+            RuntimeModule::Scheduler,
+            EpochId::new(1),
+            Time::from_nanos(20),
+        );
+
+        let stats = oracle.get_statistics();
+        assert_eq!(stats.transitions_tracked, 1);
+        assert_eq!(
+            oracle.module_epoch(RuntimeModule::Scheduler),
+            Some(EpochId::new(2))
+        );
+        assert!(matches!(
+            oracle.get_recent_violations(1).first(),
+            Some(RuntimeEpochViolation::OrderViolation {
+                first_module: RuntimeModule::Scheduler,
+                first_epoch,
+                second_module: RuntimeModule::Scheduler,
+                second_epoch,
+                ..
+            }) if *first_epoch == EpochId::new(2) && *second_epoch == EpochId::new(1)
+        ));
+    }
+
+    #[test]
+    fn test_skipped_forward_transition_records_missing_transition_and_advances() {
+        init_test_logging();
+
+        let oracle = RuntimeEpochOracle::with_default_config();
+
+        oracle.notify_epoch_transition_complete(
+            RuntimeModule::Scheduler,
+            EpochId::new(4),
+            Time::from_nanos(10),
+        );
+
+        let stats = oracle.get_statistics();
+        assert_eq!(stats.transitions_tracked, 1);
+        assert_eq!(
+            oracle.module_epoch(RuntimeModule::Scheduler),
+            Some(EpochId::new(4))
+        );
+        assert!(matches!(
+            oracle.get_recent_violations(1).first(),
+            Some(RuntimeEpochViolation::MissedTransition {
+                module: RuntimeModule::Scheduler,
+                expected_epoch,
+                actual_epoch,
+                ..
+            }) if *expected_epoch == EpochId::new(2) && *actual_epoch == EpochId::new(4)
+        ));
+    }
+
+    #[test]
+    fn test_slow_transition_reports_actual_from_epoch() {
+        init_test_logging();
+
+        let config = RuntimeEpochConfig {
+            max_transition_duration_ns: 50,
+            ..Default::default()
+        };
+        let oracle = RuntimeEpochOracle::new(config);
+
+        oracle.notify_epoch_transition_complete(
+            RuntimeModule::Scheduler,
+            EpochId::new(5),
+            Time::from_nanos(10),
+        );
+        oracle.notify_epoch_transition_start(
+            RuntimeModule::Scheduler,
+            EpochId::new(5),
+            Time::from_nanos(20),
+        );
+        oracle.notify_epoch_transition_complete(
+            RuntimeModule::Scheduler,
+            EpochId::new(8),
+            Time::from_nanos(200),
+        );
+
+        let violations = oracle.get_recent_violations(2);
+        assert!(violations.iter().any(|violation| {
+            matches!(
+                violation,
+                RuntimeEpochViolation::SlowTransition {
+                    module: RuntimeModule::Scheduler,
+                    from_epoch,
+                    to_epoch,
+                    transition_duration_ns: 180,
+                    ..
+                } if *from_epoch == EpochId::new(5) && *to_epoch == EpochId::new(8)
+            )
+        }));
+        assert!(violations.iter().any(|violation| {
+            matches!(
+                violation,
+                RuntimeEpochViolation::MissedTransition {
+                    module: RuntimeModule::Scheduler,
+                    expected_epoch,
+                    actual_epoch,
+                    ..
+                } if *expected_epoch == EpochId::new(6) && *actual_epoch == EpochId::new(8)
+            )
+        }));
     }
 }

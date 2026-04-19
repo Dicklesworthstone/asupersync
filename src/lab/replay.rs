@@ -1435,6 +1435,10 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn trace_message_contains(event: &TraceEvent, needle: &str) -> bool {
+        matches!(&event.data, TraceData::Message(message) if message.contains(needle))
+    }
+
     #[test]
     fn identical_traces_no_divergence() {
         init_test("identical_traces_no_divergence");
@@ -2296,8 +2300,6 @@ mod tests {
         checkpoint_count: usize,
         /// Number of concurrent tasks to spawn
         task_count: usize,
-        /// Maximum steps for deterministic testing
-        max_steps: u64,
     }
 
     impl Default for ReplayMetamorphicConfig {
@@ -2306,7 +2308,6 @@ mod tests {
                 worker_count: 4,
                 checkpoint_count: 5,
                 task_count: 8,
-                max_steps: 1000,
             }
         }
     }
@@ -2324,7 +2325,7 @@ mod tests {
 
             // Create a simple fork/join pattern with multiple concurrent tasks
             for i in 0..task_count {
-                let task_seed = rng.next_u64();
+                let _task_seed = rng.next_u64();
                 // This would normally spawn tasks using the runtime's spawn mechanisms
                 // For testing, we'll create trace events that represent fork/join operations
                 runtime.trace().record_event(|id| {
@@ -2384,7 +2385,7 @@ mod tests {
 
             // Simulate replay from checkpoint by processing events up to checkpoint
             for event in &original_trace[..checkpoint_idx] {
-                replay_runtime.trace().record_event(event);
+                replay_runtime.trace().push_event(event.clone());
             }
 
             // Continue execution from checkpoint
@@ -2443,7 +2444,7 @@ mod tests {
         let mut executions = Vec::new();
 
         // Execute the same scenario multiple times with the same seed
-        for run_idx in 0..5 {
+        for _run_idx in 0..5 {
             let mut runtime_config = LabConfig::new(seed); // Same seed every time
             runtime_config = runtime_config.worker_count(config.worker_count);
             let mut runtime = LabRuntime::new(runtime_config);
@@ -2568,11 +2569,11 @@ mod tests {
         // MR: Panic cause chains should be identical between original and replay
         let original_panics: Vec<_> = original_trace
             .iter()
-            .filter(|event| event.data.contains("panic_"))
+            .filter(|event| trace_message_contains(event, "panic_"))
             .collect();
         let replay_panics: Vec<_> = replay_trace
             .iter()
-            .filter(|event| event.data.contains("panic_"))
+            .filter(|event| trace_message_contains(event, "panic_"))
             .collect();
 
         assert_eq!(
@@ -2619,21 +2620,21 @@ mod tests {
         // Test scenario with multiple regions
         let multi_region_scenario = move |runtime: &mut LabRuntime| {
             use crate::util::det_rng::DetRng;
-            let mut rng = DetRng::new(seed);
+            let _rng = DetRng::new(seed);
 
             let region_count = 3;
 
             // Create events across multiple regions
             for region_id in 0..region_count {
                 for task_id in 0..config.task_count / region_count {
-                    let event_id = region_id * 1000 + task_id;
-                    runtime
-                        .trace()
-                        .record_event(&crate::trace::TraceEvent::user_trace(
-                            event_id as u64,
-                            runtime.time(),
+                    let now = runtime.now();
+                    runtime.trace().record_event(|id| {
+                        crate::trace::TraceEvent::user_trace(
+                            id,
+                            now,
                             format!("region_{}_task_{}", region_id, task_id),
-                        ));
+                        )
+                    });
                 }
             }
         };
@@ -2708,12 +2709,12 @@ mod tests {
             // Extract logical ordering (ignoring precise timing)
             let logical_order1: Vec<_> = trace1
                 .iter()
-                .filter(|e| e.data.contains("region_"))
+                .filter(|e| trace_message_contains(e, "region_"))
                 .map(|e| &e.data)
                 .collect();
             let logical_order2: Vec<_> = trace2
                 .iter()
-                .filter(|e| e.data.contains("region_"))
+                .filter(|e| trace_message_contains(e, "region_"))
                 .map(|e| &e.data)
                 .collect();
 
@@ -2808,7 +2809,7 @@ mod tests {
         let mut different_seed_runtime = LabRuntime::new(different_seed_config);
 
         deterministic_scenario(&mut different_seed_runtime);
-        let different_trace = different_seed_runtime.trace().snapshot();
+        let _different_trace = different_seed_runtime.trace().snapshot();
         let different_certificate = different_seed_runtime.certificate().hash();
 
         assert_ne!(
@@ -2854,36 +2855,35 @@ mod tests {
             for region_id in 0..regions {
                 // Fork phase
                 for task_id in 0..tasks_per_region {
-                    let event_id = region_id * 1000 + task_id;
-                    runtime
-                        .trace()
-                        .record_event(&crate::trace::TraceEvent::user_trace(
-                            event_id as u64,
-                            runtime.time(),
+                    let now = runtime.now();
+                    runtime.trace().record_event(|id| {
+                        crate::trace::TraceEvent::user_trace(
+                            id,
+                            now,
                             format!("fork_region_{}_task_{}", region_id, task_id),
-                        ));
+                        )
+                    });
                 }
 
                 // Work phase (with occasional panics)
                 for task_id in 0..tasks_per_region {
-                    let event_id = region_id * 1000 + task_id + 100;
                     let event_type = if rng.next_u64() % 10 == 0 {
                         "panic"
                     } else {
                         "work"
                     };
-                    runtime
-                        .trace()
-                        .record_event(&crate::trace::TraceEvent::user_trace(
-                            event_id as u64,
-                            runtime.time(),
+                    let now = runtime.now();
+                    runtime.trace().record_event(|id| {
+                        crate::trace::TraceEvent::user_trace(
+                            id,
+                            now,
                             format!("{}_region_{}_task_{}", event_type, region_id, task_id),
-                        ));
+                        )
+                    });
                 }
 
                 // Join phase
                 for task_id in 0..tasks_per_region {
-                    let event_id = region_id * 1000 + task_id + 200;
                     runtime.trace().record_event(|id| {
                         crate::trace::TraceEvent::user_trace(
                             id,

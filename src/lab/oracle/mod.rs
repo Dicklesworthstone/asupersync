@@ -69,7 +69,7 @@ pub use ambient_authority::{
 };
 pub use cancel_correctness::{
     CancelCorrectnessConfig, CancelCorrectnessOracle, CancelCorrectnessStatistics,
-    CancelCorrectnessViolation,
+    CancelCorrectnessViolation, InvalidInitialWitnessKind,
 };
 pub use cancel_debt::{
     CancelDebtConfig, CancelDebtOracle, CancelDebtStatistics, CancelDebtViolation,

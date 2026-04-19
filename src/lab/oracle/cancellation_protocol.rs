@@ -151,19 +151,18 @@ impl ViolationRecord {
     }
 
     /// Emits structured log for this violation.
+    #[allow(unused_variables)]
     pub fn emit_structured_log(&self) {
         if cfg!(feature = "cancel-correctness-oracle") {
-            eprintln!(
-                "{{\"event\":\"cancel_protocol_violation\",\"trace_id\":{},\"violation_type\":\"{:?}\",\"timestamp\":{},\"replay_command\":\"{}\",\"stack_trace\":{}}}",
-                self.trace_id,
-                std::mem::discriminant(&self.violation),
-                self.detected_at.as_nanos(),
-                self.replay_command.as_ref().unwrap_or(&"none".to_string()),
-                if let Some(ref stack) = self.stack_trace {
-                    format!("\"{}\"", stack.replace('\n', "\\n").replace('"', "\\\""))
-                } else {
-                    "null".to_string()
-                }
+            crate::tracing_compat::error!(
+                violation_type = "cancel_protocol_violation",
+                trace_id = self.trace_id,
+                violation_kind = ?std::mem::discriminant(&self.violation),
+                timestamp_nanos = self.detected_at.as_nanos(),
+                replay_command = ?self.replay_command,
+                stack_trace = ?self.stack_trace,
+                violation = %self.violation,
+                "cancel protocol violation"
             );
         }
     }
@@ -558,13 +557,22 @@ impl CancellationProtocolOracle {
                 panic!("Cancel protocol violation detected: {violation}");
             }
             EnforcementMode::Warn => {
-                eprintln!("⚠️  Cancel protocol violation: {violation}");
-                if let Some(stack) = self
-                    .violation_records
-                    .last()
-                    .and_then(|r| r.stack_trace.as_ref())
+                crate::tracing_compat::warn!(
+                    violation = %violation,
+                    "cancel protocol violation"
+                );
+                #[cfg(feature = "tracing-integration")]
                 {
-                    eprintln!("   Stack trace: {stack}");
+                    if let Some(stack) = self
+                        .violation_records
+                        .last()
+                        .and_then(|r| r.stack_trace.as_ref())
+                    {
+                        crate::tracing_compat::warn!(
+                            stack_trace = %stack,
+                            "cancel protocol violation stack trace"
+                        );
+                    }
                 }
             }
             EnforcementMode::Collect => {
@@ -840,11 +848,14 @@ impl CancellationProtocolOracle {
                         | TaskStateKind::CompletedPanicked
                         | TaskStateKind::CancelRequested
                 )
-                // From CancelRequested: can strengthen, move to Cancelling, or complete without acknowledging
+                // From CancelRequested: can strengthen, move to Cancelling, or
+                // complete before acknowledging. The runtime canonicalizes
+                // successful completion under cancel to CompletedCancelled.
                 | (
                     TaskStateKind::CancelRequested,
                     TaskStateKind::CancelRequested
                         | TaskStateKind::Cancelling
+                        | TaskStateKind::CompletedCancelled
                         | TaskStateKind::CompletedOk
                         | TaskStateKind::CompletedErr
                         | TaskStateKind::CompletedPanicked
@@ -1987,6 +1998,47 @@ mod tests {
         let ok = oracle.check().is_ok();
         crate::assert_with_log!(ok, "oracle ok", true, ok);
         crate::test_complete!("cancel_requested_then_completed_ok_passes");
+    }
+
+    #[test]
+    fn cancel_requested_then_completed_cancelled_passes() {
+        init_test("cancel_requested_then_completed_cancelled_passes");
+        let mut oracle = CancellationProtocolOracle::new();
+        let task = task_id(0);
+        let region = region_id(0);
+
+        oracle.on_region_create(region, None);
+        oracle.on_task_create(task, region);
+
+        let reason = CancelReason::shutdown();
+        let cleanup_budget = Budget::INFINITE;
+
+        oracle.on_transition(task, &TaskState::Created, &TaskState::Running, Time::ZERO);
+
+        oracle.on_cancel_request(task, reason.clone(), Time::from_nanos(100));
+        oracle.on_transition(
+            task,
+            &TaskState::Running,
+            &TaskState::CancelRequested {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(100),
+        );
+
+        oracle.on_transition(
+            task,
+            &TaskState::CancelRequested {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            &TaskState::Completed(Outcome::Cancelled(reason)),
+            Time::from_nanos(200),
+        );
+
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("cancel_requested_then_completed_cancelled_passes");
     }
 
     #[test]
