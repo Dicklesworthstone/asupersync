@@ -8687,7 +8687,7 @@ mod tests {
 
             // Record weights every 50 steps
             if step % 50 == 49 {
-                weight_history.push(policy.as_ref().unwrap().weights);
+                weight_history.push(policy.weights);
             }
         }
 

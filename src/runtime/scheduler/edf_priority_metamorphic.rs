@@ -343,7 +343,8 @@ fn generate_test_tasks(config: &EdfMetamorphicConfig) -> Vec<EdfTestTask> {
         let deadline = Time::from_millis(deadline_ms);
 
         // Generate resource requirements
-        let num_resources = rng.gen_range(1..(config.num_resources.min(3) as u64 + 1));
+        let max_res = config.num_resources.min(3) as u64;
+        let num_resources = rng.gen_range(1..max_res + 1);
         let mut required_resources = Vec::new();
         for _ in 0..num_resources {
             let resource_id = ResourceId::new(rng.gen_range(0..config.num_resources as u64));
@@ -428,9 +429,11 @@ fn create_test_inversion(
         inversion_id: InversionId::new(0),
         task_chain: vec![],
         impact: crate::runtime::scheduler::priority_inversion_oracle::InversionImpact {
-            severity: InversionSeverity::Low,
-            duration: Duration::from_micros(100),
-            tasks_affected: 1,
+            severity: InversionSeverity::Minor,
+            delay_us: 100,
+            affected_tasks: 1,
+            throughput_impact: 0.0,
+            fairness_impact: 0.0,
         },
         blocked_task: blocked_task.task_id,
         blocked_priority: blocked_task.priority,
