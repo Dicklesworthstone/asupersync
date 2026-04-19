@@ -1224,3 +1224,10 @@ path = "fuzz_targets/auth_aead.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "qpack_decoder"
+path = "fuzz_targets/qpack_decoder.rs"
+test = false
+doc = false
+bench = false
