@@ -1902,10 +1902,14 @@ mod tests {
             }
 
             fn get_unique_thread_count(&self) -> usize {
-                let mut ids = self.thread_ids.lock();
-                ids.sort();
-                ids.dedup();
-                ids.len()
+                let ids = self.thread_ids.lock();
+                let mut unique_ids = Vec::new();
+                for id in ids.iter() {
+                    if !unique_ids.contains(id) {
+                        unique_ids.push(*id);
+                    }
+                }
+                unique_ids.len()
             }
         }
 
@@ -2339,9 +2343,9 @@ mod tests {
             // Verify handle spawning works identically to pool spawning
             let executed = Arc::new(AtomicBool::new(false));
             let executed_clone = executed.clone();
-let task_handle = handle.spawn(move || {
-    executed_clone.store(true, Ordering::SeqCst);
-});
+            let task_handle = handle.spawn(move || {
+                executed_clone.store(true, Ordering::SeqCst);
+            });
 
             assert!(task_handle.wait_timeout(Duration::from_secs(5)));
             assert!(

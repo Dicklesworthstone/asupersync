@@ -1124,7 +1124,6 @@ mod tests {
         crate::test_complete!("deregister_hard_delete_failure_preserves_bookkeeping_for_retry");
     }
 
-    
     #[test]
     fn modify_failure_preserves_bookkeeping_when_poller_fd_closed() {
         init_test("modify_failure_preserves_bookkeeping_when_poller_fd_closed");
@@ -1141,15 +1140,10 @@ mod tests {
         let poller_fd = reactor.poller.as_raw_fd();
         let saved_poller_fd = dup_fd_at_least(poller_fd, fd_reuse_min);
         let mut poller_restore = FdRestoreGuard::new(poller_fd, saved_poller_fd);
-        
+
         // Close the poller fd to cause EBADF on modify
         let close_result = unsafe { libc::close(poller_fd) };
-        crate::assert_with_log!(
-            close_result == 0,
-            "close poller fd",
-            0,
-            close_result
-        );
+        crate::assert_with_log!(close_result == 0, "close poller fd", 0, close_result);
 
         let err = reactor
             .modify(token, Interest::WRITABLE)
@@ -1191,13 +1185,13 @@ mod tests {
         reactor
             .modify(token, Interest::WRITABLE)
             .expect("retry modify after poller restore failed");
-        
+
         // Cleanup
         reactor.deregister(token).expect("deregister failed");
         crate::test_complete!("modify_failure_preserves_bookkeeping_when_poller_fd_closed");
     }
 
-#[test]
+    #[test]
     fn modify_closed_fd_cleans_stale_bookkeeping_for_fd_reuse() {
         init_test("modify_closed_fd_cleans_stale_bookkeeping_for_fd_reuse");
         let reactor = EpollReactor::new().expect("failed to create reactor");
