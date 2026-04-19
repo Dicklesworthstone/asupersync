@@ -490,6 +490,8 @@ impl Budget {
                 true
             }
             Some(remaining) => {
+                #[cfg(not(feature = "tracing-integration"))]
+                let _ = remaining;
                 trace!(
                     cost_requested = cost,
                     cost_remaining = remaining,

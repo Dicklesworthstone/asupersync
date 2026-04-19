@@ -2082,6 +2082,8 @@ impl RuntimeState {
         // the O(arena_capacity) scan just for a size hint.
         let mut tasks_to_cancel = Vec::with_capacity(32);
         let cleanup_budget = reason.cleanup_budget();
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = (source_task, cleanup_budget);
         let root_span = debug_span!(
             "cancel_request",
             target_region = ?region_id,
@@ -2398,6 +2400,8 @@ impl RuntimeState {
             .map(|task| std::mem::take(&mut task.waiters))
             .unwrap_or_default();
         let waiter_count = waiters.len();
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = (outcome_kind, waiter_count);
 
         if !matches!(completion, TaskCompletionKind::Cancelled) {
             let leaks = self.collect_obligation_leaks_for_holder(task_id);
