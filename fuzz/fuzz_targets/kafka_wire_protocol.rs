@@ -32,10 +32,8 @@
 
 use arbitrary::Arbitrary;
 use asupersync::messaging::kafka::*;
-use libfuzzer_sys::fuzz_target;
-
-#[cfg(feature = "kafka")]
 use asupersync::messaging::kafka_consumer::*;
+use libfuzzer_sys::fuzz_target;
 
 use asupersync::cx::Cx;
 use std::time::Duration;
@@ -52,10 +50,6 @@ const MAX_TOPICS: usize = 100;
 
 /// Maximum string length for topics, keys, values.
 const MAX_STRING_LENGTH: usize = 10 * 1024; // 10KB
-
-/// Kafka protocol version range for testing.
-const MIN_API_VERSION: i16 = 0;
-const MAX_API_VERSION: i16 = 10;
 
 /// Fuzzed Kafka configuration parameters.
 #[derive(Debug, Clone, Arbitrary)]
@@ -102,7 +96,13 @@ impl From<CompressionFuzz> for Compression {
             CompressionFuzz::Snappy => Compression::Snappy,
             CompressionFuzz::Lz4 => Compression::Lz4,
             CompressionFuzz::Zstd => Compression::Zstd,
-            CompressionFuzz::Invalid(_) => Compression::None, // fallback
+            CompressionFuzz::Invalid(value) => match value % 5 {
+                0 => Compression::None,
+                1 => Compression::Gzip,
+                2 => Compression::Snappy,
+                3 => Compression::Lz4,
+                _ => Compression::Zstd,
+            },
         }
     }
 }
@@ -123,7 +123,15 @@ impl From<AcksFuzz> for Acks {
             AcksFuzz::None => Acks::None,
             AcksFuzz::Leader => Acks::Leader,
             AcksFuzz::All => Acks::All,
-            AcksFuzz::Invalid(_) => Acks::All, // fallback
+            AcksFuzz::Invalid(value) => {
+                if value >= 1 {
+                    Acks::Leader
+                } else if value == 0 {
+                    Acks::None
+                } else {
+                    Acks::All
+                }
+            }
         }
     }
 }
@@ -144,7 +152,6 @@ struct KafkaMessageFuzz {
 }
 
 /// Fuzzed consumer configuration.
-#[cfg(feature = "kafka")]
 #[derive(Debug, Clone, Arbitrary)]
 struct ConsumerConfigFuzz {
     /// Base config
@@ -171,7 +178,6 @@ struct ConsumerConfigFuzz {
     isolation_level: IsolationLevelFuzz,
 }
 
-#[cfg(feature = "kafka")]
 #[derive(Debug, Clone, Arbitrary)]
 enum AutoOffsetResetFuzz {
     Earliest,
@@ -181,19 +187,23 @@ enum AutoOffsetResetFuzz {
     Invalid(u8),
 }
 
-#[cfg(feature = "kafka")]
 impl From<AutoOffsetResetFuzz> for AutoOffsetReset {
     fn from(a: AutoOffsetResetFuzz) -> Self {
         match a {
             AutoOffsetResetFuzz::Earliest => AutoOffsetReset::Earliest,
             AutoOffsetResetFuzz::Latest => AutoOffsetReset::Latest,
             AutoOffsetResetFuzz::None => AutoOffsetReset::None,
-            AutoOffsetResetFuzz::Invalid(_) => AutoOffsetReset::Latest, // fallback
+            AutoOffsetResetFuzz::Invalid(value) => {
+                if value & 1 == 0 {
+                    AutoOffsetReset::Earliest
+                } else {
+                    AutoOffsetReset::Latest
+                }
+            }
         }
     }
 }
 
-#[cfg(feature = "kafka")]
 #[derive(Debug, Clone, Arbitrary)]
 enum IsolationLevelFuzz {
     ReadUncommitted,
@@ -202,13 +212,18 @@ enum IsolationLevelFuzz {
     Invalid(u8),
 }
 
-#[cfg(feature = "kafka")]
 impl From<IsolationLevelFuzz> for IsolationLevel {
     fn from(i: IsolationLevelFuzz) -> Self {
         match i {
             IsolationLevelFuzz::ReadUncommitted => IsolationLevel::ReadUncommitted,
             IsolationLevelFuzz::ReadCommitted => IsolationLevel::ReadCommitted,
-            IsolationLevelFuzz::Invalid(_) => IsolationLevel::ReadUncommitted, // fallback
+            IsolationLevelFuzz::Invalid(value) => {
+                if value & 1 == 0 {
+                    IsolationLevel::ReadUncommitted
+                } else {
+                    IsolationLevel::ReadCommitted
+                }
+            }
         }
     }
 }
@@ -244,14 +259,12 @@ enum KafkaWireProtocolFuzz {
         should_commit: bool,
     },
     /// Consumer operations
-    #[cfg(feature = "kafka")]
     ConsumerPoll {
         config: ConsumerConfigFuzz,
         topics: Vec<String>,
         poll_timeout_ms: u64,
     },
     /// Consumer seek/commit operations
-    #[cfg(feature = "kafka")]
     ConsumerSeekCommit {
         config: ConsumerConfigFuzz,
         topic: String,
@@ -273,31 +286,33 @@ enum KafkaWireProtocolFuzz {
 fn build_producer_config(config: &KafkaConfigFuzz) -> ProducerConfig {
     let mut builder = ProducerConfig::new(sanitize_bootstrap_servers(&config.bootstrap_servers));
 
-    if let Some(ref client_id) = config.client_id {
-        if !client_id.trim().is_empty() && client_id.len() < MAX_STRING_LENGTH {
-            builder = builder.client_id(client_id);
-        }
+    if let Some(ref client_id) = config.client_id
+        && !client_id.trim().is_empty()
+        && client_id.len() < MAX_STRING_LENGTH
+    {
+        builder = builder.client_id(client_id);
     }
 
     // Bound extreme values to prevent resource exhaustion
     let batch_size = config.batch_size.clamp(1, MAX_MESSAGE_SIZE);
     let linger_ms = config.linger_ms.min(60_000); // Max 60 seconds
     let retries = config.retries.min(1000); // Reasonable retry limit
-    let _timeout_ms = config.request_timeout_ms.clamp(1000, 300_000); // 1s - 5min
-    let _max_size = config.max_message_size.clamp(1024, MAX_MESSAGE_SIZE);
+    let timeout_ms = config.request_timeout_ms.clamp(1000, 300_000); // 1s - 5min
+    let max_size = config.max_message_size.clamp(1024, MAX_MESSAGE_SIZE);
 
-    builder
+    let mut config = builder
         .batch_size(batch_size)
         .linger_ms(linger_ms)
         .compression(config.compression.clone().into())
         .enable_idempotence(config.enable_idempotence)
         .acks(config.acks.clone().into())
-        .retries(retries)
-    // Note: can't set request_timeout and max_message_size as they're not in the builder pattern
+        .retries(retries);
+    config.request_timeout = Duration::from_millis(timeout_ms);
+    config.max_message_size = max_size;
+    config
 }
 
 /// Build consumer config from fuzzed input.
-#[cfg(feature = "kafka")]
 fn build_consumer_config(config: &ConsumerConfigFuzz) -> ConsumerConfig {
     let bootstrap_servers = sanitize_bootstrap_servers(&config.kafka_config.bootstrap_servers);
     let group_id = if config.group_id.trim().is_empty() {
@@ -308,10 +323,11 @@ fn build_consumer_config(config: &ConsumerConfigFuzz) -> ConsumerConfig {
 
     let mut builder = ConsumerConfig::new(bootstrap_servers, group_id);
 
-    if let Some(ref client_id) = config.kafka_config.client_id {
-        if !client_id.trim().is_empty() && client_id.len() < MAX_STRING_LENGTH {
-            builder = builder.client_id(client_id);
-        }
+    if let Some(ref client_id) = config.kafka_config.client_id
+        && !client_id.trim().is_empty()
+        && client_id.len() < MAX_STRING_LENGTH
+    {
+        builder = builder.client_id(client_id);
     }
 
     // Bound extreme values
@@ -529,7 +545,6 @@ async fn fuzz_transactional(
     }
 }
 
-#[cfg(feature = "kafka")]
 async fn fuzz_consumer_poll(
     config: &ConsumerConfigFuzz,
     topics: &[String],
@@ -554,7 +569,8 @@ async fn fuzz_consumer_poll(
         .collect();
 
     if !sanitized_topics.is_empty() {
-        let _ = consumer.subscribe(&sanitized_topics).await;
+        let topic_refs: Vec<&str> = sanitized_topics.iter().map(String::as_str).collect();
+        let _ = consumer.subscribe(cx, &topic_refs).await;
 
         // Test poll operation
         let timeout = Duration::from_millis(poll_timeout_ms.min(5000)); // Limit timeout
@@ -564,7 +580,6 @@ async fn fuzz_consumer_poll(
     let _ = consumer.close(cx).await;
 }
 
-#[cfg(feature = "kafka")]
 async fn fuzz_consumer_seek_commit(
     config: &ConsumerConfigFuzz,
     topic: &str,
@@ -580,16 +595,16 @@ async fn fuzz_consumer_seek_commit(
     };
 
     let sanitized_topic = sanitize_topic(topic);
-    let bounded_partition = partition.max(0).min(MAX_PARTITIONS);
+    let bounded_partition = partition.clamp(0, MAX_PARTITIONS);
     let bounded_offset = offset.max(-2); // Allow special offsets
 
     // Test seek operation
     let tpo = TopicPartitionOffset::new(sanitized_topic.clone(), bounded_partition, bounded_offset);
-    let _ = consumer.seek(&[tpo.clone()]).await;
+    let _ = consumer.seek(cx, &tpo).await;
 
     if should_commit {
         // Test commit operation
-        let _ = consumer.commit_offsets(&[tpo]).await;
+        let _ = consumer.commit_offsets(cx, &[tpo]).await;
     }
 
     let _ = consumer.close(cx).await;
@@ -650,7 +665,6 @@ fuzz_target!(|fuzz_input: KafkaWireProtocolFuzz| {
                 fuzz_transactional(&config, &messages, should_commit, &cx).await;
             }
 
-            #[cfg(feature = "kafka")]
             KafkaWireProtocolFuzz::ConsumerPoll {
                 config,
                 topics,
@@ -659,7 +673,6 @@ fuzz_target!(|fuzz_input: KafkaWireProtocolFuzz| {
                 fuzz_consumer_poll(&config, &topics, poll_timeout_ms, &cx).await;
             }
 
-            #[cfg(feature = "kafka")]
             KafkaWireProtocolFuzz::ConsumerSeekCommit {
                 config,
                 topic,
