@@ -1,12 +1,11 @@
-//! Comprehensive RaptorQ InactivationDecoder Fuzz Target
+//! Fuzz target for RaptorQ decoder encoded packet corruption.
 //!
-//! Tests security assertions:
-//! 1. No panic on oversized ESI (ESI ≥ 2^24)
-//! 2. Per-block limits K' max honored (K ≤ 8192 per RFC 6330)
-//! 3. Repair symbols parsed without overflow (column indices bounded)
-//! 4. Early decoder failure returns error not hang (timeout-resistant)
-//! 5. Duplicate ESIs idempotent (no corruption from dup processing)
-//! 6. Decoder handles empty source-block gracefully (K=0, L=0 cases)
+//! The harness builds a valid, decodable source block first, then mutates the
+//! received source/repair packets at the byte and metadata levels. Corrupted
+//! packets must never panic the decoder, and all decode entry points must agree
+//! on either:
+//! - successful recovery of the original source block, or
+//! - the same decode error.
 
 #![no_main]
 
@@ -15,294 +14,379 @@ use libfuzzer_sys::fuzz_target;
 
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::Gf256;
+use asupersync::raptorq::systematic::SystematicEncoder;
+use asupersync::types::ObjectId;
 
-/// Fuzz-friendly received symbol generator
+const MAX_K: usize = 32;
+const MAX_SYMBOL_SIZE: usize = 256;
+const MAX_MUTATIONS: usize = 32;
+const MAX_PACKET_BYTES: usize = 4096;
+const MAX_EXTRA_REPAIRS: usize = 8;
+
+#[derive(Debug, Arbitrary)]
+struct DecoderPacketInput {
+    k: u8,
+    symbol_size: u16,
+    seed: u64,
+    extra_repairs: u8,
+    missing_sources: Vec<u8>,
+    packet_bytes: Vec<u8>,
+    mutations: Vec<PacketMutation>,
+    reorder: PacketReorder,
+    wavefront_batch: u8,
+    object_id: u128,
+}
+
 #[derive(Debug, Clone, Arbitrary)]
-struct FuzzReceivedSymbol {
-    /// ESI value (may be oversized for testing)
-    pub esi: u32,
-    /// Whether this is marked as a source symbol
-    pub is_source: bool,
-    /// Column dependencies (indices into [0, L))
-    pub columns: Vec<u16>, // Limited size to prevent explosion
-    /// GF(256) coefficients for each column
-    pub coefficients: Vec<u8>,
-    /// Symbol payload data
-    pub data: Vec<u8>,
+struct PacketMutation {
+    target: u8,
+    kind: MutationKind,
 }
 
-impl FuzzReceivedSymbol {
-    /// Convert to actual ReceivedSymbol, normalizing for valid ranges
-    fn to_received_symbol(&self, l: usize, symbol_size: usize) -> ReceivedSymbol {
-        // Clamp columns to valid range [0, L)
-        let columns: Vec<usize> = self
-            .columns
-            .iter()
-            .take(32) // Limit equation degree for performance
-            .map(|&col| (col as usize) % l.max(1))
-            .collect();
-
-        // Truncate coefficients to match columns
-        let coefficients: Vec<Gf256> = self
-            .coefficients
-            .iter()
-            .take(columns.len())
-            .map(|&coef| Gf256(coef))
-            .collect();
-
-        // Normalize data to expected symbol size
-        let mut data = self.data.clone();
-        data.truncate(symbol_size);
-        data.resize(symbol_size, 0u8); // Pad with zeros if needed
-
-        ReceivedSymbol {
-            esi: self.esi,
-            is_source: self.is_source,
-            columns,
-            coefficients,
-            data,
-        }
-    }
-}
-
-/// Systematic parameters for fuzzing
 #[derive(Debug, Clone, Arbitrary)]
-struct FuzzParams {
-    /// Number of source symbols K
-    pub k: u16,
-    /// Symbol size in bytes
-    pub symbol_size: u16,
-    /// Deterministic seed for decoder
-    pub seed: u64,
+enum MutationKind {
+    FlipPayload { offset: u16, mask: u8 },
+    TruncatePayload { keep: u16 },
+    ExtendPayload { extra: u8, fill: u8 },
+    TogglePacketKind,
+    ForceOversizedEsi { high_bits: u8 },
+    ShiftEsi { delta: u16 },
+    CorruptSourceEquation { column: u16 },
+    CorruptRepairColumn { add: u16 },
+    DropCoefficient,
+    AddCoefficient { coefficient: u8 },
+    DropAllColumns,
+    DuplicatePacket,
 }
 
-impl FuzzParams {
-    /// Normalize to valid ranges per RFC 6330
+#[derive(Debug, Clone, Copy, Arbitrary)]
+enum PacketReorder {
+    Preserve,
+    Reverse,
+    Rotate { by: u8 },
+    SortByEsi,
+}
+
+impl DecoderPacketInput {
     fn normalize(&mut self) {
-        // RFC 6330 constraint: 1 ≤ K ≤ 8192
-        self.k = self.k.clamp(1, 8192);
-        // Practical symbol size limits for fuzzing
-        self.symbol_size = self.symbol_size.clamp(1, 1024);
-    }
-
-    /// Create InactivationDecoder from normalized parameters
-    fn create_decoder(&self) -> InactivationDecoder {
-        InactivationDecoder::new(self.k as usize, self.symbol_size as usize, self.seed)
+        self.k = ((self.k as usize % MAX_K) + 1) as u8;
+        self.symbol_size = ((self.symbol_size as usize % MAX_SYMBOL_SIZE) + 1) as u16;
+        self.extra_repairs = (self.extra_repairs as usize % (MAX_EXTRA_REPAIRS + 1)) as u8;
+        self.packet_bytes.truncate(MAX_PACKET_BYTES);
+        self.mutations.truncate(MAX_MUTATIONS);
     }
 }
 
-/// Security Assertion 1: No panic on oversized ESI
-fn test_oversized_esi(params: &FuzzParams, unstructured: &mut Unstructured) {
-    let decoder = params.create_decoder();
+fn build_source_block(
+    packet_bytes: &[u8],
+    k: usize,
+    symbol_size: usize,
+    seed: u64,
+) -> Vec<Vec<u8>> {
+    let mut source = Vec::with_capacity(k);
+    let salt = seed.to_le_bytes();
 
-    if let Ok(oversized_esi) = u32::arbitrary(unstructured) {
-        // Force ESI ≥ 2^24 to test bounds checking
-        let oversized_esi = oversized_esi | (1u32 << 24);
-
-        let symbol = ReceivedSymbol {
-            esi: oversized_esi,
-            is_source: false,
-            columns: vec![0],
-            coefficients: vec![Gf256(1)],
-            data: vec![0u8; params.symbol_size as usize],
-        };
-
-        // Should return error, not panic
-        let _result = decoder.decode(&[symbol]);
+    for row in 0..k {
+        let mut symbol = Vec::with_capacity(symbol_size);
+        for col in 0..symbol_size {
+            let patterned = ((row * 37 + col * 13 + 0x5A) & 0xFF) as u8;
+            let mixed = if packet_bytes.is_empty() {
+                patterned ^ salt[(row + col) % salt.len()]
+            } else {
+                let idx = (row * symbol_size + col) % packet_bytes.len();
+                packet_bytes[idx] ^ patterned ^ salt[(idx + row + col) % salt.len()]
+            };
+            symbol.push(mixed);
+        }
+        source.push(symbol);
     }
+
+    source
 }
 
-/// Security Assertion 2: Per-block limits K' max honored
-fn test_k_limit_enforcement(unstructured: &mut Unstructured) {
-    // Test K > 8192 (RFC 6330 violation)
-    if let Ok(oversized_k) = u16::arbitrary(unstructured) {
-        let oversized_k = oversized_k.saturating_add(8193); // Force K > 8192
+fn build_valid_packets(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    missing_sources: &[u8],
+    extra_repairs: usize,
+) -> Vec<ReceivedSymbol> {
+    let k = source.len();
+    let mut missing = vec![false; k];
+    let missing_cap = (k / 2).max(1);
 
-        let decoder = InactivationDecoder::new(oversized_k as usize, 64, 0);
-
-        // Should handle gracefully without panic/hang
-        let symbol = ReceivedSymbol {
-            esi: 0,
-            is_source: true,
-            columns: vec![0],
-            coefficients: vec![Gf256(1)],
-            data: vec![0u8; 64],
-        };
-
-        let _result = decoder.decode(&[symbol]);
+    for &index in missing_sources.iter().take(missing_cap) {
+        missing[index as usize % k] = true;
     }
-}
 
-/// Security Assertion 3: Repair symbols parsed without overflow
-fn test_repair_symbol_overflow(params: &FuzzParams, fuzz_symbols: &[FuzzReceivedSymbol]) {
-    let decoder = params.create_decoder();
-    let l = decoder.params().l;
+    let missing_count = missing.iter().filter(|&&is_missing| is_missing).count();
+    let repair_count = missing_count.max(1).saturating_add(extra_repairs);
 
-    let symbols: Vec<ReceivedSymbol> = fuzz_symbols
-        .iter()
-        .take(50) // Limit for performance
-        .map(|fs| {
-            // Intentionally create out-of-bounds column indices
-            let mut symbol = fs.to_received_symbol(l, params.symbol_size as usize);
-
-            // Force some columns to be out of bounds
-            if !symbol.columns.is_empty() {
-                symbol.columns[0] = symbol.columns[0].saturating_add(l * 2);
-            }
-
-            symbol
-        })
-        .collect();
-
-    // Should detect out-of-bounds and return error, not overflow/panic
-    let _result = decoder.decode(&symbols);
-}
-
-/// Security Assertion 4: Early failure returns error not hang
-fn test_early_failure_no_hang(params: &FuzzParams, fuzz_symbols: &[FuzzReceivedSymbol]) {
-    let decoder = params.create_decoder();
-    let l = decoder.params().l;
-
-    // Create obviously unsolvable system (insufficient symbols)
-    let symbols: Vec<ReceivedSymbol> = fuzz_symbols
-        .iter()
-        .take((params.k as usize).saturating_sub(10).max(1)) // Definitely insufficient
-        .map(|fs| fs.to_received_symbol(l, params.symbol_size as usize))
-        .collect();
-
-    // Should return InsufficientSymbols error quickly, not hang
-    let result = decoder.decode(&symbols);
-
-    // Verify it returns the expected error type
-    if let Err(DecodeError::InsufficientSymbols { received, required }) = result {
-        assert!(received < required, "Error should indicate insufficiency");
+    let mut packets = Vec::with_capacity(k + repair_count);
+    for (esi, data) in source.iter().enumerate() {
+        if !missing[esi] {
+            packets.push(ReceivedSymbol::source(esi as u32, data.clone()));
+        }
     }
+
+    for repair_offset in 0..repair_count {
+        let esi = k as u32 + repair_offset as u32;
+        let (columns, coefficients) = decoder.repair_equation(esi);
+        let data = encoder.repair_symbol(esi);
+        packets.push(ReceivedSymbol::repair(esi, columns, coefficients, data));
+    }
+
+    packets
 }
 
-/// Security Assertion 5: Duplicate ESIs idempotent
-fn test_duplicate_esi_idempotent(params: &FuzzParams, unstructured: &mut Unstructured) {
-    if let Ok(base_symbol) = FuzzReceivedSymbol::arbitrary(unstructured) {
-        let decoder = params.create_decoder();
-        let l = decoder.params().l;
-
-        let base = base_symbol.to_received_symbol(l, params.symbol_size as usize);
-
-        // Create duplicate symbols with same ESI
-        let mut symbols = vec![base.clone(), base.clone(), base];
-
-        // Add some different symbols to make system potentially solvable
-        for i in 1..params.k.min(10) {
-            if let Ok(other) = FuzzReceivedSymbol::arbitrary(unstructured) {
-                let mut other = other.to_received_symbol(l, params.symbol_size as usize);
-                other.esi = i as u32; // Ensure different ESI
-                symbols.push(other);
+fn apply_reorder(packets: &mut [ReceivedSymbol], reorder: PacketReorder) {
+    match reorder {
+        PacketReorder::Preserve => {}
+        PacketReorder::Reverse => packets.reverse(),
+        PacketReorder::Rotate { by } => {
+            let len = packets.len();
+            if len > 0 {
+                packets.rotate_left(by as usize % len);
             }
         }
-
-        // Processing duplicate ESIs should be idempotent
-        let _result = decoder.decode(&symbols);
+        PacketReorder::SortByEsi => packets.sort_by_key(|packet| (packet.esi, packet.is_source)),
     }
 }
 
-/// Security Assertion 6: Decoder handles empty source-block gracefully
-fn test_empty_source_block() {
-    // Test K=0 case
-    let decoder = InactivationDecoder::new(0, 64, 0);
-    let _result = decoder.decode(&[]);
-    // Should return error gracefully, not panic
+fn apply_mutations(packets: &mut Vec<ReceivedSymbol>, mutations: &[PacketMutation]) {
+    for mutation in mutations {
+        if packets.is_empty() {
+            return;
+        }
+        let idx = mutation.target as usize % packets.len();
 
-    // Test empty symbol list with valid K
-    let decoder2 = InactivationDecoder::new(1, 64, 0);
-    let result2 = decoder2.decode(&[]);
-    if let Err(DecodeError::InsufficientSymbols { received, required }) = result2 {
-        assert_eq!(received, 0);
-        assert!(required > 0);
-    }
-}
-
-/// Additional stress test: Malformed symbol structures
-fn test_malformed_symbol_structures(params: &FuzzParams, fuzz_symbols: &[FuzzReceivedSymbol]) {
-    let decoder = params.create_decoder();
-    let l = decoder.params().l;
-
-    let symbols: Vec<ReceivedSymbol> = fuzz_symbols
-        .iter()
-        .take(20)
-        .map(|fs| {
-            let mut symbol = fs.to_received_symbol(l, params.symbol_size as usize);
-
-            // Introduce various malformations
-            if !symbol.columns.is_empty() && !symbol.coefficients.is_empty() {
-                // Mismatched columns/coefficients lengths
-                symbol.coefficients.pop();
-
-                // Wrong symbol size
-                if !symbol.data.is_empty() {
-                    symbol.data.pop();
+        match mutation.kind.clone() {
+            MutationKind::FlipPayload { offset, mask } => {
+                let packet = &mut packets[idx];
+                if !packet.data.is_empty() {
+                    let byte = offset as usize % packet.data.len();
+                    packet.data[byte] ^= mask;
                 }
             }
+            MutationKind::TruncatePayload { keep } => {
+                let packet = &mut packets[idx];
+                let new_len = keep as usize % (packet.data.len().saturating_add(1));
+                packet.data.truncate(new_len);
+            }
+            MutationKind::ExtendPayload { extra, fill } => {
+                let packet = &mut packets[idx];
+                let growth = (extra as usize % 16).saturating_add(1);
+                packet
+                    .data
+                    .extend(std::iter::repeat_n(fill, growth));
+            }
+            MutationKind::TogglePacketKind => {
+                let packet = &mut packets[idx];
+                packet.is_source = !packet.is_source;
+            }
+            MutationKind::ForceOversizedEsi { high_bits } => {
+                let packet = &mut packets[idx];
+                packet.esi |= (1u32 << 24) | ((high_bits as u32) << 16);
+            }
+            MutationKind::ShiftEsi { delta } => {
+                let packet = &mut packets[idx];
+                packet.esi = packet.esi.wrapping_add(delta as u32 + 1);
+            }
+            MutationKind::CorruptSourceEquation { column } => {
+                let packet = &mut packets[idx];
+                packet.columns = vec![column as usize];
+                packet.coefficients = vec![Gf256::ONE];
+            }
+            MutationKind::CorruptRepairColumn { add } => {
+                let packet = &mut packets[idx];
+                if let Some(first) = packet.columns.first_mut() {
+                    *first = first.saturating_add(add as usize + 1);
+                } else {
+                    packet.columns.push(add as usize + 1);
+                    packet.coefficients.push(Gf256::ONE);
+                }
+            }
+            MutationKind::DropCoefficient => {
+                let packet = &mut packets[idx];
+                let _ = packet.coefficients.pop();
+            }
+            MutationKind::AddCoefficient { coefficient } => {
+                let packet = &mut packets[idx];
+                packet.coefficients.push(Gf256(coefficient));
+            }
+            MutationKind::DropAllColumns => {
+                let packet = &mut packets[idx];
+                packet.columns.clear();
+                packet.coefficients.clear();
+            }
+            MutationKind::DuplicatePacket => {
+                let duplicate = packets[idx].clone();
+                packets.push(duplicate);
+            }
+        }
+    }
+}
 
-            symbol
-        })
-        .collect();
+fn combine_symbols(
+    decoder: &InactivationDecoder,
+    payload_packets: &[ReceivedSymbol],
+) -> Vec<ReceivedSymbol> {
+    let mut received = decoder.constraint_symbols();
+    received.extend_from_slice(payload_packets);
+    received
+}
 
-    // Should detect malformation and return appropriate errors
-    let _result = decoder.decode(&symbols);
+fn assert_decode_consensus(
+    decoder: &InactivationDecoder,
+    received: &[ReceivedSymbol],
+    expected_source: &[Vec<u8>],
+    wavefront_batch: usize,
+    object_id: ObjectId,
+) {
+    let direct = decoder.decode(received);
+    let wavefront = decoder.decode_wavefront(received, wavefront_batch);
+    let proof = decoder.decode_with_proof(received, object_id, 0);
+
+    match (&direct, &wavefront) {
+        (Ok(lhs), Ok(rhs)) => {
+            assert_eq!(
+                lhs.source, rhs.source,
+                "wavefront decode diverged from direct decode"
+            );
+        }
+        (Err(lhs), Err(rhs)) => {
+            assert_eq!(lhs, rhs, "wavefront decode diverged from direct error");
+        }
+        _ => {
+            panic!("wavefront decode disagreed on success vs error");
+        }
+    }
+
+    match (&direct, &proof) {
+        (Ok(lhs), Ok(rhs)) => {
+            assert_eq!(
+                lhs.source, rhs.result.source,
+                "proof decode diverged from direct decode"
+            );
+        }
+        (Err(lhs), Err((rhs, _proof))) => {
+            assert_eq!(lhs, rhs, "proof decode diverged from direct error");
+        }
+        _ => {
+            panic!("proof decode disagreed on success vs error");
+        }
+    }
+
+    if let Ok(decoded) = direct {
+        assert_eq!(
+            decoded.source, expected_source,
+            "decoder returned incorrect source data after packet corruption"
+        );
+    }
+}
+
+fn assert_recoverable_or_unrecoverable(err: &DecodeError) {
+    assert!(
+        err.is_recoverable() || err.is_unrecoverable(),
+        "decode error must have a failure class"
+    );
 }
 
 fuzz_target!(|data: &[u8]| {
-    // Guard against excessive input sizes
-    if data.len() > 100_000 {
+    if data.len() > 200_000 {
         return;
     }
 
     let mut unstructured = Unstructured::new(data);
-
-    // Generate fuzzing parameters
-    let mut params = match FuzzParams::arbitrary(&mut unstructured) {
-        Ok(p) => p,
-        Err(_) => return,
+    let Ok(mut input) = DecoderPacketInput::arbitrary(&mut unstructured) else {
+        return;
     };
-    params.normalize();
+    input.normalize();
 
-    // Generate fuzzed symbols
-    let fuzz_symbols: Vec<FuzzReceivedSymbol> = match Vec::arbitrary(&mut unstructured) {
-        Ok(s) => s.into_iter().take(200).collect(), // Limit for performance
-        Err(_) => vec![],
+    let k = input.k as usize;
+    let symbol_size = input.symbol_size as usize;
+    let source = build_source_block(&input.packet_bytes, k, symbol_size, input.seed);
+    let Some(encoder) = SystematicEncoder::new(&source, symbol_size, input.seed) else {
+        return;
+    };
+    let decoder = InactivationDecoder::new(k, symbol_size, input.seed);
+
+    let baseline_packets = build_valid_packets(
+        &decoder,
+        &encoder,
+        &source,
+        &input.missing_sources,
+        input.extra_repairs as usize,
+    );
+    let baseline_received = combine_symbols(&decoder, &baseline_packets);
+    let baseline_batch = if baseline_received.is_empty() {
+        0
+    } else {
+        input.wavefront_batch as usize % (baseline_received.len() + 1)
+    };
+    let object_id = ObjectId::from_u128(input.object_id);
+
+    assert_decode_consensus(&decoder, &baseline_received, &source, baseline_batch, object_id);
+
+    let baseline_result = decoder
+        .decode(&baseline_received)
+        .expect("baseline received packets must remain decodable");
+    assert_eq!(
+        baseline_result.source, source,
+        "baseline encoded packets must round-trip before corruption"
+    );
+
+    let mut corrupted_packets = baseline_packets.clone();
+    apply_reorder(&mut corrupted_packets, input.reorder);
+    apply_mutations(&mut corrupted_packets, &input.mutations);
+
+    let corrupted_received = combine_symbols(&decoder, &corrupted_packets);
+    let corrupted_batch = if corrupted_received.is_empty() {
+        0
+    } else {
+        input.wavefront_batch as usize % (corrupted_received.len() + 1)
     };
 
-    // Security Assertion 1: No panic on oversized ESI
-    test_oversized_esi(&params, &mut unstructured);
+    let direct = decoder.decode(&corrupted_received);
+    let wavefront = decoder.decode_wavefront(&corrupted_received, corrupted_batch);
+    let proof = decoder.decode_with_proof(&corrupted_received, object_id, 0);
 
-    // Security Assertion 2: Per-block limits K' max honored
-    test_k_limit_enforcement(&mut unstructured);
+    match (&direct, &wavefront) {
+        (Ok(lhs), Ok(rhs)) => assert_eq!(
+            lhs.source, rhs.source,
+            "direct and wavefront decode disagreed on corrupted packets"
+        ),
+        (Err(lhs), Err(rhs)) => {
+            assert_recoverable_or_unrecoverable(lhs);
+            assert_recoverable_or_unrecoverable(rhs);
+            assert_eq!(
+                lhs, rhs,
+                "direct and wavefront decode disagreed on corrupted packet error"
+            );
+        }
+        _ => panic!("direct and wavefront decode disagreed on corrupted packet outcome"),
+    }
 
-    // Security Assertion 3: Repair symbols parsed without overflow
-    test_repair_symbol_overflow(&params, &fuzz_symbols);
+    match (&direct, &proof) {
+        (Ok(lhs), Ok(rhs)) => assert_eq!(
+            lhs.source, rhs.result.source,
+            "direct and proof decode disagreed on corrupted packets"
+        ),
+        (Err(lhs), Err((rhs, _proof))) => {
+            assert_recoverable_or_unrecoverable(lhs);
+            assert_recoverable_or_unrecoverable(rhs);
+            assert_eq!(
+                lhs, rhs,
+                "direct and proof decode disagreed on corrupted packet error"
+            );
+        }
+        _ => panic!("direct and proof decode disagreed on corrupted packet outcome"),
+    }
 
-    // Security Assertion 4: Early decoder failure returns error not hang
-    test_early_failure_no_hang(&params, &fuzz_symbols);
-
-    // Security Assertion 5: Duplicate ESIs idempotent
-    test_duplicate_esi_idempotent(&params, &mut unstructured);
-
-    // Security Assertion 6: Decoder handles empty source-block gracefully
-    test_empty_source_block();
-
-    // Additional: Malformed symbol structures
-    test_malformed_symbol_structures(&params, &fuzz_symbols);
-
-    // Main decode test with valid symbols
-    let decoder = params.create_decoder();
-    let l = decoder.params().l;
-
-    let valid_symbols: Vec<ReceivedSymbol> = fuzz_symbols
-        .iter()
-        .take(100)
-        .map(|fs| fs.to_received_symbol(l, params.symbol_size as usize))
-        .collect();
-
-    if !valid_symbols.is_empty() {
-        let _result = decoder.decode(&valid_symbols);
+    if let Ok(decoded) = direct {
+        assert_eq!(
+            decoded.source, source,
+            "corrupted packets may not decode to incorrect source output"
+        );
     }
 });
