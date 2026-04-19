@@ -1,41 +1,31 @@
-//! Metamorphic tests for sync::semaphore permit invariants.
+//! Metamorphic Tests: sync::Semaphore Invariants (Five Relations)
 //!
-//! These tests validate the core invariants of the semaphore permit acquisition
-//! and release mechanism using metamorphic relations and property-based testing.
-//!
-//! ## Key Properties Tested
-//!
-//! 1. **Permit count bound**: available permits never exceed initial count
-//! 2. **Acquire-release symmetry**: successful acquire matched by at most one release
-//! 3. **Cancellation safety**: cancelled acquire returns permit to pool
-//! 4. **Auto-release**: dropped SemaphorePermit auto-releases
-//! 5. **FIFO ordering**: try_acquire respects waiter queue ordering
-//!
-//! ## Metamorphic Relations
-//!
-//! - **Count preservation**: permits_available ≤ max_permits (invariant)
-//! - **Conservation**: sum(acquired) + available_permits = initial_count
-//! - **FIFO fairness**: waiters are served in arrival order
-//! - **Cancellation idempotence**: cancel + release ≡ no-op
-//! - **Drop equivalence**: drop(permit) ≡ explicit release
+//! Tests five critical metamorphic relations for semaphore correctness using LabRuntime + proptest:
+//! 1. MR1: acquire(n) blocks until n permits available (bounded counter)
+//! 2. MR2: try_acquire(n) returns None (no block) if <n available
+//! 3. MR3: close() wakes all waiters with Outcome::Cancelled
+//! 4. MR4: cancel during acquire releases reservation (no deadlock)
+//! 5. MR5: FIFO fairness — waiters woken in registration order when permits released
 
-use proptest::prelude::*;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use std::collections::VecDeque;
+#![cfg(test)]
 
-use asupersync::cx::Cx;
-use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::sync::semaphore::{AcquireError, Semaphore, TryAcquireError};
-use asupersync::types::{
-    cancel::CancelReason, ArenaIndex, Budget, Outcome, RegionId, TaskId,
+use asupersync::{
+    cx::Cx,
+    lab::LabRuntime,
+    sync::semaphore::{AcquireError, Semaphore, SemaphorePermit},
+    types::{Budget, Outcome, RegionId, TaskId},
+    util::ArenaIndex,
+    test_utils::init_test_logging,
 };
+use proptest::prelude::*;
+use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
 
-// =============================================================================
-// Test Utilities
-// =============================================================================
-
-/// Create a test context for semaphore testing.
+/// Helper to create a test context
 fn test_cx() -> Cx {
     Cx::new(
         RegionId::from_arena(ArenaIndex::new(0, 0)),
@@ -44,611 +34,512 @@ fn test_cx() -> Cx {
     )
 }
 
-/// Create a test context with specific slot.
-fn test_cx_with_slot(slot: u32) -> Cx {
-    Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, slot)),
-        TaskId::from_arena(ArenaIndex::new(0, slot)),
-        Budget::INFINITE,
-    )
-}
-
-/// Create a test LabRuntime for deterministic testing.
-fn test_lab_runtime() -> LabRuntime {
-    LabRuntime::with_config(LabConfig::deterministic())
-}
-
-/// Create a test LabRuntime with specific seed.
-fn test_lab_runtime_with_seed(seed: u64) -> LabRuntime {
-    LabRuntime::with_config(LabConfig::deterministic().with_seed(seed))
-}
-
-/// Tracks semaphore operations for invariant checking.
-#[derive(Debug, Clone)]
-struct SemaphoreTracker {
-    initial_permits: usize,
-    acquired: Vec<usize>,
-    released: Vec<usize>,
-    cancelled: Vec<usize>,
-}
-
-impl SemaphoreTracker {
-    fn new(initial_permits: usize) -> Self {
-        Self {
-            initial_permits,
-            acquired: Vec::new(),
-            released: Vec::new(),
-            cancelled: Vec::new(),
-        }
-    }
-
-    fn record_acquire(&mut self, count: usize) {
-        self.acquired.push(count);
-    }
-
-    fn record_release(&mut self, count: usize) {
-        self.released.push(count);
-    }
-
-    fn record_cancel(&mut self, count: usize) {
-        self.cancelled.push(count);
-    }
-
-    /// Check conservation of permits: acquired - released should not exceed capacity.
-    fn check_conservation(&self, current_available: usize) -> bool {
-        let total_acquired: usize = self.acquired.iter().sum();
-        let total_released: usize = self.released.iter().sum();
-        let total_cancelled: usize = self.cancelled.iter().sum();
-
-        // Conservation: available + (acquired - released - cancelled) = initial
-        // Rearranged: available + acquired = initial + released + cancelled
-        current_available + total_acquired <= self.initial_permits + total_released + total_cancelled
-    }
-
-    /// Check that available permits never exceed initial count.
-    fn check_count_bound(&self, current_available: usize) -> bool {
-        current_available <= self.initial_permits
+/// Helper to poll a future once
+fn poll_once<T, F>(future: &mut F) -> Option<T>
+where
+    F: Future<Output = T> + Unpin,
+{
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    match Pin::new(future).poll(&mut cx) {
+        Poll::Ready(v) => Some(v),
+        Poll::Pending => None,
     }
 }
 
-// =============================================================================
-// Proptest Strategies
-// =============================================================================
+/// MR1: acquire(n) blocks until n permits available (bounded counter)
+///
+/// Property: acquire(n) should block when permits < n and complete immediately
+/// when permits >= n. The semaphore acts as a bounded counter.
 
-/// Generate arbitrary permit counts (1-100).
-fn arb_permit_count() -> impl Strategy<Value = usize> {
-    1usize..=100
-}
-
-/// Generate arbitrary semaphore initial capacity.
-fn arb_semaphore_capacity() -> impl Strategy<Value = usize> {
-    1usize..=50
-}
-
-/// Generate arbitrary operation sequences.
-fn arb_operation_sequence() -> impl Strategy<Value = Vec<SemaphoreOperation>> {
-    prop::collection::vec(arb_semaphore_operation(), 0..20)
-}
-
-#[derive(Debug, Clone)]
-enum SemaphoreOperation {
-    TryAcquire(usize),
-    Acquire(usize),
-    AddPermits(usize),
-    Close,
-}
-
-fn arb_semaphore_operation() -> impl Strategy<Value = SemaphoreOperation> {
-    prop_oneof![
-        arb_permit_count().prop_map(SemaphoreOperation::TryAcquire),
-        arb_permit_count().prop_map(SemaphoreOperation::Acquire),
-        arb_permit_count().prop_map(SemaphoreOperation::AddPermits),
-        Just(SemaphoreOperation::Close),
-    ]
-}
-
-// =============================================================================
-// Core Metamorphic Relations
-// =============================================================================
-
-/// MR1: Permit count bound - available permits never exceed initial count.
 #[test]
-fn mr_permit_count_bound() {
-    proptest!(|(initial_permits in arb_semaphore_capacity(),
-               operations in arb_operation_sequence())| {
-        let lab = test_lab_runtime();
-        let _guard = lab.enter();
+fn mr1_acquire_blocks_until_permits_available() {
+    LabRuntime::test(|lab| async {
+        init_test_logging();
 
-        let semaphore = Semaphore::new(initial_permits);
-        let mut tracker = SemaphoreTracker::new(initial_permits);
-
-        // Execute operations and verify count bound invariant
-        for op in operations {
-            match op {
-                SemaphoreOperation::TryAcquire(count) => {
-                    match semaphore.try_acquire(count) {
-                        Ok(permit) => {
-                            tracker.record_acquire(count);
-                            prop_assert!(tracker.check_count_bound(semaphore.available_permits()),
-                                "Count bound violated: available={}, initial={}",
-                                semaphore.available_permits(), initial_permits);
-
-                            // Explicit release to test conservation
-                            permit.commit();
-                            tracker.record_release(count);
-                        }
-                        Err(_) => {} // Failed acquire is benign
-                    }
-                }
-                SemaphoreOperation::AddPermits(count) => {
-                    semaphore.add_permits(count);
-                    // Adding permits may temporarily exceed initial count,
-                    // but this should be bounded by reasonable saturation
-                }
-                SemaphoreOperation::Close => {
-                    semaphore.close();
-                    prop_assert_eq!(semaphore.available_permits(), 0,
-                        "Closed semaphore should show 0 available permits");
-                }
-                SemaphoreOperation::Acquire(_) => {
-                    // Skip async acquire in try_acquire test
-                }
-            }
-
-            prop_assert!(tracker.check_conservation(semaphore.available_permits()),
-                "Conservation violated: available={}, tracker={:?}",
-                semaphore.available_permits(), tracker);
-        }
-    });
-}
-
-/// MR2: Acquire-release symmetry - every successful acquire matched by at most one release.
-#[test]
-fn mr_acquire_release_symmetry() {
-    proptest!(|(initial_permits in 1usize..=20,
-               acquire_counts in prop::collection::vec(1usize..=5, 1..10))| {
-        let lab = test_lab_runtime();
-        let _guard = lab.enter();
-
-        let semaphore = Semaphore::new(initial_permits);
-        let mut permits = Vec::new();
-        let mut total_acquired = 0;
-
-        // Acquire permits up to capacity
-        for &count in &acquire_counts {
-            if semaphore.available_permits() >= count {
-                match semaphore.try_acquire(count) {
-                    Ok(permit) => {
-                        total_acquired += count;
-                        permits.push(permit);
-
-                        // Verify available permits decreased
-                        prop_assert_eq!(
-                            semaphore.available_permits() + total_acquired,
-                            initial_permits,
-                            "Symmetry violated: available + acquired != initial"
-                        );
-                    }
-                    Err(_) => break, // No more permits available
-                }
-            }
-
-            if semaphore.available_permits() == 0 {
-                break;
-            }
-        }
-
-        // Release all permits and verify symmetry
-        let acquired_before_release = total_acquired;
-        for permit in permits {
-            let count = permit.count();
-            permit.commit(); // Explicit release
-            total_acquired -= count;
-        }
-
-        // After releasing all permits, should be back to initial state
-        prop_assert_eq!(semaphore.available_permits(), initial_permits,
-            "Symmetry broken: after releasing all permits, available {} != initial {}",
-            semaphore.available_permits(), initial_permits);
-        prop_assert_eq!(total_acquired, 0,
-            "Symmetry broken: total_acquired should be 0 after releasing all");
-    });
-}
-
-/// MR3: Cancellation safety - cancelled acquire returns permit to pool.
-#[test]
-fn mr_cancellation_safety() {
-    proptest!(|(initial_permits in 2usize..=10,
-               acquire_count in 1usize..=3,
-               seed in 0u64..1000)| {
-        let lab = test_lab_runtime_with_seed(seed);
-        let _guard = lab.enter();
-
-        let semaphore = Arc::new(Semaphore::new(initial_permits));
-
-        futures_lite::future::block_on(async {
+        proptest!(|(
+            initial_permits in 1usize..=10,
+            acquire_count in 1usize..=15,
+            release_count in 0usize..=20
+        )| {
+            let sem = Semaphore::new(initial_permits);
             let cx = test_cx();
 
-            // Fill semaphore to capacity with try_acquire
-            let mut held_permits = Vec::new();
-            while semaphore.available_permits() >= acquire_count {
-                if let Ok(permit) = semaphore.try_acquire(acquire_count) {
-                    held_permits.push(permit);
-                } else {
-                    break;
-                }
-            }
+            // Test immediate acquire when permits available
+            if acquire_count <= initial_permits {
+                let mut fut = sem.acquire(&cx, acquire_count);
+                let result = poll_once(&mut fut);
+                prop_assert!(
+                    result.is_some() && result.unwrap().is_ok(),
+                    "acquire({}) should succeed immediately when {} permits available",
+                    acquire_count, initial_permits
+                );
 
-            let permits_before = semaphore.available_permits();
-
-            // Create acquire future that will need to wait
-            let acquire_future = semaphore.acquire(&cx, acquire_count);
-
-            // Cancel the context to simulate cancellation
-            cx.cancel(CancelReason::Timeout);
-
-            // Try to acquire - should fail with cancellation
-            match acquire_future.await {
-                Err(AcquireError::Cancelled) => {
-                    // Verify permits were returned to pool
-                    prop_assert_eq!(semaphore.available_permits(), permits_before,
-                        "Cancelled acquire should return permits to pool: before={}, after={}",
-                        permits_before, semaphore.available_permits());
-                }
-                other => {
-                    prop_assert!(false, "Expected Cancelled, got {:?}", other);
-                }
-            }
-
-            // Clean up: release held permits
-            for permit in held_permits {
-                permit.commit();
-            }
-        });
-    });
-}
-
-/// MR4: Auto-release - dropped SemaphorePermit auto-releases permits.
-#[test]
-fn mr_auto_release() {
-    proptest!(|(initial_permits in 2usize..=20,
-               acquire_count in 1usize..=5)| {
-        let lab = test_lab_runtime();
-        let _guard = lab.enter();
-
-        let semaphore = Semaphore::new(initial_permits);
-
-        // Record permits before acquire
-        let permits_before = semaphore.available_permits();
-
-        if permits_before >= acquire_count {
-            // Acquire permit and let it drop
-            {
-                let permit = semaphore.try_acquire(acquire_count);
-                prop_assert!(permit.is_ok(), "Acquire should succeed");
-
-                let permits_during = semaphore.available_permits();
-                prop_assert_eq!(permits_during + acquire_count, permits_before,
-                    "Permits should decrease by acquired count: before={}, during={}, acquired={}",
-                    permits_before, permits_during, acquire_count);
-            } // permit drops here and should auto-release
-
-            // Verify permits were automatically released
-            // Note: auto-release happens through Drop, which adds permits back
-            let permits_after = semaphore.available_permits();
-            prop_assert_eq!(permits_after, permits_before,
-                "Auto-release should restore permits: before={}, after={}",
-                permits_before, permits_after);
-        }
-    });
-}
-
-/// MR5: FIFO ordering - try_acquire respects waiter queue ordering.
-/// This tests that try_acquire fails when there are waiters, preserving FIFO.
-#[test]
-fn mr_fifo_ordering() {
-    proptest!(|(initial_permits in 1usize..=5,
-               acquire_count in 1usize..=2,
-               seed in 0u64..1000)| {
-        let lab = test_lab_runtime_with_seed(seed);
-        let _guard = lab.enter();
-
-        let semaphore = Arc::new(Semaphore::new(initial_permits));
-
-        futures_lite::future::block_on(async {
-            // Fill semaphore to capacity
-            let mut held_permits = Vec::new();
-            while semaphore.available_permits() >= acquire_count {
-                if let Ok(permit) = semaphore.try_acquire(acquire_count) {
-                    held_permits.push(permit);
-                } else {
-                    break;
-                }
-            }
-
-            // Verify no permits available
-            prop_assert_eq!(semaphore.available_permits(), 0,
-                "Semaphore should be at capacity");
-
-            // Create async acquire (waiter) but don't await it yet
-            let cx1 = test_cx_with_slot(1);
-            let _acquire_future1 = semaphore.acquire(&cx1, acquire_count);
-
-            // TODO: In a real test, we'd need to ensure the waiter is registered
-            // before testing try_acquire behavior. For this simple test,
-            // we verify that try_acquire fails when no permits are available.
-
-            // try_acquire should fail when no permits available
-            let try_result = semaphore.try_acquire(acquire_count);
-            prop_assert!(try_result.is_err(), "try_acquire should fail when no permits available");
-
-            match try_result {
-                Err(TryAcquireError) => {
-                    // This is expected - either no permits or waiters exist
-                }
-                Ok(_) => {
-                    prop_assert!(false, "try_acquire should not succeed when at capacity");
-                }
-            }
-
-            // Clean up: release one permit to unblock waiter
-            if let Some(permit) = held_permits.pop() {
-                permit.commit();
-            }
-
-            // Clean up remaining permits
-            for permit in held_permits {
-                permit.commit();
-            }
-        });
-    });
-}
-
-// =============================================================================
-// Additional Metamorphic Relations
-// =============================================================================
-
-/// MR6: Permit conservation under concurrent operations.
-#[test]
-fn mr_permit_conservation() {
-    proptest!(|(initial_permits in 3usize..=15,
-               operations in prop::collection::vec(1usize..=3, 3..8),
-               seed in 0u64..1000)| {
-        let lab = test_lab_runtime_with_seed(seed);
-        let _guard = lab.enter();
-
-        let semaphore = Arc::new(Semaphore::new(initial_permits));
-        let mut total_acquired = 0;
-        let mut permits = Vec::new();
-
-        // Perform multiple acquire/release cycles
-        for &count in &operations {
-            if semaphore.available_permits() >= count {
-                match semaphore.try_acquire(count) {
-                    Ok(permit) => {
-                        total_acquired += count;
-                        permits.push(permit);
-
-                        // Check conservation invariant
-                        prop_assert_eq!(
-                            semaphore.available_permits() + total_acquired,
-                            initial_permits,
-                            "Conservation violated: available({}) + acquired({}) != initial({})",
-                            semaphore.available_permits(), total_acquired, initial_permits
-                        );
-                    }
-                    Err(_) => {} // Expected when no permits available
-                }
-            }
-
-            // Randomly release some permits to test conservation
-            if !permits.is_empty() && operations.len() > 1 {
-                let permit = permits.remove(0);
-                let released_count = permit.count();
-                permit.commit();
-                total_acquired -= released_count;
-
-                // Check conservation after release
+                let available_after = sem.available_permits();
                 prop_assert_eq!(
-                    semaphore.available_permits() + total_acquired,
-                    initial_permits,
-                    "Conservation violated after release: available({}) + acquired({}) != initial({})",
-                    semaphore.available_permits(), total_acquired, initial_permits
+                    available_after,
+                    initial_permits - acquire_count,
+                    "permits should be decremented by acquire count"
+                );
+            } else {
+                // Test blocking when insufficient permits
+                let mut fut = sem.acquire(&cx, acquire_count);
+                let result = poll_once(&mut fut);
+                prop_assert!(
+                    result.is_none(),
+                    "acquire({}) should block when only {} permits available",
+                    acquire_count, initial_permits
+                );
+
+                // Add permits to satisfy the acquire
+                let needed = acquire_count - initial_permits;
+                sem.add_permits(needed);
+
+                let result_after = poll_once(&mut fut);
+                prop_assert!(
+                    result_after.is_some() && result_after.unwrap().is_ok(),
+                    "acquire should complete after adding {} permits",
+                    needed
                 );
             }
-        }
+        });
 
-        // Final cleanup and conservation check
-        for permit in permits {
-            let released_count = permit.count();
-            permit.commit();
-            total_acquired -= released_count;
-        }
+        // Edge case: zero permits semaphore
+        let zero_sem = Semaphore::new(0);
+        let cx = test_cx();
 
-        prop_assert_eq!(semaphore.available_permits(), initial_permits,
-            "Final conservation: all permits should be available");
-        prop_assert_eq!(total_acquired, 0,
-            "Final conservation: no permits should be tracked as acquired");
-    });
-}
-
-/// MR7: Close operation atomicity - close immediately stops new acquisitions.
-#[test]
-fn mr_close_atomicity() {
-    proptest!(|(initial_permits in 1usize..=10,
-               acquire_count in 1usize..=3)| {
-        let lab = test_lab_runtime();
-        let _guard = lab.enter();
-
-        let semaphore = Semaphore::new(initial_permits);
-
-        // Verify semaphore works before closing
-        if initial_permits >= acquire_count {
-            let permit = semaphore.try_acquire(acquire_count);
-            prop_assert!(permit.is_ok(), "Acquire should work before close");
-            if let Ok(p) = permit {
-                p.commit();
-            }
-        }
-
-        // Close the semaphore
-        semaphore.close();
-
-        // Verify close effects
-        prop_assert!(semaphore.is_closed(), "Semaphore should report closed");
-        prop_assert_eq!(semaphore.available_permits(), 0,
-            "Closed semaphore should show 0 available permits");
-
-        // All acquire attempts should fail
-        let try_result = semaphore.try_acquire(acquire_count);
-        prop_assert!(try_result.is_err(),
-            "try_acquire should fail on closed semaphore");
-
-        // Verify error type
-        match try_result {
-            Err(TryAcquireError) => {} // Expected
-            Ok(_) => prop_assert!(false, "Should not succeed on closed semaphore"),
-        }
-    });
-}
-
-/// MR8: Multiple permit acquire consistency.
-#[test]
-fn mr_multiple_permit_consistency() {
-    proptest!(|(initial_permits in 5usize..=20,
-               counts in prop::collection::vec(1usize..=4, 2..6))| {
-        let lab = test_lab_runtime();
-        let _guard = lab.enter();
-
-        let semaphore = Semaphore::new(initial_permits);
-        let mut total_requested = 0;
-        let mut permits = Vec::new();
-
-        // Acquire multiple permits in sequence
-        for &count in &counts {
-            total_requested += count;
-            if total_requested <= initial_permits {
-                let result = semaphore.try_acquire(count);
-                prop_assert!(result.is_ok(),
-                    "Should be able to acquire {} permits (total requested: {}, initial: {})",
-                    count, total_requested, initial_permits);
-
-                if let Ok(permit) = result {
-                    prop_assert_eq!(permit.count(), count,
-                        "Permit should hold correct count");
-                    permits.push(permit);
-                }
-            } else {
-                // Should fail when exceeding capacity
-                let result = semaphore.try_acquire(count);
-                prop_assert!(result.is_err(),
-                    "Should fail to acquire {} permits when total would exceed capacity",
-                    count);
-                break;
-            }
-        }
-
-        // Verify total consistency
-        let permits_held: usize = permits.iter().map(|p| p.count()).sum();
-        prop_assert_eq!(
-            semaphore.available_permits() + permits_held,
-            initial_permits,
-            "Total permits consistency check failed"
+        let mut fut = zero_sem.acquire(&cx, 1);
+        assert!(
+            poll_once(&mut fut).is_none(),
+            "acquire should block on zero-permit semaphore"
         );
 
-        // Clean up
-        for permit in permits {
-            permit.commit();
-        }
-
-        prop_assert_eq!(semaphore.available_permits(), initial_permits,
-            "Should return to initial state after releasing all permits");
+        zero_sem.add_permits(1);
+        assert!(
+            poll_once(&mut fut).is_some(),
+            "acquire should complete after adding permit"
+        );
     });
 }
 
-// =============================================================================
-// Regression Tests
-// =============================================================================
-
-/// Test specific edge cases and regressions.
+/// MR2: try_acquire(n) returns None (no block) if <n available
+///
+/// Property: try_acquire is always immediate (non-blocking) and returns
+/// Err when insufficient permits, Ok when sufficient permits.
 #[test]
-fn test_zero_permit_semaphore() {
-    let lab = test_lab_runtime();
-    let _guard = lab.enter();
+fn mr2_try_acquire_never_blocks() {
+    LabRuntime::test(|lab| async {
+        init_test_logging();
 
-    let semaphore = Semaphore::new(0);
+        proptest!(|(
+            initial_permits in 0usize..=20,
+            try_acquire_count in 1usize..=25
+        )| {
+            let sem = Semaphore::new(initial_permits);
 
-    assert_eq!(semaphore.available_permits(), 0);
-    assert_eq!(semaphore.max_permits(), 0);
+            // Measure execution time to ensure non-blocking
+            let start = Instant::now();
+            let result = sem.try_acquire(try_acquire_count);
+            let elapsed = start.elapsed();
 
-    // Should fail to acquire from empty semaphore
-    let result = semaphore.try_acquire(1);
-    assert!(result.is_err());
+            // Should complete very quickly (< 1ms typically, allow 10ms for CI)
+            prop_assert!(
+                elapsed < Duration::from_millis(10),
+                "try_acquire should be immediate, took {:?}",
+                elapsed
+            );
+
+            if try_acquire_count <= initial_permits {
+                prop_assert!(
+                    result.is_ok(),
+                    "try_acquire({}) should succeed when {} permits available",
+                    try_acquire_count, initial_permits
+                );
+
+                let permit = result.unwrap();
+                prop_assert_eq!(
+                    permit.count(),
+                    try_acquire_count,
+                    "permit count should match acquire count"
+                );
+
+                let available_after = sem.available_permits();
+                prop_assert_eq!(
+                    available_after,
+                    initial_permits - try_acquire_count,
+                    "permits should be decremented"
+                );
+            } else {
+                prop_assert!(
+                    result.is_err(),
+                    "try_acquire({}) should fail when only {} permits available",
+                    try_acquire_count, initial_permits
+                );
+
+                let available_unchanged = sem.available_permits();
+                prop_assert_eq!(
+                    available_unchanged,
+                    initial_permits,
+                    "permits should be unchanged on failed try_acquire"
+                );
+            }
+        });
+
+        // Edge case: try_acquire on closed semaphore should be immediate
+        let closed_sem = Semaphore::new(5);
+        closed_sem.close();
+
+        let start = Instant::now();
+        let result = closed_sem.try_acquire(1);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(10),
+            "try_acquire on closed semaphore should be immediate"
+        );
+        assert!(
+            result.is_err(),
+            "try_acquire should fail on closed semaphore"
+        );
+    });
 }
 
+/// MR3: close() wakes all waiters with Outcome::Cancelled
+///
+/// Property: Closing a semaphore should immediately wake all pending waiters
+/// with AcquireError::Closed, regardless of permit availability.
 #[test]
-fn test_single_permit_semaphore() {
-    let lab = test_lab_runtime();
-    let _guard = lab.enter();
+fn mr3_close_wakes_all_waiters() {
+    LabRuntime::test(|lab| async {
+        init_test_logging();
 
-    let semaphore = Semaphore::new(1);
+        proptest!(|(
+            initial_permits in 1usize..=5,
+            num_waiters in 1usize..=8
+        )| {
+            let sem = Semaphore::new(initial_permits);
 
-    // First acquire should succeed
-    let permit = semaphore.try_acquire(1).expect("Should acquire single permit");
-    assert_eq!(semaphore.available_permits(), 0);
+            // Exhaust permits so waiters will queue
+            let _held_permits: Vec<_> = (0..initial_permits)
+                .map(|_| sem.try_acquire(1).unwrap())
+                .collect();
 
-    // Second acquire should fail
-    let result = semaphore.try_acquire(1);
-    assert!(result.is_err());
+            prop_assert_eq!(
+                sem.available_permits(),
+                0,
+                "all permits should be held"
+            );
 
-    // Release and verify
-    permit.commit();
-    assert_eq!(semaphore.available_permits(), 1);
+            // Create waiters
+            let mut futures = Vec::new();
+            let contexts: Vec<_> = (0..num_waiters)
+                .map(|i| Cx::new(
+                    RegionId::from_arena(ArenaIndex::new(0, i as u32)),
+                    TaskId::from_arena(ArenaIndex::new(0, i as u32)),
+                    Budget::INFINITE,
+                ))
+                .collect();
+
+            for ctx in &contexts {
+                let mut fut = sem.acquire(ctx, 1);
+                let pending = poll_once(&mut fut).is_none();
+                prop_assert!(pending, "waiter should be pending");
+                futures.push(fut);
+            }
+
+            // Close the semaphore
+            sem.close();
+
+            // All waiters should wake with Closed error
+            let mut closed_count = 0;
+            for mut fut in futures {
+                let result = poll_once(&mut fut);
+                prop_assert!(
+                    result.is_some(),
+                    "waiter should wake immediately after close"
+                );
+
+                match result.unwrap() {
+                    Err(AcquireError::Closed) => closed_count += 1,
+                    other => prop_assert!(
+                        false,
+                        "expected Closed error, got {:?}",
+                        other
+                    ),
+                }
+            }
+
+            prop_assert_eq!(
+                closed_count,
+                num_waiters,
+                "all waiters should receive Closed error"
+            );
+
+            // Semaphore should be closed and have zero permits
+            prop_assert!(sem.is_closed(), "semaphore should be closed");
+            prop_assert_eq!(
+                sem.available_permits(),
+                0,
+                "closed semaphore should have zero permits"
+            );
+        });
+    });
 }
 
+/// MR4: cancel during acquire releases reservation (no deadlock)
+///
+/// Property: Cancelling an acquire operation should not leak permits or
+/// corrupt semaphore state. Other waiters should still be served correctly.
 #[test]
-fn test_permit_forget() {
-    let lab = test_lab_runtime();
-    let _guard = lab.enter();
+fn mr4_cancel_during_acquire_no_deadlock() {
+    LabRuntime::test(|lab| async {
+        init_test_logging();
 
-    let semaphore = Semaphore::new(2);
+        proptest!(|(
+            initial_permits in 1usize..=5,
+            num_cancellations in 1usize..=6
+        )| {
+            let sem = Semaphore::new(initial_permits);
 
-    let permit = semaphore.try_acquire(1).expect("Should acquire permit");
-    assert_eq!(semaphore.available_permits(), 1);
+            // Hold all permits to force queueing
+            let held_permits: Vec<_> = (0..initial_permits)
+                .map(|_| sem.try_acquire(1).unwrap())
+                .collect();
 
-    // Forget the permit (intentional leak)
-    permit.forget();
+            // Create cancellable contexts
+            let cancel_contexts: Vec<_> = (0..num_cancellations)
+                .map(|i| Cx::new(
+                    RegionId::from_arena(ArenaIndex::new(0, (100 + i) as u32)),
+                    TaskId::from_arena(ArenaIndex::new(0, (100 + i) as u32)),
+                    Budget::INFINITE,
+                ))
+                .collect();
 
-    // Permits should not be returned to pool
-    assert_eq!(semaphore.available_permits(), 1);
+            // Create regular context for verification
+            let verify_cx = Cx::new(
+                RegionId::from_arena(ArenaIndex::new(0, 200)),
+                TaskId::from_arena(ArenaIndex::new(0, 200)),
+                Budget::INFINITE,
+            );
+
+            // Start cancellable acquires
+            let mut cancel_futures = Vec::new();
+            for ctx in &cancel_contexts {
+                let mut fut = sem.acquire(ctx, 1);
+                let pending = poll_once(&mut fut).is_none();
+                prop_assert!(pending, "acquire should be pending");
+                cancel_futures.push(fut);
+            }
+
+            // Start verification acquire
+            let mut verify_fut = sem.acquire(&verify_cx, 1);
+            prop_assert!(
+                poll_once(&mut verify_fut).is_none(),
+                "verification acquire should be pending"
+            );
+
+            let permits_before_cancel = sem.available_permits();
+
+            // Cancel all pending acquires
+            for ctx in &cancel_contexts {
+                ctx.set_cancel_requested(true);
+            }
+
+            let mut cancelled_count = 0;
+            for mut fut in cancel_futures {
+                let result = poll_once(&mut fut);
+                if let Some(Err(AcquireError::Cancelled)) = result {
+                    cancelled_count += 1;
+                }
+            }
+
+            prop_assert!(
+                cancelled_count > 0,
+                "at least one acquire should be cancelled"
+            );
+
+            let permits_after_cancel = sem.available_permits();
+            prop_assert_eq!(
+                permits_after_cancel,
+                permits_before_cancel,
+                "permit count should be unchanged by cancellation"
+            );
+
+            // Release one permit - verification acquire should complete
+            drop(held_permits.into_iter().next().unwrap());
+
+            let verify_result = poll_once(&mut verify_fut);
+            prop_assert!(
+                verify_result.is_some() && verify_result.unwrap().is_ok(),
+                "verification acquire should succeed after permit release"
+            );
+        });
+    });
 }
 
-/// Test add_permits behavior.
+/// MR5: FIFO fairness — waiters woken in registration order when permits released
+///
+/// Property: When multiple waiters are queued and permits become available,
+/// waiters should be served in the order they registered (FIFO fairness).
 #[test]
-fn test_add_permits() {
-    let lab = test_lab_runtime();
-    let _guard = lab.enter();
+fn mr5_fifo_fairness_ordering() {
+    LabRuntime::test(|lab| async {
+        init_test_logging();
 
-    let semaphore = Semaphore::new(2);
+        proptest!(|(
+            num_waiters in 2usize..=6
+        )| {
+            let sem = Semaphore::new(0); // Start with no permits to force queueing
 
-    // Acquire all permits
-    let permit1 = semaphore.try_acquire(1).expect("Should acquire permit");
-    let permit2 = semaphore.try_acquire(1).expect("Should acquire permit");
-    assert_eq!(semaphore.available_permits(), 0);
+            // Create contexts and futures for waiters
+            let contexts: Vec<_> = (0..num_waiters)
+                .map(|i| Cx::new(
+                    RegionId::from_arena(ArenaIndex::new(0, (300 + i) as u32)),
+                    TaskId::from_arena(ArenaIndex::new(0, (300 + i) as u32)),
+                    Budget::INFINITE,
+                ))
+                .collect();
 
-    // Add more permits
-    semaphore.add_permits(3);
-    assert_eq!(semaphore.available_permits(), 3);
+            let mut futures = Vec::new();
+            let mut completion_order = Vec::new();
 
-    // Should be able to acquire more now
-    let permit3 = semaphore.try_acquire(2).expect("Should acquire from added permits");
-    assert_eq!(semaphore.available_permits(), 1);
+            // Queue all waiters in order
+            for (i, ctx) in contexts.iter().enumerate() {
+                let mut fut = sem.acquire(ctx, 1);
+                let pending = poll_once(&mut fut).is_none();
+                prop_assert!(pending, "waiter {} should be pending", i);
+                futures.push((i, fut));
+            }
 
-    // Clean up
-    permit1.commit();
-    permit2.commit();
-    permit3.commit();
+            // Release permits one by one and track completion order
+            for round in 0..num_waiters {
+                sem.add_permits(1);
 
-    // Should have initial + added permits available
-    assert_eq!(semaphore.available_permits(), 2 + 3);
+                // Check which waiter completed
+                for (waiter_id, fut) in futures.iter_mut() {
+                    if completion_order.contains(waiter_id) {
+                        continue; // Already completed
+                    }
+
+                    if let Some(result) = poll_once(fut) {
+                        prop_assert!(
+                            result.is_ok(),
+                            "waiter {} should acquire successfully",
+                            waiter_id
+                        );
+                        completion_order.push(*waiter_id);
+                        break; // Only one should complete per permit release
+                    }
+                }
+
+                prop_assert_eq!(
+                    completion_order.len(),
+                    round + 1,
+                    "exactly one waiter should complete per permit release"
+                );
+            }
+
+            // Verify FIFO order: completion order should match registration order
+            for (expected_order, actual_waiter_id) in completion_order.iter().enumerate() {
+                prop_assert_eq!(
+                    *actual_waiter_id,
+                    expected_order,
+                    "waiter {} completed out of FIFO order (expected position {})",
+                    actual_waiter_id, expected_order
+                );
+            }
+
+            prop_assert_eq!(
+                completion_order.len(),
+                num_waiters,
+                "all waiters should complete"
+            );
+        });
+
+        // Edge case: FIFO fairness with cancellations
+        let sem = Semaphore::new(0);
+
+        let contexts: Vec<_> = (0..4)
+            .map(|i| Cx::new(
+                RegionId::from_arena(ArenaIndex::new(0, (400 + i) as u32)),
+                TaskId::from_arena(ArenaIndex::new(0, (400 + i) as u32)),
+                Budget::INFINITE,
+            ))
+            .collect();
+
+        // Queue: 0, 1, 2, 3
+        let mut futures = Vec::new();
+        for ctx in &contexts {
+            let mut fut = sem.acquire(ctx, 1);
+            assert!(poll_once(&mut fut).is_none(), "should be pending");
+            futures.push(fut);
+        }
+
+        // Cancel waiters 1 and 2 (middle cancellations)
+        contexts[1].set_cancel_requested(true);
+        contexts[2].set_cancel_requested(true);
+
+        let result1 = poll_once(&mut futures[1]);
+        let result2 = poll_once(&mut futures[2]);
+        assert!(matches!(result1, Some(Err(AcquireError::Cancelled))));
+        assert!(matches!(result2, Some(Err(AcquireError::Cancelled))));
+
+        // Release permits - should serve remaining waiters in order: 0, then 3
+        sem.add_permits(1);
+        let result0 = poll_once(&mut futures[0]);
+        assert!(result0.is_some() && result0.unwrap().is_ok(), "waiter 0 should complete first");
+        assert!(poll_once(&mut futures[3]).is_none(), "waiter 3 should still be pending");
+
+        sem.add_permits(1);
+        let result3 = poll_once(&mut futures[3]);
+        assert!(result3.is_some() && result3.unwrap().is_ok(), "waiter 3 should complete second");
+    });
+}
+
+/// Composite test: All metamorphic relations working together
+#[test]
+fn composite_semaphore_invariants() {
+    LabRuntime::test(|lab| async {
+        init_test_logging();
+
+        let sem = Semaphore::new(3);
+
+        // MR2: try_acquire immediate behavior
+        let permit1 = sem.try_acquire(2).expect("should acquire 2 permits");
+        assert_eq!(sem.available_permits(), 1);
+
+        // MR1: acquire blocks when insufficient permits
+        let ctx = test_cx();
+        let mut blocking_fut = sem.acquire(&ctx, 2);
+        assert!(poll_once(&mut blocking_fut).is_none(), "should block for 2 permits");
+
+        // MR4: cancel during acquire doesn't affect permit count
+        ctx.set_cancel_requested(true);
+        let cancel_result = poll_once(&mut blocking_fut);
+        assert!(matches!(cancel_result, Some(Err(AcquireError::Cancelled))));
+        assert_eq!(sem.available_permits(), 1, "permits unchanged by cancellation");
+
+        // MR1: acquire succeeds when permits available
+        drop(permit1); // Release 2 permits -> total 3
+        let ctx2 = test_cx();
+        let mut success_fut = sem.acquire(&ctx2, 2);
+        let success_result = poll_once(&mut success_fut);
+        assert!(success_result.is_some() && success_result.unwrap().is_ok());
+
+        // MR3: close wakes all waiters
+        let ctx3 = test_cx();
+        let mut final_fut = sem.acquire(&ctx3, 1);
+        assert!(poll_once(&mut final_fut).is_none(), "should block when permits exhausted");
+
+        sem.close();
+        let close_result = poll_once(&mut final_fut);
+        assert!(matches!(close_result, Some(Err(AcquireError::Closed))));
+
+        // MR2: try_acquire still immediate on closed semaphore
+        let start = Instant::now();
+        let closed_try = sem.try_acquire(1);
+        let elapsed = start.elapsed();
+        assert!(elapsed < Duration::from_millis(10), "try_acquire should be immediate");
+        assert!(closed_try.is_err(), "should fail on closed semaphore");
+    });
 }
