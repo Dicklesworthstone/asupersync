@@ -566,6 +566,15 @@ impl TimerWheel {
     #[must_use]
     pub fn next_deadline(&mut self) -> Option<Time> {
         let current = self.current_time();
+
+        // With coalescing enabled, collect_expired(now) can legally fire a
+        // whole in-window group immediately, before the group's raw earliest
+        // deadline. next_deadline() must report that immediate readiness or
+        // callers can oversleep past the actual coalesced wake point.
+        if self.coalescing.enabled && self.coalescing_group_size(current) > 0 {
+            return Some(current);
+        }
+
         let mut min_deadline: Option<Time> = None;
 
         for entry in &self.ready {
@@ -1277,6 +1286,47 @@ mod tests {
             next
         );
         crate::test_complete!("next_deadline_ready_same_tick_returns_actual_deadline");
+    }
+
+    #[test]
+    fn next_deadline_returns_current_when_coalescing_can_fire_window_now() {
+        init_test("next_deadline_returns_current_when_coalescing_can_fire_window_now");
+
+        let coalescing = CoalescingConfig::new()
+            .coalesce_window(Duration::from_millis(5))
+            .min_group_size(2)
+            .enable();
+        let mut wheel =
+            TimerWheel::with_config(Time::ZERO, TimerWheelConfig::default(), coalescing);
+
+        wheel.register(
+            Time::from_millis(2),
+            counter_waker(Arc::new(AtomicU64::new(0))),
+        );
+        wheel.register(
+            Time::from_millis(4),
+            counter_waker(Arc::new(AtomicU64::new(0))),
+        );
+
+        wheel.synchronize(Time::from_millis(1));
+
+        let next = wheel.next_deadline();
+        crate::assert_with_log!(
+            next == Some(Time::from_millis(1)),
+            "coalescing-ready window is immediately due",
+            Some(Time::from_millis(1)),
+            next
+        );
+
+        let wakers = wheel.collect_expired(Time::from_millis(1));
+        crate::assert_with_log!(
+            wakers.len() == 2,
+            "same query time really fires the whole coalesced group",
+            2usize,
+            wakers.len()
+        );
+
+        crate::test_complete!("next_deadline_returns_current_when_coalescing_can_fire_window_now");
     }
 
     struct CounterWaker {

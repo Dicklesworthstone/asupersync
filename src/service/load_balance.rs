@@ -41,14 +41,18 @@ fn tracked_probe_waker() -> (Waker, Arc<AtomicBool>) {
     (waker, woke)
 }
 
-fn poll_service_ready_once<S, Request>(service: &mut S) -> (Poll<Result<(), S::Error>>, bool)
+fn poll_service_ready_once<S, Request>(
+    service: &mut S,
+    probe_waker: &Waker,
+    probe_woke: &AtomicBool,
+) -> (Poll<Result<(), S::Error>>, bool)
 where
     S: Service<Request>,
 {
-    let (waker, woke) = tracked_probe_waker();
-    let mut cx = Context::from_waker(&waker);
+    probe_woke.store(false, Ordering::SeqCst);
+    let mut cx = Context::from_waker(probe_waker);
     let poll = service.poll_ready(&mut cx);
-    (poll, woke.load(Ordering::SeqCst))
+    (poll, probe_woke.load(Ordering::SeqCst))
 }
 
 fn backend_matches_service<S>(backend: &Backend<S>, expected: &S) -> bool
@@ -177,6 +181,31 @@ pub trait Strategy: fmt::Debug + Send + Sync {
         index < loads.len()
     }
 
+    /// Returns whether `candidate` is allowed as a same-call fallback after the
+    /// strategy's initially picked backend at `picked` could not accept work.
+    ///
+    /// The default preserves the normal selection filter. Strategies with
+    /// ordered failover semantics, such as gRPC `pick_first`, can widen the
+    /// allowed set here without weakening their primary selection rule.
+    fn permits_fallback_index(&self, _picked: usize, candidate: usize, loads: &[u64]) -> bool {
+        self.permits_index(candidate, loads)
+    }
+
+    /// Returns the backend index to probe on a given dispatch attempt.
+    ///
+    /// Attempt `0` is always the primary strategy pick. Later attempts are
+    /// same-call fallback probes. The default preserves the existing wrapped
+    /// order so strategies keep probing from the originally selected index.
+    fn candidate_for_attempt(&self, picked: usize, attempt: usize, len: usize) -> Option<usize> {
+        (attempt < len).then_some((picked + attempt) % len)
+    }
+
+    /// Records which backend actually accepted a dispatch.
+    ///
+    /// Strategies with sticky affinity can use this to preserve the chosen
+    /// backend across later calls instead of recomputing from scratch.
+    fn note_dispatch(&self, _picked: usize, _chosen: usize, _loads: &[u64]) {}
+
     /// Reconciles strategy topology state with an already-materialized backend set.
     ///
     /// This is used during constructor-time initialization, where the balancer
@@ -194,6 +223,14 @@ pub trait Strategy: fmt::Debug + Send + Sync {
     /// Strategies with per-backend state can override this to keep their
     /// topology metadata aligned with the balancer's backend list.
     fn on_backend_removed(&self, _index: usize) {}
+
+    /// Notifies the strategy that the backend list was reordered.
+    ///
+    /// `new_to_old[new_index]` gives the previous index of the backend now
+    /// stored at `new_index`. Strategies with index-coupled state can use this
+    /// to preserve affinity or per-backend bookkeeping across snapshot
+    /// reconciliations that keep the same backend set but change ordering.
+    fn on_backends_reordered(&self, _new_to_old: &[usize]) {}
 }
 
 // ─── RoundRobin ───────────────────────────────────────────────────────────
@@ -238,13 +275,19 @@ impl Strategy for RoundRobin {
 /// connection affinity by using the first backend in the list until it becomes
 /// unavailable, then failing over to the next available backend.
 #[derive(Debug)]
-pub struct PickFirst;
+pub struct PickFirst {
+    active: AtomicUsize,
+}
 
 impl PickFirst {
+    const NO_ACTIVE_BACKEND: usize = usize::MAX;
+
     /// Create a new pick-first strategy.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            active: AtomicUsize::new(Self::NO_ACTIVE_BACKEND),
+        }
     }
 }
 
@@ -259,13 +302,86 @@ impl Strategy for PickFirst {
         if loads.is_empty() {
             return None;
         }
-        // Always pick the first backend (index 0)
-        Some(0)
+        let active = self.active.load(Ordering::Relaxed);
+        if active < loads.len() {
+            Some(active)
+        } else {
+            Some(0)
+        }
     }
 
     fn permits_index(&self, index: usize, loads: &[u64]) -> bool {
-        // Only permit index 0 (first backend) unless it's unavailable
-        index < loads.len() && index == 0
+        if index >= loads.len() {
+            return false;
+        }
+        let active = self.active.load(Ordering::Relaxed);
+        if active < loads.len() {
+            index == active
+        } else {
+            index == 0
+        }
+    }
+
+    fn permits_fallback_index(&self, picked: usize, candidate: usize, loads: &[u64]) -> bool {
+        picked < loads.len() && candidate < loads.len()
+    }
+
+    fn candidate_for_attempt(&self, picked: usize, attempt: usize, len: usize) -> Option<usize> {
+        if picked >= len || attempt >= len {
+            return None;
+        }
+        if attempt == 0 {
+            return Some(picked);
+        }
+        let natural = attempt - 1;
+        if natural < picked {
+            Some(natural)
+        } else {
+            let shifted = natural + 1;
+            (shifted < len).then_some(shifted)
+        }
+    }
+
+    fn note_dispatch(&self, _picked: usize, chosen: usize, loads: &[u64]) {
+        if chosen < loads.len() {
+            self.active.store(chosen, Ordering::Relaxed);
+        }
+    }
+
+    fn sync_backend_count(&self, count: usize) {
+        let active = self.active.load(Ordering::Relaxed);
+        if count == 0 || active >= count {
+            self.active
+                .store(Self::NO_ACTIVE_BACKEND, Ordering::Relaxed);
+        }
+    }
+
+    fn on_backend_removed(&self, index: usize) {
+        let active = self.active.load(Ordering::Relaxed);
+        if active == Self::NO_ACTIVE_BACKEND {
+            return;
+        }
+        if index < active {
+            self.active.store(active - 1, Ordering::Relaxed);
+        }
+    }
+
+    fn on_backends_reordered(&self, new_to_old: &[usize]) {
+        let active = self.active.load(Ordering::Relaxed);
+        if active == Self::NO_ACTIVE_BACKEND {
+            return;
+        }
+
+        if let Some((new_index, _)) = new_to_old
+            .iter()
+            .enumerate()
+            .find(|(_, old_index)| **old_index == active)
+        {
+            self.active.store(new_index, Ordering::Relaxed);
+        } else {
+            self.active
+                .store(Self::NO_ACTIVE_BACKEND, Ordering::Relaxed);
+        }
     }
 }
 
@@ -437,6 +553,32 @@ impl Strategy for Weighted {
             .is_some_and(|weight| weight > 0)
     }
 
+    fn note_dispatch(&self, picked: usize, chosen: usize, _loads: &[u64]) {
+        if picked == chosen {
+            return;
+        }
+
+        let mut state = self.state.lock();
+        let len = state
+            .active_backend_count
+            .min(state.weights.len())
+            .min(state.current_weights.len());
+        if picked >= len || chosen >= len {
+            return;
+        }
+
+        let total_weight: i64 = state.weights[..len].iter().map(|&w| i64::from(w)).sum();
+        if total_weight == 0 {
+            return;
+        }
+
+        // `pick()` already debited the speculative choice. When readiness
+        // fallback dispatches elsewhere, move that single SWRR debit to the
+        // backend that actually handled the request so future picks stay fair.
+        state.current_weights[picked] += total_weight;
+        state.current_weights[chosen] -= total_weight;
+    }
+
     fn sync_backend_count(&self, count: usize) {
         let mut state = self.state.lock();
         if state.weights.len() < count {
@@ -469,6 +611,27 @@ impl Strategy for Weighted {
         if index < state.current_weights.len() {
             state.current_weights.remove(index);
         }
+    }
+
+    fn on_backends_reordered(&self, new_to_old: &[usize]) {
+        let mut state = self.state.lock();
+        let reordered_weights: Vec<u32> = new_to_old
+            .iter()
+            .map(|&old_index| state.weights.get(old_index).copied().unwrap_or(1))
+            .collect();
+        let reordered_current_weights: Vec<i64> = new_to_old
+            .iter()
+            .map(|&old_index| {
+                state
+                    .current_weights
+                    .get(old_index)
+                    .copied()
+                    .unwrap_or_default()
+            })
+            .collect();
+        state.weights = reordered_weights;
+        state.current_weights = reordered_current_weights;
+        state.active_backend_count = new_to_old.len();
     }
 }
 
@@ -521,6 +684,20 @@ pub struct LoadBalancer<S, T: Strategy> {
 struct Backend<S> {
     service: Mutex<S>,
     load: Arc<LoadMetric>,
+    probe_waker: Waker,
+    probe_woke: Arc<AtomicBool>,
+}
+
+impl<S> Backend<S> {
+    fn new(service: S) -> Self {
+        let (probe_waker, probe_woke) = tracked_probe_waker();
+        Self {
+            service: Mutex::new(service),
+            load: Arc::new(LoadMetric::new()),
+            probe_waker,
+            probe_woke,
+        }
+    }
 }
 
 impl<S: fmt::Debug, T: Strategy> fmt::Debug for LoadBalancer<S, T> {
@@ -539,12 +716,7 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
     pub fn new(strategy: T, backends: Vec<S>) -> Self {
         let backends: Vec<_> = backends
             .into_iter()
-            .map(|s| {
-                Arc::new(Backend {
-                    service: Mutex::new(s),
-                    load: Arc::new(LoadMetric::new()),
-                })
-            })
+            .map(|s| Arc::new(Backend::new(s)))
             .collect();
         strategy.sync_backend_count(backends.len());
         Self {
@@ -567,10 +739,7 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
     pub fn push(&self, service: S) {
         let mut backends = self.backends.lock();
         let index = backends.len();
-        backends.push(Arc::new(Backend {
-            service: Mutex::new(service),
-            load: Arc::new(LoadMetric::new()),
-        }));
+        backends.push(Arc::new(Backend::new(service)));
         drop(backends);
         self.strategy.on_backend_inserted(index);
     }
@@ -619,7 +788,7 @@ where
 
 impl<S, T: Strategy> LoadBalancer<S, T>
 where
-    S: Eq,
+    S: Eq + Clone,
 {
     /// Apply topology changes from a [`Discover`] source.
     ///
@@ -643,10 +812,7 @@ where
                     }
 
                     let index = backends.len();
-                    backends.push(Arc::new(Backend {
-                        service: Mutex::new(service),
-                        load: Arc::new(LoadMetric::new()),
-                    }));
+                    backends.push(Arc::new(Backend::new(service)));
                     self.strategy.on_backend_inserted(index);
                 }
                 Change::Remove(service) => {
@@ -675,17 +841,46 @@ where
             self.strategy.on_backend_removed(index);
         }
 
-        for service in endpoints {
-            if backends_contain_service(&backends, &service) {
+        for service in &endpoints {
+            if backends_contain_service(&backends, service) {
                 continue;
             }
 
             let index = backends.len();
-            backends.push(Arc::new(Backend {
-                service: Mutex::new(service),
-                load: Arc::new(LoadMetric::new()),
-            }));
+            backends.push(Arc::new(Backend::new(service.clone())));
             self.strategy.on_backend_inserted(index);
+        }
+
+        let needs_reorder = backends.len() == endpoints.len()
+            && endpoints
+                .iter()
+                .zip(backends.iter())
+                .any(|(endpoint, backend)| !backend_matches_service(backend, endpoint));
+
+        if needs_reorder {
+            let mut drained: Vec<Option<Arc<Backend<S>>>> = backends.drain(..).map(Some).collect();
+            let mut reordered = Vec::with_capacity(endpoints.len());
+            let mut new_to_old = Vec::with_capacity(endpoints.len());
+
+            for endpoint in &endpoints {
+                let old_index = drained
+                    .iter()
+                    .position(|candidate| {
+                        candidate
+                            .as_ref()
+                            .is_some_and(|backend| backend_matches_service(backend, endpoint))
+                    })
+                    .expect("discovery snapshot diverged from reconciled backend set");
+                reordered.push(
+                    drained[old_index]
+                        .take()
+                        .expect("backend already moved during reorder"),
+                );
+                new_to_old.push(old_index);
+            }
+
+            *backends = reordered;
+            self.strategy.on_backends_reordered(&new_to_old);
         }
 
         drop(backends);
@@ -728,21 +923,39 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
         let mut req = Some(req);
 
         for offset in 0..backend_handles.len() {
-            let candidate_idx = (idx + offset) % backend_handles.len();
-            if !self.strategy.permits_index(candidate_idx, &loads) {
+            let Some(candidate_idx) =
+                self.strategy
+                    .candidate_for_attempt(idx, offset, backend_handles.len())
+            else {
+                continue;
+            };
+            let permitted = if offset == 0 {
+                self.strategy.permits_index(candidate_idx, &loads)
+            } else {
+                self.strategy
+                    .permits_fallback_index(idx, candidate_idx, &loads)
+            };
+            if !permitted {
                 continue;
             }
             let backend = &backend_handles[candidate_idx];
             let mut svc = backend.service.lock();
 
-            let (mut readiness, woke_during_poll) =
-                poll_service_ready_once::<S, Request>(&mut *svc);
+            let (mut readiness, woke_during_poll) = poll_service_ready_once::<S, Request>(
+                &mut *svc,
+                &backend.probe_waker,
+                backend.probe_woke.as_ref(),
+            );
             if matches!(readiness, Poll::Pending) && woke_during_poll {
                 // Preserve same-turn readiness edges from backends that
                 // self-wake during `poll_ready` and become callable on the
                 // immediate follow-up poll, without spinning forever on a
                 // repeatedly self-waking-but-still-pending backend.
-                let (next_readiness, _) = poll_service_ready_once::<S, Request>(&mut *svc);
+                let (next_readiness, _) = poll_service_ready_once::<S, Request>(
+                    &mut *svc,
+                    &backend.probe_waker,
+                    backend.probe_woke.as_ref(),
+                );
                 readiness = next_readiness;
             }
 
@@ -753,6 +966,7 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
                         req.take()
                             .expect("load-balanced request must be consumed once"),
                     );
+                    self.strategy.note_dispatch(idx, candidate_idx, &loads);
                     let load_metric = load_guard.defuse();
                     drop(svc);
 
@@ -875,6 +1089,12 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn push_waker_if_new(wakers: &mut Vec<Waker>, waker: &Waker) {
+        if wakers.iter().all(|existing| !existing.will_wake(waker)) {
+            wakers.push(waker.clone());
+        }
     }
 
     // ================================================================
@@ -1401,6 +1621,144 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    enum PickFirstBackend {
+        Pending,
+        Ready(u32),
+        ReadinessError(&'static str),
+    }
+
+    impl Service<u32> for PickFirstBackend {
+        type Response = u32;
+        type Error = &'static str;
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            match self {
+                Self::Pending => Poll::Pending,
+                Self::Ready(_) => Poll::Ready(Ok(())),
+                Self::ReadinessError(err) => Poll::Ready(Err(*err)),
+            }
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            match self {
+                Self::Ready(response) => std::future::ready(Ok(*response)),
+                Self::Pending => panic!("pending pick_first backend must not be called"),
+                Self::ReadinessError(_) => {
+                    panic!("readiness-error pick_first backend must not be called")
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum StickyPickFirstBackend {
+        PendingThenReady {
+            response: u32,
+            first_poll_pending: bool,
+            ready_polls: Arc<AtomicUsize>,
+        },
+        ReadyThenPending {
+            response: u32,
+            remaining_ready_polls: usize,
+        },
+    }
+
+    impl StickyPickFirstBackend {
+        fn pending_then_ready(response: u32) -> Self {
+            Self::PendingThenReady {
+                response,
+                first_poll_pending: true,
+                ready_polls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn ready_then_pending(response: u32, remaining_ready_polls: usize) -> Self {
+            Self::ReadyThenPending {
+                response,
+                remaining_ready_polls,
+            }
+        }
+
+        fn ready_polls(&self) -> Arc<AtomicUsize> {
+            match self {
+                Self::PendingThenReady { ready_polls, .. } => Arc::clone(ready_polls),
+                Self::ReadyThenPending { .. } => Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl Service<u32> for StickyPickFirstBackend {
+        type Response = u32;
+        type Error = ();
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            match self {
+                Self::PendingThenReady {
+                    first_poll_pending,
+                    ready_polls,
+                    ..
+                } => {
+                    if *first_poll_pending {
+                        *first_poll_pending = false;
+                        Poll::Pending
+                    } else {
+                        ready_polls.fetch_add(1, Ordering::SeqCst);
+                        Poll::Ready(Ok(()))
+                    }
+                }
+                Self::ReadyThenPending {
+                    remaining_ready_polls,
+                    ..
+                } => {
+                    if *remaining_ready_polls > 0 {
+                        *remaining_ready_polls -= 1;
+                        Poll::Ready(Ok(()))
+                    } else {
+                        Poll::Pending
+                    }
+                }
+            }
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            let response = match self {
+                Self::PendingThenReady { response, .. }
+                | Self::ReadyThenPending { response, .. } => *response,
+            };
+            std::future::ready(Ok(response))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct ProbeLeakService {
+        waiters: Arc<Mutex<Vec<Waker>>>,
+    }
+
+    impl ProbeLeakService {
+        fn new(waiters: Arc<Mutex<Vec<Waker>>>) -> Self {
+            Self { waiters }
+        }
+    }
+
+    impl Service<u32> for ProbeLeakService {
+        type Response = u32;
+        type Error = ();
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            let mut waiters = self.waiters.lock();
+            push_waker_if_new(&mut waiters, cx.waker());
+            Poll::Pending
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            panic!("probe leak backend must never be called while pending");
+        }
+    }
+
     #[derive(Debug)]
     struct ScriptedDiscover<K, E> {
         polls: Mutex<VecDeque<Result<Vec<Change<K>>, E>>>,
@@ -1453,6 +1811,48 @@ mod tests {
 
         fn endpoints(&self) -> Vec<Self::Key> {
             self.endpoints.lock().clone()
+        }
+    }
+
+    #[derive(Debug)]
+    struct SnapshotDiscover<K, E> {
+        polls: Mutex<VecDeque<Result<Vec<Change<K>>, E>>>,
+        snapshots: Mutex<VecDeque<Vec<K>>>,
+    }
+
+    impl<K, E> SnapshotDiscover<K, E> {
+        fn new(polls: Vec<Result<Vec<Change<K>>, E>>, snapshots: Vec<Vec<K>>) -> Self {
+            Self {
+                polls: Mutex::new(polls.into()),
+                snapshots: Mutex::new(snapshots.into()),
+            }
+        }
+    }
+
+    impl<K, E> Discover for SnapshotDiscover<K, E>
+    where
+        K: Clone + Eq + std::hash::Hash + fmt::Debug + Send + Sync + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        type Key = K;
+        type Error = E;
+
+        fn poll_discover(&self) -> Result<Vec<Change<K>>, Self::Error> {
+            self.polls
+                .lock()
+                .pop_front()
+                .unwrap_or_else(|| Ok(Vec::new()))
+        }
+
+        fn endpoints(&self) -> Vec<Self::Key> {
+            let mut snapshots = self.snapshots.lock();
+            if snapshots.len() > 1 {
+                snapshots
+                    .pop_front()
+                    .expect("snapshot queue must be non-empty")
+            } else {
+                snapshots.front().cloned().unwrap_or_default()
+            }
         }
     }
 
@@ -1737,6 +2137,186 @@ mod tests {
     }
 
     #[test]
+    fn lb_weighted_fallback_reassigns_scheduler_credit_to_actual_backend() {
+        init_test("lb_weighted_fallback_reassigns_scheduler_credit_to_actual_backend");
+        let lb = LoadBalancer::new(
+            Weighted::new(vec![1, 1]),
+            vec![ReadyArmService::pending(), ReadyArmService::new(55)],
+        );
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut first = lb
+            .call_balanced(7)
+            .expect("fallback backend should handle the first weighted request");
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut cx),
+            Poll::Ready(Ok(55))
+        ));
+        assert_eq!(lb.loads(), vec![0, 0]);
+
+        let loads = lb.loads();
+        let next = lb
+            .strategy()
+            .pick(&loads)
+            .expect("weighted strategy should still pick a backend");
+        assert_eq!(
+            next, 0,
+            "SWRR accounting must follow the backend that actually accepted the request"
+        );
+        crate::test_complete!("lb_weighted_fallback_reassigns_scheduler_credit_to_actual_backend");
+    }
+
+    #[test]
+    fn lb_pick_first_fails_over_when_primary_is_pending() {
+        init_test("lb_pick_first_fails_over_when_primary_is_pending");
+        let lb = LoadBalancer::new(
+            PickFirst::new(),
+            vec![PickFirstBackend::Pending, PickFirstBackend::Ready(77)],
+        );
+
+        let mut fut = lb
+            .call_balanced(7)
+            .expect("pick_first should fail over when the primary is pending");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let output = Pin::new(&mut fut).poll(&mut cx);
+
+        assert!(matches!(output, Poll::Ready(Ok(77))));
+        assert_eq!(lb.loads(), vec![0, 0]);
+        crate::test_complete!("lb_pick_first_fails_over_when_primary_is_pending");
+    }
+
+    #[test]
+    fn lb_pick_first_fails_over_when_primary_readiness_errors() {
+        init_test("lb_pick_first_fails_over_when_primary_readiness_errors");
+        let lb = LoadBalancer::new(
+            PickFirst::new(),
+            vec![
+                PickFirstBackend::ReadinessError("primary not ready"),
+                PickFirstBackend::Ready(91),
+            ],
+        );
+
+        let mut fut = lb
+            .call_balanced(7)
+            .expect("pick_first should fail over when the primary readiness errors");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let output = Pin::new(&mut fut).poll(&mut cx);
+
+        assert!(matches!(output, Poll::Ready(Ok(91))));
+        assert_eq!(lb.loads(), vec![0, 0]);
+        crate::test_complete!("lb_pick_first_fails_over_when_primary_readiness_errors");
+    }
+
+    #[test]
+    fn lb_pick_first_sticks_to_successful_fallback_backend() {
+        init_test("lb_pick_first_sticks_to_successful_fallback_backend");
+        let primary = StickyPickFirstBackend::pending_then_ready(11);
+        let primary_ready_polls = primary.ready_polls();
+        let lb = LoadBalancer::new(
+            PickFirst::new(),
+            vec![primary, StickyPickFirstBackend::ready_then_pending(22, 2)],
+        );
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut first = lb
+            .call_balanced(7)
+            .expect("fallback backend should handle the first request");
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut cx),
+            Poll::Ready(Ok(22))
+        ));
+
+        let mut second = lb
+            .call_balanced(8)
+            .expect("pick_first should stay on the chosen fallback backend");
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut cx),
+            Poll::Ready(Ok(22))
+        ));
+        assert_eq!(
+            primary_ready_polls.load(Ordering::SeqCst),
+            0,
+            "pick_first must not reprobe the original primary after failing over to a healthy backend"
+        );
+        assert_eq!(lb.loads(), vec![0, 0]);
+        crate::test_complete!("lb_pick_first_sticks_to_successful_fallback_backend");
+    }
+
+    #[test]
+    fn lb_pick_first_fails_over_again_when_active_backend_becomes_pending() {
+        init_test("lb_pick_first_fails_over_again_when_active_backend_becomes_pending");
+        let lb = LoadBalancer::new(
+            PickFirst::new(),
+            vec![
+                StickyPickFirstBackend::pending_then_ready(11),
+                StickyPickFirstBackend::ready_then_pending(22, 1),
+            ],
+        );
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut first = lb
+            .call_balanced(7)
+            .expect("fallback backend should handle the first request");
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut cx),
+            Poll::Ready(Ok(22))
+        ));
+
+        let mut second = lb
+            .call_balanced(8)
+            .expect("pick_first should move again when the active backend stops accepting work");
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut cx),
+            Poll::Ready(Ok(11))
+        ));
+        assert_eq!(lb.loads(), vec![0, 0]);
+        crate::test_complete!("lb_pick_first_fails_over_again_when_active_backend_becomes_pending");
+    }
+
+    #[test]
+    fn lb_pick_first_restarts_fallback_search_from_front_of_list() {
+        init_test("lb_pick_first_restarts_fallback_search_from_front_of_list");
+        let lb = LoadBalancer::new(
+            PickFirst::new(),
+            vec![
+                StickyPickFirstBackend::pending_then_ready(11),
+                StickyPickFirstBackend::ready_then_pending(22, 1),
+                StickyPickFirstBackend::ready_then_pending(33, 2),
+            ],
+        );
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut first = lb
+            .call_balanced(7)
+            .expect("fallback backend should handle the first request");
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut cx),
+            Poll::Ready(Ok(22))
+        ));
+
+        let mut second = lb
+            .call_balanced(8)
+            .expect("pick_first should restart at the front of the list");
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut cx),
+            Poll::Ready(Ok(11))
+        ));
+
+        assert_eq!(lb.loads(), vec![0, 0, 0]);
+        crate::test_complete!("lb_pick_first_restarts_fallback_search_from_front_of_list");
+    }
+
+    #[test]
     fn lb_call_balanced_reports_when_all_backends_pending() {
         init_test("lb_call_balanced_reports_when_all_backends_pending");
         let lb = LoadBalancer::new(RoundRobin::new(), vec![ReadyArmService::pending()]);
@@ -1850,6 +2430,30 @@ mod tests {
     }
 
     #[test]
+    fn lb_pending_probe_reuses_backend_probe_waker() {
+        init_test("lb_pending_probe_reuses_backend_probe_waker");
+        let waiters = Arc::new(Mutex::new(Vec::new()));
+        let lb = LoadBalancer::new(
+            RoundRobin::new(),
+            vec![ProbeLeakService::new(Arc::clone(&waiters))],
+        );
+
+        for _ in 0..4 {
+            let err = lb
+                .call_balanced(7)
+                .expect_err("pending backend should not dispatch");
+            assert!(matches!(err, LoadBalanceError::NoReadyBackends));
+        }
+
+        assert_eq!(
+            waiters.lock().len(),
+            1,
+            "repeated probes should reuse the same backend probe waker instead of leaking waiters"
+        );
+        crate::test_complete!("lb_pending_probe_reuses_backend_probe_waker");
+    }
+
+    #[test]
     fn lb_call_balanced_preserves_backend_local_state() {
         init_test("lb_call_balanced_preserves_backend_local_state");
         let lb = LoadBalancer::new(RoundRobin::new(), vec![SingleUseService::new(55)]);
@@ -1955,6 +2559,118 @@ mod tests {
             vec!["backend-a".to_string(), "backend-b".to_string()]
         );
         crate::test_complete!("lb_update_from_discover_reconciles_late_joiner_against_snapshot");
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct OrderedReadyService {
+        id: u32,
+    }
+
+    impl OrderedReadyService {
+        fn new(id: u32) -> Self {
+            Self { id }
+        }
+    }
+
+    impl Service<u32> for OrderedReadyService {
+        type Response = u32;
+        type Error = ();
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            std::future::ready(Ok(self.id))
+        }
+    }
+
+    #[test]
+    fn lb_update_from_discover_reorders_backends_to_snapshot_for_pick_first() {
+        init_test("lb_update_from_discover_reorders_backends_to_snapshot_for_pick_first");
+        let backend_a = OrderedReadyService::new(10);
+        let backend_b = OrderedReadyService::new(20);
+        let discover = SnapshotDiscover::<OrderedReadyService, std::io::Error>::new(
+            vec![
+                Ok(vec![
+                    Change::Insert(backend_a.clone()),
+                    Change::Insert(backend_b.clone()),
+                ]),
+                Ok(Vec::new()),
+            ],
+            vec![
+                vec![backend_a.clone(), backend_b.clone()],
+                vec![backend_b.clone(), backend_a.clone()],
+            ],
+        );
+        let lb = LoadBalancer::empty(PickFirst::new());
+
+        lb.update_from_discover(&discover)
+            .expect("initial snapshot should populate backends");
+        lb.update_from_discover(&discover)
+            .expect("reordered snapshot should be reconciled");
+
+        let response = futures_lite::future::block_on(
+            lb.call_balanced(1)
+                .expect("pick_first should find a ready backend"),
+        )
+        .expect("backend should respond");
+        assert_eq!(
+            response, 20,
+            "pick_first must honor the discovery snapshot order before any backend is active"
+        );
+        crate::test_complete!(
+            "lb_update_from_discover_reorders_backends_to_snapshot_for_pick_first"
+        );
+    }
+
+    #[test]
+    fn lb_update_from_discover_preserves_active_pick_first_backend_across_reorder() {
+        init_test("lb_update_from_discover_preserves_active_pick_first_backend_across_reorder");
+        let backend_a = OrderedReadyService::new(10);
+        let backend_b = OrderedReadyService::new(20);
+        let discover = SnapshotDiscover::<OrderedReadyService, std::io::Error>::new(
+            vec![
+                Ok(vec![
+                    Change::Insert(backend_a.clone()),
+                    Change::Insert(backend_b.clone()),
+                ]),
+                Ok(Vec::new()),
+            ],
+            vec![
+                vec![backend_a.clone(), backend_b.clone()],
+                vec![backend_b.clone(), backend_a.clone()],
+            ],
+        );
+        let lb = LoadBalancer::empty(PickFirst::new());
+
+        lb.update_from_discover(&discover)
+            .expect("initial snapshot should populate backends");
+        let first = futures_lite::future::block_on(
+            lb.call_balanced(1)
+                .expect("initial pick_first dispatch should succeed"),
+        )
+        .expect("initial backend should respond");
+        assert_eq!(
+            first, 10,
+            "backend A should become the active pick_first target"
+        );
+
+        lb.update_from_discover(&discover)
+            .expect("reordered snapshot should be reconciled");
+        let second = futures_lite::future::block_on(
+            lb.call_balanced(2)
+                .expect("sticky pick_first dispatch should succeed after reorder"),
+        )
+        .expect("active backend should still respond");
+        assert_eq!(
+            second, 10,
+            "reordering retained backends must preserve the active pick_first backend instead of retargeting by stale index"
+        );
+        crate::test_complete!(
+            "lb_update_from_discover_preserves_active_pick_first_backend_across_reorder"
+        );
     }
 
     #[test]

@@ -60,7 +60,8 @@ impl<T> ReceiverStream<T> {
     /// Unwraps the stream into the inner receiver.
     #[inline]
     #[must_use]
-    pub fn into_inner(self) -> mpsc::Receiver<T> {
+    pub fn into_inner(mut self) -> mpsc::Receiver<T> {
+        self.inner.clear_recv_waker();
         self.inner
     }
 }
@@ -249,5 +250,42 @@ mod tests {
         crate::assert_with_log!(got_99, "message preserved after into_inner", true, got_99);
 
         crate::test_complete!("receiver_stream_accessors");
+    }
+
+    #[test]
+    fn receiver_stream_into_inner_clears_pending_waker_registration() {
+        init_test("receiver_stream_into_inner_clears_pending_waker_registration");
+        let cx_recv: Cx = Cx::for_testing();
+        let (tx, rx) = mpsc::channel::<i32>(4);
+        let mut stream = ReceiverStream::new(cx_recv, rx);
+
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waker = counting_waker(Arc::clone(&wake_count));
+        let mut task_cx = Context::from_waker(&waker);
+
+        let pending = Pin::new(&mut stream).poll_next(&mut task_cx);
+        crate::assert_with_log!(
+            pending.is_pending(),
+            "first poll pending",
+            true,
+            pending.is_pending()
+        );
+
+        let mut recovered = stream.into_inner();
+        tx.try_send(7).expect("send");
+
+        let wake_total = wake_count.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            wake_total == 0,
+            "into_inner clears stale stream waker",
+            0usize,
+            wake_total
+        );
+
+        let msg = recovered.try_recv();
+        let got_7 = matches!(msg, Ok(7));
+        crate::assert_with_log!(got_7, "recovered receiver still receives", true, got_7);
+
+        crate::test_complete!("receiver_stream_into_inner_clears_pending_waker_registration");
     }
 }

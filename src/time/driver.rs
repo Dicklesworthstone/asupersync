@@ -314,7 +314,19 @@ impl VirtualClock {
     /// No-op when the clock is paused.
     pub fn advance(&self, nanos: u64) {
         if !self.paused.load(Ordering::Acquire) {
-            self.now.fetch_add(nanos, Ordering::Release);
+            let mut current = self.now.load(Ordering::Acquire);
+            loop {
+                let next = current.saturating_add(nanos);
+                match self.now.compare_exchange_weak(
+                    current,
+                    next,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => current = actual,
+                }
+            }
         }
     }
 
@@ -342,7 +354,11 @@ impl VirtualClock {
 
     /// Sets the current time (for testing).
     pub fn set(&self, time: Time) {
-        self.now.store(time.as_nanos(), Ordering::Release);
+        let nanos = time.as_nanos();
+        self.now.store(nanos, Ordering::Release);
+        if self.paused.load(Ordering::Acquire) {
+            self.frozen_at.store(nanos, Ordering::Release);
+        }
     }
 
     /// Pauses the clock, freezing `now()` at the current time.
@@ -746,6 +762,7 @@ impl TimerDriverHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::time::{CoalescingConfig, TimerWheelConfig};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
@@ -801,6 +818,23 @@ mod tests {
     }
 
     #[test]
+    fn virtual_clock_advance_saturates_at_time_max() {
+        init_test("virtual_clock_advance_saturates_at_time_max");
+        let clock = VirtualClock::starting_at(Time::from_nanos(u64::MAX - 5));
+
+        clock.advance(10);
+
+        let now = clock.now();
+        crate::assert_with_log!(
+            now == Time::MAX,
+            "advance saturates at Time::MAX",
+            Time::MAX,
+            now
+        );
+        crate::test_complete!("virtual_clock_advance_saturates_at_time_max");
+    }
+
+    #[test]
     fn virtual_clock_advance_to() {
         init_test("virtual_clock_advance_to");
         let clock = VirtualClock::new();
@@ -848,6 +882,33 @@ mod tests {
             now_back
         );
         crate::test_complete!("virtual_clock_set");
+    }
+
+    #[test]
+    fn virtual_clock_set_updates_frozen_time_while_paused() {
+        init_test("virtual_clock_set_updates_frozen_time_while_paused");
+        let clock = VirtualClock::starting_at(Time::from_secs(1));
+        clock.pause();
+
+        clock.set(Time::from_secs(9));
+
+        let now = clock.now();
+        crate::assert_with_log!(
+            now == Time::from_secs(9),
+            "set updates the frozen clock view while paused",
+            Time::from_secs(9),
+            now
+        );
+
+        clock.resume();
+        let resumed_now = clock.now();
+        crate::assert_with_log!(
+            resumed_now == Time::from_secs(9),
+            "resume continues from the explicitly set time",
+            Time::from_secs(9),
+            resumed_now
+        );
+        crate::test_complete!("virtual_clock_set_updates_frozen_time_while_paused");
     }
 
     #[test]
@@ -1220,6 +1281,37 @@ mod tests {
             actual
         );
         crate::test_complete!("timer_driver_next_deadline_clamps_overdue_timer_to_now");
+    }
+
+    #[test]
+    fn timer_driver_next_deadline_returns_now_for_coalescing_ready_group() {
+        init_test("timer_driver_next_deadline_returns_now_for_coalescing_ready_group");
+        let clock = Arc::new(VirtualClock::new());
+        let driver = TimerDriver {
+            clock: clock.clone(),
+            wheel: Mutex::new(TimerWheel::with_config(
+                Time::ZERO,
+                TimerWheelConfig::default(),
+                CoalescingConfig::new()
+                    .coalesce_window(Duration::from_millis(5))
+                    .min_group_size(2)
+                    .enable(),
+            )),
+        };
+
+        driver.register(Time::from_millis(2), futures_waker());
+        driver.register(Time::from_millis(4), futures_waker());
+        clock.set(Time::from_millis(1));
+
+        let actual = driver.next_deadline();
+        let expected = Some(Time::from_millis(1));
+        crate::assert_with_log!(
+            actual == expected,
+            "driver reports immediate wake when coalescing can fire now",
+            expected,
+            actual
+        );
+        crate::test_complete!("timer_driver_next_deadline_returns_now_for_coalescing_ready_group");
     }
 
     #[test]
@@ -1968,7 +2060,7 @@ mod tests {
                 .min(u128::from(u64::MAX)) as u64,
         );
         while wall_clock.now() < timeout && counter.load(Ordering::SeqCst) == 0 {
-            handle.process_timers();
+            let _ = handle.process_timers();
             std::thread::sleep(Duration::from_millis(1));
         }
 
@@ -2040,7 +2132,7 @@ mod tests {
         let mut expected_fired = 0;
         for advance_duration in &advance_steps {
             virtual_clock.advance(advance_duration.as_nanos() as u64);
-            handle.process_timers();
+            let _ = handle.process_timers();
 
             expected_fired += 1;
             let actual_fired = counter.load(Ordering::SeqCst);
@@ -2096,7 +2188,7 @@ mod tests {
 
         // Advance time to fire all timers
         virtual_clock.advance(Duration::from_millis(200).as_nanos() as u64);
-        handle.process_timers();
+        let _ = handle.process_timers();
 
         let fired_count = counters
             .iter()
@@ -2160,7 +2252,7 @@ mod tests {
 
         // Advance past deadline - cancelled timer should not fire
         virtual_clock.advance(Duration::from_millis(200).as_nanos() as u64);
-        handle.process_timers();
+        let _ = handle.process_timers();
 
         crate::assert_with_log!(
             counter.load(Ordering::SeqCst) == 0,
@@ -2229,7 +2321,7 @@ mod tests {
 
         // Advance browser clock
         browser_clock.observe_host_time(Duration::from_millis(50));
-        handle.process_timers();
+        let _ = handle.process_timers();
 
         crate::assert_with_log!(
             counter.load(Ordering::SeqCst) > 0,

@@ -83,6 +83,7 @@ impl<S> Layer<S> for BufferLayer {
 /// and worker.
 pub struct Buffer<S> {
     shared: Arc<SharedBuffer<S>>,
+    ready_reserved: bool,
 }
 
 struct SharedBuffer<S> {
@@ -90,8 +91,9 @@ struct SharedBuffer<S> {
     inner: Mutex<S>,
     /// Buffer capacity.
     capacity: usize,
-    /// Number of requests currently in the buffer (pending processing).
-    pending: Mutex<usize>,
+    /// Occupied capacity. `pending` tracks admitted requests; `reserved` tracks
+    /// readiness windows that have been granted but not yet consumed by `call`.
+    slots: Mutex<SlotCounts>,
     /// Whether the buffer has been closed.
     closed: Mutex<bool>,
     /// Wakers waiting for capacity to become available.
@@ -100,9 +102,45 @@ struct SharedBuffer<S> {
     inner_wakers: Mutex<Vec<std::task::Waker>>,
 }
 
+#[derive(Default)]
+struct SlotCounts {
+    pending: usize,
+    reserved: usize,
+}
+
+impl SlotCounts {
+    fn occupied(&self) -> usize {
+        self.pending + self.reserved
+    }
+}
+
 fn push_waker_if_new(wakers: &mut Vec<Waker>, waker: &Waker) {
     if wakers.iter().all(|existing| !existing.will_wake(waker)) {
         wakers.push(waker.clone());
+    }
+}
+
+fn release_pending_capacity<S>(shared: &SharedBuffer<S>) {
+    let mut slots = shared.slots.lock();
+    slots.pending = slots.pending.saturating_sub(1);
+    let ready_wakers = std::mem::take(&mut *shared.ready_wakers.lock());
+    let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
+    drop(slots);
+    for waker in ready_wakers {
+        waker.wake();
+    }
+    for waker in inner_wakers {
+        waker.wake();
+    }
+}
+
+fn release_reserved_capacity<S>(shared: &SharedBuffer<S>) {
+    let mut slots = shared.slots.lock();
+    slots.reserved = slots.reserved.saturating_sub(1);
+    let ready_wakers = std::mem::take(&mut *shared.ready_wakers.lock());
+    drop(slots);
+    for waker in ready_wakers {
+        waker.wake();
     }
 }
 
@@ -119,11 +157,12 @@ impl<S> Buffer<S> {
             shared: Arc::new(SharedBuffer {
                 inner: Mutex::new(inner),
                 capacity,
-                pending: Mutex::new(0),
+                slots: Mutex::new(SlotCounts::default()),
                 closed: Mutex::new(false),
                 ready_wakers: Mutex::new(Vec::new()),
                 inner_wakers: Mutex::new(Vec::new()),
             }),
+            ready_reserved: false,
         }
     }
 
@@ -136,19 +175,20 @@ impl<S> Buffer<S> {
     /// Returns the number of pending (buffered) requests.
     #[must_use]
     pub fn pending(&self) -> usize {
-        *self.shared.pending.lock()
+        self.shared.slots.lock().pending
     }
 
     /// Returns `true` if the buffer is full.
     #[must_use]
     pub fn is_full(&self) -> bool {
-        self.pending() >= self.shared.capacity
+        self.shared.slots.lock().occupied() >= self.shared.capacity
     }
 
-    /// Returns `true` if the buffer is empty.
+    /// Returns `true` if the buffer has no admitted requests or reserved
+    /// readiness windows.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.pending() == 0
+        self.shared.slots.lock().occupied() == 0
     }
 
     /// Close the buffer, rejecting new requests.
@@ -174,6 +214,16 @@ impl<S> Clone for Buffer<S> {
     fn clone(&self) -> Self {
         Self {
             shared: self.shared.clone(),
+            ready_reserved: false,
+        }
+    }
+}
+
+impl<S> Drop for Buffer<S> {
+    fn drop(&mut self) {
+        if self.ready_reserved {
+            self.ready_reserved = false;
+            release_reserved_capacity(self.shared.as_ref());
         }
     }
 }
@@ -183,6 +233,7 @@ impl<S> fmt::Debug for Buffer<S> {
         f.debug_struct("Buffer")
             .field("capacity", &self.shared.capacity)
             .field("pending", &self.pending())
+            .field("ready_reserved", &self.ready_reserved)
             .finish()
     }
 }
@@ -265,17 +316,7 @@ impl<F, E, S, R> BufferFuture<F, E, S, R> {
     }
 
     fn release_pending_slot(shared: &SharedBuffer<S>) {
-        let mut pending = shared.pending.lock();
-        *pending = pending.saturating_sub(1);
-        let ready_wakers = std::mem::take(&mut *shared.ready_wakers.lock());
-        let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
-        drop(pending);
-        for waker in ready_wakers {
-            waker.wake();
-        }
-        for waker in inner_wakers {
-            waker.wake();
-        }
+        release_pending_capacity(shared);
     }
 }
 
@@ -458,32 +499,45 @@ where
     type Future = BufferFuture<S::Future, S::Error, S, Request>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.ready_reserved {
+            return Poll::Ready(Ok(()));
+        }
         if *self.shared.closed.lock() {
             return Poll::Ready(Err(BufferError::Closed));
         }
-        // Lock ordering is pending -> ready_wakers everywhere to avoid inversion
-        // with completion/drop paths that decrement pending then wake waiters.
-        let pending = self.shared.pending.lock();
-        if *pending >= self.shared.capacity {
+        // Lock ordering is slots -> ready_wakers everywhere to avoid inversion
+        // with completion/drop paths that release capacity then wake waiters.
+        let mut slots = self.shared.slots.lock();
+        if slots.occupied() >= self.shared.capacity {
             let mut wakers = self.shared.ready_wakers.lock();
             push_waker_if_new(&mut wakers, cx.waker());
             Poll::Pending
         } else {
+            slots.reserved += 1;
+            self.ready_reserved = true;
             Poll::Ready(Ok(()))
         }
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
+        if self.ready_reserved {
+            self.ready_reserved = false;
+            let mut slots = self.shared.slots.lock();
+            slots.reserved = slots.reserved.saturating_sub(1);
+            slots.pending += 1;
+            return BufferFuture::waiting(req, self.shared.clone());
+        }
+
         if *self.shared.closed.lock() {
             return BufferFuture::error(BufferError::Closed);
         }
 
         {
-            let mut pending = self.shared.pending.lock();
-            if *pending >= self.shared.capacity {
+            let mut slots = self.shared.slots.lock();
+            if slots.occupied() >= self.shared.capacity {
                 return BufferFuture::error(BufferError::Full);
             }
-            *pending += 1;
+            slots.pending += 1;
         }
 
         BufferFuture::waiting(req, self.shared.clone())
@@ -1208,7 +1262,7 @@ mod tests {
     fn poll_ready_deduplicates_waker_when_full() {
         init_test("poll_ready_deduplicates_waker_when_full");
         let mut svc = Buffer::new(EchoService, 1);
-        *svc.shared.pending.lock() = 1;
+        svc.shared.slots.lock().pending = 1;
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -1225,7 +1279,7 @@ mod tests {
     fn poll_ready_deduplicates_alternating_waiters_when_full() {
         init_test("poll_ready_deduplicates_alternating_waiters_when_full");
         let mut svc = Buffer::new(EchoService, 1);
-        *svc.shared.pending.lock() = 1;
+        svc.shared.slots.lock().pending = 1;
 
         let first_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let first_waker = Waker::from(Arc::new(TestWake(Arc::clone(&first_woken))));
@@ -1246,6 +1300,90 @@ mod tests {
             "alternating parked waiters should not accumulate duplicate readiness wakers"
         );
         crate::test_complete!("poll_ready_deduplicates_alternating_waiters_when_full");
+    }
+
+    #[test]
+    fn poll_ready_reserves_capacity_across_clones() {
+        init_test("poll_ready_reserves_capacity_across_clones");
+        let mut ready_holder = Buffer::new(EchoService, 1);
+        let mut waiter = ready_holder.clone();
+        let noop = noop_waker();
+        let mut noop_cx = Context::from_waker(&noop);
+
+        assert!(matches!(
+            ready_holder.poll_ready(&mut noop_cx),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(ready_holder.pending(), 0);
+        assert!(!ready_holder.is_empty());
+
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waiter_waker = Waker::from(Arc::new(TestWake(Arc::clone(&woken))));
+        let mut waiter_cx = Context::from_waker(&waiter_waker);
+        assert!(matches!(waiter.poll_ready(&mut waiter_cx), Poll::Pending));
+
+        let mut future = ready_holder.call(21);
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut noop_cx),
+            Poll::Ready(Ok(42))
+        ));
+        assert!(
+            woken.load(std::sync::atomic::Ordering::Relaxed),
+            "completing the reserved request must wake blocked clones"
+        );
+        assert!(matches!(
+            waiter.poll_ready(&mut waiter_cx),
+            Poll::Ready(Ok(()))
+        ));
+        crate::test_complete!("poll_ready_reserves_capacity_across_clones");
+    }
+
+    #[test]
+    fn dropping_reserved_handle_releases_capacity() {
+        init_test("dropping_reserved_handle_releases_capacity");
+        let mut reserved = Buffer::new(EchoService, 1);
+        let mut waiter = reserved.clone();
+        let noop = noop_waker();
+        let mut noop_cx = Context::from_waker(&noop);
+
+        assert!(matches!(
+            reserved.poll_ready(&mut noop_cx),
+            Poll::Ready(Ok(()))
+        ));
+
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waiter_waker = Waker::from(Arc::new(TestWake(Arc::clone(&woken))));
+        let mut waiter_cx = Context::from_waker(&waiter_waker);
+        assert!(matches!(waiter.poll_ready(&mut waiter_cx), Poll::Pending));
+
+        drop(reserved);
+        assert!(
+            woken.load(std::sync::atomic::Ordering::Relaxed),
+            "dropping an unused readiness window must wake blocked callers"
+        );
+        assert!(matches!(
+            waiter.poll_ready(&mut waiter_cx),
+            Poll::Ready(Ok(()))
+        ));
+        crate::test_complete!("dropping_reserved_handle_releases_capacity");
+    }
+
+    #[test]
+    fn close_preserves_already_reserved_call_window() {
+        init_test("close_preserves_already_reserved_call_window");
+        let mut svc = Buffer::new(EchoService, 1);
+        let noop = noop_waker();
+        let mut cx = Context::from_waker(&noop);
+
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        svc.close();
+
+        let mut future = svc.call(5);
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut cx),
+            Poll::Ready(Ok(10))
+        ));
+        crate::test_complete!("close_preserves_already_reserved_call_window");
     }
 
     #[test]

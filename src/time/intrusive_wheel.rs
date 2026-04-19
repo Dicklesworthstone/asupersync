@@ -392,11 +392,28 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
         self.current
     }
 
+    /// Returns the wheel's current logical time.
+    ///
+    /// This is derived from the wheel cursor/base time, not wall-clock time.
+    #[must_use]
+    fn current_time(&self) -> Instant {
+        self.base_time
+            + Duration::from_nanos(
+                self.current_tick
+                    .saturating_mul(duration_to_ns(self.resolution)),
+            )
+    }
+
     /// Computes the slot index for a given deadline.
     fn slot_for(&self, deadline: Instant) -> usize {
+        self.slot_for_with_min_tick(deadline, self.current_tick)
+    }
+
+    /// Computes the slot index for a deadline, clamping to a minimum tick.
+    fn slot_for_with_min_tick(&self, deadline: Instant, min_tick: u64) -> usize {
         let elapsed = deadline.saturating_duration_since(self.base_time);
         let ticks = elapsed.as_nanos() / self.resolution.as_nanos().max(1);
-        let safe_ticks = ticks.max(u128::from(self.current_tick));
+        let safe_ticks = ticks.max(u128::from(min_tick));
         (safe_ticks % (SLOTS as u128)) as usize
     }
 
@@ -453,9 +470,7 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
     ///
     /// All timer nodes in the wheel must be valid.
     pub unsafe fn tick(&mut self, now: Instant) -> Vec<Waker> {
-        // Collect expired timers from current slot
-        let (wakers, removed_count) = self.slots[self.current].collect_expired(now);
-        self.count = self.count.saturating_sub(removed_count);
+        let wakers = self.drain_retired_slot(self.current, now);
 
         // Advance cursor
         self.current = (self.current + 1) % SLOTS;
@@ -489,27 +504,28 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
 
         // If advancing more than SLOTS ticks, we need to scan all slots
         if ticks_to_advance >= SLOTS as u64 {
-            // Full rotation or more: collect expired from ALL slots
-            for slot in &self.slots {
-                let (wakers, removed) = slot.collect_expired(now);
-                self.count = self.count.saturating_sub(removed);
+            // Full rotation or more: every slot up to the new cursor has been
+            // logically retired, so survivors must be re-bucketed rather than
+            // left behind in already-consumed slots.
+            let min_tick = target_tick_u64.saturating_add(1);
+            for slot_idx in 0..SLOTS {
+                let wakers = self.drain_slot_with_min_tick(slot_idx, now, min_tick);
                 all_wakers.extend(wakers);
             }
             self.current = ((target_tick_u64 + 1) % (SLOTS as u64)) as usize;
         } else {
             let target_slot = (target_tick_u64 % (SLOTS as u64)) as usize;
+            let min_tick = target_tick_u64.saturating_add(1);
 
             // Process slots until we reach target (handling wrap-around)
             while self.current != target_slot {
-                let (wakers, removed) = self.slots[self.current].collect_expired(now);
-                self.count = self.count.saturating_sub(removed);
+                let wakers = self.drain_slot_with_min_tick(self.current, now, min_tick);
                 all_wakers.extend(wakers);
                 self.current = (self.current + 1) % SLOTS;
             }
 
             // Process the target slot
-            let (wakers, removed) = self.slots[self.current].collect_expired(now);
-            self.count = self.count.saturating_sub(removed);
+            let wakers = self.drain_slot_with_min_tick(self.current, now, min_tick);
             all_wakers.extend(wakers);
             self.current = (self.current + 1) % SLOTS;
         }
@@ -527,7 +543,7 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
             return None;
         }
 
-        let now = Instant::now();
+        let now = self.current_time();
         let mut min_deadline: Option<Instant> = None;
 
         for slot in &self.slots {
@@ -562,6 +578,49 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
             let _ = slot.drain();
         }
         self.count = 0;
+    }
+
+    /// Drains a slot that is being retired and re-buckets survivors.
+    ///
+    /// Timers that are not yet expired but hashed into the retiring slot can
+    /// occur at exact tick boundaries. Leaving them in-place would strand them
+    /// until the wheel wraps around.
+    unsafe fn drain_retired_slot(&mut self, slot_idx: usize, now: Instant) -> Vec<Waker> {
+        self.drain_slot_with_min_tick(slot_idx, now, self.current_tick.saturating_add(1))
+    }
+
+    unsafe fn drain_slot_with_min_tick(
+        &mut self,
+        slot_idx: usize,
+        now: Instant,
+        min_tick: u64,
+    ) -> Vec<Waker> {
+        let mut wakers = Vec::new();
+        let mut current = self.slots[slot_idx].take_all();
+
+        while let Some(node_ptr) = current {
+            let node_ref = node_ptr.as_ref();
+            let next = node_ref.next.get();
+
+            node_ref.linked.set(false);
+            node_ref.prev.set(None);
+            node_ref.next.set(None);
+
+            if node_ref.deadline() <= now {
+                if let Some(waker) = node_ref.take_waker() {
+                    wakers.push(waker);
+                }
+                self.count = self.count.saturating_sub(1);
+            } else {
+                let new_slot = self.slot_for_with_min_tick(node_ref.deadline(), min_tick);
+                node_ref.update_slot_level(new_slot, 0);
+                self.slots[new_slot].push_back(node_ptr);
+            }
+
+            current = next;
+        }
+
+        wakers
     }
 }
 
@@ -721,8 +780,7 @@ impl HierarchicalTimerWheel {
     ///
     /// All timer nodes in the wheel must be valid.
     pub unsafe fn tick(&mut self, now: Instant) -> Vec<Waker> {
-        let (mut wakers, removed) = self.level0.slots[self.level0.cursor].collect_expired(now);
-        self.count = self.count.saturating_sub(removed);
+        let mut wakers = self.drain_level0_current_slot(now);
 
         self.level0.cursor = (self.level0.cursor + 1) % LEVEL0_SLOTS;
         self.current_tick = self.current_tick.saturating_add(1);
@@ -839,7 +897,7 @@ impl HierarchicalTimerWheel {
             return None;
         }
 
-        let now = Instant::now();
+        let now = self.current_time();
         self.min_deadline()
             .map(|deadline| deadline.saturating_duration_since(now))
     }
@@ -857,32 +915,106 @@ impl HierarchicalTimerWheel {
         self.count = 0;
     }
 
+    /// Drains the current level-0 slot and re-buckets survivors.
+    ///
+    /// Level-0 slots are retired on every tick. A timer later in the same
+    /// millisecond bucket must be moved forward rather than left in a slot
+    /// that has already been consumed.
+    unsafe fn drain_level0_current_slot(&mut self, now: Instant) -> Vec<Waker> {
+        let slot_idx = self.level0.cursor;
+        let mut wakers = Vec::new();
+        let mut current_node = self.level0.slots[slot_idx].take_all();
+
+        while let Some(node_ptr) = current_node {
+            let node_ref = node_ptr.as_ref();
+            let next = node_ref.next.get();
+
+            node_ref.linked.set(false);
+            node_ref.prev.set(None);
+            node_ref.next.set(None);
+
+            if node_ref.deadline() <= now {
+                if let Some(waker) = node_ref.take_waker() {
+                    wakers.push(waker);
+                }
+                self.count = self.count.saturating_sub(1);
+            } else {
+                let (new_level, new_slot) = self
+                    .slot_for_from_tick(node_ref.deadline(), self.current_tick.saturating_add(1));
+                node_ref.update_slot_level(new_slot, new_level);
+                self.push_node(new_level, new_slot, node_ptr);
+            }
+
+            current_node = next;
+        }
+
+        wakers
+    }
+
     fn slot_for(&self, deadline: Instant) -> (u8, usize) {
-        let current = self.current_time();
+        self.slot_for_from_tick(deadline, self.current_tick)
+    }
+
+    fn slot_for_from_tick(&self, deadline: Instant, min_level0_tick: u64) -> (u8, usize) {
+        let current = self.base_time
+            + Duration::from_nanos(min_level0_tick.saturating_mul(self.level0.resolution_ns));
         let delta_ns = duration_to_ns(deadline.saturating_duration_since(current));
         let ticks_until = delta_ns / self.level0.resolution_ns.max(1);
 
         if ticks_until < LEVEL0_SLOTS as u64 {
-            (0, self.slot_for_level(deadline, &self.level0, LEVEL0_SLOTS))
+            (
+                0,
+                self.slot_for_level_from_tick(
+                    deadline,
+                    &self.level0,
+                    LEVEL0_SLOTS,
+                    min_level0_tick,
+                ),
+            )
         } else if ticks_until < (LEVEL0_SLOTS * LEVEL1_SLOTS) as u64 {
-            (1, self.slot_for_level(deadline, &self.level1, LEVEL1_SLOTS))
+            (
+                1,
+                self.slot_for_level_from_tick(
+                    deadline,
+                    &self.level1,
+                    LEVEL1_SLOTS,
+                    min_level0_tick,
+                ),
+            )
         } else if ticks_until < (LEVEL0_SLOTS * LEVEL1_SLOTS * LEVEL2_SLOTS) as u64 {
-            (2, self.slot_for_level(deadline, &self.level2, LEVEL2_SLOTS))
+            (
+                2,
+                self.slot_for_level_from_tick(
+                    deadline,
+                    &self.level2,
+                    LEVEL2_SLOTS,
+                    min_level0_tick,
+                ),
+            )
         } else {
-            (3, self.slot_for_level(deadline, &self.level3, LEVEL3_SLOTS))
+            (
+                3,
+                self.slot_for_level_from_tick(
+                    deadline,
+                    &self.level3,
+                    LEVEL3_SLOTS,
+                    min_level0_tick,
+                ),
+            )
         }
     }
 
-    fn slot_for_level<const SLOTS: usize>(
+    fn slot_for_level_from_tick<const SLOTS: usize>(
         &self,
         deadline: Instant,
         level: &WheelLevel<SLOTS>,
         slots: usize,
+        min_level0_tick: u64,
     ) -> usize {
         let elapsed_ns = duration_to_ns(deadline.saturating_duration_since(self.base_time));
         let tick = elapsed_ns / level.resolution_ns.max(1);
 
-        let current_elapsed_ns = self.current_tick.saturating_mul(self.level0.resolution_ns);
+        let current_elapsed_ns = min_level0_tick.saturating_mul(self.level0.resolution_ns);
         let current_level_tick = current_elapsed_ns / level.resolution_ns.max(1);
 
         let safe_tick = tick.max(current_level_tick);
@@ -930,7 +1062,12 @@ impl HierarchicalTimerWheel {
                 }
                 self.count = self.count.saturating_sub(1);
             } else {
-                let (new_level, new_slot) = self.slot_for(node_ref.deadline());
+                // Cascade runs after level 0 has advanced to `self.current_tick`, but
+                // before the new current level-0 slot has been retired. Survivors that
+                // now fit in level 0 must remain eligible for that immediate next slot
+                // rather than being pushed an extra tick forward.
+                let (new_level, new_slot) =
+                    self.slot_for_from_tick(node_ref.deadline(), self.current_tick);
                 node_ref.update_slot_level(new_slot, new_level);
                 self.push_node(new_level, new_slot, node_ptr);
             }
@@ -1287,6 +1424,128 @@ mod tests {
     }
 
     #[test]
+    fn intrusive_wheel_next_expiration_uses_wheel_time_not_wall_clock() {
+        init_test("intrusive_wheel_next_expiration_uses_wheel_time_not_wall_clock");
+
+        let base = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        let mut wheel: TimerWheel<256> = TimerWheel::new_at(Duration::from_millis(1), base);
+
+        let mut node = Box::pin(TimerNode::new());
+        let deadline = base + Duration::from_millis(100);
+        let waker = Arc::new(CounterWaker {
+            counter: Arc::new(AtomicU64::new(0)),
+        })
+        .into();
+
+        unsafe {
+            wheel.insert(node.as_mut(), deadline, waker);
+        }
+
+        let next = wheel.next_expiration();
+        crate::assert_with_log!(
+            next == Some(Duration::from_millis(100)),
+            "next expiration is relative to wheel progress, not ambient wall clock",
+            Some(Duration::from_millis(100)),
+            next
+        );
+
+        unsafe {
+            wheel.cancel(node.as_mut());
+        }
+
+        crate::test_complete!("intrusive_wheel_next_expiration_uses_wheel_time_not_wall_clock");
+    }
+
+    #[test]
+    fn intrusive_wheel_rebuckets_nonexpired_timer_from_retired_slot() {
+        init_test("intrusive_wheel_rebuckets_nonexpired_timer_from_retired_slot");
+
+        let base = Instant::now();
+        let mut wheel: TimerWheel<256> = TimerWheel::new_at(Duration::from_millis(1), base);
+        let counter = Arc::new(AtomicU64::new(0));
+
+        let mut node = Box::pin(TimerNode::new());
+        let deadline = base + Duration::from_micros(5_500);
+        let waker = counter_waker(counter.clone());
+
+        unsafe {
+            wheel.insert(node.as_mut(), deadline, waker);
+        }
+
+        let early = unsafe { wheel.advance_to(base + Duration::from_millis(5)) };
+        crate::assert_with_log!(
+            early.is_empty(),
+            "timer later in the bucket must not fire at the bucket boundary",
+            true,
+            early.is_empty()
+        );
+        crate::assert_with_log!(
+            node.is_linked(),
+            "timer stays scheduled",
+            true,
+            node.is_linked()
+        );
+
+        let due = unsafe { wheel.advance_to(base + Duration::from_millis(6)) };
+        crate::assert_with_log!(due.len() == 1, "timer fires on next tick", 1, due.len());
+        for waker in due {
+            waker.wake();
+        }
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 1, "waker fired once", 1, count);
+
+        crate::test_complete!("intrusive_wheel_rebuckets_nonexpired_timer_from_retired_slot");
+    }
+
+    #[test]
+    fn intrusive_wheel_rebuckets_survivor_after_full_rotation_advance() {
+        init_test("intrusive_wheel_rebuckets_survivor_after_full_rotation_advance");
+
+        let base = Instant::now();
+        let mut wheel: TimerWheel<4> = TimerWheel::new_at(Duration::from_millis(10), base);
+        let counter = Arc::new(AtomicU64::new(0));
+
+        let mut node = Box::pin(TimerNode::new());
+        let deadline = base + Duration::from_millis(45);
+        let waker = counter_waker(counter.clone());
+
+        unsafe {
+            wheel.insert(node.as_mut(), deadline, waker);
+        }
+
+        let early = unsafe { wheel.advance_to(base + Duration::from_millis(40)) };
+        crate::assert_with_log!(
+            early.is_empty(),
+            "full-rotation advance must not fire future timer early",
+            true,
+            early.is_empty()
+        );
+        crate::assert_with_log!(
+            node.is_linked(),
+            "future timer stays scheduled after full rotation",
+            true,
+            node.is_linked()
+        );
+
+        let due = unsafe { wheel.advance_to(base + Duration::from_millis(50)) };
+        crate::assert_with_log!(
+            due.len() == 1,
+            "future timer fires after rebucketing from full rotation",
+            1,
+            due.len()
+        );
+        for waker in due {
+            waker.wake();
+        }
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 1, "waker fired once", 1, count);
+
+        crate::test_complete!("intrusive_wheel_rebuckets_survivor_after_full_rotation_advance");
+    }
+
+    #[test]
     fn hierarchical_cascade_fires_expired() {
         init_test("hierarchical_cascade_fires_expired");
         let base = Instant::now()
@@ -1320,5 +1579,138 @@ mod tests {
         crate::assert_with_log!(count == 1, "expired fired", 1, count);
         crate::assert_with_log!(wheel.is_empty(), "wheel empty", true, wheel.is_empty());
         crate::test_complete!("hierarchical_cascade_fires_expired");
+    }
+
+    #[test]
+    fn hierarchical_next_expiration_uses_wheel_time_not_wall_clock() {
+        init_test("hierarchical_next_expiration_uses_wheel_time_not_wall_clock");
+
+        let base = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        let mut wheel = HierarchicalTimerWheel::new_at(Duration::from_millis(1), base);
+
+        let mut node = Box::pin(TimerNode::new());
+        let deadline = base + Duration::from_millis(100);
+        let waker = Arc::new(CounterWaker {
+            counter: Arc::new(AtomicU64::new(0)),
+        })
+        .into();
+
+        unsafe {
+            wheel.insert(node.as_mut(), deadline, waker);
+        }
+
+        let next = wheel.next_expiration();
+        crate::assert_with_log!(
+            next == Some(Duration::from_millis(100)),
+            "hierarchical next expiration is relative to wheel progress, not ambient wall clock",
+            Some(Duration::from_millis(100)),
+            next
+        );
+
+        unsafe {
+            wheel.cancel(node.as_mut());
+        }
+
+        crate::test_complete!("hierarchical_next_expiration_uses_wheel_time_not_wall_clock");
+    }
+
+    #[test]
+    fn hierarchical_wheel_rebuckets_nonexpired_level0_timer_from_retired_slot() {
+        init_test("hierarchical_wheel_rebuckets_nonexpired_level0_timer_from_retired_slot");
+
+        let base = Instant::now();
+        let mut wheel = HierarchicalTimerWheel::new_at(Duration::from_millis(1), base);
+        let counter = Arc::new(AtomicU64::new(0));
+
+        let mut node = Box::pin(TimerNode::new());
+        let deadline = base + Duration::from_micros(5_500);
+        let waker = counter_waker(counter.clone());
+
+        unsafe {
+            wheel.insert(node.as_mut(), deadline, waker);
+        }
+
+        let early = unsafe { wheel.advance_to(base + Duration::from_millis(5)) };
+        crate::assert_with_log!(
+            early.is_empty(),
+            "hierarchical wheel must not fire later-in-bucket timers early",
+            true,
+            early.is_empty()
+        );
+        crate::assert_with_log!(
+            node.is_linked(),
+            "timer stays scheduled",
+            true,
+            node.is_linked()
+        );
+
+        let due = unsafe { wheel.advance_to(base + Duration::from_millis(6)) };
+        crate::assert_with_log!(due.len() == 1, "timer fires on next tick", 1, due.len());
+        for waker in due {
+            waker.wake();
+        }
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 1, "waker fired once", 1, count);
+
+        crate::test_complete!(
+            "hierarchical_wheel_rebuckets_nonexpired_level0_timer_from_retired_slot"
+        );
+    }
+
+    #[test]
+    fn hierarchical_wheel_cascade_survivor_reinserts_without_extra_tick_delay() {
+        init_test("hierarchical_wheel_cascade_survivor_reinserts_without_extra_tick_delay");
+
+        let base = Instant::now();
+        let mut wheel = HierarchicalTimerWheel::new_at(Duration::from_millis(1), base);
+        let counter = Arc::new(AtomicU64::new(0));
+
+        let mut node = Box::pin(TimerNode::new());
+        let deadline = base + Duration::from_micros(256_500);
+        let waker = counter_waker(counter.clone());
+
+        unsafe {
+            wheel.insert(node.as_mut(), deadline, waker);
+        }
+
+        let before_due = unsafe { wheel.advance_to(base + Duration::from_millis(256)) };
+        crate::assert_with_log!(
+            before_due.is_empty(),
+            "cascade boundary must not fire timer early",
+            true,
+            before_due.is_empty()
+        );
+        crate::assert_with_log!(
+            node.is_linked(),
+            "timer remains scheduled after cascade rebucketing",
+            true,
+            node.is_linked()
+        );
+
+        let due = unsafe { wheel.advance_to(base + Duration::from_millis(257)) };
+        crate::assert_with_log!(
+            due.len() == 1,
+            "timer fires on the immediate next tick after cascade",
+            1,
+            due.len()
+        );
+        for waker in due {
+            waker.wake();
+        }
+
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 1, "waker fired exactly once", 1, count);
+        crate::assert_with_log!(
+            wheel.is_empty(),
+            "wheel is empty after firing",
+            true,
+            wheel.is_empty()
+        );
+
+        crate::test_complete!(
+            "hierarchical_wheel_cascade_survivor_reinserts_without_extra_tick_delay"
+        );
     }
 }

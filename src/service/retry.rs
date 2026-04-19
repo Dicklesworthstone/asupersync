@@ -4,12 +4,14 @@
 //! according to a configurable [`Policy`].
 
 use super::{Layer, Service};
-use crate::util::entropy::EntropySource;
+use crate::cx::Cx;
+use crate::time::{Sleep, wall_now};
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 /// Cooperative budget for immediately completed retry attempts in a single
 /// outer poll.
@@ -210,6 +212,7 @@ where
         request: Option<Request>,
         result: Option<Result<S::Response, S::Error>>,
         retry_future: P::Future,
+        request_consumed: bool,
     },
     /// Completed.
     Done,
@@ -257,7 +260,7 @@ where
                 RetryState::PollReady {
                     mut service,
                     policy,
-                    mut request,
+                    request,
                 } => {
                     match service.poll_ready(cx) {
                         Poll::Pending => {
@@ -269,11 +272,34 @@ where
                             return Poll::Pending;
                         }
                         Poll::Ready(Err(e)) => {
-                            this.state = RetryState::Done;
-                            return Poll::Ready(Err(RetryError::Inner(e)));
+                            let retry_decision = request.as_ref().and_then(|req_ref| {
+                                policy.retry(req_ref, Err::<&S::Response, &S::Error>(&e))
+                            });
+
+                            match retry_decision {
+                                None => {
+                                    this.state = RetryState::Done;
+                                    return Poll::Ready(Err(RetryError::Inner(e)));
+                                }
+                                Some(retry_future) => {
+                                    completed_attempts_this_poll += 1;
+                                    this.state = RetryState::Checking {
+                                        service,
+                                        request,
+                                        result: Some(Err(e)),
+                                        retry_future,
+                                        request_consumed: false,
+                                    };
+
+                                    if completed_attempts_this_poll >= RETRY_COOPERATIVE_BUDGET {
+                                        cx.waker().wake_by_ref();
+                                        return Poll::Pending;
+                                    }
+                                }
+                            }
                         }
                         Poll::Ready(Ok(())) => {
-                            let req = request.take().expect("request already taken");
+                            let req = request.expect("request already taken");
 
                             // Try to clone the request for potential retry
                             let backup = policy.clone_request(&req);
@@ -328,6 +354,7 @@ where
                                     request,
                                     result: Some(result),
                                     retry_future,
+                                    request_consumed: true,
                                 };
 
                                 if completed_attempts_this_poll >= RETRY_COOPERATIVE_BUDGET {
@@ -343,6 +370,7 @@ where
                     request,
                     mut result,
                     mut retry_future,
+                    request_consumed,
                 } => {
                     match Pin::new(&mut retry_future).poll(cx) {
                         Poll::Pending => {
@@ -351,13 +379,21 @@ where
                                 request,
                                 result,
                                 retry_future,
+                                request_consumed,
                             };
                             return Poll::Pending;
                         }
                         Poll::Ready(new_policy) => {
-                            // Try to clone the request for retry
-                            let next_request =
-                                request.as_ref().and_then(|r| new_policy.clone_request(r));
+                            let next_request = if request_consumed {
+                                // After `call()` the original request has been consumed, so
+                                // retries must use a policy-approved backup clone.
+                                request.as_ref().and_then(|r| new_policy.clone_request(r))
+                            } else {
+                                // A `poll_ready()` failure happens before the request is sent.
+                                // Reuse the original request directly instead of requiring an
+                                // artificial clone for a side-effect-free retry.
+                                request
+                            };
 
                             if let Some(new_request) = next_request {
                                 this.state = RetryState::PollReady {
@@ -483,6 +519,8 @@ impl<Request, Res, E> Policy<Request, Res, E> for NoRetry {
 /// Jitter strategy for exponential backoff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JitterStrategy {
+    /// No jitter: delay = base_delay * 2^attempt
+    None,
     /// Full jitter: delay = random(0, base_delay * 2^attempt)
     Full,
     /// Equal jitter: delay = (base_delay * 2^attempt) / 2 + random(0, (base_delay * 2^attempt) / 2)
@@ -559,6 +597,14 @@ impl<Request> ExponentialBackoff<Request> {
         let entropy = DetEntropy::new(42); // Deterministic seed
 
         match self.jitter {
+            JitterStrategy::None => self
+                .base_delay_ms
+                .saturating_mul(
+                    1_u64
+                        .checked_shl(self.current_attempt as u32)
+                        .unwrap_or(u64::MAX),
+                )
+                .min(self.max_delay_ms),
             JitterStrategy::Full => {
                 // Full jitter: random(0, base_delay * 2^attempt)
                 let max_delay = self
@@ -572,7 +618,7 @@ impl<Request> ExponentialBackoff<Request> {
                 if max_delay == 0 {
                     0
                 } else {
-                    entropy.next_u64() % (max_delay + 1)
+                    crate::util::entropy::EntropySource::next_u64(&entropy) % (max_delay + 1)
                 }
             }
             JitterStrategy::Equal => {
@@ -589,7 +635,7 @@ impl<Request> ExponentialBackoff<Request> {
                 let jitter = if half_delay == 0 {
                     0
                 } else {
-                    entropy.next_u64() % (half_delay + 1)
+                    crate::util::entropy::EntropySource::next_u64(&entropy) % (half_delay + 1)
                 };
                 half_delay + jitter
             }
@@ -601,9 +647,66 @@ impl<Request> ExponentialBackoff<Request> {
                     min_delay
                 } else {
                     let range = max_delay - min_delay;
-                    min_delay + (entropy.next_u64() % (range + 1))
+                    min_delay
+                        + (crate::util::entropy::EntropySource::next_u64(&entropy) % (range + 1))
                 }
             }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RetryDelay<P> {
+    delay: Duration,
+    sleep: Option<Sleep>,
+    next_policy: Option<P>,
+}
+
+impl<P> RetryDelay<P> {
+    fn new(delay: Duration, next_policy: P) -> Self {
+        Self {
+            delay,
+            sleep: None,
+            next_policy: Some(next_policy),
+        }
+    }
+
+    fn initialize_sleep(&mut self) {
+        if self.sleep.is_some() {
+            return;
+        }
+
+        let sleep = Cx::current().and_then(|cx| cx.timer_driver()).map_or_else(
+            || Sleep::after(wall_now(), self.delay),
+            |timer| {
+                let deadline = timer
+                    .now()
+                    .saturating_add_nanos(self.delay.as_nanos().min(u128::from(u64::MAX)) as u64);
+                Sleep::with_timer_driver(deadline, timer)
+            },
+        );
+
+        self.sleep = Some(sleep);
+    }
+}
+
+impl<P: Unpin> Future for RetryDelay<P> {
+    type Output = P;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.initialize_sleep();
+        let sleep = self
+            .sleep
+            .as_mut()
+            .expect("retry delay sleep should be initialized before polling");
+
+        match Pin::new(sleep).poll(cx) {
+            Poll::Ready(()) => Poll::Ready(
+                self.next_policy
+                    .take()
+                    .expect("retry delay policy should be present until completion"),
+            ),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -639,9 +742,10 @@ impl<Request: Clone + 'static, Res, E> Policy<Request, Res, E> for ExponentialBa
             // No delay - return immediately
             Some(Box::pin(std::future::ready(new_policy)))
         } else {
-            // For simplicity, return immediately for now
-            // In a real implementation, this would use proper time management
-            Some(Box::pin(std::future::ready(new_policy)))
+            Some(Box::pin(RetryDelay::new(
+                Duration::from_millis(delay_ms),
+                new_policy,
+            )))
         }
     }
 
@@ -704,10 +808,9 @@ impl<Request> SmartRetry<Request> {
                 true
             }
             RequestClassification::NonIdempotent => {
-                // For this implementation, assume all errors are retryable
-                // In a real system, this would check if the error is a network/infrastructure error
-                // vs an application error (e.g., 400 Bad Request should not be retried)
-                true
+                // Fail closed until the caller can distinguish transport failures
+                // from application-level errors, which avoids replaying side effects.
+                false
             }
         }
     }
@@ -750,7 +853,10 @@ impl<Request: Clone + 'static, Res, E> Policy<Request, Res, E> for SmartRetry<Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cx::Cx;
     use crate::service::concurrency_limit::ConcurrencyLimitLayer;
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, RegionId, TaskId};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -829,6 +935,84 @@ mod tests {
             } else {
                 std::future::ready(Ok(req * 2))
             }
+        }
+    }
+
+    struct OneShotRequest(i32);
+
+    #[derive(Clone)]
+    struct ReadyFailThenSucceedService {
+        ready_failures_remaining: Arc<AtomicUsize>,
+        ready_polls: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ReadyFailThenSucceedService {
+        fn new(ready_failures: usize) -> (Self, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+            let ready_polls = Arc::new(AtomicUsize::new(0));
+            let calls = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    ready_failures_remaining: Arc::new(AtomicUsize::new(ready_failures)),
+                    ready_polls: Arc::clone(&ready_polls),
+                    calls: Arc::clone(&calls),
+                },
+                ready_polls,
+                calls,
+            )
+        }
+    }
+
+    impl Service<OneShotRequest> for ReadyFailThenSucceedService {
+        type Response = i32;
+        type Error = &'static str;
+        type Future = std::future::Ready<Result<i32, &'static str>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.ready_polls.fetch_add(1, Ordering::SeqCst);
+            let remaining = self.ready_failures_remaining.load(Ordering::SeqCst);
+            if remaining > 0 {
+                self.ready_failures_remaining.fetch_sub(1, Ordering::SeqCst);
+                Poll::Ready(Err("transient readiness failure"))
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn call(&mut self, req: OneShotRequest) -> Self::Future {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(req.0 * 3))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct RetryReadyOnceWithoutClone {
+        attempted: bool,
+    }
+
+    impl RetryReadyOnceWithoutClone {
+        const fn new() -> Self {
+            Self { attempted: false }
+        }
+    }
+
+    impl Policy<OneShotRequest, i32, &'static str> for RetryReadyOnceWithoutClone {
+        type Future = std::future::Ready<Self>;
+
+        fn retry(
+            &self,
+            _req: &OneShotRequest,
+            result: Result<&i32, &&'static str>,
+        ) -> Option<Self::Future> {
+            if self.attempted || result.is_ok() {
+                None
+            } else {
+                Some(std::future::ready(Self { attempted: true }))
+            }
+        }
+
+        fn clone_request(&self, _req: &OneShotRequest) -> Option<OneShotRequest> {
+            None
         }
     }
 
@@ -947,6 +1131,45 @@ mod tests {
         let count = calls.load(Ordering::SeqCst);
         crate::assert_with_log!(count == 3, "call count", 3, count);
         crate::test_complete!("retry_succeeds_after_failures");
+    }
+
+    #[test]
+    fn retry_reuses_original_request_after_poll_ready_error() {
+        init_test("retry_reuses_original_request_after_poll_ready_error");
+        let policy = RetryReadyOnceWithoutClone::new();
+        let (svc, ready_polls, calls) = ReadyFailThenSucceedService::new(1);
+        let mut retry_svc = Retry::new(svc, policy);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut future = retry_svc.call(OneShotRequest(7));
+        let result = Pin::new(&mut future).poll(&mut cx);
+
+        crate::assert_with_log!(
+            matches!(result, Poll::Ready(Ok(21))),
+            "poll_ready failure retries with original one-shot request",
+            "Poll::Ready(Ok(21))",
+            result
+        );
+
+        let ready_poll_count = ready_polls.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            ready_poll_count == 2,
+            "service polled ready twice",
+            2usize,
+            ready_poll_count
+        );
+
+        let call_count = calls.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            call_count == 1,
+            "request was not duplicated across readiness retry",
+            1usize,
+            call_count
+        );
+
+        crate::test_complete!("retry_reuses_original_request_after_poll_ready_error");
     }
 
     // =========================================================================
@@ -1393,7 +1616,8 @@ mod tests {
         // Test classification properties
         let mut results = Vec::new();
 
-        // Both policies should retry on error (simplified implementation)
+        // Non-idempotent retries fail closed unless the caller can prove the
+        // error is transport-only.
         let error_result: Result<&i32, &&str> = Err(&"error");
         let success_result: Result<&i32, &&str> = Ok(&42);
 
@@ -1418,7 +1642,7 @@ mod tests {
         let expected = vec![
             ("idempotent_error", true),        // Should retry on error
             ("idempotent_success", false),     // Should not retry on success
-            ("non_idempotent_error", true),    // Should retry on error (simplified)
+            ("non_idempotent_error", false),   // Should fail closed on error
             ("non_idempotent_success", false), // Should not retry on success
         ];
 
@@ -1504,5 +1728,125 @@ mod tests {
         );
 
         crate::test_complete!("golden_jitter_strategy_comparison");
+    }
+
+    #[test]
+    fn smart_retry_non_idempotent_errors_fail_closed() {
+        init_test("smart_retry_non_idempotent_errors_fail_closed");
+
+        let policy = SmartRetry::<i32>::new(
+            3,
+            10,
+            JitterStrategy::None,
+            RequestClassification::NonIdempotent,
+        );
+
+        let error_result: Result<&i32, &&str> = Err(&"transient");
+        crate::assert_with_log!(
+            policy.retry(&42, error_result).is_none(),
+            "non-idempotent errors are not retried",
+            true,
+            false
+        );
+
+        crate::test_complete!("smart_retry_non_idempotent_errors_fail_closed");
+    }
+
+    #[test]
+    fn exponential_backoff_future_waits_before_retrying() {
+        init_test("exponential_backoff_future_waits_before_retrying");
+
+        let policy = ExponentialBackoff::<i32>::new(3, 10, JitterStrategy::None);
+        let error_result: Result<&i32, &&str> = Err(&"transient");
+        let mut future = policy
+            .retry(&7, error_result)
+            .expect("retry should be scheduled");
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        crate::assert_with_log!(
+            matches!(future.as_mut().poll(&mut cx), Poll::Pending),
+            "backoff delay yields pending before timer fires",
+            true,
+            false
+        );
+
+        std::thread::sleep(Duration::from_millis(25));
+
+        let next_policy = match future.as_mut().poll(&mut cx) {
+            Poll::Ready(policy) => policy,
+            Poll::Pending => panic!("retry backoff should complete after the delay"),
+        };
+
+        crate::assert_with_log!(
+            next_policy.current_attempt() == 1,
+            "retry advances after delay",
+            1usize,
+            next_policy.current_attempt()
+        );
+
+        crate::test_complete!("exponential_backoff_future_waits_before_retrying");
+    }
+
+    #[test]
+    fn exponential_backoff_uses_ambient_timer_driver() {
+        init_test("exponential_backoff_uses_ambient_timer_driver");
+
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let policy = ExponentialBackoff::<i32>::new(3, 10, JitterStrategy::None);
+        let error_result: Result<&i32, &&str> = Err(&"transient");
+        let mut future = policy
+            .retry(&7, error_result)
+            .expect("retry should be scheduled");
+
+        let waker = std::task::Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
+        crate::assert_with_log!(
+            matches!(future.as_mut().poll(&mut poll_cx), Poll::Pending),
+            "virtual timer starts pending",
+            true,
+            false
+        );
+        crate::assert_with_log!(
+            timer.pending_count() == 1,
+            "retry delay registered with ambient timer",
+            1usize,
+            timer.pending_count()
+        );
+
+        clock.advance(Duration::from_millis(10).as_nanos() as u64);
+
+        let next_policy = match future.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(policy) => policy,
+            Poll::Pending => panic!("retry delay should complete after virtual time advance"),
+        };
+
+        crate::assert_with_log!(
+            next_policy.current_attempt() == 1,
+            "retry completes after virtual advance",
+            1usize,
+            next_policy.current_attempt()
+        );
+        crate::assert_with_log!(
+            timer.pending_count() == 0,
+            "retry delay clears timer registration",
+            0usize,
+            timer.pending_count()
+        );
+
+        crate::test_complete!("exponential_backoff_uses_ambient_timer_driver");
     }
 }
