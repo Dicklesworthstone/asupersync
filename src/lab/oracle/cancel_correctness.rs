@@ -1079,4 +1079,3 @@ mod tests {
         assert_eq!(snapshot.witness_history_len, 2);
     }
 }
-

@@ -1954,10 +1954,19 @@ mod tests {
         let short_duration = Duration::from_millis(5);
         let start_time = wall_clock.now();
 
-        let timer_id = handle.register(handle.now().saturating_add_nanos(short_duration.as_nanos().min(u128::from(u64::MAX)) as u64), waker_that_increments(counter.clone()));
+        let timer_id = handle.register(
+            handle
+                .now()
+                .saturating_add_nanos(short_duration.as_nanos().min(u128::from(u64::MAX)) as u64),
+            waker_that_increments(counter.clone()),
+        );
 
         // Busy wait for timer to fire (this is a test, so it's acceptable)
-        let timeout = start_time.saturating_add_nanos(Duration::from_millis(100).as_nanos().min(u128::from(u64::MAX)) as u64);
+        let timeout = start_time.saturating_add_nanos(
+            Duration::from_millis(100)
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
         while wall_clock.now() < timeout && counter.load(Ordering::SeqCst) == 0 {
             handle.process_timers();
             std::thread::sleep(Duration::from_millis(1));
@@ -2011,7 +2020,12 @@ mod tests {
 
         let mut timer_ids = Vec::new();
         for duration in &durations {
-            let timer_id = handle.register(handle.now().saturating_add_nanos(duration.as_nanos().min(u128::from(u64::MAX)) as u64), waker_that_increments(counter.clone()));
+            let timer_id = handle.register(
+                handle
+                    .now()
+                    .saturating_add_nanos(duration.as_nanos().min(u128::from(u64::MAX)) as u64),
+                waker_that_increments(counter.clone()),
+            );
             timer_ids.push(timer_id);
         }
 
@@ -2064,7 +2078,12 @@ mod tests {
         let mut timer_ids = Vec::new();
         for (i, counter) in counters.iter().enumerate() {
             let duration = Duration::from_millis(10 + (i as u64 % 100)); // Varying durations
-            let timer_id = handle.register(handle.now().saturating_add_nanos(duration.as_nanos().min(u128::from(u64::MAX)) as u64), waker_that_increments(counter.clone()));
+            let timer_id = handle.register(
+                handle
+                    .now()
+                    .saturating_add_nanos(duration.as_nanos().min(u128::from(u64::MAX)) as u64),
+                waker_that_increments(counter.clone()),
+            );
             timer_ids.push(timer_id);
         }
 
@@ -2114,8 +2133,13 @@ mod tests {
         let counter = Arc::new(AtomicU64::new(0));
 
         // Register timer and immediately cancel
-        let timer_id = handle.register(handle.now().saturating_add_nanos(
-            Duration::from_millis(100).as_nanos().min(u128::from(u64::MAX)) as u64), waker_that_increments(counter.clone()),
+        let timer_id = handle.register(
+            handle.now().saturating_add_nanos(
+                Duration::from_millis(100)
+                    .as_nanos()
+                    .min(u128::from(u64::MAX)) as u64,
+            ),
+            waker_that_increments(counter.clone()),
         );
         crate::assert_with_log!(
             handle.pending_count() == 1,
@@ -2194,8 +2218,13 @@ mod tests {
         }
 
         // Register a timer and verify it works with browser clock
-        let timer_id = handle.register(handle.now().saturating_add_nanos(
-            Duration::from_millis(5).as_nanos().min(u128::from(u64::MAX)) as u64), waker_that_increments(counter.clone()),
+        let timer_id = handle.register(
+            handle.now().saturating_add_nanos(
+                Duration::from_millis(5)
+                    .as_nanos()
+                    .min(u128::from(u64::MAX)) as u64,
+            ),
+            waker_that_increments(counter.clone()),
         );
 
         // Advance browser clock
@@ -2212,4 +2241,3 @@ mod tests {
         crate::test_complete!("conformance_timer_driver_browser_clock_monotonic");
     }
 }
-

@@ -2197,7 +2197,8 @@ pub mod backpressure_metamorphic {
 
             // Single sender to ensure clear ordering
             let sent_ref = Arc::clone(&sent_messages);
-            let send_handle = scope.spawn_task(async move {
+            let send_handle = std::thread::spawn(move || {
+                    futures_lite::future::block_on(async move {
                 for i in 0..config.messages_per_sender {
                     let value = i as u32;
                     match sender.send(&cx, value).await {
@@ -2209,11 +2210,12 @@ pub mod backpressure_metamorphic {
                     }
                 }
                 Ok(())
-            });
+                })});
 
             // Receiver collects all messages
             let recv_ref = Arc::clone(&received_messages);
-            let recv_handle = scope.spawn_task(async move {
+            let recv_handle = std::thread::spawn(move || {
+                    futures_lite::future::block_on(async move {
                 loop {
                     match receiver.recv(&cx).await {
                         Ok(value) => {
@@ -2224,10 +2226,10 @@ pub mod backpressure_metamorphic {
                     }
                 }
                 Ok(())
-            });
+                })});
 
-            let send_outcome = send_handle.await;
-            let recv_outcome = recv_handle.await;
+            let send_outcome = send_handle.join().unwrap();
+            let recv_outcome = recv_handle.join().unwrap();
 
             // Compare ordering
             let sent = sent_messages.lock().clone();
@@ -2277,12 +2279,13 @@ pub mod backpressure_metamorphic {
                         let received1 = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
                         let recv1_ref = Arc::clone(&received1);
-                        let recv1_handle = scope.spawn_task(async move {
+                        let recv1_handle = std::thread::spawn(move || {
+                    futures_lite::future::block_on(async move {
                             while let Ok(value) = receiver1.recv(&cx).await {
                                 recv1_ref.lock().push(value);
                             }
                             Ok(())
-                        });
+                })});
 
                         // Send via reserve/send
                         for i in 0..std::cmp::min(config.messages_per_sender, config.capacity) {
@@ -2291,26 +2294,27 @@ pub mod backpressure_metamorphic {
                             }
                         }
                         drop(sender1);
-                        let _ = recv1_handle.await;
+                        let _ = recv1_handle.join().unwrap();
 
                         // Path 2: direct send
                         let (sender2, mut receiver2) = channel::<u32>(config.capacity);
                         let received2 = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
                         let recv2_ref = Arc::clone(&received2);
-                        let recv2_handle = scope.spawn_task(async move {
+                        let recv2_handle = std::thread::spawn(move || {
+                    futures_lite::future::block_on(async move {
                             while let Ok(value) = receiver2.recv(&cx).await {
                                 recv2_ref.lock().push(value);
                             }
                             Ok(())
-                        });
+                })});
 
                         // Send via try_send
                         for i in 0..std::cmp::min(config.messages_per_sender, config.capacity) {
                             let _ = sender2.try_send(i as u32);
                         }
                         drop(sender2);
-                        let _ = recv2_handle.await;
+                        let _ = recv2_handle.join().unwrap();
 
                         // Results should be equivalent
                         let result1 = received1.lock().clone();
@@ -2352,58 +2356,68 @@ pub mod backpressure_metamorphic {
 
                 crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
-                        let cx = crate::cx::Cx::for_testing();
-                        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(root, Budget::INFINITE);
-                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
-                        let (sender, _receiver) = channel::<u32>(config.capacity);
+                    let (test_task, _) = lab
+                        .state
+                        .create_task(root, Budget::INFINITE, async move {
+                            let cx = crate::cx::Cx::for_testing();
+                            let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
+                                root,
+                                Budget::INFINITE,
+                            );
+                            let _test_res: Result<(), proptest::test_runner::TestCaseError> =
+                                async {
+                                    let (sender, _receiver) = channel::<u32>(config.capacity);
 
-                        // Fill channel to force reserves to block
-                        for i in 0..config.capacity {
-                            sender.try_send(i as u32).expect("Fill channel");
-                        }
-
-                        let initial_state = observe_channel_state(&sender);
-
-                        // Create multiple reserves that will block
-                        let mut reserve_handles = Vec::new();
-                        for i in 0..config.sender_count {
-                            let sender_clone = sender.clone();
-                            let handle = scope.spawn_task(async move {
-                                match sender_clone.reserve(&cx).await {
-                                    Ok(permit) => {
-                                        permit.send(i as u32);
-                                        Ok(true) // Successfully sent
+                                    // Fill channel to force reserves to block
+                                    for i in 0..config.capacity {
+                                        sender.try_send(i as u32).expect("Fill channel");
                                     }
-                                    Err(SendError::Cancelled(_)) => Ok(false), // Cancelled
-                                    Err(_) => Ok(false),                       // Other error
+
+                                    let initial_state = observe_channel_state(&sender);
+
+                                    // Create multiple reserves that will block
+                                    let mut reserve_handles = Vec::new();
+                                    for i in 0..config.sender_count {
+                                        let sender_clone = sender.clone();
+                                        let handle = std::thread::spawn(move || {
+                                            futures_lite::future::block_on(async move {
+                                                match sender_clone.reserve(&cx).await {
+                                                    Ok(permit) => {
+                                                        permit.send(i as u32);
+                                                        Ok(true) // Successfully sent
+                                                    }
+                                                    Err(SendError::Cancelled(_)) => Ok(false), // Cancelled
+                                                    Err(_) => Ok(false), // Other error
+                                                }
+                                            })
+                                        });
+                                        reserve_handles.push(handle);
+                                    }
+
+                                    // Cancel some operations
+                                    scope.cancel(CancelReason::user("test cancellation"));
+
+                                    // Collect results
+                                    for handle in reserve_handles {
+                                        let _ = handle.join().unwrap(); // Ignore individual results
+                                    }
+
+                                    let final_state = observe_channel_state(&sender);
+
+                                    // Capacity conservation must hold despite cancellation
+                                    assert_eq!(
+                                        initial_state.0 + initial_state.1 + initial_state.2,
+                                        final_state.0 + final_state.1 + final_state.2,
+                                        "Cancellation leaked capacity: initial {:?} vs final {:?}",
+                                        initial_state,
+                                        final_state
+                                    );
+
+                                    Ok(())
                                 }
-                            });
-                            reserve_handles.push(handle);
-                        }
-
-                        // Cancel some operations
-                        scope.cancel(CancelReason::user("test cancellation"));
-
-                        // Collect results
-                        for handle in reserve_handles {
-                            let _ = handle.await; // Ignore individual results
-                        }
-
-                        let final_state = observe_channel_state(&sender);
-
-                        // Capacity conservation must hold despite cancellation
-                        assert_eq!(
-                            initial_state.0 + initial_state.1 + initial_state.2,
-                            final_state.0 + final_state.1 + final_state.2,
-                            "Cancellation leaked capacity: initial {:?} vs final {:?}",
-                            initial_state,
-                            final_state
-                        );
-
-                        Ok(())
-                        }.await;
-                    }).unwrap();
+                                .await;
+                        })
+                        .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     lab.run_until_quiescent_with_report();
                 });
@@ -2496,69 +2510,80 @@ pub mod backpressure_metamorphic {
             .run(&backpressure_config_strategy(), |config| {
                 crate::lab::runtime::test(config.seed, |lab| {
                     let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
-                        let cx = crate::cx::Cx::for_testing();
-                        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(root, Budget::INFINITE);
-                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
-                        let (sender, receiver) = channel::<u32>(config.capacity);
+                    let (test_task, _) = lab
+                        .state
+                        .create_task(root, Budget::INFINITE, async move {
+                            let cx = crate::cx::Cx::for_testing();
+                            let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
+                                root,
+                                Budget::INFINITE,
+                            );
+                            let _test_res: Result<(), proptest::test_runner::TestCaseError> =
+                                async {
+                                    let (sender, receiver) = channel::<u32>(config.capacity);
 
-                        // Fill channel
-                        for i in 0..config.capacity {
-                            sender.try_send(i as u32).expect("Fill channel");
-                        }
-
-                        // Start multiple blocking reserves
-                        let disconnected_count = Arc::new(AtomicUsize::new(0));
-                        let mut reserve_handles = Vec::new();
-
-                        for i in 0..config.sender_count {
-                            let sender_clone = sender.clone();
-                            let counter_clone = Arc::clone(&disconnected_count);
-                            let handle = scope.spawn_task(async move {
-                                match sender_clone.reserve(&cx).await {
-                                    Err(SendError::Disconnected(_)) => {
-                                        counter_clone.fetch_add(1, Ordering::SeqCst);
+                                    // Fill channel
+                                    for i in 0..config.capacity {
+                                        sender.try_send(i as u32).expect("Fill channel");
                                     }
-                                    _ => {}
+
+                                    // Start multiple blocking reserves
+                                    let disconnected_count = Arc::new(AtomicUsize::new(0));
+                                    let mut reserve_handles = Vec::new();
+
+                                    for i in 0..config.sender_count {
+                                        let sender_clone = sender.clone();
+                                        let counter_clone = Arc::clone(&disconnected_count);
+                                        let handle = std::thread::spawn(move || {
+                                            futures_lite::future::block_on(async move {
+                                                match sender_clone.reserve(&cx).await {
+                                                    Err(SendError::Disconnected(_)) => {
+                                                        counter_clone
+                                                            .fetch_add(1, Ordering::SeqCst);
+                                                    }
+                                                    _ => {}
+                                                }
+                                                Ok(())
+                                            })
+                                        });
+                                        reserve_handles.push(handle);
+                                    }
+
+                                    // Let reserves queue up
+                                    crate::runtime::yield_now().await;
+
+                                    // Verify reserves are queued
+                                    let queued_before = observe_channel_state(&sender).3;
+                                    assert!(queued_before > 0, "No reserves queued");
+
+                                    // Drop receiver - should unblock all pending reserves
+                                    drop(receiver);
+
+                                    // Wait for all reserves to complete
+                                    for handle in reserve_handles {
+                                        let _ = handle.join().unwrap();
+                                    }
+
+                                    // All queued senders should have been disconnected
+                                    let disconnected = disconnected_count.load(Ordering::SeqCst);
+                                    assert!(
+                                        disconnected > 0,
+                                        "No senders received Disconnected after receiver drop"
+                                    );
+
+                                    // No waiters should remain
+                                    let queued_after = observe_channel_state(&sender).3;
+                                    assert_eq!(
+                                        queued_after, 0,
+                                        "Waiters remain queued after receiver drop: {}",
+                                        queued_after
+                                    );
+
+                                    Ok(())
                                 }
-                                Ok(())
-                            });
-                            reserve_handles.push(handle);
-                        }
-
-                        // Let reserves queue up
-                        crate::runtime::yield_now().await;
-
-                        // Verify reserves are queued
-                        let queued_before = observe_channel_state(&sender).3;
-                        assert!(queued_before > 0, "No reserves queued");
-
-                        // Drop receiver - should unblock all pending reserves
-                        drop(receiver);
-
-                        // Wait for all reserves to complete
-                        for handle in reserve_handles {
-                            let _ = handle.await;
-                        }
-
-                        // All queued senders should have been disconnected
-                        let disconnected = disconnected_count.load(Ordering::SeqCst);
-                        assert!(
-                            disconnected > 0,
-                            "No senders received Disconnected after receiver drop"
-                        );
-
-                        // No waiters should remain
-                        let queued_after = observe_channel_state(&sender).3;
-                        assert_eq!(
-                            queued_after, 0,
-                            "Waiters remain queued after receiver drop: {}",
-                            queued_after
-                        );
-
-                        Ok(())
-                        }.await;
-                    }).unwrap();
+                                .await;
+                        })
+                        .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     lab.run_until_quiescent_with_report();
                 });
@@ -2591,19 +2616,21 @@ pub mod backpressure_metamorphic {
 
                         // MR1 + MR2: Capacity conservation + FIFO under mixed load
                         let recv_ref = Arc::clone(&received_messages);
-                        let recv_handle = scope.spawn_task(async move {
+                        let recv_handle = std::thread::spawn(move || {
+                    futures_lite::future::block_on(async move {
                             while let Ok(value) = receiver.recv(&cx).await {
                                 recv_ref.lock().push(value);
                             }
                             Ok(())
-                        });
+                })});
 
                         // Multiple senders with different patterns
                         let mut send_handles = Vec::new();
                         for sender_id in 0..config.sender_count {
                             let sender_clone = sender.clone();
                             let sent_ref = Arc::clone(&sent_messages);
-                            let handle = scope.spawn_task(async move {
+                            let handle = std::thread::spawn(move || {
+                    futures_lite::future::block_on(async move {
                                 for i in 0..config.messages_per_sender {
                                     let value = (sender_id * 1000 + i) as u32;
                                     match sender_clone.send(&cx, value).await {
@@ -2623,17 +2650,17 @@ pub mod backpressure_metamorphic {
                                     );
                                 }
                                 Ok(())
-                            });
+                })});
                             send_handles.push(handle);
                         }
 
                         // Complete all sends
                         for handle in send_handles {
-                            let _ = handle.await;
+                            let _ = handle.join().unwrap();
                         }
                         drop(sender);
 
-                        let _ = recv_handle.await;
+                        let _ = recv_handle.join().unwrap();
 
                         // MR2: Verify ordering within each sender
                         let sent = sent_messages.lock().clone();

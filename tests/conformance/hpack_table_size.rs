@@ -28,10 +28,10 @@
 //! - Size reduction MAY trigger entry eviction to fit new limit
 //! - Encoder MUST signal size changes via SETTINGS frame acknowledgment
 
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::http::h2::{
     error::{ErrorCode, H2Error},
-    hpack::{Decoder, Encoder, Header, DynamicTable, DEFAULT_MAX_TABLE_SIZE},
+    hpack::{DEFAULT_MAX_TABLE_SIZE, Decoder, DynamicTable, Encoder, Header},
 };
 use asupersync::lab::runtime::LabRuntime;
 use proptest::prelude::*;
@@ -145,7 +145,10 @@ impl MockHpackContext {
 
         // Decode to update decoder's dynamic table
         let mut encoded_bytes = buf.freeze();
-        let _ = self.decoder.decode(&mut encoded_bytes).expect("Failed to populate table");
+        let _ = self
+            .decoder
+            .decode(&mut encoded_bytes)
+            .expect("Failed to populate table");
     }
 
     /// Get current dynamic table usage.
@@ -207,7 +210,8 @@ fn arb_header() -> impl Strategy<Value = Header> {
             Just("gzip, deflate".to_string()),
             "[a-zA-Z0-9._~!$&'()*+,;=:@/?-]{5,50}",
         ],
-    ).prop_map(|(name, value)| Header::new(name, value))
+    )
+        .prop_map(|(name, value)| Header::new(name, value))
 }
 
 /// Generate header lists for table population.
@@ -386,7 +390,9 @@ mod conformance_tests {
 
         // Step 1: Exchange SETTINGS with new table size
         let new_size = 2048;
-        context.exchange_settings(new_size).expect("SETTINGS exchange failed");
+        context
+            .exchange_settings(new_size)
+            .expect("SETTINGS exchange failed");
 
         // Step 2: Encoder should emit size update in next header block
         let test_headers = vec![
@@ -400,7 +406,9 @@ mod conformance_tests {
 
         // Step 3: Decoder should accept the size update + headers
         let mut encoded_bytes = encoded.freeze();
-        let decoded = context.decoder.decode(&mut encoded_bytes)
+        let decoded = context
+            .decoder
+            .decode(&mut encoded_bytes)
             .expect("Decoding with size update failed");
 
         // Verify headers were decoded correctly
@@ -424,7 +432,12 @@ mod conformance_tests {
             let mut update_bytes = size_update.freeze();
 
             let result = context.decoder.decode(&mut update_bytes);
-            assert!(result.is_ok(), "Rapid size update to {} failed: {:?}", size, result);
+            assert!(
+                result.is_ok(),
+                "Rapid size update to {} failed: {:?}",
+                size,
+                result
+            );
         }
     }
 
@@ -449,6 +462,9 @@ mod conformance_tests {
 
         // This should be accepted because our decoder processes all size updates first
         // The spec allows implementations to be tolerant of this case
-        assert!(result.is_ok(), "Mixed headers and size updates should be handled gracefully");
+        assert!(
+            result.is_ok(),
+            "Mixed headers and size updates should be handled gracefully"
+        );
     }
 }

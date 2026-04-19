@@ -2327,24 +2327,25 @@ mod tests {
                 let task_seed = rng.next_u64();
                 // This would normally spawn tasks using the runtime's spawn mechanisms
                 // For testing, we'll create trace events that represent fork/join operations
-                runtime
-                    .trace()
-                    .record_event(|id| crate::trace::TraceEvent::user_trace(
+                runtime.trace().record_event(|id| {
+                    crate::trace::TraceEvent::user_trace(
                         id,
                         runtime.now(),
                         format!("fork_task_{}", i),
-                    ));
+                    )
+                });
             }
 
             // Simulate join phase
             for i in 0..task_count {
-                runtime
-                    .trace()
-                    .record_event(|id| crate::trace::TraceEvent::user_trace(
+                runtime.trace().record_event(|id| {
+                    crate::trace::TraceEvent::user_trace(
                         id,
                         runtime.now(),
                         format!("join_task_{}", i),
-                    ));            }
+                    )
+                });
+            }
         }
     }
 
@@ -2485,9 +2486,11 @@ mod tests {
             let mut join_events = Vec::new();
 
             for event in trace {
-                if matches!(&event.data, crate::trace::event::TraceData::Message(msg) if msg.contains("fork_task_")) {
+                if matches!(&event.data, crate::trace::event::TraceData::Message(msg) if msg.contains("fork_task_"))
+                {
                     fork_events.push(event.clone());
-                } else if matches!(&event.data, crate::trace::event::TraceData::Message(msg) if msg.contains("join_task_")) {
+                } else if matches!(&event.data, crate::trace::event::TraceData::Message(msg) if msg.contains("join_task_"))
+                {
                     join_events.push(event.clone());
                 }
             }
@@ -2529,21 +2532,21 @@ mod tests {
             for i in 0..config.task_count {
                 if rng.next_u64() % 4 == 0 {
                     // 25% chance of panic
-                    runtime
-                        .trace()
-                        .record_event(|id| crate::trace::TraceEvent::user_trace(
+                    runtime.trace().record_event(|id| {
+                        crate::trace::TraceEvent::user_trace(
                             id,
                             runtime.now(),
                             format!("panic_task_{}", i),
-                        ));
+                        )
+                    });
                 } else {
-                    runtime
-                        .trace()
-                        .record_event(|id| crate::trace::TraceEvent::user_trace(
+                    runtime.trace().record_event(|id| {
+                        crate::trace::TraceEvent::user_trace(
                             id,
                             runtime.now(),
                             format!("normal_task_{}", i),
-                        ));
+                        )
+                    });
                 }
             }
         };
@@ -2750,13 +2753,13 @@ mod tests {
                     _ => "join",
                 };
 
-                runtime
-                    .trace()
-                    .record_event(|id| crate::trace::TraceEvent::user_trace(
+                runtime.trace().record_event(|id| {
+                    crate::trace::TraceEvent::user_trace(
                         id,
                         runtime.now(),
                         format!("{}_{}", event_type, i),
-                    ));
+                    )
+                });
             }
         };
 
@@ -2881,13 +2884,13 @@ mod tests {
                 // Join phase
                 for task_id in 0..tasks_per_region {
                     let event_id = region_id * 1000 + task_id + 200;
-                    runtime
-                        .trace()
-                        .record_event(|id| crate::trace::TraceEvent::user_trace(
+                    runtime.trace().record_event(|id| {
+                        crate::trace::TraceEvent::user_trace(
                             id,
                             runtime.now(),
                             format!("join_region_{}_task_{}", region_id, task_id),
-                        ));
+                        )
+                    });
                 }
             }
         };

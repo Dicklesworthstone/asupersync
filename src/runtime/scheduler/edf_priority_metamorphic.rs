@@ -136,7 +136,7 @@ impl EdfTestTask {
     pub fn urgency_score(&self, current_time: Time) -> f64 {
         let deadline_proximity = if self.deadline > current_time {
             let remaining = self.deadline.duration_since(current_time);
-            1.0 / (remaining.as_millis() as f64 + 1.0)
+            1.0 / ((remaining / 1_000_000) as f64 + 1.0)
         } else {
             1000.0 // Past deadline - very urgent
         };
@@ -343,7 +343,7 @@ fn generate_test_tasks(config: &EdfMetamorphicConfig) -> Vec<EdfTestTask> {
         let deadline = Time::from_millis(deadline_ms);
 
         // Generate resource requirements
-        let num_resources = rng.gen_range(1..=config.num_resources.min(3));
+        let num_resources = rng.gen_range(1..=(config.num_resources.min(3) as u64));
         let mut required_resources = Vec::new();
         for _ in 0..num_resources {
             let resource_id = ResourceId::new(rng.gen_range(0..config.num_resources as u64));
@@ -419,22 +419,19 @@ fn find_blocking_task(
     None
 }
 
-/// Simple test inversion record for metamorphic testing.
-#[derive(Debug, Clone)]
-struct TestInversion {
-    blocked_task: TaskId,
-    blocked_priority: Priority,
-    blocking_task: TaskId,
-    blocking_priority: Priority,
-    resource: ResourceId,
-    start_time: Instant,
-    duration: Option<Duration>,
-    inversion_type: InversionType,
-}
-
 /// Create a test priority inversion record.
-fn create_test_inversion(blocked_task: &EdfTestTask, blocking_task: &EdfTestTask) -> TestInversion {
-    TestInversion {
+fn create_test_inversion(
+    blocked_task: &EdfTestTask,
+    blocking_task: &EdfTestTask,
+) -> PriorityInversion {
+    PriorityInversion {
+        inversion_id: InversionId::new(0),
+        task_chain: vec![],
+        impact: crate::runtime::scheduler::priority_inversion_oracle::InversionImpact {
+            severity: InversionSeverity::Low,
+            duration: Duration::from_micros(100),
+            tasks_affected: 1,
+        },
         blocked_task: blocked_task.task_id,
         blocked_priority: blocked_task.priority,
         blocking_task: blocking_task.task_id,
@@ -497,8 +494,8 @@ fn test_edf_ordering_preservation(
     let mut shuffled_tasks = tasks.clone();
     let mut rng = DetRng::new(config.seed + 1);
     for i in (1..shuffled_tasks.len()).rev() {
-        let j = rng.gen_range(0..=i);
-        shuffled_tasks.swap(i, j);
+        let j = rng.gen_range(0..(i as u64 + 1));
+        shuffled_tasks.swap(i, j as usize);
     }
     let state2 = simulate_edf_scheduling(&shuffled_tasks, config);
 

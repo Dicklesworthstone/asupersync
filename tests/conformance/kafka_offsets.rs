@@ -3,12 +3,12 @@
 //! Implements metamorphic relations for Kafka consumer offset management to verify
 //! protocol compliance across commit operations, rebalancing, and transactional semantics.
 
-use asupersync::messaging::kafka_consumer::{
-    ConsumerConfig, KafkaConsumer, TopicPartitionOffset, RebalanceResult, KafkaError
-};
 use asupersync::cx::Cx;
-use asupersync::types::Outcome;
+use asupersync::messaging::kafka_consumer::{
+    ConsumerConfig, KafkaConsumer, KafkaError, RebalanceResult, TopicPartitionOffset,
+};
 use asupersync::runtime::Runtime;
+use asupersync::types::Outcome;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,7 +65,11 @@ async fn create_test_consumer(
 }
 
 /// Helper to create test offset data
-fn create_test_offsets(topic: &str, partitions: &[i32], base_offset: i64) -> Vec<TopicPartitionOffset> {
+fn create_test_offsets(
+    topic: &str,
+    partitions: &[i32],
+    base_offset: i64,
+) -> Vec<TopicPartitionOffset> {
     partitions
         .iter()
         .enumerate()
@@ -84,77 +88,83 @@ fn create_test_offsets(topic: &str, partitions: &[i32], base_offset: i64) -> Vec
 #[tokio::test]
 async fn mr1_commit_offsets_monotonic_per_partition() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::new_test();
-    runtime.block_on(async {
-        let cx = runtime.cx();
-        let config = ConformanceConfig::default();
+    runtime
+        .block_on(async {
+            let cx = runtime.cx();
+            let config = ConformanceConfig::default();
 
-        // Test with both stub and real consumers if available
-        for use_stub in [true, false] {
-            let consumer = match create_test_consumer(&cx, config.clone(), use_stub).await {
-                Ok(c) => c,
-                Err(_) if !use_stub => continue, // Skip real Kafka if unavailable
-                Err(e) => return Err(e.into()),
-            };
+            // Test with both stub and real consumers if available
+            for use_stub in [true, false] {
+                let consumer = match create_test_consumer(&cx, config.clone(), use_stub).await {
+                    Ok(c) => c,
+                    Err(_) if !use_stub => continue, // Skip real Kafka if unavailable
+                    Err(e) => return Err(e.into()),
+                };
 
-            let topic = "test-monotonic";
-            let partition = 0;
+                let topic = "test-monotonic";
+                let partition = 0;
 
-            // Initial offset commit
-            let initial_offsets = vec![TopicPartitionOffset {
-                topic: topic.to_string(),
-                partition,
-                offset: 100,
-            }];
+                // Initial offset commit
+                let initial_offsets = vec![TopicPartitionOffset {
+                    topic: topic.to_string(),
+                    partition,
+                    offset: 100,
+                }];
 
-            consumer.commit_offsets(&cx, &initial_offsets).await?;
-            let committed_1 = consumer.committed_offset(topic, partition);
-            assert_eq!(committed_1, Some(100));
+                consumer.commit_offsets(&cx, &initial_offsets).await?;
+                let committed_1 = consumer.committed_offset(topic, partition);
+                assert_eq!(committed_1, Some(100));
 
-            // Increasing offset commit (should succeed)
-            let increased_offsets = vec![TopicPartitionOffset {
-                topic: topic.to_string(),
-                partition,
-                offset: 200,
-            }];
+                // Increasing offset commit (should succeed)
+                let increased_offsets = vec![TopicPartitionOffset {
+                    topic: topic.to_string(),
+                    partition,
+                    offset: 200,
+                }];
 
-            consumer.commit_offsets(&cx, &increased_offsets).await?;
-            let committed_2 = consumer.committed_offset(topic, partition);
-            assert_eq!(committed_2, Some(200));
+                consumer.commit_offsets(&cx, &increased_offsets).await?;
+                let committed_2 = consumer.committed_offset(topic, partition);
+                assert_eq!(committed_2, Some(200));
 
-            // Attempt decreasing offset commit (should be rejected)
-            let decreased_offsets = vec![TopicPartitionOffset {
-                topic: topic.to_string(),
-                partition,
-                offset: 150,
-            }];
+                // Attempt decreasing offset commit (should be rejected)
+                let decreased_offsets = vec![TopicPartitionOffset {
+                    topic: topic.to_string(),
+                    partition,
+                    offset: 150,
+                }];
 
-            let result = consumer.commit_offsets(&cx, &decreased_offsets).await;
-            match result {
-                Err(KafkaError::OffsetCommitRegression { .. }) => {
-                    // Expected - offset regression should be prevented
-                    let committed_3 = consumer.committed_offset(topic, partition);
-                    assert_eq!(committed_3, Some(200), "Offset should remain at previous value after regression attempt");
+                let result = consumer.commit_offsets(&cx, &decreased_offsets).await;
+                match result {
+                    Err(KafkaError::OffsetCommitRegression { .. }) => {
+                        // Expected - offset regression should be prevented
+                        let committed_3 = consumer.committed_offset(topic, partition);
+                        assert_eq!(
+                            committed_3,
+                            Some(200),
+                            "Offset should remain at previous value after regression attempt"
+                        );
+                    }
+                    Ok(_) => {
+                        panic!("Offset regression should have been rejected");
+                    }
+                    Err(e) => return Err(e.into()),
                 }
-                Ok(_) => {
-                    panic!("Offset regression should have been rejected");
-                }
-                Err(e) => return Err(e.into()),
+
+                // Subsequent increasing commit should work
+                let final_offsets = vec![TopicPartitionOffset {
+                    topic: topic.to_string(),
+                    partition,
+                    offset: 300,
+                }];
+
+                consumer.commit_offsets(&cx, &final_offsets).await?;
+                let committed_4 = consumer.committed_offset(topic, partition);
+                assert_eq!(committed_4, Some(300));
             }
 
-            // Subsequent increasing commit should work
-            let final_offsets = vec![TopicPartitionOffset {
-                topic: topic.to_string(),
-                partition,
-                offset: 300,
-            }];
-
-            consumer.commit_offsets(&cx, &final_offsets).await?;
-            let committed_4 = consumer.committed_offset(topic, partition);
-            assert_eq!(committed_4, Some(300));
-        }
-
-        Ok(())
-    }).await
+            Ok(())
+        })
+        .await
 }
 
 /// Metamorphic Relation 2: Idempotent commit with same ConsumerGroupId
@@ -165,62 +175,83 @@ async fn mr1_commit_offsets_monotonic_per_partition() -> Result<(), Box<dyn std:
 #[tokio::test]
 async fn mr2_idempotent_commit_same_group() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::new_test();
-    runtime.block_on(async {
-        let cx = runtime.cx();
-        let config = ConformanceConfig::default();
+    runtime
+        .block_on(async {
+            let cx = runtime.cx();
+            let config = ConformanceConfig::default();
 
-        for use_stub in [true, false] {
-            let consumer1 = match create_test_consumer(&cx, config.clone(), use_stub).await {
-                Ok(c) => c,
-                Err(_) if !use_stub => continue,
-                Err(e) => return Err(e.into()),
-            };
+            for use_stub in [true, false] {
+                let consumer1 = match create_test_consumer(&cx, config.clone(), use_stub).await {
+                    Ok(c) => c,
+                    Err(_) if !use_stub => continue,
+                    Err(e) => return Err(e.into()),
+                };
 
-            // Create second consumer with same group ID
-            let consumer2 = match create_test_consumer(&cx, config.clone(), use_stub).await {
-                Ok(c) => c,
-                Err(_) if !use_stub => continue,
-                Err(e) => return Err(e.into()),
-            };
+                // Create second consumer with same group ID
+                let consumer2 = match create_test_consumer(&cx, config.clone(), use_stub).await {
+                    Ok(c) => c,
+                    Err(_) if !use_stub => continue,
+                    Err(e) => return Err(e.into()),
+                };
 
-            let topic = "test-idempotent";
-            let offsets = create_test_offsets(topic, &[0, 1, 2], 1000);
+                let topic = "test-idempotent";
+                let offsets = create_test_offsets(topic, &[0, 1, 2], 1000);
 
-            // First commit
-            consumer1.commit_offsets(&cx, &offsets).await?;
+                // First commit
+                consumer1.commit_offsets(&cx, &offsets).await?;
 
-            // Verify committed state after first commit
-            let state_after_first = offsets.iter()
-                .map(|tpo| (tpo.partition, consumer1.committed_offset(&tpo.topic, tpo.partition)))
-                .collect::<Vec<_>>();
+                // Verify committed state after first commit
+                let state_after_first = offsets
+                    .iter()
+                    .map(|tpo| {
+                        (
+                            tpo.partition,
+                            consumer1.committed_offset(&tpo.topic, tpo.partition),
+                        )
+                    })
+                    .collect::<Vec<_>>();
 
-            // Second identical commit (should be idempotent)
-            consumer1.commit_offsets(&cx, &offsets).await?;
+                // Second identical commit (should be idempotent)
+                consumer1.commit_offsets(&cx, &offsets).await?;
 
-            // Verify state is identical after second commit
-            let state_after_second = offsets.iter()
-                .map(|tpo| (tpo.partition, consumer1.committed_offset(&tpo.topic, tpo.partition)))
-                .collect::<Vec<_>>();
+                // Verify state is identical after second commit
+                let state_after_second = offsets
+                    .iter()
+                    .map(|tpo| {
+                        (
+                            tpo.partition,
+                            consumer1.committed_offset(&tpo.topic, tpo.partition),
+                        )
+                    })
+                    .collect::<Vec<_>>();
 
-            assert_eq!(state_after_first, state_after_second,
-                "Idempotent commit should not change committed state");
+                assert_eq!(
+                    state_after_first, state_after_second,
+                    "Idempotent commit should not change committed state"
+                );
 
-            // Third commit by different consumer in same group (should also be idempotent)
-            consumer2.commit_offsets(&cx, &offsets).await?;
+                // Third commit by different consumer in same group (should also be idempotent)
+                consumer2.commit_offsets(&cx, &offsets).await?;
 
-            // Verify same group sees same committed offsets
-            for tpo in &offsets {
-                let offset1 = consumer1.committed_offset(&tpo.topic, tpo.partition);
-                let offset2 = consumer2.committed_offset(&tpo.topic, tpo.partition);
-                assert_eq!(offset1, offset2,
-                    "Same consumer group should see identical committed offsets");
-                assert_eq!(offset1, Some(tpo.offset),
-                    "Committed offset should match expected value");
+                // Verify same group sees same committed offsets
+                for tpo in &offsets {
+                    let offset1 = consumer1.committed_offset(&tpo.topic, tpo.partition);
+                    let offset2 = consumer2.committed_offset(&tpo.topic, tpo.partition);
+                    assert_eq!(
+                        offset1, offset2,
+                        "Same consumer group should see identical committed offsets"
+                    );
+                    assert_eq!(
+                        offset1,
+                        Some(tpo.offset),
+                        "Committed offset should match expected value"
+                    );
+                }
             }
-        }
 
-        Ok(())
-    }).await
+            Ok(())
+        })
+        .await
 }
 
 /// Metamorphic Relation 3: Offset retention respected per group.metadata.retention.minutes
@@ -230,65 +261,81 @@ async fn mr2_idempotent_commit_same_group() -> Result<(), Box<dyn std::error::Er
 #[tokio::test]
 async fn mr3_offset_retention_respected() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::new_test();
-    runtime.block_on(async {
-        let cx = runtime.cx();
+    runtime
+        .block_on(async {
+            let cx = runtime.cx();
 
-        // Test with short retention for faster testing
-        let short_retention_config = ConformanceConfig {
-            retention_minutes: 1, // 1 minute retention
-            ..ConformanceConfig::default()
-        };
-
-        // Test with longer retention
-        let long_retention_config = ConformanceConfig {
-            retention_minutes: 60, // 1 hour retention
-            ..ConformanceConfig::default()
-        };
-
-        for use_stub in [true, false] {
-            // Test short retention scenario
-            let short_consumer = match create_test_consumer(&cx, short_retention_config.clone(), use_stub).await {
-                Ok(c) => c,
-                Err(_) if !use_stub => continue,
-                Err(e) => return Err(e.into()),
+            // Test with short retention for faster testing
+            let short_retention_config = ConformanceConfig {
+                retention_minutes: 1, // 1 minute retention
+                ..ConformanceConfig::default()
             };
 
-            let topic = "test-retention-short";
-            let offsets = create_test_offsets(topic, &[0], 500);
-
-            // Commit offsets
-            short_consumer.commit_offsets(&cx, &offsets).await?;
-
-            // Verify offsets are immediately available
-            let committed_immediate = short_consumer.committed_offset(topic, 0);
-            assert_eq!(committed_immediate, Some(500),
-                "Offsets should be immediately available after commit");
-
-            // Test long retention scenario
-            let long_consumer = match create_test_consumer(&cx, long_retention_config.clone(), use_stub).await {
-                Ok(c) => c,
-                Err(_) if !use_stub => continue,
-                Err(e) => return Err(e.into()),
+            // Test with longer retention
+            let long_retention_config = ConformanceConfig {
+                retention_minutes: 60, // 1 hour retention
+                ..ConformanceConfig::default()
             };
 
-            let long_topic = "test-retention-long";
-            let long_offsets = create_test_offsets(long_topic, &[0], 1000);
+            for use_stub in [true, false] {
+                // Test short retention scenario
+                let short_consumer =
+                    match create_test_consumer(&cx, short_retention_config.clone(), use_stub).await
+                    {
+                        Ok(c) => c,
+                        Err(_) if !use_stub => continue,
+                        Err(e) => return Err(e.into()),
+                    };
 
-            long_consumer.commit_offsets(&cx, &long_offsets).await?;
+                let topic = "test-retention-short";
+                let offsets = create_test_offsets(topic, &[0], 500);
 
-            // Verify offsets are available within retention period
-            let committed_long = long_consumer.committed_offset(long_topic, 0);
-            assert_eq!(committed_long, Some(1000),
-                "Offsets should be available within retention period");
+                // Commit offsets
+                short_consumer.commit_offsets(&cx, &offsets).await?;
 
-            // Note: In a real implementation, we would test that offsets expire after
-            // the retention period, but this requires time manipulation or very long waits.
-            // For this conformance test, we verify that the retention configuration
-            // is properly applied to the consumer.
-        }
+                // Verify offsets are immediately available
+                let committed_immediate = short_consumer.committed_offset(topic, 0);
+                assert_eq!(
+                    committed_immediate,
+                    Some(500),
+                    "Offsets should be immediately available after commit"
+                );
 
-        Ok(())
-    }).await
+                // Test long retention scenario
+                let long_consumer = match create_test_consumer(
+                    &cx,
+                    long_retention_config.clone(),
+                    use_stub,
+                )
+                .await
+                {
+                    Ok(c) => c,
+                    Err(_) if !use_stub => continue,
+                    Err(e) => return Err(e.into()),
+                };
+
+                let long_topic = "test-retention-long";
+                let long_offsets = create_test_offsets(long_topic, &[0], 1000);
+
+                long_consumer.commit_offsets(&cx, &long_offsets).await?;
+
+                // Verify offsets are available within retention period
+                let committed_long = long_consumer.committed_offset(long_topic, 0);
+                assert_eq!(
+                    committed_long,
+                    Some(1000),
+                    "Offsets should be available within retention period"
+                );
+
+                // Note: In a real implementation, we would test that offsets expire after
+                // the retention period, but this requires time manipulation or very long waits.
+                // For this conformance test, we verify that the retention configuration
+                // is properly applied to the consumer.
+            }
+
+            Ok(())
+        })
+        .await
 }
 
 /// Metamorphic Relation 4: Rebalance preserves committed offsets
@@ -298,68 +345,84 @@ async fn mr3_offset_retention_respected() -> Result<(), Box<dyn std::error::Erro
 #[tokio::test]
 async fn mr4_rebalance_preserves_committed_offsets() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::new_test();
-    runtime.block_on(async {
-        let cx = runtime.cx();
-        let config = ConformanceConfig::default();
+    runtime
+        .block_on(async {
+            let cx = runtime.cx();
+            let config = ConformanceConfig::default();
 
-        for use_stub in [true, false] {
-            let consumer = match create_test_consumer(&cx, config.clone(), use_stub).await {
-                Ok(c) => c,
-                Err(_) if !use_stub => continue,
-                Err(e) => return Err(e.into()),
-            };
+            for use_stub in [true, false] {
+                let consumer = match create_test_consumer(&cx, config.clone(), use_stub).await {
+                    Ok(c) => c,
+                    Err(_) if !use_stub => continue,
+                    Err(e) => return Err(e.into()),
+                };
 
-            let topic = "test-rebalance";
-            let initial_assignments = create_test_offsets(topic, &[0, 1, 2], 2000);
+                let topic = "test-rebalance";
+                let initial_assignments = create_test_offsets(topic, &[0, 1, 2], 2000);
 
-            // Commit initial offsets
-            consumer.commit_offsets(&cx, &initial_assignments).await?;
+                // Commit initial offsets
+                consumer.commit_offsets(&cx, &initial_assignments).await?;
 
-            // Store pre-rebalance committed offsets
-            let pre_rebalance_offsets: HashMap<i32, Option<i64>> = initial_assignments
-                .iter()
-                .map(|tpo| (tpo.partition, consumer.committed_offset(&tpo.topic, tpo.partition)))
-                .collect();
+                // Store pre-rebalance committed offsets
+                let pre_rebalance_offsets: HashMap<i32, Option<i64>> = initial_assignments
+                    .iter()
+                    .map(|tpo| {
+                        (
+                            tpo.partition,
+                            consumer.committed_offset(&tpo.topic, tpo.partition),
+                        )
+                    })
+                    .collect();
 
-            // Simulate rebalance (partition reassignment)
-            let rebalance_assignments = create_test_offsets(topic, &[0, 1], 2000); // Fewer partitions
-            let rebalance_result = consumer.rebalance(&cx, &rebalance_assignments).await?;
+                // Simulate rebalance (partition reassignment)
+                let rebalance_assignments = create_test_offsets(topic, &[0, 1], 2000); // Fewer partitions
+                let rebalance_result = consumer.rebalance(&cx, &rebalance_assignments).await?;
 
-            // Verify rebalance was processed
-            match rebalance_result {
-                RebalanceResult::PartitionsRevoked { .. } |
-                RebalanceResult::PartitionsAssigned { .. } => {
-                    // Expected rebalance result
+                // Verify rebalance was processed
+                match rebalance_result {
+                    RebalanceResult::PartitionsRevoked { .. }
+                    | RebalanceResult::PartitionsAssigned { .. } => {
+                        // Expected rebalance result
+                    }
+                    RebalanceResult::NoChange => {
+                        // Also acceptable for this test
+                    }
                 }
-                RebalanceResult::NoChange => {
-                    // Also acceptable for this test
+
+                // Verify committed offsets are preserved after rebalance
+                for (partition, expected_offset) in pre_rebalance_offsets {
+                    if rebalance_assignments
+                        .iter()
+                        .any(|tpo| tpo.partition == partition)
+                    {
+                        // Only check partitions still assigned after rebalance
+                        let post_rebalance_offset = consumer.committed_offset(topic, partition);
+                        assert_eq!(
+                            post_rebalance_offset, expected_offset,
+                            "Committed offset for partition {} should be preserved after rebalance",
+                            partition
+                        );
+                    }
+                }
+
+                // Test rebalance with additional partitions
+                let expanded_assignments = create_test_offsets(topic, &[0, 1, 2, 3], 2000);
+                consumer.rebalance(&cx, &expanded_assignments).await?;
+
+                // Original partitions should still have their committed offsets
+                for tpo in &initial_assignments {
+                    let offset = consumer.committed_offset(&tpo.topic, tpo.partition);
+                    assert_eq!(
+                        offset,
+                        Some(tpo.offset),
+                        "Original committed offsets should survive partition expansion"
+                    );
                 }
             }
 
-            // Verify committed offsets are preserved after rebalance
-            for (partition, expected_offset) in pre_rebalance_offsets {
-                if rebalance_assignments.iter().any(|tpo| tpo.partition == partition) {
-                    // Only check partitions still assigned after rebalance
-                    let post_rebalance_offset = consumer.committed_offset(topic, partition);
-                    assert_eq!(post_rebalance_offset, expected_offset,
-                        "Committed offset for partition {} should be preserved after rebalance", partition);
-                }
-            }
-
-            // Test rebalance with additional partitions
-            let expanded_assignments = create_test_offsets(topic, &[0, 1, 2, 3], 2000);
-            consumer.rebalance(&cx, &expanded_assignments).await?;
-
-            // Original partitions should still have their committed offsets
-            for tpo in &initial_assignments {
-                let offset = consumer.committed_offset(&tpo.topic, tpo.partition);
-                assert_eq!(offset, Some(tpo.offset),
-                    "Original committed offsets should survive partition expansion");
-            }
-        }
-
-        Ok(())
-    }).await
+            Ok(())
+        })
+        .await
 }
 
 /// Metamorphic Relation 5: Transactional commit atomic
@@ -481,46 +544,48 @@ async fn mr5_transactional_commit_atomic() -> Result<(), Box<dyn std::error::Err
 #[tokio::test]
 async fn integration_all_metamorphic_relations() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::new_test();
-    runtime.block_on(async {
-        let cx = runtime.cx();
-        let config = ConformanceConfig {
-            group_id: "integration-test-group".to_string(),
-            retention_minutes: 30,
-            enable_auto_commit: false,
-            auto_commit_interval: Duration::from_secs(10),
-        };
+    runtime
+        .block_on(async {
+            let cx = runtime.cx();
+            let config = ConformanceConfig {
+                group_id: "integration-test-group".to_string(),
+                retention_minutes: 30,
+                enable_auto_commit: false,
+                auto_commit_interval: Duration::from_secs(10),
+            };
 
-        // Test against stub implementation
-        let consumer = create_test_consumer(&cx, config, true).await?;
-        let topic = "integration-test";
+            // Test against stub implementation
+            let consumer = create_test_consumer(&cx, config, true).await?;
+            let topic = "integration-test";
 
-        // MR1: Verify monotonic commits
-        let offsets_v1 = create_test_offsets(topic, &[0, 1], 100);
-        consumer.commit_offsets(&cx, &offsets_v1).await?;
+            // MR1: Verify monotonic commits
+            let offsets_v1 = create_test_offsets(topic, &[0, 1], 100);
+            consumer.commit_offsets(&cx, &offsets_v1).await?;
 
-        let offsets_v2 = create_test_offsets(topic, &[0, 1], 200);
-        consumer.commit_offsets(&cx, &offsets_v2).await?;
+            let offsets_v2 = create_test_offsets(topic, &[0, 1], 200);
+            consumer.commit_offsets(&cx, &offsets_v2).await?;
 
-        // MR2: Verify idempotency
-        consumer.commit_offsets(&cx, &offsets_v2).await?;
-        consumer.commit_offsets(&cx, &offsets_v2).await?;
+            // MR2: Verify idempotency
+            consumer.commit_offsets(&cx, &offsets_v2).await?;
+            consumer.commit_offsets(&cx, &offsets_v2).await?;
 
-        // MR4: Verify rebalance preservation
-        let rebalance_assignment = create_test_offsets(topic, &[0], 200);
-        consumer.rebalance(&cx, &rebalance_assignment).await?;
-        assert_eq!(consumer.committed_offset(topic, 0), Some(200));
+            // MR4: Verify rebalance preservation
+            let rebalance_assignment = create_test_offsets(topic, &[0], 200);
+            consumer.rebalance(&cx, &rebalance_assignment).await?;
+            assert_eq!(consumer.committed_offset(topic, 0), Some(200));
 
-        // MR5: Verify atomic behavior
-        let atomic_offsets = create_test_offsets(topic, &[0, 2, 3], 300);
-        consumer.commit_offsets(&cx, &atomic_offsets).await?;
+            // MR5: Verify atomic behavior
+            let atomic_offsets = create_test_offsets(topic, &[0, 2, 3], 300);
+            consumer.commit_offsets(&cx, &atomic_offsets).await?;
 
-        for tpo in &atomic_offsets {
-            let committed = consumer.committed_offset(&tpo.topic, tpo.partition);
-            assert_eq!(committed, Some(tpo.offset));
-        }
+            for tpo in &atomic_offsets {
+                let committed = consumer.committed_offset(&tpo.topic, tpo.partition);
+                assert_eq!(committed, Some(tpo.offset));
+            }
 
-        Ok(())
-    }).await
+            Ok(())
+        })
+        .await
 }
 
 #[cfg(test)]

@@ -385,7 +385,10 @@ mod tests {
     fn stacked_multiply_layers_compose_correctly() {
         // Stack: multiply-by-2 (inner) then multiply-by-3 (outer)
         // Result: echo(5) * 2 * 3 = 30
-        let stack = Stack::new(MultiplyLayer { factor: 2, id: 0 }, MultiplyLayer { factor: 3, id: 0 });
+        let stack = Stack::new(
+            MultiplyLayer { factor: 2, id: 0 },
+            MultiplyLayer { factor: 3, id: 0 },
+        );
         let svc = stack.layer(EchoService);
 
         let fut = svc.oneshot(5);
@@ -423,7 +426,10 @@ mod tests {
 
     #[test]
     fn backpressure_propagates_through_stack() {
-        let stack = Stack::new(MultiplyLayer { factor: 2, id: 0 }, MultiplyLayer { factor: 3, id: 0 });
+        let stack = Stack::new(
+            MultiplyLayer { factor: 2, id: 0 },
+            MultiplyLayer { factor: 3, id: 0 },
+        );
         let mut svc = stack.layer(NeverReadyService);
 
         let waker = noop_waker();
@@ -478,9 +484,12 @@ mod tests {
 
     #[test]
     fn stack_inner_outer_accessors() {
-        let stack = Stack::new(MultiplyLayer { factor: 2, id: 0 }, MultiplyLayer { factor: 3, id: 0 });
-        assert_eq!(stack.inner().0, 2);
-        assert_eq!(stack.outer().0, 3);
+        let stack = Stack::new(
+            MultiplyLayer { factor: 2, id: 0 },
+            MultiplyLayer { factor: 3, id: 0 },
+        );
+        assert_eq!(stack.inner().factor, 2);
+        assert_eq!(stack.outer().factor, 3);
     }
 
     // =========================================================================
@@ -543,7 +552,10 @@ mod tests {
 
     #[test]
     fn ready_service_propagates_through_stack() {
-        let stack = Stack::new(MultiplyLayer { factor: 2, id: 0 }, MultiplyLayer { factor: 3, id: 0 });
+        let stack = Stack::new(
+            MultiplyLayer { factor: 2, id: 0 },
+            MultiplyLayer { factor: 3, id: 0 },
+        );
         let mut svc = stack.layer(EchoService);
 
         let waker = noop_waker();
@@ -640,9 +652,9 @@ mod tests {
         value: u32,
     }
 
-    impl<F> Future for AddFuture<F>
+    impl<F, E> Future for AddFuture<F>
     where
-        F: Future<Output = Result<u32, std::convert::Infallible>> + Unpin,
+        F: Future<Output = Result<u32, E>> + Unpin,
     {
         type Output = F::Output;
 
@@ -660,6 +672,7 @@ mod tests {
     where
         S: Service<u32>,
         S::Future: Unpin,
+        S::Error: std::fmt::Debug,
     {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -702,9 +715,9 @@ mod tests {
 
             // Right-associative: Stack(A, Stack(B, C))
             let right_stack = Stack::new(
-                    Stack::new(layer_b.clone(), layer_c.clone()),
-                    layer_a.clone(),
-                );
+                Stack::new(layer_b.clone(), layer_c.clone()),
+                layer_a.clone(),
+            );
             let right_service = right_stack.layer(EchoService);
             let right_result = execute_service_call(right_service, test_value);
 
@@ -868,21 +881,24 @@ mod tests {
             // Build deep composition in multiple ways
 
             // Left-nested: (((L1, L2), L3), L4)
-            let left_nested = layers
-                .iter()
-                .cloned()
-                .reduce(|acc, layer| Stack::new(layer, acc))
-                .unwrap();
+            let left_nested = Stack::new(
+                Stack::new(
+                    Stack::new(AddLayer::new(2, 1), AddLayer::new(3, 2)),
+                    AddLayer::new(5, 3),
+                ),
+                AddLayer::new(7, 4),
+            );
             let left_service = left_nested.layer(EchoService);
             let left_result = execute_service_call(left_service, test_value);
 
             // Right-nested: (L1, (L2, (L3, L4)))
-            let right_nested = layers
-                .iter()
-                .rev()
-                .cloned()
-                .reduce(|acc, layer| Stack::new(layer, acc))
-                .unwrap();
+            let right_nested = Stack::new(
+                AddLayer::new(2, 1),
+                Stack::new(
+                    AddLayer::new(3, 2),
+                    Stack::new(AddLayer::new(5, 3), AddLayer::new(7, 4)),
+                ),
+            );
             let right_service = right_nested.layer(EchoService);
             let right_result = execute_service_call(right_service, test_value);
 
@@ -1058,23 +1074,25 @@ mod tests {
 
         let config = LayerMetamorphicConfig::default();
 
-        // Create many layers for stress testing
-        let mut layers: Vec<Box<dyn Layer<EchoService, Service = _> + Clone>> = vec![
-            Box::new(AddLayer::new(1, 1)),
-            Box::new(MultiplyLayer::new(2, 2)),
-            Box::new(AddLayer::new(3, 3)),
-            Box::new(AddLayer::new(4, 4)),
-            Box::new(MultiplyLayer::new(1, 5)), // Multiply by 1 (identity)
-            Box::new(AddLayer::new(0, 6)),      // Add 0 (identity)
-        ];
+        let l1 = AddLayer::new(1, 1);
+        let l2 = MultiplyLayer::new(2, 2);
+        let l3 = AddLayer::new(3, 3);
+        let l4 = AddLayer::new(4, 4);
+        let l5 = MultiplyLayer::new(1, 5); // Multiply by 1 (identity)
+        let l6 = AddLayer::new(0, 6); // Add 0 (identity)
 
         for &test_value in &config.test_values {
             // Build composition by folding layers
-            let composition = layers
-                .iter()
-                .cloned()
-                .reduce(|acc, layer| Box::new(Stack::new(acc, layer)))
-                .unwrap();
+            let composition = Stack::new(
+                Stack::new(
+                    Stack::new(
+                        Stack::new(Stack::new(l1.clone(), l2.clone()), l3.clone()),
+                        l4.clone(),
+                    ),
+                    l5.clone(),
+                ),
+                l6.clone(),
+            );
 
             let service = composition.layer(EchoService);
             let result = execute_service_call(service, test_value);
@@ -1088,13 +1106,16 @@ mod tests {
             );
 
             // Test with reversed order to ensure different but predictable result
-            let mut reversed_layers = layers.clone();
-            reversed_layers.reverse();
-
-            let reversed_composition = reversed_layers
-                .into_iter()
-                .reduce(|acc, layer| Box::new(Stack::new(acc, layer)))
-                .unwrap();
+            let reversed_composition = Stack::new(
+                Stack::new(
+                    Stack::new(
+                        Stack::new(Stack::new(l6.clone(), l5.clone()), l4.clone()),
+                        l3.clone(),
+                    ),
+                    l2.clone(),
+                ),
+                l1.clone(),
+            );
 
             let reversed_service = reversed_composition.layer(EchoService);
             let reversed_result = execute_service_call(reversed_service, test_value);

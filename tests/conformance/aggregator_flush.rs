@@ -10,8 +10,8 @@
 //! 5. concurrent writers share aggregator safely
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -19,10 +19,10 @@ use asupersync::cx::Cx;
 use asupersync::lab::config::LabConfig;
 use asupersync::lab::runtime::LabRuntime;
 use asupersync::transport::aggregator::{
-    AggregatorConfig, MultipathAggregator, PathCharacteristics, PathId, TransportPath
+    AggregatorConfig, MultipathAggregator, PathCharacteristics, PathId, TransportPath,
 };
-use asupersync::types::symbol::{ObjectId, Symbol, SymbolId};
 use asupersync::types::Time;
+use asupersync::types::symbol::{ObjectId, Symbol, SymbolId};
 use asupersync::util::ArenaIndex;
 use proptest::prelude::*;
 
@@ -118,11 +118,7 @@ impl AggregatorFlushConformanceHarness {
                 }));
 
                 // Register a path
-                let path = TransportPath::new(
-                    PathId::new(1),
-                    "test_path",
-                    "test_remote"
-                );
+                let path = TransportPath::new(PathId::new(1), "test_path", "test_remote");
                 let path_id = aggregator.paths().register(path);
 
                 // Add symbols that will be buffered (out of order)
@@ -134,14 +130,25 @@ impl AggregatorFlushConformanceHarness {
 
                 // Process out-of-order symbols
                 let result1 = aggregator.process(symbol1, path_id, now);
-                assert_eq!(result1.ready.len(), 1, "Seq 0 should be immediately deliverable");
+                assert_eq!(
+                    result1.ready.len(),
+                    1,
+                    "Seq 0 should be immediately deliverable"
+                );
 
                 let result2 = aggregator.process(symbol2, path_id, now + Time::from_millis(5));
-                assert_eq!(result2.ready.len(), 0, "Seq 2 should be buffered waiting for seq 1");
+                assert_eq!(
+                    result2.ready.len(),
+                    0,
+                    "Seq 2 should be buffered waiting for seq 1"
+                );
 
                 // Before flush interval
                 let early_flush = aggregator.flush(now + Time::from_millis(5));
-                assert!(early_flush.is_empty(), "Early flush should return empty (within interval)");
+                assert!(
+                    early_flush.is_empty(),
+                    "Early flush should return empty (within interval)"
+                );
 
                 // After flush interval - should drain pending
                 let later = now + Time::from_millis(200); // Well past max_wait_time
@@ -151,8 +158,16 @@ impl AggregatorFlushConformanceHarness {
 
                 // Process the missing symbol
                 let result3 = aggregator.process(symbol3, path_id, later);
-                assert_eq!(result3.ready.len(), 1, "Seq 1 should be delivered immediately");
-                assert_eq!(result3.ready[0].esi(), 1, "Delivered symbol should be seq 1");
+                assert_eq!(
+                    result3.ready.len(),
+                    1,
+                    "Seq 1 should be delivered immediately"
+                );
+                assert_eq!(
+                    result3.ready[0].esi(),
+                    1,
+                    "Delivered symbol should be seq 1"
+                );
 
                 Ok(())
             })
@@ -165,7 +180,8 @@ impl AggregatorFlushConformanceHarness {
 
         results.push(AggregatorFlushConformanceResult {
             test_id: "mr_flush_drains_pending_synchronously".to_string(),
-            description: "Flush operation drains pending buffered symbols synchronously".to_string(),
+            description: "Flush operation drains pending buffered symbols synchronously"
+                .to_string(),
             category: TestCategory::FlushSynchronous,
             requirement_level: RequirementLevel::Must,
             verdict,
@@ -216,13 +232,21 @@ impl AggregatorFlushConformanceHarness {
 
                 // Process symbols on path1
                 for (i, symbol) in symbols_path1.iter().enumerate() {
-                    let result = aggregator.process(symbol.clone(), path1_id, now + Time::from_millis(i as u64));
+                    let result = aggregator.process(
+                        symbol.clone(),
+                        path1_id,
+                        now + Time::from_millis(i as u64),
+                    );
                     total_processed += result.ready.len();
                 }
 
                 // Process symbols on path2
                 for (i, symbol) in symbols_path2.iter().enumerate() {
-                    let result = aggregator.process(symbol.clone(), path2_id, now + Time::from_millis(10 + i as u64));
+                    let result = aggregator.process(
+                        symbol.clone(),
+                        path2_id,
+                        now + Time::from_millis(10 + i as u64),
+                    );
                     total_processed += result.ready.len();
                 }
 
@@ -238,7 +262,10 @@ impl AggregatorFlushConformanceHarness {
                 // Verify all symbols were eventually processed
                 // We expect: path1 has 1 immediate (seq0) + 1 buffered (seq2) = 2
                 //           path2 has 2 immediate (seq0,seq1) + 1 buffered (seq3) = 3
-                assert_eq!(total_processed, 5, "All 5 symbols should be processed after drain");
+                assert_eq!(
+                    total_processed, 5,
+                    "All 5 symbols should be processed after drain"
+                );
 
                 Ok(())
             })
@@ -291,7 +318,11 @@ impl AggregatorFlushConformanceHarness {
 
                 let mut processed_count = 0;
                 for (i, symbol) in symbols.iter().enumerate() {
-                    let result = aggregator.process(symbol.clone(), path_id, now + Time::from_millis(i as u64));
+                    let result = aggregator.process(
+                        symbol.clone(),
+                        path_id,
+                        now + Time::from_millis(i as u64),
+                    );
                     processed_count += result.ready.len();
                 }
 
@@ -306,7 +337,10 @@ impl AggregatorFlushConformanceHarness {
                 let final_count = initial_count + flush_result.len();
 
                 // Verify the count is preserved and consistent
-                assert!(final_count >= initial_count, "Cancel should preserve existing sent count");
+                assert!(
+                    final_count >= initial_count,
+                    "Cancel should preserve existing sent count"
+                );
                 assert_eq!(final_count, 3, "Should have processed all 3 symbols");
 
                 Ok(())
@@ -378,9 +412,16 @@ impl AggregatorFlushConformanceHarness {
                 let result4 = aggregator.process(symbol4, path_id, now + Time::from_millis(3));
 
                 // Backpressure manifests as either buffering or forced flushing
-                let total_buffered = if result4.ready.is_empty() { 3 } else { 3 - result4.ready.len() };
+                let total_buffered = if result4.ready.is_empty() {
+                    3
+                } else {
+                    3 - result4.ready.len()
+                };
 
-                assert!(total_buffered <= 2, "Buffer should not exceed max_buffer_size due to backpressure");
+                assert!(
+                    total_buffered <= 2,
+                    "Buffer should not exceed max_buffer_size due to backpressure"
+                );
 
                 Ok(())
             })
@@ -434,54 +475,62 @@ impl AggregatorFlushConformanceHarness {
             let processed_count = Arc::new(AtomicU64::new(0));
             let error_occurred = Arc::new(AtomicBool::new(false));
 
-            let handles: Vec<_> = (0..NUM_THREADS).map(|thread_id| {
-                let aggregator = Arc::clone(&aggregator);
-                let barrier = Arc::clone(&barrier);
-                let processed_count = Arc::clone(&processed_count);
-                let error_occurred = Arc::clone(&error_occurred);
+            let handles: Vec<_> = (0..NUM_THREADS)
+                .map(|thread_id| {
+                    let aggregator = Arc::clone(&aggregator);
+                    let barrier = Arc::clone(&barrier);
+                    let processed_count = Arc::clone(&processed_count);
+                    let error_occurred = Arc::clone(&error_occurred);
 
-                thread::spawn(move || {
-                    let path_id = if thread_id % 2 == 0 { path1_id } else { path2_id };
-                    let object_id = (thread_id / 2) + 1;
+                    thread::spawn(move || {
+                        let path_id = if thread_id % 2 == 0 {
+                            path1_id
+                        } else {
+                            path2_id
+                        };
+                        let object_id = (thread_id / 2) + 1;
 
-                    // Wait for all threads to be ready
-                    barrier.wait();
+                        // Wait for all threads to be ready
+                        barrier.wait();
 
-                    let base_time = Time::from_millis(thread_id as u64 * 100);
+                        let base_time = Time::from_millis(thread_id as u64 * 100);
 
-                    for i in 0..SYMBOLS_PER_THREAD {
-                        let symbol = create_test_symbol(object_id as u64, i as u64, i as u64);
-                        let now = base_time + Time::from_millis(i as u64);
+                        for i in 0..SYMBOLS_PER_THREAD {
+                            let symbol = create_test_symbol(object_id as u64, i as u64, i as u64);
+                            let now = base_time + Time::from_millis(i as u64);
 
-                        match std::panic::catch_unwind(|| {
-                            aggregator.process(symbol, path_id, now)
-                        }) {
-                            Ok(result) => {
-                                processed_count.fetch_add(result.ready.len() as u64, Ordering::SeqCst);
-                            }
-                            Err(_) => {
-                                error_occurred.store(true, Ordering::SeqCst);
-                                return;
-                            }
-                        }
-
-                        // Occasionally call flush
-                        if i % 3 == 0 {
                             match std::panic::catch_unwind(|| {
-                                aggregator.flush(now + Time::from_millis(1))
+                                aggregator.process(symbol, path_id, now)
                             }) {
-                                Ok(flushed) => {
-                                    processed_count.fetch_add(flushed.len() as u64, Ordering::SeqCst);
+                                Ok(result) => {
+                                    processed_count
+                                        .fetch_add(result.ready.len() as u64, Ordering::SeqCst);
                                 }
                                 Err(_) => {
                                     error_occurred.store(true, Ordering::SeqCst);
                                     return;
                                 }
                             }
+
+                            // Occasionally call flush
+                            if i % 3 == 0 {
+                                match std::panic::catch_unwind(|| {
+                                    aggregator.flush(now + Time::from_millis(1))
+                                }) {
+                                    Ok(flushed) => {
+                                        processed_count
+                                            .fetch_add(flushed.len() as u64, Ordering::SeqCst);
+                                    }
+                                    Err(_) => {
+                                        error_occurred.store(true, Ordering::SeqCst);
+                                        return;
+                                    }
+                                }
+                            }
                         }
-                    }
+                    })
                 })
-            }).collect();
+                .collect();
 
             // Wait for all threads to complete
             for handle in handles {
@@ -489,7 +538,10 @@ impl AggregatorFlushConformanceHarness {
             }
 
             // Check that no errors occurred and some processing happened
-            assert!(!error_occurred.load(Ordering::SeqCst), "No thread should panic or error");
+            assert!(
+                !error_occurred.load(Ordering::SeqCst),
+                "No thread should panic or error"
+            );
 
             let total_processed = processed_count.load(Ordering::SeqCst);
             assert!(total_processed > 0, "Some symbols should be processed");
@@ -500,7 +552,10 @@ impl AggregatorFlushConformanceHarness {
 
             // We expect roughly NUM_THREADS * SYMBOLS_PER_THREAD symbols total
             let expected_range = (NUM_THREADS * SYMBOLS_PER_THREAD) as u64;
-            assert!(final_total <= expected_range, "Should not process more symbols than sent");
+            assert!(
+                final_total <= expected_range,
+                "Should not process more symbols than sent"
+            );
 
             Ok(())
         });

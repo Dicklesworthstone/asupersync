@@ -6,9 +6,9 @@
 //! - Trace capture for replay
 //! - Chaos injection for stress testing
 
-use crate::lab::chaos::{ChaosRng, ChaosStats};
 use super::config::LabConfig;
 use super::oracle::OracleSuite;
+use crate::lab::chaos::{ChaosRng, ChaosStats};
 use crate::record::ObligationKind;
 use crate::record::task::TaskState;
 use crate::runtime::RuntimeState;

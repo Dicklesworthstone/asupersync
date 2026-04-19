@@ -431,12 +431,14 @@ impl EpochConsistencyTracker {
         }
 
         let mut records = self.module_records.write();
-        let record = records.entry(module).or_insert_with(|| EpochTransitionRecord {
-            current_epoch: from_epoch,
-            last_transition_time: now,
-            transition_start_time: None,
-            transition_count: 0,
-        });
+        let record = records
+            .entry(module)
+            .or_insert_with(|| EpochTransitionRecord {
+                current_epoch: from_epoch,
+                last_transition_time: now,
+                transition_start_time: None,
+                transition_count: 0,
+            });
         record.transition_start_time = Some(now);
     }
 
@@ -575,12 +577,34 @@ impl EpochConsistencyTracker {
             let violations = self.violations.read();
             if let Some(last) = violations.last() {
                 match (last, &violation) {
-                    (EpochConsistencyViolation::ModuleDesync { max_skew: s1, .. }, 
-                     EpochConsistencyViolation::ModuleDesync { max_skew: s2, .. }) if s1 == s2 => return,
-                    (EpochConsistencyViolation::AdvancementOrderViolation { module: m1, advanced_to: a1, .. }, 
-                     EpochConsistencyViolation::AdvancementOrderViolation { module: m2, advanced_to: a2, .. }) if m1 == m2 && a1 == a2 => return,
-                    (EpochConsistencyViolation::SlowTransition { module: m1, to_epoch: t1, .. }, 
-                     EpochConsistencyViolation::SlowTransition { module: m2, to_epoch: t2, .. }) if m1 == m2 && t1 == t2 => return,
+                    (
+                        EpochConsistencyViolation::ModuleDesync { max_skew: s1, .. },
+                        EpochConsistencyViolation::ModuleDesync { max_skew: s2, .. },
+                    ) if s1 == s2 => return,
+                    (
+                        EpochConsistencyViolation::AdvancementOrderViolation {
+                            module: m1,
+                            advanced_to: a1,
+                            ..
+                        },
+                        EpochConsistencyViolation::AdvancementOrderViolation {
+                            module: m2,
+                            advanced_to: a2,
+                            ..
+                        },
+                    ) if m1 == m2 && a1 == a2 => return,
+                    (
+                        EpochConsistencyViolation::SlowTransition {
+                            module: m1,
+                            to_epoch: t1,
+                            ..
+                        },
+                        EpochConsistencyViolation::SlowTransition {
+                            module: m2,
+                            to_epoch: t2,
+                            ..
+                        },
+                    ) if m1 == m2 && t1 == t2 => return,
                     _ => {}
                 }
             }

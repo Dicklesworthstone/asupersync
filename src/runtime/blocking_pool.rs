@@ -2047,7 +2047,7 @@ mod tests {
             let task_executed_clone = task_executed.clone();
             let handle_normal = pool.spawn(move || {
                 task_executed_clone.store(true, Ordering::SeqCst);
-                42 // Return a value
+                // Return nothing
             });
 
             // Both tasks should complete (panic is isolated)
@@ -2061,7 +2061,9 @@ mod tests {
             );
 
             // Verify pool is still operational after panic
-            let handle_after_panic = pool.spawn(|| { let _ = "still working"; });
+            let handle_after_panic = pool.spawn(|| {
+                let _ = "still working";
+            });
             assert!(handle_after_panic.wait_timeout(Duration::from_secs(5)));
 
             assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
@@ -2102,7 +2104,7 @@ mod tests {
             );
 
             // Verify completion was signaled at the right time
-            let recorded_completion = completion_time.lock().unwrap();
+            let recorded_completion = completion_time.lock();
             assert!(
                 recorded_completion.is_some(),
                 "Completion time should be recorded"
@@ -2129,10 +2131,10 @@ mod tests {
                 let (lock, cvar) = &*gate_clone;
                 let mut release = lock.lock();
                 while !*release {
-                    release = cvar.wait(release);
+                    cvar.wait(&mut release);
                 }
+                // "completed" -> removed to match F: FnOnce() -> ()
             });
-
             // Test timeout behavior
             let start_time = Instant::now();
             assert!(!handle.wait_timeout(Duration::from_millis(100)));
@@ -2279,7 +2281,7 @@ mod tests {
                 let (lock, cvar) = &*start_gate_clone;
                 let mut start = lock.lock();
                 while !*start {
-                    start = cvar.wait(start);
+                    cvar.wait(&mut start);
                 }
             });
 
@@ -2383,9 +2385,9 @@ mod tests {
                 let (lock, cvar) = &*gate_clone;
                 let mut release = lock.lock();
                 while !*release {
-                    release = cvar.wait(release);
+                    cvar.wait(&mut release);
                 }
-                "completed"
+                // "completed" -> removed to match F: FnOnce() -> ()
             });
 
             // Initially: not done, not cancelled

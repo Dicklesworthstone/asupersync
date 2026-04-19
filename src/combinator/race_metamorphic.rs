@@ -504,7 +504,7 @@ fn mr3_branch_outcome_consistency(branch_count: usize, winner_index: usize, seed
     global_state.on_race_operation();
 
     // Simulate race execution
-    let mut outcomes = vec![None; branch_count];
+    let mut outcomes: Vec<Option<Outcome<i32, ()>>> = vec![None; branch_count];
     let mut winner_completed = false;
 
     // Poll until winner completes
@@ -574,7 +574,7 @@ fn mr4_cancel_propagation_consistency(
     global_state.on_race_operation();
 
     // Simulate race execution with external cancellation
-    let mut outcomes = vec![None; branch_count];
+    let mut outcomes: Vec<Option<Outcome<i32, ()>>> = vec![None; branch_count];
     let mut total_polls = 0;
     let race_cancel_reason = CancelReason::user("test race cancellation");
 

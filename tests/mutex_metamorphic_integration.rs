@@ -3,8 +3,8 @@
 //! This test verifies that the mutex poisoning metamorphic relations work
 //! correctly in a simplified environment without requiring the full test suite.
 
-use asupersync::lab::runtime::LabRuntime;
 use asupersync::lab::LabConfig;
+use asupersync::lab::runtime::LabRuntime;
 use asupersync::sync::{LockError, Mutex, TryLockError};
 use asupersync::types::Budget;
 use asupersync::util::ArenaIndex;
@@ -151,7 +151,8 @@ fn mr4_concurrent_poison_consistency_integration() {
             std::thread::sleep(std::time::Duration::from_millis((i as u64) * 10));
 
             let cx = create_test_context((i as u32) + 10, (i as u32) + 10);
-            let result = futures_lite::future::block_on(async { mutex_clone.lock(&cx).await });
+            let result =
+                futures_lite::future::block_on(async { mutex_clone.lock(&cx).await.map(|_| ()) });
             results_clone.lock().unwrap().push((i, result));
         });
 

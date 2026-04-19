@@ -402,11 +402,12 @@ impl H3Frame {
                 Self::MaxPushId(id)
             }
             H3_FRAME_DATAGRAM => {
-                let (quarter_stream_id, n) = decode_varint(payload)
-                    .map_err(|e| match e {
-                        crate::net::quic_core::QuicCoreError::UnexpectedEof => H3NativeError::UnexpectedEof,
-                        _ => H3NativeError::InvalidFrame("datagram quarter_stream_id"),
-                    })?;
+                let (quarter_stream_id, n) = decode_varint(payload).map_err(|e| match e {
+                    crate::net::quic_core::QuicCoreError::UnexpectedEof => {
+                        H3NativeError::UnexpectedEof
+                    }
+                    _ => H3NativeError::InvalidFrame("datagram quarter_stream_id"),
+                })?;
                 Self::Datagram {
                     quarter_stream_id,
                     payload: payload[n..].to_vec(),

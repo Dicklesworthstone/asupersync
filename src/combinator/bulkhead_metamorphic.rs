@@ -473,7 +473,7 @@ fn mr3_cancel_propagation(worker_count: u32, in_flight_count: u32, seed: u64) ->
     // Queue additional work
     let now = Time::from_millis(0);
     for work_id in worker_count..worker_count + in_flight_count {
-        match bulkhead.enqueue(1, now, Duration::from_millis(1000)) {
+        match bulkhead.enqueue(1, now) {
             Ok(entry_id) => {
                 queue_entries.push(entry_id);
             }
@@ -493,7 +493,7 @@ fn mr3_cancel_propagation(worker_count: u32, in_flight_count: u32, seed: u64) ->
 
     // Cancel all queued entries
     for entry_id in &queue_entries {
-        bulkhead.cancel_entry(*entry_id);
+        bulkhead.cancel_entry(*entry_id, now);
         global_state.record_cancelled("cancel_test", *entry_id);
     }
 

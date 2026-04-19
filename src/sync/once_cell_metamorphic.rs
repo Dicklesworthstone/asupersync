@@ -24,8 +24,8 @@ use crate::sync::OnceCell;
 use std::future::{Future, pending, ready};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 /// Configuration for OnceCell metamorphic tests.
@@ -219,7 +219,7 @@ where
     F: FnOnce(Arc<GlobalOnceCellState>) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let lab_config = LabConfig::default().with_seed(config.seed);
+    let lab_config = LabConfig::new(config.seed);
     let lab = LabRuntime::new(lab_config);
 
     futures_lite::future::block_on(async {

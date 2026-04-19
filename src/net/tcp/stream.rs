@@ -3,6 +3,8 @@
 //! This module provides a TCP stream for reading and writing data over a connection.
 //! The stream implements [`TcpStreamApi`] for use with generic code and frameworks.
 
+#![allow(unsafe_code)]
+
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 #[cfg(not(target_arch = "wasm32"))]
@@ -1000,7 +1002,6 @@ impl TcpStreamApi for TcpStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::io::AsRawFd;
     use crate::runtime::reactor::{Events, Reactor, Token};
     use crate::runtime::{IoDriverHandle, LabReactor};
     use crate::types::{Budget, RegionId, TaskId, Time};
@@ -1011,6 +1012,7 @@ mod tests {
     use std::future::poll_fn;
     use std::io;
     use std::net::{SocketAddr, TcpListener};
+    use std::os::unix::io::AsRawFd;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};

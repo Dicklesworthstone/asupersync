@@ -17,9 +17,9 @@
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::cx::Cx;
+use asupersync::http::h2::frame::{HeadersFrame, SettingsFrame};
 use asupersync::http::h2::{
-    Connection, ErrorCode, Frame, FrameHeader, FrameType, H2Error, Header, HeadersFrame,
-    Settings, SettingsFrame,
+    Connection, ErrorCode, Frame, FrameHeader, FrameType, H2Error, Header, Settings,
 };
 use asupersync::time::{InstrumentedInstant, TestTimeGetter};
 use proptest::prelude::*;
@@ -171,14 +171,21 @@ impl ConnectTestContext {
         }
     }
 
-    fn establish_target_connection(&mut self, authority: &str) -> Result<(), Box<dyn std::error::Error>> {
-        self.target_connections.insert(authority.to_string(), TargetConnectionState::Connected);
+    fn establish_target_connection(
+        &mut self,
+        authority: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.target_connections
+            .insert(authority.to_string(), TargetConnectionState::Connected);
         self.time_getter.advance(1_000_000); // 1ms for connection establishment
         Ok(())
     }
 
     fn get_target_connection_state(&self, authority: &str) -> TargetConnectionState {
-        self.target_connections.get(authority).copied().unwrap_or(TargetConnectionState::NotAttempted)
+        self.target_connections
+            .get(authority)
+            .copied()
+            .unwrap_or(TargetConnectionState::NotAttempted)
     }
 }
 
@@ -186,16 +193,22 @@ impl ConnectTestContext {
 fn validate_connect_pseudo_headers(input: &ConnectRequestInput) -> Result<(), H2Error> {
     // RFC 9113 §8.5: CONNECT method MUST include :authority
     if input.authority.is_none() {
-        return Err(H2Error::protocol("CONNECT request missing :authority pseudo-header"));
+        return Err(H2Error::protocol(
+            "CONNECT request missing :authority pseudo-header",
+        ));
     }
 
     // RFC 9113 §8.5: CONNECT method MUST NOT include :scheme or :path
     if input.scheme.is_some() {
-        return Err(H2Error::protocol("CONNECT request must not include :scheme pseudo-header"));
+        return Err(H2Error::protocol(
+            "CONNECT request must not include :scheme pseudo-header",
+        ));
     }
 
     if input.path.is_some() {
-        return Err(H2Error::protocol("CONNECT request must not include :path pseudo-header"));
+        return Err(H2Error::protocol(
+            "CONNECT request must not include :path pseudo-header",
+        ));
     }
 
     Ok(())
@@ -206,21 +219,24 @@ fn arb_valid_connect_request() -> impl Strategy<Value = ConnectRequestInput> {
     (
         "[a-z]+\\.(com|org|net):[1-9][0-9]{1,4}", // authority (hostname:port)
         prop::collection::vec("[a-z]+", 0..5).prop_map(|names| {
-            names.into_iter().enumerate()
+            names
+                .into_iter()
+                .enumerate()
                 .map(|(i, name)| (format!("header-{i}"), format!("value-{name}")))
                 .collect::<Vec<_>>()
         }), // headers
-        1u32..=100, // stream_id (odd for client-initiated)
-    ).prop_map(|(authority, headers, stream_id)| {
-        ConnectRequestInput {
-            authority: Some(authority),
-            scheme: None, // Valid CONNECT: no scheme
-            path: None,   // Valid CONNECT: no path
-            end_stream: true, // RFC 9113 §8.5: CONNECT request ends with END_STREAM
-            headers,
-            stream_id: stream_id * 2 + 1, // Ensure odd (client-initiated)
-        }
-    })
+        1u32..=100,                               // stream_id (odd for client-initiated)
+    )
+        .prop_map(|(authority, headers, stream_id)| {
+            ConnectRequestInput {
+                authority: Some(authority),
+                scheme: None,     // Valid CONNECT: no scheme
+                path: None,       // Valid CONNECT: no path
+                end_stream: true, // RFC 9113 §8.5: CONNECT request ends with END_STREAM
+                headers,
+                stream_id: stream_id * 2 + 1, // Ensure odd (client-initiated)
+            }
+        })
 }
 
 /// Generate invalid ConnectRequestInput for testing error cases
@@ -228,55 +244,57 @@ fn arb_invalid_connect_request() -> impl Strategy<Value = ConnectRequestInput> {
     prop_oneof![
         // Missing authority
         (
-            prop::option::of("[a-z]+\\.(com|org|net):[1-9][0-9]{1,4}").prop_filter("no authority", |opt| opt.is_none()),
+            prop::option::of("[a-z]+\\.(com|org|net):[1-9][0-9]{1,4}")
+                .prop_filter("no authority", |opt| opt.is_none()),
             prop::option::of("https?"),
             prop::option::of("/[a-z/]*"),
             any::<bool>(),
             1u32..=100,
-        ).prop_map(|(authority, scheme, path, end_stream, stream_id)| {
-            ConnectRequestInput {
-                authority,
-                scheme,
-                path,
-                end_stream,
-                headers: vec![],
-                stream_id: stream_id * 2 + 1,
-            }
-        }),
-
+        )
+            .prop_map(|(authority, scheme, path, end_stream, stream_id)| {
+                ConnectRequestInput {
+                    authority,
+                    scheme,
+                    path,
+                    end_stream,
+                    headers: vec![],
+                    stream_id: stream_id * 2 + 1,
+                }
+            }),
         // Has forbidden scheme
         (
             "[a-z]+\\.(com|org|net):[1-9][0-9]{1,4}",
             "https?",
             any::<bool>(),
             1u32..=100,
-        ).prop_map(|(authority, scheme, end_stream, stream_id)| {
-            ConnectRequestInput {
-                authority: Some(authority),
-                scheme: Some(scheme), // Forbidden for CONNECT
-                path: None,
-                end_stream,
-                headers: vec![],
-                stream_id: stream_id * 2 + 1,
-            }
-        }),
-
+        )
+            .prop_map(|(authority, scheme, end_stream, stream_id)| {
+                ConnectRequestInput {
+                    authority: Some(authority),
+                    scheme: Some(scheme), // Forbidden for CONNECT
+                    path: None,
+                    end_stream,
+                    headers: vec![],
+                    stream_id: stream_id * 2 + 1,
+                }
+            }),
         // Has forbidden path
         (
             "[a-z]+\\.(com|org|net):[1-9][0-9]{1,4}",
             "/[a-z/]*",
             any::<bool>(),
             1u32..=100,
-        ).prop_map(|(authority, path, end_stream, stream_id)| {
-            ConnectRequestInput {
-                authority: Some(authority),
-                scheme: None,
-                path: Some(path), // Forbidden for CONNECT
-                end_stream,
-                headers: vec![],
-                stream_id: stream_id * 2 + 1,
-            }
-        }),
+        )
+            .prop_map(|(authority, path, end_stream, stream_id)| {
+                ConnectRequestInput {
+                    authority: Some(authority),
+                    scheme: None,
+                    path: Some(path), // Forbidden for CONNECT
+                    end_stream,
+                    headers: vec![],
+                    stream_id: stream_id * 2 + 1,
+                }
+            }),
     ]
 }
 
@@ -290,7 +308,6 @@ fn mr1_connect_authority_required() {
     ///
     /// Property: validate_connect_pseudo_headers(input) should fail with PROTOCOL_ERROR
     /// when input.authority.is_none()
-
     let strategy = arb_invalid_connect_request()
         .prop_filter("missing authority only", |input| input.authority.is_none());
 
@@ -339,9 +356,9 @@ fn mr2_connect_scheme_path_forbidden() {
     ///
     /// Property: validate_connect_pseudo_headers(input) should fail when
     /// input.has_forbidden_pseudo_headers() is true
-
-    let strategy = arb_invalid_connect_request()
-        .prop_filter("has forbidden headers", |input| input.has_forbidden_pseudo_headers());
+    let strategy = arb_invalid_connect_request().prop_filter("has forbidden headers", |input| {
+        input.has_forbidden_pseudo_headers()
+    });
 
     proptest! {
         #[test]
@@ -420,7 +437,6 @@ fn mr3_connect_end_stream_termination() {
 #[test]
 fn mr3_connect_end_stream_frame_consistency() {
     /// MR3 (frame-level): CONNECT frames without END_STREAM should be protocol violations
-
     let strategy = arb_valid_connect_request().prop_map(|mut input| {
         input.end_stream = false; // Force invalid state
         input
@@ -533,18 +549,18 @@ fn mr5_connect_response_no_body() {
     /// MR5: CONNECT response must not contain a message body per RFC 9113 §8.5
     ///
     /// Property: For any CONNECT response, has_body should be false
-
     let strategy = (
         200u16..=599u16, // Any status code
         any::<bool>(),   // end_stream flag
         1u32..=100,      // stream_id
-    ).prop_map(|(status, end_stream, stream_id)| ConnectResponseInput {
-        status,
-        has_body: false, // RFC 9113 §8.5: CONNECT response must not have body
-        end_stream,
-        headers: vec![("content-type", "text/plain".to_string())], // Should be ignored
-        stream_id: stream_id * 2 + 1,
-    });
+    )
+        .prop_map(|(status, end_stream, stream_id)| ConnectResponseInput {
+            status,
+            has_body: false, // RFC 9113 §8.5: CONNECT response must not have body
+            end_stream,
+            headers: vec![("content-type", "text/plain".to_string())], // Should be ignored
+            stream_id: stream_id * 2 + 1,
+        });
 
     proptest! {
         #[test]
@@ -566,18 +582,18 @@ fn mr5_connect_response_no_body() {
 #[test]
 fn mr5_connect_response_body_violation() {
     /// MR5 (violation case): CONNECT responses with bodies should be rejected
-
     let strategy = (
         200u16..=299u16, // Success status
         any::<bool>(),   // end_stream flag
         1u32..=100,      // stream_id
-    ).prop_map(|(status, end_stream, stream_id)| ConnectResponseInput {
-        status,
-        has_body: true, // VIOLATION: CONNECT response should not have body
-        end_stream,
-        headers: vec![("content-length", "42".to_string())], // Non-zero content length
-        stream_id: stream_id * 2 + 1,
-    });
+    )
+        .prop_map(|(status, end_stream, stream_id)| ConnectResponseInput {
+            status,
+            has_body: true, // VIOLATION: CONNECT response should not have body
+            end_stream,
+            headers: vec![("content-length", "42".to_string())], // Non-zero content length
+            stream_id: stream_id * 2 + 1,
+        });
 
     proptest! {
         #[test]
@@ -729,7 +745,10 @@ mod unit_tests {
         };
 
         let result = validate_connect_pseudo_headers(&valid_request);
-        assert!(result.is_ok(), "Valid CONNECT request should pass validation");
+        assert!(
+            result.is_ok(),
+            "Valid CONNECT request should pass validation"
+        );
     }
 
     #[test]
@@ -744,7 +763,10 @@ mod unit_tests {
         };
 
         let result = validate_connect_pseudo_headers(&invalid_request);
-        assert!(result.is_err(), "CONNECT without authority should be rejected");
+        assert!(
+            result.is_err(),
+            "CONNECT without authority should be rejected"
+        );
 
         if let Err(err) = result {
             assert_eq!(err.code, ErrorCode::ProtocolError);
@@ -798,11 +820,18 @@ mod unit_tests {
         let authority = "example.com:443";
 
         // Initial state
-        assert_eq!(ctx.get_target_connection_state(authority), TargetConnectionState::NotAttempted);
+        assert_eq!(
+            ctx.get_target_connection_state(authority),
+            TargetConnectionState::NotAttempted
+        );
 
         // Establish connection
-        ctx.establish_target_connection(authority).expect("connection should succeed");
-        assert_eq!(ctx.get_target_connection_state(authority), TargetConnectionState::Connected);
+        ctx.establish_target_connection(authority)
+            .expect("connection should succeed");
+        assert_eq!(
+            ctx.get_target_connection_state(authority),
+            TargetConnectionState::Connected
+        );
 
         // Time should advance
         assert!(ctx.time_getter.now().as_nanos() > 0);

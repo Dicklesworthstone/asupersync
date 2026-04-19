@@ -1895,7 +1895,7 @@ mod tests {
                 .loads
                 .iter()
                 .enumerate()
-                .filter(|(_, &load)| load > 0)
+                .filter(|&(_, &load)| load > 0)
                 .map(|(i, _)| i)
                 .collect();
 
@@ -1917,7 +1917,7 @@ mod tests {
                     .loads
                     .iter()
                     .enumerate()
-                    .filter(|(_, &load)| load == max_load)
+                    .filter(|&(_, &load)| load == max_load)
                     .map(|(i, _)| i)
                     .collect();
 

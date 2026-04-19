@@ -512,7 +512,10 @@ mod tests {
             // Text frames
             ("".to_string(), Opcode::Text),
             ("Hello".to_string(), Opcode::Text),
-            ("WebSocket test with special chars: üñíçødé".to_string(), Opcode::Text),
+            (
+                "WebSocket test with special chars: üñíçødé".to_string(),
+                Opcode::Text,
+            ),
             (large_text, Opcode::Text), // Large text
             // Binary frames
             ("".to_string(), Opcode::Binary),

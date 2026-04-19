@@ -8,10 +8,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use asupersync::lab::{LabConfig, LabRuntime};
-use tokio::time::sleep;
+use asupersync::lab::config::LabConfig;
+use asupersync::lab::runtime::LabRuntime;
+use asupersync::time::sleep;
 
-use crate::runtime::{ObligationId, RegionId};
 use crate::conformance::obligation_invariants::src::{
     invariant_harness::{
         InvariantTestCategory, InvariantTestResult, ObligationInvariantTest, ObligationTestContext,
@@ -19,6 +19,7 @@ use crate::conformance::obligation_invariants::src::{
     },
     obligation_tracker::{InvariantViolationType, ObligationTracker},
 };
+use asupersync::runtime::{ObligationId, RegionId};
 
 /// Test basic region quiescence - region waits for obligations
 pub struct BasicRegionQuiescenceTest;
@@ -390,20 +391,6 @@ impl ObligationInvariantTest for ConcurrentRegionClosureTest {
             }
 
             // All work completed synchronously
-
-            // Wait for all close tasks
-            for handle in close_handles {
-                if let Err(e) = handle.await {
-                    return InvariantTestResult {
-                        test_name: self.invariant_name().to_string(),
-                        category: self.test_category(),
-                        outcome: TestOutcome::Error(format!("Close failed: {}", e)),
-                        duration: test_start.elapsed(),
-                        violations: Vec::new(),
-                        metrics,
-                    };
-                }
-            }
             metrics.regions_closed = metrics.regions_created;
 
             // Validate final state

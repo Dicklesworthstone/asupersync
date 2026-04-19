@@ -453,8 +453,8 @@ mod tests {
     use std::cell::Cell;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::sync::mpsc;
+    use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::thread;
 
     thread_local! {
@@ -751,7 +751,7 @@ mod tests {
             .lock()
             .expect("discovery handle lock poisoned") = Some(Arc::clone(&discovery));
 
-        let (tx, rx) = mpsc::unbounded();
+        let (tx, rx) = mpsc::channel();
         let discovery_for_thread = Arc::clone(&discovery);
         let worker = thread::spawn(move || {
             let result = discovery_for_thread.poll_discover();
@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn dns_discovery_stale_concurrent_resolution_cannot_clobber_newer_state() {
         init_test("dns_discovery_stale_concurrent_resolution_cannot_clobber_newer_state");
-        let (first_started_tx, first_started_rx) = mpsc::unbounded();
+        let (first_started_tx, first_started_rx) = mpsc::channel();
         let release_first = Arc::new((StdMutex::new(false), Condvar::new()));
         let release_first_for_resolver = Arc::clone(&release_first);
         let call_index = Arc::new(AtomicUsize::new(0));
@@ -847,7 +847,7 @@ mod tests {
     #[test]
     fn dns_discovery_stale_concurrent_resolution_still_reports_error_to_caller() {
         init_test("dns_discovery_stale_concurrent_resolution_still_reports_error_to_caller");
-        let (first_started_tx, first_started_rx) = mpsc::unbounded();
+        let (first_started_tx, first_started_rx) = mpsc::channel();
         let release_first = Arc::new((StdMutex::new(false), Condvar::new()));
         let release_first_for_resolver = Arc::clone(&release_first);
         let call_index = Arc::new(AtomicUsize::new(0));
@@ -909,7 +909,7 @@ mod tests {
     #[test]
     fn dns_discovery_older_success_still_applies_after_newer_failure() {
         init_test("dns_discovery_older_success_still_applies_after_newer_failure");
-        let (first_started_tx, first_started_rx) = mpsc::unbounded();
+        let (first_started_tx, first_started_rx) = mpsc::channel();
         let release_first = Arc::new((StdMutex::new(false), Condvar::new()));
         let release_first_for_resolver = Arc::clone(&release_first);
         let call_index = Arc::new(AtomicUsize::new(0));
@@ -1253,10 +1253,12 @@ mod tests {
     fn golden_test_dns_refresh_vs_inflight_request_ordering() {
         init_test("golden_test_dns_refresh_vs_inflight_request_ordering");
 
-        let (first_started_tx, first_started_rx) = mpsc::unbounded();
-        let (complete_first_tx, complete_first_rx) = mpsc::unbounded();
+        let (first_started_tx, first_started_rx) = mpsc::channel();
+        let (complete_first_tx, complete_first_rx) = mpsc::channel();
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_resolver = Arc::clone(&call_count);
+
+        let complete_first_rx = Arc::new(StdMutex::new(complete_first_rx));
 
         let discovery = Arc::new(DnsServiceDiscovery::new(
             DnsDiscoveryConfig::new("service.test", 80)
@@ -1267,6 +1269,8 @@ mod tests {
                         0 => {
                             first_started_tx.send(()).expect("first started signal");
                             complete_first_rx
+                                .lock()
+                                .unwrap()
                                 .recv()
                                 .expect("wait for completion signal");
                             Ok(socket_set(&["10.0.0.1:80"]))
@@ -1480,10 +1484,12 @@ mod tests {
     fn golden_test_race_free_endpoint_lookup() {
         init_test("golden_test_race_free_endpoint_lookup");
 
-        let (resolution_started_tx, resolution_started_rx) = mpsc::unbounded();
-        let (continue_resolution_tx, continue_resolution_rx) = mpsc::unbounded();
+        let (resolution_started_tx, resolution_started_rx) = mpsc::channel();
+        let (continue_resolution_tx, continue_resolution_rx) = mpsc::channel();
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_resolver = Arc::clone(&call_count);
+
+        let continue_resolution_rx = Arc::new(StdMutex::new(continue_resolution_rx));
 
         let discovery = Arc::new(DnsServiceDiscovery::new(
             DnsDiscoveryConfig::new("service.test", 80)
@@ -1497,6 +1503,8 @@ mod tests {
                                 .send(())
                                 .expect("signal resolution start");
                             continue_resolution_rx
+                                .lock()
+                                .unwrap()
                                 .recv()
                                 .expect("wait for continue signal");
                             Ok(socket_set(&["10.0.0.2:80", "10.0.0.3:80"]))
@@ -1610,10 +1618,12 @@ mod tests {
 
         let resolution_count = Arc::new(AtomicUsize::new(0));
         let resolution_count_for_resolver = Arc::clone(&resolution_count);
-        let (all_started_tx, all_started_rx) = mpsc::unbounded();
-        let (proceed_tx, proceed_rx) = mpsc::unbounded();
+        let (all_started_tx, all_started_rx) = mpsc::channel();
+        let (proceed_tx, proceed_rx) = mpsc::channel();
         let worker_count = Arc::new(AtomicUsize::new(0));
         let worker_count_for_resolver = Arc::clone(&worker_count);
+
+        let proceed_rx = Arc::new(StdMutex::new(proceed_rx));
 
         let discovery = Arc::new(DnsServiceDiscovery::new(
             DnsDiscoveryConfig::new("service.test", 80)
@@ -1628,7 +1638,11 @@ mod tests {
                             thread::sleep(Duration::from_millis(1));
                         }
                         all_started_tx.send(()).expect("signal all started");
-                        proceed_rx.recv().expect("wait for proceed signal");
+                        proceed_rx
+                            .lock()
+                            .unwrap()
+                            .recv()
+                            .expect("wait for proceed signal");
                     }
 
                     Ok(socket_set(&[&format!("10.0.0.{}:80", count + 1)]))

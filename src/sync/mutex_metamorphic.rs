@@ -23,8 +23,8 @@
 //! - Recovery mechanisms work reliably
 //! - Race conditions don't lead to inconsistent poison state
 
-use crate::lab::runtime::LabRuntime;
 use crate::lab::LabConfig;
+use crate::lab::runtime::LabRuntime;
 use crate::sync::mutex::{LockError, Mutex, TryLockError};
 use crate::types::Budget;
 use crate::util::ArenaIndex;
@@ -374,7 +374,7 @@ fn mr4_concurrent_poison_consistency() {
 
                 let cx = create_test_context(i as u32 + 10, i as u32 + 10);
 
-                let result = futures_lite::future::block_on(async {
+                let result = futures_lite::future::block_on(async move {
                     mutex_clone.lock(&cx).await
                 });
 
@@ -432,6 +432,7 @@ fn mr4_concurrent_poison_consistency() {
                 Err(LockError::Poisoned) => poison_count += 1,
                 Ok(_) => success_count += 1,
                 Err(LockError::Cancelled) => cancel_count += 1,
+                Err(LockError::PolledAfterCompletion) => other_count += 1,
             }
         }
 

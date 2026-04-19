@@ -4798,42 +4798,44 @@ mod tests {
         // MR: replay(operations_seq) == replay(operations_seq)
         // Identical operation sequences should produce identical results under LabRuntime
 
-        let run_sequence = || -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+        let run_sequence = || -> (Vec<usize>, Vec<usize>, Vec<usize>) {
             let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(3));
-            let runtime = crate::lab::runtime::LabRuntime::new(crate::lab::LabConfig::default());
+            let runtime =
+                crate::lab::runtime::LabRuntime::new(crate::lab::config::LabConfig::default());
 
-            let (active_history, idle_history, total_history) = futures_lite::future::block_on(async {
-                let cx = crate::cx::Cx::for_testing();
-                let mut active_trace = Vec::new();
-                let mut idle_trace = Vec::new();
-                let mut total_trace = Vec::new();
+            let (active_history, idle_history, total_history) =
+                futures_lite::future::block_on(async {
+                    let cx = crate::cx::Cx::for_testing();
+                    let mut active_trace = Vec::new();
+                    let mut idle_trace = Vec::new();
+                    let mut total_trace = Vec::new();
 
-                // Deterministic sequence of operations
-                for i in 0..5 {
-                    let resource = pool.acquire(&cx).await.unwrap();
-                    let stats = pool.stats();
-                    active_trace.push(stats.active);
-                    idle_trace.push(stats.idle);
-                    total_trace.push(stats.total);
+                    // Deterministic sequence of operations
+                    for i in 0..5 {
+                        let resource = pool.acquire(&cx).await.unwrap();
+                        let stats = pool.stats();
+                        active_trace.push(stats.active);
+                        idle_trace.push(stats.idle);
+                        total_trace.push(stats.total);
 
-                    // Deterministic decision based on iteration
-                    if i % 2 == 0 {
-                        resource.return_to_pool();
-                    } else {
-                        resource.discard();
+                        // Deterministic decision based on iteration
+                        if i % 2 == 0 {
+                            resource.return_to_pool();
+                        } else {
+                            resource.discard();
+                        }
+
+                        let stats_after = pool.stats();
+                        active_trace.push(stats_after.active);
+                        idle_trace.push(stats_after.idle);
+                        total_trace.push(stats_after.total);
+
+                        // Deterministic yield
+                        crate::runtime::yield_now().await;
                     }
 
-                    let stats_after = pool.stats();
-                    active_trace.push(stats_after.active);
-                    idle_trace.push(stats_after.idle);
-                    total_trace.push(stats_after.total);
-
-                    // Deterministic yield
-                    crate::runtime::yield_now().await;
-                }
-
-                (active_trace, idle_trace, total_trace)
-            });
+                    (active_trace, idle_trace, total_trace)
+                });
 
             (active_history, idle_history, total_history)
         };
@@ -4884,7 +4886,8 @@ mod tests {
         // Test determinism with timing-dependent operations
         let timed_sequence = || -> Vec<u32> {
             let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(2));
-            let runtime = crate::lab::runtime::LabRuntime::new(crate::lab::LabConfig::default());
+            let runtime =
+                crate::lab::runtime::LabRuntime::new(crate::lab::config::LabConfig::default());
 
             futures_lite::future::block_on(async {
                 let cx = crate::cx::Cx::for_testing();

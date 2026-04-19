@@ -782,12 +782,10 @@ impl HierarchicalTimerWheel {
             let next_tick = target_tick + 1;
             self.current_tick = next_tick;
             self.level0.cursor = (next_tick % LEVEL0_SLOTS as u64) as usize;
-            self.level1.cursor =
-                ((next_tick / LEVEL0_SLOTS as u64) % LEVEL1_SLOTS as u64) as usize;
-            self.level2.cursor = ((next_tick / (LEVEL0_SLOTS * LEVEL1_SLOTS) as u64)
-                % LEVEL2_SLOTS as u64) as usize;
-            self.level3.cursor = ((next_tick
-                / (LEVEL0_SLOTS * LEVEL1_SLOTS * LEVEL2_SLOTS) as u64)
+            self.level1.cursor = ((next_tick / LEVEL0_SLOTS as u64) % LEVEL1_SLOTS as u64) as usize;
+            self.level2.cursor =
+                ((next_tick / (LEVEL0_SLOTS * LEVEL1_SLOTS) as u64) % LEVEL2_SLOTS as u64) as usize;
+            self.level3.cursor = ((next_tick / (LEVEL0_SLOTS * LEVEL1_SLOTS * LEVEL2_SLOTS) as u64)
                 % LEVEL3_SLOTS as u64) as usize;
 
             self.count = 0;

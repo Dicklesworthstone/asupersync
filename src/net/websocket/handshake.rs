@@ -326,9 +326,9 @@ pub struct ClientHandshake {
     extensions: Vec<String>,
     /// Additional headers.
     headers: BTreeMap<String, String>,
-    }
+}
 
-    impl ClientHandshake {
+impl ClientHandshake {
     /// Internal constructor for deterministic testing.
     #[doc(hidden)]
     pub fn new_for_test(

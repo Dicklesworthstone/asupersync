@@ -20,8 +20,8 @@
 
 use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
-use crate::types::{Budget, TaskId};
 use crate::sync::{Barrier, BarrierWaitError, BarrierWaitResult};
+use crate::types::{Budget, TaskId};
 use crate::util::{DetEntropy, DetRng};
 use parking_lot::Mutex;
 use proptest::prelude::*;
@@ -316,7 +316,11 @@ fn mr1_party_count_invariant(
         let (task_id, _handle) = runtime
             .state
             .create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::new(crate::types::RegionId::new_for_test(1, 0), crate::types::TaskId::new_for_test(1, 0), crate::types::Budget::INFINITE);
+                let cx = Cx::new(
+                    crate::types::RegionId::new_for_test(1, 0),
+                    crate::types::TaskId::new_for_test(1, 0),
+                    crate::types::Budget::INFINITE,
+                );
                 execute_barrier_work_unit(
                     &cx,
                     &barrier_clone,
@@ -425,7 +429,11 @@ fn mr3_drop_cleanup_correctness(
         let (task_id, _handle) = runtime
             .state
             .create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::new(crate::types::RegionId::new_for_test(1, 0), crate::types::TaskId::new_for_test(1, 0), crate::types::Budget::INFINITE);
+                let cx = Cx::new(
+                    crate::types::RegionId::new_for_test(1, 0),
+                    crate::types::TaskId::new_for_test(1, 0),
+                    crate::types::Budget::INFINITE,
+                );
                 execute_barrier_work_unit(
                     &cx,
                     &barrier_clone,
@@ -456,7 +464,11 @@ fn mr3_drop_cleanup_correctness(
             let (task_id, _handle) = runtime
                 .state
                 .create_task(root, Budget::INFINITE, async move {
-                    let cx = Cx::new(crate::types::RegionId::new_for_test(1, 0), crate::types::TaskId::new_for_test(1, 0), crate::types::Budget::INFINITE);
+                    let cx = Cx::new(
+                        crate::types::RegionId::new_for_test(1, 0),
+                        crate::types::TaskId::new_for_test(1, 0),
+                        crate::types::Budget::INFINITE,
+                    );
                     match barrier_clone.wait(&cx).await {
                         Ok(result) => {
                             fresh_global_state_clone.record_result(
@@ -571,7 +583,11 @@ fn execute_barrier_scenario(
         let (task_id, _handle) = runtime
             .state
             .create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::new(crate::types::RegionId::new_for_test(1, 0), crate::types::TaskId::new_for_test(1, 0), crate::types::Budget::INFINITE);
+                let cx = Cx::new(
+                    crate::types::RegionId::new_for_test(1, 0),
+                    crate::types::TaskId::new_for_test(1, 0),
+                    crate::types::Budget::INFINITE,
+                );
                 execute_barrier_work_unit(
                     &cx,
                     &barrier_clone,
@@ -609,7 +625,11 @@ fn execute_barrier_scenario_with_leader_tracking(
         let (task_id, _handle) = runtime
             .state
             .create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::new(crate::types::RegionId::new_for_test(1, 0), crate::types::TaskId::new_for_test(1, 0), crate::types::Budget::INFINITE);
+                let cx = Cx::new(
+                    crate::types::RegionId::new_for_test(1, 0),
+                    crate::types::TaskId::new_for_test(1, 0),
+                    crate::types::Budget::INFINITE,
+                );
                 if !work_unit.should_cancel && !work_unit.should_drop {
                     if let Ok(result) = barrier_clone.wait(&cx).await {
                         if result.is_leader() {

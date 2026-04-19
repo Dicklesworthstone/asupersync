@@ -1,0 +1,2661 @@
+  [2m2026-04-18T23:41:38.512182Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1149989 at ubuntu@212.90.121.76 (6 slots, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:289 [2;3mon[0m ThreadId(1)
+
+[*] Job j-29800209659725418 submitted to vmi1149989 (slots 6, speed 50.0)
+  [2m2026-04-18T23:41:38.883330Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for asupersync (hash: c2b1ec6d51c26260)[0m
+    [2;3mat[0m rch/src/hook.rs:4645 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:38.883367Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 10 roots[0m
+    [2;3mat[0m rch/src/hook.rs:4667 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:40.628860Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1149989...[0m
+    [2;3mat[0m rch/src/hook.rs:4691 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:40.628949Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 2 pattern(s) from .rchignore (total: 33)[0m
+    [2;3mat[0m rch/src/transfer.rs:575 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:40.628960Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync -> /data/projects/asupersync on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:43.841092Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3212ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:43.841404Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/asupersync-browser-core -> /data/projects/asupersync/asupersync-browser-core on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:45.883771Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2042ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:45.883841Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/asupersync-macros -> /data/projects/asupersync/asupersync-macros on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:47.975423Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2091ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:47.975519Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/asupersync-tokio-compat -> /data/projects/asupersync/asupersync-tokio-compat on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:50.009512Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2033ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:50.009604Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/conformance -> /data/projects/asupersync/conformance on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:51.998409Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1988ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:51.998513Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/drop_unwrap_finder -> /data/projects/asupersync/drop_unwrap_finder on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:54.019381Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2020ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:54.019461Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/franken_decision -> /data/projects/asupersync/franken_decision on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:56.016009Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1996ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:56.016105Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/franken_evidence -> /data/projects/asupersync/franken_evidence on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:58.285495Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2269ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:41:58.285606Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/franken_kernel -> /data/projects/asupersync/franken_kernel on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:42:00.331387Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2045ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:42:00.331509Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/frankenlab -> /data/projects/asupersync/frankenlab on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:42:02.386468Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2054ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:42:02.386512Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 7739 files, 351189 bytes in 21750ms[0m
+    [2;3mat[0m rch/src/hook.rs:4848 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:42:03.863572Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo check --tests[0m
+    [2;3mat[0m rch/src/hook.rs:4875 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-18T23:42:03.863607Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mWrapping command with external timeout protection, [1;32mkind[0m[32m: cargo check, [1;32mtimeout_secs[0m[32m: 1200[0m
+    [2;3mat[0m rch/src/transfer.rs:782 [2;3mon[0m ThreadId(1)
+
+    Checking asupersync v0.2.9 (/data/projects/asupersync)
+error[E0308]: mismatched types
+   --> src/channel/mpsc.rs:632:9
+    |
+607 |     pub fn try_send(mut self, value: T) -> Result<(), SendError<T>> {
+    |                                            ------------------------ expected `std::result::Result<(), channel::mpsc::SendError<T>>` because of return type
+...
+632 |         Ok::<(), ()>(())
+    |         ^^^^^^^^^^^^^^^^ expected `Result<(), SendError<T>>`, found `Result<(), ()>`
+    |
+    = note: expected enum `std::result::Result<_, channel::mpsc::SendError<T>>`
+               found enum `std::result::Result<_, ()>`
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `asupersync` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+warning: unused imports: `Cx` and `Scope`
+    --> src/channel/mpsc.rs:2018:21
+     |
+2018 |     use crate::cx::{Cx, Scope};
+     |                     ^^  ^^^^^
+     |
+     = note: `-W unused-imports` implied by `-W unused`
+     = help: to override `-W unused` add `#[allow(unused_imports)]`
+
+warning: unused imports: `LabConfig` and `LabRuntime`
+    --> src/channel/mpsc.rs:2019:22
+     |
+2019 |     use crate::lab::{LabConfig, LabRuntime};
+     |                      ^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused imports: `Outcome` and `Time`
+    --> src/channel/mpsc.rs:2020:46
+     |
+2020 |     use crate::types::{Budget, CancelReason, Outcome, Time};
+     |                                              ^^^^^^^  ^^^^
+
+warning: unused imports: `DetEntropy` and `DetRng`
+    --> src/channel/mpsc.rs:2021:23
+     |
+2021 |     use crate::util::{DetEntropy, DetRng};
+     |                       ^^^^^^^^^^  ^^^^^^
+
+warning: unused import: `VecDeque`
+    --> src/channel/mpsc.rs:2023:37
+     |
+2023 |     use std::collections::{HashMap, VecDeque};
+     |                                     ^^^^^^^^
+
+warning: unused imports: `pending` and `ready`
+    --> src/channel/mpsc.rs:2024:23
+     |
+2024 |     use std::future::{pending, ready};
+     |                       ^^^^^^^  ^^^^^
+
+warning: unused import: `AtomicBool`
+    --> src/channel/mpsc.rs:2026:29
+     |
+2026 |     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+     |                             ^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+    --> src/channel/mpsc.rs:2027:9
+     |
+2027 |     use std::time::Duration;
+     |         ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `proptest::strategy::Strategy`
+    --> src/channel/mpsc.rs:2104:13
+     |
+2104 |         use proptest::strategy::Strategy;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `proptest::strategy::Strategy`
+    --> src/channel/mpsc.rs:2183:13
+     |
+2183 |         use proptest::strategy::Strategy;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `proptest::strategy::Strategy`
+    --> src/channel/mpsc.rs:2265:13
+     |
+2265 |         use proptest::strategy::Strategy;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `proptest::strategy::Strategy`
+    --> src/channel/mpsc.rs:2347:13
+     |
+2347 |         use proptest::strategy::Strategy;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `proptest::strategy::Strategy`
+    --> src/channel/mpsc.rs:2426:13
+     |
+2426 |         use proptest::strategy::Strategy;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `proptest::strategy::Strategy`
+    --> src/channel/mpsc.rs:2496:13
+     |
+2496 |         use proptest::strategy::Strategy;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `proptest::strategy::Strategy`
+    --> src/channel/mpsc.rs:2582:13
+     |
+2582 |         use proptest::strategy::Strategy;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::thread`
+    --> src/combinator/bulkhead.rs:1831:13
+     |
+1831 |         use std::thread;
+     |             ^^^^^^^^^^^
+
+warning: unused imports: `BulkheadMetrics`, `BulkheadPermit`, and `BulkheadPolicyBuilder`
+  --> src/combinator/bulkhead_metamorphic.rs:36:30
+   |
+36 |     Bulkhead, BulkheadError, BulkheadMetrics, BulkheadPermit, BulkheadPolicy, BulkheadPolicyBuilder,
+   |                              ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^                  ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Budget`, `RegionId`, and `TaskId`
+  --> src/combinator/bulkhead_metamorphic.rs:38:20
+   |
+38 | use crate::types::{Budget, RegionId, TaskId, Time};
+   |                    ^^^^^^  ^^^^^^^^  ^^^^^^
+
+warning: unused import: `ArenaIndex`
+  --> src/combinator/bulkhead_metamorphic.rs:39:19
+   |
+39 | use crate::util::{ArenaIndex, DetRng};
+   |                   ^^^^^^^^^^
+
+warning: unused import: `std::future::Future`
+  --> src/combinator/bulkhead_metamorphic.rs:42:5
+   |
+42 | use std::future::Future;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::pin::Pin`
+  --> src/combinator/bulkhead_metamorphic.rs:43:5
+   |
+43 | use std::pin::Pin;
+   |     ^^^^^^^^^^^^^
+
+warning: unused import: `AtomicUsize`
+  --> src/combinator/bulkhead_metamorphic.rs:45:59
+   |
+45 | use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+   |                                                           ^^^^^^^^^^^
+
+warning: unused imports: `Context`, `Poll`, and `Waker`
+  --> src/combinator/bulkhead_metamorphic.rs:46:17
+   |
+46 | use std::task::{Context, Poll, Waker};
+   |                 ^^^^^^^  ^^^^  ^^^^^
+
+warning: unused imports: `RaceWinner` and `race2_outcomes`
+  --> src/combinator/race_metamorphic.rs:31:31
+   |
+31 | use crate::combinator::race::{RaceWinner, race2_outcomes};
+   |                               ^^^^^^^^^^  ^^^^^^^^^^^^^^
+
+warning: unused import: `Scope`
+  --> src/combinator/race_metamorphic.rs:32:21
+   |
+32 | use crate::cx::{Cx, Scope};
+   |                     ^^^^^
+
+warning: unused import: `crate::runtime::RuntimeState`
+  --> src/combinator/race_metamorphic.rs:33:5
+   |
+33 | use crate::runtime::RuntimeState;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+  --> src/combinator/race_metamorphic.rs:43:5
+   |
+43 | use std::time::Duration;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::runtime::RuntimeState`
+   --> src/combinator/race_metamorphic.rs:739:13
+    |
+739 |         use crate::runtime::RuntimeState;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ready`
+  --> src/combinator/timeout_metamorphic.rs:26:27
+   |
+26 | use std::future::{Future, ready};
+   |                           ^^^^^
+
+warning: unused import: `AtomicUsize`
+  --> src/combinator/timeout_metamorphic.rs:29:48
+   |
+29 | use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+   |                                                ^^^^^^^^^^^
+
+warning: unused import: `proptest::strategy::Strategy`
+   --> src/combinator/timeout_metamorphic.rs:405:13
+    |
+405 |         use proptest::strategy::Strategy;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: duplicated attribute
+    --> src/lab/runtime.rs:5249:5
+     |
+5249 |     #[test]
+     |     ^^^^^^^
+     |
+     = note: `#[warn(duplicate_macro_attributes)]` on by default
+
+warning: unused imports: `Wake` and `Waker`
+    --> src/net/tcp/stream.rs:1780:40
+     |
+1780 |         use std::task::{Context, Poll, Wake, Waker};
+     |                                        ^^^^  ^^^^^
+
+warning: unused imports: `AssertUnwindSafe` and `catch_unwind`
+    --> src/observability/obligation_tracker.rs:1016:26
+     |
+1016 |         use std::panic::{AssertUnwindSafe, catch_unwind};
+     |                          ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused import: `crate::runtime::scheduler::priority::Scheduler`
+  --> src/runtime/scheduler/edf_priority_metamorphic.rs:23:5
+   |
+23 | use crate::runtime::scheduler::priority::Scheduler;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::observability::ObservabilityConfig`
+   --> src/runtime/task_table.rs:406:13
+    |
+406 |         use crate::observability::ObservabilityConfig;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::runtime::config::RuntimeConfig`
+   --> src/runtime/task_table.rs:408:13
+    |
+408 |         use crate::runtime::config::RuntimeConfig;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `pending` and `ready`
+  --> src/sync/once_cell_metamorphic.rs:24:27
+   |
+24 | use std::future::{Future, pending, ready};
+   |                           ^^^^^^^  ^^^^^
+
+warning: unused import: `AtomicBool`
+  --> src/sync/once_cell_metamorphic.rs:28:25
+   |
+28 | use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+   |                         ^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+  --> src/sync/once_cell_metamorphic.rs:29:5
+   |
+29 | use std::time::Duration;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `proptest::strategy::Strategy`
+   --> src/sync/once_cell_metamorphic.rs:281:13
+    |
+281 |         use proptest::strategy::Strategy;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `TaskId`
+  --> src/sync/barrier_metamorphic.rs:23:28
+   |
+23 | use crate::types::{Budget, TaskId};
+   |                            ^^^^^^
+
+warning: unused import: `BarrierWaitResult`
+  --> src/sync/barrier_metamorphic.rs:24:46
+   |
+24 | use crate::sync::{Barrier, BarrierWaitError, BarrierWaitResult};
+   |                                              ^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `DetEntropy` and `DetRng`
+  --> src/sync/barrier_metamorphic.rs:25:19
+   |
+25 | use crate::util::{DetEntropy, DetRng};
+   |                   ^^^^^^^^^^  ^^^^^^
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2133:33
+     |
+2132 | ...                   match sender.try_send(i as u32) {
+     |                             ------------------------- this expression has type `std::result::Result<(), channel::mpsc::SendError<u32>>`
+2133 | ...                       Ok::<(), ()>(()) => {
+     |                           ^^^^^^^^^^^^^^^^ expected `Result<(), SendError<u32>>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, channel::mpsc::SendError<u32>>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2115:91
+     |
+2115 |                           let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+     |  ___________________________________________________________________________________________^
+2116 | |                         let (sender, mut receiver) = channel::<u32>(config.capacity);
+...    |
+2165 | |                         Ok::<(), ()>(())
+2166 | |                         }.await;
+     | |_______________________________^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0109]: type arguments are not allowed on tuple variant `Ok`
+    --> src/channel/mpsc.rs:2171:42
+     |
+2171 |                 Result::<(), &str>::Ok::<(), ()>(()).expect("MR1 capacity conservation test failed");
+     |                                     --   ^^  ^^ type argument not allowed
+     |                                     |
+     |                                     not allowed on tuple variant `Ok`
+     |
+     = note: generic arguments are not allowed on both an enum and its variant's path segments simultaneously; they are only valid in one place or the other
+help: remove the generics arguments from one of the path segments
+     |
+2171 -                 Result::<(), &str>::Ok::<(), ()>(()).expect("MR1 capacity conservation test failed");
+2171 +                 Result::<(), &str>::Ok(()).expect("MR1 capacity conservation test failed");
+     |
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2172:17
+     |
+2172 |                 Ok::<(), ()>(())
+     |                 ^^^^^^^^^^^^^^^^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2205:25
+     |
+2204 |                     match sender.send(&cx, value).await {
+     |                           ----------------------------- this expression has type `std::result::Result<(), channel::mpsc::SendError<u32>>`
+2205 |                         Ok::<(), ()>(()) => {
+     |                         ^^^^^^^^^^^^^^^^ expected `Result<(), SendError<u32>>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, channel::mpsc::SendError<u32>>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2193:91
+     |
+2193 |                           let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+     |  ___________________________________________________________________________________________^
+2194 | |             let (sender, mut receiver) = channel::<u32>(config.capacity);
+2195 | |             let sent_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
+2196 | |             let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
+...    |
+2248 | |             Ok::<(), ()>(())
+2249 | |                         }.await;
+     | |_______________________________^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0109]: type arguments are not allowed on tuple variant `Ok`
+    --> src/channel/mpsc.rs:2254:42
+     |
+2254 |                 Result::<(), &str>::Ok::<(), ()>(()).expect("MR2 FIFO ordering test failed");
+     |                                     --   ^^  ^^ type argument not allowed
+     |                                     |
+     |                                     not allowed on tuple variant `Ok`
+     |
+     = note: generic arguments are not allowed on both an enum and its variant's path segments simultaneously; they are only valid in one place or the other
+help: remove the generics arguments from one of the path segments
+     |
+2254 -                 Result::<(), &str>::Ok::<(), ()>(()).expect("MR2 FIFO ordering test failed");
+2254 +                 Result::<(), &str>::Ok(()).expect("MR2 FIFO ordering test failed");
+     |
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2255:13
+     |
+2255 |             Ok::<(), ()>(())
+     |             ^^^^^^^^^^^^^^^^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2276:91
+     |
+2276 |                           let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+     |  ___________________________________________________________________________________________^
+2277 | |                         // Path 1: reserve then send
+2278 | |                         let (sender1, mut receiver1) = channel::<u32>(config.capacity);
+2279 | |                         let received1 = Arc::new(parking_lot::Mutex::new(Vec::new()));
+...    |
+2329 | |                         Ok::<(), ()>(())
+2330 | |                         }.await;
+     | |_______________________________^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0109]: type arguments are not allowed on tuple variant `Ok`
+    --> src/channel/mpsc.rs:2335:42
+     |
+2335 |                 Result::<(), &str>::Ok::<(), ()>(()).expect("MR3 reserve-send equivalence test failed");
+     |                                     --   ^^  ^^ type argument not allowed
+     |                                     |
+     |                                     not allowed on tuple variant `Ok`
+     |
+     = note: generic arguments are not allowed on both an enum and its variant's path segments simultaneously; they are only valid in one place or the other
+help: remove the generics arguments from one of the path segments
+     |
+2335 -                 Result::<(), &str>::Ok::<(), ()>(()).expect("MR3 reserve-send equivalence test failed");
+2335 +                 Result::<(), &str>::Ok(()).expect("MR3 reserve-send equivalence test failed");
+     |
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2336:17
+     |
+2336 |                 Ok::<(), ()>(())
+     |                 ^^^^^^^^^^^^^^^^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2354:28
+     |
+2354 |                     return Ok::<(), ()>(()); // Skip if cancellation not meaningful
+     |                            ^^^^^^^^^^^^^^^^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+note: return type inferred to be `std::result::Result<(), proptest::test_runner::TestCaseError>` here
+    --> src/channel/mpsc.rs:2354:28
+     |
+2354 |                     return Ok::<(), ()>(()); // Skip if cancellation not meaningful
+     |                            ^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `cancel` found for struct `scope::Scope<'r, P>` in the current scope
+    --> src/channel/mpsc.rs:2391:31
+     |
+2391 |                         scope.cancel(CancelReason::user("test cancellation"));
+     |                               ^^^^^^
+     |
+    ::: src/cx/scope.rs:120:1
+     |
+ 120 | pub struct Scope<'r, P: Policy = crate::types::policy::FailFast> {
+     | ---------------------------------------------------------------- method `cancel` not found for this struct
+     |
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following traits define an item `cancel`, perhaps you need to implement one of them:
+             candidate #1: `conformance::ConformanceTarget`
+             candidate #2: `driver::TimerDriverApi`
+             candidate #3: `race::Cancel`
+help: there is a method `race` with a similar name, but with different arguments
+    --> src/cx/scope.rs:1023:5
+     |
+1023 | /     pub async fn race<T>(
+1024 | |         &self,
+1025 | |         cx: &Cx,
+1026 | |         mut h1: TaskHandle<T>,
+1027 | |         mut h2: TaskHandle<T>,
+1028 | |     ) -> Result<T, JoinError> {
+     | |_____________________________^
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2362:91
+     |
+2362 |                           let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+     |  ___________________________________________________________________________________________^
+2363 | |                         let (sender, _receiver) = channel::<u32>(config.capacity);
+...    |
+2409 | |                         Ok::<(), ()>(())
+2410 | |                         }.await;
+     | |_______________________________^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0109]: type arguments are not allowed on tuple variant `Ok`
+    --> src/channel/mpsc.rs:2415:42
+     |
+2415 |                 Result::<(), &str>::Ok::<(), ()>(()).expect("MR4 cancellation idempotence test failed");
+     |                                     --   ^^  ^^ type argument not allowed
+     |                                     |
+     |                                     not allowed on tuple variant `Ok`
+     |
+     = note: generic arguments are not allowed on both an enum and its variant's path segments simultaneously; they are only valid in one place or the other
+help: remove the generics arguments from one of the path segments
+     |
+2415 -                 Result::<(), &str>::Ok::<(), ()>(()).expect("MR4 cancellation idempotence test failed");
+2415 +                 Result::<(), &str>::Ok(()).expect("MR4 cancellation idempotence test failed");
+     |
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2416:17
+     |
+2416 |                 Ok::<(), ()>(())
+     |                 ^^^^^^^^^^^^^^^^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+note: return type inferred to be `std::result::Result<(), proptest::test_runner::TestCaseError>` here
+    --> src/channel/mpsc.rs:2354:28
+     |
+2354 |                     return Ok::<(), ()>(()); // Skip if cancellation not meaningful
+     |                            ^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2433:28
+     |
+2433 |                     return Ok::<(), ()>(()); // Skip if eviction not meaningful
+     |                            ^^^^^^^^^^^^^^^^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+note: return type inferred to be `std::result::Result<(), proptest::test_runner::TestCaseError>` here
+    --> src/channel/mpsc.rs:2433:28
+     |
+2433 |                     return Ok::<(), ()>(()); // Skip if eviction not meaningful
+     |                            ^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2441:91
+     |
+2441 |                           let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+     |  ___________________________________________________________________________________________^
+2442 | |                         let (sender, mut receiver) = channel::<u32>(config.capacity);
+...    |
+2479 | |                         Ok::<(), ()>(())
+2480 | |                         }.await;
+     | |_______________________________^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0109]: type arguments are not allowed on tuple variant `Ok`
+    --> src/channel/mpsc.rs:2485:42
+     |
+2485 |                 Result::<(), &str>::Ok::<(), ()>(()).expect("MR5 eviction policy test failed");
+     |                                     --   ^^  ^^ type argument not allowed
+     |                                     |
+     |                                     not allowed on tuple variant `Ok`
+     |
+     = note: generic arguments are not allowed on both an enum and its variant's path segments simultaneously; they are only valid in one place or the other
+help: remove the generics arguments from one of the path segments
+     |
+2485 -                 Result::<(), &str>::Ok::<(), ()>(()).expect("MR5 eviction policy test failed");
+2485 +                 Result::<(), &str>::Ok(()).expect("MR5 eviction policy test failed");
+     |
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2486:17
+     |
+2486 |                 Ok::<(), ()>(())
+     |                 ^^^^^^^^^^^^^^^^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+note: return type inferred to be `std::result::Result<(), proptest::test_runner::TestCaseError>` here
+    --> src/channel/mpsc.rs:2433:28
+     |
+2433 |                     return Ok::<(), ()>(()); // Skip if eviction not meaningful
+     |                            ^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2507:91
+     |
+2507 |                           let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+     |  ___________________________________________________________________________________________^
+2508 | |                         let (sender, receiver) = channel::<u32>(config.capacity);
+...    |
+2565 | |                         Ok::<(), ()>(())
+2566 | |                         }.await;
+     | |_______________________________^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0109]: type arguments are not allowed on tuple variant `Ok`
+    --> src/channel/mpsc.rs:2571:42
+     |
+2571 |                 Result::<(), &str>::Ok::<(), ()>(()).expect("MR6 receiver drain test failed");
+     |                                     --   ^^  ^^ type argument not allowed
+     |                                     |
+     |                                     not allowed on tuple variant `Ok`
+     |
+     = note: generic arguments are not allowed on both an enum and its variant's path segments simultaneously; they are only valid in one place or the other
+help: remove the generics arguments from one of the path segments
+     |
+2571 -                 Result::<(), &str>::Ok::<(), ()>(()).expect("MR6 receiver drain test failed");
+2571 +                 Result::<(), &str>::Ok(()).expect("MR6 receiver drain test failed");
+     |
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2572:17
+     |
+2572 |                 Ok::<(), ()>(())
+     |                 ^^^^^^^^^^^^^^^^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2618:41
+     |
+2617 | ...                   match sender_clone.send(&cx, value).await {
+     |                             ----------------------------------- this expression has type `std::result::Result<(), channel::mpsc::SendError<u32>>`
+2618 | ...                       Ok::<(), ()>(()) => {
+     |                           ^^^^^^^^^^^^^^^^ expected `Result<(), SendError<u32>>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, channel::mpsc::SendError<u32>>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2593:91
+     |
+2593 |                           let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+     |  ___________________________________________________________________________________________^
+2594 | |                         let (sender, mut receiver) = channel::<u32>(config.capacity);
+2595 | |                         let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
+2596 | |                         let sent_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
+...    |
+2676 | |                         Ok::<(), ()>(())
+2677 | |                         }.await;
+     | |_______________________________^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0109]: type arguments are not allowed on tuple variant `Ok`
+    --> src/channel/mpsc.rs:2682:42
+     |
+2682 |                 Result::<(), &str>::Ok::<(), ()>(()).expect("Composite backpressure properties test failed");
+     |                                     --   ^^  ^^ type argument not allowed
+     |                                     |
+     |                                     not allowed on tuple variant `Ok`
+     |
+     = note: generic arguments are not allowed on both an enum and its variant's path segments simultaneously; they are only valid in one place or the other
+help: remove the generics arguments from one of the path segments
+     |
+2682 -                 Result::<(), &str>::Ok::<(), ()>(()).expect("Composite backpressure properties test failed");
+2682 +                 Result::<(), &str>::Ok(()).expect("Composite backpressure properties test failed");
+     |
+
+error[E0308]: mismatched types
+    --> src/channel/mpsc.rs:2683:17
+     |
+2683 |                 Ok::<(), ()>(())
+     |                 ^^^^^^^^^^^^^^^^ expected `Result<(), TestCaseError>`, found `Result<(), ()>`
+     |
+     = note: expected enum `std::result::Result<_, proptest::test_runner::TestCaseError>`
+                found enum `std::result::Result<_, ()>`
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+   --> src/combinator/bulkhead_metamorphic.rs:408:32
+    |
+408 |                 match bulkhead.enqueue(1, now, queue_timeout) {
+    |                                ^^^^^^^         ------------- unexpected argument #3 of type `std::time::Duration`
+    |
+note: method defined here
+   --> src/combinator/bulkhead.rs:420:12
+    |
+420 |     pub fn enqueue(&self, weight: u32, now: Time) -> Result<u64, BulkheadError<()>> {
+    |            ^^^^^^^
+help: remove the extra argument
+    |
+408 -                 match bulkhead.enqueue(1, now, queue_timeout) {
+408 +                 match bulkhead.enqueue(1, now) {
+    |
+
+error[E0061]: this function takes 2 arguments but 0 arguments were supplied
+   --> src/combinator/timeout_metamorphic.rs:497:34
+    |
+497 |                     let result = Scope::new()
+    |                                  ^^^^^^^^^^-- two arguments of type `types::id::RegionId` and `budget::Budget` are missing
+    |
+note: associated function defined here
+   --> src/cx/scope.rs:229:19
+    |
+229 |     pub(crate) fn new(region: RegionId, budget: Budget) -> Self {
+    |                   ^^^ ----------------  --------------
+help: provide the arguments
+    |
+497 |                     let result = Scope::new(/* types::id::RegionId */, /* budget::Budget */)
+    |                                             +++++++++++++++++++++++++++++++++++++++++++++++
+
+error[E0599]: no method named `run` found for struct `scope::Scope<'r, P>` in the current scope
+   --> src/combinator/timeout_metamorphic.rs:498:26
+    |
+497 |                       let result = Scope::new()
+    |  __________________________________-
+498 | |                         .run(|scope| async move {
+    | |                         -^^^ method not found in `scope::Scope<'_, _>`
+    | |_________________________|
+    |
+    |
+   ::: src/cx/scope.rs:120:1
+    |
+120 |   pub struct Scope<'r, P: Policy = crate::types::policy::FailFast> {
+    |   ---------------------------------------------------------------- method `run` not found for this struct
+
+error[E0317]: `if` may be missing an `else` clause
+   --> src/combinator/timeout_metamorphic.rs:676:17
+    |
+676 | /                  if let Some(cx) = Cx::current() {
+677 | |                      let now = cx.now();
+678 | |                      let result = timeout(now, Duration::from_millis(duration_ms), operation).await;
+679 | |
+680 | |/                     match result {
+681 | ||                         Ok(Ok(_)) => global_state
+682 | ||                             .operation_completed
+683 | ||                             .fetch_add(1, Ordering::SeqCst),
+...   ||
+686 | ||                             .fetch_add(1, Ordering::SeqCst),
+687 | ||                     }
+    | ||_____________________- found here
+688 | |                  }
+    | |__________________^ expected `u32`, found `()`
+    |
+    = note: `if` expressions without `else` evaluate to `()`
+    = help: consider adding an `else` block that evaluates to the expected type
+
+error[E0317]: `if` may be missing an `else` clause
+   --> src/combinator/timeout_metamorphic.rs:722:17
+    |
+722 | /                  if let Some(cx) = Cx::current() {
+723 | |                      let now = cx.now();
+724 | |                      let inner_timeout = timeout(now, Duration::from_millis(30), operation);
+725 | |                      let result = timeout(now, Duration::from_millis(50), inner_timeout).await;
+726 | |
+727 | |/                     match result {
+728 | ||                         Ok(Ok(Ok(_))) => global_state
+729 | ||                             .operation_completed
+730 | ||                             .fetch_add(1, Ordering::SeqCst),
+...   ||
+733 | ||                             .fetch_add(1, Ordering::SeqCst),
+734 | ||                     }
+    | ||_____________________- found here
+735 | |                  }
+    | |__________________^ expected `u32`, found `()`
+    |
+    = note: `if` expressions without `else` evaluate to `()`
+    = help: consider adding an `else` block that evaluates to the expected type
+
+error[E0317]: `if` may be missing an `else` clause
+   --> src/combinator/timeout_metamorphic.rs:775:17
+    |
+775 | /                  if let Some(cx) = Cx::current() {
+776 | |                      let now = cx.now();
+777 | |                      let inner_timeout = timeout(now, Duration::from_millis(55), operation);
+778 | |                      let result = timeout(now, Duration::from_millis(45), inner_timeout).await;
+779 | |
+780 | |/                     match result {
+781 | ||                         Ok(Ok(Ok(_))) => global_state
+782 | ||                             .operation_completed
+783 | ||                             .fetch_add(1, Ordering::SeqCst),
+...   ||
+786 | ||                             .fetch_add(1, Ordering::SeqCst),
+787 | ||                     }
+    | ||_____________________- found here
+788 | |                  }
+    | |__________________^ expected `u32`, found `()`
+    |
+    = note: `if` expressions without `else` evaluate to `()`
+    = help: consider adding an `else` block that evaluates to the expected type
+
+error[E0317]: `if` may be missing an `else` clause
+   --> src/combinator/timeout_metamorphic.rs:818:13
+    |
+818 | /              if let Some(cx) = Cx::current() {
+819 | |                  let now = cx.now();
+...   |
+828 | |/                 match result {
+829 | ||                     Ok(Ok(Ok(_))) => global_state
+830 | ||                         .operation_completed
+831 | ||                         .fetch_add(1, Ordering::SeqCst),
+...   ||
+837 | ||                         .fetch_add(1, Ordering::SeqCst),
+838 | ||                 }
+    | ||_________________- found here
+839 | |              }
+    | |______________^ expected `u32`, found `()`
+    |
+    = note: `if` expressions without `else` evaluate to `()`
+    = help: consider adding an `else` block that evaluates to the expected type
+
+error[E0609]: no field `tick` on type `&vclock::LogicalTime`
+    --> src/cx/cx.rs:3485:30
+     |
+3485 |                 times[i - 1].tick <= times[i].tick,
+     |                              ^^^^ unknown field
+
+error[E0609]: no field `tick` on type `&vclock::LogicalTime`
+    --> src/cx/cx.rs:3485:47
+     |
+3485 |                 times[i - 1].tick <= times[i].tick,
+     |                                               ^^^^ unknown field
+
+error[E0609]: no field `tick` on type `&vclock::LogicalTime`
+    --> src/cx/cx.rs:3487:30
+     |
+3487 |                 times[i - 1].tick,
+     |                              ^^^^ unknown field
+
+error[E0609]: no field `tick` on type `&vclock::LogicalTime`
+    --> src/cx/cx.rs:3488:26
+     |
+3488 |                 times[i].tick
+     |                          ^^^^ unknown field
+
+error[E0609]: no field `message` on type `&trace::event::TraceEvent`
+    --> src/cx/cx.rs:3539:20
+     |
+3539 |                 e1.message, e2.message,
+     |                    ^^^^^^^ unknown field
+     |
+     = note: available fields are: `version`, `seq`, `time`, `logical_time`, `kind`, `data`
+
+error[E0609]: no field `message` on type `&trace::event::TraceEvent`
+    --> src/cx/cx.rs:3539:32
+     |
+3539 |                 e1.message, e2.message,
+     |                                ^^^^^^^ unknown field
+     |
+     = note: available fields are: `version`, `seq`, `time`, `logical_time`, `kind`, `data`
+
+error[E0609]: no field `message` on type `&trace::event::TraceEvent`
+    --> src/cx/cx.rs:3541:23
+     |
+3541 |                 i, e1.message, e2.message
+     |                       ^^^^^^^ unknown field
+     |
+     = note: available fields are: `version`, `seq`, `time`, `logical_time`, `kind`, `data`
+
+error[E0609]: no field `message` on type `&trace::event::TraceEvent`
+    --> src/cx/cx.rs:3541:35
+     |
+3541 |                 i, e1.message, e2.message
+     |                                   ^^^^^^^ unknown field
+     |
+     = note: available fields are: `version`, `seq`, `time`, `logical_time`, `kind`, `data`
+
+error[E0609]: no field `tick` on type `&vclock::LogicalTime`
+    --> src/cx/cx.rs:3585:69
+     |
+3585 |             .map(|e| e.logical_time.as_ref().expect("logical time").tick)
+     |                                                                     ^^^^ unknown field
+
+error[E0609]: no field `tick` on type `&vclock::LogicalTime`
+    --> src/cx/cx.rs:3631:69
+     |
+3631 |             .map(|e| e.logical_time.as_ref().expect("logical time").tick)
+     |                                                                     ^^^^ unknown field
+
+error[E0609]: no field `tick` on type `&vclock::LogicalTime`
+    --> src/cx/cx.rs:3667:69
+     |
+3667 |             .map(|e| e.logical_time.as_ref().expect("logical time").tick)
+     |                                                                     ^^^^ unknown field
+
+error[E0609]: no field `tick` on type `&vclock::LogicalTime`
+    --> src/cx/cx.rs:3736:69
+     |
+3736 |             .map(|e| e.logical_time.as_ref().expect("logical time").tick)
+     |                                                                     ^^^^ unknown field
+
+error[E0609]: no field `message` on type `&trace::event::TraceEvent`
+    --> src/cx/cx.rs:3750:38
+     |
+3750 |             events.iter().all(|e| !e.message.is_empty()),
+     |                                      ^^^^^^^ unknown field
+     |
+     = note: available fields are: `version`, `seq`, `time`, `logical_time`, `kind`, `data`
+
+error[E0609]: no field `message` on type `&&trace::event::TraceEvent`
+    --> src/cx/cx.rs:3757:27
+     |
+3757 |             .filter(|e| e.message.contains("_branch_"))
+     |                           ^^^^^^^ unknown field
+     |
+     = note: available fields are: `version`, `seq`, `time`, `logical_time`, `kind`, `data`
+
+error[E0308]: mismatched types
+    --> src/cx/scope.rs:2700:39
+     |
+2700 |                         task.complete(outcome);
+     |                              -------- ^^^^^^^ expected `Outcome<(), Error>`, found `Outcome<(), ()>`
+     |                              |
+     |                              arguments to this method are incorrect
+     |
+     = note: expected enum `outcome::Outcome<_, error::Error>`
+                found enum `outcome::Outcome<_, ()>`
+note: method defined here
+    --> src/record/task.rs:654:12
+     |
+ 654 |     pub fn complete(&mut self, outcome: TaskOutcome) -> bool {
+     |            ^^^^^^^^            --------------------
+
+error[E0599]: no method named `advance` found for struct `bytes::bytes::Bytes` in the current scope
+    --> src/http/h2/hpack.rs:2779:13
+     |
+2779 |         src.advance(1); // Skip the 0x42 byte
+     |             ^^^^^^^ method not found in `bytes::bytes::Bytes`
+     |
+    ::: src/bytes/bytes.rs:35:1
+     |
+  35 | pub struct Bytes {
+     | ---------------- method `advance` not found for this struct
+     |
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following traits define an item `advance`, perhaps you need to implement one of them:
+             candidate #1: `buf_trait::Buf`
+             candidate #2: `write_ext::Buf`
+             candidate #3: `prost::bytes::Buf`
+
+error[E0599]: no method named `set_max_table_size` found for struct `hpack::Decoder` in the current scope
+    --> src/http/h2/hpack.rs:2855:17
+     |
+ 428 | pub struct Decoder {
+     | ------------------ method `set_max_table_size` not found for this struct
+...
+2855 |         decoder.set_max_table_size(256);
+     |                 ^^^^^^^^^^^^^^^^^^
+     |
+help: there is a method `set_allowed_table_size` with a similar name
+     |
+2855 -         decoder.set_max_table_size(256);
+2855 +         decoder.set_allowed_table_size(256);
+     |
+
+error[E0559]: variant `h3_native::H3Frame::Data` has no field named `payload`
+    --> src/http/h3_native.rs:3606:13
+     |
+ 251 |     Data(Vec<u8>),
+     |     ---- `h3_native::H3Frame::Data` defined here
+...
+3606 |             payload: vec![1, 2, 3],
+     |             ^^^^^^^ field does not exist
+     |
+help: `h3_native::H3Frame::Data` is a tuple variant, use the appropriate syntax
+     |
+3605 -         let data_frame = H3Frame::Data {
+3606 -             payload: vec![1, 2, 3],
+3607 -         };
+3605 +         let data_frame = H3Frame::Data(/* Vec<u8> */);
+     |
+
+error[E0559]: variant `h3_native::H3Frame::Headers` has no field named `field_block`
+    --> src/http/h3_native.rs:3613:13
+     |
+ 253 |     Headers(Vec<u8>),
+     |     ------- `h3_native::H3Frame::Headers` defined here
+...
+3613 |             field_block: vec![4, 5, 6],
+     |             ^^^^^^^^^^^ field does not exist
+     |
+help: `h3_native::H3Frame::Headers` is a tuple variant, use the appropriate syntax
+     |
+3612 -         let headers_frame = H3Frame::Headers {
+3613 -             field_block: vec![4, 5, 6],
+3614 -         };
+3612 +         let headers_frame = H3Frame::Headers(/* Vec<u8> */);
+     |
+
+error[E0559]: variant `h3_native::H3Frame::Data` has no field named `payload`
+    --> src/http/h3_native.rs:3690:13
+     |
+ 251 |     Data(Vec<u8>),
+     |     ---- `h3_native::H3Frame::Data` defined here
+...
+3690 |             payload: vec![1, 2, 3],
+     |             ^^^^^^^ field does not exist
+     |
+help: `h3_native::H3Frame::Data` is a tuple variant, use the appropriate syntax
+     |
+3689 -         let data_frame = H3Frame::Data {
+3690 -             payload: vec![1, 2, 3],
+3691 -         };
+3689 +         let data_frame = H3Frame::Data(/* Vec<u8> */);
+     |
+
+error[E0559]: variant `h3_native::H3Frame::Headers` has no field named `field_block`
+    --> src/http/h3_native.rs:3698:13
+     |
+ 253 |     Headers(Vec<u8>),
+     |     ------- `h3_native::H3Frame::Headers` defined here
+...
+3698 |             field_block: vec![4, 5, 6],
+     |             ^^^^^^^^^^^ field does not exist
+     |
+help: `h3_native::H3Frame::Headers` is a tuple variant, use the appropriate syntax
+     |
+3697 -         let headers_frame = H3Frame::Headers {
+3698 -             field_block: vec![4, 5, 6],
+3699 -         };
+3697 +         let headers_frame = H3Frame::Headers(/* Vec<u8> */);
+     |
+
+error[E0559]: variant `h3_native::H3Frame::Data` has no field named `payload`
+    --> src/http/h3_native.rs:3727:13
+     |
+ 251 |     Data(Vec<u8>),
+     |     ---- `h3_native::H3Frame::Data` defined here
+...
+3727 |             payload: vec![1, 2, 3],
+     |             ^^^^^^^ field does not exist
+     |
+help: `h3_native::H3Frame::Data` is a tuple variant, use the appropriate syntax
+     |
+3726 -         let data_frame = H3Frame::Data {
+3727 -             payload: vec![1, 2, 3],
+3728 -         };
+3726 +         let data_frame = H3Frame::Data(/* Vec<u8> */);
+     |
+
+error[E0277]: expected a `FnOnce(u64)` closure, found `&trace::event::TraceEvent`
+    --> src/lab/replay.rs:2386:53
+     |
+2386 |                 replay_runtime.trace().record_event(event);
+     |                                        ------------ ^^^^^ expected an `FnOnce(u64)` closure, found `&trace::event::TraceEvent`
+     |                                        |
+     |                                        required by a bound introduced by this call
+     |
+help: the trait `Fn(u64)` is not implemented for `trace::event::TraceEvent`
+    --> src/trace/event.rs:1102:1
+     |
+1102 | pub struct TraceEvent {
+     | ^^^^^^^^^^^^^^^^^^^^^
+     = note: required for `&trace::event::TraceEvent` to implement `FnOnce(u64)`
+note: required by a bound in `trace::buffer::TraceBufferHandle::record_event`
+    --> src/trace/buffer.rs:168:12
+     |
+ 166 |     pub fn record_event<F>(&self, build: F)
+     |            ------------ required by a bound in this associated function
+ 167 |     where
+ 168 |         F: FnOnce(u64) -> TraceEvent,
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `TraceBufferHandle::record_event`
+
+error[E0599]: no method named `contains` found for enum `trace::event::TraceData` in the current scope
+    --> src/lab/replay.rs:2568:40
+     |
+2568 |             .filter(|event| event.data.contains("panic_"))
+     |                                        ^^^^^^^^ method not found in `trace::event::TraceData`
+     |
+    ::: src/trace/event.rs:894:1
+     |
+ 894 | pub enum TraceData {
+     | ------------------ method `contains` not found for this enum
+     |
+note: the method `contains` exists on the type `std::string::String`
+    --> /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:1363:5
+     |
+1363 |     pub fn contains<P: Pattern>(&self, pat: P) -> bool {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following traits define an item `contains`, perhaps you need to implement one of them:
+             candidate #1: `bitflags::traits::Flags`
+             candidate #2: `std::ops::RangeBounds`
+
+error[E0599]: no method named `contains` found for enum `trace::event::TraceData` in the current scope
+    --> src/lab/replay.rs:2572:40
+     |
+2572 |             .filter(|event| event.data.contains("panic_"))
+     |                                        ^^^^^^^^ method not found in `trace::event::TraceData`
+     |
+    ::: src/trace/event.rs:894:1
+     |
+ 894 | pub enum TraceData {
+     | ------------------ method `contains` not found for this enum
+     |
+note: the method `contains` exists on the type `std::string::String`
+    --> /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:1363:5
+     |
+1363 |     pub fn contains<P: Pattern>(&self, pat: P) -> bool {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following traits define an item `contains`, perhaps you need to implement one of them:
+             candidate #1: `bitflags::traits::Flags`
+             candidate #2: `std::ops::RangeBounds`
+
+error[E0599]: no method named `time` found for mutable reference `&mut lab::runtime::LabRuntime` in the current scope
+    --> src/lab/replay.rs:2631:37
+     |
+2631 | ...                   runtime.time(),
+     |                               ^^^^ method not found in `&mut lab::runtime::LabRuntime`
+
+error[E0277]: expected a `FnOnce(u64)` closure, found `&trace::event::TraceEvent`
+    --> src/lab/replay.rs:2629:40
+     |
+2629 |                           .record_event(&crate::trace::TraceEvent::user_trace(
+     |  __________________________------------__^
+     | |                          |
+     | |                          required by a bound introduced by this call
+2630 | |                             event_id as u64,
+2631 | |                             runtime.time(),
+2632 | |                             format!("region_{}_task_{}", region_id, task_id),
+2633 | |                         ));
+     | |_________________________^ expected an `FnOnce(u64)` closure, found `&trace::event::TraceEvent`
+     |
+help: the trait `Fn(u64)` is not implemented for `trace::event::TraceEvent`
+    --> src/trace/event.rs:1102:1
+     |
+1102 | pub struct TraceEvent {
+     | ^^^^^^^^^^^^^^^^^^^^^
+     = note: required for `&trace::event::TraceEvent` to implement `FnOnce(u64)`
+note: required by a bound in `trace::buffer::TraceBufferHandle::record_event`
+    --> src/trace/buffer.rs:168:12
+     |
+ 166 |     pub fn record_event<F>(&self, build: F)
+     |            ------------ required by a bound in this associated function
+ 167 |     where
+ 168 |         F: FnOnce(u64) -> TraceEvent,
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `TraceBufferHandle::record_event`
+
+error[E0277]: expected a `FnOnce(u64)` closure, found `trace::event::TraceEvent`
+    --> src/lab/replay.rs:2629:39
+     |
+2629 |                           .record_event(&crate::trace::TraceEvent::user_trace(
+     |  __________________________------------_^
+     | |                          |
+     | |                          required by a bound introduced by this call
+2630 | |                             event_id as u64,
+2631 | |                             runtime.time(),
+2632 | |                             format!("region_{}_task_{}", region_id, task_id),
+2633 | |                         ));
+     | |_________________________^ expected an `FnOnce(u64)` closure, found `trace::event::TraceEvent`
+     |
+help: the trait `FnOnce(u64)` is not implemented for `trace::event::TraceEvent`
+    --> src/trace/event.rs:1102:1
+     |
+1102 | pub struct TraceEvent {
+     | ^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `trace::buffer::TraceBufferHandle::record_event`
+    --> src/trace/buffer.rs:168:27
+     |
+ 166 |     pub fn record_event<F>(&self, build: F)
+     |            ------------ required by a bound in this associated function
+ 167 |     where
+ 168 |         F: FnOnce(u64) -> TraceEvent,
+     |                           ^^^^^^^^^^ required by this bound in `TraceBufferHandle::record_event`
+
+error[E0599]: no method named `contains` found for enum `trace::event::TraceData` in the current scope
+    --> src/lab/replay.rs:2708:36
+     |
+2708 |                 .filter(|e| e.data.contains("region_"))
+     |                                    ^^^^^^^^ method not found in `trace::event::TraceData`
+     |
+    ::: src/trace/event.rs:894:1
+     |
+ 894 | pub enum TraceData {
+     | ------------------ method `contains` not found for this enum
+     |
+note: the method `contains` exists on the type `std::string::String`
+    --> /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:1363:5
+     |
+1363 |     pub fn contains<P: Pattern>(&self, pat: P) -> bool {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following traits define an item `contains`, perhaps you need to implement one of them:
+             candidate #1: `bitflags::traits::Flags`
+             candidate #2: `std::ops::RangeBounds`
+
+error[E0599]: no method named `contains` found for enum `trace::event::TraceData` in the current scope
+    --> src/lab/replay.rs:2713:36
+     |
+2713 |                 .filter(|e| e.data.contains("region_"))
+     |                                    ^^^^^^^^ method not found in `trace::event::TraceData`
+     |
+    ::: src/trace/event.rs:894:1
+     |
+ 894 | pub enum TraceData {
+     | ------------------ method `contains` not found for this enum
+     |
+note: the method `contains` exists on the type `std::string::String`
+    --> /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:1363:5
+     |
+1363 |     pub fn contains<P: Pattern>(&self, pat: P) -> bool {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following traits define an item `contains`, perhaps you need to implement one of them:
+             candidate #1: `bitflags::traits::Flags`
+             candidate #2: `std::ops::RangeBounds`
+
+error[E0599]: no method named `time` found for mutable reference `&mut lab::runtime::LabRuntime` in the current scope
+    --> src/lab/replay.rs:2859:37
+     |
+2859 | ...                   runtime.time(),
+     |                               ^^^^ method not found in `&mut lab::runtime::LabRuntime`
+
+error[E0277]: expected a `FnOnce(u64)` closure, found `&trace::event::TraceEvent`
+    --> src/lab/replay.rs:2857:40
+     |
+2857 |                           .record_event(&crate::trace::TraceEvent::user_trace(
+     |  __________________________------------__^
+     | |                          |
+     | |                          required by a bound introduced by this call
+2858 | |                             event_id as u64,
+2859 | |                             runtime.time(),
+2860 | |                             format!("fork_region_{}_task_{}", region_id, task_id),
+2861 | |                         ));
+     | |_________________________^ expected an `FnOnce(u64)` closure, found `&trace::event::TraceEvent`
+     |
+help: the trait `Fn(u64)` is not implemented for `trace::event::TraceEvent`
+    --> src/trace/event.rs:1102:1
+     |
+1102 | pub struct TraceEvent {
+     | ^^^^^^^^^^^^^^^^^^^^^
+     = note: required for `&trace::event::TraceEvent` to implement `FnOnce(u64)`
+note: required by a bound in `trace::buffer::TraceBufferHandle::record_event`
+    --> src/trace/buffer.rs:168:12
+     |
+ 166 |     pub fn record_event<F>(&self, build: F)
+     |            ------------ required by a bound in this associated function
+ 167 |     where
+ 168 |         F: FnOnce(u64) -> TraceEvent,
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `TraceBufferHandle::record_event`
+
+error[E0277]: expected a `FnOnce(u64)` closure, found `trace::event::TraceEvent`
+    --> src/lab/replay.rs:2857:39
+     |
+2857 |                           .record_event(&crate::trace::TraceEvent::user_trace(
+     |  __________________________------------_^
+     | |                          |
+     | |                          required by a bound introduced by this call
+2858 | |                             event_id as u64,
+2859 | |                             runtime.time(),
+2860 | |                             format!("fork_region_{}_task_{}", region_id, task_id),
+2861 | |                         ));
+     | |_________________________^ expected an `FnOnce(u64)` closure, found `trace::event::TraceEvent`
+     |
+help: the trait `FnOnce(u64)` is not implemented for `trace::event::TraceEvent`
+    --> src/trace/event.rs:1102:1
+     |
+1102 | pub struct TraceEvent {
+     | ^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `trace::buffer::TraceBufferHandle::record_event`
+    --> src/trace/buffer.rs:168:27
+     |
+ 166 |     pub fn record_event<F>(&self, build: F)
+     |            ------------ required by a bound in this associated function
+ 167 |     where
+ 168 |         F: FnOnce(u64) -> TraceEvent,
+     |                           ^^^^^^^^^^ required by this bound in `TraceBufferHandle::record_event`
+
+error[E0599]: no method named `time` found for mutable reference `&mut lab::runtime::LabRuntime` in the current scope
+    --> src/lab/replay.rs:2876:37
+     |
+2876 | ...                   runtime.time(),
+     |                               ^^^^ method not found in `&mut lab::runtime::LabRuntime`
+
+error[E0277]: expected a `FnOnce(u64)` closure, found `&trace::event::TraceEvent`
+    --> src/lab/replay.rs:2874:40
+     |
+2874 |                           .record_event(&crate::trace::TraceEvent::user_trace(
+     |  __________________________------------__^
+     | |                          |
+     | |                          required by a bound introduced by this call
+2875 | |                             event_id as u64,
+2876 | |                             runtime.time(),
+2877 | |                             format!("{}_region_{}_task_{}", event_type, region_id, task_id),
+2878 | |                         ));
+     | |_________________________^ expected an `FnOnce(u64)` closure, found `&trace::event::TraceEvent`
+     |
+help: the trait `Fn(u64)` is not implemented for `trace::event::TraceEvent`
+    --> src/trace/event.rs:1102:1
+     |
+1102 | pub struct TraceEvent {
+     | ^^^^^^^^^^^^^^^^^^^^^
+     = note: required for `&trace::event::TraceEvent` to implement `FnOnce(u64)`
+note: required by a bound in `trace::buffer::TraceBufferHandle::record_event`
+    --> src/trace/buffer.rs:168:12
+     |
+ 166 |     pub fn record_event<F>(&self, build: F)
+     |            ------------ required by a bound in this associated function
+ 167 |     where
+ 168 |         F: FnOnce(u64) -> TraceEvent,
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `TraceBufferHandle::record_event`
+
+error[E0277]: expected a `FnOnce(u64)` closure, found `trace::event::TraceEvent`
+    --> src/lab/replay.rs:2874:39
+     |
+2874 |                           .record_event(&crate::trace::TraceEvent::user_trace(
+     |  __________________________------------_^
+     | |                          |
+     | |                          required by a bound introduced by this call
+2875 | |                             event_id as u64,
+2876 | |                             runtime.time(),
+2877 | |                             format!("{}_region_{}_task_{}", event_type, region_id, task_id),
+2878 | |                         ));
+     | |_________________________^ expected an `FnOnce(u64)` closure, found `trace::event::TraceEvent`
+     |
+help: the trait `FnOnce(u64)` is not implemented for `trace::event::TraceEvent`
+    --> src/trace/event.rs:1102:1
+     |
+1102 | pub struct TraceEvent {
+     | ^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `trace::buffer::TraceBufferHandle::record_event`
+    --> src/trace/buffer.rs:168:27
+     |
+ 166 |     pub fn record_event<F>(&self, build: F)
+     |            ------------ required by a bound in this associated function
+ 167 |     where
+ 168 |         F: FnOnce(u64) -> TraceEvent,
+     |                           ^^^^^^^^^^ required by this bound in `TraceBufferHandle::record_event`
+
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+    --> src/lab/runtime.rs:5271:33
+     |
+5271 | ...                   crate::time::sleep(Duration::from_millis(1)).await;
+     |                       ^^^^^^^^^^^^^^^^^^ ------------------------ argument #1 of type `types::id::Time` is missing
+     |
+note: function defined here
+    --> src/time/sleep.rs:768:8
+     |
+ 768 | pub fn sleep(now: Time, duration: Duration) -> Sleep {
+     |        ^^^^^ ---------
+help: provide the argument
+     |
+5271 |                                 crate::time::sleep(/* types::id::Time */, Duration::from_millis(1)).await;
+     |                                                    ++++++++++++++++++++++
+
+error[E0599]: no method named `generate_report` found for struct `lab::runtime::LabRuntime` in the current scope
+    --> src/lab/runtime.rs:5281:34
+     |
+ 702 | pub struct LabRuntime {
+     | --------------------- method `generate_report` not found for this struct
+...
+5281 |             let report = runtime.generate_report();
+     |                                  ^^^^^^^^^^^^^^^ method not found in `lab::runtime::LabRuntime`
+
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+    --> src/lab/runtime.rs:5354:25
+     |
+5354 |                         crate::time::sleep(dur).await;
+     |                         ^^^^^^^^^^^^^^^^^^ --- argument #1 of type `types::id::Time` is missing
+     |
+note: function defined here
+    --> src/time/sleep.rs:768:8
+     |
+ 768 | pub fn sleep(now: Time, duration: Duration) -> Sleep {
+     |        ^^^^^ ---------
+help: provide the argument
+     |
+5354 |                         crate::time::sleep(/* types::id::Time */, dur).await;
+     |                                            ++++++++++++++++++++++
+
+error[E0061]: this method takes 0 arguments but 1 argument was supplied
+    --> src/lab/runtime.rs:5362:40
+     |
+5362 |             let vtime_report = runtime.run_with_auto_advance(1000);
+     |                                        ^^^^^^^^^^^^^^^^^^^^^ ---- unexpected argument of type `{integer}`
+     |
+note: method defined here
+    --> src/lab/runtime.rs:1036:12
+     |
+1036 |     pub fn run_with_auto_advance(&mut self) -> VirtualTimeReport {
+     |            ^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+5362 -             let vtime_report = runtime.run_with_auto_advance(1000);
+5362 +             let vtime_report = runtime.run_with_auto_advance();
+     |
+
+error[E0599]: no method named `certificate_snapshot` found for struct `lab::runtime::LabRuntime` in the current scope
+    --> src/lab/runtime.rs:5425:32
+     |
+ 702 | pub struct LabRuntime {
+     | --------------------- method `certificate_snapshot` not found for this struct
+...
+5425 |             let cert = runtime.certificate_snapshot();
+     |                                ^^^^^^^^^^^^^^^^^^^^
+     |
+help: there is a method `certificate` with a similar name
+     |
+5425 -             let cert = runtime.certificate_snapshot();
+5425 +             let cert = runtime.certificate();
+     |
+
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+    --> src/lab/runtime.rs:5488:33
+     |
+5488 | ...                   crate::time::sleep(Duration::from_millis(1)).await;
+     |                       ^^^^^^^^^^^^^^^^^^ ------------------------ argument #1 of type `types::id::Time` is missing
+     |
+note: function defined here
+    --> src/time/sleep.rs:768:8
+     |
+ 768 | pub fn sleep(now: Time, duration: Duration) -> Sleep {
+     |        ^^^^^ ---------
+help: provide the argument
+     |
+5488 |                                 crate::time::sleep(/* types::id::Time */, Duration::from_millis(1)).await;
+     |                                                    ++++++++++++++++++++++
+
+error[E0609]: no field `cancel_decision_points` on type `&chaos::ChaosStats`
+    --> src/lab/runtime.rs:5501:47
+     |
+5501 |             let total_decisions = chaos_stats.cancel_decision_points
+     |                                               ^^^^^^^^^^^^^^^^^^^^^^ unknown field
+     |
+help: a field with a similar name exists
+     |
+5501 -             let total_decisions = chaos_stats.cancel_decision_points
+5501 +             let total_decisions = chaos_stats.decision_points
+     |
+
+error[E0609]: no field `delay_decision_points` on type `&chaos::ChaosStats`
+    --> src/lab/runtime.rs:5502:31
+     |
+5502 |                 + chaos_stats.delay_decision_points
+     |                               ^^^^^^^^^^^^^^^^^^^^^ unknown field
+     |
+help: a field with a similar name exists
+     |
+5502 -                 + chaos_stats.delay_decision_points
+5502 +                 + chaos_stats.decision_points
+     |
+
+error[E0609]: no field `wakeup_storm_decision_points` on type `&chaos::ChaosStats`
+    --> src/lab/runtime.rs:5503:31
+     |
+5503 |                 + chaos_stats.wakeup_storm_decision_points;
+     |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `cancellations`, `delays`, `total_delay`, `io_errors`, `wakeup_storms` ... and 3 others
+
+error[E0599]: no method named `generate_report` found for mutable reference `&mut lab::runtime::LabRuntime` in the current scope
+    --> src/lab/runtime.rs:5552:34
+     |
+5552 |             let report = runtime.generate_report();
+     |                                  ^^^^^^^^^^^^^^^ method not found in `&mut lab::runtime::LabRuntime`
+
+error[E0599]: no method named `snapshot_trace` found for mutable reference `&mut lab::runtime::LabRuntime` in the current scope
+    --> src/lab/runtime.rs:5553:40
+     |
+5553 |             let trace_events = runtime.snapshot_trace();
+     |                                        ^^^^^^^^^^^^^^ method not found in `&mut lab::runtime::LabRuntime`
+
+error[E0599]: no variant named `TaskPanicked` found for enum `trace::event::TraceData`
+    --> src/lab/runtime.rs:5558:65
+     |
+5558 |                 .filter(|event| matches!(event.data, TraceData::TaskPanicked { .. }))
+     |                                                                 ^^^^^^^^^^^^ variant not found in `trace::event::TraceData`
+     |
+    ::: src/trace/event.rs:894:1
+     |
+ 894 | pub enum TraceData {
+     | ------------------ variant `TaskPanicked` not found here
+
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+    --> src/lab/runtime.rs:5609:38
+     |
+5609 | ...                   1 => crate::time::sleep(Duration::from_millis(j as u64 % 5)).await,
+     |                            ^^^^^^^^^^^^^^^^^^ ----------------------------------- argument #1 of type `types::id::Time` is missing
+     |
+note: function defined here
+    --> src/time/sleep.rs:768:8
+     |
+ 768 | pub fn sleep(now: Time, duration: Duration) -> Sleep {
+     |        ^^^^^ ---------
+help: provide the argument
+     |
+5609 |                                 1 => crate::time::sleep(/* types::id::Time */, Duration::from_millis(j as u64 % 5)).await,
+     |                                                         ++++++++++++++++++++++
+
+error[E0308]: `match` arms have incompatible types
+    --> src/lab/runtime.rs:5616:37
+     |
+5607 | / ...                   match (i + j) % 4 {
+5608 | | ...                       0 => futures_lite::future::yield_now().await,
+     | |                                --------------------------------------- this is found to be of type `()`
+5609 | | ...                       1 => crate::time::sleep(Duration::from_millis(j as u64 % 5)).await,
+     | |                                ------------------------------------------------------------- this is found to be of type `()`
+5610 | | ...                       2 => {
+...    |
+5616 | | ...                           sum
+     | |                               ^^^ expected `()`, found `u64`
+5617 | | ...                       }
+5618 | | ...                       _ => futures_lite::future::yield_now().await,
+5619 | | ...                   };
+     | |_______________________- `match` arms have incompatible types
+
+error[E0061]: this method takes 0 arguments but 1 argument was supplied
+    --> src/lab/runtime.rs:5628:40
+     |
+5628 |             let vtime_report = runtime.run_with_auto_advance(10000);
+     |                                        ^^^^^^^^^^^^^^^^^^^^^ ----- unexpected argument of type `{integer}`
+     |
+note: method defined here
+    --> src/lab/runtime.rs:1036:12
+     |
+1036 |     pub fn run_with_auto_advance(&mut self) -> VirtualTimeReport {
+     |            ^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+5628 -             let vtime_report = runtime.run_with_auto_advance(10000);
+5628 +             let vtime_report = runtime.run_with_auto_advance();
+     |
+
+error[E0277]: the trait bound `det_rng::DetRng: entropy::EntropySource` is not satisfied
+    --> src/net/websocket/handshake.rs:2140:77
+     |
+2140 |         let mut client = ClientHandshake::new("ws://localhost:8080/socket", &entropy)
+     |                                                                             ^^^^^^^^ unsatisfied trait bound
+     |
+help: the trait `entropy::EntropySource` is not implemented for `det_rng::DetRng`
+    --> src/util/det_rng.rs:16:1
+     |
+  16 | pub struct DetRng {
+     | ^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `entropy::EntropySource`
+    --> src/util/entropy.rs:33:1
+     |
+  33 | impl EntropySource for OsEntropy {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `entropy::OsEntropy`
+...
+ 112 | impl EntropySource for DetEntropy {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `entropy::DetEntropy`
+...
+ 155 | impl EntropySource for BrowserEntropy {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `entropy::BrowserEntropy`
+     = note: required for the cast from `&det_rng::DetRng` to `&(dyn entropy::EntropySource + 'static)`
+
+error[E0308]: mismatched types
+    --> src/observability/diagnostics.rs:3126:48
+     |
+3126 |         running_task_record.last_polled_step = Some(Time::from_millis(100));
+     |         ------------------------------------   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `u64`, found `Option<Time>`
+     |         |
+     |         expected due to the type of this binding
+     |
+     = note: expected type `u64`
+                found enum `std::option::Option<types::id::Time>`
+
+error[E0599]: no method named `next_u32` found for type `u64` in the current scope
+    --> src/observability/obligation_tracker.rs:1185:36
+     |
+1185 |             let kind = if entropy1.next_u32() % 2 == 0 {
+     |                                    ^^^^^^^^ method not found in `u64`
+
+error[E0599]: no function or associated item named `with_seed` found for struct `entropy::DetEntropy` in the current scope
+    --> src/observability/obligation_tracker.rs:1207:36
+     |
+1207 |         let entropy2 = DetEntropy::with_seed(12345); // Same seed
+     |                                    ^^^^^^^^^ function or associated item not found in `entropy::DetEntropy`
+     |
+    ::: src/util/entropy.rs:60:1
+     |
+  60 | pub struct DetEntropy {
+     | --------------------- function or associated item `with_seed` not found for this struct
+     |
+note: if you're trying to build a new `entropy::DetEntropy`, consider using `entropy::DetEntropy::new` which returns `entropy::DetEntropy`
+    --> src/util/entropy.rs:75:5
+     |
+  75 |     pub fn new(seed: u64) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is an associated function `mix_seed` with a similar name
+     |
+1207 -         let entropy2 = DetEntropy::with_seed(12345); // Same seed
+1207 +         let entropy2 = DetEntropy::mix_seed(12345); // Same seed
+     |
+
+error[E0599]: no method named `clone` found for struct `runtime::state::RuntimeState` in the current scope
+    --> src/observability/obligation_tracker.rs:1318:61
+     |
+1318 |         let tracker = ObligationTracker::new(Arc::new(state.clone()), None);
+     |                                                             ^^^^^ method not found in `runtime::state::RuntimeState`
+     |
+    ::: src/runtime/state.rs:326:1
+     |
+ 326 | pub struct RuntimeState {
+     | ----------------------- method `clone` not found for this struct
+     |
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following trait defines an item `clone`, perhaps you need to implement it:
+             candidate #1: `Clone`
+
+error[E0599]: no function or associated item named `with_seed` found for struct `entropy::DetEntropy` in the current scope
+    --> src/observability/obligation_tracker.rs:1319:35
+     |
+1319 |         let entropy = DetEntropy::with_seed(999);
+     |                                   ^^^^^^^^^ function or associated item not found in `entropy::DetEntropy`
+     |
+    ::: src/util/entropy.rs:60:1
+     |
+  60 | pub struct DetEntropy {
+     | --------------------- function or associated item `with_seed` not found for this struct
+     |
+note: if you're trying to build a new `entropy::DetEntropy`, consider using `entropy::DetEntropy::new` which returns `entropy::DetEntropy`
+    --> src/util/entropy.rs:75:5
+     |
+  75 |     pub fn new(seed: u64) -> Self {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is an associated function `mix_seed` with a similar name
+     |
+1319 -         let entropy = DetEntropy::with_seed(999);
+1319 +         let entropy = DetEntropy::mix_seed(999);
+     |
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+    --> src/observability/obligation_tracker.rs:1340:22
+     |
+1340 |                     .commit_obligation(obligation_id, Time::from_secs(i as u64))
+     |                      ^^^^^^^^^^^^^^^^^                ------------------------- unexpected argument #2 of type `types::id::Time`
+     |
+note: method defined here
+    --> src/runtime/state.rs:1576:12
+     |
+1576 |     pub fn commit_obligation(&mut self, obligation: ObligationId) -> Result<u64, Error> {
+     |            ^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+1340 -                     .commit_obligation(obligation_id, Time::from_secs(i as u64))
+1340 +                     .commit_obligation(obligation_id)
+     |
+
+error[E0277]: the trait bound `ThreadId: std::cmp::Ord` is not satisfied
+    --> src/runtime/blocking_pool.rs:1906:21
+     |
+1906 |                 ids.sort();
+     |                     ^^^^ the trait `std::cmp::Ord` is not implemented for `ThreadId`
+     |
+note: required by a bound in `std::slice::<impl [T]>::sort`
+    --> /home/ubuntu/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:133:12
+     |
+ 131 |     pub fn sort(&mut self)
+     |            ---- required by a bound in this associated function
+ 132 |     where
+ 133 |         T: Ord,
+     |            ^^^ required by this bound in `std::slice::<impl [T]>::sort`
+
+error[E0308]: mismatched types
+    --> src/runtime/blocking_pool.rs:1989:40
+     |
+1989 |                     finish = cvar.wait(finish);
+     |                                   ---- ^^^^^^ expected `&mut MutexGuard<'_, RawMutex, _>`, found `MutexGuard<'_, RawMutex, bool>`
+     |                                   |
+     |                                   arguments to this method are incorrect
+     |
+     = note: expected mutable reference `&mut parking_lot::lock_api::MutexGuard<'_, _, _>`
+                           found struct `parking_lot::lock_api::MutexGuard<'_, _, bool>`
+note: method defined here
+    --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot-0.12.5/src/condvar.rs:255:12
+     |
+ 255 |     pub fn wait<T: ?Sized>(&self, mutex_guard: &mut MutexGuard<'_, T>) {
+     |            ^^^^
+help: consider mutably borrowing here
+     |
+1989 |                     finish = cvar.wait(&mut finish);
+     |                                        ++++
+
+error[E0308]: mismatched types
+    --> src/runtime/blocking_pool.rs:1989:30
+     |
+1987 |                 let mut finish = lock.lock();
+     |                                  ----------- expected due to this value
+1988 |                 while !*finish {
+1989 |                     finish = cvar.wait(finish);
+     |                              ^^^^^^^^^^^^^^^^^ expected `MutexGuard<'_, RawMutex, bool>`, found `()`
+     |
+     = note: expected struct `parking_lot::lock_api::MutexGuard<'_, parking_lot::RawMutex, bool>`
+             found unit type `()`
+
+error[E0308]: mismatched types
+    --> src/runtime/blocking_pool.rs:2343:17
+     |
+2343 |                 "handle result"
+     |                 ^^^^^^^^^^^^^^^ expected `()`, found `&str`
+
+error[E0308]: mismatched types
+   --> src/runtime/scheduler/edf_priority_metamorphic.rs:346:43
+    |
+346 |         let num_resources = rng.gen_range(1..=(config.num_resources.min(3) as u64));
+    |                                 --------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Range<u64>`, found `RangeInclusive<u64>`
+    |                                 |
+    |                                 arguments to this method are incorrect
+    |
+    = note: expected struct `std::ops::Range<u64>`
+               found struct `std::ops::RangeInclusive<u64>`
+note: method defined here
+   --> src/runtime/scheduler/edf_priority_metamorphic.rs:35:8
+    |
+ 35 |     fn gen_range(&mut self, range: std::ops::Range<u64>) -> u64;
+    |        ^^^^^^^^^            -----
+
+error[E0624]: associated function `new` is private
+   --> src/runtime/scheduler/edf_priority_metamorphic.rs:425:36
+    |
+425 |         inversion_id: InversionId::new(0),
+    |                                    ^^^ private associated function
+    |
+   ::: src/runtime/scheduler/priority_inversion_oracle.rs:120:5
+    |
+120 |     fn new(id: u64) -> Self {
+    |     ----------------------- private associated function defined here
+
+error[E0599]: no variant or associated item named `Low` found for enum `InversionSeverity` in the current scope
+   --> src/runtime/scheduler/edf_priority_metamorphic.rs:428:42
+    |
+428 |             severity: InversionSeverity::Low,
+    |                                          ^^^ variant or associated item not found in `InversionSeverity`
+    |
+   ::: src/runtime/scheduler/priority_inversion_oracle.rs:104:1
+    |
+104 | pub enum InversionSeverity {
+    | -------------------------- variant or associated item `Low` not found for this enum
+
+error[E0560]: struct `InversionImpact` has no field named `duration`
+   --> src/runtime/scheduler/edf_priority_metamorphic.rs:429:13
+    |
+429 |             duration: Duration::from_micros(100),
+    |             ^^^^^^^^ `InversionImpact` does not have this field
+    |
+    = note: available fields are: `delay_us`, `affected_tasks`, `throughput_impact`, `fairness_impact`
+
+error[E0560]: struct `InversionImpact` has no field named `tasks_affected`
+   --> src/runtime/scheduler/edf_priority_metamorphic.rs:430:13
+    |
+430 |             tasks_affected: 1,
+    |             ^^^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+430 -             tasks_affected: 1,
+430 +             affected_tasks: 1,
+    |
+
+error[E0277]: the trait bound `lyapunov::StateSnapshot: Default` is not satisfied
+    --> src/runtime/scheduler/three_lane.rs:8614:104
+     |
+8614 |                     let state_snapshot = StateSnapshot { ready_queue_depth: ready_queue_size as u32, ..Default::default() };
+     |                                                                                                        ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `lyapunov::StateSnapshot`
+     |
+help: consider annotating `lyapunov::StateSnapshot` with `#[derive(Default)]`
+    -->  src/obligation/lyapunov.rs:186:1
+     |
+ 186 + #[derive(Default)]
+ 187 | pub struct StateSnapshot {
+     |
+
+error[E0599]: no method named `as_ref` found for struct `three_lane::AdaptiveCancelStreakPolicy` in the current scope
+    --> src/runtime/scheduler/three_lane.rs:8688:44
+     |
+ 270 | struct AdaptiveCancelStreakPolicy {
+     | --------------------------------- method `as_ref` not found for this struct
+...
+8688 |                 weight_history.push(policy.as_ref().unwrap().weights);
+     |                                            ^^^^^^ method not found in `three_lane::AdaptiveCancelStreakPolicy`
+     |
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following trait defines an item `as_ref`, perhaps you need to implement it:
+             candidate #1: `AsRef`
+help: one of the expressions' fields has a method of the same name
+     |
+8688 |                 weight_history.push(policy.epoch_start.as_ref().unwrap().weights);
+     |                                            ++++++++++++
+
+error[E0308]: mismatched types
+    --> src/runtime/scheduler/three_lane.rs:8864:52
+     |
+8864 |                 let task_id = TaskId::new_for_test(task_base + worker_idx * 100, i);
+     |                               -------------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `u32`, found `usize`
+     |                               |
+     |                               arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> src/types/id.rs:184:18
+     |
+ 184 |     pub const fn new_for_test(index: u32, generation: u32) -> Self {
+     |                  ^^^^^^^^^^^^ ----------
+help: you can convert a `usize` to a `u32` and panic if the converted value doesn't fit
+     |
+8864 |                 let task_id = TaskId::new_for_test((task_base + worker_idx * 100).try_into().unwrap(), i);
+     |                                                    +                            +++++++++++++++++++++
+
+error[E0277]: `types::id::RegionId` is not a future
+    --> src/runtime/state.rs:8452:74
+     |
+8452 |                         let _close_task = futures_lite::future::block_on(region_id, Budget::default(), move |_cx| async move {
+     |                                           ------------------------------ ^^^^^^^^^ `types::id::RegionId` is not a future
+     |                                           |
+     |                                           required by a bound introduced by this call
+     |
+help: the trait `futures_lite::Future` is not implemented for `types::id::RegionId`
+    --> src/types/id.rs:20:1
+     |
+  20 | pub struct RegionId(pub(crate) ArenaIndex);
+     | ^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `futures_lite::future::block_on`
+    --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-2.6.1/src/future.rs:53:33
+     |
+  53 | pub fn block_on<T>(future: impl Future<Output = T>) -> T {
+     |                                 ^^^^^^^^^^^^^^^^^^ required by this bound in `block_on`
+
+error[E0061]: this function takes 1 argument but 3 arguments were supplied
+    --> src/runtime/state.rs:8452:43
+     |
+8452 |                           let _close_task = futures_lite::future::block_on(region_id, Budget::default(), move |_cx| async move {
+     |  ___________________________________________^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^____________-----------------__-
+     | |                                                                                     |
+     | |                                                                                     unexpected argument #2 of type `budget::Budget`
+8453 | |                             // Simulate close operation
+8454 | |                             Box::pin(async {
+...    |
+8457 | |                             }).await
+8458 | |                         });
+     | |_________________________- unexpected argument #3 of type `{closure@src/runtime/state.rs:8452:104: 8452:114}`
+     |
+note: function defined here
+    --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-2.6.1/src/future.rs:53:8
+     |
+  53 | pub fn block_on<T>(future: impl Future<Output = T>) -> T {
+     |        ^^^^^^^^
+help: remove the extra arguments
+     |
+8452 -                         let _close_task = futures_lite::future::block_on(region_id, Budget::default(), move |_cx| async move {
+8453 -                             // Simulate close operation
+8454 -                             Box::pin(async {
+8455 -                                 // Close logic would go here in real concurrent scenario
+8456 -                                 Ok(())
+8457 -                             }).await
+8458 -                         });
+8452 +                         let _close_task = futures_lite::future::block_on(region_id);
+     |
+
+error[E0277]: `types::id::RegionId` is not a future
+    --> src/runtime/state.rs:8464:74
+     |
+8464 |                         let task_result = futures_lite::future::block_on(region_id, Budget::default(), move |_cx| async move {
+     |                                           ------------------------------ ^^^^^^^^^ `types::id::RegionId` is not a future
+     |                                           |
+     |                                           required by a bound introduced by this call
+     |
+help: the trait `futures_lite::Future` is not implemented for `types::id::RegionId`
+    --> src/types/id.rs:20:1
+     |
+  20 | pub struct RegionId(pub(crate) ArenaIndex);
+     | ^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `futures_lite::future::block_on`
+    --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-2.6.1/src/future.rs:53:33
+     |
+  53 | pub fn block_on<T>(future: impl Future<Output = T>) -> T {
+     |                                 ^^^^^^^^^^^^^^^^^^ required by this bound in `block_on`
+
+error[E0061]: this function takes 1 argument but 3 arguments were supplied
+    --> src/runtime/state.rs:8464:43
+     |
+8464 |                           let task_result = futures_lite::future::block_on(region_id, Budget::default(), move |_cx| async move {
+     |  ___________________________________________^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^____________-----------------__-
+     | |                                                                                     |
+     | |                                                                                     unexpected argument #2 of type `budget::Budget`
+8465 | |                             task_spawned.fetch_add(1, Ordering::Relaxed);
+...    |
+8471 | |                             }).await
+8472 | |                         });
+     | |_________________________- unexpected argument #3 of type `{closure@src/runtime/state.rs:8464:104: 8464:114}`
+     |
+note: function defined here
+    --> /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-2.6.1/src/future.rs:53:8
+     |
+  53 | pub fn block_on<T>(future: impl Future<Output = T>) -> T {
+     |        ^^^^^^^^
+help: remove the extra arguments
+     |
+8464 -                         let task_result = futures_lite::future::block_on(region_id, Budget::default(), move |_cx| async move {
+8465 -                             task_spawned.fetch_add(1, Ordering::Relaxed);
+8466 - 
+8467 -                             // Simulate some work
+8468 -                             Box::pin(async {
+8469 -                                 task_completed.fetch_add(1, Ordering::Relaxed);
+8470 -                                 Ok(())
+8471 -                             }).await
+8472 -                         });
+8464 +                         let task_result = futures_lite::future::block_on(region_id);
+     |
+
+error[E0061]: this function takes 1 argument but 0 arguments were supplied
+    --> src/runtime/state.rs:8549:65
+     |
+8549 | ...                   let _ = parent.begin_close(Some(CancelReason::user()));
+     |                                                       ^^^^^^^^^^^^^^^^^^-- argument #1 of type `&'static str` is missing
+     |
+note: associated function defined here
+    --> src/types/cancel.rs:491:12
+     |
+ 491 |     pub fn user(message: &'static str) -> Self {
+     |            ^^^^ ---------------------
+help: provide the argument
+     |
+8549 |                                 let _ = parent.begin_close(Some(CancelReason::user(/* &'static str */)));
+     |                                                                                    ++++++++++++++++++
+
+error[E0061]: this function takes 1 argument but 0 arguments were supplied
+    --> src/runtime/state.rs:8557:64
+     |
+8557 | ...                   let _ = child.begin_close(Some(CancelReason::user()));
+     |                                                      ^^^^^^^^^^^^^^^^^^-- argument #1 of type `&'static str` is missing
+     |
+note: associated function defined here
+    --> src/types/cancel.rs:491:12
+     |
+ 491 |     pub fn user(message: &'static str) -> Self {
+     |            ^^^^ ---------------------
+help: provide the argument
+     |
+8557 |                                 let _ = child.begin_close(Some(CancelReason::user(/* &'static str */)));
+     |                                                                                   ++++++++++++++++++
+
+error[E0277]: the trait bound `det_rng::DetRng: entropy::EntropySource` is not satisfied
+   --> src/runtime/task_table.rs:421:33
+    |
+421 |                 entropy_source: Arc::new(crate::util::det_rng::DetRng::new(0)),
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+    |
+help: the trait `entropy::EntropySource` is not implemented for `det_rng::DetRng`
+   --> src/util/det_rng.rs:16:1
+    |
+ 16 | pub struct DetRng {
+    | ^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `entropy::EntropySource`
+   --> src/util/entropy.rs:33:1
+    |
+ 33 | impl EntropySource for OsEntropy {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `entropy::OsEntropy`
+...
+112 | impl EntropySource for DetEntropy {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `entropy::DetEntropy`
+...
+155 | impl EntropySource for BrowserEntropy {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `entropy::BrowserEntropy`
+    = note: required for the cast from `std::sync::Arc<det_rng::DetRng>` to `std::sync::Arc<(dyn entropy::EntropySource + 'static)>`
+
+warning: unused variable: `previous_azuma_bound`
+    --> src/cancel/progress_certificate.rs:2667:21
+     |
+2667 |                 let previous_azuma_bound = verdict.azuma_bound;
+     |                     ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_previous_azuma_bound`
+     |
+     = note: `-W unused-variables` implied by `-W unused`
+     = help: to override `-W unused` add `#[allow(unused_variables)]`
+
+warning: unused variable: `parent2`
+    --> src/cancel/symbol_cancel.rs:2015:13
+     |
+2015 |         let parent2 = SymbolCancelToken::new(ObjectId::new_for_test(10), &mut rng2);
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_parent2`
+
+warning: unused variable: `child2c_id`
+    --> src/cancel/symbol_cancel.rs:2019:13
+     |
+2019 |         let child2c_id = rng2.next_u64(); // child1c token_id
+     |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_child2c_id`
+
+warning: variable does not need to be mutable
+    --> src/channel/session.rs:1001:18
+     |
+1001 |         let (tx, mut rx) = tracked_channel::<i32>(10);
+     |                  ----^^
+     |                  |
+     |                  help: remove this `mut`
+     |
+     = note: `-W unused-mut` implied by `-W unused`
+     = help: to override `-W unused` add `#[allow(unused_mut)]`
+
+warning: unused variable: `rx`
+    --> src/channel/session.rs:1001:18
+     |
+1001 |         let (tx, mut rx) = tracked_channel::<i32>(10);
+     |                  ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rx`
+
+warning: unused variable: `cx`
+    --> src/channel/watch.rs:1859:13
+     |
+1859 |         let cx = test_cx();
+     |             ^^ help: if this is intentional, prefix it with an underscore: `_cx`
+
+warning: unused variable: `stable_p1`
+    --> src/combinator/bulkhead.rs:1857:13
+     |
+1857 |         let stable_p1 = bh_stable.try_acquire(1).unwrap();
+     |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_stable_p1`
+
+warning: variable does not need to be mutable
+   --> src/combinator/bulkhead_metamorphic.rs:296:9
+    |
+296 |     let mut rng = DetRng::new(seed);
+    |         ----^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `rng`
+   --> src/combinator/bulkhead_metamorphic.rs:296:9
+    |
+296 |     let mut rng = DetRng::new(seed);
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rng`
+
+warning: unused variable: `seed`
+   --> src/combinator/bulkhead_metamorphic.rs:447:68
+    |
+447 | fn mr3_cancel_propagation(worker_count: u32, in_flight_count: u32, seed: u64) -> bool {
+    |                                                                    ^^^^ help: if this is intentional, prefix it with an underscore: `_seed`
+
+warning: unused variable: `work_id`
+   --> src/combinator/bulkhead_metamorphic.rs:466:9
+    |
+466 |     for work_id in 0..worker_count {
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_work_id`
+
+warning: unused variable: `work_id`
+   --> src/combinator/bulkhead_metamorphic.rs:475:9
+    |
+475 |     for work_id in worker_count..worker_count + in_flight_count {
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_work_id`
+
+warning: unused variable: `initial_active`
+   --> src/combinator/bulkhead_metamorphic.rs:488:9
+    |
+488 |     let initial_active = initial_metrics.active_permits;
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_initial_active`
+
+warning: unused variable: `processed_after_cancel`
+   --> src/combinator/bulkhead_metamorphic.rs:501:9
+    |
+501 |     let processed_after_cancel = bulkhead.process_queue(now);
+    |         ^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_processed_after_cancel`
+
+warning: unused variable: `seed`
+   --> src/combinator/bulkhead_metamorphic.rs:532:5
+    |
+532 |     seed: u64,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_seed`
+
+warning: variable does not need to be mutable
+   --> src/combinator/bulkhead_metamorphic.rs:636:9
+    |
+636 |     let mut rng = DetRng::new(seed);
+    |         ----^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `global_state`
+   --> src/combinator/bulkhead_metamorphic.rs:635:9
+    |
+635 |     let global_state = GlobalBulkheadState::new();
+    |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_global_state`
+
+warning: unused variable: `rng`
+   --> src/combinator/bulkhead_metamorphic.rs:636:9
+    |
+636 |     let mut rng = DetRng::new(seed);
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rng`
+
+warning: unused variable: `global_state`
+   --> src/combinator/bulkhead_metamorphic.rs:784:13
+    |
+784 |         let global_state = GlobalBulkheadState::new();
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_global_state`
+
+warning: variable does not need to be mutable
+   --> src/combinator/race_metamorphic.rs:307:9
+    |
+307 |     let mut rng = DetRng::new(seed);
+    |         ----^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `rng`
+   --> src/combinator/race_metamorphic.rs:307:9
+    |
+307 |     let mut rng = DetRng::new(seed);
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rng`
+
+warning: variable `completed_futures` is assigned to, but never used
+   --> src/combinator/race_metamorphic.rs:325:9
+    |
+325 |     let mut completed_futures = 0;
+    |         ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_completed_futures` instead
+
+warning: value assigned to `completed_futures` is never read
+   --> src/combinator/race_metamorphic.rs:339:25
+    |
+339 |                         completed_futures += 1;
+    |                         ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `-W unused-assignments` implied by `-W unused`
+    = help: to override `-W unused` add `#[allow(unused_assignments)]`
+
+warning: value assigned to `winner_value` is never read
+   --> src/combinator/race_metamorphic.rs:424:32
+    |
+424 |         let mut winner_value = None;
+    |                                ^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `seed`
+   --> src/combinator/race_metamorphic.rs:397:5
+    |
+397 |     seed: u64,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_seed`
+
+warning: unused variable: `panics_occurred`
+   --> src/combinator/race_metamorphic.rs:470:9
+    |
+470 |     let panics_occurred = panic_count_after > panic_count_before;
+    |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_panics_occurred`
+
+warning: unused variable: `seed`
+   --> src/combinator/race_metamorphic.rs:489:77
+    |
+489 | fn mr3_branch_outcome_consistency(branch_count: usize, winner_index: usize, seed: u64) -> bool {
+    |                                                                             ^^^^ help: if this is intentional, prefix it with an underscore: `_seed`
+
+warning: unused variable: `seed`
+   --> src/combinator/race_metamorphic.rs:563:5
+    |
+563 |     seed: u64,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_seed`
+
+warning: unused variable: `reason`
+   --> src/combinator/timeout_metamorphic.rs:186:17
+    |
+186 |             let reason = this
+    |                 ^^^^^^ help: if this is intentional, prefix it with an underscore: `_reason`
+
+warning: unused variable: `polls`
+   --> src/combinator/timeout_metamorphic.rs:195:13
+    |
+195 |         let polls = this.polls_completed.fetch_add(1, Ordering::SeqCst) + 1;
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_polls`
+
+warning: unused variable: `lab_runtime`
+   --> src/combinator/timeout_metamorphic.rs:281:9
+    |
+281 |     let lab_runtime = LabRuntime::new(lab_config);
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_lab_runtime`
+
+warning: unused variable: `has_timer`
+    --> src/cx/scope.rs:2790:66
+     |
+2790 |             std::task::Poll::Ready(Ok((same_registry, node_name, has_timer))) => {
+     |                                                                  ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_has_timer`
+
+warning: unused variable: `task_seed`
+    --> src/lab/replay.rs:2327:21
+     |
+2327 |                 let task_seed = rng.next_u64();
+     |                     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_task_seed`
+
+warning: unused variable: `run_idx`
+    --> src/lab/replay.rs:2445:13
+     |
+2445 |         for run_idx in 0..5 {
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_run_idx`
+
+warning: unused variable: `different_trace`
+    --> src/lab/replay.rs:2808:13
+     |
+2808 |         let different_trace = different_seed_runtime.trace().snapshot();
+     |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_different_trace`
+
+warning: unused variable: `max_width`
+    --> src/net/quic_core/mod.rs:1429:40
+     |
+1429 |         for (packet_number, min_width, max_width) in test_cases {
+     |                                        ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_max_width`
+
+warning: unused variable: `client_fd`
+    --> src/net/tcp/stream.rs:1651:13
+     |
+1651 |         let client_fd = client.as_raw_fd();
+     |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_client_fd`
+
+warning: unused variable: `generated_key`
+   --> src/net/websocket/masking_conformance_tests.rs:362:13
+    |
+362 |         let generated_key = entropy.next_key();
+    |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_generated_key`
+
+warning: variable does not need to be mutable
+    --> src/obligation/dialectica.rs:1608:13
+     |
+1608 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `rng`
+    --> src/obligation/dialectica.rs:1608:13
+     |
+1608 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rng`
+
+warning: variable does not need to be mutable
+    --> src/obligation/dialectica.rs:1700:13
+     |
+1700 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `rng`
+    --> src/obligation/dialectica.rs:1700:13
+     |
+1700 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rng`
+
+warning: variable does not need to be mutable
+    --> src/obligation/dialectica.rs:1849:17
+     |
+1849 |             let mut reordered_trace = base_trace.clone();
+     |                 ----^^^^^^^^^^^^^^^
+     |                 |
+     |                 help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/obligation/dialectica.rs:2140:13
+     |
+2140 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `rng`
+    --> src/obligation/dialectica.rs:2140:13
+     |
+2140 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rng`
+
+warning: unused variable: `full_result`
+    --> src/obligation/saga.rs:1528:13
+     |
+1528 |         let full_result = executor.execute(&exec_plan, &mut full_exec);
+     |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_full_result`
+
+warning: unused variable: `ob1`
+    --> src/observability/diagnostics.rs:2903:13
+     |
+2903 |         let ob1 = insert_obligation(
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_ob1`
+
+warning: unused variable: `ob3`
+    --> src/observability/diagnostics.rs:2910:13
+     |
+2910 |         let ob3 = insert_obligation(
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_ob3`
+
+warning: unused variable: `ob2`
+    --> src/observability/diagnostics.rs:2917:13
+     |
+2917 |         let ob2 = insert_obligation(
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_ob2`
+
+warning: unused variable: `ob1`
+    --> src/observability/diagnostics.rs:3687:13
+     |
+3687 |         let ob1 = insert_obligation(
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_ob1`
+
+warning: unused variable: `ob2`
+    --> src/observability/diagnostics.rs:3694:13
+     |
+3694 |         let ob2 = insert_obligation(
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_ob2`
+
+warning: unused variable: `i`
+    --> src/runtime/blocking_pool.rs:2192:17
+     |
+2192 |             for i in 0..3 {
+     |                 ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `test_name`
+   --> src/runtime/scheduler/edf_priority_metamorphic.rs:277:35
+    |
+277 |     pub fn record_pass(&mut self, test_name: &str) {
+    |                                   ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_test_name`
+
+warning: unused variable: `config`
+   --> src/runtime/scheduler/edf_priority_metamorphic.rs:371:51
+    |
+371 | fn simulate_edf_scheduling(tasks: &[EdfTestTask], config: &EdfMetamorphicConfig) -> EdfTestState {
+    |                                                   ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: unused variable: `state`
+   --> src/runtime/scheduler/edf_priority_metamorphic.rs:403:5
+    |
+403 |     state: &EdfTestState,
+    |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+
+warning: variable does not need to be mutable
+    --> src/runtime/scheduler/three_lane.rs:4649:13
+     |
+4649 |         let mut workers = scheduler.take_workers();
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/runtime/scheduler/three_lane.rs:4918:13
+     |
+4918 |         let mut workers = scheduler.take_workers();
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/runtime/scheduler/worker.rs:1764:17
+     |
+1764 |             let mut stealers: Vec<_> = queues
+     |                 ----^^^^^^^^
+     |                 |
+     |                 help: remove this `mut`
+
+warning: unused variable: `first_close_result`
+    --> src/runtime/state.rs:8297:21
+     |
+8297 |                 let first_close_result = {
+     |                     ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_first_close_result`
+
+warning: unused variable: `i`
+   --> src/runtime/task_table.rs:749:29
+    |
+749 |                         for i in 0..25 {
+    |                             ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `i`
+    --> src/service/discover.rs:1648:19
+     |
+1648 |             .map(|i| {
+     |                   ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: variable does not need to be mutable
+    --> src/supervision.rs:8668:13
+     |
+8668 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `rng`
+    --> src/supervision.rs:8668:13
+     |
+8668 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rng`
+
+warning: unused variable: `seq_idx`
+    --> src/supervision.rs:8721:18
+     |
+8721 |             for (seq_idx, sequence) in failure_sequences.iter().enumerate() {
+     |                  ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_seq_idx`
+
+warning: variable does not need to be mutable
+    --> src/supervision.rs:8764:13
+     |
+8764 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `rng`
+    --> src/supervision.rs:8764:13
+     |
+8764 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rng`
+
+warning: unused variable: `config`
+    --> src/supervision.rs:8769:13
+     |
+8769 |         let config = SupervisionMetamorphicConfig::default();
+     |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: variable does not need to be mutable
+    --> src/supervision.rs:8843:13
+     |
+8843 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `rng`
+    --> src/supervision.rs:8843:13
+     |
+8843 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rng`
+
+warning: unused variable: `config`
+    --> src/supervision.rs:8848:13
+     |
+8848 |         let config = SupervisionMetamorphicConfig {
+     |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: variable does not need to be mutable
+    --> src/supervision.rs:8944:13
+     |
+8944 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `rng`
+    --> src/supervision.rs:8944:13
+     |
+8944 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rng`
+
+warning: unused variable: `escalation_policy`
+    --> src/supervision.rs:8955:14
+     |
+8955 |         for &escalation_policy in &escalation_policies {
+     |              ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_escalation_policy`
+
+warning: variable does not need to be mutable
+    --> src/supervision.rs:9098:13
+     |
+9098 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `rng`
+    --> src/supervision.rs:9098:13
+     |
+9098 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rng`
+
+warning: unused variable: `lab`
+   --> src/sync/once_cell_metamorphic.rs:223:9
+    |
+223 |     let lab = LabRuntime::new(lab_config);
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_lab`
+
+warning: unused variable: `i`
+   --> src/sync/once_cell_metamorphic.rs:298:26
+    |
+298 |                     for (i, &value) in values.iter().enumerate() {
+    |                          ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `global_state`
+   --> src/sync/once_cell_metamorphic.rs:479:38
+    |
+479 |         run_once_cell_test(&config, |global_state| async move {
+    |                                      ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_global_state`
+
+warning: unused variable: `global_state`
+   --> src/sync/once_cell_metamorphic.rs:524:38
+    |
+524 |         run_once_cell_test(&config, |global_state| async move {
+    |                                      ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_global_state`
+
+warning: unused variable: `runtime`
+    --> src/sync/pool.rs:4887:17
+     |
+4887 |             let runtime = crate::lab::runtime::LabRuntime::new(crate::lab::config::LabConfig::default());
+     |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_runtime`
+
+warning: unused variable: `runtime`
+    --> src/sync/pool.rs:4803:17
+     |
+4803 |             let runtime = crate::lab::runtime::LabRuntime::new(crate::lab::config::LabConfig::default());
+     |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_runtime`
+
+warning: unused variable: `lab`
+   --> src/sync/mutex_metamorphic.rs:174:13
+    |
+174 |         let lab = LabRuntime::new(LabConfig::default());
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_lab`
+
+warning: unused variable: `lab2`
+   --> src/sync/mutex_metamorphic.rs:230:13
+    |
+230 |         let lab2 = LabRuntime::new(LabConfig::default());
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_lab2`
+
+warning: unused variable: `lab`
+   --> src/sync/mutex_metamorphic.rs:291:17
+    |
+291 |             let lab = LabRuntime::new(LabConfig::default());
+    |                 ^^^ help: if this is intentional, prefix it with an underscore: `_lab`
+
+warning: unused variable: `expected_state`
+   --> src/sync/mutex_metamorphic.rs:265:13
+    |
+265 |         let expected_state = {
+    |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected_state`
+
+warning: unused variable: `lab`
+   --> src/sync/mutex_metamorphic.rs:267:17
+    |
+267 |             let lab = LabRuntime::new(LabConfig::default());
+    |                 ^^^ help: if this is intentional, prefix it with an underscore: `_lab`
+
+error[E0597]: `mutex_clone` does not live long enough
+   --> src/sync/mutex_metamorphic.rs:378:21
+    |
+362 |             let mutex_clone = Arc::clone(&mutex);
+    |                 ----------- binding `mutex_clone` declared here
+...
+377 |                 let result = futures_lite::future::block_on(async move {
+    |                                                                      - return type of async block is std::result::Result<mutex::MutexGuard<'1, mutex_metamorphic::TestData>, mutex::LockError>
+378 |                     mutex_clone.lock(&cx).await
+    |                     ^^^^^^^^^^^----------
+    |                     |
+    |                     borrowed value does not live long enough
+    |                     argument requires that `mutex_clone` is borrowed for `'1`
+379 |                 });
+    |                 - `mutex_clone` dropped here while still borrowed
+
+warning: unused variable: `lab`
+   --> src/sync/mutex_metamorphic.rs:353:13
+    |
+353 |         let lab = LabRuntime::new(LabConfig::default());
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_lab`
+
+warning: unused variable: `lab`
+   --> src/sync/mutex_metamorphic.rs:485:17
+    |
+485 |             let lab = LabRuntime::new(LabConfig::default());
+    |                 ^^^ help: if this is intentional, prefix it with an underscore: `_lab`
+
+warning: unused variable: `lab`
+   --> src/sync/mutex_metamorphic.rs:499:17
+    |
+499 |             let lab = LabRuntime::new(LabConfig::default());
+    |                 ^^^ help: if this is intentional, prefix it with an underscore: `_lab`
+
+warning: unused variable: `lab`
+   --> src/sync/mutex_metamorphic.rs:548:17
+    |
+548 |             let lab = LabRuntime::new(LabConfig::default());
+    |                 ^^^ help: if this is intentional, prefix it with an underscore: `_lab`
+
+warning: unused variable: `timer_id`
+    --> src/time/driver.rs:1957:13
+     |
+1957 | ...   let timer_id = handle.register(handle.now().saturating_add_nanos(short_duration.as_nanos().min(u128::from(u64::MAX)) as u64)...
+     |           ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_timer_id`
+
+warning: unused variable: `timer_id`
+    --> src/time/driver.rs:2197:13
+     |
+2197 |         let timer_id = handle.register(handle.now().saturating_add_nanos(
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_timer_id`
+
+warning: unused variable: `wakers1`
+    --> src/time/wheel.rs:2631:13
+     |
+2631 |         let wakers1 = wheel.collect_expired(test_time);
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_wakers1`
+
+warning: variable does not need to be mutable
+    --> src/process.rs:2876:17
+     |
+2876 |             let mut child = Command::new("sh")
+     |                 ----^^^^^
+     |                 |
+     |                 help: remove this `mut`
+
+Some errors have detailed explanations: E0061, E0109, E0277, E0308, E0317, E0559, E0560, E0597, E0599...
+For more information about an error, try `rustc --explain E0061`.
+warning: `asupersync` (lib test) generated 138 warnings
+error: could not compile `asupersync` (lib test) due to 113 previous errors; 138 warnings emitted
+  [2m2026-04-18T23:45:06.654621Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=101 in 182790ms[0m
+    [2;3mat[0m rch/src/hook.rs:4996 [2;3mon[0m ThreadId(1)
+
+[W] Worker: vmi1149989 | Job: j-29800209659725418
+[T] Total: 204.5s (sync 21.8s, build 182.8s, artifacts --)
+^ Sync: 343.0 KB in 21.8s (15.8 KB/s)
+[C] Compile: 182.8s
+Artifacts: skipped
+[T] Cache: MISS
+[RCH] remote vmi1149989 failed (exit 101)

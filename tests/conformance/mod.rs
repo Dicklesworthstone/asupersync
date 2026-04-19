@@ -15,8 +15,8 @@ pub mod hpack_table_size;
 // pub mod hpack_metamorphic;
 // pub mod hpack_rfc7541;
 pub mod cancel_dag_determinism;
-pub mod kafka_record_batch_v2;
 pub mod kafka_offsets;
+pub mod kafka_record_batch_v2;
 pub mod obligation_lifecycle_metamorphic;
 pub mod quic_retry_rfc9000;
 pub mod race_loser_drain_metamorphic;
@@ -29,13 +29,13 @@ pub mod postgres_logical_replication;
 // TODO: SQLite conformance tests - module has unresolved dependencies
 // pub mod sqlite_prepared_statements;
 // pub mod websocket_rfc6455;
-pub mod grpc_trailer_forwarding_rfc9113;
 pub mod broadcast;
-pub mod tcp_accept;
+pub mod grpc_trailer_forwarding_rfc9113;
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub mod kqueue_bsd_events;
 #[cfg(feature = "quic")]
 pub mod quic_connection_migration_rfc9000;
+pub mod tcp_accept;
 pub mod websocket_extension_negotiation_rfc6455;
 
 // Re-export main conformance test functionality
@@ -184,7 +184,7 @@ pub enum TestCategory {
     Http2FrameOrdering,
     ErrorResponseHandling,
     // MySQL categories
-    PacketFormat,
+    MysqlPacketFormat,
     AuthAlgorithm,
     StateMachine,
     PluginNegotiation,
@@ -202,7 +202,7 @@ pub enum TestCategory {
     ChangeDataCapture,
     LogicalSnapshots,
     // QUIC categories
-    PacketFormat,
+    QuicPacketFormat,
     ConnectionIdHandling,
     TokenProcessing,
     IntegrityValidation,
@@ -228,7 +228,7 @@ pub enum TestCategory {
     DagSerialization,
     CancellationOrdering,
     FinalizerLogging,
-    BudgetExhaustion,
+    DagBudgetExhaustion,
     DependencyTopology,
     // Obligation lifecycle metamorphic categories
     ObligationLifecycle,
@@ -245,7 +245,7 @@ pub enum TestCategory {
     // Race loser-drain metamorphic categories
     RaceCommutativity,
     LoserCancellation,
-    BudgetExhaustion,
+    RaceBudgetExhaustion,
     FinalizerInvocation,
     RegionQuiescence,
 }
@@ -277,9 +277,15 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
             category: match r.category {
                 aggregator_flush::TestCategory::FlushSynchronous => TestCategory::FlushSynchronous,
                 aggregator_flush::TestCategory::DrainThenClose => TestCategory::DrainThenClose,
-                aggregator_flush::TestCategory::CancelPreservation => TestCategory::CancelPreservation,
-                aggregator_flush::TestCategory::BackpressurePropagation => TestCategory::BackpressurePropagation,
-                aggregator_flush::TestCategory::ConcurrentWriterSafety => TestCategory::ConcurrentWriterSafety,
+                aggregator_flush::TestCategory::CancelPreservation => {
+                    TestCategory::CancelPreservation
+                }
+                aggregator_flush::TestCategory::BackpressurePropagation => {
+                    TestCategory::BackpressurePropagation
+                }
+                aggregator_flush::TestCategory::ConcurrentWriterSafety => {
+                    TestCategory::ConcurrentWriterSafety
+                }
             },
             requirement_level: match r.requirement_level {
                 aggregator_flush::RequirementLevel::Must => RequirementLevel::Must,
@@ -443,7 +449,7 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
             test_id: r.test_id,
             description: r.description,
             category: match r.category {
-                quic_retry_rfc9000::TestCategory::PacketFormat => TestCategory::PacketFormat,
+                quic_retry_rfc9000::TestCategory::PacketFormat => TestCategory::QuicPacketFormat,
                 quic_retry_rfc9000::TestCategory::ConnectionIdHandling => {
                     TestCategory::ConnectionIdHandling
                 }
@@ -589,7 +595,7 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                         TestCategory::FinalizerLogging
                     }
                     cancel_dag_determinism::TestCategory::BudgetExhaustion => {
-                        TestCategory::BudgetExhaustion
+                        TestCategory::DagBudgetExhaustion
                     }
                     cancel_dag_determinism::TestCategory::DependencyTopology => {
                         TestCategory::DependencyTopology
@@ -741,7 +747,7 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                         TestCategory::LoserCancellation
                     }
                     race_loser_drain_metamorphic::TestCategory::BudgetExhaustion => {
-                        TestCategory::BudgetExhaustion
+                        TestCategory::RaceBudgetExhaustion
                     }
                     race_loser_drain_metamorphic::TestCategory::FinalizerInvocation => {
                         TestCategory::FinalizerInvocation

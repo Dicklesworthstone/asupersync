@@ -452,8 +452,12 @@ fn mr4_error_propagation_preservation_channels_closed() {
     match (join_result, try_join_result) {
         (Err(JoinError::Cancelled(r1)), Err(JoinError::Cancelled(r2))) => {
             assert_eq!(r1.kind, r2.kind, "Cancel kinds must match across methods");
-            assert_eq!(r1.kind, CancelKind::Timeout, "Should preserve timeout cancel kind");
-        },
+            assert_eq!(
+                r1.kind,
+                CancelKind::Timeout,
+                "Should preserve timeout cancel kind"
+            );
+        }
         _ => panic!("Both methods should propagate Cancelled error with timeout"),
     }
 }

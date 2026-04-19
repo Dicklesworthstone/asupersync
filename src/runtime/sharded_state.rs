@@ -682,7 +682,7 @@ impl Drop for ShardGuard<'_> {
 
 #[cfg(debug_assertions)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LockShard {
+pub(crate) enum LockShard {
     Regions,
     Tasks,
     Obligations,

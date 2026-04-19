@@ -21,8 +21,8 @@ use std::net::{SocketAddr, TcpStream as StdTcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
-use std::time::{Duration, Instant};
 use std::thread;
+use std::time::{Duration, Instant};
 
 /// Test context for TCP accept conformance
 fn test_cx() -> Cx {
@@ -50,7 +50,7 @@ enum ConnectionOutcome {
 /// TCP accept operation for metamorphic testing
 #[derive(Debug, Clone)]
 enum AcceptOperation {
-    StartListening(u16), // port (0 = any)
+    StartListening(u16),  // port (0 = any)
     ConnectClient(usize), // connection index
     AcceptNext,
     ForceReset(usize), // reset connection by index
@@ -69,7 +69,7 @@ fn operation_sequence_strategy() -> impl Strategy<Value = Vec<AcceptOperation>> 
             (10usize..100).prop_map(AcceptOperation::ExhaustFds),
             Just(AcceptOperation::CheckBacklog),
         ],
-        1..20
+        1..20,
     )
 }
 
@@ -122,7 +122,12 @@ struct TestWaker {
 impl TestWaker {
     fn new() -> (Self, Arc<AtomicUsize>) {
         let wake_count = Arc::new(AtomicUsize::new(0));
-        (Self { wake_count: wake_count.clone() }, wake_count)
+        (
+            Self {
+                wake_count: wake_count.clone(),
+            },
+            wake_count,
+        )
     }
 }
 
@@ -723,8 +728,11 @@ fn test_tcp_accept_performance() {
     if accepts > 0 {
         let avg_time = duration / accepts;
         // Accept should be reasonably fast (< 1ms per accept in ideal conditions)
-        assert!(avg_time < Duration::from_millis(1),
-            "Average accept time {}μs too slow", avg_time.as_micros());
+        assert!(
+            avg_time < Duration::from_millis(1),
+            "Average accept time {}μs too slow",
+            avg_time.as_micros()
+        );
     }
 
     drop(connections);

@@ -43,8 +43,7 @@ impl TestMessage {
 
 /// Generate test messages for proptest
 fn test_message_strategy() -> impl Strategy<Value = TestMessage> {
-    (0u64..1000, "[a-z]{1,20}")
-        .prop_map(|(id, content)| TestMessage::new(id, &content))
+    (0u64..1000, "[a-z]{1,20}").prop_map(|(id, content)| TestMessage::new(id, &content))
 }
 
 /// Generate a sequence of test messages
@@ -72,7 +71,7 @@ fn operation_sequence_strategy() -> impl Strategy<Value = Vec<BroadcastOperation
             (0usize..5).prop_map(BroadcastOperation::DropReceiver),
             Just(BroadcastOperation::Close),
         ],
-        1..100
+        1..100,
     )
 }
 
@@ -112,12 +111,15 @@ impl BroadcastState {
     fn subscribe(&mut self) -> usize {
         let receiver_id = self.next_receiver_id;
         self.next_receiver_id += 1;
-        self.receiver_states.insert(receiver_id, ReceiverState {
-            subscription_point: self.sent_messages.len(),
-            next_expected_index: self.sent_messages.len(),
-            active: true,
-            lag_count: 0,
-        });
+        self.receiver_states.insert(
+            receiver_id,
+            ReceiverState {
+                subscription_point: self.sent_messages.len(),
+                next_expected_index: self.sent_messages.len(),
+                active: true,
+                lag_count: 0,
+            },
+        );
         receiver_id
     }
 

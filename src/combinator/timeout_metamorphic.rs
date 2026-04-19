@@ -177,7 +177,7 @@ impl Future for TestOperation {
         {
             let mut start_time = this.start_time.lock();
             if start_time.is_none() {
-                *start_time = Cx::current().map(|cx| cx.now()).unwrap_or(Time::ZERO);
+                *start_time = Some(Cx::current().map(|cx| cx.now()).unwrap_or(Time::ZERO));
             }
         }
 
@@ -187,7 +187,7 @@ impl Future for TestOperation {
                 .cancel_reason
                 .lock()
                 .take()
-                .unwrap_or(CancelReason::unknown());
+                .unwrap_or(CancelReason::user("unknown"));
             return Poll::Ready(Err("cancelled"));
         }
 
@@ -273,16 +273,13 @@ where
     F: FnOnce(Arc<GlobalTimeoutState>) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let lab_config = LabConfig::default()
-        .with_seed(config.seed)
-        .with_max_iterations(1000)
-        .with_chaos_injection(true);
+    let lab_config = LabConfig::new(config.seed);
 
     let global_state = GlobalTimeoutState::new();
     global_state.reset();
 
     let lab_runtime = LabRuntime::new(lab_config);
-    let _result = lab_runtime.block_on(test_fn(Arc::clone(&global_state)));
+    let _result = futures_lite::future::block_on(test_fn(Arc::clone(&global_state)));
 
     global_state.summary()
 }
@@ -570,17 +567,17 @@ mod metamorphic_no_double_cancel {
 
         let summary = run_timeout_test(&config, |global_state| async move {
             // Create multiple overlapping timeout operations
-            let operations: Vec<_> = (0..3)
+            let mut operations = (0..3)
                 .map(|i| TestOperation::new(i, 200, Arc::clone(&global_state)))
-                .collect();
+                .into_iter();
 
             if let Some(cx) = Cx::current() {
                 let now = cx.now();
 
                 // Create multiple timeout futures for the same operations
-                let timeout1 = timeout(now, Duration::from_millis(100), operations[0].clone());
-                let timeout2 = timeout(now, Duration::from_millis(120), operations[1].clone());
-                let timeout3 = timeout(now, Duration::from_millis(80), operations[2].clone());
+                let timeout1 = timeout(now, Duration::from_millis(100), operations.next().unwrap());
+                let timeout2 = timeout(now, Duration::from_millis(120), operations.next().unwrap());
+                let timeout3 = timeout(now, Duration::from_millis(80), operations.next().unwrap());
 
                 // Run them concurrently and collect results
                 let results = future::join3(timeout1, timeout2, timeout3).await;

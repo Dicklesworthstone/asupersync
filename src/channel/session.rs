@@ -1343,7 +1343,8 @@ mod tests {
                     }
                     "send" => {
                         if let Some(permit_slot) = permits.get_mut(*permit_idx) {
-                            let taken_permit = permit_slot.take().expect("permit available for send");
+                            let taken_permit =
+                                permit_slot.take().expect("permit available for send");
                             let _proof = taken_permit
                                 .send((run, *permit_idx))
                                 .expect("deterministic send");
@@ -1351,7 +1352,8 @@ mod tests {
                     }
                     "abort" => {
                         if let Some(permit_slot) = permits.get_mut(*permit_idx) {
-                            let taken_permit = permit_slot.take().expect("permit available for abort");
+                            let taken_permit =
+                                permit_slot.take().expect("permit available for abort");
                             let _proof = taken_permit.abort();
                         }
                     }

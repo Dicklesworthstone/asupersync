@@ -141,7 +141,7 @@ fn cancel_reason_builder_methods() {
 
     test_section!("with_message");
     let reason = CancelReason::user("initial").with_message("updated message");
-    assert_eq!(reason.message, Some("updated message"));
+    assert_eq!(reason.message.as_deref(), Some("updated message"));
     tracing::info!(message = ?reason.message, "Message updated");
 
     test_section!("with_region");
@@ -166,7 +166,7 @@ fn cancel_reason_builder_methods() {
     assert_eq!(reason.kind, CancelKind::Shutdown);
     assert_eq!(reason.origin_region, region);
     assert_eq!(reason.origin_task, Some(task));
-    assert_eq!(reason.message, Some("graceful shutdown"));
+    assert_eq!(reason.message.as_deref(), Some("graceful shutdown"));
     tracing::info!(
         kind = ?reason.kind,
         region = ?reason.origin_region,
@@ -245,7 +245,7 @@ fn cancel_reason_root_cause() {
     let single = CancelReason::timeout().with_message("request timeout");
     let root = single.root_cause();
     assert_eq!(root.kind, CancelKind::Timeout);
-    assert_eq!(root.message, Some("request timeout"));
+    assert_eq!(root.message.as_deref(), Some("request timeout"));
     tracing::info!(root_kind = ?root.kind, "Single reason is its own root");
 
     test_section!("two-level chain");
@@ -275,7 +275,7 @@ fn cancel_reason_root_cause() {
 
     let found_root = level5.root_cause();
     assert_eq!(found_root.kind, CancelKind::PollQuota);
-    assert_eq!(found_root.message, Some("exceeded 1000 polls"));
+    assert_eq!(found_root.message.as_deref(), Some("exceeded 1000 polls"));
     assert_eq!(found_root.origin_region, RegionId::new_for_test(1, 0));
     tracing::info!(
         root_kind = ?found_root.kind,
@@ -409,7 +409,7 @@ fn cx_cancel_with_stores_reason() {
     let reason = cx.cancel_reason().expect("should have reason");
 
     assert_eq!(reason.kind, CancelKind::User);
-    assert_eq!(reason.message, Some("User pressed Ctrl+C"));
+    assert_eq!(reason.message.as_deref(), Some("User pressed Ctrl+C"));
 
     tracing::info!(
         kind = ?reason.kind,
@@ -492,7 +492,7 @@ fn cx_root_cancel_cause_api() {
 
     let root = cx.root_cancel_cause().expect("should have root");
     assert_eq!(root.kind, CancelKind::Shutdown);
-    assert_eq!(root.message, Some("graceful shutdown"));
+    assert_eq!(root.message.as_deref(), Some("graceful shutdown"));
     tracing::info!(root_kind = ?root.kind, "Single reason is its own root");
 
     test_section!("deep chain root cause");
@@ -682,7 +682,10 @@ fn e2e_debugging_workflow() {
             tracing::warn!("Consider: Increase timeout or optimize query");
 
             // Verify the chain structure
-            assert_eq!(root.message, Some("database query timeout (100ms)".to_string()));
+            assert_eq!(
+                root.message,
+                Some("database query timeout (100ms)".to_string())
+            );
         }
 
         // Step 4: Check if any cause is a specific type

@@ -780,7 +780,7 @@ mod tests {
             let task_cancelled = Arc::new(AtomicBool::new(false));
             let task_cancelled_clone = Arc::clone(&task_cancelled);
 
-            let _outcome = region.run(|ctx| {
+            let outcome = region.run(|ctx| {
                 std::thread::scope(|s| {
                     // Spawn a background task that monitors cancellation
                     let task_ctx = ctx.cx().clone();
@@ -807,7 +807,7 @@ mod tests {
 
             // MR2: Spawned tasks should observe cancellation
             assert!(
-                task_cancelled.load(Ordering::SeqCst) || _outcome.is_cancelled(),
+                task_cancelled.load(Ordering::SeqCst) || outcome.is_cancelled(),
                 "Spawned tasks should receive cancellation signal"
             );
         }
@@ -825,7 +825,7 @@ mod tests {
             let obligation_cleaned = Arc::new(AtomicBool::new(false));
             let obligation_cleaned_clone = Arc::clone(&obligation_cleaned);
 
-            let outcome = region.run(|ctx| {
+            let _outcome = region.run(|ctx| {
                 // Simulate creating an obligation (e.g., database transaction)
                 struct MockObligation {
                     cleaned: Arc<AtomicBool>,
@@ -1045,7 +1045,7 @@ mod tests {
 
                     // Give tasks time to observe cancellation and clean up
                     std::thread::sleep(Duration::from_millis(10));
-                    
+
                     for h in handles {
                         let _ = h.join();
                     }

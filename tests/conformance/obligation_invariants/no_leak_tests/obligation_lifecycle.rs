@@ -8,17 +8,18 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::lab::config::LabConfig;
+use asupersync::lab::runtime::LabRuntime;
 use asupersync::time::sleep;
 
-use crate::runtime::{ObligationId, RegionId, RuntimeHandle};
-use crate::tests::conformance::obligation_invariants::src::{
+use crate::conformance::obligation_invariants::src::{
     invariant_harness::{
         InvariantTestCategory, InvariantTestResult, ObligationInvariantTest, ObligationTestContext,
         TestMetrics, TestOutcome,
     },
     obligation_tracker::ObligationTracker,
 };
+use asupersync::runtime::{ObligationId, RegionId, RuntimeHandle};
 
 /// Test basic obligation creation and resolution
 pub struct BasicObligationLifecycleTest;
