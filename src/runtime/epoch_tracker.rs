@@ -42,7 +42,10 @@ use crate::util::det_hash::DetHashMap;
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+type TimeGetter = Arc<dyn Fn() -> Time + Send + Sync>;
 
 /// Identifier for runtime modules that participate in epoch transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -304,6 +307,8 @@ impl EpochConsistencyConfig {
 pub struct EpochConsistencyTracker {
     /// Configuration for consistency checking.
     config: EpochConsistencyConfig,
+    /// Source of wall-clock time for current-health checks.
+    time_getter: TimeGetter,
     /// Per-module epoch transition records.
     module_records: RwLock<DetHashMap<ModuleId, EpochTransitionRecord>>,
     /// Global epoch transition counter.
@@ -325,8 +330,18 @@ impl EpochConsistencyTracker {
     /// Creates a new epoch consistency tracker with the given configuration.
     #[must_use]
     pub fn with_config(config: EpochConsistencyConfig) -> Self {
+        Self::with_config_and_time_getter(config, Arc::new(crate::time::wall_now))
+    }
+
+    /// Creates a new epoch consistency tracker with a custom time source.
+    #[must_use]
+    pub fn with_config_and_time_getter(
+        config: EpochConsistencyConfig,
+        time_getter: TimeGetter,
+    ) -> Self {
         Self {
             config,
+            time_getter,
             module_records: RwLock::new(DetHashMap::default()),
             global_transition_count: AtomicU64::new(0),
             violations: RwLock::new(Vec::new()),
@@ -535,7 +550,7 @@ impl EpochConsistencyTracker {
         }
 
         let records = self.module_records.read();
-        let now = records
+        let recorded_now = records
             .values()
             .map(|record| {
                 record
@@ -544,6 +559,12 @@ impl EpochConsistencyTracker {
             })
             .max()
             .unwrap_or(Time::ZERO);
+        let sampled_now = (self.time_getter)();
+        let now = if sampled_now.as_nanos() >= recorded_now.as_nanos() {
+            sampled_now
+        } else {
+            recorded_now
+        };
         if let Some(violation) = self.current_module_desync_violation(&records, now, false) {
             return Some(violation);
         }
@@ -1949,12 +1970,19 @@ mod tests {
     fn tracker_check_consistency_surfaces_active_slow_transition() {
         init_test("tracker_check_consistency_surfaces_active_slow_transition");
 
-        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig {
-            max_epoch_skew: 10,
-            slow_transition_threshold_ns: 100,
-            strict_ordering: false,
-            enabled: true,
-        });
+        let now = Arc::new(AtomicU64::new(500));
+        let tracker = EpochConsistencyTracker::with_config_and_time_getter(
+            EpochConsistencyConfig {
+                max_epoch_skew: 10,
+                slow_transition_threshold_ns: 100,
+                strict_ordering: false,
+                enabled: true,
+            },
+            {
+                let now = Arc::clone(&now);
+                Arc::new(move || Time::from_nanos(now.load(Ordering::Relaxed)))
+            },
+        );
 
         tracker.notify_epoch_transition_start(
             ModuleId::Scheduler,
@@ -1999,12 +2027,19 @@ mod tests {
     fn tracker_transition_start_preserves_earliest_witness_timestamp() {
         init_test("tracker_transition_start_preserves_earliest_witness_timestamp");
 
-        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig {
-            max_epoch_skew: 10,
-            slow_transition_threshold_ns: 500,
-            strict_ordering: false,
-            enabled: true,
-        });
+        let now = Arc::new(AtomicU64::new(1_000));
+        let tracker = EpochConsistencyTracker::with_config_and_time_getter(
+            EpochConsistencyConfig {
+                max_epoch_skew: 10,
+                slow_transition_threshold_ns: 500,
+                strict_ordering: false,
+                enabled: true,
+            },
+            {
+                let now = Arc::clone(&now);
+                Arc::new(move || Time::from_nanos(now.load(Ordering::Relaxed)))
+            },
+        );
 
         tracker.notify_epoch_transition_start(
             ModuleId::Scheduler,
@@ -2049,12 +2084,19 @@ mod tests {
     fn tracker_transition_start_ignores_stale_epoch_snapshot() {
         init_test("tracker_transition_start_ignores_stale_epoch_snapshot");
 
-        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig {
-            max_epoch_skew: 10,
-            slow_transition_threshold_ns: 100,
-            strict_ordering: false,
-            enabled: true,
-        });
+        let now = Arc::new(AtomicU64::new(500));
+        let tracker = EpochConsistencyTracker::with_config_and_time_getter(
+            EpochConsistencyConfig {
+                max_epoch_skew: 10,
+                slow_transition_threshold_ns: 100,
+                strict_ordering: false,
+                enabled: true,
+            },
+            {
+                let now = Arc::clone(&now);
+                Arc::new(move || Time::from_nanos(now.load(Ordering::Relaxed)))
+            },
+        );
 
         tracker.notify_epoch_transition(
             ModuleId::Scheduler,
@@ -2099,6 +2141,58 @@ mod tests {
         );
 
         crate::test_complete!("tracker_transition_start_ignores_stale_epoch_snapshot");
+    }
+
+    #[test]
+    fn tracker_check_consistency_uses_live_time_for_idle_slow_transition() {
+        init_test("tracker_check_consistency_uses_live_time_for_idle_slow_transition");
+
+        let now = Arc::new(AtomicU64::new(100));
+        let tracker = EpochConsistencyTracker::with_config_and_time_getter(
+            EpochConsistencyConfig {
+                max_epoch_skew: 10,
+                slow_transition_threshold_ns: 25,
+                strict_ordering: false,
+                enabled: true,
+            },
+            {
+                let now = Arc::clone(&now);
+                Arc::new(move || Time::from_nanos(now.load(Ordering::Relaxed)))
+            },
+        );
+
+        tracker.notify_epoch_transition_start(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            Time::from_nanos(100),
+        );
+        now.store(200, Ordering::Relaxed);
+
+        let violation = tracker.check_consistency();
+        crate::assert_with_log!(
+            matches!(
+                violation,
+                Some(EpochConsistencyViolation::SlowTransition {
+                    module: ModuleId::Scheduler,
+                    from_epoch,
+                    to_epoch,
+                    started_at,
+                    duration_ns,
+                    ..
+                }) if from_epoch == EpochId::GENESIS
+                    && to_epoch == EpochId::new(1)
+                    && started_at == Time::from_nanos(100)
+                    && duration_ns == 100
+            ),
+            "idle in-flight transitions must age against the live clock",
+            true,
+            matches!(
+                violation,
+                Some(EpochConsistencyViolation::SlowTransition { .. })
+            )
+        );
+
+        crate::test_complete!("tracker_check_consistency_uses_live_time_for_idle_slow_transition");
     }
 
     #[test]

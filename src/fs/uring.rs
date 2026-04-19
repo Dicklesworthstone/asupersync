@@ -314,9 +314,9 @@ impl IoUringFile {
     /// The caller must ensure that `fd` is a valid, open file descriptor
     /// that is not used elsewhere.
     pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {
-        let position = Self::current_fd_position(fd)?;
         // SAFETY: caller guarantees fd is valid and not used elsewhere
         let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let position = Self::current_fd_position(owned_fd.as_raw_fd())?;
         let ring = IoUring::new(DEFAULT_ENTRIES)?;
 
         Ok(Self {
@@ -1211,6 +1211,51 @@ mod tests {
             );
         });
         crate::test_complete!("test_uring_from_raw_fd_preserves_existing_cursor_position");
+    }
+
+    #[test]
+    fn test_uring_from_raw_fd_closes_fd_when_position_probe_fails() {
+        init_test("test_uring_from_raw_fd_closes_fd_when_position_probe_fails");
+
+        let mut fds = [0; 2];
+        let pipe_result = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(pipe_result, 0, "pipe creation should succeed");
+
+        let read_fd = fds[0];
+        let write_fd = fds[1];
+
+        let err = unsafe { IoUringFile::from_raw_fd(read_fd) }
+            .expect_err("non-seekable fds must fail position probe");
+        crate::assert_with_log!(
+            err.raw_os_error() == Some(libc::ESPIPE),
+            "pipe fd fails with ESPIPE",
+            Some(libc::ESPIPE),
+            err.raw_os_error()
+        );
+
+        let close_result = unsafe { libc::close(read_fd) };
+        crate::assert_with_log!(
+            close_result == -1,
+            "failed construction must still consume and close the transferred fd",
+            -1,
+            close_result
+        );
+        crate::assert_with_log!(
+            io::Error::last_os_error().raw_os_error() == Some(libc::EBADF),
+            "transferred fd is already closed after failure",
+            Some(libc::EBADF),
+            io::Error::last_os_error().raw_os_error()
+        );
+
+        let write_close_result = unsafe { libc::close(write_fd) };
+        crate::assert_with_log!(
+            write_close_result == 0,
+            "write end remains open for explicit cleanup",
+            0,
+            write_close_result
+        );
+
+        crate::test_complete!("test_uring_from_raw_fd_closes_fd_when_position_probe_fails");
     }
 
     #[test]

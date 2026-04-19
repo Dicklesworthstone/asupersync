@@ -1080,11 +1080,6 @@ fn idempotency_store_duplicate_returns_cached_outcome() {
     let request = IdempotencyRequestFingerprint::new(
         ComputationName::new("encode_block"),
         RemoteInput::empty(),
-        Duration::from_secs(30),
-        None,
-        NodeId::new("origin"),
-        RegionId::testing_default(),
-        TaskId::testing_default(),
     );
     let now = Time::from_secs(1);
 
@@ -1112,15 +1107,7 @@ fn idempotency_store_duplicate_returns_cached_outcome() {
 
     let conflict = store.check(
         &key,
-        &IdempotencyRequestFingerprint::new(
-            ComputationName::new("other"),
-            RemoteInput::empty(),
-            Duration::from_secs(30),
-            None,
-            NodeId::new("origin"),
-            RegionId::testing_default(),
-            TaskId::testing_default(),
-        ),
+        &IdempotencyRequestFingerprint::new(ComputationName::new("other"), RemoteInput::empty()),
         Time::from_secs(2),
     );
     assert!(matches!(conflict, DedupDecision::Conflict));

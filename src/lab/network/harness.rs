@@ -149,6 +149,10 @@ pub struct SimNode {
     app_outbox: Arc<Mutex<VecDeque<(NodeId, RemoteMessage)>>>,
     /// Tasks currently running on this node.
     running_tasks: BTreeMap<RemoteTaskId, RunningTask>,
+    /// Duplicate task IDs waiting on the canonical task's terminal result.
+    duplicate_waiters: BTreeMap<RemoteTaskId, Vec<RemoteTaskId>>,
+    /// Reverse lookup from duplicate task IDs to the canonical running task.
+    duplicate_aliases: BTreeMap<RemoteTaskId, RemoteTaskId>,
     /// Pending results expected by local tasks (application code).
     pending_results: SharedPendingResults,
     /// Idempotency store for deduplication.
@@ -240,6 +244,8 @@ impl SimNode {
             outbox: VecDeque::new(),
             app_outbox: Arc::new(Mutex::new(VecDeque::new())),
             running_tasks: BTreeMap::new(),
+            duplicate_waiters: BTreeMap::new(),
+            duplicate_aliases: BTreeMap::new(),
             pending_results: Arc::new(Mutex::new(BTreeMap::new())),
             dedup: IdempotencyStore::new(Duration::from_mins(5)),
             crashed: false,
@@ -302,13 +308,20 @@ impl SimNode {
         let dedup = self.dedup.check(&req.idempotency_key, &request, now);
         match dedup {
             crate::remote::DedupDecision::Duplicate(record) => {
+                if record.outcome.is_none() {
+                    self.register_duplicate_alias(record.remote_task_id, req.remote_task_id);
+                }
                 self.event_log.push(NodeEvent::DuplicateSpawn {
                     task_id: req.remote_task_id,
                 });
                 self.outbox.push_back((
                     req.origin_node.clone(),
                     RemoteMessage::SpawnAck(SpawnAck {
-                        remote_task_id: record.remote_task_id,
+                        // Retries may carry a fresh correlation ID while
+                        // reusing the same idempotency key. Echo the current
+                        // request ID so the caller can match the cached reply
+                        // to its live handle.
+                        remote_task_id: req.remote_task_id,
                         status: SpawnAckStatus::Accepted,
                         assigned_node: self.node_id.clone(),
                     }),
@@ -317,7 +330,7 @@ impl SimNode {
                     self.outbox.push_back((
                         req.origin_node,
                         RemoteMessage::ResultDelivery(ResultDelivery {
-                            remote_task_id: record.remote_task_id,
+                            remote_task_id: req.remote_task_id,
                             outcome,
                             execution_time: Duration::ZERO,
                         }),
@@ -403,7 +416,8 @@ impl SimNode {
             task_id: cancel.remote_task_id,
         });
 
-        if let Some(task) = self.running_tasks.get_mut(&cancel.remote_task_id) {
+        let canonical_task_id = self.canonical_task_id(cancel.remote_task_id);
+        if let Some(task) = self.running_tasks.get_mut(&canonical_task_id) {
             task.cancel_requested = true;
         }
     }
@@ -452,6 +466,7 @@ impl SimNode {
         }
 
         let mut completed = Vec::new();
+        let mut finalized = Vec::new();
         let mut to_remove = Vec::new();
 
         for (id, task) in &mut self.running_tasks {
@@ -459,33 +474,40 @@ impl SimNode {
                 let outcome =
                     RemoteOutcome::Cancelled(crate::types::CancelReason::user("harness cancel"));
                 let _ = self.dedup.complete(&task.idempotency_key, outcome.clone());
-                completed.push((
-                    task.origin.clone(),
-                    RemoteMessage::ResultDelivery(ResultDelivery {
-                        remote_task_id: *id,
-                        outcome,
-                        execution_time: Duration::ZERO,
-                    }),
-                ));
+                finalized.push((*id, task.origin.clone(), outcome));
                 self.event_log
                     .push(NodeEvent::TaskCancelled { task_id: *id });
                 to_remove.push(*id);
             } else if task.work_remaining <= elapsed {
                 let outcome = RemoteOutcome::Success(vec![]);
                 let _ = self.dedup.complete(&task.idempotency_key, outcome.clone());
-                completed.push((
-                    task.origin.clone(),
-                    RemoteMessage::ResultDelivery(ResultDelivery {
-                        remote_task_id: *id,
-                        outcome,
-                        execution_time: Duration::ZERO,
-                    }),
-                ));
+                finalized.push((*id, task.origin.clone(), outcome));
                 self.event_log
                     .push(NodeEvent::TaskCompleted { task_id: *id });
                 to_remove.push(*id);
             } else {
                 task.work_remaining -= elapsed;
+            }
+        }
+
+        for (task_id, origin, outcome) in finalized {
+            completed.push((
+                origin.clone(),
+                RemoteMessage::ResultDelivery(ResultDelivery {
+                    remote_task_id: task_id,
+                    outcome: outcome.clone(),
+                    execution_time: Duration::ZERO,
+                }),
+            ));
+            for duplicate_task_id in self.take_duplicate_waiters(task_id) {
+                completed.push((
+                    origin.clone(),
+                    RemoteMessage::ResultDelivery(ResultDelivery {
+                        remote_task_id: duplicate_task_id,
+                        outcome: outcome.clone(),
+                        execution_time: Duration::ZERO,
+                    }),
+                ));
             }
         }
 
@@ -500,6 +522,8 @@ impl SimNode {
     pub fn crash(&mut self) {
         self.crashed = true;
         self.running_tasks.clear();
+        self.duplicate_waiters.clear();
+        self.duplicate_aliases.clear();
         self.outbox.clear();
         {
             let mut app = self.app_outbox.lock();
@@ -511,8 +535,45 @@ impl SimNode {
     /// Simulates a node restart: clears crash flag, starts fresh.
     pub fn restart(&mut self) {
         self.crashed = false;
+        self.duplicate_waiters.clear();
+        self.duplicate_aliases.clear();
         self.dedup = IdempotencyStore::new(Duration::from_mins(5));
         self.event_log.push(NodeEvent::Restarted);
+    }
+
+    fn register_duplicate_alias(
+        &mut self,
+        canonical_task_id: RemoteTaskId,
+        duplicate_task_id: RemoteTaskId,
+    ) {
+        if canonical_task_id == duplicate_task_id {
+            return;
+        }
+
+        let waiters = self.duplicate_waiters.entry(canonical_task_id).or_default();
+        if !waiters.contains(&duplicate_task_id) {
+            waiters.push(duplicate_task_id);
+        }
+        self.duplicate_aliases
+            .insert(duplicate_task_id, canonical_task_id);
+    }
+
+    fn canonical_task_id(&self, task_id: RemoteTaskId) -> RemoteTaskId {
+        self.duplicate_aliases
+            .get(&task_id)
+            .copied()
+            .unwrap_or(task_id)
+    }
+
+    fn take_duplicate_waiters(&mut self, canonical_task_id: RemoteTaskId) -> Vec<RemoteTaskId> {
+        let waiters = self
+            .duplicate_waiters
+            .remove(&canonical_task_id)
+            .unwrap_or_default();
+        for duplicate_task_id in &waiters {
+            self.duplicate_aliases.remove(duplicate_task_id);
+        }
+        waiters
     }
 
     /// Returns the event log for assertions.
@@ -992,13 +1053,23 @@ impl DistributedHarness {
                             let outcome = RemoteOutcome::Failed("lease expired".into());
                             let _ = node.dedup.complete(&task.idempotency_key, outcome.clone());
                             node.outbox.push_back((
-                                task.origin,
+                                task.origin.clone(),
                                 RemoteMessage::ResultDelivery(ResultDelivery {
                                     remote_task_id: tid,
-                                    outcome,
+                                    outcome: outcome.clone(),
                                     execution_time: Duration::ZERO,
                                 }),
                             ));
+                            for duplicate_task_id in node.take_duplicate_waiters(tid) {
+                                node.outbox.push_back((
+                                    task.origin.clone(),
+                                    RemoteMessage::ResultDelivery(ResultDelivery {
+                                        remote_task_id: duplicate_task_id,
+                                        outcome: outcome.clone(),
+                                        execution_time: Duration::ZERO,
+                                    }),
+                                ));
+                            }
                         }
                     }
                 }
@@ -1068,6 +1139,21 @@ fn msg_type_name(msg: &RemoteMessage) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn register_pending_result(
+        node: &mut SimNode,
+        task_id: RemoteTaskId,
+    ) -> crate::channel::oneshot::Receiver<Result<RemoteOutcome, RemoteError>> {
+        let (tx, rx) = crate::channel::oneshot::channel();
+        node.pending_results.lock().insert(
+            task_id,
+            PendingResultEntry {
+                tx: Some(tx),
+                state: RemoteTaskState::Pending,
+            },
+        );
+        rx
+    }
 
     fn setup_harness() -> (DistributedHarness, NodeId, NodeId) {
         let config = NetworkConfig {
@@ -1174,6 +1260,142 @@ mod tests {
             })
             .count();
         assert!(result_count >= 2);
+    }
+
+    #[test]
+    fn duplicate_spawn_with_fresh_task_id_delivers_result_to_retry_handle() {
+        let (mut harness, a, b) = setup_harness();
+        let canonical_task_id = RemoteTaskId::from_raw(9001);
+        let retry_task_id = RemoteTaskId::from_raw(9002);
+        let key = IdempotencyKey::from_raw(0xfeed_beef);
+
+        let mut rx1 =
+            register_pending_result(harness.nodes.get_mut(&a).unwrap(), canonical_task_id);
+        let mut rx2 = register_pending_result(harness.nodes.get_mut(&a).unwrap(), retry_task_id);
+
+        harness.send_message(
+            &a,
+            &b,
+            &RemoteMessage::SpawnRequest(SpawnRequest {
+                remote_task_id: canonical_task_id,
+                computation: crate::remote::ComputationName::new("test-computation"),
+                input: crate::remote::RemoteInput::new(vec![1, 2, 3]),
+                lease: Duration::from_secs(30),
+                idempotency_key: key,
+                budget: None,
+                origin_node: a.clone(),
+                origin_region: crate::types::RegionId::new_for_test(0, 0),
+                origin_task: crate::types::TaskId::new_for_test(0, 0),
+            }),
+        );
+        harness.run_for(Duration::from_millis(10));
+
+        harness.send_message(
+            &a,
+            &b,
+            &RemoteMessage::SpawnRequest(SpawnRequest {
+                remote_task_id: retry_task_id,
+                computation: crate::remote::ComputationName::new("test-computation"),
+                input: crate::remote::RemoteInput::new(vec![1, 2, 3]),
+                lease: Duration::from_secs(30),
+                idempotency_key: key,
+                budget: None,
+                origin_node: a.clone(),
+                origin_region: crate::types::RegionId::new_for_test(0, 0),
+                origin_task: crate::types::TaskId::new_for_test(0, 0),
+            }),
+        );
+        harness.run_for(Duration::from_millis(200));
+
+        let origin = harness.node(&a).unwrap();
+        let pending = origin.pending_results.lock();
+        assert_eq!(
+            pending.get(&canonical_task_id).map(|entry| entry.state),
+            Some(RemoteTaskState::Completed)
+        );
+        assert_eq!(
+            pending.get(&retry_task_id).map(|entry| entry.state),
+            Some(RemoteTaskState::Completed)
+        );
+        drop(pending);
+
+        let outcome1 = rx1.try_recv().expect("canonical result");
+        let outcome2 = rx2.try_recv().expect("retry result");
+        assert!(matches!(outcome1, Ok(RemoteOutcome::Success(_))));
+        assert!(matches!(outcome2, Ok(RemoteOutcome::Success(_))));
+
+        let remote = harness.node(&b).unwrap();
+        assert!(
+            remote.duplicate_waiters.is_empty(),
+            "duplicate waiter aliases must be cleared once the canonical task completes"
+        );
+        assert!(
+            remote.duplicate_aliases.is_empty(),
+            "duplicate alias reverse map must be cleared once the canonical task completes"
+        );
+    }
+
+    #[test]
+    fn duplicate_cancel_with_fresh_task_id_cancels_canonical_task() {
+        let (mut harness, a, b) = setup_harness();
+        let canonical_task_id = RemoteTaskId::from_raw(9101);
+        let retry_task_id = RemoteTaskId::from_raw(9102);
+        let key = IdempotencyKey::from_raw(0xcafe_feed);
+
+        let mut rx1 =
+            register_pending_result(harness.nodes.get_mut(&a).unwrap(), canonical_task_id);
+        let mut rx2 = register_pending_result(harness.nodes.get_mut(&a).unwrap(), retry_task_id);
+
+        let make_request = |remote_task_id| SpawnRequest {
+            remote_task_id,
+            computation: crate::remote::ComputationName::new("test-computation"),
+            input: crate::remote::RemoteInput::new(vec![4, 5, 6]),
+            lease: Duration::from_secs(30),
+            idempotency_key: key,
+            budget: None,
+            origin_node: a.clone(),
+            origin_region: crate::types::RegionId::new_for_test(0, 0),
+            origin_task: crate::types::TaskId::new_for_test(0, 0),
+        };
+
+        harness.send_message(
+            &a,
+            &b,
+            &RemoteMessage::SpawnRequest(make_request(canonical_task_id)),
+        );
+        harness.run_for(Duration::from_millis(10));
+
+        harness.send_message(
+            &a,
+            &b,
+            &RemoteMessage::SpawnRequest(make_request(retry_task_id)),
+        );
+        harness.run_for(Duration::from_millis(10));
+
+        harness.send_message(
+            &a,
+            &b,
+            &RemoteMessage::CancelRequest(CancelRequest {
+                remote_task_id: retry_task_id,
+                reason: crate::types::CancelReason::user("retry cancel"),
+                origin_node: a.clone(),
+            }),
+        );
+        harness.run_for(Duration::from_millis(200));
+
+        let remote = harness.node(&b).unwrap();
+        assert!(
+            remote.events().iter().any(|event| matches!(
+                event,
+                NodeEvent::TaskCancelled { task_id } if *task_id == canonical_task_id
+            )),
+            "duplicate cancel must cancel the canonical running task"
+        );
+
+        let outcome1 = rx1.try_recv().expect("canonical cancelled result");
+        let outcome2 = rx2.try_recv().expect("retry cancelled result");
+        assert!(matches!(outcome1, Ok(RemoteOutcome::Cancelled(_))));
+        assert!(matches!(outcome2, Ok(RemoteOutcome::Cancelled(_))));
     }
 
     #[test]
@@ -1584,6 +1806,56 @@ mod tests {
         // First should be accepted, second should be deduped
         assert_eq!(spawn_count, 1);
         assert_eq!(dedup_count, 1);
+    }
+
+    #[test]
+    fn duplicate_spawn_reuses_cached_outcome_but_echoes_retry_task_id() {
+        let mut node = SimNode::new(NodeId::new("node-b"), HostId::new(1));
+        let origin = NodeId::new("node-a");
+        let idempotency_key = IdempotencyKey::from_raw(0xD00D);
+        let first_task = RemoteTaskId::from_raw(41);
+        let retry_task = RemoteTaskId::from_raw(99);
+
+        let make_request = |remote_task_id| SpawnRequest {
+            remote_task_id,
+            computation: crate::remote::ComputationName::new("test-computation"),
+            input: crate::remote::RemoteInput::new(vec![1, 2, 3]),
+            lease: Duration::from_secs(30),
+            idempotency_key,
+            budget: None,
+            origin_node: origin.clone(),
+            origin_region: crate::types::RegionId::new_for_test(0, 0),
+            origin_task: crate::types::TaskId::new_for_test(0, 0),
+        };
+
+        node.handle_spawn(make_request(first_task), Time::from_secs(1));
+        node.outbox.clear();
+        let _ = node.tick(Duration::from_millis(100));
+
+        node.handle_spawn(make_request(retry_task), Time::from_secs(2));
+
+        let (_, ack) = node.outbox.pop_front().expect("duplicate spawn ack");
+        match ack {
+            RemoteMessage::SpawnAck(SpawnAck {
+                remote_task_id,
+                status: SpawnAckStatus::Accepted,
+                ..
+            }) => assert_eq!(remote_task_id, retry_task),
+            other => panic!("unexpected duplicate ack: {other:?}"),
+        }
+
+        let (_, delivery) = node.outbox.pop_front().expect("cached result delivery");
+        match delivery {
+            RemoteMessage::ResultDelivery(ResultDelivery {
+                remote_task_id,
+                outcome,
+                ..
+            }) => {
+                assert_eq!(remote_task_id, retry_task);
+                assert!(outcome.is_success());
+            }
+            other => panic!("unexpected cached result: {other:?}"),
+        }
     }
 
     #[test]

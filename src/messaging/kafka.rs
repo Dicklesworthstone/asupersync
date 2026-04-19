@@ -630,21 +630,37 @@ pub(crate) fn stub_broker_fetch(
 
 #[cfg(not(feature = "kafka"))]
 pub(crate) fn stub_broker_publish(record: StubBrokerRecord) -> RecordMetadata {
+    stub_broker_publish_batch(vec![record])
+        .into_iter()
+        .next()
+        .expect("single-record publish must return metadata")
+}
+
+#[cfg(not(feature = "kafka"))]
+fn stub_broker_publish_batch(records: Vec<StubBrokerRecord>) -> Vec<RecordMetadata> {
+    if records.is_empty() {
+        return Vec::new();
+    }
+
     let metadata = {
         let mut state = stub_broker().state.lock();
-        let partition_log = state
-            .partitions
-            .entry((record.topic.clone(), record.partition))
-            .or_default();
-        let offset = i64::try_from(partition_log.len()).unwrap_or(i64::MAX);
-        let metadata = RecordMetadata {
-            topic: record.topic.clone(),
-            partition: record.partition,
-            offset,
-            timestamp: record.timestamp,
-        };
-        partition_log.push(record);
-        drop(state);
+        let mut metadata = Vec::with_capacity(records.len());
+
+        for record in records {
+            let partition_log = state
+                .partitions
+                .entry((record.topic.clone(), record.partition))
+                .or_default();
+            let offset = i64::try_from(partition_log.len()).unwrap_or(i64::MAX);
+            metadata.push(RecordMetadata {
+                topic: record.topic.clone(),
+                partition: record.partition,
+                offset,
+                timestamp: record.timestamp,
+            });
+            partition_log.push(record);
+        }
+
         metadata
     };
 
@@ -1521,13 +1537,12 @@ impl Transaction<'_> {
                         "transaction is not active".to_string(),
                     ));
                 }
-                state.phase = TransactionPhase::Idle;
+                state.phase = TransactionPhase::Finalizing;
                 std::mem::take(&mut state.staged_records)
             };
 
-            for record in staged {
-                let _ = stub_broker_publish(record);
-            }
+            let _metadata = stub_broker_publish_batch(staged);
+            self.producer.mark_transaction_idle();
             self.finished = true;
         }
 
@@ -1587,7 +1602,7 @@ mod tests {
     #[cfg(feature = "kafka")]
     use futures_lite::future;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     #[cfg(feature = "kafka")]
     use std::task::{Context, Wake, Waker};
 
@@ -2214,6 +2229,68 @@ mod tests {
                 .unwrap();
             assert_eq!(metadata.offset, 1);
         });
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn transactional_fallback_commit_stays_finalizing_until_batch_publish_completes() {
+        let _broker = stub_broker_guard();
+        let producer = Arc::new(
+            TransactionalProducer::new(TransactionalConfig::new(
+                ProducerConfig::default(),
+                "tx-finalizing-until-visible".to_string(),
+            ))
+            .unwrap(),
+        );
+        let topic = "transactional-fallback-finalizing-until-visible";
+        let ready = Arc::new(AtomicBool::new(false));
+
+        let broker_lock = stub_broker().state.lock();
+        let producer_for_thread = Arc::clone(&producer);
+        let ready_for_thread = Arc::clone(&ready);
+        let topic_for_thread = topic.to_string();
+
+        let worker = std::thread::spawn(move || {
+            let cx = Cx::for_testing();
+            futures_lite::future::block_on(async move {
+                let tx = producer_for_thread.begin_transaction(&cx).await.unwrap();
+                tx.send(&cx, &topic_for_thread, None, b"batched")
+                    .await
+                    .unwrap();
+                ready_for_thread.store(true, Ordering::Release);
+                tx.commit(&cx).await.unwrap();
+            });
+        });
+
+        while !ready.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+
+        let mut observed_finalizing = false;
+        for _ in 0..10_000 {
+            let phase = producer.state.lock().phase;
+            if phase == TransactionPhase::Finalizing {
+                observed_finalizing = true;
+                break;
+            }
+            assert_ne!(
+                phase,
+                TransactionPhase::Idle,
+                "commit must not become idle before the staged batch is published"
+            );
+            std::thread::yield_now();
+        }
+
+        assert!(
+            observed_finalizing,
+            "commit should remain in Finalizing while broker publication is blocked"
+        );
+
+        drop(broker_lock);
+        worker.join().unwrap();
+
+        assert_eq!(producer.state.lock().phase, TransactionPhase::Idle);
+        assert_eq!(stub_broker_end_offset(topic, 0), 1);
     }
 
     #[test]

@@ -1370,47 +1370,23 @@ pub enum DedupDecision {
 /// [`IdempotencyKey`].
 ///
 /// Remote task IDs are intentionally excluded because they are assigned per
-/// delivery attempt. Every other spawn parameter that changes the remote
-/// computation contract must match for the key to be considered a duplicate.
+/// delivery attempt. The deduplication contract is scoped to the logical
+/// operation being requested, not to origin-side execution metadata. Retry-only
+/// changes such as lease tuning, budget clamping, or origin task migration must
+/// not turn a duplicate into a conflict.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IdempotencyRequestFingerprint {
     /// The computation that was requested.
     pub computation: ComputationName,
     /// Serialized input payload.
     pub input: RemoteInput,
-    /// Requested lease duration.
-    pub lease: Duration,
-    /// Optional remote budget ceiling.
-    pub budget: Option<Budget>,
-    /// Origin node that issued the request.
-    pub origin_node: NodeId,
-    /// Origin region that owns the remote work.
-    pub origin_region: RegionId,
-    /// Origin task that initiated the remote work.
-    pub origin_task: TaskId,
 }
 
 impl IdempotencyRequestFingerprint {
     /// Creates a new request fingerprint.
     #[must_use]
-    pub fn new(
-        computation: ComputationName,
-        input: RemoteInput,
-        lease: Duration,
-        budget: Option<Budget>,
-        origin_node: NodeId,
-        origin_region: RegionId,
-        origin_task: TaskId,
-    ) -> Self {
-        Self {
-            computation,
-            input,
-            lease,
-            budget,
-            origin_node,
-            origin_region,
-            origin_task,
-        }
+    pub fn new(computation: ComputationName, input: RemoteInput) -> Self {
+        Self { computation, input }
     }
 
     /// Builds a request fingerprint from a spawn request.
@@ -1419,11 +1395,6 @@ impl IdempotencyRequestFingerprint {
         Self {
             computation: request.computation.clone(),
             input: request.input.clone(),
-            lease: request.lease,
-            budget: request.budget,
-            origin_node: request.origin_node.clone(),
-            origin_region: request.origin_region,
-            origin_task: request.origin_task,
         }
     }
 }
@@ -2691,15 +2662,7 @@ mod tests {
     }
 
     fn test_request_fingerprint(name: &str) -> IdempotencyRequestFingerprint {
-        IdempotencyRequestFingerprint::new(
-            ComputationName::new(name),
-            RemoteInput::empty(),
-            Duration::from_secs(30),
-            None,
-            NodeId::new("origin"),
-            RegionId::testing_default(),
-            TaskId::testing_default(),
-        )
+        IdempotencyRequestFingerprint::new(ComputationName::new(name), RemoteInput::empty())
     }
 
     #[test]
@@ -5376,11 +5339,6 @@ mod tests {
         let base = IdempotencyRequestFingerprint::new(
             ComputationName::new("encode"),
             RemoteInput::new(vec![1, 2, 3]),
-            Duration::from_secs(30),
-            Some(Budget::MINIMAL),
-            NodeId::new("origin-a"),
-            RegionId::new_for_test(1, 1),
-            TaskId::new_for_test(1, 1),
         );
         let mut changed_input = base.clone();
         changed_input.input = RemoteInput::new(vec![9, 9, 9]);
@@ -5391,6 +5349,50 @@ mod tests {
         assert!(
             matches!(decision, DedupDecision::Conflict),
             "same key + same computation but different payload must conflict"
+        );
+    }
+
+    #[test]
+    fn idempotency_store_retry_metadata_does_not_trigger_conflict() {
+        let mut store = IdempotencyStore::new(Duration::from_secs(300));
+        let key = IdempotencyKey::from_raw(0xbeef);
+        let base = SpawnRequest {
+            remote_task_id: RemoteTaskId::from_raw(7),
+            computation: ComputationName::new("encode"),
+            input: RemoteInput::new(vec![1, 2, 3]),
+            lease: Duration::from_secs(30),
+            idempotency_key: key,
+            budget: Some(Budget::MINIMAL),
+            origin_node: NodeId::new("origin-a"),
+            origin_region: RegionId::new_for_test(1, 1),
+            origin_task: TaskId::new_for_test(1, 1),
+        };
+        let retry = SpawnRequest {
+            remote_task_id: RemoteTaskId::from_raw(99),
+            lease: Duration::from_secs(120),
+            budget: Some(Budget::INFINITE),
+            origin_node: NodeId::new("origin-b"),
+            origin_region: RegionId::new_for_test(2, 2),
+            origin_task: TaskId::new_for_test(2, 2),
+            ..base.clone()
+        };
+
+        let recorded = IdempotencyRequestFingerprint::from_spawn_request(&base);
+        assert!(store.record(
+            key,
+            base.remote_task_id,
+            recorded.clone(),
+            Time::from_secs(10),
+        ));
+
+        let decision = store.check(
+            &key,
+            &IdempotencyRequestFingerprint::from_spawn_request(&retry),
+            Time::from_secs(20),
+        );
+        assert!(
+            matches!(decision, DedupDecision::Duplicate(record) if record.request == recorded),
+            "retries must deduplicate on logical operation, not lease/budget/origin metadata"
         );
     }
 

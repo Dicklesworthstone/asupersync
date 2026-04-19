@@ -40,7 +40,7 @@ use asupersync::remote::{
     IdempotencyStore, NodeId, RemoteError, RemoteInput, RemoteTaskId, RemoteTaskState, Saga,
     SagaState, spawn_remote,
 };
-use asupersync::types::{RegionId, TaskId, Time};
+use asupersync::types::Time;
 use common::*;
 use std::future::Future;
 use std::sync::Arc;
@@ -707,24 +707,10 @@ fn idempotency_store_conflict_detection() {
     // Unit-level test: same key, different computation → conflict.
     let mut store = IdempotencyStore::new(Duration::from_secs(60));
     let key = IdempotencyKey::from_raw(0xABCD);
-    let request_a = IdempotencyRequestFingerprint::new(
-        ComputationName::new("compute_a"),
-        RemoteInput::empty(),
-        Duration::from_secs(30),
-        None,
-        NodeId::new("origin"),
-        RegionId::testing_default(),
-        TaskId::testing_default(),
-    );
-    let request_b = IdempotencyRequestFingerprint::new(
-        ComputationName::new("compute_b"),
-        RemoteInput::empty(),
-        Duration::from_secs(30),
-        None,
-        NodeId::new("origin"),
-        RegionId::testing_default(),
-        TaskId::testing_default(),
-    );
+    let request_a =
+        IdempotencyRequestFingerprint::new(ComputationName::new("compute_a"), RemoteInput::empty());
+    let request_b =
+        IdempotencyRequestFingerprint::new(ComputationName::new("compute_b"), RemoteInput::empty());
 
     assert!(matches!(
         store.check(&key, &request_a, Time::ZERO),

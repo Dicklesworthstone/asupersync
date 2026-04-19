@@ -1497,6 +1497,30 @@ where
         fut.await.map_err(|e| PoolError::CreateFailed(e.into()))
     }
 
+    /// Compute the remaining time for an acquire attempt after applying both
+    /// the pool timeout and any tighter deadline carried by the caller's `Cx`.
+    fn remaining_acquire_timeout(
+        &self,
+        cx: &Cx,
+        acquire_start: crate::types::Time,
+        now: crate::types::Time,
+    ) -> Result<Duration, PoolError> {
+        let elapsed = Duration::from_nanos(now.duration_since(acquire_start));
+        if elapsed >= self.config.acquire_timeout {
+            return Err(PoolError::Timeout);
+        }
+
+        let remaining = self.config.acquire_timeout.saturating_sub(elapsed);
+        if let Some(budget_remaining) = cx.budget().remaining_time(now) {
+            if budget_remaining.is_zero() {
+                return Err(PoolError::Cancelled);
+            }
+            Ok(remaining.min(budget_remaining))
+        } else {
+            Ok(remaining)
+        }
+    }
+
     /// Remove a waiter by ID.
     fn remove_waiter(&self, id: u64) {
         let mut state = self.state.lock();
@@ -1629,6 +1653,13 @@ where
                 // Process any pending returns
                 self.process_returns();
 
+                // A waiter can resume because of cancellation/deadline as well
+                // as because a resource became available. Re-check before taking
+                // any fast path so cancelled acquirers do not steal capacity.
+                if cx.checkpoint().is_err() {
+                    return Err(PoolError::Cancelled);
+                }
+
                 // Check if closed (lock-free fast path).
                 if self.closed.load(Ordering::Acquire) {
                     return Err(PoolError::Closed);
@@ -1689,15 +1720,33 @@ where
                     }
 
                     let now = get_now();
-                    let elapsed = Duration::from_nanos(now.duration_since(acquire_start));
-                    let remaining = self.config.acquire_timeout.saturating_sub(elapsed);
+                    let remaining = match self.remaining_acquire_timeout(cx, acquire_start, now) {
+                        Ok(remaining) => remaining,
+                        Err(PoolError::Timeout) => {
+                            #[cfg(feature = "metrics")]
+                            if let Some(ref metrics) = self.metrics {
+                                metrics.record_timeout(Duration::from_nanos(
+                                    now.duration_since(acquire_start),
+                                ));
+                            }
+                            return Err(PoolError::Timeout);
+                        }
+                        Err(PoolError::Cancelled) => return Err(PoolError::Cancelled),
+                        Err(other) => return Err(other),
+                    };
 
                     if remaining.is_zero() {
                         #[cfg(feature = "metrics")]
                         if let Some(ref metrics) = self.metrics {
-                            metrics.record_timeout(elapsed);
+                            metrics.record_timeout(Duration::from_nanos(
+                                now.duration_since(acquire_start),
+                            ));
                         }
-                        return Err(PoolError::Timeout);
+                        return if cx.checkpoint().is_err() {
+                            Err(PoolError::Cancelled)
+                        } else {
+                            Err(PoolError::Timeout)
+                        };
                     }
 
                     let create_result =
@@ -1706,9 +1755,15 @@ where
                         Ok(Ok(res)) => res,
                         Ok(Err(e)) => return Err(e),
                         Err(_) => {
+                            if cx.checkpoint().is_err() {
+                                return Err(PoolError::Cancelled);
+                            }
+
                             #[cfg(feature = "metrics")]
                             if let Some(ref metrics) = self.metrics {
-                                metrics.record_timeout(self.config.acquire_timeout);
+                                metrics.record_timeout(Duration::from_nanos(
+                                    get_now().duration_since(acquire_start),
+                                ));
                             }
                             return Err(PoolError::Timeout);
                         }
@@ -1742,14 +1797,19 @@ where
 
                 // Check for timeout
                 let now = get_now();
-                let elapsed = Duration::from_nanos(now.duration_since(acquire_start));
-                if elapsed >= self.config.acquire_timeout {
-                    #[cfg(feature = "metrics")]
-                    if let Some(ref metrics) = self.metrics {
-                        metrics.record_timeout(elapsed);
+                let remaining = match self.remaining_acquire_timeout(cx, acquire_start, now) {
+                    Ok(remaining) => remaining,
+                    Err(PoolError::Timeout) => {
+                        let elapsed = Duration::from_nanos(now.duration_since(acquire_start));
+                        #[cfg(feature = "metrics")]
+                        if let Some(ref metrics) = self.metrics {
+                            metrics.record_timeout(elapsed);
+                        }
+                        return Err(PoolError::Timeout);
                     }
-                    return Err(PoolError::Timeout);
-                }
+                    Err(PoolError::Cancelled) => return Err(PoolError::Cancelled),
+                    Err(other) => return Err(other),
+                };
 
                 // Check for cancellation
                 if let Err(_e) = cx.checkpoint() {
@@ -1763,16 +1823,17 @@ where
                     waiter_id: &mut cleanup.waiter_id,
                     cx,
                 };
-                if crate::time::timeout(
-                    now,
-                    self.config.acquire_timeout.saturating_sub(elapsed),
-                    wait_fut,
-                )
-                .await
-                .is_err()
+                if crate::time::timeout(now, remaining, wait_fut)
+                    .await
+                    .is_err()
                 {
                     let wait_duration =
                         Duration::from_nanos(get_now().duration_since(wait_started));
+                    if cx.checkpoint().is_err() {
+                        self.record_wait_time(wait_duration);
+                        return Err(PoolError::Cancelled);
+                    }
+
                     #[cfg(feature = "metrics")]
                     if let Some(ref metrics) = self.metrics {
                         metrics.record_timeout(wait_duration);
@@ -2345,6 +2406,19 @@ mod tests {
             RegionId::new_for_test(0, 0),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer),
+            None,
+        )
+    }
+
+    fn test_cx_with_timer_and_budget(timer: TimerDriverHandle, budget: Budget) -> Cx {
+        Cx::new_with_drivers(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            budget,
             None,
             None,
             None,
@@ -3192,6 +3266,129 @@ mod tests {
 
         held.return_to_pool();
         crate::test_complete!("acquire_timeout_reports_timeout_and_cleans_waiter_state");
+    }
+
+    #[test]
+    fn acquire_budget_deadline_wakes_and_cancels_waiter() {
+        init_test("acquire_budget_deadline_wakes_and_cancels_waiter");
+
+        struct FlagWake(Arc<std::sync::atomic::AtomicBool>);
+
+        impl Wake for FlagWake {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let holding_cx = test_cx_with_timer(timer.clone());
+        let deadline_cx = test_cx_with_timer_and_budget(
+            timer.clone(),
+            Budget::new().with_deadline(Time::from_millis(10)),
+        );
+        let _guard = Cx::set_current(Some(deadline_cx.clone()));
+        let pool = GenericPool::with_time_getter(
+            simple_factory,
+            PoolConfig::with_max_size(1).acquire_timeout(Duration::from_secs(1)),
+            test_pool_time_now,
+        );
+
+        let held =
+            futures_lite::future::block_on(pool.acquire(&holding_cx)).expect("first acquire");
+        let wake_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(FlagWake(Arc::clone(&wake_flag))));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut acquire_fut = std::pin::pin!(pool.acquire(&deadline_cx));
+
+        let first_poll = acquire_fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            first_poll.is_pending(),
+            "deadline-bound waiter should block while pool is exhausted",
+            true,
+            first_poll.is_pending()
+        );
+
+        advance_test_pool_time(Duration::from_millis(10));
+        clock.advance(Time::from_millis(10).as_nanos());
+        let _ = timer.process_timers();
+
+        crate::assert_with_log!(
+            wake_flag.load(std::sync::atomic::Ordering::SeqCst),
+            "budget deadline should wake blocked acquire before pool timeout",
+            true,
+            wake_flag.load(std::sync::atomic::Ordering::SeqCst)
+        );
+
+        let result = acquire_fut.as_mut().poll(&mut task_cx);
+        assert!(
+            matches!(result, Poll::Ready(Err(PoolError::Cancelled))),
+            "budget deadline should cancel blocked acquire"
+        );
+
+        let stats = pool.stats();
+        assert_eq!(
+            stats.waiters, 0,
+            "deadline cancellation must not leak waiters"
+        );
+
+        held.return_to_pool();
+        crate::test_complete!("acquire_budget_deadline_wakes_and_cancels_waiter");
+    }
+
+    #[test]
+    fn cancelled_waiter_does_not_acquire_returned_resource() {
+        init_test("cancelled_waiter_does_not_acquire_returned_resource");
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let holding_cx = test_cx_with_timer(timer.clone());
+        let deadline_cx = test_cx_with_timer_and_budget(
+            timer.clone(),
+            Budget::new().with_deadline(Time::from_millis(10)),
+        );
+        let _guard = Cx::set_current(Some(deadline_cx.clone()));
+        let pool = GenericPool::with_time_getter(
+            simple_factory,
+            PoolConfig::with_max_size(1).acquire_timeout(Duration::from_secs(1)),
+            test_pool_time_now,
+        );
+
+        let held =
+            futures_lite::future::block_on(pool.acquire(&holding_cx)).expect("first acquire");
+        let waker = noop_pool_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut acquire_fut = std::pin::pin!(pool.acquire(&deadline_cx));
+
+        let first_poll = acquire_fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            first_poll.is_pending(),
+            "deadline-bound waiter should enter the wait queue",
+            true,
+            first_poll.is_pending()
+        );
+
+        advance_test_pool_time(Duration::from_millis(10));
+        clock.advance(Time::from_millis(10).as_nanos());
+
+        held.return_to_pool();
+
+        let result = acquire_fut.as_mut().poll(&mut task_cx);
+        assert!(
+            matches!(result, Poll::Ready(Err(PoolError::Cancelled))),
+            "expired waiter must not consume a returned resource"
+        );
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0, "cancelled waiter must not become active");
+        assert_eq!(stats.idle, 1, "returned resource should remain idle");
+        assert_eq!(stats.waiters, 0, "cancelled waiter must be cleaned up");
+
+        crate::test_complete!("cancelled_waiter_does_not_acquire_returned_resource");
     }
 
     // ========================================================================

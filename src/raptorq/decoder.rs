@@ -1380,7 +1380,6 @@ impl InactivationDecoder {
     ) -> Result<DecodeResult, DecodeError> {
         let k = self.params.k;
         let symbol_size = self.params.symbol_size;
-        let l = self.params.l;
 
         self.validate_input(symbols)?;
 
@@ -1391,17 +1390,12 @@ impl InactivationDecoder {
             batch_size
         };
 
-        // Initialize state with empty equations; we'll add them in batches.
-        let active_cols: BTreeSet<usize> = (0..l).collect();
-        let mut state = DecoderState {
-            params: self.params.clone(),
-            equations: Vec::with_capacity(symbols.len()),
-            rhs: Vec::with_capacity(symbols.len()),
-            solved: vec![None; l],
-            active_cols,
-            inactive_cols: BTreeSet::new(),
-            stats: DecodeStats::default(),
-        };
+        // Start from the same implicit K..K' padding rows that the sequential
+        // decoder synthesizes so wavefront mode remains RFC-parity equivalent
+        // on padded parameter sets.
+        let mut state = self.build_state(&[]);
+        state.equations.reserve(symbols.len());
+        state.rhs.reserve(symbols.len());
         state.stats.wavefront_active = true;
         state.stats.wavefront_batch_size = effective_batch;
 
@@ -1409,7 +1403,21 @@ impl InactivationDecoder {
         let mut total_overlap_peeled = 0usize;
         let mut batch_count = 0usize;
         let mut queue = VecDeque::new();
-        let mut queued = Vec::new();
+        let mut queued = vec![false; state.equations.len()];
+
+        // The synthesized K..K' padding rows are immediately available and may
+        // peel before any real symbols arrive. Apply that deterministic prefix
+        // up front so subsequent batch catch-up sees the same reduced state as
+        // the sequential decode path.
+        for (idx, queued_flag) in queued.iter_mut().enumerate() {
+            if !*queued_flag && active_degree_one_col(&state, &state.equations[idx]).is_some() {
+                queue.push_back(idx);
+                *queued_flag = true;
+                state.stats.peel_queue_pushes += 1;
+            }
+        }
+        state.stats.peel_frontier_peak = state.stats.peel_frontier_peak.max(queue.len());
+        Self::peel_from_queue(&mut state, &mut queue, &mut queued);
 
         for chunk in symbols.chunks(effective_batch) {
             let base_eq_idx = state.equations.len();
@@ -3281,6 +3289,37 @@ mod tests {
             assert_eq!(
                 &result.source[idx], original,
                 "source symbol {idx} mismatch after synthesized padding rows"
+            );
+        }
+    }
+
+    #[test]
+    fn wavefront_decode_sources_only_auto_synthesizes_padded_lt_rows() {
+        let k = 50;
+        let symbol_size = 32;
+        let seed = 79u64;
+
+        let source = make_source_data(k, symbol_size);
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        assert!(
+            decoder.params().k_prime > k,
+            "test requires a padded systematic parameter set"
+        );
+
+        let mut received = decoder.constraint_symbols();
+        received.extend(make_received_source(&decoder, &source));
+
+        let sequential = decoder
+            .decode(&received)
+            .expect("sequential decoder should synthesize K..K' zero LT rows");
+
+        for &batch_size in &[1, 7, received.len()] {
+            let wavefront = decoder
+                .decode_wavefront(&received, batch_size)
+                .unwrap_or_else(|_| panic!("wavefront decode batch_size={batch_size}"));
+            assert_eq!(
+                wavefront.source, sequential.source,
+                "wavefront decode must match sequential decode for padded K..K' rows"
             );
         }
     }

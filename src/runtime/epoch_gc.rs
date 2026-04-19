@@ -573,13 +573,15 @@ impl DeferredCleanupQueue {
     }
 
     /// Clean up an obligation.
-    fn cleanup_obligation(&self, id: u64) {
+    fn cleanup_obligation(&self, obligation_id: u64) {
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = obligation_id;
         // Integrate with obligation tracking system
         // Note: This is a simplified implementation - real integration would
         // require access to the ObligationTable and proper error handling
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
-            obligation_id = id,
+            obligation_id = obligation_id,
             "Cleaning up obligation in deferred cleanup"
         );
 
@@ -590,6 +592,8 @@ impl DeferredCleanupQueue {
 
     /// Clean up a waker.
     fn cleanup_waker(&self, waker_id: u64, source: &str) {
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = waker_id;
         // Integrate with IO driver waker cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
@@ -621,6 +625,8 @@ impl DeferredCleanupQueue {
 
     /// Clean up region state.
     fn cleanup_region(&self, region_id: RegionId, task_ids: &[TaskId]) {
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = region_id;
         // Integrate with region table cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
@@ -631,6 +637,8 @@ impl DeferredCleanupQueue {
 
         // Clean up region metadata and associated tasks
         for &task_id in task_ids {
+            #[cfg(not(feature = "tracing-integration"))]
+            let _ = task_id;
             #[cfg(feature = "tracing-integration")]
             tracing::trace!(
                 task_id = task_id.as_u64(),
@@ -650,6 +658,8 @@ impl DeferredCleanupQueue {
 
     /// Clean up a timer.
     fn cleanup_timer(&self, timer_id: u64, timer_type: &str) {
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = timer_id;
         // Integrate with timer wheel cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
@@ -690,6 +700,8 @@ impl DeferredCleanupQueue {
 
     /// Clean up channel state.
     fn cleanup_channel(&self, channel_id: u64, cleanup_type: &str) {
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = channel_id;
         // Integrate with channel cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(

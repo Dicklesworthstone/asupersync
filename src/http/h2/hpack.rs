@@ -43,6 +43,9 @@ static STATIC_NAME_INDEX: LazyLock<HashMap<&'static str, usize>> = LazyLock::new
     map
 });
 
+/// Maximum allowed HPACK table size to prevent DoS (1MB).
+const MAX_ALLOWED_TABLE_SIZE: usize = 1024 * 1024;
+
 /// Maximum size of the dynamic table (default: 4096 bytes).
 pub const DEFAULT_MAX_TABLE_SIZE: usize = 4096;
 
@@ -166,7 +169,7 @@ impl DynamicTable {
         Self {
             entries: VecDeque::new(),
             size: 0,
-            max_size,
+            max_size: max_size.min(MAX_ALLOWED_TABLE_SIZE),
         }
     }
 
@@ -184,7 +187,7 @@ impl DynamicTable {
 
     /// Set the maximum size of the table, evicting entries if necessary.
     pub fn set_max_size(&mut self, max_size: usize) {
-        self.max_size = max_size;
+        self.max_size = max_size.min(MAX_ALLOWED_TABLE_SIZE);
         self.evict();
     }
 
@@ -390,12 +393,17 @@ impl Encoder {
         let name = normalized_name.as_ref();
         let value = header.value.as_str();
 
-        // Try to find exact match in tables
-        if let Some(idx) = find_static(name, value).or_else(|| self.dynamic_table.find(name, value))
-        {
-            // Indexed header field
-            encode_integer(dst, idx, 7, 0x80);
-            return;
+        if index {
+            // Exact-match indexing is only legal for regular indexed fields.
+            // Sensitive headers must stay on the RFC 7541 §6.2.3 "never
+            // indexed" representation even if the same name/value is already
+            // present in the static or dynamic table.
+            if let Some(idx) =
+                find_static(name, value).or_else(|| self.dynamic_table.find(name, value))
+            {
+                encode_integer(dst, idx, 7, 0x80);
+                return;
+            }
         }
 
         // Try to find name match
@@ -433,9 +441,6 @@ impl Default for Encoder {
         Self::new()
     }
 }
-
-/// Maximum allowed HPACK table size to prevent DoS (1MB).
-const MAX_ALLOWED_TABLE_SIZE: usize = 1024 * 1024;
 
 /// Maximum allowed decoded string length to prevent DoS (256 KB).
 /// This bounds the allocation size before the header-list-size check runs.
@@ -1498,6 +1503,19 @@ mod tests {
         let decoder = Decoder::with_max_size(MAX_ALLOWED_TABLE_SIZE + 1);
         assert_eq!(decoder.allowed_table_size, MAX_ALLOWED_TABLE_SIZE);
         assert_eq!(decoder.dynamic_table.max_size(), MAX_ALLOWED_TABLE_SIZE);
+    }
+
+    #[test]
+    fn test_encoder_with_max_size_caps_to_allowed_maximum() {
+        let encoder = Encoder::with_max_size(MAX_ALLOWED_TABLE_SIZE + 1);
+        assert_eq!(encoder.dynamic_table_max_size(), MAX_ALLOWED_TABLE_SIZE);
+    }
+
+    #[test]
+    fn test_dynamic_table_set_max_size_caps_to_allowed_maximum() {
+        let mut table = DynamicTable::new();
+        table.set_max_size(MAX_ALLOWED_TABLE_SIZE + 1);
+        assert_eq!(table.max_size(), MAX_ALLOWED_TABLE_SIZE);
     }
 
     #[test]
@@ -3086,6 +3104,64 @@ mod tests {
             !is_indexed,
             "Never-indexed header should not be found in dynamic table on subsequent encode"
         );
+    }
+
+    #[test]
+    fn sensitive_exact_static_match_never_uses_indexed_representation() {
+        let mut encoder = Encoder::new();
+        let mut decoder = Decoder::new();
+        encoder.set_use_huffman(false);
+
+        let header = Header::new(":method", "GET");
+        let mut encoded = BytesMut::new();
+        encoder.encode_sensitive(std::slice::from_ref(&header), &mut encoded);
+
+        assert_eq!(
+            encoded[0] & 0xF0,
+            0x10,
+            "sensitive headers must use the RFC 7541 never-indexed wire form, not indexed lookup"
+        );
+        assert_eq!(encoder.dynamic_table_size(), 0);
+
+        let mut src = encoded.freeze();
+        let decoded = decoder.decode(&mut src).expect("decode sensitive header");
+        assert_eq!(decoded, vec![header]);
+        assert_eq!(decoder.dynamic_table_size(), 0);
+    }
+
+    #[test]
+    fn sensitive_exact_dynamic_match_never_uses_indexed_representation() {
+        let mut encoder = Encoder::new();
+        let mut decoder = Decoder::new();
+        encoder.set_use_huffman(false);
+
+        let header = Header::new("authorization", "Bearer secret-token");
+        let mut indexed = BytesMut::new();
+        encoder.encode(std::slice::from_ref(&header), &mut indexed);
+        let mut indexed_src = indexed.freeze();
+        let decoded = decoder
+            .decode(&mut indexed_src)
+            .expect("decode indexed header");
+        assert_eq!(decoded, vec![header.clone()]);
+
+        let encoder_table_before = encoder.dynamic_table_size();
+        let decoder_table_before = decoder.dynamic_table_size();
+
+        let mut sensitive = BytesMut::new();
+        encoder.encode_sensitive(std::slice::from_ref(&header), &mut sensitive);
+        assert_eq!(
+            sensitive[0] & 0xF0,
+            0x10,
+            "sensitive exact matches must not collapse to indexed dynamic-table lookups"
+        );
+
+        let mut sensitive_src = sensitive.freeze();
+        let decoded_sensitive = decoder
+            .decode(&mut sensitive_src)
+            .expect("decode sensitive header");
+        assert_eq!(decoded_sensitive, vec![header]);
+        assert_eq!(encoder.dynamic_table_size(), encoder_table_before);
+        assert_eq!(decoder.dynamic_table_size(), decoder_table_before);
     }
 
     /// Additional test: Static table index bounds checking
