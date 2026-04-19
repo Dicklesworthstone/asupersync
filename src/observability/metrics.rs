@@ -168,6 +168,69 @@ impl Histogram {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    #[cfg(all(test, feature = "metrics"))]
+    pub(crate) fn bucket_counts(&self) -> Vec<u64> {
+        self.counts
+            .iter()
+            .map(|atomic| atomic.load(Ordering::Relaxed))
+            .collect()
+    }
+
+    #[cfg(all(test, feature = "metrics"))]
+    pub(crate) fn reset(&self) {
+        for count in &self.counts {
+            count.store(0, Ordering::Relaxed);
+        }
+        self.count.store(0, Ordering::Relaxed);
+        self.sum.store(0.0f64.to_bits(), Ordering::Relaxed);
+    }
+
+    #[cfg(all(test, feature = "metrics"))]
+    pub(crate) fn mean(&self) -> f64 {
+        let total_count = self.count();
+        if total_count == 0 {
+            0.0
+        } else {
+            self.sum() / (total_count as f64)
+        }
+    }
+
+    #[cfg(all(test, feature = "metrics"))]
+    pub(crate) fn bucket_boundaries(&self) -> &[f64] {
+        &self.buckets
+    }
+
+    #[cfg(test)]
+    pub(crate) fn percentile(&self, p: f64) -> Option<f64> {
+        if !(0.0..=1.0).contains(&p) || self.count() == 0 {
+            return None;
+        }
+
+        let total = self.count();
+        let target_rank = if p == 0.0 {
+            1
+        } else {
+            ((total as f64) * p).ceil() as u64
+        };
+        let mut cumulative = 0_u64;
+
+        for (i, count) in self
+            .counts
+            .iter()
+            .enumerate()
+            .map(|(i, count)| (i, count.load(Ordering::Relaxed)))
+        {
+            cumulative += count;
+            if cumulative >= target_rank {
+                if i == self.buckets.len() {
+                    return None;
+                }
+                return Some(self.buckets[i]);
+            }
+        }
+        None
+    }
 }
 
 /// A collection of metrics.
@@ -401,6 +464,7 @@ impl MetricsProvider for NoOpMetrics {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use super::*;
 
@@ -534,6 +598,37 @@ mod tests {
         h.observe(3.0); // should go in the <=5.0 bucket
         h.observe(100.0); // should go in the +Inf bucket
         assert_eq!(h.count(), 3);
+    }
+
+    #[test]
+    fn histogram_percentile_skips_empty_leading_buckets() {
+        let h = Histogram::new("h", vec![1.0, 5.0, 10.0]);
+        h.observe(6.0);
+
+        assert_eq!(h.percentile(0.0), Some(10.0));
+        assert_eq!(h.percentile(0.5), Some(10.0));
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn histogram_metrics_feature_test_helpers_round_trip() {
+        let h = Histogram::new("h", vec![5.0, 1.0, 10.0]);
+        assert_eq!(h.bucket_boundaries(), &[1.0, 5.0, 10.0]);
+        assert_eq!(h.bucket_counts(), vec![0, 0, 0, 0]);
+        assert_eq!(h.mean(), 0.0);
+
+        h.observe(0.5);
+        h.observe(4.5);
+        h.observe(20.0);
+        assert_eq!(h.bucket_counts(), vec![1, 1, 0, 1]);
+        assert_eq!(h.mean(), 25.0 / 3.0);
+
+        h.reset();
+        assert_eq!(h.count(), 0);
+        assert_eq!(h.sum(), 0.0);
+        assert_eq!(h.bucket_counts(), vec![0, 0, 0, 0]);
+        assert_eq!(h.mean(), 0.0);
     }
 
     #[test]

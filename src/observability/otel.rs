@@ -1625,12 +1625,77 @@ pub mod span_semantics {
     //! ```
 
     use opentelemetry::trace::{
-        SpanBuilder, SpanContext, SpanId, SpanKind, Status, StatusCode, TraceFlags, TraceId,
-        TraceState, Tracer,
+        SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState,
     };
-    use opentelemetry::{KeyValue, global};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime};
+
+    static NEXT_TEST_SPAN_SEED: AtomicU64 = AtomicU64::new(1);
+
+    fn next_test_trace_id() -> TraceId {
+        let seed = NEXT_TEST_SPAN_SEED.fetch_add(1, Ordering::Relaxed);
+        let hi = splitmix64(seed);
+        let lo = splitmix64(seed ^ 0x9e37_79b9_7f4a_7c15);
+        let trace_id = TraceId::from_bytes([
+            (hi >> 56) as u8,
+            (hi >> 48) as u8,
+            (hi >> 40) as u8,
+            (hi >> 32) as u8,
+            (hi >> 24) as u8,
+            (hi >> 16) as u8,
+            (hi >> 8) as u8,
+            hi as u8,
+            (lo >> 56) as u8,
+            (lo >> 48) as u8,
+            (lo >> 40) as u8,
+            (lo >> 32) as u8,
+            (lo >> 24) as u8,
+            (lo >> 16) as u8,
+            (lo >> 8) as u8,
+            lo as u8,
+        ]);
+        if trace_id == TraceId::INVALID {
+            TraceId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+        } else {
+            trace_id
+        }
+    }
+
+    fn next_test_span_id() -> SpanId {
+        let seed = NEXT_TEST_SPAN_SEED.fetch_add(1, Ordering::Relaxed);
+        let raw = splitmix64(seed ^ 0xa5a5_a5a5_a5a5_a5a5);
+        let span_id = SpanId::from_bytes([
+            (raw >> 56) as u8,
+            (raw >> 48) as u8,
+            (raw >> 40) as u8,
+            (raw >> 32) as u8,
+            (raw >> 24) as u8,
+            (raw >> 16) as u8,
+            (raw >> 8) as u8,
+            raw as u8,
+        ]);
+        if span_id == SpanId::INVALID {
+            SpanId::from_bytes([0, 0, 0, 0, 0, 0, 0, 1])
+        } else {
+            span_id
+        }
+    }
+
+    fn splitmix64(mut state: u64) -> u64 {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn truncate_value(value: &str, max_len: Option<usize>) -> String {
+        match max_len {
+            Some(limit) => value.chars().take(limit).collect(),
+            None => value.to_string(),
+        }
+    }
 
     /// Configuration for span semantics conformance testing.
     #[derive(Debug, Clone)]
@@ -1684,7 +1749,7 @@ pub mod span_semantics {
         }
 
         /// Record a test pass.
-        pub fn record_pass(&mut self, test_name: &str) {
+        pub fn record_pass(&mut self, _test_name: &str) {
             self.tests_run += 1;
             self.tests_passed += 1;
         }
@@ -1698,7 +1763,7 @@ pub mod span_semantics {
 
         /// Check if all tests passed.
         pub fn is_success(&self) -> bool {
-            self.tests_failed == 0 && self.tests_run > 0
+            self.tests_failed == 0
         }
 
         /// Get success rate as percentage.
@@ -1732,6 +1797,11 @@ pub mod span_semantics {
         pub status: Status,
         /// Parent span context.
         pub parent_context: Option<SpanContext>,
+        /// Propagated baggage entries.
+        pub baggage: HashMap<String, String>,
+        max_attributes: usize,
+        max_events: usize,
+        max_attribute_length: Option<usize>,
     }
 
     /// Span event for conformance testing.
@@ -1748,48 +1818,89 @@ pub mod span_semantics {
     impl TestSpan {
         /// Create a new test span.
         pub fn new(name: &str, kind: SpanKind) -> Self {
-            // Generate deterministic but unique IDs using system time
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default();
-            let nanos = now.as_nanos();
-            let trace_id = TraceId::from_u128(nanos ^ 0x1234567890abcdef_1234567890abcdef);
-            let span_id = SpanId::from_u64((nanos as u64) ^ 0xabcdef1234567890);
+            Self::new_with_config(name, kind, &SpanConformanceConfig::default())
+        }
+
+        /// Create a new root test span with explicit limits.
+        pub fn new_with_config(name: &str, kind: SpanKind, config: &SpanConformanceConfig) -> Self {
             let context = SpanContext::new(
-                trace_id,
-                span_id,
+                next_test_trace_id(),
+                next_test_span_id(),
                 TraceFlags::SAMPLED,
                 false,
                 TraceState::default(),
             );
-
-            Self {
-                context,
-                name: name.to_string(),
+            Self::from_parts(
+                name,
                 kind,
-                start_time: SystemTime::now(),
-                end_time: None,
-                attributes: HashMap::new(),
-                events: Vec::new(),
-                status: Status::Unset,
-                parent_context: None,
-            }
+                context,
+                None,
+                HashMap::new(),
+                config.max_attributes,
+                config.max_events,
+                config.max_attribute_length,
+            )
         }
 
         /// Create a child span.
         pub fn new_child(&self, name: &str, kind: SpanKind) -> Self {
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default();
-            let span_id = SpanId::from_u64((now.as_nanos() as u64) ^ 0xcdef1234567890ab);
+            let parent_context = self.context.clone();
             let context = SpanContext::new(
-                self.context.trace_id(),
-                span_id,
-                TraceFlags::SAMPLED,
+                parent_context.trace_id(),
+                next_test_span_id(),
+                parent_context.trace_flags(),
                 false,
-                TraceState::default(),
+                parent_context.trace_state().clone(),
             );
+            Self::from_parts(
+                name,
+                kind,
+                context,
+                Some(parent_context),
+                self.baggage.clone(),
+                self.max_attributes,
+                self.max_events,
+                self.max_attribute_length,
+            )
+        }
 
+        /// Create a child span from an extracted remote parent.
+        pub fn child_from_remote_parent(
+            parent_context: SpanContext,
+            baggage: HashMap<String, String>,
+            name: &str,
+            kind: SpanKind,
+            config: &SpanConformanceConfig,
+        ) -> Self {
+            let context = SpanContext::new(
+                parent_context.trace_id(),
+                next_test_span_id(),
+                parent_context.trace_flags(),
+                false,
+                parent_context.trace_state().clone(),
+            );
+            Self::from_parts(
+                name,
+                kind,
+                context,
+                Some(parent_context),
+                baggage,
+                config.max_attributes,
+                config.max_events,
+                config.max_attribute_length,
+            )
+        }
+
+        fn from_parts(
+            name: &str,
+            kind: SpanKind,
+            context: SpanContext,
+            parent_context: Option<SpanContext>,
+            baggage: HashMap<String, String>,
+            max_attributes: usize,
+            max_events: usize,
+            max_attribute_length: Option<usize>,
+        ) -> Self {
             Self {
                 context,
                 name: name.to_string(),
@@ -1799,17 +1910,35 @@ pub mod span_semantics {
                 attributes: HashMap::new(),
                 events: Vec::new(),
                 status: Status::Unset,
-                parent_context: Some(self.context),
+                parent_context,
+                baggage,
+                max_attributes,
+                max_events,
+                max_attribute_length,
             }
         }
 
         /// Set span attribute.
         pub fn set_attribute(&mut self, key: &str, value: &str) {
-            self.attributes.insert(key.to_string(), value.to_string());
+            let value = truncate_value(value, self.max_attribute_length);
+            if self.attributes.contains_key(key) || self.attributes.len() < self.max_attributes {
+                self.attributes.insert(key.to_string(), value);
+            }
+        }
+
+        /// Set a propagated baggage entry.
+        pub fn set_baggage_item(&mut self, key: &str, value: &str) {
+            self.baggage.insert(key.to_string(), value.to_string());
         }
 
         /// Add span event.
-        pub fn add_event(&mut self, name: &str, attributes: HashMap<String, String>) {
+        pub fn add_event(&mut self, name: &str, mut attributes: HashMap<String, String>) {
+            if self.events.len() >= self.max_events {
+                return;
+            }
+            for value in attributes.values_mut() {
+                *value = truncate_value(value, self.max_attribute_length);
+            }
             let event = SpanEvent {
                 name: name.to_string(),
                 timestamp: SystemTime::now(),
@@ -1820,12 +1949,26 @@ pub mod span_semantics {
 
         /// Set span status.
         pub fn set_status(&mut self, status: Status) {
-            self.status = status;
+            match status {
+                Status::Error { .. } => self.status = status,
+                Status::Ok => {
+                    if !matches!(self.status, Status::Error { .. }) {
+                        self.status = Status::Ok;
+                    }
+                }
+                Status::Unset => {
+                    if matches!(self.status, Status::Unset) {
+                        self.status = Status::Unset;
+                    }
+                }
+            }
         }
 
         /// End the span.
         pub fn end(&mut self) {
-            self.end_time = Some(SystemTime::now());
+            if self.end_time.is_none() {
+                self.end_time = Some(SystemTime::now());
+            }
         }
 
         /// Get span duration.
@@ -2023,7 +2166,7 @@ pub mod span_semantics {
     fn test_span_attributes(result: &mut SpanConformanceResult, config: &SpanConformanceConfig) {
         // Test 3.1: Basic attribute setting
         {
-            let mut span = TestSpan::new("test_span", SpanKind::Internal);
+            let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
             span.set_attribute("service.name", "test-service");
             span.set_attribute("http.method", "GET");
 
@@ -2042,7 +2185,7 @@ pub mod span_semantics {
 
         // Test 3.2: Attribute overwrite
         {
-            let mut span = TestSpan::new("test_span", SpanKind::Internal);
+            let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
             span.set_attribute("test.key", "original_value");
             span.set_attribute("test.key", "new_value");
 
@@ -2059,16 +2202,38 @@ pub mod span_semantics {
 
         // Test 3.3: Attribute limits (if configured)
         {
-            let mut span = TestSpan::new("test_span", SpanKind::Internal);
+            let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
 
             // Add more than max_attributes to test limit
             for i in 0..config.max_attributes + 10 {
                 span.set_attribute(&format!("attr_{}", i), "value");
             }
 
-            // Implementation should respect limits (this is specification-dependent)
-            // For now, we just verify the test runs without panic
+            if span.attributes.len() != config.max_attributes {
+                result.record_failure(
+                    "span_attributes_limits",
+                    "Attribute count should respect max_attributes",
+                );
+                return;
+            }
+
             result.record_pass("span_attributes_limits");
+        }
+
+        if let Some(limit) = config.max_attribute_length {
+            let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
+            let oversized = "x".repeat(limit + 5);
+            span.set_attribute("oversized", &oversized);
+
+            if span.attributes.get("oversized").map(String::len) != Some(limit) {
+                result.record_failure(
+                    "span_attributes_value_length",
+                    "Attribute values should respect max_attribute_length",
+                );
+                return;
+            }
+
+            result.record_pass("span_attributes_value_length");
         }
     }
 
@@ -2076,7 +2241,7 @@ pub mod span_semantics {
     fn test_span_events(result: &mut SpanConformanceResult, config: &SpanConformanceConfig) {
         // Test 4.1: Basic event recording
         {
-            let mut span = TestSpan::new("test_span", SpanKind::Internal);
+            let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
             let mut event_attrs = HashMap::new();
             event_attrs.insert("event.severity".to_string(), "info".to_string());
 
@@ -2098,7 +2263,7 @@ pub mod span_semantics {
 
         // Test 4.2: Multiple events with ordering
         {
-            let mut span = TestSpan::new("test_span", SpanKind::Internal);
+            let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
 
             span.add_event("first_event", HashMap::new());
             std::thread::sleep(Duration::from_millis(1));
@@ -2123,14 +2288,21 @@ pub mod span_semantics {
 
         // Test 4.3: Event limits (if configured)
         {
-            let mut span = TestSpan::new("test_span", SpanKind::Internal);
+            let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
 
             // Add more than max_events to test limit
             for i in 0..config.max_events + 10 {
                 span.add_event(&format!("event_{}", i), HashMap::new());
             }
 
-            // Implementation should respect limits
+            if span.events.len() != config.max_events {
+                result.record_failure(
+                    "span_events_limits",
+                    "Event count should respect max_events",
+                );
+                return;
+            }
+
             result.record_pass("span_events_limits");
         }
     }
@@ -2276,32 +2448,37 @@ pub mod span_semantics {
     /// Test context propagation semantics.
     fn test_context_propagation(
         result: &mut SpanConformanceResult,
-        _config: &SpanConformanceConfig,
+        config: &SpanConformanceConfig,
     ) {
         // Test 8.1: Context propagation across service boundaries
         {
             // Simulate extracting context from incoming request
-            let trace_id = TraceId::from_u128(0x12345678_90abcdef_12345678_90abcdef);
-            let span_id = SpanId::from_u64(0x1234567890abcdef);
+            let trace_id = TraceId::from_bytes([
+                0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab,
+                0xcd, 0xef,
+            ]);
+            let span_id = SpanId::from_bytes([0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef]);
+            let trace_state =
+                TraceState::from_key_value([("vendor", "upstream")]).expect("valid trace state");
             let incoming_context = SpanContext::new(
                 trace_id,
                 span_id,
                 TraceFlags::SAMPLED,
-                false,
-                TraceState::default(),
+                true,
+                trace_state.clone(),
             );
 
-            // Create child span from incoming context
-            let child_span_id = SpanId::from_u64(0xfedcba9876543210);
-            let child_context = SpanContext::new(
-                trace_id,            // Same trace ID
-                child_span_id,       // New span ID
-                TraceFlags::SAMPLED, // Inherit sampling
-                false,
-                TraceState::default(),
+            let mut baggage = HashMap::new();
+            baggage.insert("tenant".to_string(), "alpha".to_string());
+            let child = TestSpan::child_from_remote_parent(
+                incoming_context.clone(),
+                baggage,
+                "remote_child",
+                SpanKind::Server,
+                config,
             );
 
-            if child_context.trace_id() != incoming_context.trace_id() {
+            if child.context.trace_id() != incoming_context.trace_id() {
                 result.record_failure(
                     "context_propagation_trace_id",
                     "Trace ID should be preserved across boundaries",
@@ -2309,10 +2486,18 @@ pub mod span_semantics {
                 return;
             }
 
-            if child_context.trace_flags() != incoming_context.trace_flags() {
+            if child.context.trace_flags() != incoming_context.trace_flags() {
                 result.record_failure(
                     "context_propagation_flags",
                     "Trace flags should be preserved",
+                );
+                return;
+            }
+
+            if !incoming_context.is_remote() || child.context.is_remote() {
+                result.record_failure(
+                    "context_propagation_remote_flag",
+                    "Incoming context should stay remote while child becomes local",
                 );
                 return;
             }
@@ -2322,10 +2507,71 @@ pub mod span_semantics {
 
         // Test 8.2: TraceState propagation
         {
-            let mut trace_state = TraceState::default();
-            // In a real implementation, we would test trace state key-value propagation
-            // For now, just verify the test structure works
+            let trace_state =
+                TraceState::from_key_value([("vendor", "upstream")]).expect("valid trace state");
+            let incoming_context = SpanContext::new(
+                TraceId::from_bytes([
+                    0xaa, 0xaa, 0xaa, 0xaa, 0xbb, 0xbb, 0xbb, 0xbb, 0xcc, 0xcc, 0xcc, 0xcc, 0xdd,
+                    0xdd, 0xdd, 0xdd,
+                ]),
+                SpanId::from_bytes([0x11; 8]),
+                TraceFlags::SAMPLED,
+                true,
+                trace_state,
+            );
+            let child = TestSpan::child_from_remote_parent(
+                incoming_context,
+                HashMap::new(),
+                "remote_child",
+                SpanKind::Consumer,
+                config,
+            );
+
+            if child.context.trace_state().get("vendor") != Some("upstream") {
+                result.record_failure(
+                    "context_propagation_state",
+                    "TraceState should propagate to child spans",
+                );
+                return;
+            }
+
             result.record_pass("context_propagation_state");
+        }
+
+        // Test 8.3: Baggage propagation
+        {
+            let incoming_context = SpanContext::new(
+                TraceId::from_bytes([
+                    0xee, 0xee, 0xee, 0xee, 0xff, 0xff, 0xff, 0xff, 0x11, 0x11, 0x11, 0x11, 0x22,
+                    0x22, 0x22, 0x22,
+                ]),
+                SpanId::from_bytes([0x22; 8]),
+                TraceFlags::SAMPLED,
+                true,
+                TraceState::default(),
+            );
+            let mut baggage = HashMap::new();
+            baggage.insert("tenant".to_string(), "alpha".to_string());
+            baggage.insert("request.class".to_string(), "gold".to_string());
+            let child = TestSpan::child_from_remote_parent(
+                incoming_context,
+                baggage,
+                "remote_child",
+                SpanKind::Server,
+                config,
+            );
+
+            if child.baggage.get("tenant").map(String::as_str) != Some("alpha")
+                || child.baggage.get("request.class").map(String::as_str) != Some("gold")
+            {
+                result.record_failure(
+                    "context_propagation_baggage",
+                    "Baggage should propagate across service boundaries",
+                );
+                return;
+            }
+
+            result.record_pass("context_propagation_baggage");
         }
     }
 
@@ -2378,6 +2624,15 @@ pub mod span_semantics {
         }
 
         #[test]
+        fn test_span_end_is_idempotent() {
+            let mut span = TestSpan::new("test", SpanKind::Internal);
+            span.end();
+            let first_end_time = span.end_time;
+            span.end();
+            assert_eq!(span.end_time, first_end_time);
+        }
+
+        #[test]
         fn test_span_hierarchy() {
             let parent = TestSpan::new("parent", SpanKind::Internal);
             let child = parent.new_child("child", SpanKind::Internal);
@@ -2389,34 +2644,80 @@ pub mod span_semantics {
         }
 
         #[test]
+        fn test_span_remote_parent_propagates_trace_state_and_baggage() {
+            let config = SpanConformanceConfig {
+                max_attributes: 8,
+                max_events: 8,
+                max_attribute_length: Some(8),
+                test_sampling: true,
+                test_context_propagation: true,
+            };
+            let trace_state =
+                TraceState::from_key_value([("vendor", "edge")]).expect("valid trace state");
+            let remote_parent = SpanContext::new(
+                TraceId::from_bytes([
+                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x11, 0x12, 0x13, 0x14, 0x15,
+                    0x16, 0x17, 0x18,
+                ]),
+                SpanId::from_bytes([0x11; 8]),
+                TraceFlags::SAMPLED,
+                true,
+                trace_state,
+            );
+            let mut baggage = HashMap::new();
+            baggage.insert("tenant".to_string(), "alpha".to_string());
+
+            let child = TestSpan::child_from_remote_parent(
+                remote_parent,
+                baggage,
+                "child",
+                SpanKind::Server,
+                &config,
+            );
+
+            assert_eq!(child.context.trace_state().get("vendor"), Some("edge"));
+            assert_eq!(
+                child.baggage.get("tenant").map(String::as_str),
+                Some("alpha")
+            );
+            assert!(!child.context.is_remote());
+            assert!(child.parent_context.expect("parent").is_remote());
+        }
+
+        #[test]
+        fn test_span_attribute_and_event_limits_are_enforced() {
+            let config = SpanConformanceConfig {
+                max_attributes: 2,
+                max_events: 1,
+                max_attribute_length: Some(4),
+                test_sampling: true,
+                test_context_propagation: true,
+            };
+            let mut span = TestSpan::new_with_config("test", SpanKind::Internal, &config);
+
+            span.set_attribute("k1", "value");
+            span.set_attribute("k2", "value");
+            span.set_attribute("k3", "value");
+            assert_eq!(span.attributes.len(), 2);
+            assert_eq!(span.attributes.get("k1").map(String::as_str), Some("valu"));
+
+            span.add_event("one", HashMap::new());
+            span.add_event("two", HashMap::new());
+            assert_eq!(span.events.len(), 1);
+        }
+
+        #[test]
         fn run_basic_conformance_tests() {
             // Test the actual conformance runner
             let config = SpanConformanceConfig::default();
             let result = run_span_conformance_tests_with_config(&config)
                 .expect("Conformance tests should run");
 
-            // Verify some tests were run
             assert!(result.tests_run > 0);
-
-            // Print results for debugging
-            println!("Span Conformance Results:");
-            println!("  Tests run: {}", result.tests_run);
-            println!("  Tests passed: {}", result.tests_passed);
-            println!("  Tests failed: {}", result.tests_failed);
-            println!("  Success rate: {:.1}%", result.success_rate());
-
-            if !result.failures.is_empty() {
-                println!("  Failures:");
-                for failure in &result.failures {
-                    println!("    - {}", failure);
-                }
-            }
-
-            // For basic functionality, we expect high success rate
             assert!(
-                result.success_rate() >= 80.0,
-                "Expected at least 80% success rate, got {:.1}%",
-                result.success_rate()
+                result.is_success(),
+                "span conformance failures: {:?}",
+                result.failures
             );
         }
     }
@@ -2432,17 +2733,23 @@ pub mod span_semantics {
     /// Placeholder result when tracing is disabled.
     #[derive(Debug)]
     pub struct SpanConformanceResult {
+        /// Total number of tests executed.
         pub tests_run: usize,
+        /// Number of tests that passed.
         pub tests_passed: usize,
+        /// Number of tests that failed.
         pub tests_failed: usize,
+        /// Failure descriptions captured during the run.
         pub failures: Vec<String>,
     }
 
     impl SpanConformanceResult {
+        /// Returns `true` when no failures were recorded.
         pub fn is_success(&self) -> bool {
-            false
+            self.tests_failed == 0
         }
 
+        /// Returns a placeholder success rate for the disabled implementation.
         pub fn success_rate(&self) -> f64 {
             0.0
         }

@@ -689,6 +689,7 @@ impl CancellationDebtMonitor {
     }
 
     /// Generate and store an alert.
+    #[allow(unused_variables)]
     fn generate_alert(&self, alert: DebtAlert) {
         {
             let mut alerts = self.recent_alerts.lock().unwrap();
@@ -700,11 +701,16 @@ impl CancellationDebtMonitor {
             }
         }
 
-        // In a real implementation, this would integrate with the alerting system
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("[DEBT_ALERT] {:?}: {}", alert.level, alert.message);
-        }
+        crate::tracing_compat::warn!(
+            level = ?alert.level,
+            work_type = ?alert.work_type,
+            entity_id = ?alert.entity_id,
+            metric_value = alert.metric_value,
+            threshold = alert.threshold,
+            generated_at = ?alert.generated_at,
+            message = %alert.message,
+            "cancellation debt alert"
+        );
     }
 }
 

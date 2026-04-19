@@ -1013,8 +1013,6 @@ mod tests {
     #[test]
     fn mr_obligation_panic_during_commit_triggers_abort() {
         use crate::types::Budget;
-        use std::panic::{AssertUnwindSafe, catch_unwind};
-
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
         let (task_id, _handle) = state
@@ -1168,7 +1166,7 @@ mod tests {
     #[test]
     fn mr_obligation_deterministic_replay() {
         use crate::types::Budget;
-        use crate::util::DetEntropy;
+        use crate::util::DetRng;
 
         // First execution with deterministic entropy
         let mut state1 = RuntimeState::new();
@@ -1178,7 +1176,7 @@ mod tests {
             .expect("create task 1");
 
         // Simulate deterministic obligation creation pattern
-        let entropy1 = DetEntropy::mix_seed(12345);
+        let mut entropy1 = DetRng::new(12345);
         let mut obligation_ids_1 = Vec::new();
 
         for i in 0..3 {
@@ -1204,7 +1202,7 @@ mod tests {
             .create_task(root2, Budget::INFINITE, async {})
             .expect("create task 2");
 
-        let entropy2 = DetEntropy::with_seed(12345); // Same seed
+        let mut entropy2 = DetRng::new(12345); // Same seed
         let mut obligation_ids_2 = Vec::new();
 
         for i in 0..3 {

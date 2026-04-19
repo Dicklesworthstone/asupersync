@@ -17,7 +17,6 @@ mod conformance_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier as StdBarrier};
     use std::thread;
-    use std::time::Duration;
 
     // ULP (Unit in the Last Place) helper for floating-point precision testing
     fn ulp_diff(a: f64, b: f64) -> u64 {
@@ -42,70 +41,6 @@ mod conformance_tests {
         } else {
             // Same sign, direct bit difference
             a_bits.max(b_bits) - a_bits.min(b_bits)
-        }
-    }
-
-    // Helper to access histogram internals for testing
-    impl Histogram {
-        #[cfg(test)]
-        pub(crate) fn bucket_counts(&self) -> Vec<u64> {
-            self.counts
-                .iter()
-                .map(|atomic| atomic.load(Ordering::Relaxed))
-                .collect()
-        }
-
-        #[cfg(test)]
-        pub(crate) fn reset(&self) {
-            // Atomic reset of all counters
-            for count in &self.counts {
-                count.store(0, Ordering::Relaxed);
-            }
-            self.count.store(0, Ordering::Relaxed);
-            self.sum.store(0_u64, Ordering::Relaxed);
-        }
-
-        #[cfg(test)]
-        pub(crate) fn mean(&self) -> f64 {
-            let total_count = self.count();
-            if total_count == 0 {
-                0.0
-            } else {
-                self.sum() / (total_count as f64)
-            }
-        }
-
-        #[cfg(test)]
-        pub(crate) fn bucket_boundaries(&self) -> &[f64] {
-            &self.buckets
-        }
-
-        #[cfg(test)]
-        pub(crate) fn percentile(&self, p: f64) -> Option<f64> {
-            if !(0.0..=1.0).contains(&p) || self.count() == 0 {
-                return None;
-            }
-
-            let total = self.count() as f64;
-            let target = total * p;
-            let mut cumulative = 0_u64;
-
-            for (i, &count) in self
-                .counts
-                .iter()
-                .enumerate()
-                .map(|(i, count)| (i, count.load(Ordering::Relaxed)))
-            {
-                cumulative += count;
-                if (cumulative as f64) >= target {
-                    if i == self.buckets.len() {
-                        // +Inf bucket, no meaningful upper bound
-                        return None;
-                    }
-                    return Some(self.buckets[i]);
-                }
-            }
-            None
         }
     }
 
@@ -180,7 +115,7 @@ mod conformance_tests {
                 let incremented_buckets: Vec<_> = bucket_counts
                     .iter()
                     .enumerate()
-                    .filter(|(_, &count)| count > 0)
+                    .filter(|&(_, &count)| count > 0)
                     .collect();
 
                 assert_eq!(
@@ -206,6 +141,9 @@ mod conformance_tests {
                     let next_float = f64::from_bits(boundary.to_bits() + 1);
                     let prev_float = f64::from_bits(boundary.to_bits() - 1);
 
+                    assert_eq!(ulp_diff(prev_float, boundary), 1);
+                    assert_eq!(ulp_diff(boundary, next_float), 1);
+
                     // Test that values within 1 ULP are handled consistently
                     hist.reset();
                     hist.observe(prev_float);
@@ -217,7 +155,7 @@ mod conformance_tests {
                     let non_zero_buckets: Vec<_> = counts
                         .iter()
                         .enumerate()
-                        .filter(|(_, &count)| count > 0)
+                        .filter(|&(_, &count)| count > 0)
                         .collect();
 
                     // Should span at most 2 adjacent buckets
@@ -303,18 +241,18 @@ mod conformance_tests {
         // Test cases with known statistical properties
         let test_cases = vec![
             // Single value
-            (vec![3.0], 3.0, 3.0), // mean=3.0, all percentiles=3.0
+            (vec![3.0], 3.0), // mean=3.0
             // Two values
-            (vec![1.0, 5.0], 3.0, 3.0), // mean=3.0, median around 3.0
+            (vec![1.0, 5.0], 3.0), // mean=3.0
             // Multiple identical values
-            (vec![2.0, 2.0, 2.0, 2.0], 2.0, 2.0), // all stats = 2.0
+            (vec![2.0, 2.0, 2.0, 2.0], 2.0), // mean=2.0
             // Symmetric distribution
-            (vec![1.0, 2.0, 3.0, 4.0, 5.0], 3.0, 3.0), // mean=3.0, median=3.0
+            (vec![1.0, 2.0, 3.0, 4.0, 5.0], 3.0), // mean=3.0
             // Arithmetic sequence
-            (vec![10.0, 20.0, 30.0, 40.0, 50.0], 30.0, 30.0), // mean=30.0
+            (vec![10.0, 20.0, 30.0, 40.0, 50.0], 30.0), // mean=30.0
         ];
 
-        for (values, expected_mean, expected_approx_median) in test_cases {
+        for (values, expected_mean) in test_cases {
             hist.reset();
 
             for &value in &values {

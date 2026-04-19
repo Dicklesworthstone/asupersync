@@ -107,7 +107,21 @@ impl LamportClock {
     /// Records a local event and returns the updated time.
     #[must_use]
     pub fn tick(&self) -> LamportTime {
-        LamportTime(self.counter.fetch_add(1, Ordering::AcqRel) + 1)
+        let mut current = self.counter.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_add(1)
+                .expect("Lamport clock overflowed while ticking");
+            match self.counter.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return LamportTime(next),
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Merges a received Lamport time and returns the updated time.
@@ -115,7 +129,10 @@ impl LamportClock {
     pub fn receive(&self, sender: LamportTime) -> LamportTime {
         let mut current = self.counter.load(Ordering::Acquire);
         loop {
-            let next = current.max(sender.raw()) + 1;
+            let next = current
+                .max(sender.raw())
+                .checked_add(1)
+                .expect("Lamport clock overflowed while merging a received time");
             match self.counter.compare_exchange_weak(
                 current,
                 next,
@@ -231,7 +248,10 @@ impl HybridClock {
         let mut state = self.state.lock();
         let physical = self.physical_now(&state);
         if physical == state.last_physical {
-            state.logical = state.logical.saturating_add(1);
+            state.logical = state
+                .logical
+                .checked_add(1)
+                .expect("Hybrid clock logical counter overflowed while ticking");
         } else {
             state.last_physical = physical;
             state.logical = 0;
@@ -248,11 +268,19 @@ impl HybridClock {
 
         let next_logical = if max_physical == state.last_physical && max_physical == sender.physical
         {
-            state.logical.max(sender.logical).saturating_add(1)
+            state
+                .logical
+                .max(sender.logical)
+                .checked_add(1)
+                .expect("Hybrid clock logical counter overflowed while merging equal physical time")
         } else if max_physical == state.last_physical {
-            state.logical.saturating_add(1)
+            state.logical.checked_add(1).expect(
+                "Hybrid clock logical counter overflowed while advancing local logical time",
+            )
         } else if max_physical == sender.physical {
-            sender.logical.saturating_add(1)
+            sender.logical.checked_add(1).expect(
+                "Hybrid clock logical counter overflowed while incorporating a remote physical time",
+            )
         } else {
             0
         };
@@ -589,7 +617,9 @@ impl VectorClock {
     /// Increments the counter for the given node and returns the new value.
     pub fn increment(&mut self, node: &NodeId) -> u64 {
         let entry = self.entries.entry(node.clone()).or_insert(0);
-        *entry += 1;
+        *entry = entry
+            .checked_add(1)
+            .expect("Vector clock counter overflowed while incrementing");
         *entry
     }
 
@@ -913,6 +943,20 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Lamport clock overflowed while ticking")]
+    fn lamport_tick_panics_on_overflow() {
+        let clock = LamportClock::with_start(u64::MAX);
+        let _ = clock.tick();
+    }
+
+    #[test]
+    #[should_panic(expected = "Lamport clock overflowed while merging a received time")]
+    fn lamport_receive_panics_on_overflow() {
+        let clock = LamportClock::with_start(u64::MAX - 1);
+        let _ = clock.receive(LamportTime::from_raw(u64::MAX));
+    }
+
+    #[test]
     fn hybrid_clock_deterministic_with_virtual_time() {
         let virtual_clock = Arc::new(VirtualClock::new());
         let hlc = HybridClock::new(virtual_clock.clone());
@@ -941,6 +985,38 @@ mod tests {
 
         let t2 = hlc.tick();
         assert!(t2 >= observed);
+    }
+
+    #[test]
+    #[should_panic(expected = "Hybrid clock logical counter overflowed while ticking")]
+    fn hybrid_tick_panics_on_logical_overflow() {
+        let time_source: Arc<dyn TimeSource> = Arc::new(VirtualClock::new());
+        let hlc = HybridClock {
+            time_source,
+            state: Mutex::new(HybridState {
+                last_physical: Time::ZERO,
+                logical: u64::MAX,
+            }),
+        };
+
+        let _ = hlc.tick();
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Hybrid clock logical counter overflowed while merging equal physical time"
+    )]
+    fn hybrid_receive_panics_on_equal_physical_logical_overflow() {
+        let time_source: Arc<dyn TimeSource> = Arc::new(VirtualClock::new());
+        let hlc = HybridClock {
+            time_source,
+            state: Mutex::new(HybridState {
+                last_physical: Time::ZERO,
+                logical: u64::MAX,
+            }),
+        };
+
+        let _ = hlc.receive(HybridTime::new(Time::ZERO, u64::MAX));
     }
 
     #[test]
@@ -1039,6 +1115,29 @@ mod tests {
         // Higher value should advance.
         vc.set(&n, 7);
         assert_eq!(vc.get(&n), 7);
+    }
+
+    #[test]
+    #[should_panic(expected = "Vector clock counter overflowed while incrementing")]
+    fn vector_clock_increment_panics_on_overflow() {
+        let n = node("A");
+        let mut vc = VectorClock::new();
+        vc.entries.insert(n.clone(), u64::MAX);
+        let _ = vc.increment(&n);
+    }
+
+    #[test]
+    #[should_panic(expected = "Vector clock counter overflowed while incrementing")]
+    fn vector_clock_receive_panics_on_local_overflow() {
+        let local = node("A");
+        let remote = node("B");
+        let mut vc = VectorClock::new();
+        vc.entries.insert(local.clone(), u64::MAX);
+
+        let mut remote_clock = VectorClock::new();
+        remote_clock.set(&remote, 1);
+
+        vc.receive(&local, &remote_clock);
     }
 
     #[test]

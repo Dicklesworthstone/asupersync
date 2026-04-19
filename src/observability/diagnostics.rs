@@ -3123,7 +3123,7 @@ mod tests {
         // Configure scheduler-visible state
         let running_task_record = state.task_mut(running_task).expect("running task");
         running_task_record.total_polls = 5;
-        running_task_record.last_polled_step = Some(Time::from_millis(100));
+        running_task_record.last_polled_step = 100;
         let notified = running_task_record.wake_state.notify();
         crate::assert_with_log!(notified, "wake state notified", true, notified);
 

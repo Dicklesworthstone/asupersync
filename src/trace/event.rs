@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const TRACE_EVENT_SCHEMA_VERSION: u32 = 1;
 /// Browser trace contract schema version.
 pub const BROWSER_TRACE_SCHEMA_VERSION: &str = "browser-trace-schema-v1";
+const MAX_BROWSER_TRACE_ATTRIBUTE_BYTES: usize = 128;
 
 /// Browser trace event category for deterministic diagnostics.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -767,6 +768,70 @@ fn default_browser_capture_metadata(event: &TraceEvent) -> BrowserCaptureMetadat
     }
 }
 
+fn stable_browser_trace_hash(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    hash
+}
+
+fn cap_browser_trace_attribute(value: &str) -> String {
+    if value.len() <= MAX_BROWSER_TRACE_ATTRIBUTE_BYTES {
+        return value.to_string();
+    }
+
+    let suffix = format!("#{:016x}", stable_browser_trace_hash(value.as_bytes()));
+    let mut cut = MAX_BROWSER_TRACE_ATTRIBUTE_BYTES.saturating_sub(suffix.len());
+    while cut > 0 && !value.is_char_boundary(cut) {
+        cut -= 1;
+    }
+
+    let mut capped = value[..cut].to_string();
+    capped.push_str(&suffix);
+    capped
+}
+
+fn browser_trace_sequence_group(event: &TraceEvent) -> String {
+    // Sequence groups must identify the causal or relationship domain for
+    // ordering checks; category labels are too coarse and collapse independent
+    // streams into the same group.
+    let raw = match &event.data {
+        TraceData::Task { task, .. }
+        | TraceData::Cancel { task, .. }
+        | TraceData::Futurelock { task, .. } => format!("task:{task}"),
+        TraceData::Region { region, .. } | TraceData::RegionCancel { region, .. } => {
+            format!("region:{region}")
+        }
+        TraceData::Obligation { obligation, .. } => format!("obligation:{obligation}"),
+        TraceData::Worker {
+            worker_id, job_id, ..
+        } => format!("worker_job:{job_id}:{worker_id}"),
+        TraceData::Time { .. } => "time".to_string(),
+        TraceData::Timer { timer_id, .. } => format!("timer:{timer_id}"),
+        TraceData::IoRequested { token, .. }
+        | TraceData::IoReady { token, .. }
+        | TraceData::IoResult { token, .. }
+        | TraceData::IoError { token, .. } => format!("io:{token}"),
+        TraceData::RngSeed { .. } | TraceData::RngValue { .. } => "rng".to_string(),
+        TraceData::Checkpoint { sequence, .. } => format!("checkpoint:{sequence}"),
+        TraceData::Monitor { monitor_ref, .. } | TraceData::Down { monitor_ref, .. } => {
+            format!("monitor:{monitor_ref}")
+        }
+        TraceData::Link { link_ref, .. } | TraceData::Exit { link_ref, .. } => {
+            format!("link:{link_ref}")
+        }
+        TraceData::Message(_) => "user_trace".to_string(),
+        TraceData::Chaos {
+            task: Some(task), ..
+        } => format!("task:{task}"),
+        TraceData::Chaos { task: None, .. } => "chaos".to_string(),
+        TraceData::None => format!("kind:{}", event.kind.stable_name()),
+    };
+    cap_browser_trace_attribute(&raw)
+}
+
 fn browser_capture_replay_key(metadata: &BrowserCaptureMetadata) -> String {
     format!(
         "{}:{}:{}:{}",
@@ -835,7 +900,7 @@ pub fn browser_trace_log_fields_with_capture(
     fields.insert("trace_id".to_string(), trace_id.to_string());
     fields.insert(
         "sequence_group".to_string(),
-        browser_trace_category_name(browser_trace_category_for_kind(event.kind)).to_string(),
+        browser_trace_sequence_group(event),
     );
     let failure_category = validation_failure_category
         .filter(|category| !category.trim().is_empty())
@@ -868,7 +933,10 @@ pub fn browser_trace_log_fields_with_capture(
         fields.insert("region".to_string(), region.to_string());
         fields.insert("replay_hash".to_string(), replay_hash.to_string());
         fields.insert("task".to_string(), task.to_string());
-        fields.insert("worker_id".to_string(), worker_id.clone());
+        fields.insert(
+            "worker_id".to_string(),
+            cap_browser_trace_attribute(worker_id),
+        );
     }
     fields
 }
@@ -3479,6 +3547,7 @@ mod tests {
             fields.get("validation_failure_category"),
             Some(&"none".to_string())
         );
+        assert_eq!(fields.get("sequence_group"), Some(&"timer:10".to_string()));
     }
 
     #[test]
@@ -3505,6 +3574,78 @@ mod tests {
         assert_eq!(
             fields.get("capture_replay_key"),
             Some(&"host_input:71:4:9001".to_string())
+        );
+    }
+
+    #[test]
+    fn browser_trace_log_fields_sequence_group_tracks_causal_domain() {
+        let first = TraceEvent::timer_fired(7, Time::from_nanos(10), 41);
+        let second = TraceEvent::timer_cancelled(8, Time::from_nanos(11), 41);
+        let unrelated = TraceEvent::timer_fired(9, Time::from_nanos(12), 99);
+
+        let first_fields = browser_trace_log_fields(&first, "trace-browser-group-1", None);
+        let second_fields = browser_trace_log_fields(&second, "trace-browser-group-2", None);
+        let unrelated_fields = browser_trace_log_fields(&unrelated, "trace-browser-group-3", None);
+
+        assert_eq!(
+            first_fields.get("sequence_group"),
+            Some(&"timer:41".to_string())
+        );
+        assert_eq!(
+            first_fields.get("sequence_group"),
+            second_fields.get("sequence_group")
+        );
+        assert_ne!(
+            first_fields.get("sequence_group"),
+            unrelated_fields.get("sequence_group")
+        );
+    }
+
+    #[test]
+    fn browser_trace_log_fields_sequence_group_preserves_link_relationships() {
+        let created = TraceEvent::link_created(
+            20,
+            Time::from_nanos(100),
+            77,
+            task(1),
+            region(2),
+            task(3),
+            region(4),
+        );
+        let exited = TraceEvent::exit_delivered(
+            21,
+            Time::from_nanos(101),
+            77,
+            task(1),
+            task(3),
+            Time::from_nanos(55),
+            DownReason::Normal,
+        );
+        let other = TraceEvent::link_dropped(
+            22,
+            Time::from_nanos(102),
+            88,
+            task(1),
+            region(2),
+            task(3),
+            region(4),
+        );
+
+        let created_fields = browser_trace_log_fields(&created, "trace-browser-link-1", None);
+        let exited_fields = browser_trace_log_fields(&exited, "trace-browser-link-2", None);
+        let other_fields = browser_trace_log_fields(&other, "trace-browser-link-3", None);
+
+        assert_eq!(
+            created_fields.get("sequence_group"),
+            Some(&"link:77".to_string())
+        );
+        assert_eq!(
+            created_fields.get("sequence_group"),
+            exited_fields.get("sequence_group")
+        );
+        assert_ne!(
+            created_fields.get("sequence_group"),
+            other_fields.get("sequence_group")
         );
     }
 
@@ -3544,5 +3685,40 @@ mod tests {
         assert_eq!(fields.get("replay_hash"), Some(&"12648430".to_string()));
         assert_eq!(fields.get("task"), Some(&task(9).to_string()));
         assert_eq!(fields.get("worker_id"), Some(&"worker-a".to_string()));
+        assert_eq!(
+            fields.get("sequence_group"),
+            Some(&"worker_job:77:worker-a".to_string())
+        );
+    }
+
+    #[test]
+    fn browser_trace_log_fields_cap_large_worker_attributes_without_utf8_breakage() {
+        let worker_id = format!("worker-{}", "e\u{0301}".repeat(200));
+        let event = TraceEvent::worker_cancel_requested(
+            30,
+            Time::from_nanos(60),
+            worker_id,
+            123,
+            456,
+            0xDEAD_BEEF,
+            task(5),
+            region(6),
+            obligation(7),
+        );
+        let fields = browser_trace_log_fields(&event, "trace-browser-worker-2", None);
+
+        let worker_id = fields
+            .get("worker_id")
+            .expect("worker_id field should be present");
+        let sequence_group = fields
+            .get("sequence_group")
+            .expect("sequence_group field should be present");
+
+        assert!(worker_id.len() <= MAX_BROWSER_TRACE_ATTRIBUTE_BYTES);
+        assert!(sequence_group.len() <= MAX_BROWSER_TRACE_ATTRIBUTE_BYTES);
+        assert!(worker_id.starts_with("worker-"));
+        assert!(sequence_group.starts_with("worker_job:123:worker-"));
+        assert!(worker_id.contains('#'));
+        assert!(sequence_group.contains('#'));
     }
 }

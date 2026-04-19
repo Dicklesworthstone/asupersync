@@ -418,34 +418,33 @@ impl StructuredCancellationAnalyzer {
     }
 
     /// Log a structured trace event.
+    #[allow(unused_variables)]
     fn log_trace_event(
         event_type: &str,
         trace_id: crate::observability::TraceId,
         entity_id: Option<&str>,
     ) {
-        // In a real implementation, this would integrate with the structured logging framework
-        #[cfg(debug_assertions)]
-        {
-            let entity_info = entity_id.map_or(String::new(), |id| format!(", entity_id: {id}"));
-            eprintln!(
-                "[CANCELLATION_TRACE] {}: trace_id: {}{}",
-                event_type,
-                trace_id.as_u64(),
-                entity_info
-            );
-        }
+        crate::tracing_compat::debug!(
+            event_type = event_type,
+            trace_id = trace_id.as_u64(),
+            entity_id = ?entity_id,
+            "cancellation trace event"
+        );
     }
 
     /// Log an alert using structured logging.
+    #[allow(unused_variables)]
     fn log_alert(alert: &CancellationAlert) {
-        // In a real implementation, this would integrate with the structured logging framework
-        #[cfg(debug_assertions)]
-        {
-            eprintln!(
-                "[CANCELLATION_ALERT] {:?}: {} (severity: {:?})",
-                alert.alert_type, alert.message, alert.severity
-            );
-        }
+        crate::tracing_compat::warn!(
+            alert_type = ?alert.alert_type,
+            severity = ?alert.severity,
+            entity_id = ?alert.entity_id,
+            metric_value = alert.metric_value,
+            threshold = alert.threshold,
+            triggered_at = ?alert.triggered_at,
+            message = %alert.message,
+            "cancellation alert"
+        );
     }
 
     /// Clean up old traces to manage memory usage.
