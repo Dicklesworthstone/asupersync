@@ -182,7 +182,7 @@ impl Default for PotentialWeights {
 /// This is a lightweight aggregate of the state components that feed
 /// the Lyapunov potential function. It can be constructed from
 /// `RuntimeState` or assembled manually in tests.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StateSnapshot {
     /// Current virtual time.
     pub time: Time,
