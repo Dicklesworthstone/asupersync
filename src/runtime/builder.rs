@@ -3042,6 +3042,55 @@ impl Runtime {
         run_future_with_budget(future, self.inner.config.poll_budget)
     }
 
+    /// Run a future to completion with an ambient [`Cx`](crate::cx::Cx).
+    ///
+    /// This is for execution paths that are polled directly by `block_on`
+    /// rather than through the scheduler, but still need `Cx::current()` to
+    /// reflect the active request/task context.
+    pub(crate) fn block_on_with_cx<F: Future>(
+        &self,
+        request_cx: crate::cx::Cx,
+        future: F,
+    ) -> F::Output {
+        let _runtime_guard = ScopedRuntimeHandle::new(self.handle());
+        let _cx_guard = crate::cx::Cx::set_current(Some(request_cx));
+        run_future_with_budget(future, self.inner.config.poll_budget)
+    }
+
+    /// Run a future to completion using the currently installed runtime handle
+    /// while temporarily overriding the ambient [`Cx`](crate::cx::Cx).
+    ///
+    /// Unlike [`block_on_with_cx`](Self::block_on_with_cx), this preserves the
+    /// existing thread-local runtime handle instead of replacing it. That is
+    /// required for framework adapter paths that are invoked from within an
+    /// already-running runtime task and must not sever deadline/cancellation
+    /// propagation by switching to a detached helper runtime.
+    pub(crate) fn block_on_current_with_cx<F: Future>(
+        request_cx: crate::cx::Cx,
+        future: F,
+    ) -> Option<F::Output> {
+        let handle = Self::current_handle()?;
+        let inner = handle.try_inner().ok()?;
+        let _cx_guard = crate::cx::Cx::set_current(Some(request_cx));
+        Some(run_future_with_budget(future, inner.config.poll_budget))
+    }
+
+    /// Create a request-scoped [`Cx`](crate::cx::Cx) backed by this runtime's
+    /// drivers, tracing, and logical clock configuration.
+    #[must_use]
+    pub(crate) fn request_cx_with_budget(&self, budget: Budget) -> crate::cx::Cx {
+        build_request_cx_from_inner(&self.inner, budget)
+    }
+
+    /// Create a request-scoped [`Cx`](crate::cx::Cx) from the currently
+    /// installed runtime handle, if one exists.
+    #[must_use]
+    pub(crate) fn current_request_cx_with_budget(budget: Budget) -> Option<crate::cx::Cx> {
+        let handle = Self::current_handle()?;
+        let inner = handle.try_inner().ok()?;
+        Some(build_request_cx_from_inner(&inner, budget))
+    }
+
     /// Returns a handle to the current runtime, if called from within
     /// [`Runtime::block_on`] or a worker thread.
     ///
@@ -3056,9 +3105,15 @@ impl Runtime {
     ///     handle.spawn(async { do_work().await });
     /// });
     /// ```
+    ///
+    /// Returns `None` when no runtime is installed on the current thread and
+    /// during thread-local teardown, where the ambient handle is no longer
+    /// accessible.
     #[must_use]
     pub fn current_handle() -> Option<RuntimeHandle> {
-        CURRENT_RUNTIME_HANDLE.with(|cell| cell.borrow().clone())
+        CURRENT_RUNTIME_HANDLE
+            .try_with(|cell| cell.borrow().clone())
+            .unwrap_or(None)
     }
 
     /// Returns a reference to the runtime configuration.
@@ -3707,6 +3762,44 @@ fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
     }
 }
 
+fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> crate::cx::Cx {
+    let task = crate::types::TaskId::new_ephemeral();
+    let (observability, io_driver, timer_driver, blocking_pool, logical_clock, entropy, trace) = {
+        let guard = inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let timer_driver = guard.timer_driver_handle();
+        let logical_clock = guard
+            .logical_clock_mode()
+            .build_handle(timer_driver.clone());
+        (
+            guard.observability_for_task(inner.root_region, task),
+            guard.io_driver_handle(),
+            timer_driver,
+            guard.blocking_pool_handle(),
+            logical_clock,
+            guard.entropy_source().fork(task),
+            guard.trace_handle(),
+        )
+    };
+
+    let request_cx = crate::cx::Cx::new_with_drivers(
+        inner.root_region,
+        task,
+        budget,
+        observability,
+        io_driver,
+        None,
+        timer_driver,
+        Some(entropy),
+    )
+    .with_blocking_pool_handle(blocking_pool)
+    .with_logical_clock(logical_clock);
+    request_cx.set_trace_buffer(trace);
+    request_cx
+}
+
 #[cfg(test)]
 #[allow(unsafe_code)]
 mod tests {
@@ -3719,8 +3812,33 @@ mod tests {
     use crate::trace::{TraceEvent, TraceEventKind};
     use crate::types::{Budget, CancelReason, Time};
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
     use std::time::Duration;
+
+    static CURRENT_HANDLE_DTOR_STATE: AtomicU8 = AtomicU8::new(0);
+
+    thread_local! {
+        static CURRENT_HANDLE_DTOR_PROBE: CurrentHandleDtorProbe = const { CurrentHandleDtorProbe };
+    }
+
+    struct CurrentHandleDtorProbe;
+
+    impl Drop for CurrentHandleDtorProbe {
+        fn drop(&mut self) {
+            let state = match CURRENT_RUNTIME_HANDLE.try_with(|cell| cell.borrow().clone()) {
+                Ok(Some(_)) => 1,
+                Ok(None) => 2,
+                Err(_) => {
+                    if Runtime::current_handle().is_none() {
+                        3
+                    } else {
+                        4
+                    }
+                }
+            };
+            CURRENT_HANDLE_DTOR_STATE.store(state, Ordering::SeqCst);
+        }
+    }
 
     struct NoopWaker;
 
@@ -5352,6 +5470,36 @@ worker_threads = 16
 
         // After block_on: restored to None.
         assert!(Runtime::current_handle().is_none());
+    }
+
+    #[test]
+    fn current_handle_returns_none_during_thread_local_teardown() {
+        init_test_logging();
+        CURRENT_HANDLE_DTOR_STATE.store(0, Ordering::SeqCst);
+
+        let join = std::thread::spawn(|| {
+            // Initialize the probe first so its destructor runs after the
+            // runtime handle TLS and can exercise the teardown path.
+            CURRENT_HANDLE_DTOR_PROBE.with(|_| {});
+
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("runtime build");
+            runtime.block_on(async {
+                assert!(
+                    Runtime::current_handle().is_some(),
+                    "runtime handle should be installed inside block_on"
+                );
+            });
+        });
+
+        join.join()
+            .expect("thread-local teardown should not panic when reading runtime handle");
+        assert_eq!(
+            CURRENT_HANDLE_DTOR_STATE.load(Ordering::SeqCst),
+            3,
+            "Runtime::current_handle() should fail closed once TLS is unavailable"
+        );
     }
 
     #[test]

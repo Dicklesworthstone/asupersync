@@ -276,7 +276,8 @@ impl EpochConsistencyConfig {
     #[must_use]
     pub fn strict() -> Self {
         Self {
-            max_epoch_skew: 1,
+            // In strict mode any cross-module skew is actionable.
+            max_epoch_skew: 0,
             slow_transition_threshold_ns: 100_000, // 100μs
             strict_ordering: true,
             enabled: true,
@@ -334,6 +335,7 @@ impl EpochConsistencyTracker {
     }
 
     /// Notifies the tracker of an epoch transition for a module.
+    #[allow(unused_variables)]
     pub fn notify_epoch_transition(
         &self,
         module: ModuleId,
@@ -358,19 +360,71 @@ impl EpochConsistencyTracker {
                 transition_count: 0,
             });
 
-        // Check for expected transition sequence
-        let _sync_status = if record.current_epoch == from_epoch {
-            "synchronized"
+        let exact_duplicate_completion = record.current_epoch == to_epoch
+            && to_epoch
+                .prev()
+                .is_some_and(|expected_from| expected_from == from_epoch);
+        if exact_duplicate_completion {
+            debug!(
+                module_id = %module,
+                current_epoch = %record.current_epoch,
+                reported_from_epoch = %from_epoch,
+                reported_to_epoch = %to_epoch,
+                transition_time_ns = now.as_nanos(),
+                "epoch_transition_duplicate_ignored"
+            );
+            return;
+        }
+
+        // Check for expected transition sequence. Forward skips are accepted but
+        // reported; stale/backward reports remain visible as violations without
+        // rewinding the tracker's internal epoch state.
+        let expected_epoch = record.current_epoch.next();
+        let (sync_status, should_update) = if record.current_epoch == from_epoch {
+            if to_epoch == expected_epoch {
+                ("synchronized", true)
+            } else if to_epoch.is_after(expected_epoch) {
+                let violation = EpochConsistencyViolation::MissingTransition {
+                    module,
+                    expected_epoch,
+                    actual_epoch: to_epoch,
+                    detected_at: now,
+                };
+                self.record_violation(violation);
+                ("skipped_forward", true)
+            } else {
+                let violation = EpochConsistencyViolation::MissingTransition {
+                    module,
+                    expected_epoch,
+                    actual_epoch: to_epoch,
+                    detected_at: now,
+                };
+                self.record_violation(violation);
+                ("non_advancing", false)
+            }
         } else {
             let violation = EpochConsistencyViolation::MissingTransition {
                 module,
-                expected_epoch: record.current_epoch.next(),
+                expected_epoch,
                 actual_epoch: to_epoch,
                 detected_at: now,
             };
             self.record_violation(violation);
-            "violated"
+            ("violated", to_epoch.is_after(record.current_epoch))
         };
+        let _ = sync_status;
+        if !should_update {
+            debug!(
+                module_id = %module,
+                current_epoch = %record.current_epoch,
+                reported_from_epoch = %from_epoch,
+                reported_to_epoch = %to_epoch,
+                transition_time_ns = now.as_nanos(),
+                sync_status = sync_status,
+                "epoch_transition_ignored"
+            );
+            return;
+        }
 
         // Calculate transition latency if there was a transition start time
         let transition_latency_ns = record
@@ -393,7 +447,7 @@ impl EpochConsistencyTracker {
             new_epoch = %to_epoch,
             transition_time_ns = now.as_nanos(),
             sync_status = sync_status,
-            correlation_id = correlation_id,
+            correlation_id = _correlation_id,
             transition_count = record.transition_count,
             transition_latency_ns = transition_latency_ns,
             "epoch_transition"
@@ -404,7 +458,7 @@ impl EpochConsistencyTracker {
             debug!(
                 module_id = %module,
                 transition_latency_ns = transition_latency_ns,
-                correlation_id = correlation_id,
+                correlation_id = _correlation_id,
                 threshold_ns = self.config.slow_transition_threshold_ns,
                 "epoch_transition_latency"
             );
@@ -418,8 +472,8 @@ impl EpochConsistencyTracker {
 
         // Log consistency check performance
         debug!(
-            correlation_id = correlation_id,
-            processing_latency_ns = processing_latency,
+            correlation_id = _correlation_id,
+            processing_latency_ns = _processing_latency,
             "epoch_consistency_check_latency"
         );
     }
@@ -439,19 +493,67 @@ impl EpochConsistencyTracker {
                 transition_start_time: None,
                 transition_count: 0,
             });
-        record.transition_start_time = Some(now);
+
+        if record.current_epoch != from_epoch {
+            let current_epoch = record.current_epoch;
+            let violation = EpochConsistencyViolation::MissingTransition {
+                module,
+                expected_epoch: current_epoch,
+                actual_epoch: from_epoch,
+                detected_at: now,
+            };
+            drop(records);
+            self.record_violation(violation);
+
+            debug!(
+                module_id = %module,
+                current_epoch = %current_epoch,
+                reported_from_epoch = %from_epoch,
+                transition_time_ns = now.as_nanos(),
+                "epoch_transition_start_ignored"
+            );
+            return;
+        }
+
+        record.transition_start_time = Some(
+            record
+                .transition_start_time
+                .map_or(now, |existing_start| existing_start.min(now)),
+        );
     }
 
-    /// Checks for epoch consistency violations.
+    /// Checks for currently active epoch consistency violations.
     ///
-    /// Returns the first violation found, if any.
+    /// This reports only violations that are still true of the current tracker
+    /// state. Historical transition anomalies remain available through
+    /// [`all_violations`](Self::all_violations) and
+    /// [`latest_violation`](Self::latest_violation), but do not permanently
+    /// poison the runtime's current-health signal.
     pub fn check_consistency(&self) -> Option<EpochConsistencyViolation> {
         if !self.config.enabled {
             return None;
         }
 
-        let violations = self.violations.read();
-        violations.last().cloned()
+        let records = self.module_records.read();
+        let now = records
+            .values()
+            .map(|record| {
+                record
+                    .transition_start_time
+                    .unwrap_or(record.last_transition_time)
+            })
+            .max()
+            .unwrap_or(Time::ZERO);
+        if let Some(violation) = self.current_module_desync_violation(&records, now, false) {
+            return Some(violation);
+        }
+        if let Some(violation) = self.current_slow_transition_violation(&records, now) {
+            return Some(violation);
+        }
+        if self.config.strict_ordering {
+            return self.current_advancement_order_violation(&records, now);
+        }
+        None
     }
 
     /// Internal consistency checking with proper timestamp.
@@ -476,6 +578,17 @@ impl EpochConsistencyTracker {
         records: &DetHashMap<ModuleId, EpochTransitionRecord>,
         now: Time,
     ) {
+        if let Some(violation) = self.current_module_desync_violation(records, now, true) {
+            self.record_violation(violation);
+        }
+    }
+
+    fn current_module_desync_violation(
+        &self,
+        records: &DetHashMap<ModuleId, EpochTransitionRecord>,
+        now: Time,
+        suppress_single_step_batch: bool,
+    ) -> Option<EpochConsistencyViolation> {
         let mut epochs: BTreeMap<EpochId, Vec<ModuleId>> = BTreeMap::new();
 
         for (&module, record) in records {
@@ -483,7 +596,7 @@ impl EpochConsistencyTracker {
         }
 
         if epochs.len() <= 1 {
-            return; // All modules on same epoch or no modules
+            return None;
         }
 
         let epoch_ids: Vec<EpochId> = epochs.keys().copied().collect();
@@ -491,21 +604,65 @@ impl EpochConsistencyTracker {
         let max_epoch = epoch_ids.last().copied().unwrap_or(EpochId::GENESIS);
         let skew = max_epoch.distance(min_epoch);
 
-        if skew > self.config.max_epoch_skew {
-            let mut modules_with_epochs = Vec::new();
-            for (&epoch, modules) in &epochs {
-                for &module in modules {
-                    modules_with_epochs.push((module, epoch));
-                }
-            }
-
-            let violation = EpochConsistencyViolation::ModuleDesync {
-                modules: modules_with_epochs,
-                detected_at: now,
-                max_skew: skew,
-            };
-            self.record_violation(violation);
+        if skew <= self.config.max_epoch_skew {
+            return None;
         }
+
+        // Multiple modules often advance within the same logical time tick.
+        // Suppress the transient "some at N, some at N+1" shape while that
+        // single-step batch is still being reported. Without this, the first
+        // module in a coherent same-timestamp wave records a permanent
+        // false-positive desync before the remaining modules notify.
+        if suppress_single_step_batch
+            && self.is_single_step_batch_transition(records, min_epoch, max_epoch, now)
+        {
+            return None;
+        }
+
+        let mut modules_with_epochs = Vec::new();
+        for (&epoch, modules) in &epochs {
+            for &module in modules {
+                modules_with_epochs.push((module, epoch));
+            }
+        }
+        modules_with_epochs.sort_by_key(|(module, epoch)| (*epoch, *module));
+
+        Some(EpochConsistencyViolation::ModuleDesync {
+            modules: modules_with_epochs,
+            detected_at: now,
+            max_skew: skew,
+        })
+    }
+
+    fn is_single_step_batch_transition(
+        &self,
+        records: &DetHashMap<ModuleId, EpochTransitionRecord>,
+        min_epoch: EpochId,
+        max_epoch: EpochId,
+        now: Time,
+    ) -> bool {
+        if max_epoch.distance(min_epoch) != 1 {
+            return false;
+        }
+
+        let expected_next_epoch = min_epoch.next();
+        if expected_next_epoch != max_epoch {
+            return false;
+        }
+
+        let mut saw_advanced_module = false;
+        for record in records.values() {
+            if record.current_epoch == max_epoch {
+                if record.last_transition_time != now {
+                    return false;
+                }
+                saw_advanced_module = true;
+            } else if record.current_epoch != min_epoch {
+                return false;
+            }
+        }
+
+        saw_advanced_module
     }
 
     /// Checks for slow epoch transitions.
@@ -514,22 +671,50 @@ impl EpochConsistencyTracker {
         records: &DetHashMap<ModuleId, EpochTransitionRecord>,
         now: Time,
     ) {
+        if let Some(violation) = self.current_slow_transition_violation(records, now) {
+            self.record_violation(violation);
+        }
+    }
+
+    fn current_slow_transition_violation(
+        &self,
+        records: &DetHashMap<ModuleId, EpochTransitionRecord>,
+        now: Time,
+    ) -> Option<EpochConsistencyViolation> {
+        let mut candidate: Option<(ModuleId, EpochId, Time, u64)> = None;
+
         for (&module, record) in records {
-            if let Some(transition_start) = record.transition_start_time {
-                let duration_ns = now.duration_since(transition_start);
-                if duration_ns > self.config.slow_transition_threshold_ns {
-                    let violation = EpochConsistencyViolation::SlowTransition {
-                        module,
-                        from_epoch: record.current_epoch,
-                        to_epoch: record.current_epoch.next(),
-                        started_at: transition_start,
-                        detected_at: now,
-                        duration_ns,
-                    };
-                    self.record_violation(violation);
+            let Some(transition_start) = record.transition_start_time else {
+                continue;
+            };
+
+            let duration_ns = now.duration_since(transition_start);
+            if duration_ns <= self.config.slow_transition_threshold_ns {
+                continue;
+            }
+
+            match candidate {
+                Some((best_module, _best_epoch, best_start, best_duration))
+                    if best_duration > duration_ns
+                        || (best_duration == duration_ns
+                            && (best_start < transition_start
+                                || (best_start == transition_start && best_module <= module))) => {}
+                _ => {
+                    candidate = Some((module, record.current_epoch, transition_start, duration_ns));
                 }
             }
         }
+
+        candidate.map(|(module, from_epoch, started_at, duration_ns)| {
+            EpochConsistencyViolation::SlowTransition {
+                module,
+                from_epoch,
+                to_epoch: from_epoch.next(),
+                started_at,
+                detected_at: now,
+                duration_ns,
+            }
+        })
     }
 
     /// Checks for epoch advancement order violations.
@@ -541,6 +726,16 @@ impl EpochConsistencyTracker {
         records: &DetHashMap<ModuleId, EpochTransitionRecord>,
         now: Time,
     ) {
+        if let Some(violation) = self.current_advancement_order_violation(records, now) {
+            self.record_violation(violation);
+        }
+    }
+
+    fn current_advancement_order_violation(
+        &self,
+        records: &DetHashMap<ModuleId, EpochTransitionRecord>,
+        now: Time,
+    ) -> Option<EpochConsistencyViolation> {
         // Define dependency relationships: (dependent_module, dependency_module)
         let dependencies = [
             (ModuleId::TaskTable, ModuleId::Scheduler),
@@ -558,29 +753,42 @@ impl EpochConsistencyTracker {
                     .current_epoch
                     .is_after(dependency_record.current_epoch)
                 {
-                    let violation = EpochConsistencyViolation::AdvancementOrderViolation {
+                    return Some(EpochConsistencyViolation::AdvancementOrderViolation {
                         module: dependent,
                         advanced_to: dependent_record.current_epoch,
                         dependency_module: dependency,
                         dependency_epoch: dependency_record.current_epoch,
                         detected_at: now,
-                    };
-                    self.record_violation(violation);
+                    });
                 }
             }
         }
+
+        None
     }
 
     /// Records a violation, maintaining bounded storage.
+    // Structured logging fields in this function are compiled out when
+    // `tracing-integration` is disabled, so the bindings only become "unused"
+    // in no-op builds.
+    #[allow(unused_variables)]
     fn record_violation(&self, violation: EpochConsistencyViolation) {
         {
             let violations = self.violations.read();
             if let Some(last) = violations.last() {
                 match (last, &violation) {
                     (
-                        EpochConsistencyViolation::ModuleDesync { max_skew: s1, .. },
-                        EpochConsistencyViolation::ModuleDesync { max_skew: s2, .. },
-                    ) if s1 == s2 => return,
+                        EpochConsistencyViolation::ModuleDesync {
+                            modules: modules1,
+                            max_skew: skew1,
+                            ..
+                        },
+                        EpochConsistencyViolation::ModuleDesync {
+                            modules: modules2,
+                            max_skew: skew2,
+                            ..
+                        },
+                    ) if skew1 == skew2 && modules1 == modules2 => return,
                     (
                         EpochConsistencyViolation::AdvancementOrderViolation {
                             module: m1,
@@ -617,8 +825,8 @@ impl EpochConsistencyTracker {
         match &violation {
             EpochConsistencyViolation::ModuleDesync {
                 modules,
-                detected_at: _,
-                max_skew: _,
+                detected_at: _detected_at,
+                max_skew: _max_skew,
             } => {
                 let _affected_modules: Vec<String> = modules
                     .iter()
@@ -628,43 +836,43 @@ impl EpochConsistencyTracker {
                 // Log epoch consistency violation with affected_modules, epoch_skew, consistency_level
                 error!(
                     violation_type = "module_desync",
-                    affected_modules = ?affected_modules,
-                    epoch_skew = max_skew,
+                    affected_modules = ?_affected_modules,
+                    epoch_skew = _max_skew,
                     consistency_level = if self.config.strict_ordering { "strict" } else { "relaxed" },
-                    correlation_id = violation_id,
-                    detected_at_ns = detected_at.as_nanos(),
-                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type module_desync", violation_id),
+                    correlation_id = _violation_id,
+                    detected_at_ns = _detected_at.as_nanos(),
+                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type module_desync", _violation_id),
                     "epoch_consistency_violation"
                 );
             }
             EpochConsistencyViolation::SlowTransition {
-                module: _,
-                from_epoch: _,
-                to_epoch: _,
-                started_at: _,
-                detected_at: _,
-                duration_ns: _,
+                module: _module,
+                from_epoch: _from_epoch,
+                to_epoch: _to_epoch,
+                started_at: _started_at,
+                detected_at: _detected_at,
+                duration_ns: _duration_ns,
             } => {
                 error!(
                     violation_type = "slow_transition",
-                    affected_modules = ?[format!("{}@{}->{}", module, from_epoch, to_epoch)],
+                    affected_modules = ?[format!("{}@{}->{}", _module, _from_epoch, _to_epoch)],
                     epoch_skew = 0u64,
                     consistency_level = if self.config.strict_ordering { "strict" } else { "relaxed" },
-                    correlation_id = violation_id,
-                    module_id = %module,
-                    transition_duration_ns = duration_ns,
+                    correlation_id = _violation_id,
+                    module_id = %_module,
+                    transition_duration_ns = _duration_ns,
                     threshold_ns = self.config.slow_transition_threshold_ns,
-                    started_at_ns = started_at.as_nanos(),
-                    detected_at_ns = detected_at.as_nanos(),
-                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type slow_transition --module {}", violation_id, module),
+                    started_at_ns = _started_at.as_nanos(),
+                    detected_at_ns = _detected_at.as_nanos(),
+                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type slow_transition --module {}", _violation_id, _module),
                     "epoch_consistency_violation"
                 );
             }
             EpochConsistencyViolation::MissingTransition {
-                module: _,
+                module: _module,
                 expected_epoch,
                 actual_epoch,
-                detected_at: _,
+                detected_at: _detected_at,
             } => {
                 let _epoch_skew = if actual_epoch > expected_epoch {
                     actual_epoch.as_u64() - expected_epoch.as_u64()
@@ -674,43 +882,43 @@ impl EpochConsistencyTracker {
 
                 error!(
                     violation_type = "missing_transition",
-                    affected_modules = ?[format!("{}@{}", module, actual_epoch)],
-                    epoch_skew = epoch_skew,
+                    affected_modules = ?[format!("{}@{}", _module, actual_epoch)],
+                    epoch_skew = _epoch_skew,
                     consistency_level = if self.config.strict_ordering { "strict" } else { "relaxed" },
-                    correlation_id = violation_id,
-                    module_id = %module,
+                    correlation_id = _violation_id,
+                    module_id = %_module,
                     expected_epoch = %expected_epoch,
                     actual_epoch = %actual_epoch,
-                    detected_at_ns = detected_at.as_nanos(),
-                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type missing_transition --module {} --expected-epoch {} --actual-epoch {}", violation_id, module, expected_epoch, actual_epoch),
+                    detected_at_ns = _detected_at.as_nanos(),
+                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type missing_transition --module {} --expected-epoch {} --actual-epoch {}", _violation_id, _module, expected_epoch, actual_epoch),
                     "epoch_consistency_violation"
                 );
             }
             EpochConsistencyViolation::AdvancementOrderViolation {
-                module: _,
-                advanced_to,
-                dependency_module: _,
-                dependency_epoch,
-                detected_at: _,
+                module: _module,
+                advanced_to: _advanced_to,
+                dependency_module: _dependency_module,
+                dependency_epoch: _dependency_epoch,
+                detected_at: _detected_at,
             } => {
-                let _epoch_skew = if advanced_to > dependency_epoch {
-                    advanced_to.as_u64() - dependency_epoch.as_u64()
+                let _epoch_skew = if _advanced_to > _dependency_epoch {
+                    _advanced_to.as_u64() - _dependency_epoch.as_u64()
                 } else {
-                    dependency_epoch.as_u64() - advanced_to.as_u64()
+                    _dependency_epoch.as_u64() - _advanced_to.as_u64()
                 };
 
                 error!(
                     violation_type = "advancement_order_violation",
-                    affected_modules = ?[format!("{}@{}", module, advanced_to), format!("{}@{}", dependency_module, dependency_epoch)],
-                    epoch_skew = epoch_skew,
+                    affected_modules = ?[format!("{}@{}", _module, _advanced_to), format!("{}@{}", _dependency_module, _dependency_epoch)],
+                    epoch_skew = _epoch_skew,
                     consistency_level = if self.config.strict_ordering { "strict" } else { "relaxed" },
-                    correlation_id = violation_id,
-                    violating_module = %module,
-                    advanced_to = %advanced_to,
-                    dependency_module = %dependency_module,
-                    dependency_epoch = %dependency_epoch,
-                    detected_at_ns = detected_at.as_nanos(),
-                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type order_violation --module {} --dependency-module {}", violation_id, module, dependency_module),
+                    correlation_id = _violation_id,
+                    violating_module = %_module,
+                    advanced_to = %_advanced_to,
+                    dependency_module = %_dependency_module,
+                    dependency_epoch = %_dependency_epoch,
+                    detected_at_ns = _detected_at.as_nanos(),
+                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type order_violation --module {} --dependency-module {}", _violation_id, _module, _dependency_module),
                     "epoch_consistency_violation"
                 );
             }
@@ -737,6 +945,16 @@ impl EpochConsistencyTracker {
     #[must_use]
     pub fn all_violations(&self) -> Vec<EpochConsistencyViolation> {
         self.violations.read().clone()
+    }
+
+    /// Returns the most recently recorded historical violation, if any.
+    ///
+    /// Unlike [`check_consistency`](Self::check_consistency), this does not
+    /// require the violation to still be active in the current tracker state.
+    #[inline]
+    #[must_use]
+    pub fn latest_violation(&self) -> Option<EpochConsistencyViolation> {
+        self.violations.read().last().cloned()
     }
 
     /// Returns the number of violations detected.
@@ -847,10 +1065,13 @@ impl EpochConsistencyTracker {
     /// This method provides structured logging of the complete epoch state
     /// across all modules, which can be useful for debugging and monitoring
     /// epoch consistency in production environments.
+    // `tracing_compat` expands to no-op macros without tracing integration,
+    // so these locals are only consumed in tracing-enabled builds.
+    #[allow(unused_variables)]
     pub fn log_epoch_state(&self) {
         let records = self.module_records.read();
         let violation_count = self.violation_count();
-        let _total_transitions = self.global_transition_count.load(Ordering::Relaxed);
+        let total_transitions = self.global_transition_count.load(Ordering::Relaxed);
 
         // Log overall epoch state
         info!(
@@ -868,7 +1089,7 @@ impl EpochConsistencyTracker {
         );
 
         // Log per-module state
-        for (&_module, _record) in records.iter() {
+        for (&module, record) in records.iter() {
             debug!(
                 module_id = %module,
                 current_epoch = %record.current_epoch,
@@ -883,7 +1104,7 @@ impl EpochConsistencyTracker {
         // Log recent violations summary
         if violation_count > 0 {
             let violations = self.violations.read();
-            for (_idx, _violation) in violations.iter().enumerate().take(5) {
+            for (idx, violation) in violations.iter().enumerate().take(5) {
                 debug!(
                     violation_index = idx,
                     violation_type = match violation {
@@ -913,8 +1134,9 @@ impl EpochConsistencyTracker {
     ///
     /// This allows tuning the sensitivity of slow transition detection
     /// based on runtime conditions or performance requirements.
+    #[allow(unused_variables)]
     pub fn set_slow_transition_threshold(&mut self, threshold_ns: u64) {
-        let _old_threshold = self.config.slow_transition_threshold_ns;
+        let old_threshold = self.config.slow_transition_threshold_ns;
         self.config.slow_transition_threshold_ns = threshold_ns;
 
         info!(
@@ -977,6 +1199,112 @@ mod tests {
     }
 
     #[test]
+    fn tracker_records_distinct_desync_states_with_same_skew() {
+        init_test("tracker_records_distinct_desync_states_with_same_skew");
+
+        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig::strict());
+
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            Time::from_nanos(1000),
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::new(1),
+            EpochId::new(2),
+            Time::from_nanos(1100),
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::new(2),
+            EpochId::new(3),
+            Time::from_nanos(1200),
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::TaskTable,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            Time::from_nanos(1300),
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::TaskTable,
+            EpochId::new(1),
+            EpochId::new(2),
+            Time::from_nanos(1400),
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::RegionTable,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            Time::from_nanos(1500),
+        );
+
+        let violations = tracker.all_violations();
+        let desyncs: Vec<Vec<(ModuleId, EpochId)>> = violations
+            .into_iter()
+            .filter_map(|violation| match violation {
+                EpochConsistencyViolation::ModuleDesync { modules, .. } => Some(modules),
+                _ => None,
+            })
+            .collect();
+
+        crate::assert_with_log!(
+            desyncs.len() == 3,
+            "strict mode records each distinct desync state, including intermediate skew changes",
+            3,
+            desyncs.len()
+        );
+        crate::assert_with_log!(
+            desyncs[0]
+                == vec![
+                    (ModuleId::TaskTable, EpochId::new(1)),
+                    (ModuleId::Scheduler, EpochId::new(3)),
+                ],
+            "first desync captures scheduler/task skew",
+            true,
+            desyncs[0]
+                == vec![
+                    (ModuleId::TaskTable, EpochId::new(1)),
+                    (ModuleId::Scheduler, EpochId::new(3)),
+                ]
+        );
+        crate::assert_with_log!(
+            desyncs[1]
+                == vec![
+                    (ModuleId::TaskTable, EpochId::new(2)),
+                    (ModuleId::Scheduler, EpochId::new(3)),
+                ],
+            "second desync captures the intermediate scheduler/task skew state",
+            true,
+            desyncs[1]
+                == vec![
+                    (ModuleId::TaskTable, EpochId::new(2)),
+                    (ModuleId::Scheduler, EpochId::new(3)),
+                ]
+        );
+        crate::assert_with_log!(
+            desyncs[2]
+                == vec![
+                    (ModuleId::RegionTable, EpochId::new(1)),
+                    (ModuleId::TaskTable, EpochId::new(2)),
+                    (ModuleId::Scheduler, EpochId::new(3)),
+                ],
+            "third desync captures the expanded module set with renewed skew",
+            true,
+            desyncs[2]
+                == vec![
+                    (ModuleId::RegionTable, EpochId::new(1)),
+                    (ModuleId::TaskTable, EpochId::new(2)),
+                    (ModuleId::Scheduler, EpochId::new(3)),
+                ]
+        );
+
+        crate::test_complete!("tracker_records_distinct_desync_states_with_same_skew");
+    }
+
+    #[test]
     fn tracker_allows_synchronized_modules() {
         init_test("tracker_allows_synchronized_modules");
 
@@ -1003,6 +1331,128 @@ mod tests {
         );
 
         crate::test_complete!("tracker_allows_synchronized_modules");
+    }
+
+    #[test]
+    fn tracker_allows_same_timestamp_second_wave_without_false_desync() {
+        init_test("tracker_allows_same_timestamp_second_wave_without_false_desync");
+
+        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig::strict());
+        let first_wave = Time::from_nanos(1000);
+        let second_wave = Time::from_nanos(2000);
+
+        for module in [
+            ModuleId::Scheduler,
+            ModuleId::TaskTable,
+            ModuleId::RegionTable,
+        ] {
+            tracker.notify_epoch_transition(module, EpochId::GENESIS, EpochId::new(1), first_wave);
+        }
+
+        for module in [
+            ModuleId::Scheduler,
+            ModuleId::TaskTable,
+            ModuleId::RegionTable,
+        ] {
+            tracker.notify_epoch_transition(module, EpochId::new(1), EpochId::new(2), second_wave);
+        }
+
+        crate::assert_with_log!(
+            tracker.check_consistency().is_none(),
+            "no desync recorded for coherent second-wave rollout",
+            None::<EpochConsistencyViolation>,
+            tracker.check_consistency()
+        );
+        crate::assert_with_log!(
+            tracker
+                .all_violations()
+                .into_iter()
+                .all(|violation| !matches!(
+                    violation,
+                    EpochConsistencyViolation::ModuleDesync { .. }
+                )),
+            "second-wave rollout does not leave behind latent desync evidence",
+            true,
+            tracker
+                .all_violations()
+                .into_iter()
+                .all(|violation| !matches!(
+                    violation,
+                    EpochConsistencyViolation::ModuleDesync { .. }
+                ))
+        );
+
+        crate::test_complete!("tracker_allows_same_timestamp_second_wave_without_false_desync");
+    }
+
+    #[test]
+    fn tracker_check_consistency_surfaces_stuck_single_step_wave() {
+        init_test("tracker_check_consistency_surfaces_stuck_single_step_wave");
+
+        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig::strict());
+        let baseline = Time::from_nanos(1000);
+        let stuck_wave = Time::from_nanos(2000);
+
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            baseline,
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::TaskTable,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            baseline,
+        );
+
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::new(1),
+            EpochId::new(2),
+            stuck_wave,
+        );
+
+        crate::assert_with_log!(
+            tracker
+                .all_violations()
+                .into_iter()
+                .all(|violation| !matches!(
+                    violation,
+                    EpochConsistencyViolation::ModuleDesync { .. }
+                )),
+            "notify-time batch suppression leaves no stored desync evidence yet",
+            true,
+            tracker
+                .all_violations()
+                .into_iter()
+                .all(|violation| !matches!(
+                    violation,
+                    EpochConsistencyViolation::ModuleDesync { .. }
+                ))
+        );
+
+        let violation = tracker.check_consistency();
+        let expected_modules = vec![
+            (ModuleId::TaskTable, EpochId::new(1)),
+            (ModuleId::Scheduler, EpochId::new(2)),
+        ];
+        let has_stuck_half_wave_desync = matches!(
+            violation.as_ref(),
+            Some(EpochConsistencyViolation::ModuleDesync {
+                modules,
+                max_skew,
+                ..
+            }) if *max_skew == 1 && modules == &expected_modules
+        );
+        crate::assert_with_log!(
+            has_stuck_half_wave_desync,
+            "explicit consistency check must surface a stuck half-wave desync",
+            true,
+            has_stuck_half_wave_desync
+        );
+
+        crate::test_complete!("tracker_check_consistency_surfaces_stuck_single_step_wave");
     }
 
     #[test]
@@ -1047,6 +1497,277 @@ mod tests {
         );
 
         crate::test_complete!("tracker_statistics");
+    }
+
+    #[test]
+    fn tracker_ignores_duplicate_completion_notifications() {
+        init_test("tracker_ignores_duplicate_completion_notifications");
+
+        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig::strict());
+        let now = Time::from_nanos(1000);
+
+        tracker.notify_epoch_transition(
+            ModuleId::RegionTable,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            now,
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::RegionTable,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            Time::from_nanos(2000),
+        );
+
+        let stats = tracker.transition_statistics();
+        crate::assert_with_log!(
+            stats.total_transitions == 1,
+            "duplicate transition does not increment totals",
+            1,
+            stats.total_transitions
+        );
+        crate::assert_with_log!(
+            stats
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .is_some_and(|s| s.transition_count == 1),
+            "duplicate transition does not increment module count",
+            true,
+            stats
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .is_some_and(|s| s.transition_count == 1)
+        );
+        crate::assert_with_log!(
+            tracker.check_consistency().is_none(),
+            "duplicate completion is not reported as missing transition",
+            None::<EpochConsistencyViolation>,
+            tracker.check_consistency()
+        );
+
+        crate::test_complete!("tracker_ignores_duplicate_completion_notifications");
+    }
+
+    #[test]
+    fn tracker_does_not_mask_backward_transition_as_duplicate() {
+        init_test("tracker_does_not_mask_backward_transition_as_duplicate");
+
+        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig::strict());
+        tracker.notify_epoch_transition(
+            ModuleId::RegionTable,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            Time::from_nanos(1000),
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::RegionTable,
+            EpochId::new(1),
+            EpochId::new(2),
+            Time::from_nanos(1500),
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::RegionTable,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            Time::from_nanos(2000),
+        );
+
+        crate::assert_with_log!(
+            tracker.check_consistency().is_none(),
+            "stale backward report does not poison current consistency",
+            None::<EpochConsistencyViolation>,
+            tracker.check_consistency()
+        );
+        crate::assert_with_log!(
+            matches!(
+                tracker.latest_violation(),
+                Some(EpochConsistencyViolation::MissingTransition { .. })
+            ),
+            "backward transition still records historical violation evidence",
+            true,
+            matches!(
+                tracker.latest_violation(),
+                Some(EpochConsistencyViolation::MissingTransition { .. })
+            )
+        );
+
+        let stats = tracker.transition_statistics();
+        crate::assert_with_log!(
+            stats
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .is_some_and(|s| s.current_epoch == EpochId::new(2)),
+            "stale backward report must not rewind tracked epoch",
+            true,
+            stats
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .is_some_and(|s| s.current_epoch == EpochId::new(2))
+        );
+        crate::assert_with_log!(
+            stats.total_transitions == 2,
+            "ignored stale report must not increment totals",
+            2,
+            stats.total_transitions
+        );
+
+        crate::test_complete!("tracker_does_not_mask_backward_transition_as_duplicate");
+    }
+
+    #[test]
+    fn tracker_records_skipped_forward_transition_from_current_epoch() {
+        init_test("tracker_records_skipped_forward_transition_from_current_epoch");
+
+        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig::strict());
+        tracker.notify_epoch_transition(
+            ModuleId::RegionTable,
+            EpochId::GENESIS,
+            EpochId::new(2),
+            Time::from_nanos(1000),
+        );
+
+        let violation = tracker.latest_violation();
+        crate::assert_with_log!(
+            matches!(
+                violation,
+                Some(EpochConsistencyViolation::MissingTransition {
+                    module: ModuleId::RegionTable,
+                    expected_epoch,
+                    actual_epoch,
+                    ..
+                }) if expected_epoch == EpochId::new(1) && actual_epoch == EpochId::new(2)
+            ),
+            "initial skipped-forward report must surface missing-transition evidence",
+            true,
+            matches!(
+                violation,
+                Some(EpochConsistencyViolation::MissingTransition {
+                    module: ModuleId::RegionTable,
+                    expected_epoch,
+                    actual_epoch,
+                    ..
+                }) if expected_epoch == EpochId::new(1) && actual_epoch == EpochId::new(2)
+            )
+        );
+        crate::assert_with_log!(
+            tracker.check_consistency().is_none(),
+            "historical skipped-forward evidence does not imply current inconsistency",
+            None::<EpochConsistencyViolation>,
+            tracker.check_consistency()
+        );
+
+        let stats = tracker.transition_statistics();
+        crate::assert_with_log!(
+            stats
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .is_some_and(|s| s.current_epoch == EpochId::new(2)),
+            "skipped-forward transition still advances tracked epoch",
+            true,
+            stats
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .is_some_and(|s| s.current_epoch == EpochId::new(2))
+        );
+        crate::assert_with_log!(
+            stats.total_transitions == 1,
+            "skipped-forward transition counts once",
+            1,
+            stats.total_transitions
+        );
+
+        crate::test_complete!("tracker_records_skipped_forward_transition_from_current_epoch");
+    }
+
+    #[test]
+    fn tracker_does_not_mask_skipped_transition_as_duplicate() {
+        init_test("tracker_does_not_mask_skipped_transition_as_duplicate");
+
+        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig::strict());
+        tracker.notify_epoch_transition(
+            ModuleId::RegionTable,
+            EpochId::GENESIS,
+            EpochId::new(2),
+            Time::from_nanos(1000),
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::RegionTable,
+            EpochId::GENESIS,
+            EpochId::new(2),
+            Time::from_nanos(2000),
+        );
+
+        let violation = tracker.latest_violation();
+        crate::assert_with_log!(
+            matches!(
+                violation,
+                Some(EpochConsistencyViolation::MissingTransition {
+                    module: ModuleId::RegionTable,
+                    expected_epoch,
+                    actual_epoch,
+                    ..
+                }) if expected_epoch == EpochId::new(3) && actual_epoch == EpochId::new(2)
+            ),
+            "late skipped-transition report must remain visible as missing-transition evidence",
+            true,
+            matches!(
+                violation,
+                Some(EpochConsistencyViolation::MissingTransition {
+                    module: ModuleId::RegionTable,
+                    expected_epoch,
+                    actual_epoch,
+                    ..
+                }) if expected_epoch == EpochId::new(3) && actual_epoch == EpochId::new(2)
+            )
+        );
+        crate::assert_with_log!(
+            tracker.check_consistency().is_none(),
+            "duplicate skipped-forward reports remain historical only once state stabilizes",
+            None::<EpochConsistencyViolation>,
+            tracker.check_consistency()
+        );
+
+        crate::test_complete!("tracker_does_not_mask_skipped_transition_as_duplicate");
+    }
+
+    #[test]
+    fn tracker_separates_current_health_from_historical_violation_log() {
+        init_test("tracker_separates_current_health_from_historical_violation_log");
+
+        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig::strict());
+        tracker.notify_epoch_transition(
+            ModuleId::RegionTable,
+            EpochId::GENESIS,
+            EpochId::new(2),
+            Time::from_nanos(1000),
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::TaskTable,
+            EpochId::GENESIS,
+            EpochId::new(2),
+            Time::from_nanos(1000),
+        );
+
+        crate::assert_with_log!(
+            tracker.check_consistency().is_none(),
+            "current state is healthy once modules converge on the same epoch",
+            None::<EpochConsistencyViolation>,
+            tracker.check_consistency()
+        );
+        crate::assert_with_log!(
+            matches!(
+                tracker.latest_violation(),
+                Some(EpochConsistencyViolation::MissingTransition { .. })
+            ),
+            "historical skipped-forward evidence remains queryable separately",
+            true,
+            matches!(
+                tracker.latest_violation(),
+                Some(EpochConsistencyViolation::MissingTransition { .. })
+            )
+        );
+
+        crate::test_complete!("tracker_separates_current_health_from_historical_violation_log");
     }
 
     #[test]
@@ -1222,6 +1943,162 @@ mod tests {
         );
 
         crate::test_complete!("tracker_runtime_configuration");
+    }
+
+    #[test]
+    fn tracker_check_consistency_surfaces_active_slow_transition() {
+        init_test("tracker_check_consistency_surfaces_active_slow_transition");
+
+        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig {
+            max_epoch_skew: 10,
+            slow_transition_threshold_ns: 100,
+            strict_ordering: false,
+            enabled: true,
+        });
+
+        tracker.notify_epoch_transition_start(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            Time::from_nanos(100),
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::TaskTable,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            Time::from_nanos(500),
+        );
+
+        let violation = tracker.check_consistency();
+        crate::assert_with_log!(
+            matches!(
+                violation,
+                Some(EpochConsistencyViolation::SlowTransition {
+                    module: ModuleId::Scheduler,
+                    from_epoch,
+                    to_epoch,
+                    started_at,
+                    duration_ns,
+                    ..
+                }) if from_epoch == EpochId::GENESIS
+                    && to_epoch == EpochId::new(1)
+                    && started_at == Time::from_nanos(100)
+                    && duration_ns == 400
+            ),
+            "active slow transitions must be surfaced by current-health checks",
+            true,
+            matches!(
+                violation,
+                Some(EpochConsistencyViolation::SlowTransition { .. })
+            )
+        );
+
+        crate::test_complete!("tracker_check_consistency_surfaces_active_slow_transition");
+    }
+
+    #[test]
+    fn tracker_transition_start_preserves_earliest_witness_timestamp() {
+        init_test("tracker_transition_start_preserves_earliest_witness_timestamp");
+
+        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig {
+            max_epoch_skew: 10,
+            slow_transition_threshold_ns: 500,
+            strict_ordering: false,
+            enabled: true,
+        });
+
+        tracker.notify_epoch_transition_start(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            Time::from_nanos(100),
+        );
+        tracker.notify_epoch_transition_start(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            Time::from_nanos(900),
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::TaskTable,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            Time::from_nanos(1000),
+        );
+
+        let violation = tracker.check_consistency();
+        crate::assert_with_log!(
+            matches!(
+                violation,
+                Some(EpochConsistencyViolation::SlowTransition {
+                    module: ModuleId::Scheduler,
+                    started_at,
+                    duration_ns,
+                    ..
+                }) if started_at == Time::from_nanos(100) && duration_ns == 900
+            ),
+            "duplicate start witnesses must preserve the original transition start time",
+            true,
+            matches!(
+                violation,
+                Some(EpochConsistencyViolation::SlowTransition { .. })
+            )
+        );
+
+        crate::test_complete!("tracker_transition_start_preserves_earliest_witness_timestamp");
+    }
+
+    #[test]
+    fn tracker_transition_start_ignores_stale_epoch_snapshot() {
+        init_test("tracker_transition_start_ignores_stale_epoch_snapshot");
+
+        let tracker = EpochConsistencyTracker::with_config(EpochConsistencyConfig {
+            max_epoch_skew: 10,
+            slow_transition_threshold_ns: 100,
+            strict_ordering: false,
+            enabled: true,
+        });
+
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            Time::from_nanos(100),
+        );
+        tracker.notify_epoch_transition_start(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            Time::from_nanos(200),
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::TaskTable,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            Time::from_nanos(500),
+        );
+
+        crate::assert_with_log!(
+            tracker.check_consistency().is_none(),
+            "stale transition-start witnesses must not manufacture an in-flight slow transition",
+            None::<EpochConsistencyViolation>,
+            tracker.check_consistency()
+        );
+        crate::assert_with_log!(
+            matches!(
+                tracker.latest_violation(),
+                Some(EpochConsistencyViolation::MissingTransition {
+                    module: ModuleId::Scheduler,
+                    expected_epoch,
+                    actual_epoch,
+                    ..
+                }) if expected_epoch == EpochId::new(1) && actual_epoch == EpochId::GENESIS
+            ),
+            "stale transition-start witness must remain visible as historical evidence",
+            true,
+            matches!(
+                tracker.latest_violation(),
+                Some(EpochConsistencyViolation::MissingTransition { .. })
+            )
+        );
+
+        crate::test_complete!("tracker_transition_start_ignores_stale_epoch_snapshot");
     }
 
     #[test]

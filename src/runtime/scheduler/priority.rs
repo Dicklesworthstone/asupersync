@@ -127,6 +127,22 @@ impl ScheduledSet {
     }
 
     #[inline]
+    fn contains(&self, task: TaskId) -> bool {
+        let idx = task.0.index() as usize;
+        let tag = u64::from(task.0.generation()) + 1;
+
+        if idx >= self.dense.len() {
+            return self.overflow.contains(&task);
+        }
+
+        match self.dense[idx] {
+            existing if existing == tag => true,
+            Self::DENSE_COLLISION => self.overflow.contains(&task),
+            _ => false,
+        }
+    }
+
+    #[inline]
     fn insert(&mut self, task: TaskId) -> bool {
         let idx = task.0.index() as usize;
         let tag = u64::from(task.0.generation()) + 1;
@@ -314,6 +330,33 @@ impl Default for Scheduler {
 
 impl Scheduler {
     #[inline]
+    fn next_valid_cancel_entry(&self) -> Option<SchedulerEntry> {
+        self.cancel_lane
+            .iter()
+            .copied()
+            .filter(|entry| self.scheduled.contains(entry.task))
+            .max()
+    }
+
+    #[inline]
+    fn next_valid_timed_entry(&self) -> Option<TimedEntry> {
+        self.timed_lane
+            .iter()
+            .copied()
+            .filter(|entry| self.scheduled.contains(entry.task))
+            .max()
+    }
+
+    #[inline]
+    fn next_valid_ready_entry(&self) -> Option<SchedulerEntry> {
+        self.ready_lane
+            .iter()
+            .copied()
+            .filter(|entry| self.scheduled.contains(entry.task))
+            .max()
+    }
+
+    #[inline]
     fn tie_break_index(rng_hint: u64, len: usize) -> usize {
         debug_assert!(len > 0);
         let len_u64 = u64::try_from(len).expect("len should fit in u64");
@@ -367,17 +410,18 @@ impl Scheduler {
     #[inline]
     #[must_use]
     pub fn has_runnable_work(&self, now: Time) -> bool {
-        if !self.cancel_lane.is_empty() || !self.ready_lane.is_empty() {
+        if self.next_valid_cancel_entry().is_some() || self.next_valid_ready_entry().is_some() {
             return true;
         }
-        self.timed_lane.peek().is_some_and(|t| t.deadline <= now)
+        self.next_valid_timed_entry()
+            .is_some_and(|entry| entry.deadline <= now)
     }
 
     /// Returns the earliest deadline from the timed lane, if any.
     #[inline]
     #[must_use]
     pub fn next_deadline(&self) -> Option<Time> {
-        self.timed_lane.peek().map(|t| t.deadline)
+        self.next_valid_timed_entry().map(|entry| entry.deadline)
     }
 
     /// Allocates and returns the next generation number for FIFO ordering.
@@ -1034,29 +1078,28 @@ impl Scheduler {
     #[inline]
     #[must_use]
     pub fn has_cancel_work(&self) -> bool {
-        !self.cancel_lane.is_empty()
+        self.next_valid_cancel_entry().is_some()
     }
 
     /// Returns true if the timed lane has pending tasks.
     #[inline]
     #[must_use]
     pub fn has_timed_work(&self) -> bool {
-        !self.timed_lane.is_empty()
+        self.next_valid_timed_entry().is_some()
     }
 
     /// Returns true if the ready lane has pending tasks.
     #[inline]
     #[must_use]
     pub fn has_ready_work(&self) -> bool {
-        !self.ready_lane.is_empty()
+        self.next_valid_ready_entry().is_some()
     }
 
     /// Returns the current ready-lane head without removing it.
     #[inline]
     #[must_use]
     pub fn peek_ready_task(&self) -> Option<(TaskId, u8)> {
-        self.ready_lane
-            .peek()
+        self.next_valid_ready_entry()
             .map(|entry| (entry.task, entry.priority))
     }
 
@@ -1064,7 +1107,7 @@ impl Scheduler {
     #[inline]
     #[must_use]
     pub fn peek_ready_priority(&self) -> Option<u8> {
-        self.ready_lane.peek().map(|entry| entry.priority)
+        self.next_valid_ready_entry().map(|entry| entry.priority)
     }
 
     /// Clears all scheduled tasks.
@@ -2851,6 +2894,158 @@ mod tests {
         let expected_tag = u64::from(g0.0.generation()) + 1;
         assert_eq!(sched.scheduled.dense[idx as usize], expected_tag);
         assert!(!sched.scheduled.overflow.contains(&g0));
+    }
+
+    #[test]
+    fn observability_ignores_stale_lane_entries() {
+        init_test("observability_ignores_stale_lane_entries");
+        let mut sched = Scheduler::new();
+        let stale_cancel = TaskId::new_for_test(910, 0);
+        let stale_ready = TaskId::new_for_test(911, 0);
+        let stale_timed = TaskId::new_for_test(912, 0);
+
+        sched.cancel_lane.push(SchedulerEntry {
+            task: stale_cancel,
+            priority: 200,
+            generation: 0,
+        });
+        sched.ready_lane.push(SchedulerEntry {
+            task: stale_ready,
+            priority: 150,
+            generation: 0,
+        });
+        sched.timed_lane.push(TimedEntry {
+            task: stale_timed,
+            deadline: Time::from_secs(5),
+            generation: 0,
+        });
+
+        crate::assert_with_log!(
+            !sched.has_cancel_work(),
+            "stale cancel entry ignored",
+            true,
+            !sched.has_cancel_work()
+        );
+        crate::assert_with_log!(
+            !sched.has_ready_work(),
+            "stale ready entry ignored",
+            true,
+            !sched.has_ready_work()
+        );
+        crate::assert_with_log!(
+            !sched.has_timed_work(),
+            "stale timed entry ignored",
+            true,
+            !sched.has_timed_work()
+        );
+        crate::assert_with_log!(
+            !sched.has_runnable_work(Time::from_secs(10)),
+            "stale entries do not report runnable work",
+            true,
+            !sched.has_runnable_work(Time::from_secs(10))
+        );
+        crate::assert_with_log!(
+            sched.next_deadline().is_none(),
+            "stale timed entry does not report a deadline",
+            true,
+            sched.next_deadline().is_none()
+        );
+        crate::assert_with_log!(
+            sched.peek_ready_task().is_none(),
+            "stale ready entry does not become peek head",
+            true,
+            sched.peek_ready_task().is_none()
+        );
+        crate::assert_with_log!(
+            sched.peek_ready_priority().is_none(),
+            "stale ready priority ignored",
+            true,
+            sched.peek_ready_priority().is_none()
+        );
+        crate::test_complete!("observability_ignores_stale_lane_entries");
+    }
+
+    #[test]
+    fn ready_observability_skips_stale_head() {
+        init_test("ready_observability_skips_stale_head");
+        let mut sched = Scheduler::new();
+        let stale_ready = TaskId::new_for_test(920, 0);
+        let live_ready = TaskId::new_for_test(921, 0);
+
+        sched.ready_lane.push(SchedulerEntry {
+            task: stale_ready,
+            priority: 250,
+            generation: 0,
+        });
+        sched.schedule(live_ready, 10);
+
+        crate::assert_with_log!(
+            sched.has_ready_work(),
+            "live ready work remains visible behind stale head",
+            true,
+            sched.has_ready_work()
+        );
+        crate::assert_with_log!(
+            sched.peek_ready_task() == Some((live_ready, 10)),
+            "peek_ready_task skips stale head",
+            Some((live_ready, 10)),
+            sched.peek_ready_task()
+        );
+        crate::assert_with_log!(
+            sched.peek_ready_priority() == Some(10),
+            "peek_ready_priority skips stale head",
+            Some(10u8),
+            sched.peek_ready_priority()
+        );
+        crate::assert_with_log!(
+            sched.has_runnable_work(Time::ZERO),
+            "ready work remains runnable despite stale head",
+            true,
+            sched.has_runnable_work(Time::ZERO)
+        );
+        crate::test_complete!("ready_observability_skips_stale_head");
+    }
+
+    #[test]
+    fn timed_observability_skips_stale_head() {
+        init_test("timed_observability_skips_stale_head");
+        let mut sched = Scheduler::new();
+        let stale_timed = TaskId::new_for_test(930, 0);
+        let live_timed = TaskId::new_for_test(931, 0);
+        let live_deadline = Time::from_secs(8);
+
+        sched.timed_lane.push(TimedEntry {
+            task: stale_timed,
+            deadline: Time::from_secs(1),
+            generation: 0,
+        });
+        sched.schedule_timed(live_timed, live_deadline);
+
+        crate::assert_with_log!(
+            sched.has_timed_work(),
+            "live timed work remains visible behind stale head",
+            true,
+            sched.has_timed_work()
+        );
+        crate::assert_with_log!(
+            sched.next_deadline() == Some(live_deadline),
+            "next_deadline ignores stale earlier head",
+            Some(live_deadline),
+            sched.next_deadline()
+        );
+        crate::assert_with_log!(
+            !sched.has_runnable_work(Time::from_secs(7)),
+            "future live deadline remains non-runnable",
+            true,
+            !sched.has_runnable_work(Time::from_secs(7))
+        );
+        crate::assert_with_log!(
+            sched.has_runnable_work(live_deadline),
+            "live timed task becomes runnable at its own deadline",
+            true,
+            sched.has_runnable_work(live_deadline)
+        );
+        crate::test_complete!("timed_observability_skips_stale_head");
     }
 
     // ── Audit regression tests (asupersync-10x0x.78) ─────────────────────

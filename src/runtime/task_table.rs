@@ -403,9 +403,7 @@ mod tests {
 
     mod conformance_lock_ordering {
         use super::*;
-        use crate::observability::ObservabilityConfig;
         use crate::observability::metrics::NoOpMetrics;
-        use crate::runtime::config::RuntimeConfig;
         use crate::runtime::{ShardGuard, ShardedState};
         use crate::trace::TraceBufferHandle;
         use std::sync::{Arc, Barrier};

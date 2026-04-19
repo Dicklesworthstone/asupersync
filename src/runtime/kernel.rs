@@ -565,6 +565,17 @@ pub struct ControllerRegistry {
 }
 
 impl ControllerRegistry {
+    fn set_controller_mode_state(controller: &mut RegisteredController, mode: ControllerMode) {
+        if controller.mode == ControllerMode::Hold && mode != ControllerMode::Hold {
+            controller.held_from_mode = None;
+        }
+        controller.mode = mode;
+        // Epoch residency is scoped to the controller's current mode. Any
+        // explicit mode set starts a fresh residency window, even when the
+        // caller is re-asserting the same mode to reset stale state.
+        controller.epochs_in_current_mode = 0;
+    }
+
     /// Create a new empty registry.
     #[must_use]
     pub fn new() -> Self {
@@ -708,7 +719,10 @@ impl ControllerRegistry {
         let Some(controller) = self.controllers.get_mut(&id) else {
             return false;
         };
-        controller.mode = mode;
+        if mode == ControllerMode::Hold && controller.mode != ControllerMode::Hold {
+            controller.held_from_mode = Some(controller.mode);
+        }
+        Self::set_controller_mode_state(controller, mode);
         true
     }
 
@@ -742,7 +756,10 @@ impl ControllerRegistry {
     /// Allocate the next snapshot ID.
     pub fn next_snapshot_id(&mut self) -> SnapshotId {
         let id = SnapshotId(self.next_snapshot_id);
-        self.next_snapshot_id += 1;
+        self.next_snapshot_id = self
+            .next_snapshot_id
+            .checked_add(1)
+            .expect("runtime kernel snapshot id counter exhausted");
         id
     }
 
@@ -761,7 +778,13 @@ impl ControllerRegistry {
         let Some(controller) = self.controllers.get_mut(&decision.controller_id) else {
             return false;
         };
-        controller.last_snapshot_id = Some(decision.snapshot_id);
+        controller.last_snapshot_id = Some(
+            controller
+                .last_snapshot_id
+                .map_or(decision.snapshot_id, |current| {
+                    current.max(decision.snapshot_id)
+                }),
+        );
         controller.last_action_label.clone_from(&decision.label);
         controller.decisions_this_epoch += 1;
         let within_budget = controller.decisions_this_epoch
@@ -922,8 +945,7 @@ impl ControllerRegistry {
 
         // All gates passed — promote
         let controller = self.controllers.get_mut(&id).expect("checked above");
-        controller.mode = target;
-        controller.epochs_in_current_mode = 0;
+        Self::set_controller_mode_state(controller, target);
         controller.budget_overruns = 0;
 
         self.record_ledger_entry(
@@ -962,8 +984,7 @@ impl ControllerRegistry {
         }
 
         let to = ControllerMode::Shadow;
-        controller.mode = to;
-        controller.epochs_in_current_mode = 0;
+        Self::set_controller_mode_state(controller, to);
         controller.fallback_active = true;
         let name = controller.registration.name.clone();
         let snapshot_id = controller.last_snapshot_id;
@@ -1029,7 +1050,7 @@ impl ControllerRegistry {
         }
         let from = controller.mode;
         controller.held_from_mode = Some(from);
-        controller.mode = ControllerMode::Hold;
+        Self::set_controller_mode_state(controller, ControllerMode::Hold);
 
         self.record_ledger_entry(id, None, LedgerEvent::Held { from });
 
@@ -1052,8 +1073,7 @@ impl ControllerRegistry {
             .held_from_mode
             .take()
             .unwrap_or(ControllerMode::Shadow);
-        controller.mode = restored;
-        controller.epochs_in_current_mode = 0;
+        Self::set_controller_mode_state(controller, restored);
 
         self.record_ledger_entry(id, None, LedgerEvent::Released { to: restored });
 
@@ -1319,6 +1339,21 @@ mod tests {
     }
 
     #[test]
+    fn set_mode_resets_epoch_residency() {
+        let mut registry = ControllerRegistry::new();
+        let id = registry.register(test_registration("mode-reset")).unwrap();
+        registry.advance_epoch();
+        registry.advance_epoch();
+        assert_eq!(registry.epochs_in_current_mode(id), Some(2));
+
+        assert!(registry.set_mode(id, ControllerMode::Shadow));
+        assert_eq!(registry.epochs_in_current_mode(id), Some(0));
+
+        registry.advance_epoch();
+        assert_eq!(registry.epochs_in_current_mode(id), Some(1));
+    }
+
+    #[test]
     fn shadow_count() {
         let mut registry = ControllerRegistry::new();
         let id1 = registry.register(test_registration("s1")).unwrap();
@@ -1370,6 +1405,17 @@ mod tests {
         let id3 = registry.next_snapshot_id();
         assert!(id1 < id2);
         assert!(id2 < id3);
+    }
+
+    #[test]
+    fn snapshot_id_overflow_panics() {
+        let mut registry = ControllerRegistry::new();
+        registry.next_snapshot_id = u64::MAX;
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = registry.next_snapshot_id();
+        }));
+        assert!(panic.is_err(), "snapshot id overflow must panic");
     }
 
     #[test]
@@ -1796,6 +1842,45 @@ mod tests {
     }
 
     #[test]
+    fn stale_decision_does_not_regress_last_snapshot_watermark() {
+        let mut registry = registry_with_policy(fast_policy());
+        let id = registry
+            .register(test_registration("stale-snapshot"))
+            .unwrap();
+        registry.update_calibration(id, 0.95);
+        registry.advance_epoch();
+        registry.advance_epoch();
+        registry.try_promote(id, ControllerMode::Canary).unwrap();
+
+        let first = registry.next_snapshot_id();
+        let second = registry.next_snapshot_id();
+        let newer = ControllerDecision {
+            controller_id: id,
+            snapshot_id: second,
+            label: "newer".to_string(),
+            payload: serde_json::Value::Null,
+            confidence: 0.9,
+            fallback_label: "noop".to_string(),
+        };
+        let stale = ControllerDecision {
+            controller_id: id,
+            snapshot_id: first,
+            label: "stale".to_string(),
+            payload: serde_json::Value::Null,
+            confidence: 0.9,
+            fallback_label: "noop".to_string(),
+        };
+
+        assert!(registry.record_decision(&newer));
+        assert!(!registry.record_decision(&stale));
+
+        let rollback = registry
+            .rollback(id, RollbackReason::ManualRollback)
+            .expect("canary controller should roll back");
+        assert_eq!(rollback.at_snapshot_id, Some(second));
+    }
+
+    #[test]
     fn evidence_ledger_records_promotion_rejections() {
         let mut registry = registry_with_policy(fast_policy());
         let id = registry
@@ -2082,12 +2167,29 @@ mod tests {
             Err(PromotionRejection::CalibrationTooLow { .. })
         ));
 
-        // Attempt 3: promote to Canary without sufficient epochs
+        // Attempt 3: re-asserting Shadow starts a fresh residency window, so
+        // the controller still cannot bypass the minimum shadow epochs.
         registry.update_calibration(id, 0.99);
-        // Reset epochs by setting mode (simulate re-registration scenario)
         registry.set_mode(id, ControllerMode::Shadow);
-        // epochs_in_current_mode is still high, so this succeeds — good,
-        // it proves you can't bypass calibration but epochs accumulate
+        assert!(matches!(
+            registry.try_promote(id, ControllerMode::Canary),
+            Err(PromotionRejection::InsufficientEpochs {
+                current: 0,
+                required: 2,
+                ..
+            })
+        ));
+        registry.advance_epoch();
+        assert!(matches!(
+            registry.try_promote(id, ControllerMode::Canary),
+            Err(PromotionRejection::InsufficientEpochs {
+                current: 1,
+                required: 2,
+                ..
+            })
+        ));
+        registry.advance_epoch();
+        assert!(registry.try_promote(id, ControllerMode::Canary).is_ok());
 
         // Correct path: full pipeline
         let id2 = registry

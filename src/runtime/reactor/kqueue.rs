@@ -1,7 +1,7 @@
 //! macOS/BSD kqueue-based reactor implementation.
 //!
 //! This module provides [`KqueueReactor`], a reactor implementation that uses
-//! kqueue for efficient I/O event notification with edge-triggered mode.
+//! kqueue for efficient I/O event notification on BSD-family platforms.
 //!
 //! # Safety
 //!
@@ -41,9 +41,12 @@
 //!
 //! # Edge-Triggered Mode
 //!
-//! Kqueue uses edge-triggered behavior by default (with EV_CLEAR).
-//! Events fire when state *changes*, not while the condition persists.
-//! Applications must read/write until `EAGAIN` before the next event.
+//! Registrations default to oneshot delivery, matching the portable reactor
+//! contract across backends. Callers can opt into edge-triggered behavior with
+//! [`Interest::EDGE_TRIGGERED`], which maps to `EV_CLEAR`.
+//! [`Interest::DISPATCH`] and [`Interest::PRIORITY`] are rejected because the
+//! `polling` crate does not expose portable support for native `EV_DISPATCH`
+//! or OOB/priority registration through this backend.
 //!
 //! # Example
 //!
@@ -54,7 +57,7 @@
 //! let reactor = KqueueReactor::new()?;
 //! let mut listener = TcpListener::bind("127.0.0.1:0")?;
 //!
-//! // Register the listener with kqueue (edge-triggered mode)
+//! // Register the listener with kqueue
 //! reactor.register(&listener, Token::new(1), Interest::READABLE)?;
 //!
 //! // Poll for events
@@ -69,7 +72,7 @@
 
 use super::{Event, Events, Interest, Reactor, Source, Token};
 use parking_lot::Mutex;
-use polling::{Event as PollEvent, Events as PollingEvents, Poller};
+use polling::{Event as PollEvent, Events as PollingEvents, PollMode, Poller};
 use std::collections::HashMap;
 use std::io;
 use std::num::NonZeroUsize;
@@ -85,24 +88,24 @@ struct RegistrationInfo {
     interest: Interest,
 }
 
-/// macOS/BSD kqueue-based reactor with edge-triggered mode.
+/// macOS/BSD kqueue-based reactor.
 ///
 /// This reactor uses the `polling` crate to interface with kqueue,
 /// providing efficient I/O event notification for async operations.
 ///
 /// # Features
 ///
-/// - `register()`: Adds fd to kqueue with EV_CLEAR (edge-triggered)
+/// - `register()`: Adds fd to kqueue with caller-selected trigger mode
 /// - `modify()`: Updates interest flags for a registered fd
 /// - `deregister()`: Removes fd from kqueue
 /// - `poll()`: Waits for and collects ready events
 /// - `wake()`: Interrupts a blocking poll from another thread
 ///
-/// # Edge-Triggered Mode
-///
-/// Kqueue naturally supports edge-triggered semantics via EV_CLEAR.
-/// Events fire when state *changes*, not while the condition persists.
-/// Applications must read/write until `EAGAIN` before the next event.
+/// Registrations default to oneshot delivery to match the rest of the reactor
+/// abstraction. Callers can request edge-triggered semantics via
+/// [`Interest::EDGE_TRIGGERED`]. [`Interest::DISPATCH`] and
+/// [`Interest::PRIORITY`] are rejected because this backend cannot express
+/// them faithfully through the `polling` crate.
 ///
 /// # Platform Support
 ///
@@ -125,6 +128,41 @@ fn should_resize_poll_events(current: usize, target: usize) -> bool {
 }
 
 impl KqueueReactor {
+    #[inline]
+    fn validate_supported_interest(interest: Interest) -> io::Result<()> {
+        if interest.is_dispatch() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Interest::DISPATCH is not supported by the kqueue reactor",
+            ));
+        }
+
+        if interest.is_priority() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Interest::PRIORITY is not supported by the kqueue reactor",
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    const fn interest_to_poll_mode(interest: Interest) -> PollMode {
+        let single_shot = interest.is_oneshot();
+        if interest.is_edge_triggered() {
+            if single_shot {
+                PollMode::EdgeOneshot
+            } else {
+                PollMode::Edge
+            }
+        } else {
+            // Preserve the reactor's default oneshot semantics when callers
+            // do not explicitly request edge-triggered delivery.
+            PollMode::Oneshot
+        }
+    }
+
     /// Creates a new kqueue-based reactor.
     ///
     /// This initializes a `Poller` instance which creates a kqueue fd internally.
@@ -166,15 +204,38 @@ impl KqueueReactor {
         }
     }
 
-    /// Converts polling crate's event to our Interest type.
-    fn poll_event_to_interest(event: &PollEvent) -> Interest {
-        let mut interest = Interest::NONE;
-
+    /// Converts a polling event into reactor readiness while recovering the
+    /// kqueue-specific EOF signal that `polling` encodes as readable+writable.
+    ///
+    /// As with the epoll backend, generic readiness bits are masked by the
+    /// registration's requested directions so we do not synthesize readiness
+    /// the caller never asked for. For single-direction registrations,
+    /// `polling` reports EOF as readable+writable; in that case we preserve
+    /// the registered direction and surface the extra bit as `HUP`.
+    fn poll_event_to_interest(
+        event: &PollEvent,
+        registered_interest: Option<Interest>,
+    ) -> Interest {
+        let mut observed_readiness = Interest::NONE;
         if event.readable {
-            interest = interest.add(Interest::READABLE);
+            observed_readiness = observed_readiness.add(Interest::READABLE);
         }
         if event.writable {
-            interest = interest.add(Interest::WRITABLE);
+            observed_readiness = observed_readiness.add(Interest::WRITABLE);
+        }
+
+        let mut interest = match registered_interest {
+            Some(registered) => observed_readiness & registered,
+            None => observed_readiness,
+        };
+
+        let eof_for_single_direction = event.readable
+            && event.writable
+            && registered_interest
+                .is_some_and(|registered| registered.is_readable() ^ registered.is_writable());
+
+        if eof_for_single_direction {
+            interest = interest.add(Interest::HUP);
         }
 
         interest
@@ -183,6 +244,7 @@ impl KqueueReactor {
 
 impl Reactor for KqueueReactor {
     fn register(&self, source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
+        Self::validate_supported_interest(interest)?;
         let raw_fd = source.as_raw_fd();
 
         // Check for duplicate registration first
@@ -213,10 +275,12 @@ impl Reactor for KqueueReactor {
         // The BorrowedFd is only used for the duration of this call.
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
 
-        // Add to kqueue via the polling crate
+        let mode = Self::interest_to_poll_mode(interest);
+
+        // Add to kqueue via the polling crate with the caller-selected mode.
         // SAFETY: the caller must uphold the invariant that `source` remains valid
         // (and thus its raw fd remains open) until `deregister()` is called.
-        unsafe { self.poller.add(&borrowed_fd, event)? };
+        unsafe { self.poller.add_with_mode(&borrowed_fd, event, mode)? };
 
         // Track the registration for modify/deregister
         regs.insert(token, RegistrationInfo { raw_fd, interest });
@@ -225,6 +289,7 @@ impl Reactor for KqueueReactor {
     }
 
     fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+        Self::validate_supported_interest(interest)?;
         let mut regs = self.registrations.lock();
         let entry = match regs.entry(token) {
             std::collections::hash_map::Entry::Occupied(entry) => entry,
@@ -244,8 +309,10 @@ impl Reactor for KqueueReactor {
         // The caller is responsible for ensuring the fd remains valid until deregistered.
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
 
-        // Modify the kqueue registration
-        let result = match self.poller.modify(&borrowed_fd, event) {
+        let mode = Self::interest_to_poll_mode(interest);
+
+        // Modify the kqueue registration with the caller-selected mode.
+        let result = match self.poller.modify_with_mode(&borrowed_fd, event, mode) {
             Ok(()) => {
                 entry.into_mut().interest = interest;
                 Ok(())
@@ -330,13 +397,17 @@ impl Reactor for KqueueReactor {
 
         self.poller.wait(&mut poll_events, timeout)?;
 
+        let registrations = self.registrations.lock();
+
         // Convert polling events to our Event type.
         for poll_event in poll_events.iter() {
             let token = Token(poll_event.key);
-            let interest = Self::poll_event_to_interest(&poll_event);
+            let registered_interest = registrations.get(&token).map(|info| info.interest);
+            let interest = Self::poll_event_to_interest(&poll_event, registered_interest);
             events.push(Event::new(token, interest));
         }
 
+        drop(registrations);
         drop(poll_events);
         Ok(events.len())
     }
@@ -418,6 +489,115 @@ mod tests {
             let _ = unsafe { libc::dup2(saved_fd, self.target_fd) };
             let _ = unsafe { libc::close(saved_fd) };
         }
+    }
+
+    #[test]
+    fn interest_to_poll_mode_mapping() {
+        init_test("kqueue_interest_to_poll_mode_mapping");
+        crate::assert_with_log!(
+            KqueueReactor::interest_to_poll_mode(Interest::READABLE) == PollMode::Oneshot,
+            "default oneshot mode",
+            PollMode::Oneshot,
+            KqueueReactor::interest_to_poll_mode(Interest::READABLE)
+        );
+        crate::assert_with_log!(
+            KqueueReactor::interest_to_poll_mode(Interest::READABLE.with_edge_triggered())
+                == PollMode::Edge,
+            "edge mode",
+            PollMode::Edge,
+            KqueueReactor::interest_to_poll_mode(Interest::READABLE.with_edge_triggered())
+        );
+        crate::assert_with_log!(
+            KqueueReactor::interest_to_poll_mode(Interest::READABLE.with_oneshot())
+                == PollMode::Oneshot,
+            "oneshot mode",
+            PollMode::Oneshot,
+            KqueueReactor::interest_to_poll_mode(Interest::READABLE.with_oneshot())
+        );
+        crate::assert_with_log!(
+            KqueueReactor::interest_to_poll_mode(
+                Interest::READABLE.with_edge_triggered().with_oneshot()
+            ) == PollMode::EdgeOneshot,
+            "edge oneshot mode",
+            PollMode::EdgeOneshot,
+            KqueueReactor::interest_to_poll_mode(
+                Interest::READABLE.with_edge_triggered().with_oneshot()
+            )
+        );
+        crate::test_complete!("kqueue_interest_to_poll_mode_mapping");
+    }
+
+    #[test]
+    fn dispatch_interest_is_rejected() {
+        init_test("kqueue_dispatch_interest_is_rejected");
+        let reactor = KqueueReactor::new().expect("failed to create reactor");
+        let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
+
+        let register_err = reactor
+            .register(&sock1, Token::new(77), Interest::dispatch())
+            .expect_err("dispatch register should be rejected");
+        crate::assert_with_log!(
+            register_err.kind() == io::ErrorKind::InvalidInput,
+            "register rejects unsupported dispatch interest",
+            io::ErrorKind::InvalidInput,
+            register_err.kind()
+        );
+
+        reactor
+            .register(&sock1, Token::new(78), Interest::READABLE)
+            .expect("plain register should succeed");
+        let modify_err = reactor
+            .modify(Token::new(78), Interest::dispatch())
+            .expect_err("dispatch modify should be rejected");
+        crate::assert_with_log!(
+            modify_err.kind() == io::ErrorKind::InvalidInput,
+            "modify rejects unsupported dispatch interest",
+            io::ErrorKind::InvalidInput,
+            modify_err.kind()
+        );
+        reactor
+            .deregister(Token::new(78))
+            .expect("cleanup deregister should succeed");
+        crate::test_complete!("kqueue_dispatch_interest_is_rejected");
+    }
+
+    #[test]
+    fn priority_interest_is_rejected() {
+        init_test("kqueue_priority_interest_is_rejected");
+        let reactor = KqueueReactor::new().expect("failed to create reactor");
+        let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
+
+        let register_err = reactor
+            .register(
+                &sock1,
+                Token::new(79),
+                Interest::READABLE.add(Interest::PRIORITY),
+            )
+            .expect_err("priority register should be rejected");
+        crate::assert_with_log!(
+            register_err.kind() == io::ErrorKind::InvalidInput,
+            "register rejects unsupported priority interest",
+            io::ErrorKind::InvalidInput,
+            register_err.kind()
+        );
+
+        reactor
+            .register(&sock1, Token::new(80), Interest::READABLE)
+            .expect("plain register should succeed");
+        let modify_err = reactor
+            .modify(Token::new(80), Interest::READABLE.add(Interest::PRIORITY))
+            .expect_err("priority modify should be rejected");
+        crate::assert_with_log!(
+            modify_err.kind() == io::ErrorKind::InvalidInput,
+            "modify rejects unsupported priority interest",
+            io::ErrorKind::InvalidInput,
+            modify_err.kind()
+        );
+
+        reactor
+            .deregister(Token::new(80))
+            .expect("cleanup deregister should succeed");
+        crate::test_complete!("kqueue_priority_interest_is_rejected");
     }
 
     #[test]
@@ -706,7 +886,7 @@ mod tests {
 
         let token = Token::new(7);
         reactor
-            .register(&read_sock, token, Interest::READABLE)
+            .register(&read_sock, token, Interest::READABLE.with_edge_triggered())
             .expect("register failed");
 
         write_sock.write_all(b"hello").expect("write failed");
@@ -744,6 +924,81 @@ mod tests {
 
         reactor.deregister(token).expect("deregister failed");
         crate::test_complete!("kqueue_edge_triggered_requires_drain");
+    }
+
+    #[test]
+    fn default_oneshot_requires_rearm_for_new_edges() {
+        init_test("kqueue_default_oneshot_requires_rearm_for_new_edges");
+        let reactor = KqueueReactor::new().expect("failed to create reactor");
+        let (mut read_sock, mut write_sock) =
+            UnixStream::pair().expect("failed to create unix stream pair");
+        read_sock
+            .set_nonblocking(true)
+            .expect("failed to set nonblocking");
+
+        let token = Token::new(8);
+        reactor
+            .register(&read_sock, token, Interest::READABLE)
+            .expect("register failed");
+
+        write_sock.write_all(b"hello").expect("write failed");
+
+        let mut events = Events::with_capacity(64);
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("first poll failed");
+        crate::assert_with_log!(count >= 1, "first poll has events", true, count >= 1);
+
+        let mut found = false;
+        for event in events.iter() {
+            if event.token == token && event.is_readable() {
+                found = true;
+                break;
+            }
+        }
+        crate::assert_with_log!(found, "first poll found readable event", true, found);
+
+        let mut buf = [0_u8; 16];
+        let read_count = read_sock.read(&mut buf).expect("drain read failed");
+        crate::assert_with_log!(read_count == 5, "drained first payload", 5usize, read_count);
+
+        write_sock.write_all(b"world").expect("second write failed");
+        events.clear();
+        let count = reactor
+            .poll(&mut events, Some(Duration::ZERO))
+            .expect("second poll failed");
+        crate::assert_with_log!(
+            count == 0,
+            "oneshot stays silent until rearm",
+            0usize,
+            count
+        );
+
+        reactor
+            .modify(token, Interest::READABLE)
+            .expect("rearm modify failed");
+        events.clear();
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("third poll failed");
+        crate::assert_with_log!(count >= 1, "rearmed poll has events", true, count >= 1);
+
+        let mut found_after_rearm = false;
+        for event in events.iter() {
+            if event.token == token && event.is_readable() {
+                found_after_rearm = true;
+                break;
+            }
+        }
+        crate::assert_with_log!(
+            found_after_rearm,
+            "rearmed poll found readable event",
+            true,
+            found_after_rearm
+        );
+
+        reactor.deregister(token).expect("deregister failed");
+        crate::test_complete!("kqueue_default_oneshot_requires_rearm_for_new_edges");
     }
 
     #[test]
@@ -1028,7 +1283,7 @@ mod tests {
     fn poll_event_to_interest_mapping() {
         init_test("kqueue_poll_event_to_interest_mapping");
         let event = PollEvent::all(1);
-        let interest = KqueueReactor::poll_event_to_interest(&event);
+        let interest = KqueueReactor::poll_event_to_interest(&event, Some(Interest::both()));
         crate::assert_with_log!(
             interest.is_readable(),
             "all readable",
@@ -1043,7 +1298,7 @@ mod tests {
         );
 
         let event = PollEvent::readable(2);
-        let interest = KqueueReactor::poll_event_to_interest(&event);
+        let interest = KqueueReactor::poll_event_to_interest(&event, Some(Interest::READABLE));
         crate::assert_with_log!(
             interest.is_readable(),
             "readable set",
@@ -1058,7 +1313,7 @@ mod tests {
         );
 
         let event = PollEvent::writable(3);
-        let interest = KqueueReactor::poll_event_to_interest(&event);
+        let interest = KqueueReactor::poll_event_to_interest(&event, Some(Interest::WRITABLE));
         crate::assert_with_log!(
             !interest.is_readable(),
             "readable unset",
@@ -1070,6 +1325,50 @@ mod tests {
             "writable set",
             true,
             interest.is_writable()
+        );
+
+        let read_eof_event = PollEvent::all(4);
+        let interest =
+            KqueueReactor::poll_event_to_interest(&read_eof_event, Some(Interest::READABLE));
+        crate::assert_with_log!(
+            interest.is_readable(),
+            "read eof stays readable",
+            true,
+            interest.is_readable()
+        );
+        crate::assert_with_log!(
+            !interest.is_writable(),
+            "read eof does not invent writable readiness",
+            false,
+            interest.is_writable()
+        );
+        crate::assert_with_log!(
+            interest.is_hup(),
+            "read eof becomes hangup for readable-only registration",
+            true,
+            interest.is_hup()
+        );
+
+        let write_eof_event = PollEvent::all(5);
+        let interest =
+            KqueueReactor::poll_event_to_interest(&write_eof_event, Some(Interest::WRITABLE));
+        crate::assert_with_log!(
+            !interest.is_readable(),
+            "write eof does not invent readable readiness",
+            false,
+            interest.is_readable()
+        );
+        crate::assert_with_log!(
+            interest.is_writable(),
+            "write eof stays writable",
+            true,
+            interest.is_writable()
+        );
+        crate::assert_with_log!(
+            interest.is_hup(),
+            "write eof becomes hangup for writable-only registration",
+            true,
+            interest.is_hup()
         );
         crate::test_complete!("kqueue_poll_event_to_interest_mapping");
     }

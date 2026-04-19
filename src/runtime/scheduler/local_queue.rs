@@ -221,6 +221,18 @@ impl LocalQueue {
         stack.len()
     }
 
+    /// Returns a stable snapshot of queued task IDs for observability/tests.
+    ///
+    /// The snapshot is captured under a single queue lock so callers can use
+    /// the returned vector and its length consistently without racing queue
+    /// mutations between separate `len()` and iteration steps.
+    #[inline]
+    #[must_use]
+    pub fn snapshot_tasks(&self) -> Vec<TaskId> {
+        let queue = self.inner.lock();
+        queue.iter().copied().collect()
+    }
+
     /// Creates a stealer for this queue.
     #[inline]
     #[must_use]

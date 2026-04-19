@@ -665,10 +665,10 @@ pub struct IoRegistration {
     /// Used for `Waker::will_wake` comparison to avoid unnecessary
     /// atomic ref-count bumps and mutex acquisitions on the hot path.
     cached_waker: Option<Waker>,
-    /// Tracks whether this registration has already been explicitly deregistered.
+    /// Tracks whether this registration has already been successfully deregistered.
     ///
-    /// This prevents duplicate best-effort deregistration in `Drop` without
-    /// leaking the registration object.
+    /// Persistent explicit deregistration failures leave Drop armed for one
+    /// final best-effort cleanup pass.
     deregistered: bool,
 }
 
@@ -775,7 +775,7 @@ impl IoRegistration {
         {
             let slab_key = SlabToken::from_usize(self.token.0);
             if let Some(slot) = guard.wakers.get_mut(slab_key) {
-                *slot = waker.clone();
+                slot.clone_from(waker);
                 self.cached_waker = Some(waker.clone());
             } else {
                 return Ok(false);
@@ -817,10 +817,7 @@ impl IoRegistration {
                             self.deregistered = true;
                             Ok(())
                         }
-                        Err(_second_err) => {
-                            self.deregistered = true;
-                            Err(first_err)
-                        }
+                        Err(_second_err) => Err(first_err),
                     }
                 }
             }
@@ -1038,6 +1035,65 @@ mod tests {
         fn deregister(&self, _token: Token) -> io::Result<()> {
             self.deregister_calls.fetch_add(1, Ordering::SeqCst);
             Err(io::Error::other("persistent failure"))
+        }
+
+        fn poll(&self, _events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
+            Ok(0)
+        }
+
+        fn wake(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn registration_count(&self) -> usize {
+            0
+        }
+    }
+
+    struct ThirdTryReactor {
+        deregister_calls: AtomicUsize,
+        deregistered: AtomicBool,
+    }
+
+    impl ThirdTryReactor {
+        fn new() -> Self {
+            Self {
+                deregister_calls: AtomicUsize::new(0),
+                deregistered: AtomicBool::new(false),
+            }
+        }
+
+        fn deregister_calls(&self) -> usize {
+            self.deregister_calls.load(Ordering::SeqCst)
+        }
+
+        fn was_deregistered(&self) -> bool {
+            self.deregistered.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Reactor for ThirdTryReactor {
+        fn register(
+            &self,
+            _source: &dyn Source,
+            _token: Token,
+            _interest: Interest,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn modify(&self, _token: Token, _interest: Interest) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn deregister(&self, _token: Token) -> io::Result<()> {
+            let call = self.deregister_calls.fetch_add(1, Ordering::SeqCst);
+            if call < 2 {
+                Err(io::Error::other("persistent failure"))
+            } else {
+                self.deregistered.store(true, Ordering::SeqCst);
+                Ok(())
+            }
         }
 
         fn poll(&self, _events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
@@ -1522,9 +1578,10 @@ mod tests {
             true,
             result.is_err()
         );
-        // deregister() performs two attempts.
+        // deregister() performs two explicit attempts and leaves Drop armed
+        // for one final best-effort cleanup pass.
         let calls = reactor.deregister_calls();
-        crate::assert_with_log!(calls == 2, "two total deregister attempts", 2usize, calls);
+        crate::assert_with_log!(calls == 4, "four total deregister attempts", 4usize, calls);
         crate::assert_with_log!(
             driver.is_empty(),
             "driver cleans up local registration after persistent failure",
@@ -1532,6 +1589,44 @@ mod tests {
             driver.is_empty()
         );
         crate::test_complete!("io_registration_deregister_persistent_error_returns_err");
+    }
+
+    #[test]
+    fn io_registration_deregister_error_still_allows_drop_cleanup_success() {
+        init_test("io_registration_deregister_error_still_allows_drop_cleanup_success");
+        let reactor = Arc::new(ThirdTryReactor::new());
+        let reactor_handle: Arc<dyn Reactor> = reactor.clone();
+        let driver = IoDriverHandle::new(reactor_handle);
+        let source = TestFdSource;
+
+        let (waker, _) = create_test_waker();
+        let reg = driver
+            .register(&source, Interest::READABLE, waker)
+            .expect("register should succeed");
+
+        let result = reg.deregister();
+        crate::assert_with_log!(
+            result.is_err(),
+            "explicit deregister still reports the two-attempt failure",
+            true,
+            result.is_err()
+        );
+        let was = reactor.was_deregistered();
+        crate::assert_with_log!(
+            was,
+            "drop cleanup gets a final successful deregister attempt",
+            true,
+            was
+        );
+        let calls = reactor.deregister_calls();
+        crate::assert_with_log!(
+            calls == 3,
+            "two explicit attempts plus one drop cleanup attempt",
+            3usize,
+            calls
+        );
+        crate::assert_with_log!(driver.is_empty(), "driver empty", true, driver.is_empty());
+        crate::test_complete!("io_registration_deregister_error_still_allows_drop_cleanup_success");
     }
 
     #[test]

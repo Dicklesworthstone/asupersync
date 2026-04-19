@@ -12,6 +12,8 @@ use crate::cancel::protocol_state_machines::{
     TaskContext, TaskEvent, TransitionResult, ValidationLevel as CancelValidationLevel,
 };
 use crate::cx::cx::ObservabilityState;
+use crate::cx::scope::{CatchUnwind, payload_to_string};
+use crate::epoch::EpochId;
 use crate::error::{Error, ErrorKind};
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics, OutcomeKind};
 use crate::observability::{LogCollector, ObservabilityConfig};
@@ -57,6 +59,16 @@ use std::time::Duration;
 static NEXT_RUNTIME_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 type BoxedAsyncFinalizer = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
+
+fn log_cancel_protocol_violation(operation: &'static str, validation_result: &TransitionResult) {
+    let _ = operation;
+    let _ = validation_result;
+    crate::tracing_compat::error!(
+        operation,
+        validation_result = ?validation_result,
+        "cancel protocol violation"
+    );
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FinalizerHistoryEvent {
@@ -366,12 +378,22 @@ pub struct RuntimeState {
     leak_escalation: Option<LeakEscalation>,
     /// Cumulative count of obligation leaks (for escalation threshold).
     leak_count: u64,
-    /// Reentrance guard for `handle_obligation_leaks`.
+    /// Leak-handling recursion depth for diagnostics.
     ///
-    /// Prevents reentrant calls from inflating `leak_count` when
-    /// `mark_obligation_leaked → advance_region_state → collect_obligation_leaks`
-    /// discovers obligations already being processed by the outer caller.
-    handling_leaks: bool,
+    /// Distinct leak batches may be processed reentrantly (for example when a
+    /// child region closes and advances an ancestor into `Finalizing`), so we
+    /// cannot use a coarse boolean guard here without suppressing legitimate
+    /// nested leak handling. Track the depth for observability and pair it with
+    /// `in_flight_leak_ids` to deduplicate only the exact obligations already
+    /// being processed by an outer frame.
+    handling_leaks: usize,
+    /// Obligation ids currently being processed by `handle_obligation_leaks`.
+    ///
+    /// This prevents recursive `mark_obligation_leaked` /
+    /// `abort_obligation` / `advance_region_state` paths from rediscovering the
+    /// same leak batch and inflating `leak_count`, while still allowing
+    /// different regions' leaks to be handled during the same unwind.
+    in_flight_leak_ids: HashSet<ObligationId>,
     /// Regions currently in `Finalizing` state.
     ///
     /// Allows `drain_ready_async_finalizers` to skip a full region-arena scan
@@ -389,10 +411,21 @@ pub struct RuntimeState {
     pending_finalizer_ids: HashMap<RegionId, Vec<u64>>,
     /// Async finalizer tasks mapped back to the logical finalizer they are running.
     async_finalizer_tasks: HashMap<TaskId, u64>,
+    /// Regions currently blocked on an in-flight async finalizer barrier.
+    ///
+    /// While a region is present here, lower finalizers in its stack must not
+    /// run yet. This preserves the per-region async barrier: at most one async
+    /// finalizer task may be active for a region at a time, and lower LIFO
+    /// finalizers must wait until it completes.
+    active_async_finalizers: HashMap<RegionId, TaskId>,
     /// Append-only finalizer lifecycle history for post-run oracle hydration.
     finalizer_history: Vec<FinalizerHistoryEvent>,
     /// Monotonic id source for finalizer registrations.
     next_finalizer_id: u64,
+    /// Per-module epoch cursors feeding the runtime epoch tracker.
+    region_table_epoch: EpochId,
+    task_table_epoch: EpochId,
+    obligation_table_epoch: EpochId,
     /// Epoch consistency tracker for runtime state transitions.
     epoch_tracker: super::epoch_tracker::EpochConsistencyTracker,
     /// State machine transition verifier for runtime entities.
@@ -430,6 +463,7 @@ impl std::fmt::Debug for RuntimeState {
             .field("leak_escalation", &self.leak_escalation)
             .field("leak_count", &self.leak_count)
             .field("handling_leaks", &self.handling_leaks)
+            .field("in_flight_leak_ids", &self.in_flight_leak_ids.len())
             .field("finalizing_region_count", &self.finalizing_regions.len())
             .field(
                 "recently_closed_region_count",
@@ -444,8 +478,15 @@ impl std::fmt::Debug for RuntimeState {
                 &self.pending_finalizer_ids.len(),
             )
             .field("async_finalizer_tasks", &self.async_finalizer_tasks.len())
+            .field(
+                "active_async_finalizers",
+                &self.active_async_finalizers.len(),
+            )
             .field("finalizer_history_len", &self.finalizer_history.len())
             .field("next_finalizer_id", &self.next_finalizer_id)
+            .field("region_table_epoch", &self.region_table_epoch)
+            .field("task_table_epoch", &self.task_table_epoch)
+            .field("obligation_table_epoch", &self.obligation_table_epoch)
             .field("state_verifier", &"<StateTransitionVerifier>")
             .field("cancel_protocol_validator", &"<CancelProtocolValidator>")
             .field("debt_monitor", &"<CancellationDebtMonitor>")
@@ -487,14 +528,19 @@ impl RuntimeState {
             obligation_leak_response: ObligationLeakResponse::Log,
             leak_escalation: None,
             leak_count: 0,
-            handling_leaks: false,
+            handling_leaks: 0,
+            in_flight_leak_ids: HashSet::new(),
             finalizing_regions: Vec::new(),
             recently_closed_regions: HashSet::new(),
             recently_closed_region_order: VecDeque::new(),
             pending_finalizer_ids: HashMap::new(),
             async_finalizer_tasks: HashMap::new(),
+            active_async_finalizers: HashMap::new(),
             finalizer_history: Vec::new(),
             next_finalizer_id: 0,
+            region_table_epoch: EpochId::GENESIS,
+            task_table_epoch: EpochId::GENESIS,
+            obligation_table_epoch: EpochId::GENESIS,
             epoch_tracker: super::epoch_tracker::EpochConsistencyTracker::new(),
             state_verifier: Arc::new(super::state_verifier::StateTransitionVerifier::new(
                 super::state_verifier::StateVerifierConfig::default(),
@@ -604,6 +650,13 @@ impl RuntimeState {
     #[must_use]
     pub fn timer_driver_handle(&self) -> Option<TimerDriverHandle> {
         self.timer_driver.clone()
+    }
+
+    #[inline]
+    fn current_runtime_time(&self) -> Time {
+        self.timer_driver
+            .as_ref()
+            .map_or(self.now, TimerDriverHandle::now)
     }
 
     /// Returns a cloned handle to the blocking pool, if present.
@@ -720,6 +773,18 @@ impl RuntimeState {
         self.observability = None;
     }
 
+    /// Builds the observability state for a new task-like execution context.
+    #[must_use]
+    pub(crate) fn observability_for_task(
+        &self,
+        region: RegionId,
+        task: TaskId,
+    ) -> Option<ObservabilityState> {
+        self.observability
+            .as_ref()
+            .map(|obs| obs.for_task(region, task))
+    }
+
     /// Sets the response policy when obligation leaks are detected.
     pub fn set_obligation_leak_response(&mut self, response: ObligationLeakResponse) {
         self.obligation_leak_response = response;
@@ -806,7 +871,11 @@ impl RuntimeState {
     /// Returns the removed record if it existed.
     #[inline]
     pub fn remove_task(&mut self, task_id: TaskId) -> Option<TaskRecord> {
-        self.tasks.remove_task(task_id)
+        let removed = self.tasks.remove_task(task_id);
+        if removed.is_some() {
+            self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
+        }
+        removed
     }
 
     /// Returns an iterator over all task records.
@@ -917,6 +986,7 @@ impl RuntimeState {
     /// recent trace events. It is designed to be lightweight and serializable.
     #[must_use]
     pub fn snapshot(&self) -> RuntimeSnapshot {
+        let now = self.current_runtime_time();
         let mut obligations_by_task: HashMap<TaskId, Vec<ObligationId>> =
             HashMap::with_capacity(self.obligations_len());
         let obligations: Vec<ObligationSnapshot> = self
@@ -954,7 +1024,7 @@ impl RuntimeState {
             .collect();
 
         RuntimeSnapshot {
-            timestamp: self.now.as_nanos(),
+            timestamp: now.as_nanos(),
             regions,
             tasks,
             obligations,
@@ -973,7 +1043,8 @@ impl RuntimeState {
             "create_root_region called twice; previous root: {:?}",
             self.root_region
         );
-        let id = self.regions.create_root(budget, self.now);
+        let now = self.current_runtime_time();
+        let id = self.regions.create_root(budget, now);
 
         // Register region with cancel protocol validator
         {
@@ -982,16 +1053,11 @@ impl RuntimeState {
         }
 
         self.root_region = Some(id);
-        self.record_trace_event(|seq| TraceEvent::region_created(seq, self.now, id, None));
+        self.record_trace_event(|seq| TraceEvent::region_created(seq, now, id, None));
         self.metrics.region_created(id, None);
 
         // Notify epoch tracker of region creation
-        self.epoch_tracker.notify_epoch_transition(
-            super::epoch_tracker::ModuleId::RegionTable,
-            crate::epoch::EpochId::GENESIS,
-            crate::epoch::EpochId::GENESIS.next(),
-            self.now,
-        );
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
 
         id
     }
@@ -1012,18 +1078,14 @@ impl RuntimeState {
         // Use Normal priority as the default for backward compatibility
         self.check_resource_pressure_for_region(RegionPriority::Normal)?;
 
-        let id = self.regions.create_child(parent, budget, self.now)?;
+        let now = self.current_runtime_time();
+        let id = self.regions.create_child(parent, budget, now)?;
 
-        self.record_trace_event(|seq| TraceEvent::region_created(seq, self.now, id, Some(parent)));
+        self.record_trace_event(|seq| TraceEvent::region_created(seq, now, id, Some(parent)));
         self.metrics.region_created(id, Some(parent));
 
         // Notify epoch tracker of region creation
-        self.epoch_tracker.notify_epoch_transition(
-            super::epoch_tracker::ModuleId::RegionTable,
-            crate::epoch::EpochId::GENESIS,
-            crate::epoch::EpochId::GENESIS.next(),
-            self.now,
-        );
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
 
         Ok(id)
     }
@@ -1070,7 +1132,7 @@ impl RuntimeState {
             oneshot::channel::<Result<T, crate::runtime::task_handle::JoinError>>();
 
         // Create the TaskRecord
-        let now = self.now;
+        let now = self.current_runtime_time();
         let idx = self.tasks.insert_task_with(|idx| {
             TaskRecord::new_with_time(TaskId::from_arena(idx), region, budget, now)
         });
@@ -1086,7 +1148,7 @@ impl RuntimeState {
         let context = TaskContext {
             task_id,
             region_id: region,
-            spawned_at: self.now,
+            spawned_at: now,
             validation_level: CancelValidationLevel::Basic,
         };
         let validation_result = self.validate_task_protocol_transition(
@@ -1098,7 +1160,7 @@ impl RuntimeState {
             validation_result,
             TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
         ) {
-            eprintln!("Cancel protocol violation during task creation: {validation_result:?}");
+            log_cancel_protocol_violation("task creation", &validation_result);
             // Continue with creation but log violation
         }
 
@@ -1213,12 +1275,25 @@ impl RuntimeState {
         let (task_id, handle, cx, result_tx) =
             self.create_task_infrastructure(region, budget, false)?;
 
-        // Wrap the future to send the result through the channel
+        // Wrap the future to send the result through the channel. Panics must
+        // surface as `JoinError::Panicked` rather than silently closing the
+        // channel and looking like cancellation to the join handle.
         let wrapped_future = async move {
-            let result = future.await;
-            // Send the result - ignore error if TaskHandle was dropped
-            let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
-            crate::types::Outcome::Ok(())
+            match (CatchUnwind { inner: future }).await {
+                Ok(result) => {
+                    let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
+                    crate::types::Outcome::Ok(())
+                }
+                Err(payload) => {
+                    let panic_payload =
+                        crate::types::outcome::PanicPayload::new(payload_to_string(&payload));
+                    let _ = result_tx.send(
+                        &cx,
+                        Err::<T, JoinError>(JoinError::Panicked(panic_payload.clone())),
+                    );
+                    crate::types::Outcome::Panicked(panic_payload)
+                }
+            }
         };
 
         // Store the wrapped future with task_id for poll tracing
@@ -1226,12 +1301,7 @@ impl RuntimeState {
             .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
 
         // Notify epoch tracker of task creation
-        self.epoch_tracker.notify_epoch_transition(
-            super::epoch_tracker::ModuleId::TaskTable,
-            crate::epoch::EpochId::GENESIS,
-            crate::epoch::EpochId::GENESIS.next(),
-            self.now,
-        );
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
 
         Ok((task_id, handle))
     }
@@ -1247,6 +1317,21 @@ impl RuntimeState {
         F: FnOnce(u64) -> TraceEvent,
     {
         self.trace.record_event(build);
+    }
+
+    pub(crate) fn notify_runtime_epoch_advance(&mut self, module: super::epoch_tracker::ModuleId) {
+        let now = self.current_runtime_time();
+        let cursor = match module {
+            super::epoch_tracker::ModuleId::RegionTable => &mut self.region_table_epoch,
+            super::epoch_tracker::ModuleId::TaskTable => &mut self.task_table_epoch,
+            super::epoch_tracker::ModuleId::ObligationTable => &mut self.obligation_table_epoch,
+            _ => return,
+        };
+        let from_epoch = *cursor;
+        let to_epoch = from_epoch.next();
+        *cursor = to_epoch;
+        self.epoch_tracker
+            .notify_epoch_transition(module, from_epoch, to_epoch, now);
     }
 
     fn record_task_trace_event<F>(&self, task_id: TaskId, build: F)
@@ -1265,18 +1350,18 @@ impl RuntimeState {
     }
 
     pub(crate) fn record_task_spawn(&self, task_id: TaskId, region: RegionId) {
-        self.record_task_trace_event(task_id, |seq| {
-            TraceEvent::spawn(seq, self.now, task_id, region)
-        });
+        let now = self.current_runtime_time();
+        self.record_task_trace_event(task_id, |seq| TraceEvent::spawn(seq, now, task_id, region));
         self.metrics.task_spawned(region, task_id);
     }
 
     fn record_task_complete(&self, task: &TaskRecord) {
+        let now = self.current_runtime_time();
         self.record_task_trace_event(task.id, |seq| {
-            TraceEvent::complete(seq, self.now, task.id, task.owner)
+            TraceEvent::complete(seq, now, task.id, task.owner)
         });
 
-        let duration = Duration::from_nanos(self.now.duration_since(task.created_at()));
+        let duration = Duration::from_nanos(now.duration_since(task.created_at()));
         let outcome_kind = match &task.state {
             TaskState::Completed(outcome) => OutcomeKind::from(outcome),
             _ => OutcomeKind::Err,
@@ -1296,6 +1381,7 @@ impl RuntimeState {
     where
         F: FnMut(&ObligationRecord) -> bool,
     {
+        let now = self.current_runtime_time();
         self.obligations
             .iter()
             .filter_map(|(_, record)| {
@@ -1303,7 +1389,7 @@ impl RuntimeState {
                     return None;
                 }
 
-                let held_duration_ns = self.now.duration_since(record.reserved_at);
+                let held_duration_ns = now.duration_since(record.reserved_at);
                 Some(LeakedObligationInfo {
                     id: record.id,
                     kind: record.kind,
@@ -1320,6 +1406,7 @@ impl RuntimeState {
 
     /// Collect obligation leaks for a specific task holder using the secondary index.
     fn collect_obligation_leaks_for_holder(&self, task_id: TaskId) -> Vec<LeakedObligationInfo> {
+        let now = self.current_runtime_time();
         self.obligations
             .ids_for_holder(task_id)
             .iter()
@@ -1328,7 +1415,7 @@ impl RuntimeState {
                 if !record.is_pending() {
                     return None;
                 }
-                let held_duration_ns = self.now.duration_since(record.reserved_at);
+                let held_duration_ns = now.duration_since(record.reserved_at);
                 Some(LeakedObligationInfo {
                     id: record.id,
                     kind: record.kind,
@@ -1345,14 +1432,32 @@ impl RuntimeState {
 
     #[allow(clippy::needless_pass_by_value)]
     fn handle_obligation_leaks(&mut self, error: ObligationLeakError) {
-        if error.leaks.is_empty() || self.handling_leaks {
+        if error.leaks.is_empty() {
             return;
         }
 
-        self.handling_leaks = true;
+        let new_leaks: Vec<LeakedObligationInfo> = error
+            .leaks
+            .iter()
+            .filter(|leak| {
+                self.obligations
+                    .get(leak.id.arena_index())
+                    .is_some_and(ObligationRecord::is_pending)
+                    && !self.in_flight_leak_ids.contains(&leak.id)
+            })
+            .cloned()
+            .collect();
+
+        if new_leaks.is_empty() {
+            return;
+        }
+
+        let leak_ids: Vec<ObligationId> = new_leaks.iter().map(|leak| leak.id).collect();
+        self.in_flight_leak_ids.extend(leak_ids.iter().copied());
+        self.handling_leaks = self.handling_leaks.saturating_add(1);
 
         // Track cumulative leaks for escalation.
-        self.leak_count = self.leak_count.saturating_add(error.leaks.len() as u64);
+        self.leak_count = self.leak_count.saturating_add(leak_ids.len() as u64);
 
         // Determine the effective response: check escalation threshold first.
         let mut response = if let Some(ref esc) = self.leak_escalation {
@@ -1374,11 +1479,10 @@ impl RuntimeState {
             response = ObligationLeakResponse::Log;
         }
 
-        let leak_ids: Vec<ObligationId> = error.leaks.iter().map(|leak| leak.id).collect();
         match response {
             ObligationLeakResponse::Panic => {
                 // Mark leaked first so trace/metrics capture the event before panicking.
-                for id in leak_ids {
+                for &id in &leak_ids {
                     let _ = self.mark_obligation_leaked(id);
                 }
                 let msg = error.to_string();
@@ -1390,22 +1494,19 @@ impl RuntimeState {
                     completion = %error
                         .completion
                         .map_or("unknown", TaskCompletionKind::as_str),
-                    leak_count = error.leaks.len(),
+                    leak_count = leak_ids.len(),
                     cumulative_leaks = self.leak_count,
                     details = %error,
                     "obligation leaks detected (fail-fast)"
                 );
-                // Reset reentrancy guard before panicking. Without this,
-                // panic_any unwinds past `self.handling_leaks = false` at the
-                // end of this function. If the mutex is recovered via
-                // PoisonError::into_inner (which our ContendedMutex callers
-                // do), the flag stays true and all future obligation leak
-                // handling is silently disabled.
-                self.handling_leaks = false;
+                self.handling_leaks = self.handling_leaks.saturating_sub(1);
+                for id in leak_ids {
+                    self.in_flight_leak_ids.remove(&id);
+                }
                 std::panic::panic_any(msg);
             }
             ObligationLeakResponse::Log => {
-                for id in leak_ids {
+                for &id in &leak_ids {
                     let _ = self.mark_obligation_leaked(id);
                 }
                 crate::tracing_compat::error!(
@@ -1414,19 +1515,19 @@ impl RuntimeState {
                     completion = %error
                         .completion
                         .map_or("unknown", TaskCompletionKind::as_str),
-                    leak_count = error.leaks.len(),
+                    leak_count = leak_ids.len(),
                     cumulative_leaks = self.leak_count,
                     details = %error,
                     "obligation leaks detected"
                 );
             }
             ObligationLeakResponse::Silent => {
-                for id in leak_ids {
+                for &id in &leak_ids {
                     let _ = self.mark_obligation_leaked(id);
                 }
             }
             ObligationLeakResponse::Recover => {
-                for id in leak_ids {
+                for &id in &leak_ids {
                     // Abort instead of marking leaked — performs resource cleanup.
                     let _ = self.abort_obligation(id, ObligationAbortReason::Error);
                 }
@@ -1436,7 +1537,7 @@ impl RuntimeState {
                     completion = %error
                         .completion
                         .map_or("unknown", TaskCompletionKind::as_str),
-                    leak_count = error.leaks.len(),
+                    leak_count = leak_ids.len(),
                     cumulative_leaks = self.leak_count,
                     details = %error,
                     "obligation leaks recovered via auto-abort"
@@ -1444,7 +1545,10 @@ impl RuntimeState {
             }
         }
 
-        self.handling_leaks = false;
+        self.handling_leaks = self.handling_leaks.saturating_sub(1);
+        for id in leak_ids {
+            self.in_flight_leak_ids.remove(&id);
+        }
     }
 
     /// Creates and registers an obligation for the given task and region.
@@ -1493,6 +1597,7 @@ impl RuntimeState {
 
         let acquired_at = SourceLocation::from_panic_location(std::panic::Location::caller());
         let acquire_backtrace = Self::capture_obligation_backtrace();
+        let now = self.current_runtime_time();
 
         // Create the obligation first to get the ID
         let obligation_id =
@@ -1501,7 +1606,7 @@ impl RuntimeState {
                     kind,
                     holder,
                     region,
-                    now: self.now,
+                    now,
                     description,
                     acquired_at,
                     acquire_backtrace,
@@ -1517,7 +1622,7 @@ impl RuntimeState {
         let context = ObligationContext {
             obligation_id,
             region_id: region,
-            created_at: self.now,
+            created_at: now,
             validation_level: CancelValidationLevel::Basic,
         };
         let validation_result = self.validate_obligation_protocol_transition(
@@ -1531,9 +1636,7 @@ impl RuntimeState {
             validation_result,
             TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
         ) {
-            eprintln!(
-                "Cancel protocol violation during obligation creation: {validation_result:?}"
-            );
+            log_cancel_protocol_violation("obligation creation", &validation_result);
             // Continue with creation but log violation
         }
 
@@ -1554,17 +1657,12 @@ impl RuntimeState {
         );
 
         self.record_task_trace_event(holder, |seq| {
-            TraceEvent::obligation_reserve(seq, self.now, obligation_id, holder, region, kind)
+            TraceEvent::obligation_reserve(seq, now, obligation_id, holder, region, kind)
         });
         self.metrics.obligation_created(region);
 
         // Notify epoch tracker of obligation creation
-        self.epoch_tracker.notify_epoch_transition(
-            super::epoch_tracker::ModuleId::ObligationTable,
-            crate::epoch::EpochId::GENESIS,
-            crate::epoch::EpochId::GENESIS.next(),
-            self.now,
-        );
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::ObligationTable);
 
         Ok(obligation_id)
     }
@@ -1574,6 +1672,7 @@ impl RuntimeState {
     /// Returns the duration the obligation was held (nanoseconds).
     #[allow(clippy::result_large_err)]
     pub fn commit_obligation(&mut self, obligation: ObligationId) -> Result<u64, Error> {
+        let now = self.current_runtime_time();
         // Validate obligation commit protocol transition
         if let Some(record) = self.obligations.get(obligation.arena_index()) {
             let context = ObligationContext {
@@ -1591,14 +1690,12 @@ impl RuntimeState {
                 validation_result,
                 TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
             ) {
-                eprintln!(
-                    "Cancel protocol violation during obligation commit: {validation_result:?}"
-                );
+                log_cancel_protocol_violation("obligation commit", &validation_result);
                 // Continue with commit but log violation
             }
         }
 
-        let info = self.obligations.commit(obligation, self.now)?;
+        let info = self.obligations.commit(obligation, now)?;
 
         let span = crate::tracing_compat::debug_span!(
             "obligation_commit",
@@ -1621,7 +1718,7 @@ impl RuntimeState {
         self.record_task_trace_event(info.holder, |seq| {
             TraceEvent::obligation_commit(
                 seq,
-                self.now,
+                now,
                 info.id,
                 info.holder,
                 info.region,
@@ -1632,12 +1729,7 @@ impl RuntimeState {
         self.metrics.obligation_discharged(info.region);
 
         // Notify epoch tracker of obligation commit
-        self.epoch_tracker.notify_epoch_transition(
-            super::epoch_tracker::ModuleId::ObligationTable,
-            crate::epoch::EpochId::GENESIS,
-            crate::epoch::EpochId::GENESIS.next(),
-            self.now,
-        );
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::ObligationTable);
 
         if let Some(region_record) = self.regions.get(info.region.arena_index()) {
             region_record.resolve_obligation();
@@ -1657,6 +1749,7 @@ impl RuntimeState {
         obligation: ObligationId,
         reason: ObligationAbortReason,
     ) -> Result<u64, Error> {
+        let now = self.current_runtime_time();
         // Validate obligation abort protocol transition
         if let Some(record) = self.obligations.get(obligation.arena_index()) {
             let context = ObligationContext {
@@ -1676,14 +1769,12 @@ impl RuntimeState {
                 validation_result,
                 TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
             ) {
-                eprintln!(
-                    "Cancel protocol violation during obligation abort: {validation_result:?}"
-                );
+                log_cancel_protocol_violation("obligation abort", &validation_result);
                 // Continue with abort but log violation
             }
         }
 
-        let info = self.obligations.abort(obligation, self.now, reason)?;
+        let info = self.obligations.abort(obligation, now, reason)?;
 
         let span = crate::tracing_compat::debug_span!(
             "obligation_abort",
@@ -1708,7 +1799,7 @@ impl RuntimeState {
         self.record_task_trace_event(info.holder, |seq| {
             TraceEvent::obligation_abort(
                 seq,
-                self.now,
+                now,
                 info.id,
                 info.holder,
                 info.region,
@@ -1732,12 +1823,7 @@ impl RuntimeState {
         );
 
         // Notify epoch tracker of obligation abort
-        self.epoch_tracker.notify_epoch_transition(
-            super::epoch_tracker::ModuleId::ObligationTable,
-            crate::epoch::EpochId::GENESIS,
-            crate::epoch::EpochId::GENESIS.next(),
-            self.now,
-        );
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::ObligationTable);
 
         if let Some(region_record) = self.regions.get(info.region.arena_index()) {
             region_record.resolve_obligation();
@@ -1753,12 +1839,13 @@ impl RuntimeState {
     /// Returns the duration the obligation was held (nanoseconds).
     #[allow(clippy::result_large_err)]
     pub fn mark_obligation_leaked(&mut self, obligation: ObligationId) -> Result<u64, Error> {
-        let info = self.obligations.mark_leaked(obligation, self.now)?;
+        let now = self.current_runtime_time();
+        let info = self.obligations.mark_leaked(obligation, now)?;
 
         self.record_task_trace_event(info.holder, |seq| {
             TraceEvent::obligation_leak(
                 seq,
-                self.now,
+                now,
                 info.id,
                 info.holder,
                 info.region,
@@ -1930,6 +2017,7 @@ impl RuntimeState {
         let sibling_candidates = region_record.task_ids_small();
         let mut tasks_to_cancel =
             SmallVec::with_capacity(sibling_candidates.len().saturating_sub(1));
+        let now = self.current_runtime_time();
 
         for &task_id in &sibling_candidates {
             if task_id == child {
@@ -1947,7 +2035,7 @@ impl RuntimeState {
             };
             if newly_cancelled {
                 self.record_task_trace_event(task_id, |seq| {
-                    TraceEvent::cancel_request(seq, self.now, task_id, region, reason.clone())
+                    TraceEvent::cancel_request(seq, now, task_id, region, reason.clone())
                 });
             }
             if newly_cancelled || is_cancelling {
@@ -2014,6 +2102,7 @@ impl RuntimeState {
             source_task = ?_source_task,
             "cancel request initiated"
         );
+        let now = self.current_runtime_time();
 
         // Collect all regions to cancel (target + descendants) with depth information
         let mut regions_to_cancel = self.collect_region_and_descendants_with_depth(region_id);
@@ -2058,7 +2147,7 @@ impl RuntimeState {
             region_reasons.insert(rid, region_reason.clone());
 
             self.record_trace_event(|seq| {
-                TraceEvent::region_cancelled(seq, self.now, rid, region_reason.clone())
+                TraceEvent::region_cancelled(seq, now, rid, region_reason.clone())
             });
             self.metrics.cancellation_requested(rid, region_reason.kind);
 
@@ -2099,7 +2188,7 @@ impl RuntimeState {
                     self.record_trace_event(|seq| {
                         TraceEvent::new(
                             seq,
-                            self.now,
+                            now,
                             TraceEventKind::RegionCloseBegin,
                             TraceData::Region {
                                 region: rid,
@@ -2139,13 +2228,7 @@ impl RuntimeState {
                     let _cancel_kind = task.cancel_reason().map(|r| r.kind);
                     if newly_cancelled {
                         self.record_task_trace_event(task_id, |seq| {
-                            TraceEvent::cancel_request(
-                                seq,
-                                self.now,
-                                task_id,
-                                rid,
-                                task_reason.clone(),
-                            )
+                            TraceEvent::cancel_request(seq, now, task_id, rid, task_reason.clone())
                         });
                     }
                     let span = trace_span!(
@@ -2284,9 +2367,7 @@ impl RuntimeState {
                 validation_result,
                 TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
             ) {
-                eprintln!(
-                    "Cancel protocol violation during task completion: {validation_result:?}"
-                );
+                log_cancel_protocol_violation("task completion", &validation_result);
                 // Continue with completion but log violation
             }
             if let Some(inner) = task.cx_inner.as_ref() {
@@ -2332,6 +2413,13 @@ impl RuntimeState {
         }
 
         if let Some(finalizer_id) = self.async_finalizer_tasks.remove(&task_id) {
+            let should_clear_barrier = self
+                .active_async_finalizers
+                .get(&owner)
+                .is_some_and(|active_task| *active_task == task_id);
+            if should_clear_barrier {
+                self.active_async_finalizers.remove(&owner);
+            }
             self.record_finalizer_run(finalizer_id);
         }
 
@@ -2383,6 +2471,9 @@ impl RuntimeState {
         let mut regions_to_process = SmallVec::<[RegionId; 8]>::new();
 
         for &region_id in &self.finalizing_regions {
+            if self.active_async_finalizers.contains_key(&region_id) {
+                continue;
+            }
             if let Some(region) = self.regions.get(region_id.arena_index()) {
                 if !region.finalizers_empty() {
                     regions_to_process.push(region_id);
@@ -2423,7 +2514,9 @@ impl RuntimeState {
         finalizer_id: u64,
         future: BoxedAsyncFinalizer,
     ) -> Result<(TaskId, u8), BoxedAsyncFinalizer> {
-        let deadline = self.now.saturating_add_nanos(FINALIZER_TIME_BUDGET_NANOS);
+        let deadline = self
+            .current_runtime_time()
+            .saturating_add_nanos(FINALIZER_TIME_BUDGET_NANOS);
         let budget = finalizer_budget().with_deadline(deadline);
 
         let Ok((task_id, _handle, cx, result_tx)) =
@@ -2435,9 +2528,21 @@ impl RuntimeState {
         let masked = MaskedFinalizer::new(future, cx_inner);
 
         let wrapped_future = async move {
-            masked.await;
-            let _ = result_tx.send(&cx, Ok::<_, JoinError>(()));
-            Outcome::Ok(())
+            match (CatchUnwind { inner: masked }).await {
+                Ok(()) => {
+                    let _ = result_tx.send(&cx, Ok::<_, JoinError>(()));
+                    Outcome::Ok(())
+                }
+                Err(payload) => {
+                    let panic_payload =
+                        crate::types::outcome::PanicPayload::new(payload_to_string(&payload));
+                    let _ = result_tx.send(
+                        &cx,
+                        Err::<(), JoinError>(JoinError::Panicked(panic_payload.clone())),
+                    );
+                    Outcome::Panicked(panic_payload)
+                }
+            }
         };
 
         self.tasks
@@ -2450,6 +2555,13 @@ impl RuntimeState {
         }
 
         self.async_finalizer_tasks.insert(task_id, finalizer_id);
+        let previous = self.active_async_finalizers.insert(region_id, task_id);
+        debug_assert!(
+            previous.is_none(),
+            "region {:?} already had an active async finalizer barrier: {:?}",
+            region_id,
+            previous
+        );
         Ok((task_id, budget.priority))
     }
 
@@ -2563,6 +2675,7 @@ impl RuntimeState {
     }
 
     fn record_finalizer_registration(&mut self, id: u64, region: RegionId) {
+        let now = self.current_runtime_time();
         self.pending_finalizer_ids
             .entry(region)
             .or_default()
@@ -2571,22 +2684,21 @@ impl RuntimeState {
             .push(FinalizerHistoryEvent::Registered {
                 id,
                 region,
-                time: self.now,
+                time: now,
             });
     }
 
     fn record_finalizer_run(&mut self, id: u64) {
+        let now = self.current_runtime_time();
         self.finalizer_history
-            .push(FinalizerHistoryEvent::Ran { id, time: self.now });
+            .push(FinalizerHistoryEvent::Ran { id, time: now });
     }
 
     fn record_finalizer_close(&mut self, region: RegionId) {
+        let now = self.current_runtime_time();
         self.pending_finalizer_ids.remove(&region);
         self.finalizer_history
-            .push(FinalizerHistoryEvent::RegionClosed {
-                region,
-                time: self.now,
-            });
+            .push(FinalizerHistoryEvent::RegionClosed { region, time: now });
     }
 
     fn pop_tracked_finalizer(&mut self, region_id: RegionId) -> Option<(u64, Finalizer)> {
@@ -2738,14 +2850,6 @@ impl RuntimeState {
     /// self-calls would deadlock on non-reentrant mutexes).
     #[allow(clippy::too_many_lines)]
     pub fn advance_region_state(&mut self, initial_region: RegionId) {
-        // Notify epoch tracker of region state advancement
-        self.epoch_tracker.notify_epoch_transition(
-            super::epoch_tracker::ModuleId::RegionTable,
-            crate::epoch::EpochId::GENESIS,
-            crate::epoch::EpochId::GENESIS.next(),
-            self.now,
-        );
-
         let mut current = Some(initial_region);
 
         while let Some(region_id) = current.take() {
@@ -2785,8 +2889,9 @@ impl RuntimeState {
                                 TransitionResult::Invalid { .. }
                                     | TransitionResult::InvariantViolation { .. }
                             ) {
-                                eprintln!(
-                                    "Cancel protocol violation during region finalize transition: {validation_result:?}"
+                                log_cancel_protocol_violation(
+                                    "region finalize transition",
+                                    &validation_result,
                                 );
                                 // Continue with transition but log violation
                             }
@@ -2815,25 +2920,36 @@ impl RuntimeState {
                                     TransitionResult::Invalid { .. }
                                         | TransitionResult::InvariantViolation { .. }
                                 ) {
-                                    eprintln!(
-                                        "Cancel protocol violation during region drain transition: {validation_result:?}"
+                                    log_cancel_protocol_violation(
+                                        "region drain transition",
+                                        &validation_result,
                                     );
                                     // Continue with transition but log violation
                                 }
 
                                 region.begin_drain();
+                                self.notify_runtime_epoch_advance(
+                                    super::epoch_tracker::ModuleId::RegionTable,
+                                );
                             }
                             false
                         }
                     };
 
                     if transition_to_finalizing {
+                        self.notify_runtime_epoch_advance(
+                            super::epoch_tracker::ModuleId::RegionTable,
+                        );
                         self.finalizing_regions.push(region_id);
                         // Re-process same region as Finalizing in next iteration
                         current = Some(region_id);
                     }
                 }
                 crate::record::region::RegionState::Finalizing => {
+                    if self.active_async_finalizers.contains_key(&region_id) {
+                        break;
+                    }
+
                     // Run sync finalizers (requires mut self).
                     // If we hit an async finalizer, reinsert it and wait for a scheduler.
                     if let Some((finalizer_id, async_finalizer)) =
@@ -2894,8 +3010,9 @@ impl RuntimeState {
                                 TransitionResult::Invalid { .. }
                                     | TransitionResult::InvariantViolation { .. }
                             ) {
-                                eprintln!(
-                                    "Cancel protocol violation during region close completion: {validation_result:?}"
+                                log_cancel_protocol_violation(
+                                    "region close completion",
+                                    &validation_result,
                                 );
                                 // Continue with transition but log violation
                             }
@@ -2913,10 +3030,11 @@ impl RuntimeState {
 
                             // Emit RegionCloseComplete trace event (pairs
                             // with RegionCloseBegin emitted in cancel_request).
+                            let now = self.current_runtime_time();
                             self.record_trace_event(|seq| {
                                 TraceEvent::new(
                                     seq,
-                                    self.now,
+                                    now,
                                     TraceEventKind::RegionCloseComplete,
                                     TraceData::Region {
                                         region: region_id,
@@ -2927,9 +3045,8 @@ impl RuntimeState {
 
                             // Emit region_closed metric with lifetime.
                             if let Some(region) = self.regions.get(region_id.arena_index()) {
-                                let lifetime = Duration::from_nanos(
-                                    self.now.duration_since(region.created_at()),
-                                );
+                                let lifetime =
+                                    Duration::from_nanos(now.duration_since(region.created_at()));
                                 self.metrics.region_closed(region_id, lifetime);
                             }
 
@@ -2947,6 +3064,9 @@ impl RuntimeState {
                             self.remember_closed_region(region_id);
                             // Cleanup: Remove the closed region from the arena to prevent memory leaks
                             self.regions.remove(region_id.arena_index());
+                            self.notify_runtime_epoch_advance(
+                                super::epoch_tracker::ModuleId::RegionTable,
+                            );
                         }
                     }
                 }
@@ -4132,6 +4252,7 @@ mod tests {
     use crate::observability::{LogEntry, ObservabilityConfig};
     use crate::record::task::TaskState;
     use crate::record::{ObligationKind, ObligationRecord, RegionLimits};
+    use crate::runtime::ModuleId;
     use crate::runtime::reactor::LabReactor;
     use crate::test_utils::init_test_logging;
     use crate::time::{TimerDriverHandle, VirtualClock};
@@ -4141,7 +4262,7 @@ mod tests {
     use parking_lot::Mutex;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::task::{Wake, Waker};
+    use std::task::{Context, Poll, Wake, Waker};
 
     #[derive(Default)]
     struct TestMetrics {
@@ -4203,6 +4324,387 @@ mod tests {
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[test]
+    fn epoch_tracker_advances_monotonically_per_runtime_module() {
+        init_test("epoch_tracker_advances_monotonically_per_runtime_module");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let _child = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("create child region");
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        let obligation_id = state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create obligation");
+        let _ = state
+            .commit_obligation(obligation_id)
+            .expect("commit obligation");
+
+        let stats = state.epoch_tracker.transition_statistics();
+        crate::assert_with_log!(
+            stats
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .is_some_and(|s| s.current_epoch == EpochId::new(3) && s.transition_count == 3),
+            "region-table transitions advance monotonically instead of replaying genesis",
+            true,
+            stats
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .is_some_and(|s| s.current_epoch == EpochId::new(3) && s.transition_count == 3)
+        );
+        crate::assert_with_log!(
+            stats
+                .per_module_stats
+                .get(&ModuleId::TaskTable)
+                .is_some_and(|s| s.current_epoch == EpochId::new(1) && s.transition_count == 1),
+            "task-table transitions advance monotonically",
+            true,
+            stats
+                .per_module_stats
+                .get(&ModuleId::TaskTable)
+                .is_some_and(|s| s.current_epoch == EpochId::new(1) && s.transition_count == 1)
+        );
+        crate::assert_with_log!(
+            stats
+                .per_module_stats
+                .get(&ModuleId::ObligationTable)
+                .is_some_and(|s| s.current_epoch == EpochId::new(2) && s.transition_count == 2),
+            "obligation-table transitions advance monotonically",
+            true,
+            stats
+                .per_module_stats
+                .get(&ModuleId::ObligationTable)
+                .is_some_and(|s| s.current_epoch == EpochId::new(2) && s.transition_count == 2)
+        );
+
+        crate::test_complete!("epoch_tracker_advances_monotonically_per_runtime_module");
+    }
+
+    #[test]
+    fn epoch_tracker_counts_task_table_cleanup_mutations() {
+        init_test("epoch_tracker_counts_task_table_cleanup_mutations");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+
+        state
+            .task_mut(task_id)
+            .expect("task")
+            .complete(Outcome::Ok(()));
+        let _ = state.task_completed(task_id);
+
+        let stats = state.epoch_tracker.transition_statistics();
+        crate::assert_with_log!(
+            stats
+                .per_module_stats
+                .get(&ModuleId::TaskTable)
+                .is_some_and(|s| s.current_epoch == EpochId::new(2) && s.transition_count == 2),
+            "task-table epoch should advance for both task creation and cleanup",
+            true,
+            stats
+                .per_module_stats
+                .get(&ModuleId::TaskTable)
+                .is_some_and(|s| s.current_epoch == EpochId::new(2) && s.transition_count == 2)
+        );
+
+        crate::test_complete!("epoch_tracker_counts_task_table_cleanup_mutations");
+    }
+
+    #[test]
+    fn timer_driver_timestamps_runtime_records_and_snapshot() {
+        init_test("timer_driver_timestamps_runtime_records_and_snapshot");
+
+        let mut state = RuntimeState::new();
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(42)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        let obligation_id = state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create obligation");
+
+        let region = state.region(root).expect("root region");
+        crate::assert_with_log!(
+            region.created_at() == Time::from_millis(42),
+            "root region uses timer-driver time",
+            Time::from_millis(42),
+            region.created_at()
+        );
+
+        let task = state.task(task_id).expect("task");
+        crate::assert_with_log!(
+            task.created_at() == Time::from_millis(42),
+            "task uses timer-driver time",
+            Time::from_millis(42),
+            task.created_at()
+        );
+
+        let obligation = state.obligation(obligation_id).expect("obligation");
+        crate::assert_with_log!(
+            obligation.reserved_at == Time::from_millis(42),
+            "obligation uses timer-driver time",
+            Time::from_millis(42),
+            obligation.reserved_at
+        );
+
+        let snapshot = state.snapshot();
+        crate::assert_with_log!(
+            snapshot.timestamp == Time::from_millis(42).as_nanos(),
+            "snapshot timestamp uses timer-driver time",
+            Time::from_millis(42).as_nanos(),
+            snapshot.timestamp
+        );
+
+        crate::test_complete!("timer_driver_timestamps_runtime_records_and_snapshot");
+    }
+
+    #[test]
+    fn epoch_tracker_uses_timer_driver_transition_timestamps() {
+        init_test("epoch_tracker_uses_timer_driver_transition_timestamps");
+
+        let mut state = RuntimeState::new();
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(7)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+
+        let root = state.create_root_region(Budget::INFINITE);
+        let stats = state.epoch_tracker.transition_statistics();
+        crate::assert_with_log!(
+            stats
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .is_some_and(|s| s.last_transition_time == Time::from_millis(7)),
+            "region epoch transition uses initial timer-driver time",
+            true,
+            stats
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .is_some_and(|s| s.last_transition_time == Time::from_millis(7))
+        );
+
+        clock.advance(Time::from_millis(5).as_nanos());
+        let _child = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("create child region");
+
+        let stats = state.epoch_tracker.transition_statistics();
+        crate::assert_with_log!(
+            stats
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .is_some_and(|s| s.current_epoch == EpochId::new(2)
+                    && s.last_transition_time == Time::from_millis(12)),
+            "region epoch transition tracks later timer-driver advances",
+            true,
+            stats
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .is_some_and(|s| s.current_epoch == EpochId::new(2)
+                    && s.last_transition_time == Time::from_millis(12))
+        );
+
+        crate::test_complete!("epoch_tracker_uses_timer_driver_transition_timestamps");
+    }
+
+    #[test]
+    fn timer_driver_timestamps_cancel_traces() {
+        init_test("timer_driver_timestamps_cancel_traces");
+
+        let mut state = RuntimeState::new();
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(7)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+
+        clock.advance(Time::from_millis(5).as_nanos());
+        let expected_time = Time::from_millis(12);
+        let _ = state.cancel_request(root, &CancelReason::timeout(), None);
+
+        let events = state.trace.snapshot();
+        let cancel_event = events
+            .iter()
+            .find(|event| {
+                event.kind == TraceEventKind::CancelRequest
+                    && matches!(
+                        event.data,
+                        TraceData::Cancel { task, region, .. }
+                            if task == task_id && region == root
+                    )
+            })
+            .expect("cancel request event");
+        crate::assert_with_log!(
+            cancel_event.time == expected_time,
+            "cancel request trace uses timer-driver time",
+            expected_time,
+            cancel_event.time
+        );
+
+        let region_cancel_event = events
+            .iter()
+            .find(|event| {
+                event.kind == TraceEventKind::RegionCancelled
+                    && matches!(
+                        event.data,
+                        TraceData::RegionCancel { region, .. } if region == root
+                    )
+            })
+            .expect("region cancelled event");
+        crate::assert_with_log!(
+            region_cancel_event.time == expected_time,
+            "region cancelled trace uses timer-driver time",
+            expected_time,
+            region_cancel_event.time
+        );
+
+        let region_close_begin = events
+            .iter()
+            .find(|event| {
+                event.kind == TraceEventKind::RegionCloseBegin
+                    && matches!(
+                        event.data,
+                        TraceData::Region {
+                            region,
+                            parent: None,
+                        } if region == root
+                    )
+            })
+            .expect("region close begin event");
+        crate::assert_with_log!(
+            region_close_begin.time == expected_time,
+            "region close begin trace uses timer-driver time",
+            expected_time,
+            region_close_begin.time
+        );
+
+        crate::test_complete!("timer_driver_timestamps_cancel_traces");
+    }
+
+    #[test]
+    fn timer_driver_timestamps_async_finalizer_deadline_and_history() {
+        init_test("timer_driver_timestamps_async_finalizer_deadline_and_history");
+
+        let mut state = RuntimeState::new();
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(100)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+
+        let region = state.create_root_region(Budget::INFINITE);
+        let registered = state.register_async_finalizer(region, async {});
+        crate::assert_with_log!(registered, "registered", true, registered);
+
+        let region_record = state
+            .regions
+            .get_mut(region.arena_index())
+            .expect("region missing");
+        region_record.begin_close(None);
+        region_record.begin_finalize();
+        state.finalizing_regions.push(region);
+
+        clock.advance(23);
+        let scheduled = state.drain_ready_async_finalizers();
+        crate::assert_with_log!(
+            scheduled.len() == 1,
+            "scheduled len",
+            1usize,
+            scheduled.len()
+        );
+        let task_id = scheduled[0].0;
+        let expected_deadline =
+            Time::from_nanos(123).saturating_add_nanos(FINALIZER_TIME_BUDGET_NANOS);
+        let finalizer_deadline = state
+            .task(task_id)
+            .expect("async finalizer task missing")
+            .cx_inner
+            .as_ref()
+            .expect("async finalizer cx missing")
+            .read()
+            .budget
+            .deadline
+            .expect("async finalizer deadline");
+        crate::assert_with_log!(
+            finalizer_deadline == expected_deadline,
+            "async finalizer deadline uses timer-driver time",
+            expected_deadline,
+            finalizer_deadline
+        );
+
+        state
+            .task_mut(task_id)
+            .expect("async finalizer task missing")
+            .complete(Outcome::Ok(()));
+        clock.advance(14);
+        let _ = state.task_completed(task_id);
+
+        crate::assert_with_log!(
+            state.finalizer_history()
+                == &[
+                    FinalizerHistoryEvent::Registered {
+                        id: 0,
+                        region,
+                        time: Time::from_nanos(100),
+                    },
+                    FinalizerHistoryEvent::Ran {
+                        id: 0,
+                        time: Time::from_nanos(137),
+                    },
+                    FinalizerHistoryEvent::RegionClosed {
+                        region,
+                        time: Time::from_nanos(137),
+                    },
+                ],
+            "async finalizer history uses timer-driver time",
+            "registered@100, ran@137, closed@137",
+            format!("{:?}", state.finalizer_history())
+        );
+
+        crate::test_complete!("timer_driver_timestamps_async_finalizer_deadline_and_history");
+    }
+
+    #[test]
+    fn advance_region_state_noop_does_not_advance_region_epoch() {
+        init_test("advance_region_state_noop_does_not_advance_region_epoch");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let before = state.epoch_tracker.transition_statistics();
+
+        state.advance_region_state(root);
+
+        let after = state.epoch_tracker.transition_statistics();
+        crate::assert_with_log!(
+            before
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .map(|s| (s.current_epoch, s.transition_count))
+                == after
+                    .per_module_stats
+                    .get(&ModuleId::RegionTable)
+                    .map(|s| (s.current_epoch, s.transition_count)),
+            "no-op region scan must not fabricate epoch transitions",
+            before
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .map(|s| (s.current_epoch, s.transition_count)),
+            after
+                .per_module_stats
+                .get(&ModuleId::RegionTable)
+                .map(|s| (s.current_epoch, s.transition_count))
+        );
+
+        crate::test_complete!("advance_region_state_noop_does_not_advance_region_epoch");
     }
 
     fn insert_task(state: &mut RuntimeState, region: RegionId) -> TaskId {
@@ -4410,6 +4912,56 @@ mod tests {
             saw_cancelled
         );
         crate::test_complete!("cancellation_outcome_metric_emitted");
+    }
+
+    #[test]
+    fn create_task_panic_reaches_join_handle() {
+        init_test("create_task_panic_reaches_join_handle");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, mut handle) = state
+            .create_task(root, Budget::INFINITE, async {
+                panic!("state task boom");
+                #[allow(unreachable_code)]
+                1_u8
+            })
+            .expect("task create");
+
+        let waker = Waker::from(Arc::new(TestWaker(AtomicBool::new(false))));
+        let mut poll_cx = Context::from_waker(&waker);
+        let stored = state.get_stored_future(task_id).expect("stored task");
+        match stored.poll(&mut poll_cx) {
+            Poll::Ready(Outcome::Panicked(payload)) => {
+                crate::assert_with_log!(
+                    payload.message() == "state task boom",
+                    "panic payload captured on stored task",
+                    "state task boom",
+                    payload.message()
+                );
+            }
+            other => panic!("panicking task must complete with Outcome::Panicked: {other:?}"),
+        }
+
+        let task_cx = state
+            .task(task_id)
+            .and_then(|record| record.cx.clone())
+            .expect("task cx");
+        let mut join_fut = std::pin::pin!(handle.join(&task_cx));
+        match join_fut.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Err(crate::runtime::task_handle::JoinError::Panicked(payload))) => {
+                crate::assert_with_log!(
+                    payload.message() == "state task boom",
+                    "join handle receives panic payload",
+                    "state task boom",
+                    payload.message()
+                );
+            }
+            other => {
+                panic!("join of panicked state task must return JoinError::Panicked: {other:?}")
+            }
+        }
+
+        crate::test_complete!("create_task_panic_reaches_join_handle");
     }
 
     #[test]
@@ -5711,6 +6263,90 @@ mod tests {
         );
         crate::test_complete!(
             "drain_ready_async_finalizers_runs_async_cleanup_even_with_zero_task_limit"
+        );
+    }
+
+    #[test]
+    fn drain_ready_async_finalizers_blocks_lower_finalizers_while_async_barrier_runs() {
+        init_test("drain_ready_async_finalizers_blocks_lower_finalizers_while_async_barrier_runs");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let sync_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sync_runs_clone = Arc::clone(&sync_runs);
+
+        // LIFO order: async barrier on top, then a lower sync finalizer that must wait.
+        let registered_sync = state.register_sync_finalizer(region, move || {
+            sync_runs_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        crate::assert_with_log!(registered_sync, "sync registered", true, registered_sync);
+        let registered_async = state.register_async_finalizer(region, async {});
+        crate::assert_with_log!(registered_async, "async registered", true, registered_async);
+
+        let region_record = state
+            .regions
+            .get(region.arena_index())
+            .expect("region missing");
+        region_record.begin_close(None);
+        region_record.begin_finalize();
+        state.finalizing_regions.push(region);
+
+        let first = state.drain_ready_async_finalizers();
+        crate::assert_with_log!(
+            first.len() == 1,
+            "first async barrier scheduled",
+            1usize,
+            first.len()
+        );
+        crate::assert_with_log!(
+            sync_runs.load(std::sync::atomic::Ordering::SeqCst) == 0,
+            "lower sync finalizer has not run yet",
+            0usize,
+            sync_runs.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            state.region_finalizer_count(region) == 1,
+            "lower finalizer still queued behind async barrier",
+            1usize,
+            state.region_finalizer_count(region)
+        );
+
+        let second = state.drain_ready_async_finalizers();
+        crate::assert_with_log!(
+            second.is_empty(),
+            "second drain does not bypass in-flight async barrier",
+            true,
+            second.is_empty()
+        );
+        crate::assert_with_log!(
+            sync_runs.load(std::sync::atomic::Ordering::SeqCst) == 0,
+            "lower sync finalizer still blocked",
+            0usize,
+            sync_runs.load(std::sync::atomic::Ordering::SeqCst)
+        );
+
+        let task_id = first[0].0;
+        state
+            .task_mut(task_id)
+            .expect("async finalizer task missing")
+            .complete(Outcome::Ok(()));
+        let _ = state.task_completed(task_id);
+
+        crate::assert_with_log!(
+            sync_runs.load(std::sync::atomic::Ordering::SeqCst) == 1,
+            "lower sync finalizer runs after async barrier completes",
+            1usize,
+            sync_runs.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        let region_removed = state.regions.get(region.arena_index()).is_none();
+        crate::assert_with_log!(
+            region_removed,
+            "region closes after deferred lower finalizer runs",
+            true,
+            region_removed
+        );
+
+        crate::test_complete!(
+            "drain_ready_async_finalizers_blocks_lower_finalizers_while_async_barrier_runs"
         );
     }
 
@@ -8160,6 +8796,92 @@ mod tests {
             state.leak_count()
         );
         crate::test_complete!("leak_count_exact_for_multiple_obligations");
+    }
+
+    #[test]
+    fn nested_parent_leaks_are_not_suppressed_by_child_leak_handling() {
+        // Regression: the old global `handling_leaks` boolean suppressed all
+        // nested leak handling, not just duplicates of the current batch. When
+        // a child leak closed the child region and advanced its parent into
+        // `Finalizing`, the parent's distinct pending obligations were skipped
+        // and the parent region stayed stuck with leaked-but-unhandled state.
+        init_test("nested_parent_leaks_are_not_suppressed_by_child_leak_handling");
+        let mut state = RuntimeState::new();
+        state.set_obligation_leak_response(ObligationLeakResponse::Silent);
+
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+        let root_task = insert_task(&mut state, root);
+        let child_task = insert_task(&mut state, child);
+
+        state
+            .create_obligation(ObligationKind::Lease, root_task, root, None)
+            .expect("root obligation");
+        state
+            .create_obligation(ObligationKind::Ack, child_task, child, None)
+            .expect("child obligation");
+
+        state
+            .regions
+            .get(root.arena_index())
+            .expect("root missing")
+            .begin_close(None);
+        state
+            .regions
+            .get(child.arena_index())
+            .expect("child missing")
+            .begin_close(None);
+
+        // Simulate a stale parent-cleanup gap: the task is already unlinked,
+        // but its obligation is still pending. Child leak handling will advance
+        // the parent into Finalizing, where the parent's leak must still be
+        // processed even though we are already inside the child's leak handler.
+        let _ = state.remove_task(root_task);
+        state
+            .regions
+            .get(root.arena_index())
+            .expect("root missing")
+            .remove_task(root_task);
+
+        state
+            .task_mut(child_task)
+            .expect("child task missing")
+            .complete(Outcome::Ok(()));
+        let _ = state.task_completed(child_task);
+
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "all nested leaks resolved",
+            0usize,
+            state.pending_obligation_count()
+        );
+        crate::assert_with_log!(
+            state.leak_count() == 2,
+            "both child and parent leaks counted exactly once",
+            2u64,
+            state.leak_count()
+        );
+        let leak_events = state
+            .trace
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.kind == TraceEventKind::ObligationLeak)
+            .count();
+        crate::assert_with_log!(
+            leak_events == 2,
+            "trace records both nested leaks",
+            2usize,
+            leak_events
+        );
+        let root_removed = state.regions.get(root.arena_index()).is_none();
+        crate::assert_with_log!(
+            root_removed,
+            "parent region closes after nested leak handling",
+            true,
+            root_removed
+        );
+
+        crate::test_complete!("nested_parent_leaks_are_not_suppressed_by_child_leak_handling");
     }
 
     // =========================================================================

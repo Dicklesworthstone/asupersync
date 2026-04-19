@@ -1,7 +1,7 @@
 //! Linux epoll-based reactor implementation.
 //!
 //! This module provides [`EpollReactor`], a reactor implementation that uses
-//! Linux epoll for efficient I/O event notification with edge-triggered mode.
+//! Linux epoll for efficient I/O event notification on Linux-family targets.
 //!
 //! # Safety
 //!
@@ -39,6 +39,12 @@
 //! `IoDriver` uses an `is_polling` CAS to enforce this leader/follower
 //! discipline).
 //!
+//! # Trigger Modes
+//!
+//! Registrations default to oneshot delivery, matching the portable reactor
+//! contract used by the runtime's Unix backends. Callers can opt into
+//! edge-triggered behavior with [`Interest::EDGE_TRIGGERED`].
+//!
 //! # Example
 //!
 //! ```ignore
@@ -48,7 +54,7 @@
 //! let reactor = EpollReactor::new()?;
 //! let mut listener = TcpListener::bind("127.0.0.1:0")?;
 //!
-//! // Register the listener with epoll (edge-triggered mode)
+//! // Register the listener with epoll
 //! reactor.register(&listener, Token::new(1), Interest::READABLE)?;
 //!
 //! // Poll for events
@@ -96,24 +102,26 @@ impl ReactorState {
     }
 }
 
-/// Linux epoll-based reactor with edge-triggered mode.
+/// Linux epoll-based reactor.
 ///
 /// This reactor uses the `polling` crate to interface with Linux epoll,
 /// providing efficient I/O event notification for async operations.
 ///
 /// # Features
 ///
-/// - `register()`: Adds fd to epoll with EPOLLET (edge-triggered)
+/// - `register()`: Adds fd to epoll with caller-selected trigger mode
 /// - `modify()`: Updates interest flags for a registered fd
 /// - `deregister()`: Removes fd from epoll
 /// - `poll()`: Waits for and collects ready events
 /// - `wake()`: Interrupts a blocking poll from another thread
 ///
-/// # Edge-Triggered Mode
+/// Registrations default to oneshot delivery to match the portable reactor
+/// abstraction. Callers can request edge-triggered semantics via
+/// [`Interest::EDGE_TRIGGERED`].
 ///
-/// This reactor uses edge-triggered mode (`EPOLLET`) for efficiency.
-/// Events fire when state *changes*, not while the condition persists.
-/// Applications must read/write until `EAGAIN` before the next event.
+/// # Platform Support
+///
+/// This reactor is only available on Linux-family targets that expose epoll.
 pub struct EpollReactor {
     /// The polling instance (wraps epoll on Linux).
     poller: Poller,
@@ -153,6 +161,18 @@ impl EpollReactor {
         })
     }
 
+    #[inline]
+    fn validate_supported_interest(interest: Interest) -> io::Result<()> {
+        if interest.is_dispatch() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Interest::DISPATCH is not supported by the epoll reactor",
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Converts our Interest flags to polling crate's event.
     #[inline]
     fn interest_to_poll_event(token: Token, interest: Interest) -> PollEvent {
@@ -187,26 +207,43 @@ impl EpollReactor {
                 PollMode::Edge
             }
         } else {
-            // Preserve current behavior for non-edge registrations.
+            // Preserve the portable Unix reactor contract: non-edge
+            // registrations fire once and must be re-armed with modify().
             PollMode::Oneshot
         }
     }
 
     /// Converts polling crate's event to our Interest type.
+    ///
+    /// The `polling` epoll backend folds `HUP`/`ERR` into both read and write
+    /// readiness. Mask the generic readiness booleans with the registration's
+    /// requested directions so we do not synthesize readiness the caller never
+    /// asked for while still preserving explicit side-band conditions.
     #[inline]
-    fn poll_event_to_interest(event: &PollEvent) -> Interest {
-        let mut interest = Interest::NONE;
+    fn poll_event_to_interest(
+        event: &PollEvent,
+        registered_interest: Option<Interest>,
+    ) -> Interest {
+        let mut observed_readiness = Interest::NONE;
 
         if event.readable {
-            interest = interest.add(Interest::READABLE);
+            observed_readiness = observed_readiness.add(Interest::READABLE);
         }
         if event.writable {
-            interest = interest.add(Interest::WRITABLE);
+            observed_readiness = observed_readiness.add(Interest::WRITABLE);
         }
+
+        let mut interest = match registered_interest {
+            Some(registered) => observed_readiness & registered,
+            None => observed_readiness,
+        };
+
         if event.is_interrupt() {
             interest = interest.add(Interest::HUP);
         }
-        if event.is_priority() {
+        if event.is_priority()
+            && registered_interest.is_none_or(|registered| registered.is_priority())
+        {
             interest = interest.add(Interest::PRIORITY);
         }
         if event.is_err() == Some(true) {
@@ -214,6 +251,14 @@ impl EpollReactor {
         }
 
         interest
+    }
+
+    #[inline]
+    fn translate_poll_event(state: &ReactorState, poll_event: &PollEvent) -> Option<Event> {
+        let token = Token(poll_event.key);
+        let registered_interest = state.tokens.get(&token).map(|info| info.interest)?;
+        let interest = Self::poll_event_to_interest(poll_event, Some(registered_interest));
+        (!interest.is_empty()).then_some(Event::new(token, interest))
     }
 }
 
@@ -224,6 +269,8 @@ fn should_resize_poll_events(current: usize, target: usize) -> bool {
 
 impl Reactor for EpollReactor {
     fn register(&self, source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
+        Self::validate_supported_interest(interest)?;
+
         let raw_fd = source.as_raw_fd();
 
         // Check for duplicate registration first
@@ -242,12 +289,6 @@ impl Reactor for EpollReactor {
             ));
         }
 
-        // Ensure the file descriptor is still valid before registering.
-        // This catches cases where the fd was closed but the value reused.
-        if unsafe { fcntl(raw_fd, F_GETFD) } == -1 {
-            return Err(io::Error::last_os_error());
-        }
-
         // Create the polling event with the token as the key
         let event = Self::interest_to_poll_event(token, interest);
         let mode = Self::interest_to_poll_mode(interest);
@@ -259,6 +300,11 @@ impl Reactor for EpollReactor {
 
         // SAFETY: `borrowed_fd` remains valid for the duration of registration and
         // is explicitly removed in `deregister`.
+        //
+        // Do not preflight the fd with `fcntl(F_GETFD)` here. A separate validity
+        // probe widens the close/reuse race window without making registration
+        // safer: the only authoritative answer is whether `epoll_ctl(ADD)` accepts
+        // the descriptor at the moment we install the kernel watch.
         unsafe {
             self.poller.add_with_mode(&borrowed_fd, event, mode)?;
         }
@@ -274,6 +320,8 @@ impl Reactor for EpollReactor {
     }
 
     fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+        Self::validate_supported_interest(interest)?;
+
         let mut state = self.state.lock();
         // Destructure for split borrows so the entry on `tokens` doesn't
         // block access to `fds` in error-cleanup paths.
@@ -405,14 +453,18 @@ impl Reactor for EpollReactor {
 
         self.poller.wait(&mut poll_events, timeout)?;
 
-        // Convert polling events to our Event type. We always preserve all
-        // observed poll events in `Events`.
+        let state = self.state.lock();
+
+        // Convert polling events to our Event type. Preserve explicit side-band
+        // conditions (error/hangup/priority) while masking generic readiness
+        // against the registration's requested directions.
         for poll_event in poll_events.iter() {
-            let token = Token(poll_event.key);
-            let interest = Self::poll_event_to_interest(&poll_event);
-            events.push(Event::new(token, interest));
+            if let Some(event) = Self::translate_poll_event(&state, &poll_event) {
+                events.push(event);
+            }
         }
 
+        drop(state);
         drop(poll_events);
         Ok(events.len())
     }
@@ -552,6 +604,41 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_interest_is_rejected() {
+        init_test("dispatch_interest_is_rejected");
+        let reactor = EpollReactor::new().expect("failed to create reactor");
+        let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
+
+        let register_err = reactor
+            .register(&sock1, Token::new(77), Interest::dispatch())
+            .expect_err("dispatch interest should be rejected");
+        crate::assert_with_log!(
+            register_err.kind() == io::ErrorKind::InvalidInput,
+            "register rejects unsupported dispatch interest",
+            io::ErrorKind::InvalidInput,
+            register_err.kind()
+        );
+
+        reactor
+            .register(&sock1, Token::new(78), Interest::READABLE)
+            .expect("readable register should succeed");
+        let modify_err = reactor
+            .modify(Token::new(78), Interest::dispatch())
+            .expect_err("dispatch modify should be rejected");
+        crate::assert_with_log!(
+            modify_err.kind() == io::ErrorKind::InvalidInput,
+            "modify rejects unsupported dispatch interest",
+            io::ErrorKind::InvalidInput,
+            modify_err.kind()
+        );
+
+        reactor
+            .deregister(Token::new(78))
+            .expect("deregister after rejected modify should succeed");
+        crate::test_complete!("dispatch_interest_is_rejected");
+    }
+
+    #[test]
     fn register_and_deregister() {
         init_test("register_and_deregister");
         let reactor = EpollReactor::new().expect("failed to create reactor");
@@ -619,7 +706,7 @@ mod tests {
             .register(&sock1, token, Interest::READABLE)
             .expect("register failed");
 
-        // Modify updates our bookkeeping (but not the actual epoll due to API limitations)
+        // Modify updates both the kernel registration and the local bookkeeping.
         reactor
             .modify(token, Interest::WRITABLE)
             .expect("modify failed");
@@ -671,7 +758,7 @@ mod tests {
 
             // This should return early due to wake
             let start = std::time::Instant::now();
-            let _count = reactor
+            let count = reactor
                 .poll(&mut events, Some(Duration::from_secs(5)))
                 .expect("poll failed");
 
@@ -682,6 +769,13 @@ mod tests {
                 "poll woke early",
                 true,
                 elapsed < Duration::from_secs(1)
+            );
+            crate::assert_with_log!(count == 0, "wake emits no readiness", 0usize, count);
+            crate::assert_with_log!(
+                events.is_empty(),
+                "wake leaves event set empty",
+                true,
+                events.is_empty()
             );
         });
         crate::test_complete!("wake_unblocks_poll");
@@ -902,7 +996,7 @@ mod tests {
 
         let token = Token::new(7);
         reactor
-            .register(&read_sock, token, Interest::READABLE)
+            .register(&read_sock, token, Interest::READABLE.with_edge_triggered())
             .expect("register failed");
 
         write_sock.write_all(b"hello").expect("write failed");
@@ -931,13 +1025,6 @@ mod tests {
                 Err(err) => unreachable!("drain failed: {err}"),
             }
         }
-
-        // Re-arm the registration. The polling crate uses an internal oneshot-style
-        // mechanism, so after receiving an event, we must call modify to re-arm
-        // before new events will be delivered.
-        reactor
-            .modify(token, Interest::READABLE)
-            .expect("modify for rearm failed");
 
         write_sock.write_all(b"world").expect("write failed");
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -1463,7 +1550,7 @@ mod tests {
     fn poll_event_to_interest_mapping() {
         init_test("poll_event_to_interest_mapping");
         let event = PollEvent::all(1);
-        let interest = EpollReactor::poll_event_to_interest(&event);
+        let interest = EpollReactor::poll_event_to_interest(&event, None);
         crate::assert_with_log!(
             interest.is_readable(),
             "all readable",
@@ -1478,7 +1565,7 @@ mod tests {
         );
 
         let event = PollEvent::readable(2);
-        let interest = EpollReactor::poll_event_to_interest(&event);
+        let interest = EpollReactor::poll_event_to_interest(&event, None);
         crate::assert_with_log!(
             interest.is_readable(),
             "readable set",
@@ -1493,7 +1580,7 @@ mod tests {
         );
 
         let event = PollEvent::writable(3);
-        let interest = EpollReactor::poll_event_to_interest(&event);
+        let interest = EpollReactor::poll_event_to_interest(&event, None);
         crate::assert_with_log!(
             !interest.is_readable(),
             "readable unset",
@@ -1508,7 +1595,7 @@ mod tests {
         );
 
         let event = PollEvent::readable(4).with_priority().with_interrupt();
-        let interest = EpollReactor::poll_event_to_interest(&event);
+        let interest = EpollReactor::poll_event_to_interest(&event, None);
         crate::assert_with_log!(
             interest.is_readable(),
             "readable set",
@@ -1523,6 +1610,120 @@ mod tests {
         );
         crate::assert_with_log!(interest.is_hup(), "hup set", true, interest.is_hup());
         crate::test_complete!("poll_event_to_interest_mapping");
+    }
+
+    #[test]
+    fn poll_event_to_interest_masks_unregistered_directions() {
+        init_test("poll_event_to_interest_masks_unregistered_directions");
+
+        let readable_hup = PollEvent::all(9).with_interrupt();
+        let interest =
+            EpollReactor::poll_event_to_interest(&readable_hup, Some(Interest::READABLE));
+        crate::assert_with_log!(
+            interest.is_readable(),
+            "registered readable preserved",
+            true,
+            interest.is_readable()
+        );
+        crate::assert_with_log!(
+            !interest.is_writable(),
+            "unregistered writable masked out",
+            false,
+            interest.is_writable()
+        );
+        crate::assert_with_log!(interest.is_hup(), "hup preserved", true, interest.is_hup());
+
+        let writable_err = PollEvent::all(10).with_interrupt();
+        let interest =
+            EpollReactor::poll_event_to_interest(&writable_err, Some(Interest::WRITABLE));
+        crate::assert_with_log!(
+            !interest.is_readable(),
+            "unregistered readable masked out",
+            false,
+            interest.is_readable()
+        );
+        crate::assert_with_log!(
+            interest.is_writable(),
+            "registered writable preserved",
+            true,
+            interest.is_writable()
+        );
+        crate::assert_with_log!(interest.is_hup(), "hup preserved", true, interest.is_hup());
+
+        let priority = PollEvent::readable(11).with_priority();
+        let interest = EpollReactor::poll_event_to_interest(&priority, Some(Interest::PRIORITY));
+        crate::assert_with_log!(
+            !interest.is_readable(),
+            "readable masked when only priority registered",
+            false,
+            interest.is_readable()
+        );
+        crate::assert_with_log!(
+            interest.is_priority(),
+            "priority preserved when requested",
+            true,
+            interest.is_priority()
+        );
+
+        let interest = EpollReactor::poll_event_to_interest(&priority, Some(Interest::READABLE));
+        crate::assert_with_log!(
+            interest.is_readable(),
+            "readable preserved for readable registration",
+            true,
+            interest.is_readable()
+        );
+        crate::assert_with_log!(
+            !interest.is_priority(),
+            "priority suppressed when not requested",
+            false,
+            interest.is_priority()
+        );
+
+        crate::test_complete!("poll_event_to_interest_masks_unregistered_directions");
+    }
+
+    #[test]
+    fn translate_poll_event_drops_unknown_tokens() {
+        init_test("translate_poll_event_drops_unknown_tokens");
+
+        let state = ReactorState::new();
+        let poll_event = PollEvent::readable(4242).with_interrupt();
+
+        let translated = EpollReactor::translate_poll_event(&state, &poll_event);
+        crate::assert_with_log!(
+            translated.is_none(),
+            "unknown token events dropped",
+            true,
+            translated.is_none()
+        );
+
+        crate::test_complete!("translate_poll_event_drops_unknown_tokens");
+    }
+
+    #[test]
+    fn translate_poll_event_drops_masked_empty_interest() {
+        init_test("translate_poll_event_drops_masked_empty_interest");
+
+        let token = Token::new(31337);
+        let mut state = ReactorState::new();
+        state.tokens.insert(
+            token,
+            RegistrationInfo {
+                raw_fd: -1,
+                interest: Interest::PRIORITY,
+            },
+        );
+
+        let poll_event = PollEvent::readable(token.0);
+        let translated = EpollReactor::translate_poll_event(&state, &poll_event);
+        crate::assert_with_log!(
+            translated.is_none(),
+            "masked empty readiness dropped",
+            true,
+            translated.is_none()
+        );
+
+        crate::test_complete!("translate_poll_event_drops_masked_empty_interest");
     }
 
     #[test]

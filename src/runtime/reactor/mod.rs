@@ -90,17 +90,15 @@
 //! reactor.deregister(token)?;
 //! ```
 //!
-//! # Edge vs Level Triggering
+//! # Oneshot vs Edge Triggering
 //!
-//! Implementations prefer edge-triggered mode where available:
+//! The portable reactor contract defaults to oneshot delivery on the Unix
+//! backends used by the runtime. After an event is delivered, callers re-arm
+//! interest with `modify()` when they are ready for the next wakeup.
 //!
-//! | Mode | Behavior | Use Case |
-//! |------|----------|----------|
-//! | **Edge** | Fire once on state *change* | High-performance servers |
-//! | **Level** | Fire while state *persists* | Simple applications |
-//!
-//! Edge-triggered requires fully draining the source before re-waiting.
-//! The [`Interest::EDGE_TRIGGERED`] flag enables edge mode when supported.
+//! The [`Interest::EDGE_TRIGGERED`] flag enables edge-triggered delivery when
+//! the backend supports it. In edge-triggered mode, callers must fully drain
+//! readable or writable state before waiting for the next event.
 //!
 //! # Cancel Safety
 //!
@@ -394,15 +392,14 @@ impl IntoIterator for Events {
 /// This ensures cancel-safety: cancelled tasks don't leave dangling registrations that
 /// could cause spurious wakeups or resource leaks.
 ///
-/// # Edge vs Level Triggering
+/// # Oneshot vs Edge Triggering
 ///
-/// Implementations should prefer edge-triggered mode where available:
-/// - **epoll**: Uses `EPOLLET` (edge-triggered)
-/// - **kqueue**: Edge-triggered by default (level with `EV_CLEAR`)
-/// - **IOCP**: Completion-based (neither edge nor level)
+/// The Unix reactor backends default to oneshot delivery so the runtime can use
+/// a single explicit re-arm path through `modify()`.
 ///
-/// Edge-triggered mode requires callers to fully drain readable/writable state
-/// before re-waiting, but provides better performance under high load.
+/// Callers can request edge-triggered delivery with
+/// [`Interest::EDGE_TRIGGERED`]. In edge-triggered mode, readable or writable
+/// state must be fully drained before waiting for the next event.
 ///
 /// # Example
 ///

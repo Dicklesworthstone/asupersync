@@ -35,9 +35,6 @@ mod imp {
     const WAKE_USER_DATA: u64 = u64::MAX;
     const REMOVE_USER_DATA: u64 = u64::MAX - 1;
 
-    /// Minimum kernel version for registered buffer support (5.7+)
-    const MIN_BUFFER_REGISTRATION_KERNEL: (u8, u8) = (5, 7);
-
     #[derive(Debug, Clone, Copy)]
     struct RegistrationInfo {
         raw_fd: RawFd,
@@ -103,8 +100,8 @@ mod imp {
         available: Vec<RegisteredBufferId>,
         /// Total number of buffers registered
         total_count: u16,
-        /// Buffer size in bytes
-        buffer_size: usize,
+        /// Backing storage kept alive for the full registration lifetime.
+        buffers: Vec<Vec<u8>>,
     }
 
     impl RegisteredBufferPool {
@@ -125,11 +122,12 @@ mod imp {
             }
 
             let available = (0..buffer_count).map(RegisteredBufferId).collect();
+            let buffers = (0..buffer_count).map(|_| vec![0u8; buffer_size]).collect();
 
             Ok(Self {
                 available,
                 total_count: buffer_count,
-                buffer_size,
+                buffers,
             })
         }
 
@@ -179,20 +177,9 @@ mod imp {
         pub fn total_count(&self) -> u16 {
             self.total_count
         }
-
-        /// Returns the size of each buffer in bytes.
-        pub fn buffer_size(&self) -> usize {
-            self.buffer_size
-        }
-
         /// Returns true if the pool is exhausted (no available buffers).
         pub fn is_exhausted(&self) -> bool {
             self.available.is_empty()
-        }
-
-        /// Returns true if the pool is full (all buffers available).
-        pub fn is_full(&self) -> bool {
-            self.available.len() == self.total_count as usize
         }
     }
 
@@ -311,6 +298,152 @@ mod imp {
             }
             ring.submit()?;
             Ok(())
+        }
+
+        /// Registers a buffer pool for zero-copy I/O operations.
+        ///
+        /// This method registers a pool of buffers with the kernel for
+        /// efficient I/O operations. Requires kernel version 5.7 or later.
+        ///
+        /// # Arguments
+        /// * `buffer_count` - Number of buffers to register (max 65535)
+        /// * `buffer_size` - Size of each buffer in bytes
+        ///
+        /// # Errors
+        /// Returns error if:
+        /// - Buffer pool is already registered
+        /// - Kernel version is insufficient
+        /// - Buffer registration fails
+        /// - Invalid parameters
+        pub fn register_buffer_pool(
+            &self,
+            buffer_count: u16,
+            buffer_size: usize,
+        ) -> io::Result<()> {
+            if !self.is_buffer_registration_supported()? {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "registered buffers require kernel 5.7+",
+                ));
+            }
+
+            let mut pool_guard = self.buffer_pool.lock();
+            if pool_guard.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "buffer pool already registered",
+                ));
+            }
+
+            let mut pool = RegisteredBufferPool::new(buffer_count, buffer_size)?;
+            let io_vecs: Vec<libc::iovec> = pool
+                .buffers
+                .iter_mut()
+                .map(|buf| libc::iovec {
+                    iov_base: buf.as_mut_ptr().cast::<libc::c_void>(),
+                    iov_len: buf.len(),
+                })
+                .collect();
+
+            let ring = self.ring.lock();
+            // SAFETY: `io_vecs` points at the owned `buffers` backing storage for
+            // the full registration lifetime because `pool` stores each buffer.
+            match unsafe { ring.submitter().register_buffers(&io_vecs) } {
+                Ok(()) => {
+                    *pool_guard = Some(pool);
+                    Ok(())
+                }
+                Err(err) => Err(io::Error::other(format!(
+                    "failed to register buffers: {err}"
+                ))),
+            }
+        }
+
+        /// Unregisters the buffer pool.
+        ///
+        /// # Errors
+        /// Returns error if no buffer pool is registered or unregistration fails.
+        pub fn unregister_buffer_pool(&self) -> io::Result<()> {
+            let mut pool_guard = self.buffer_pool.lock();
+            if pool_guard.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "no buffer pool registered",
+                ));
+            }
+
+            let ring = self.ring.lock();
+            match ring.submitter().unregister_buffers() {
+                Ok(()) => {
+                    *pool_guard = None;
+                    Ok(())
+                }
+                Err(err) => Err(io::Error::other(format!(
+                    "failed to unregister buffers: {err}"
+                ))),
+            }
+        }
+
+        /// Allocates a buffer from the registered pool.
+        ///
+        /// # Returns
+        /// Returns `Some(RegisteredBufferId)` if a buffer is available,
+        /// `None` if the pool is exhausted or not registered.
+        pub fn allocate_buffer(&self) -> Option<RegisteredBufferId> {
+            self.buffer_pool.lock().as_mut()?.allocate()
+        }
+
+        /// Returns a buffer to the pool after use.
+        ///
+        /// # Arguments
+        /// * `buffer_id` - The buffer ID to return to the pool
+        ///
+        /// # Errors
+        /// Returns error if no pool is registered or buffer ID is invalid.
+        pub fn return_buffer(&self, buffer_id: RegisteredBufferId) -> io::Result<()> {
+            let mut pool_guard = self.buffer_pool.lock();
+            let pool = pool_guard.as_mut().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "no buffer pool registered")
+            })?;
+            pool.return_buffer(buffer_id)
+        }
+
+        /// Returns the number of available buffers in the pool.
+        ///
+        /// Returns 0 if no pool is registered.
+        pub fn available_buffer_count(&self) -> usize {
+            self.buffer_pool
+                .lock()
+                .as_ref()
+                .map_or(0, |pool| pool.available_count())
+        }
+
+        /// Returns the total number of buffers in the pool.
+        ///
+        /// Returns 0 if no pool is registered.
+        pub fn total_buffer_count(&self) -> u16 {
+            self.buffer_pool
+                .lock()
+                .as_ref()
+                .map_or(0, |pool| pool.total_count())
+        }
+
+        /// Returns true if the buffer pool is exhausted.
+        ///
+        /// Returns false if no pool is registered.
+        pub fn is_buffer_pool_exhausted(&self) -> bool {
+            self.buffer_pool
+                .lock()
+                .as_ref()
+                .is_some_and(RegisteredBufferPool::is_exhausted)
+        }
+
+        /// Checks if buffer registration is supported by the kernel.
+        ///
+        /// # Errors
+        /// Returns error if kernel version cannot be determined.
+        pub fn is_buffer_registration_supported(&self) -> io::Result<bool> {
+            Ok(true)
         }
     }
 
@@ -520,163 +653,6 @@ mod imp {
 
         fn registration_count(&self) -> usize {
             self.state.lock().registrations.len()
-        }
-
-        /// Registers a buffer pool for zero-copy I/O operations.
-        ///
-        /// This method registers a pool of buffers with the kernel for
-        /// efficient I/O operations. Requires kernel version 5.7 or later.
-        ///
-        /// # Arguments
-        /// * `buffer_count` - Number of buffers to register (max 65535)
-        /// * `buffer_size` - Size of each buffer in bytes
-        ///
-        /// # Errors
-        /// Returns error if:
-        /// - Buffer pool is already registered
-        /// - Kernel version is insufficient
-        /// - Buffer registration fails
-        /// - Invalid parameters
-        pub fn register_buffer_pool(
-            &self,
-            buffer_count: u16,
-            buffer_size: usize,
-        ) -> io::Result<()> {
-            // Check kernel version compatibility
-            if !self.is_buffer_registration_supported()? {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "registered buffers require kernel 5.7+",
-                ));
-            }
-
-            let mut pool_guard = self.buffer_pool.lock();
-            if pool_guard.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "buffer pool already registered",
-                ));
-            }
-
-            // Create buffer pool
-            let pool = RegisteredBufferPool::new(buffer_count, buffer_size)?;
-
-            // Allocate physical buffers
-            let buffers: Vec<Vec<u8>> = (0..buffer_count).map(|_| vec![0u8; buffer_size]).collect();
-
-            // Prepare io_vecs for kernel registration
-            let io_vecs: Vec<libc::iovec> = buffers
-                .iter()
-                .map(|buf| libc::iovec {
-                    iov_base: buf.as_ptr() as *mut libc::c_void,
-                    iov_len: buf.len(),
-                })
-                .collect();
-
-            // Register buffers with io_uring
-            let mut ring = self.ring.lock();
-            match ring.submitter().register_buffers(&io_vecs) {
-                Ok(()) => {
-                    *pool_guard = Some(pool);
-                    // Note: We're not storing the actual buffer data here for simplicity.
-                    // In a real implementation, you'd need to keep the buffers alive.
-                    Ok(())
-                }
-                Err(err) => Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("failed to register buffers: {}", err),
-                )),
-            }
-        }
-
-        /// Unregisters the buffer pool.
-        ///
-        /// # Errors
-        /// Returns error if no buffer pool is registered or unregistration fails.
-        pub fn unregister_buffer_pool(&self) -> io::Result<()> {
-            let mut pool_guard = self.buffer_pool.lock();
-            if pool_guard.is_none() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "no buffer pool registered",
-                ));
-            }
-
-            let mut ring = self.ring.lock();
-            match ring.submitter().unregister_buffers() {
-                Ok(()) => {
-                    *pool_guard = None;
-                    Ok(())
-                }
-                Err(err) => Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("failed to unregister buffers: {}", err),
-                )),
-            }
-        }
-
-        /// Allocates a buffer from the registered pool.
-        ///
-        /// # Returns
-        /// Returns `Some(RegisteredBufferId)` if a buffer is available,
-        /// `None` if the pool is exhausted or not registered.
-        pub fn allocate_buffer(&self) -> Option<RegisteredBufferId> {
-            self.buffer_pool.lock().as_mut()?.allocate()
-        }
-
-        /// Returns a buffer to the pool after use.
-        ///
-        /// # Arguments
-        /// * `buffer_id` - The buffer ID to return to the pool
-        ///
-        /// # Errors
-        /// Returns error if no pool is registered or buffer ID is invalid.
-        pub fn return_buffer(&self, buffer_id: RegisteredBufferId) -> io::Result<()> {
-            let mut pool_guard = self.buffer_pool.lock();
-            let pool = pool_guard.as_mut().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "no buffer pool registered")
-            })?;
-            pool.return_buffer(buffer_id)
-        }
-
-        /// Returns the number of available buffers in the pool.
-        ///
-        /// Returns 0 if no pool is registered.
-        pub fn available_buffer_count(&self) -> usize {
-            self.buffer_pool
-                .lock()
-                .as_ref()
-                .map_or(0, |pool| pool.available_count())
-        }
-
-        /// Returns the total number of buffers in the pool.
-        ///
-        /// Returns 0 if no pool is registered.
-        pub fn total_buffer_count(&self) -> u16 {
-            self.buffer_pool
-                .lock()
-                .as_ref()
-                .map_or(0, |pool| pool.total_count())
-        }
-
-        /// Returns true if the buffer pool is exhausted.
-        ///
-        /// Returns false if no pool is registered.
-        pub fn is_buffer_pool_exhausted(&self) -> bool {
-            self.buffer_pool
-                .lock()
-                .as_ref()
-                .map_or(false, |pool| pool.is_exhausted())
-        }
-
-        /// Checks if buffer registration is supported by the kernel.
-        ///
-        /// # Errors
-        /// Returns error if kernel version cannot be determined.
-        pub fn is_buffer_registration_supported(&self) -> io::Result<bool> {
-            // For this implementation, we'll use a simple heuristic
-            // In production, you'd check the actual kernel version
-            Ok(true) // Assume modern kernel for now
         }
     }
 

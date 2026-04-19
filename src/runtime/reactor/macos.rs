@@ -1,7 +1,7 @@
 //! macOS/BSD kqueue-based reactor implementation.
 //!
 //! This module provides [`KqueueReactor`], a reactor implementation that uses
-//! BSD kqueue for efficient I/O event notification with edge-triggered mode.
+//! BSD kqueue for efficient I/O event notification.
 //!
 //! # Safety
 //!
@@ -49,7 +49,7 @@
 //! let reactor = KqueueReactor::new()?;
 //! let mut listener = TcpListener::bind("127.0.0.1:0")?;
 //!
-//! // Register the listener with kqueue (edge-triggered mode)
+//! // Register the listener with kqueue
 //! reactor.register(&listener, Token::new(1), Interest::READABLE)?;
 //!
 //! // Poll for events
@@ -90,24 +90,23 @@ mod kqueue_impl {
         interest: Interest,
     }
 
-    /// BSD kqueue-based reactor with edge-triggered mode.
+    /// BSD kqueue-based reactor.
     ///
     /// This reactor uses kqueue directly via libc for efficient I/O event
     /// notification for async operations on macOS and BSD systems.
     ///
     /// # Features
     ///
-    /// - `register()`: Adds fd to kqueue with EV_CLEAR (edge-triggered)
+    /// - `register()`: Adds fd to kqueue with portable trigger-mode semantics
     /// - `modify()`: Updates interest flags for a registered fd
     /// - `deregister()`: Removes fd from kqueue
     /// - `poll()`: Waits for and collects ready events
     /// - `wake()`: Interrupts a blocking poll from another thread
     ///
-    /// # Edge-Triggered Mode
-    ///
-    /// This reactor uses edge-triggered mode (`EV_CLEAR`) for efficiency.
-    /// Events fire when state *changes*, not while the condition persists.
-    /// Applications must read/write until `EAGAIN` before the next event.
+    /// Registrations default to one-shot delivery to match the portable Unix
+    /// reactor contract. Callers can opt into edge-triggered behavior with
+    /// [`Interest::EDGE_TRIGGERED`] or BSD `EV_DISPATCH` behavior with
+    /// [`Interest::DISPATCH`].
     pub struct KqueueReactor {
         /// The kqueue file descriptor.
         kq_fd: RawFd,
@@ -129,6 +128,68 @@ mod kqueue_impl {
     }
 
     impl KqueueReactor {
+        #[inline]
+        fn validate_supported_interest(interest: Interest) -> io::Result<()> {
+            if interest.is_priority() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Interest::PRIORITY is not supported by the raw macOS kqueue reactor",
+                ));
+            }
+
+            if interest.is_dispatch() && interest.is_oneshot() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Interest::DISPATCH and Interest::ONESHOT are mutually exclusive",
+                ));
+            }
+
+            Ok(())
+        }
+
+        #[inline]
+        fn validate_register_request(
+            token: Token,
+            raw_fd: RawFd,
+            interest: Interest,
+        ) -> io::Result<()> {
+            Self::validate_supported_interest(interest)?;
+
+            if token.0 == WAKE_TOKEN {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "token collides with the reactor wake token",
+                ));
+            }
+
+            if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
+
+            Ok(())
+        }
+
+        #[inline]
+        fn registration_flags(interest: Interest) -> libc::c_ushort {
+            let mut flags = libc::EV_ADD as libc::c_ushort;
+
+            if interest.is_edge_triggered() {
+                flags |= libc::EV_CLEAR as libc::c_ushort;
+            } else if interest.is_dispatch() {
+                flags |= libc::EV_DISPATCH as libc::c_ushort;
+            } else {
+                // Preserve the portable Unix reactor contract: non-edge
+                // registrations fire once and must be re-armed with modify().
+                flags |= libc::EV_ONESHOT as libc::c_ushort;
+            }
+
+            if interest.is_oneshot() {
+                flags |= libc::EV_ONESHOT as libc::c_ushort;
+            }
+
+            flags
+        }
+
         /// Creates a new kqueue-based reactor.
         ///
         /// This initializes a kqueue instance and sets up a wake pipe for
@@ -259,21 +320,18 @@ mod kqueue_impl {
             fd: RawFd,
             token: Token,
             interest: Interest,
-            add: bool,
+            previous_interest: Option<Interest>,
         ) -> Vec<libc::kevent> {
             let mut kevents = Vec::with_capacity(2);
-            let base_flags = if add {
-                libc::EV_ADD | libc::EV_CLEAR
-            } else {
-                libc::EV_DELETE
-            };
+            let flags = Self::registration_flags(interest);
+            let old_interest = previous_interest.unwrap_or(Interest::NONE);
 
-            if interest.is_readable() || !add {
+            if interest.is_readable() || old_interest.is_readable() {
                 kevents.push(libc::kevent {
                     ident: fd as usize,
                     filter: libc::EVFILT_READ,
-                    flags: if add && interest.is_readable() {
-                        base_flags
+                    flags: if interest.is_readable() {
+                        flags
                     } else {
                         libc::EV_DELETE
                     },
@@ -283,12 +341,12 @@ mod kqueue_impl {
                 });
             }
 
-            if interest.is_writable() || !add {
+            if interest.is_writable() || old_interest.is_writable() {
                 kevents.push(libc::kevent {
                     ident: fd as usize,
                     filter: libc::EVFILT_WRITE,
-                    flags: if add && interest.is_writable() {
-                        base_flags
+                    flags: if interest.is_writable() {
+                        flags
                     } else {
                         libc::EV_DELETE
                     },
@@ -301,14 +359,21 @@ mod kqueue_impl {
             kevents
         }
 
-        /// Converts kqueue event to our Interest type.
-        fn kevent_to_interest(filter: i16, flags: u16) -> Interest {
+        /// Converts kqueue event to our Interest type while masking generic
+        /// readiness to the directions that were actually registered.
+        fn kevent_to_interest(
+            filter: i16,
+            flags: u16,
+            registered_interest: Option<Interest>,
+        ) -> Interest {
             let mut interest = Interest::NONE;
+            let registered_interest =
+                registered_interest.unwrap_or(Interest::READABLE | Interest::WRITABLE);
 
-            if filter == libc::EVFILT_READ {
+            if filter == libc::EVFILT_READ && registered_interest.is_readable() {
                 interest = interest.add(Interest::READABLE);
             }
-            if filter == libc::EVFILT_WRITE {
+            if filter == libc::EVFILT_WRITE && registered_interest.is_writable() {
                 interest = interest.add(Interest::WRITABLE);
             }
             if flags & libc::EV_EOF != 0 {
@@ -330,6 +395,7 @@ mod kqueue_impl {
             interest: Interest,
         ) -> io::Result<()> {
             let raw_fd = source.as_raw_fd();
+            Self::validate_register_request(token, raw_fd, interest)?;
 
             // Check for duplicate registration first
             let mut regs = self.registrations.lock();
@@ -347,7 +413,7 @@ mod kqueue_impl {
             }
 
             // Build kevents for the registration
-            let kevents = Self::interest_to_kevents(raw_fd, token, interest, true);
+            let kevents = Self::interest_to_kevents(raw_fd, token, interest, None);
 
             // Register with kqueue
             if !kevents.is_empty() {
@@ -374,64 +440,15 @@ mod kqueue_impl {
         }
 
         fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+            Self::validate_supported_interest(interest)?;
             let mut regs = self.registrations.lock();
             let info = regs
                 .get_mut(&token)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
 
             let old_interest = info.interest;
-
-            // Build kevents to update filters
-            // We need to delete old filters and add new ones
-            let mut kevents = Vec::with_capacity(4);
-
-            // Delete old read filter if no longer wanted
-            if old_interest.is_readable() && !interest.is_readable() {
-                kevents.push(libc::kevent {
-                    ident: info.raw_fd as usize,
-                    filter: libc::EVFILT_READ,
-                    flags: libc::EV_DELETE,
-                    fflags: 0,
-                    data: 0,
-                    udata: token.0 as *mut libc::c_void,
-                });
-            }
-
-            // Delete old write filter if no longer wanted
-            if old_interest.is_writable() && !interest.is_writable() {
-                kevents.push(libc::kevent {
-                    ident: info.raw_fd as usize,
-                    filter: libc::EVFILT_WRITE,
-                    flags: libc::EV_DELETE,
-                    fflags: 0,
-                    data: 0,
-                    udata: token.0 as *mut libc::c_void,
-                });
-            }
-
-            // Add new read filter if newly wanted
-            if interest.is_readable() && !old_interest.is_readable() {
-                kevents.push(libc::kevent {
-                    ident: info.raw_fd as usize,
-                    filter: libc::EVFILT_READ,
-                    flags: libc::EV_ADD | libc::EV_CLEAR,
-                    fflags: 0,
-                    data: 0,
-                    udata: token.0 as *mut libc::c_void,
-                });
-            }
-
-            // Add new write filter if newly wanted
-            if interest.is_writable() && !old_interest.is_writable() {
-                kevents.push(libc::kevent {
-                    ident: info.raw_fd as usize,
-                    filter: libc::EVFILT_WRITE,
-                    flags: libc::EV_ADD | libc::EV_CLEAR,
-                    fflags: 0,
-                    data: 0,
-                    udata: token.0 as *mut libc::c_void,
-                });
-            }
+            let kevents =
+                Self::interest_to_kevents(info.raw_fd, token, interest, Some(old_interest));
 
             // Apply changes if any
             if !kevents.is_empty() {
@@ -468,30 +485,7 @@ mod kqueue_impl {
             // hard delete failures preserve bookkeeping for retry paths.
             let fd_still_valid = unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } != -1;
 
-            // Build kevents to delete filters
-            let mut kevents = Vec::with_capacity(2);
-
-            if interest.is_readable() {
-                kevents.push(libc::kevent {
-                    ident: raw_fd as usize,
-                    filter: libc::EVFILT_READ,
-                    flags: libc::EV_DELETE,
-                    fflags: 0,
-                    data: 0,
-                    udata: token.0 as *mut libc::c_void,
-                });
-            }
-
-            if interest.is_writable() {
-                kevents.push(libc::kevent {
-                    ident: raw_fd as usize,
-                    filter: libc::EVFILT_WRITE,
-                    flags: libc::EV_DELETE,
-                    fflags: 0,
-                    data: 0,
-                    udata: token.0 as *mut libc::c_void,
-                });
-            }
+            let kevents = Self::interest_to_kevents(raw_fd, token, Interest::NONE, Some(interest));
 
             // Only drop bookkeeping once the delete definitely succeeded or the
             // target fd itself is already gone.
@@ -576,6 +570,8 @@ mod kqueue_impl {
                 kevents.set_len(ret as usize);
             }
 
+            let regs = self.registrations.lock();
+
             // Convert kevent results to our Event type.
             // `Events` may drop entries when capacity is reached; report only
             // the number of events actually stored in `events`.
@@ -589,10 +585,12 @@ mod kqueue_impl {
                 }
 
                 let token = Token(token_val);
-                let interest = Self::kevent_to_interest(kev.filter, kev.flags);
+                let registered_interest = regs.get(&token).map(|info| info.interest);
+                let interest = Self::kevent_to_interest(kev.filter, kev.flags, registered_interest);
                 events.push(Event::new(token, interest));
             }
 
+            drop(regs);
             drop(kevents);
             Ok(events.len())
         }

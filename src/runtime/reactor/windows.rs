@@ -3,6 +3,8 @@
 //! On Windows, the reactor uses the `polling` crate's IOCP backend. While IOCP
 //! is completion-based rather than readiness-based, the `polling` abstraction
 //! exposes readiness-style events that are compatible with the runtime.
+//! The current backend only supports readable and writable interests; mode and
+//! auxiliary flags such as PRIORITY/HUP/ONESHOT/EDGE/DISPATCH are rejected.
 
 // Re-export parent types so submodules can use `super::` imports.
 #[allow(unused_imports)]
@@ -59,6 +61,22 @@ mod iocp_impl {
             })
         }
 
+        #[inline]
+        fn validate_supported_interest(interest: Interest) -> io::Result<()> {
+            let supported = Interest::READABLE | Interest::WRITABLE;
+            let unsupported = interest & !supported;
+            if !unsupported.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "IOCP reactor only supports READABLE and WRITABLE interests, got {interest}"
+                    ),
+                ));
+            }
+
+            Ok(())
+        }
+
         fn interest_to_poll_event(token: Token, interest: Interest) -> PollEvent {
             let key = token.0;
             let readable = interest.is_readable();
@@ -105,6 +123,7 @@ mod iocp_impl {
             token: Token,
             interest: Interest,
         ) -> io::Result<()> {
+            Self::validate_supported_interest(interest)?;
             let raw_socket = source.raw_socket();
 
             let mut regs = self.registrations.lock();
@@ -142,6 +161,7 @@ mod iocp_impl {
         }
 
         fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+            Self::validate_supported_interest(interest)?;
             let mut regs = self.registrations.lock();
             let info = regs
                 .get_mut(&token)
@@ -254,6 +274,38 @@ mod iocp_impl {
             let event = IocpReactor::interest_to_poll_event(token, Interest::NONE);
             let roundtrip = IocpReactor::poll_event_to_interest(&event);
             assert!(roundtrip.is_empty());
+        }
+
+        #[test]
+        fn unsupported_interest_flags_are_rejected() {
+            assert_eq!(
+                IocpReactor::validate_supported_interest(Interest::READABLE),
+                Ok(())
+            );
+            assert_eq!(
+                IocpReactor::validate_supported_interest(Interest::WRITABLE),
+                Ok(())
+            );
+            assert_eq!(
+                IocpReactor::validate_supported_interest(Interest::both()),
+                Ok(())
+            );
+
+            let err = IocpReactor::validate_supported_interest(Interest::READABLE.with_dispatch())
+                .expect_err("dispatch should be rejected");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+            let err = IocpReactor::validate_supported_interest(
+                Interest::WRITABLE.add(Interest::PRIORITY),
+            )
+            .expect_err("priority should be rejected");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+            let err = IocpReactor::validate_supported_interest(
+                Interest::READABLE.add(Interest::HUP).with_edge_triggered(),
+            )
+            .expect_err("hup/edge should be rejected");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         }
 
         #[test]

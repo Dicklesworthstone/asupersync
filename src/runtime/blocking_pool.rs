@@ -408,8 +408,11 @@ impl BlockingPool {
             completion: Arc::clone(&completion),
         };
 
-        self.inner.queue.push(task);
-        self.inner.pending_count.fetch_add(1, Ordering::Relaxed);
+        if !try_enqueue_task(&self.inner, task) {
+            cancelled.store(true, Ordering::Release);
+            completion.signal_done();
+            return handle;
+        }
 
         // Wake a waiting thread or spawn a new one if needed
         self.maybe_spawn_thread();
@@ -446,8 +449,9 @@ impl BlockingPool {
     ///
     /// No new tasks will be accepted. Pending tasks will continue to execute.
     pub fn shutdown(&self) {
+        let _guard = self.inner.mutex.lock();
         self.inner.shutdown.store(true, Ordering::Release);
-        self.notify_all();
+        self.inner.condvar.notify_all();
     }
 
     /// Shuts down and waits for all threads to exit.
@@ -555,8 +559,11 @@ impl BlockingPoolHandle {
             completion: Arc::clone(&completion),
         };
 
-        self.inner.queue.push(task);
-        self.inner.pending_count.fetch_add(1, Ordering::Relaxed);
+        if !try_enqueue_task(&self.inner, task) {
+            cancelled.store(true, Ordering::Release);
+            completion.signal_done();
+            return handle;
+        }
 
         // Wake a waiting thread or spawn a new one if needed
         maybe_spawn_thread_on_inner(&self.inner);
@@ -585,6 +592,16 @@ impl BlockingPoolHandle {
     pub fn is_shutdown(&self) -> bool {
         self.inner.shutdown.load(Ordering::Acquire)
     }
+}
+
+fn try_enqueue_task(inner: &Arc<BlockingPoolInner>, task: BlockingTask) -> bool {
+    let _guard = inner.mutex.lock();
+    if inner.shutdown.load(Ordering::Acquire) {
+        return false;
+    }
+    inner.queue.push(task);
+    inner.pending_count.fetch_add(1, Ordering::Relaxed);
+    true
 }
 
 /// Configuration options for the blocking pool.
@@ -909,10 +926,11 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize};
     use std::sync::{Condvar as StdCondvar, Mutex as StdMutex, OnceLock};
 
     static DETERMINISTIC_HOOK_TEST_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
@@ -1117,6 +1135,37 @@ mod tests {
         assert!(handle.is_cancelled());
         assert!(handle.wait_timeout(Duration::from_millis(100)));
         assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn spawn_rechecks_shutdown_before_queueing_under_submission_lock() {
+        let pool = BlockingPool::new(0, 1);
+        let handle_api = pool.handle();
+        let executed = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(std::sync::Barrier::new(2));
+
+        let submission_guard = pool.inner.mutex.lock();
+        let executed_clone = Arc::clone(&executed);
+        let gate_clone = Arc::clone(&gate);
+        let join = thread::spawn(move || {
+            gate_clone.wait();
+            handle_api.spawn(move || {
+                executed_clone.store(true, Ordering::Release);
+            })
+        });
+
+        gate.wait();
+        // Simulate shutdown linearizing while the submitter is blocked on the
+        // submission critical section after its fast-path shutdown check.
+        pool.inner.shutdown.store(true, Ordering::Release);
+        drop(submission_guard);
+
+        let handle = join.join().expect("spawn thread should return a handle");
+        assert!(handle.is_cancelled());
+        assert!(handle.wait_timeout(Duration::from_millis(100)));
+        assert_eq!(pool.pending_count(), 0);
+        assert_eq!(pool.active_threads(), 0);
+        assert!(!executed.load(Ordering::Acquire));
     }
 
     #[test]

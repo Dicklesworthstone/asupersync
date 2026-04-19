@@ -510,6 +510,7 @@ impl DegradationEngine {
             ResourceType::FileDescriptors,
             ResourceType::CpuLoad,
             ResourceType::NetworkConnections,
+            ResourceType::Task,
         ] {
             trigger_configs.insert(
                 resource_type.clone(),
@@ -720,6 +721,14 @@ impl DegradationStatsSnapshot {
         let total_overhead = self.decision_time_nanos + self.monitoring_overhead_nanos;
         (total_overhead as f64) / (total_runtime_nanos as f64) * 100.0
     }
+}
+
+fn cycle_overhead_percentage(elapsed: Duration, interval: Duration) -> f64 {
+    let interval_nanos = interval.as_nanos();
+    if interval_nanos == 0 {
+        return 0.0;
+    }
+    (elapsed.as_nanos() as f64) / (interval_nanos as f64) * 100.0
 }
 
 /// System resource collector for platform-specific monitoring.
@@ -949,6 +958,8 @@ impl ResourceMonitor {
     pub fn process_current_state(
         &self,
     ) -> Result<Vec<(ResourceType, DegradationLevel)>, ResourceMonitorError> {
+        let cycle_start = Instant::now();
+
         // Collect fresh measurements
         self.collector.collect_now()?;
 
@@ -958,15 +969,15 @@ impl ResourceMonitor {
         // Check overhead limits
         let config = self.config.read();
         if config.enable_auto_degradation {
-            let stats = self.engine.stats();
             let overhead_percent =
-                stats.overhead_percentage(Duration::from_secs(1).as_nanos() as u64);
+                cycle_overhead_percentage(cycle_start.elapsed(), config.collection_interval);
 
             if overhead_percent > config.max_overhead_percent {
-                // Could trigger a degradation level for monitoring overhead itself
-                eprintln!(
-                    "Warning: Resource monitoring overhead {:.2}% exceeds limit {:.2}%",
-                    overhead_percent, config.max_overhead_percent
+                crate::tracing_compat::warn!(
+                    overhead_percent,
+                    collection_interval_ms = config.collection_interval.as_millis(),
+                    max_overhead_percent = config.max_overhead_percent,
+                    "resource monitoring overhead exceeds configured limit"
                 );
             }
         }
@@ -1100,5 +1111,43 @@ mod tests {
 
         let decision = engine.should_shed_region(region_id);
         assert!(matches!(decision, SheddingDecision::Pause));
+    }
+
+    #[test]
+    fn test_degradation_engine_monitors_task_pressure_by_default() {
+        let pressure = Arc::new(ResourcePressure::new());
+        let engine = DegradationEngine::new(Arc::clone(&pressure));
+
+        pressure.update_measurement(
+            ResourceType::Task,
+            ResourceMeasurement::new(960, 800, 950, 1000),
+        );
+
+        let changes = engine
+            .process_measurements()
+            .expect("task pressure should process");
+        assert_eq!(
+            changes,
+            vec![(ResourceType::Task, DegradationLevel::Emergency)]
+        );
+        assert_eq!(
+            pressure.get_degradation_level(&ResourceType::Task),
+            DegradationLevel::Emergency
+        );
+    }
+
+    #[test]
+    fn test_cycle_overhead_percentage_uses_configured_interval() {
+        let overhead =
+            cycle_overhead_percentage(Duration::from_millis(25), Duration::from_millis(100));
+        assert!((overhead - 25.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_cycle_overhead_percentage_handles_zero_interval() {
+        assert_eq!(
+            cycle_overhead_percentage(Duration::from_millis(25), Duration::ZERO),
+            0.0
+        );
     }
 }

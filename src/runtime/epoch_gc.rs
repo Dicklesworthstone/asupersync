@@ -579,7 +579,7 @@ impl DeferredCleanupQueue {
         // require access to the ObligationTable and proper error handling
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
-            obligation_id = id,
+            obligation_id = _id,
             "Cleaning up obligation in deferred cleanup"
         );
 
@@ -593,7 +593,7 @@ impl DeferredCleanupQueue {
         // Integrate with IO driver waker cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
-            waker_id = waker_id,
+            waker_id = _waker_id,
             source = source,
             "Cleaning up waker in deferred cleanup"
         );
@@ -624,7 +624,7 @@ impl DeferredCleanupQueue {
         // Integrate with region table cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
-            region_id = region_id.as_u64(),
+            region_id = _region_id.as_u64(),
             task_count = task_ids.len(),
             "Cleaning up region state in deferred cleanup"
         );
@@ -633,8 +633,8 @@ impl DeferredCleanupQueue {
         for &_task_id in task_ids {
             #[cfg(feature = "tracing-integration")]
             tracing::trace!(
-                task_id = task_id.as_u64(),
-                region_id = region_id.as_u64(),
+                task_id = _task_id.as_u64(),
+                region_id = _region_id.as_u64(),
                 "Cleaning up task in region cleanup"
             );
 
@@ -653,7 +653,7 @@ impl DeferredCleanupQueue {
         // Integrate with timer wheel cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
-            timer_id = timer_id,
+            timer_id = _timer_id,
             timer_type = timer_type,
             "Cleaning up timer in deferred cleanup"
         );
@@ -693,7 +693,7 @@ impl DeferredCleanupQueue {
         // Integrate with channel cleanup
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
-            channel_id = channel_id,
+            channel_id = _channel_id,
             cleanup_type = cleanup_type,
             "Cleaning up channel state in deferred cleanup"
         );
@@ -1302,13 +1302,9 @@ mod tests {
 
         let deferred_duration = start.elapsed();
 
-        // Deferred cleanup should be faster for large batches
-        // (Note: This is a simplified benchmark - real-world performance
-        //  would depend on actual cleanup costs and batching efficiency)
-        println!(
-            "Direct cleanup: {:?}, Deferred cleanup: {:?}",
-            direct_duration, deferred_duration
-        );
+        // Keep the measured durations available for local debugging without
+        // emitting nondeterministic stdout from the test suite.
+        let _ = (direct_duration, deferred_duration);
 
         let stats = epoch_gc.stats();
         assert!(stats.total_processed.load(Ordering::Relaxed) as usize >= NUM_OPERATIONS);

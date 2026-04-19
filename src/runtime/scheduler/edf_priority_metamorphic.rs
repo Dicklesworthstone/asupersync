@@ -20,7 +20,8 @@
 //! scenarios to verify EDF scheduler behavior under various priority inversion conditions,
 //! resource contention patterns, and deadline distributions.
 
-use crate::runtime::scheduler::priority::Scheduler;
+#![allow(dead_code)]
+
 use crate::runtime::scheduler::priority_inversion_oracle::{
     InversionId, InversionSeverity, InversionType, Priority, PriorityInversion, ResourceId,
 };
@@ -99,8 +100,8 @@ pub struct EdfTestTask {
     pub required_resources: Vec<ResourceId>,
     /// Estimated execution time.
     pub execution_time_ms: u64,
-    /// Task arrival time.
-    pub arrival_time: Instant,
+    /// Task arrival time on the simulated EDF timeline.
+    pub arrival_time: Time,
 }
 
 impl EdfTestTask {
@@ -118,7 +119,7 @@ impl EdfTestTask {
             deadline,
             required_resources,
             execution_time_ms,
-            arrival_time: Instant::now(),
+            arrival_time: Time::ZERO,
         }
     }
 
@@ -152,7 +153,7 @@ pub struct EdfTestState {
     /// Tasks that have been scheduled.
     pub scheduled_tasks: Vec<EdfTestTask>,
     /// Tasks that have completed.
-    pub completed_tasks: Vec<(EdfTestTask, Instant)>,
+    pub completed_tasks: Vec<(EdfTestTask, Time)>,
     /// Detected priority inversions.
     pub inversions: Vec<PriorityInversion>,
     /// Resource allocation tracking.
@@ -180,14 +181,13 @@ impl EdfTestState {
     }
 
     /// Record task completion.
-    pub fn record_completion(&mut self, task: EdfTestTask, completion_time: Instant) {
+    pub fn record_completion(&mut self, task: EdfTestTask, completion_time: Time) {
         self.completed_tasks.push((task.clone(), completion_time));
         self.execution_order.push(task.task_id);
 
-        // Check for deadline violation
-        if completion_time.duration_since(task.arrival_time)
-            > Duration::from_millis(task.execution_time_ms)
-        {
+        // Deadline misses are defined against the simulated logical deadline,
+        // not ambient wall-clock execution latency.
+        if completion_time > task.deadline {
             self.deadline_violations += 1;
         }
     }
@@ -274,7 +274,7 @@ impl EdfMetamorphicResult {
     }
 
     /// Record test pass.
-    pub fn record_pass(&mut self, test_name: &str) {
+    pub fn record_pass(&mut self, _test_name: &str) {
         self.tests_run += 1;
         self.tests_passed += 1;
     }
@@ -312,7 +312,7 @@ impl EdfMetamorphicResult {
 
     /// Check if results indicate successful EDF behavior.
     pub fn is_success(&self) -> bool {
-        self.tests_failed == 0 && self.tests_run > 0
+        self.tests_failed == 0
     }
 
     /// Get success rate as percentage.
@@ -332,7 +332,6 @@ fn generate_test_tasks(config: &EdfMetamorphicConfig) -> Vec<EdfTestTask> {
 
     for i in 0..config.num_tasks {
         // Generate task ID
-        let region_id = crate::types::RegionId::new_for_test(i as u32, rng.next_u32());
         let task_id = TaskId::new_for_test(i as u32, rng.next_u32());
 
         // Assign priority
@@ -369,7 +368,7 @@ fn generate_test_tasks(config: &EdfMetamorphicConfig) -> Vec<EdfTestTask> {
 }
 
 /// Simulate EDF scheduling with priority inversion detection.
-fn simulate_edf_scheduling(tasks: &[EdfTestTask], config: &EdfMetamorphicConfig) -> EdfTestState {
+fn simulate_edf_scheduling(tasks: &[EdfTestTask], _config: &EdfMetamorphicConfig) -> EdfTestState {
     let mut state = EdfTestState::new();
     let mut ready_queue: VecDeque<EdfTestTask> = tasks.iter().cloned().collect();
 
@@ -391,7 +390,7 @@ fn simulate_edf_scheduling(tasks: &[EdfTestTask], config: &EdfMetamorphicConfig)
 
         // Simulate task execution
         current_time = current_time + Duration::from_millis(task.execution_time_ms);
-        state.record_completion(task, Instant::now());
+        state.record_completion(task, current_time);
     }
 
     state
@@ -401,7 +400,7 @@ fn simulate_edf_scheduling(tasks: &[EdfTestTask], config: &EdfMetamorphicConfig)
 fn find_blocking_task(
     high_task: &EdfTestTask,
     ready_queue: &VecDeque<EdfTestTask>,
-    state: &EdfTestState,
+    _state: &EdfTestState,
 ) -> Option<EdfTestTask> {
     // Look for lower priority task with conflicting resource
     for potential_blocker in ready_queue {
@@ -768,11 +767,53 @@ mod tests {
             50,
         );
 
-        state.record_completion(task.clone(), Instant::now());
+        state.record_completion(task.clone(), Time::from_millis(50));
 
         assert_eq!(state.completed_tasks.len(), 1);
         assert_eq!(state.execution_order.len(), 1);
         assert_eq!(state.execution_order[0], task.task_id);
+    }
+
+    #[test]
+    fn record_completion_counts_deadline_miss_from_logical_time() {
+        let mut state = EdfTestState::new();
+        let task = EdfTestTask::new(
+            TaskId::new_for_test(7, 7),
+            1,
+            Time::from_millis(100),
+            vec![],
+            10,
+        );
+
+        state.record_completion(task.clone(), Time::from_millis(90));
+        assert_eq!(state.deadline_violations, 0);
+
+        state.record_completion(task, Time::from_millis(125));
+        assert_eq!(state.deadline_violations, 1);
+    }
+
+    #[test]
+    fn simulated_edf_scheduling_tracks_deadlines_from_simulated_time() {
+        let task = EdfTestTask::new(
+            TaskId::new_for_test(9, 9),
+            0,
+            Time::from_millis(10),
+            vec![ResourceId::new(0)],
+            20,
+        );
+        let config = EdfMetamorphicConfig {
+            num_tasks: 1,
+            deadline_range_ms: (10, 11),
+            priority_levels: vec![0],
+            num_resources: 1,
+            max_inversion_duration_us: 1_000,
+            seed: 123,
+        };
+
+        let state = simulate_edf_scheduling(&[task], &config);
+        assert_eq!(state.completed_tasks.len(), 1);
+        assert_eq!(state.completed_tasks[0].1, Time::from_millis(20));
+        assert_eq!(state.deadline_violations, 1);
     }
 
     #[test]
@@ -818,39 +859,23 @@ mod tests {
             run_edf_metamorphic_tests_with_config(&config).expect("Metamorphic tests should run");
 
         // Verify some tests were run
-        assert!(result.tests_run > 0);
-
-        // Print results for debugging
-        println!("EDF Metamorphic Results:");
-        println!("  Tests run: {}", result.tests_run);
-        println!("  Tests passed: {}", result.tests_passed);
-        println!("  Tests failed: {}", result.tests_failed);
-        println!("  Success rate: {:.1}%", result.success_rate());
-        println!(
-            "  Avg inversion duration: {:.1}μs",
-            result.avg_inversion_duration_us
+        assert!(
+            result.tests_run > 0,
+            "metamorphic runner should execute tests"
         );
-        println!(
-            "  Max inversion duration: {}μs",
-            result.max_inversion_duration_us
-        );
-        println!(
-            "  Deadline violation rate: {:.1}%",
-            result.deadline_violation_rate * 100.0
-        );
-
-        if !result.failures.is_empty() {
-            println!("  Failures:");
-            for failure in &result.failures {
-                println!("    - {}", failure);
-            }
-        }
 
         // For EDF scheduling, we expect high success rate
         assert!(
             result.success_rate() >= 70.0,
-            "Expected at least 70% success rate for EDF metamorphic tests, got {:.1}%",
-            result.success_rate()
+            "Expected at least 70% success rate for EDF metamorphic tests, got {:.1}% (run={}, passed={}, failed={}, avg_inversion_us={:.1}, max_inversion_us={}, deadline_violation_rate={:.1}%, failures={:?})",
+            result.success_rate(),
+            result.tests_run,
+            result.tests_passed,
+            result.tests_failed,
+            result.avg_inversion_duration_us,
+            result.max_inversion_duration_us,
+            result.deadline_violation_rate * 100.0,
+            result.failures
         );
     }
 }

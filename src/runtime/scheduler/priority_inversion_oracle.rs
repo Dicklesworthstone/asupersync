@@ -117,6 +117,7 @@ pub enum InversionSeverity {
 pub struct InversionId(u64);
 
 impl InversionId {
+    /// Creates a stable identifier for a detected priority inversion.
     pub fn new(id: u64) -> Self {
         Self(id)
     }

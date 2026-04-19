@@ -179,8 +179,8 @@ impl ObligationTableEpochGC {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
-                obligation_id = obligation_id,
-                metadata_size = metadata.len(),
+                obligation_id = _obligation_id,
+                metadata_size = _metadata.len(),
                 "Direct obligation cleanup"
             );
         }
@@ -265,7 +265,11 @@ impl IODriverWakerEpochGC {
     fn direct_cleanup_waker(&self, _waker_id: u64, source: &str) {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
-            tracing::debug!(waker_id = waker_id, source = source, "Direct waker cleanup");
+            tracing::debug!(
+                waker_id = _waker_id,
+                source = source,
+                "Direct waker cleanup"
+            );
         }
 
         // Platform-specific direct cleanup
@@ -365,7 +369,7 @@ impl RegionStateEpochGC {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
-                region_id = region_id.as_u64(),
+                region_id = _region_id.as_u64(),
                 task_count = task_ids.len(),
                 "Direct region cleanup"
             );
@@ -461,7 +465,7 @@ impl TimerEpochGC {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
-                timer_id = timer_id,
+                timer_id = _timer_id,
                 timer_type = timer_type,
                 "Direct timer cleanup"
             );
@@ -578,9 +582,9 @@ impl ChannelEpochGC {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
             tracing::debug!(
-                channel_id = channel_id,
+                channel_id = _channel_id,
                 cleanup_type = cleanup_type,
-                data_size = data.len(),
+                data_size = _data.len(),
                 "Direct channel cleanup"
             );
         }

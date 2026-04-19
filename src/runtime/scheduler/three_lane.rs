@@ -68,7 +68,7 @@ use crate::util::{CachePadded, DetHasher, DetRng};
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Wake, Waker};
@@ -93,7 +93,7 @@ const SPIN_LIMIT: u32 = 8;
 const YIELD_LIMIT: u32 = 2;
 const SHORT_WAIT_LE_5MS_NANOS: u64 = 5_000_000;
 
-type LocalReadyQueue = Mutex<Vec<TaskId>>;
+type LocalReadyQueue = Mutex<VecDeque<TaskId>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IoPhaseOutcome {
@@ -554,7 +554,7 @@ impl Drop for ScopedLocalReady {
 pub(crate) fn schedule_local_task(task: TaskId) -> bool {
     CURRENT_LOCAL_READY.with(|cell| {
         cell.borrow().as_ref().is_some_and(|queue| {
-            queue.lock().push(task);
+            queue.lock().push_back(task);
             true
         })
     })
@@ -725,7 +725,7 @@ pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bo
             if let Some(queue) = lr_cell.borrow().as_ref() {
                 let mut local_ready_guard = queue.lock();
                 if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
-                    local_ready_guard.swap_remove(pos);
+                    local_ready_guard.remove(pos);
                 }
                 drop(local_ready_guard);
                 local.lock().move_to_cancel_lane(task, priority);
@@ -873,7 +873,7 @@ impl ThreeLaneScheduler {
         }
         // Create non-stealable local queues for !Send tasks
         for _ in 0..worker_count {
-            local_ready.push(Arc::new(LocalReadyQueue::new(Vec::with_capacity(32))));
+            local_ready.push(Arc::new(LocalReadyQueue::new(VecDeque::with_capacity(32))));
         }
 
         // Create parkers first
@@ -1123,7 +1123,7 @@ impl ThreeLaneScheduler {
                     if let Some(local_ready) = self.local_ready.get(worker_id) {
                         let mut local_ready_guard = local_ready.lock();
                         if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
-                            local_ready_guard.swap_remove(pos);
+                            local_ready_guard.remove(pos);
                         }
                         drop(local_ready_guard);
                         local.lock().move_to_cancel_lane(task, priority);
@@ -1284,7 +1284,7 @@ impl ThreeLaneScheduler {
             // 2. Try routing to pinned worker (cross-thread spawn)
             if let Some(worker_id) = pinned_worker {
                 if let Some(queue) = self.local_ready.get(worker_id) {
-                    queue.lock().push(task);
+                    queue.lock().push_back(task);
                     self.coordinator.wake_worker(worker_id);
                     return;
                 }
@@ -1355,7 +1355,7 @@ impl ThreeLaneScheduler {
             // 2. Try routing to pinned worker (cross-thread wake)
             if let Some(worker_id) = pinned_worker {
                 if let Some(queue) = self.local_ready.get(worker_id) {
-                    queue.lock().push(task);
+                    queue.lock().push_back(task);
                     self.coordinator.wake_worker(worker_id);
                     return;
                 }
@@ -2272,14 +2272,13 @@ impl ThreeLaneWorker {
 
         // Verify local queue consistency
         {
-            let local_guard = self.local.lock();
             let local_ready_guard = self.local_ready.lock();
+            let local_ready_tasks: Vec<_> = local_ready_guard.iter().copied().collect();
 
-            // Check ready queue consistency
             let ready_snapshot = super::invariant_monitor::QueueSnapshot {
                 name: "local_ready_queue".to_string(),
-                reported_depth: local_guard.len(),
-                actual_tasks: local_ready_guard.iter().copied().collect(),
+                reported_depth: local_ready_tasks.len(),
+                actual_tasks: local_ready_tasks,
                 priority_range: if local_ready_guard.is_empty() {
                     None
                 } else {
@@ -2289,7 +2288,6 @@ impl ThreeLaneWorker {
             };
 
             drop(local_ready_guard);
-            drop(local_guard);
 
             self.invariant_monitor
                 .lock()
@@ -2297,11 +2295,11 @@ impl ThreeLaneWorker {
         }
 
         // Verify fast queue consistency
-        let fast_queue_depth = self.fast_queue.len();
+        let fast_queue_tasks = self.fast_queue.snapshot_tasks();
         let fast_snapshot = super::invariant_monitor::QueueSnapshot {
             name: "fast_queue".to_string(),
-            reported_depth: fast_queue_depth,
-            actual_tasks: vec![], // Fast queue doesn't expose iterator
+            reported_depth: fast_queue_tasks.len(),
+            actual_tasks: fast_queue_tasks,
             priority_range: None,
             time_range: Some((current_time, current_time)),
         };
@@ -2865,10 +2863,7 @@ impl ThreeLaneWorker {
         // ── PHASE 3: Fast ready paths (no PriorityScheduler lock) ────
         // Check local_ready first (highest priority: non-stealable local tasks),
         // then lock-free fast_queue (O(1) atomic pop).
-        let local_ready_task = self
-            .local_ready
-            .try_lock()
-            .and_then(|mut queue| queue.pop());
+        let local_ready_task = self.local_ready.lock().pop_front();
         if let Some(task) = local_ready_task {
             self.record_ready_dispatch();
             return Some(self.finish_dispatch(task));
@@ -3007,7 +3002,7 @@ impl ThreeLaneWorker {
         if gap > self.preemption_metrics.max_ready_priority_inversion_gap {
             self.preemption_metrics.max_ready_priority_inversion_gap = gap;
         }
-        self.invariant_monitor.lock().record_task_enqueue(
+        self.invariant_monitor.lock().record_task_requeue(
             blocked_task,
             "local_ready_heap",
             blocked_priority,
@@ -3045,11 +3040,9 @@ impl ThreeLaneWorker {
             .record_task_dispatch(task, current_time);
 
         // Record task dequeue for invariant verification
-        self.invariant_monitor.lock().record_task_dequeue(
-            task,
-            "scheduler_dispatch",
-            Time::from_nanos(current_time),
-        );
+        self.invariant_monitor
+            .lock()
+            .record_task_dispatch(task, Time::from_nanos(current_time));
 
         task
     }
@@ -3379,10 +3372,8 @@ impl ThreeLaneWorker {
     pub(crate) fn try_ready_work(&mut self) -> Option<TaskId> {
         // Highest priority: drain non-stealable local (!Send) tasks first.
         // These tasks are pinned to this worker and cannot run elsewhere.
-        if let Some(mut queue) = self.local_ready.try_lock() {
-            if let Some(task) = queue.pop() {
-                return Some(task);
-            }
+        if let Some(task) = self.local_ready.lock().pop_front() {
+            return Some(task);
         }
 
         // Fast path: O(1) pop from local VecDeque (LIFO, cache-friendly).
@@ -3432,11 +3423,9 @@ impl ThreeLaneWorker {
                     );
 
                     // Record work-stealing for invariant verification
-                    self.invariant_monitor.lock().record_task_dequeue(
-                        task,
-                        "fast_steal",
-                        Time::from_nanos(self.current_time_ns()),
-                    );
+                    self.invariant_monitor
+                        .lock()
+                        .record_task_dispatch(task, Time::from_nanos(self.current_time_ns()));
 
                     return Some(task);
                 }
@@ -3479,11 +3468,9 @@ impl ThreeLaneWorker {
                     let (first_task, _) = self.steal_buffer[0];
 
                     // Record work-stealing for invariant verification
-                    self.invariant_monitor.lock().record_task_dequeue(
-                        first_task,
-                        "priority_steal",
-                        Time::from_nanos(self.current_time_ns()),
-                    );
+                    self.invariant_monitor
+                        .lock()
+                        .record_task_dispatch(first_task, Time::from_nanos(self.current_time_ns()));
 
                     // Push remaining stolen tasks to our fast queue
                     if stolen_count > 1 {
@@ -3491,7 +3478,7 @@ impl ThreeLaneWorker {
                             self.fast_queue.push(task);
 
                             // Record enqueue to our fast queue for stolen tasks
-                            self.invariant_monitor.lock().record_task_enqueue(
+                            self.invariant_monitor.lock().record_task_requeue(
                                 task,
                                 "fast_queue_stolen",
                                 _priority,
@@ -3543,7 +3530,7 @@ impl ThreeLaneWorker {
             // Record task enqueue for invariant verification
             self.invariant_monitor.lock().record_task_enqueue(
                 task,
-                "local_ready_queue",
+                "local_ready_heap",
                 priority,
                 Time::from_nanos(current_time),
             );
@@ -3568,7 +3555,7 @@ impl ThreeLaneWorker {
         {
             let mut local_ready_guard = self.local_ready.lock();
             if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
-                local_ready_guard.swap_remove(pos);
+                local_ready_guard.remove(pos);
             }
             drop(local_ready_guard);
             let mut local = self.local.lock();
@@ -3584,7 +3571,7 @@ impl ThreeLaneWorker {
             );
 
             // Record task enqueue for invariant verification
-            self.invariant_monitor.lock().record_task_enqueue(
+            self.invariant_monitor.lock().record_task_requeue(
                 task,
                 "local_cancel_queue",
                 priority,
@@ -3651,7 +3638,7 @@ impl ThreeLaneWorker {
                     if record.is_local() {
                         if let Some(worker_id) = record.pinned_worker() {
                             if let Some(queue) = self.all_local_ready.get(worker_id) {
-                                queue.lock().push(waiter);
+                                queue.lock().push_back(waiter);
                                 self.coordinator.wake_worker(worker_id);
                             } else {
                                 // SAFETY: Invalid worker id for a local waiter means
@@ -3670,7 +3657,7 @@ impl ThreeLaneWorker {
                         } else {
                             // Local task without a pinned worker yet.
                             // Schedule on the current worker's local queue.
-                            self.local_ready.lock().push(waiter);
+                            self.local_ready.lock().push_back(waiter);
                             self.parker.unpark();
                         }
                     } else {
@@ -3694,8 +3681,8 @@ impl ThreeLaneWorker {
 
     #[allow(clippy::too_many_lines)]
     pub(crate) fn execute(&self, task_id: TaskId) {
-        // Guard to handle task panics during polling.
-        // If the future panics, this guard will catch the unwind and mark the task as Panicked.
+        // Guard to handle unwinds that escape the explicit poll isolation below
+        // before the runtime clears the current task context.
         struct TaskExecutionGuard<'a> {
             worker: &'a ThreeLaneWorker,
             task_id: TaskId,
@@ -3941,13 +3928,13 @@ impl ThreeLaneWorker {
             completed: false,
         };
 
-        let poll_result = {
+        let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut cx = Context::from_waker(&waker);
             stored.poll(&mut cx)
-        };
+        }));
 
         match poll_result {
-            Poll::Ready(outcome) => {
+            Ok(Poll::Ready(outcome)) => {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
@@ -4019,7 +4006,7 @@ impl ThreeLaneWorker {
                 guard.completed = true;
                 wake_state.clear();
             }
-            Poll::Pending => {
+            Ok(Poll::Pending) => {
                 // Store task back: use task table for hot-path when sharded.
                 // Move waker into cache (not clone) since it is not needed after this point.
                 // Store task back and cache wakers in a single lock acquisition.
@@ -4100,7 +4087,7 @@ impl ThreeLaneWorker {
                             let mut local_ready_guard = self.local_ready.lock();
                             if let Some(pos) = local_ready_guard.iter().position(|t| *t == task_id)
                             {
-                                local_ready_guard.swap_remove(pos);
+                                local_ready_guard.remove(pos);
                             }
                             drop(local_ready_guard);
                             let mut local = self.local.lock();
@@ -4108,7 +4095,7 @@ impl ThreeLaneWorker {
                         } else {
                             // Push to non-stealable local_ready queue.
                             // Local (!Send) tasks must never enter stealable structures.
-                            self.local_ready.lock().push(task_id);
+                            self.local_ready.lock().push_back(task_id);
                         }
                         self.parker.unpark();
                     } else {
@@ -4123,6 +4110,38 @@ impl ThreeLaneWorker {
                 }
 
                 guard.completed = true;
+            }
+            Err(payload) => {
+                let panic_payload = crate::types::outcome::PanicPayload::new(
+                    crate::cx::scope::payload_to_string(&payload),
+                );
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
+                if let Some(record) = state.task_mut(task_id) {
+                    if !record.state.is_terminal() {
+                        record.complete(crate::types::Outcome::Panicked(panic_payload));
+                    }
+                }
+
+                let waiters = state.task_completed(task_id);
+                let finalizers = state.drain_ready_async_finalizers();
+
+                self.wake_dependents_locked(&state, waiters);
+
+                let finalizer_wakes = finalizers.len();
+                if finalizer_wakes > 0 {
+                    self.global.add_ready_count(finalizer_wakes);
+                    for (finalizer_task, priority) in finalizers {
+                        self.global.inject_ready_uncounted(finalizer_task, priority);
+                    }
+                    self.coordinator.wake_many(finalizer_wakes);
+                }
+                drop(state);
+                guard.completed = true;
+                wake_state.clear();
             }
         }
         let _ = guard.completed;
@@ -4205,7 +4224,9 @@ impl ThreeLaneWaker {
             // Check for cancellation to route to correct lane (cancel > ready).
             // This ensures "Losers are drained" with high priority even during I/O wakeups.
             let mut priority = self.priority;
-            let is_cancelling = self.fast_cancel.load(Ordering::Relaxed);
+            // Pair with the Release store in `CxInner::fast_cancel` so a wake
+            // that observes cancellation also observes the published reason.
+            let is_cancelling = self.fast_cancel.load(Ordering::Acquire);
 
             if is_cancelling {
                 if let Some(inner) = self.cx_inner.upgrade() {
@@ -4255,7 +4276,9 @@ impl ThreeLaneLocalWaker {
     #[inline]
     fn schedule(&self) {
         if self.wake_state.notify() {
-            let is_cancelling = self.fast_cancel.load(Ordering::Relaxed);
+            // Pair with the Release store in `CxInner::fast_cancel` so the
+            // local wake path sees cancellation publication before routing.
+            let is_cancelling = self.fast_cancel.load(Ordering::Acquire);
 
             if is_cancelling {
                 let mut priority = self.priority;
@@ -4265,13 +4288,19 @@ impl ThreeLaneLocalWaker {
                         priority = reason.cleanup_budget().priority;
                     }
                 }
-                // Route to local cancel lane (PriorityScheduler).
-                // Lock ordering: only `local` is acquired here (no local_ready).
+                // Promote to the local cancel lane, matching `inject_cancel`
+                // and `schedule_local_cancel`: a cancelled local task must not
+                // remain in the non-stealable ready queue.
+                let mut local_ready_guard = self.local_ready.lock();
+                if let Some(pos) = local_ready_guard.iter().position(|t| *t == self.task_id) {
+                    local_ready_guard.remove(pos);
+                }
+                drop(local_ready_guard);
                 let mut local = self.local.lock();
-                local.schedule_cancel(self.task_id, priority);
+                local.move_to_cancel_lane(self.task_id, priority);
             } else {
                 // Push to non-stealable local_ready queue.
-                self.local_ready.lock().push(self.task_id);
+                self.local_ready.lock().push_back(self.task_id);
             }
             self.parker.unpark();
         }
@@ -4381,7 +4410,7 @@ impl ThreeLaneLocalCancelWaker {
         {
             let mut local_ready_guard = self.local_ready.lock();
             if let Some(pos) = local_ready_guard.iter().position(|t| *t == self.task_id) {
-                local_ready_guard.swap_remove(pos);
+                local_ready_guard.remove(pos);
             }
             drop(local_ready_guard);
             let mut local = self.local.lock();
@@ -5151,6 +5180,47 @@ mod tests {
         assert_eq!(task, Some(task_id));
     }
 
+    #[test]
+    fn ordinary_waker_observes_fast_cancel_and_injects_cancel_lane() {
+        let task_id = TaskId::new_for_test(1, 7);
+        let cx_inner = Arc::new(RwLock::new(CxInner::new(
+            RegionId::new_for_test(1, 0),
+            task_id,
+            Budget::INFINITE,
+        )));
+        {
+            let mut guard = cx_inner.write();
+            guard.cancel_requested = true;
+            guard
+                .fast_cancel
+                .store(true, std::sync::atomic::Ordering::Release);
+            guard.cancel_reason = Some(CancelReason::timeout());
+        }
+
+        let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
+        let global = Arc::new(GlobalInjector::new());
+        let parker = Parker::new();
+        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker], None));
+        let waker = Waker::from(Arc::new(ThreeLaneWaker {
+            task_id,
+            wake_state,
+            global: Arc::clone(&global),
+            coordinator,
+            priority: Budget::INFINITE.priority,
+            fast_cancel: Arc::clone(&cx_inner.read().fast_cancel),
+            cx_inner: Arc::downgrade(&cx_inner),
+        }));
+
+        waker.wake_by_ref();
+
+        let task = global.pop_cancel().map(|pt| pt.task);
+        assert_eq!(task, Some(task_id));
+        assert!(
+            global.pop_ready().is_none(),
+            "cancelled task should not be re-enqueued in ready lane"
+        );
+    }
+
     // ========== Deduplication Tests (bd-35f9) ==========
 
     #[test]
@@ -5305,7 +5375,7 @@ mod tests {
     #[test]
     fn test_local_cancel_removes_from_local_ready() {
         let task_id = TaskId::new_for_test(1, 0);
-        let local_ready = Arc::new(LocalReadyQueue::new(vec![task_id]));
+        let local_ready = Arc::new(LocalReadyQueue::new(VecDeque::from([task_id])));
         let local = Arc::new(Mutex::new(PriorityScheduler::new()));
         let wake_state = Arc::new(TaskWakeState::new());
         let cx_inner = Arc::new(RwLock::new(CxInner::new(
@@ -5348,9 +5418,55 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_local_waker_promotes_cancelled_task_out_of_local_ready() {
+        let task_id = TaskId::new_for_test(1, 3);
+        let local_ready = Arc::new(LocalReadyQueue::new(VecDeque::from([task_id])));
+        let local = Arc::new(Mutex::new(PriorityScheduler::new()));
+        let wake_state = Arc::new(TaskWakeState::new());
+        let cx_inner = Arc::new(RwLock::new(CxInner::new(
+            RegionId::new_for_test(1, 0),
+            task_id,
+            Budget::INFINITE,
+        )));
+        {
+            let mut guard = cx_inner.write();
+            guard.cancel_requested = true;
+            guard
+                .fast_cancel
+                .store(true, std::sync::atomic::Ordering::Release);
+            guard.cancel_reason = Some(CancelReason::new(CancelKind::User));
+        }
+
+        let waker = ThreeLaneLocalWaker {
+            task_id,
+            priority: 10,
+            wake_state,
+            local: Arc::clone(&local),
+            local_ready: Arc::clone(&local_ready),
+            parker: Parker::new(),
+            fast_cancel: Arc::clone(&cx_inner.read().fast_cancel),
+            cx_inner: Arc::downgrade(&cx_inner),
+        };
+
+        waker.schedule();
+
+        let queue = local_ready.lock();
+        assert!(
+            !queue.contains(&task_id),
+            "cancelled local task should be removed from local_ready"
+        );
+        drop(queue);
+
+        assert!(
+            local.lock().is_in_cancel_lane(task_id),
+            "cancelled local task should be promoted to cancel lane"
+        );
+    }
+
+    #[test]
     fn schedule_cancel_on_current_local_removes_local_ready() {
         let task_id = TaskId::new_for_test(1, 0);
-        let local_ready = Arc::new(LocalReadyQueue::new(vec![task_id]));
+        let local_ready = Arc::new(LocalReadyQueue::new(VecDeque::from([task_id])));
         let local = Arc::new(Mutex::new(PriorityScheduler::new()));
 
         let _local_ready_guard = ScopedLocalReady::new(Arc::clone(&local_ready));
@@ -6959,7 +7075,7 @@ mod tests {
         assert!(
             task1_tracked
                 .queues
-                .contains(&"local_ready_queue".to_string())
+                .contains(&"local_ready_heap".to_string())
         );
         assert!(
             task2_tracked
@@ -6995,6 +7111,90 @@ mod tests {
         let stats = worker.invariant_stats();
         assert!(stats.operations_monitored > 0);
         assert_eq!(stats.violations_by_severity, [0, 0, 0, 0]); // No violations
+    }
+
+    #[test]
+    fn local_cancel_promotion_does_not_trigger_multiple_queue_violation() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let worker = &mut scheduler.workers[0];
+        let task = TaskId::new_for_test(400, 1);
+
+        worker.schedule_local(task, 10);
+        worker.schedule_local_cancel(task, 90);
+
+        let violations = worker.invariant_violations();
+        assert!(
+            violations.iter().all(|violation| {
+                !matches!(
+                    violation.invariant,
+                    SchedulerInvariant::TaskInMultipleQueues { .. }
+                )
+            }),
+            "cancel promotion should relocate queue membership, not fabricate multiple-queue violations: {violations:?}"
+        );
+
+        let tracked = worker.invariant_monitor.lock().tracked_tasks();
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].queues, vec!["local_cancel_queue".to_string()]);
+        assert_eq!(tracked[0].priority, 90);
+    }
+
+    #[test]
+    fn stolen_batch_requeues_do_not_trigger_multiple_queue_violation() {
+        let state = LocalQueue::test_state(10);
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+        scheduler.set_steal_batch_size(2);
+        let mut workers = scheduler.take_workers();
+
+        let ready_a = TaskId::new_for_test(1, 0);
+        let ready_b = TaskId::new_for_test(2, 0);
+        workers[0].schedule_local(ready_a, 20);
+        workers[0].schedule_local(ready_b, 10);
+
+        let stolen = workers[1].try_steal();
+        assert!(stolen.is_some(), "steal should produce work");
+
+        let violations = workers[1].invariant_violations();
+        assert!(
+            violations.iter().all(|violation| {
+                !matches!(
+                    violation.invariant,
+                    SchedulerInvariant::TaskInMultipleQueues { .. }
+                )
+            }),
+            "steal batch transfer should move queue membership cleanly: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn verify_scheduler_invariants_does_not_report_false_queue_mismatches() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let worker = &mut scheduler.workers[0];
+
+        let local_task = TaskId::new_for_test(300, 1);
+        let fast_task = TaskId::new_for_test(301, 1);
+
+        worker.local_ready.lock().push_back(local_task);
+        worker.fast_queue.push(fast_task);
+
+        worker.verify_scheduler_invariants();
+
+        let queue_mismatches: Vec<_> = worker
+            .invariant_violations()
+            .into_iter()
+            .filter(|violation| {
+                matches!(
+                    violation.invariant,
+                    SchedulerInvariant::QueueDepthMismatch { .. }
+                )
+            })
+            .collect();
+        assert!(
+            queue_mismatches.is_empty(),
+            "queue verifier should not fabricate mismatches for exact queue snapshots: {queue_mismatches:?}"
+        );
     }
 
     #[test]
@@ -7536,7 +7736,7 @@ mod tests {
         let priority_sched = Arc::new(Mutex::new(PriorityScheduler::new()));
         let parker = Parker::new();
 
-        let local_ready = Arc::new(LocalReadyQueue::new(Vec::new()));
+        let local_ready = Arc::new(LocalReadyQueue::new(VecDeque::new()));
 
         let waker = Waker::from(Arc::new(ThreeLaneLocalWaker {
             task_id,
@@ -7577,7 +7777,7 @@ mod tests {
         let priority_sched = Arc::new(Mutex::new(PriorityScheduler::new()));
         let parker = Parker::new();
 
-        let local_ready = Arc::new(LocalReadyQueue::new(Vec::new()));
+        let local_ready = Arc::new(LocalReadyQueue::new(VecDeque::new()));
 
         let waker = Waker::from(Arc::new(ThreeLaneLocalWaker {
             task_id,
@@ -7653,7 +7853,7 @@ mod tests {
         let local_task = TaskId::new_for_test(1, 0);
         let fast_task = TaskId::new_for_test(2, 0);
 
-        worker.local_ready.lock().push(local_task);
+        worker.local_ready.lock().push_back(local_task);
         worker.fast_queue.push(fast_task);
 
         let first = worker.try_ready_work();
@@ -7669,6 +7869,35 @@ mod tests {
     }
 
     #[test]
+    fn local_ready_queue_preserves_fifo_order() {
+        let state = LocalQueue::test_state(10);
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        let first = TaskId::new_for_test(10, 0);
+        let second = TaskId::new_for_test(11, 0);
+        let third = TaskId::new_for_test(12, 0);
+        worker.local_ready.lock().extend([first, second, third]);
+
+        assert_eq!(
+            worker.next_task(),
+            Some(first),
+            "first enqueued local task should dispatch first"
+        );
+        assert_eq!(
+            worker.next_task(),
+            Some(second),
+            "second enqueued local task should dispatch second"
+        );
+        assert_eq!(
+            worker.next_task(),
+            Some(third),
+            "third enqueued local task should dispatch third"
+        );
+    }
+
+    #[test]
     fn local_ready_queue_not_visible_to_fast_stealers() {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
@@ -7676,7 +7905,7 @@ mod tests {
 
         let local_task = TaskId::new_for_test(1, 1);
 
-        workers[0].local_ready.lock().push(local_task);
+        workers[0].local_ready.lock().push_back(local_task);
 
         let stolen = workers[1].try_steal();
         assert!(
@@ -7700,7 +7929,7 @@ mod tests {
 
         let local_task = TaskId::new_for_test(1, 1);
 
-        workers[0].local_ready.lock().push(local_task);
+        workers[0].local_ready.lock().push_back(local_task);
 
         let stolen = workers[1].try_steal();
         assert!(
@@ -7720,7 +7949,7 @@ mod tests {
         {
             let mut queue = workers[0].local_ready.lock();
             for &task in &local_tasks {
-                queue.push(task);
+                queue.push_back(task);
             }
         }
 
@@ -7781,7 +8010,7 @@ mod tests {
         let worker = &mut workers[0];
 
         let task = TaskId::new_for_test(1, 1);
-        worker.local_ready.lock().push(task);
+        worker.local_ready.lock().push_back(task);
 
         let found = worker.next_task();
         assert_eq!(found, Some(task), "next_task should find local_ready task");
@@ -7789,7 +8018,7 @@ mod tests {
 
     #[test]
     fn schedule_local_task_uses_tls() {
-        let queue = Arc::new(LocalReadyQueue::new(Vec::new()));
+        let queue = Arc::new(LocalReadyQueue::new(VecDeque::new()));
         let _guard = ScopedLocalReady::new(Arc::clone(&queue));
 
         let task = TaskId::new_for_test(1, 1);
@@ -7800,6 +8029,49 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0], task);
         drop(tasks);
+    }
+
+    #[test]
+    fn try_ready_work_waits_for_local_ready_lock_before_fast_queue() {
+        let state = LocalQueue::test_state(10);
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut workers = scheduler.take_workers();
+        let mut worker = workers.remove(0);
+
+        let local_task = TaskId::new_for_test(1, 0);
+        let fast_task = TaskId::new_for_test(2, 0);
+        worker.local_ready.lock().push_back(local_task);
+        worker.fast_queue.push(fast_task);
+
+        let local_ready = Arc::clone(&worker.local_ready);
+        let held_guard = local_ready.lock();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            started_tx.send(()).expect("notify start");
+            let next = worker.try_ready_work();
+            result_tx.send(next).expect("send result");
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker thread should start");
+        assert!(
+            result_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "worker should wait for local_ready ownership instead of skipping to fast_queue"
+        );
+        drop(held_guard);
+
+        let next = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker should return once local_ready lock is released");
+        assert_eq!(
+            next,
+            Some(local_task),
+            "local_ready task should still outrank fast_queue under contention"
+        );
+        handle.join().expect("worker join");
     }
 
     #[test]
@@ -8020,7 +8292,7 @@ mod tests {
         };
 
         // 3. Simulate being Worker 1
-        let worker_1_ready = Arc::new(LocalReadyQueue::new(Vec::new()));
+        let worker_1_ready = Arc::new(LocalReadyQueue::new(VecDeque::new()));
         let _tls_guard = ScopedLocalReady::new(worker_1_ready.clone());
         let _worker_guard = ScopedWorkerId::new(1);
 
@@ -8648,7 +8920,7 @@ mod tests {
 
         // Drain some tasks and verify queue reduces
         let mut workers = scheduler.take_workers();
-        if let Some(worker) = workers.first() {
+        if let Some(worker) = workers.first_mut() {
             for _ in 0..50 {
                 worker.next_task();
             }

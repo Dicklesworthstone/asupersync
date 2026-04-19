@@ -7,9 +7,11 @@
 use crate::observability::metrics::MetricsProvider;
 use crate::types::{ObligationId, Outcome, RegionId, TaskId, outcome::PanicPayload};
 use std::backtrace::Backtrace;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -178,12 +180,17 @@ impl<T> PanicIsolationResult<T> {
 pub struct PanicIsolator {
     config: PanicIsolationConfig,
     metrics: Arc<dyn MetricsProvider>,
+    region_panic_counts: Mutex<BTreeMap<RegionId, u32>>,
 }
 
 impl PanicIsolator {
     /// Create a new panic isolator with the given configuration.
     pub fn new(config: PanicIsolationConfig, metrics: Arc<dyn MetricsProvider>) -> Self {
-        Self { config, metrics }
+        Self {
+            config,
+            metrics,
+            region_panic_counts: Mutex::new(BTreeMap::new()),
+        }
     }
 
     /// Isolate panic-prone task execution.
@@ -302,12 +309,19 @@ impl PanicIsolator {
     where
         F: FnOnce() -> T,
     {
-        let panic_id = PANIC_COUNTER.fetch_add(1, Ordering::SeqCst);
+        if let Some((reason, context)) = self.skip_context_for_threshold(&location) {
+            if self.config.enable_panic_logging {
+                self.report_skip(&reason, &context);
+            }
+            return PanicIsolationResult::Skipped { reason, context };
+        }
 
         match std::panic::catch_unwind(AssertUnwindSafe(operation)) {
             Ok(result) => PanicIsolationResult::Success(result),
             Err(panic_payload) => {
+                let panic_id = PANIC_COUNTER.fetch_add(1, Ordering::SeqCst);
                 let context = self.create_panic_context(panic_id, location, &panic_payload);
+                self.record_region_panic(&context);
 
                 // Report panic to observability system
                 if self.config.enable_panic_logging {
@@ -319,6 +333,86 @@ impl PanicIsolator {
 
                 PanicIsolationResult::Panicked(context)
             }
+        }
+    }
+
+    fn skip_context_for_threshold(
+        &self,
+        location: &PanicLocation,
+    ) -> Option<(String, PanicContext)> {
+        let threshold = self.config.panic_threshold_per_region?;
+        let region_id = self.location_region(location)?;
+        let panic_count = {
+            let guard = self
+                .region_panic_counts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.get(&region_id).copied().unwrap_or(0)
+        };
+
+        if panic_count < threshold {
+            return None;
+        }
+
+        let reason = format!(
+            "region {} exceeded panic threshold {} with {} isolated panics",
+            region_id, threshold, panic_count
+        );
+        let panic_id = PANIC_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let context = self.create_skip_context(panic_id, location.clone(), reason.clone());
+        Some((reason, context))
+    }
+
+    fn create_skip_context(
+        &self,
+        panic_id: u64,
+        location: PanicLocation,
+        reason: String,
+    ) -> PanicContext {
+        let (region_id, task_id, obligation_id) = self.location_ids(&location);
+        PanicContext {
+            panic_id,
+            location,
+            timestamp: Instant::now(),
+            panic_message: Some(reason),
+            backtrace: None,
+            region_id,
+            task_id,
+            obligation_id,
+        }
+    }
+
+    fn record_region_panic(&self, context: &PanicContext) {
+        let Some(region_id) = context.region_id else {
+            return;
+        };
+        let mut guard = self
+            .region_panic_counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = guard.entry(region_id).or_insert(0);
+        *count = count.saturating_add(1);
+    }
+
+    fn location_region(&self, location: &PanicLocation) -> Option<RegionId> {
+        self.location_ids(location).0
+    }
+
+    fn location_ids(
+        &self,
+        location: &PanicLocation,
+    ) -> (Option<RegionId>, Option<TaskId>, Option<ObligationId>) {
+        match location {
+            PanicLocation::TaskExecution {
+                task_id, region_id, ..
+            } => (Some(*region_id), Some(*task_id), None),
+            PanicLocation::FinalizerExecution { region_id, .. } => (Some(*region_id), None, None),
+            PanicLocation::RegionCleanup { region_id, .. } => (Some(*region_id), None, None),
+            PanicLocation::ObligationHandling {
+                obligation_id,
+                region_id,
+            } => (Some(*region_id), None, Some(*obligation_id)),
+            PanicLocation::SchedulerInternal { .. } => (None, None, None),
         }
     }
 
@@ -343,18 +437,7 @@ impl PanicIsolator {
             None
         };
 
-        let (region_id, task_id, obligation_id) = match &location {
-            PanicLocation::TaskExecution {
-                task_id, region_id, ..
-            } => (Some(*region_id), Some(*task_id), None),
-            PanicLocation::FinalizerExecution { region_id, .. } => (Some(*region_id), None, None),
-            PanicLocation::RegionCleanup { region_id, .. } => (Some(*region_id), None, None),
-            PanicLocation::ObligationHandling {
-                obligation_id,
-                region_id,
-            } => (Some(*region_id), None, Some(*obligation_id)),
-            PanicLocation::SchedulerInternal { .. } => (None, None, None),
-        };
+        let (region_id, task_id, obligation_id) = self.location_ids(&location);
 
         PanicContext {
             panic_id,
@@ -369,16 +452,40 @@ impl PanicIsolator {
     }
 
     /// Report panic to the observability system.
+    #[allow(unused_variables)]
     fn report_panic(&self, context: &PanicContext) {
-        // This would integrate with the existing logging infrastructure
-        eprintln!(
-            "[PANIC ISOLATED] ID={} Location={:?} Message={:?}",
-            context.panic_id, context.location, context.panic_message
+        crate::tracing_compat::error!(
+            panic_id = context.panic_id,
+            location = ?context.location,
+            panic_message = ?context.panic_message,
+            region_id = ?context.region_id,
+            task_id = ?context.task_id,
+            obligation_id = ?context.obligation_id,
+            timestamp = ?context.timestamp,
+            "panic isolated"
         );
 
         if let Some(ref backtrace) = context.backtrace {
-            eprintln!("[PANIC BACKTRACE] ID={}\n{}", context.panic_id, backtrace);
+            crate::tracing_compat::error!(
+                panic_id = context.panic_id,
+                backtrace = %backtrace,
+                "panic backtrace captured"
+            );
         }
+    }
+
+    #[allow(unused_variables)]
+    fn report_skip(&self, reason: &str, context: &PanicContext) {
+        crate::tracing_compat::warn!(
+            panic_id = context.panic_id,
+            reason,
+            location = ?context.location,
+            region_id = ?context.region_id,
+            task_id = ?context.task_id,
+            obligation_id = ?context.obligation_id,
+            timestamp = ?context.timestamp,
+            "panic isolation skipped operation after threshold escalation"
+        );
     }
 
     /// Convert isolated panic to a proper task outcome.
@@ -597,5 +704,52 @@ mod tests {
 
         assert!(result.is_success());
         assert_eq!(result.into_success(), Some(42));
+    }
+
+    #[test]
+    fn test_region_panic_threshold_skips_followup_operations() {
+        let config = PanicIsolationConfig {
+            panic_threshold_per_region: Some(1),
+            capture_backtraces: false,
+            ..Default::default()
+        };
+        let metrics = Arc::new(NoOpMetrics);
+        let isolator = PanicIsolator::new(config, metrics);
+        let task_id = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let region_id = RegionId::from_arena(ArenaIndex::new(7, 0));
+
+        let first = isolator.isolate_task_execution(task_id, region_id, 1, || panic!("boom"));
+        assert!(matches!(first, PanicIsolationResult::Panicked(_)));
+
+        let second = isolator.isolate_task_execution(task_id, region_id, 2, || 99);
+        match second {
+            PanicIsolationResult::Skipped { reason, context } => {
+                assert!(reason.contains("exceeded panic threshold 1"));
+                assert_eq!(context.region_id, Some(region_id));
+                assert_eq!(context.task_id, Some(task_id));
+                assert_eq!(context.panic_message.as_deref(), Some(reason.as_str()));
+            }
+            other => panic!("expected skipped result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_panic_threshold_isolated_per_region() {
+        let config = PanicIsolationConfig {
+            panic_threshold_per_region: Some(1),
+            capture_backtraces: false,
+            ..Default::default()
+        };
+        let metrics = Arc::new(NoOpMetrics);
+        let isolator = PanicIsolator::new(config, metrics);
+        let task_id = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let region_a = RegionId::from_arena(ArenaIndex::new(8, 0));
+        let region_b = RegionId::from_arena(ArenaIndex::new(9, 0));
+
+        let first = isolator.isolate_task_execution(task_id, region_a, 1, || panic!("boom"));
+        assert!(matches!(first, PanicIsolationResult::Panicked(_)));
+
+        let other_region = isolator.isolate_task_execution(task_id, region_b, 1, || 7);
+        assert!(matches!(other_region, PanicIsolationResult::Success(7)));
     }
 }

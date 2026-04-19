@@ -447,6 +447,48 @@ impl SchedulerInvariantMonitor {
         self.update_monitoring_overhead(start.elapsed());
     }
 
+    /// Records a task being moved from any previous queue membership into a
+    /// new queue as part of an intentional scheduler transition.
+    ///
+    /// This is for queue relocations such as ready->cancel promotion or
+    /// victim-heap->thief-fast-queue stealing. Those are not multiple-queue
+    /// violations; they are one logical queue membership changing location.
+    pub fn record_task_requeue(
+        &mut self,
+        task_id: TaskId,
+        queue_name: &str,
+        priority: u8,
+        timestamp: Time,
+    ) {
+        if !self.config.enable_verification {
+            return;
+        }
+
+        let start = std::time::Instant::now();
+
+        let task_state = self
+            .task_states
+            .entry(task_id)
+            .or_insert_with(|| TaskInvariantState {
+                queues: HashSet::new(),
+                priority,
+                enqueue_time: timestamp,
+                last_update: timestamp,
+                lifecycle_state: "enqueued".to_string(),
+                owner_worker: None,
+                is_cancelled: false,
+            });
+
+        task_state.queues.clear();
+        task_state.queues.insert(queue_name.to_string());
+        task_state.priority = priority;
+        task_state.enqueue_time = timestamp;
+        task_state.last_update = timestamp;
+        task_state.lifecycle_state = "enqueued".to_string();
+
+        self.update_monitoring_overhead(start.elapsed());
+    }
+
     /// Records a task being dequeued from a specific queue.
     pub fn record_task_dequeue(&mut self, task_id: TaskId, queue_name: &str, timestamp: Time) {
         if !self.config.enable_verification {
@@ -458,11 +500,31 @@ impl SchedulerInvariantMonitor {
         if let Some(task_state) = self.task_states.get_mut(&task_id) {
             task_state.queues.remove(queue_name);
             task_state.last_update = timestamp;
-
-            if task_state.queues.is_empty() {
-                task_state.lifecycle_state = "executing".to_string();
-            }
         }
+        if self
+            .task_states
+            .get(&task_id)
+            .is_some_and(|task_state| task_state.queues.is_empty())
+        {
+            self.task_states.remove(&task_id);
+        }
+
+        self.update_monitoring_overhead(start.elapsed());
+    }
+
+    /// Records a task leaving the scheduler queues for execution.
+    pub fn record_task_dispatch(&mut self, task_id: TaskId, timestamp: Time) {
+        if !self.config.enable_verification {
+            return;
+        }
+
+        let start = std::time::Instant::now();
+
+        if let Some(task_state) = self.task_states.get_mut(&task_id) {
+            task_state.queues.clear();
+            task_state.last_update = timestamp;
+        }
+        self.task_states.remove(&task_id);
 
         self.update_monitoring_overhead(start.elapsed());
     }
@@ -632,6 +694,7 @@ impl SchedulerInvariantMonitor {
     }
 
     /// Records an invariant violation.
+    #[allow(unused_variables)]
     fn record_violation(
         &mut self,
         invariant: SchedulerInvariant,
@@ -665,23 +728,14 @@ impl SchedulerInvariantMonitor {
 
         // Log the violation
         if self.config.enable_diagnostics {
-            eprintln!(
-                "[SCHEDULER-INVARIANT] VIOLATION: {}",
-                invariant.description()
-            );
-            if let Some(worker) = worker_id {
-                eprintln!("  Worker: {worker}");
-            }
-            eprintln!("  Timestamp: {timestamp:?}");
-            eprintln!(
-                "  Severity: {}",
-                match severity {
-                    0 => "Low",
-                    1 => "Medium",
-                    2 => "High",
-                    3 => "Critical",
-                    _ => "Unknown",
-                }
+            crate::tracing_compat::error!(
+                category = ?category,
+                severity = severity,
+                worker_id = ?worker_id,
+                timestamp = ?timestamp,
+                invariant = ?invariant,
+                description = %invariant.description(),
+                "scheduler invariant violation"
             );
         }
 
@@ -1038,6 +1092,39 @@ mod tests {
             monitor.violations.is_empty(),
             "re-observing the same queue must not look like a multiple-queue violation"
         );
+    }
+
+    #[test]
+    fn test_requeue_replaces_previous_queue_without_multiple_queue_violation() {
+        let mut monitor = SchedulerInvariantMonitor::with_defaults();
+        let task_id = TaskId::new_for_test(11, 0);
+
+        monitor.record_task_enqueue(task_id, "ready_queue", 10, Time::from_nanos(1_000));
+        monitor.record_task_requeue(task_id, "cancel_queue", 50, Time::from_nanos(1_200));
+
+        assert!(
+            monitor.violations.is_empty(),
+            "intentional queue moves must not look like multiple-queue corruption"
+        );
+        let snapshots = monitor.tracked_tasks();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].queues, vec!["cancel_queue".to_string()]);
+        assert_eq!(snapshots[0].priority, 50);
+    }
+
+    #[test]
+    fn test_dispatch_removes_task_from_tracking() {
+        let mut monitor = SchedulerInvariantMonitor::with_defaults();
+        let task_id = TaskId::new_for_test(12, 0);
+
+        monitor.record_task_enqueue(task_id, "ready_queue", 10, Time::from_nanos(1_000));
+        monitor.record_task_dispatch(task_id, Time::from_nanos(1_500));
+
+        assert!(
+            monitor.tracked_tasks().is_empty(),
+            "dispatched task should no longer appear as queued"
+        );
+        assert!(monitor.violations.is_empty());
     }
 
     #[test]
