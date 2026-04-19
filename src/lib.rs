@@ -264,10 +264,11 @@ pub use error::{
 pub use lab::{LabConfig, LabRuntime};
 pub use remote::{
     CancelRequest, CompensationResult, ComputationName, DedupDecision, IdempotencyKey,
-    IdempotencyRecord, IdempotencyStore, Lease, LeaseError, LeaseRenewal, LeaseState, NodeId,
-    Phase0RemoteFailure, Phase0RetryPolicy, Phase0SimulationConfig, RemoteCap, RemoteError,
-    RemoteHandle, RemoteMessage, RemoteOutcome, RemoteTaskId, ResultDelivery, Saga, SagaState,
-    SagaStepError, SpawnAck, SpawnAckStatus, SpawnRejectReason, SpawnRequest, spawn_remote,
+    IdempotencyRecord, IdempotencyRequestFingerprint, IdempotencyStore, Lease, LeaseError,
+    LeaseRenewal, LeaseState, NodeId, Phase0RemoteFailure, Phase0RetryPolicy,
+    Phase0SimulationConfig, RemoteCap, RemoteError, RemoteHandle, RemoteMessage, RemoteOutcome,
+    RemoteTaskId, ResultDelivery, Saga, SagaState, SagaStepError, SpawnAck, SpawnAckStatus,
+    SpawnRejectReason, SpawnRequest, spawn_remote,
 };
 pub use types::{
     Budget, CancelKind, CancelReason, NextjsBootstrapPhase, NextjsIntegrationSnapshot,

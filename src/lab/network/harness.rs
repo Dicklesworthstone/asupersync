@@ -42,9 +42,10 @@ use crate::bytes::Bytes;
 use crate::cx::Cx;
 use crate::lab::network::{Fault, HostId, NetworkConfig, SimulatedNetwork};
 use crate::remote::{
-    CancelRequest, IdempotencyKey, IdempotencyStore, LeaseRenewal, MessageEnvelope, NodeId,
-    RemoteCap, RemoteError, RemoteMessage, RemoteOutcome, RemoteRuntime, RemoteTaskId,
-    RemoteTaskState, ResultDelivery, SpawnAck, SpawnAckStatus, SpawnRejectReason, SpawnRequest,
+    CancelRequest, IdempotencyKey, IdempotencyRequestFingerprint, IdempotencyStore,
+    LeaseRenewal, MessageEnvelope, NodeId, RemoteCap, RemoteError, RemoteMessage,
+    RemoteOutcome, RemoteRuntime, RemoteTaskId, RemoteTaskState, ResultDelivery, SpawnAck,
+    SpawnAckStatus, SpawnRejectReason, SpawnRequest,
 };
 use crate::trace::distributed::{CausalTracker, LogicalTime, VectorClock};
 use crate::types::Time;
@@ -297,9 +298,8 @@ impl SimNode {
         let _ = self.dedup.evict_expired(now);
 
         // Check idempotency
-        let dedup = self
-            .dedup
-            .check(&req.idempotency_key, &req.computation, now);
+        let request = IdempotencyRequestFingerprint::from_spawn_request(&req);
+        let dedup = self.dedup.check(&req.idempotency_key, &request, now);
         match dedup {
             crate::remote::DedupDecision::Duplicate(record) => {
                 self.event_log.push(NodeEvent::DuplicateSpawn {
@@ -347,7 +347,7 @@ impl SimNode {
         self.dedup.record(
             req.idempotency_key,
             req.remote_task_id,
-            req.computation.clone(),
+            request,
             now,
         );
 
