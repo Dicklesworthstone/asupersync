@@ -2012,11 +2012,11 @@ mod tests {
 
         // Setup 2: Add children in order C, A, B (permuted)
         let mut rng2 = DetRng::new(67890); // Same initial seed
-        let parent2 = SymbolCancelToken::new(ObjectId::new_for_test(10), &mut rng2);
+        let _parent2 = SymbolCancelToken::new(ObjectId::new_for_test(10), &mut rng2);
         // Skip ahead to same RNG state as after child1c creation
         let _ = rng2.next_u64(); // child1a token_id
         let _ = rng2.next_u64(); // child1b token_id
-        let child2c_id = rng2.next_u64(); // child1c token_id
+        let _ = rng2.next_u64(); // child1c token_id
 
         // Reset and create in different order
         let mut rng2 = DetRng::new(67890);
@@ -2087,9 +2087,10 @@ mod tests {
         // Monotonicity: strength never decreases
         assert!(matches!(
             (after_weak, after_strong),
-            (CancelKind::User, CancelKind::Shutdown)
-                | (CancelKind::Timeout, CancelKind::Shutdown)
-                | (CancelKind::Shutdown, CancelKind::Shutdown)
+            (
+                CancelKind::User | CancelKind::Timeout | CancelKind::Shutdown,
+                CancelKind::Shutdown
+            )
         ));
     }
 

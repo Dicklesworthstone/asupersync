@@ -217,17 +217,33 @@ impl fmt::Debug for GradedObligation {
 ///
 /// Created by [`GradedObligation::resolve`]. This is a zero-cost witness
 /// value: it proves at the type level that the obligation was handled.
+/// The fields are intentionally opaque so callers cannot forge resolution
+/// proofs without actually consuming an obligation.
 ///
 /// In a dependent type system, this would be:
 /// ```text
 /// ResolvedProof<K, R> : Type    where R ∈ {Commit, Abort}
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ResolvedProof {
     /// The kind of obligation that was resolved.
-    pub kind: ObligationKind,
+    kind: ObligationKind,
     /// How it was resolved.
-    pub resolution: Resolution,
+    resolution: Resolution,
+}
+
+impl ResolvedProof {
+    /// Returns the obligation kind proven to be resolved.
+    #[must_use]
+    pub fn kind(&self) -> ObligationKind {
+        self.kind
+    }
+
+    /// Returns how the obligation was resolved.
+    #[must_use]
+    pub fn resolution(&self) -> Resolution {
+        self.resolution
+    }
 }
 
 impl fmt::Display for ResolvedProof {
@@ -290,7 +306,10 @@ impl GradedScope {
 
     /// Record a reservation (obligation created in this scope).
     pub fn on_reserve(&mut self) {
-        self.reserved += 1;
+        self.reserved = self
+            .reserved
+            .checked_add(1)
+            .expect("on_reserve overflowed outstanding obligation count");
     }
 
     /// Record a resolution (obligation resolved in this scope).
@@ -306,7 +325,10 @@ impl GradedScope {
             self.resolved,
             self.reserved,
         );
-        self.resolved += 1;
+        self.resolved = self
+            .resolved
+            .checked_add(1)
+            .expect("on_resolve overflowed resolved obligation count");
     }
 
     /// Returns the number of outstanding (unresolved) obligations.
@@ -320,6 +342,7 @@ impl GradedScope {
     /// # Errors
     ///
     /// Returns `Err` with the number of leaked obligations if any remain.
+    #[must_use = "close() must be checked; Err indicates leaked obligations"]
     pub fn close(mut self) -> Result<ScopeProof, ScopeLeakError> {
         let outstanding = self.outstanding();
         if outstanding == 0 {
@@ -387,14 +410,37 @@ impl fmt::Debug for GradedScope {
 // ============================================================================
 
 /// Proof that a scope was closed with zero outstanding obligations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// This witness is intentionally opaque so callers cannot fabricate a clean
+/// closure proof without running the scope accounting.
+#[derive(Debug, PartialEq, Eq)]
 pub struct ScopeProof {
     /// Scope label.
-    pub label: String,
+    label: String,
     /// Total obligations reserved.
-    pub total_reserved: u32,
+    total_reserved: u32,
     /// Total obligations resolved.
-    pub total_resolved: u32,
+    total_resolved: u32,
+}
+
+impl ScopeProof {
+    /// Returns the label of the cleanly closed scope.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Returns how many obligations were reserved in the scope.
+    #[must_use]
+    pub fn total_reserved(&self) -> u32 {
+        self.total_reserved
+    }
+
+    /// Returns how many obligations were resolved in the scope.
+    #[must_use]
+    pub fn total_resolved(&self) -> u32 {
+        self.total_resolved
+    }
 }
 
 impl fmt::Display for ScopeProof {
@@ -462,6 +508,19 @@ pub mod toy_api {
             }
         }
 
+        #[cfg(test)]
+        pub(super) fn from_state(
+            capacity: usize,
+            messages: Vec<String>,
+            reserved_permits: usize,
+        ) -> Self {
+            Self {
+                capacity,
+                messages,
+                reserved_permits,
+            }
+        }
+
         /// Reserve a send permit.
         ///
         /// Returns a [`GradedObligation`] that must be resolved:
@@ -471,8 +530,16 @@ pub mod toy_api {
         /// Dropping the permit without resolving panics.
         #[must_use]
         pub fn reserve_send(&mut self) -> Option<GradedObligation> {
-            if self.messages.len() + self.reserved_permits < self.capacity {
-                self.reserved_permits += 1;
+            let occupied = self
+                .messages
+                .len()
+                .checked_add(self.reserved_permits)
+                .expect("toy channel occupancy overflowed");
+            if occupied < self.capacity {
+                self.reserved_permits = self
+                    .reserved_permits
+                    .checked_add(1)
+                    .expect("toy channel reserved permit count overflowed");
                 Some(GradedObligation::reserve(
                     ObligationKind::SendPermit,
                     "toy channel send permit",
@@ -681,7 +748,10 @@ impl<K: TokenKind> fmt::Debug for ObligationToken<K> {
 // ============================================================================
 
 /// Proof that an [`ObligationToken`] was committed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Commit proofs are affine witnesses: they are intentionally non-cloneable
+/// and can only be constructed by consuming a live token.
+#[derive(Debug, PartialEq, Eq)]
 pub struct CommittedProof<K: TokenKind> {
     _kind: PhantomData<K>,
 }
@@ -704,7 +774,10 @@ impl<K: TokenKind> CommittedProof<K> {
 }
 
 /// Proof that an [`ObligationToken`] was aborted.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Abort proofs are affine witnesses: they are intentionally non-cloneable
+/// and can only be constructed by consuming a live token.
+#[derive(Debug, PartialEq, Eq)]
 pub struct AbortedProof<K: TokenKind> {
     _kind: PhantomData<K>,
 }
@@ -801,7 +874,7 @@ mod tests {
         crate::assert_with_log!(!is_resolved, "not yet resolved", false, is_resolved);
 
         let proof = ob.resolve(Resolution::Commit);
-        let r = proof.resolution;
+        let r = proof.resolution();
         crate::assert_with_log!(r == Resolution::Commit, "resolution", Resolution::Commit, r);
         crate::test_complete!("obligation_commit_clean");
     }
@@ -811,7 +884,7 @@ mod tests {
         init_test("obligation_abort_clean");
         let ob = GradedObligation::reserve(ObligationKind::Ack, "ack-test");
         let proof = ob.resolve(Resolution::Abort);
-        let r = proof.resolution;
+        let r = proof.resolution();
         crate::assert_with_log!(r == Resolution::Abort, "resolution", Resolution::Abort, r);
         crate::test_complete!("obligation_abort_clean");
     }
@@ -855,9 +928,9 @@ mod tests {
         crate::assert_with_log!(outstanding == 0, "outstanding", 0, outstanding);
 
         let proof = scope.close().expect("scope should close cleanly");
-        let label = &proof.label;
+        let label = proof.label();
         crate::assert_with_log!(label == "test-scope", "label", "test-scope", label);
-        let total = proof.total_reserved;
+        let total = proof.total_reserved();
         crate::assert_with_log!(total == 1, "reserved", 1, total);
         crate::test_complete!("scope_clean_close");
     }
@@ -879,7 +952,7 @@ mod tests {
         crate::assert_with_log!(outstanding == 0, "outstanding", 0, outstanding);
 
         let proof = scope.close().expect("clean");
-        let total = proof.total_reserved;
+        let total = proof.total_reserved();
         crate::assert_with_log!(total == 3, "reserved", 3, total);
         crate::test_complete!("scope_multiple_obligations");
     }
@@ -945,7 +1018,7 @@ mod tests {
 
         // Close scope.
         let proof = scope.close().expect("clean close");
-        let total = proof.total_reserved;
+        let total = proof.total_reserved();
         crate::assert_with_log!(total == 2, "total reserved", 2, total);
         crate::test_complete!("combined_obligation_and_scope");
     }
@@ -960,7 +1033,7 @@ mod tests {
         // Reserve and commit.
         let permit = ch.reserve_send().expect("should get permit");
         let proof = ch.commit_send(permit, "hello".to_string());
-        let resolution = proof.resolution;
+        let resolution = proof.resolution();
         crate::assert_with_log!(
             resolution == Resolution::Commit,
             "commit",
@@ -979,7 +1052,7 @@ mod tests {
 
         let permit = ch.reserve_send().expect("should get permit");
         let proof = ch.abort_send(permit);
-        let resolution = proof.resolution;
+        let resolution = proof.resolution();
         crate::assert_with_log!(
             resolution == Resolution::Abort,
             "abort",
@@ -1106,14 +1179,14 @@ mod tests {
         let scope_proof = scope.close().expect("scope should be clean");
 
         // Verify the proof tokens exist (zero-cost witnesses).
-        let kind = proof.kind;
+        let kind = proof.kind();
         crate::assert_with_log!(
             kind == ObligationKind::SendPermit,
             "proof kind",
             ObligationKind::SendPermit,
             kind
         );
-        let label = &scope_proof.label;
+        let label = scope_proof.label();
         crate::assert_with_log!(label == "typing_demo", "scope label", "typing_demo", label);
 
         crate::test_complete!("typing_judgment_demonstration");
@@ -1127,7 +1200,7 @@ mod tests {
         // 0 is the identity for +: scope with 0 obligations is clean.
         let scope = GradedScope::open("zero");
         let proof = scope.close().expect("zero obligations = clean");
-        let total = proof.total_reserved;
+        let total = proof.total_reserved();
         crate::assert_with_log!(total == 0, "zero reserved", 0, total);
         crate::test_complete!("resource_semiring_identity");
     }
@@ -1147,9 +1220,9 @@ mod tests {
         }
 
         let proof = scope.close().expect("all resolved");
-        let total = proof.total_reserved;
+        let total = proof.total_reserved();
         crate::assert_with_log!(total == 3, "3 reserved", 3, total);
-        let resolved = proof.total_resolved;
+        let resolved = proof.total_resolved();
         crate::assert_with_log!(resolved == 3, "3 resolved", 3, resolved);
         crate::test_complete!("resource_semiring_additive");
     }
@@ -1216,9 +1289,9 @@ mod tests {
         let token: SendPermitToken = ObligationToken::reserve("bridge-commit");
         let committed = token.commit();
         let resolved = committed.into_resolved_proof();
-        let r = resolved.resolution;
+        let r = resolved.resolution();
         crate::assert_with_log!(r == Resolution::Commit, "resolution", Resolution::Commit, r);
-        let kind = resolved.kind;
+        let kind = resolved.kind();
         crate::assert_with_log!(
             kind == ObligationKind::SendPermit,
             "kind",
@@ -1234,9 +1307,9 @@ mod tests {
         let token: AckToken = ObligationToken::reserve("bridge-abort");
         let aborted = token.abort();
         let resolved = aborted.into_resolved_proof();
-        let r = resolved.resolution;
+        let r = resolved.resolution();
         crate::assert_with_log!(r == Resolution::Abort, "resolution", Resolution::Abort, r);
-        let kind = resolved.kind;
+        let kind = resolved.kind();
         crate::assert_with_log!(
             kind == ObligationKind::Ack,
             "kind",
@@ -1301,7 +1374,7 @@ mod tests {
         );
 
         let scope_proof = scope.close().expect("scope should close cleanly");
-        let total = scope_proof.total_reserved;
+        let total = scope_proof.total_reserved();
         crate::assert_with_log!(total == 1, "reserved", 1, total);
         crate::test_complete!("scope_reserve_and_commit_token");
     }
@@ -1327,7 +1400,7 @@ mod tests {
         );
 
         let scope_proof = scope.close().expect("scope should close cleanly");
-        let total = scope_proof.total_reserved;
+        let total = scope_proof.total_reserved();
         crate::assert_with_log!(total == 1, "reserved", 1, total);
         crate::test_complete!("scope_reserve_and_abort_token");
     }
@@ -1389,19 +1462,22 @@ mod tests {
     }
 
     #[test]
-    fn resolved_proof_debug_clone_eq() {
+    fn resolved_proof_debug_eq() {
         let rp = ResolvedProof {
             kind: ObligationKind::SendPermit,
             resolution: Resolution::Commit,
         };
         let dbg = format!("{rp:?}");
         assert!(dbg.contains("ResolvedProof"), "{dbg}");
-        let cloned = rp.clone();
-        assert_eq!(rp, cloned);
+        let rp_same = ResolvedProof {
+            kind: ObligationKind::SendPermit,
+            resolution: Resolution::Commit,
+        };
+        assert_eq!(rp, rp_same);
     }
 
     #[test]
-    fn scope_proof_debug_clone() {
+    fn scope_proof_debug_accessors() {
         let sp = ScopeProof {
             label: "test".to_string(),
             total_reserved: 5,
@@ -1409,8 +1485,29 @@ mod tests {
         };
         let dbg = format!("{sp:?}");
         assert!(dbg.contains("ScopeProof"), "{dbg}");
-        let cloned = sp;
-        assert_eq!(cloned.label, "test");
+        assert_eq!(sp.label(), "test");
+        assert_eq!(sp.total_reserved(), 5);
+        assert_eq!(sp.total_resolved(), 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "on_reserve overflowed outstanding obligation count")]
+    fn scope_on_reserve_overflow_panics_instead_of_wrapping() {
+        let mut scope = GradedScope {
+            label: "overflow".to_string(),
+            reserved: u32::MAX,
+            resolved: 0,
+            closed: false,
+        };
+        scope.on_reserve();
+    }
+
+    #[test]
+    #[should_panic(expected = "toy channel occupancy overflowed")]
+    fn toy_channel_capacity_overflow_panics_instead_of_wrapping() {
+        let mut ch =
+            toy_api::ToyChannel::from_state(usize::MAX, vec!["occupied".to_string()], usize::MAX);
+        let _ = ch.reserve_send();
     }
 
     #[test]

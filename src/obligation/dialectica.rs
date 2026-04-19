@@ -729,6 +729,7 @@ impl fmt::Display for DialecticaMorphism {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use super::*;
     use crate::types::TaskId;

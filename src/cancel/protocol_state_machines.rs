@@ -1558,6 +1558,31 @@ impl CancelProtocolValidator {
         self.timer_machines.insert(timer_id, machine);
     }
 
+    /// Emit a structured protocol-violation record without writing directly to stderr.
+    ///
+    /// When `tracing-integration` is disabled the compatibility macro compiles
+    /// to a no-op, so the formatted fields appear unused in default builds.
+    #[allow(unused_variables)]
+    fn log_violation(
+        &self,
+        component: &'static str,
+        identifier: &dyn Debug,
+        result: &TransitionResult,
+    ) {
+        if matches!(
+            self.validation_level,
+            ValidationLevel::Debug | ValidationLevel::Full
+        ) {
+            crate::tracing_compat::error!(
+                component = component,
+                id = ?identifier,
+                validation_level = ?self.validation_level,
+                result = ?result,
+                "cancel protocol violation"
+            );
+        }
+    }
+
     /// Validate a region state transition.
     pub fn validate_region_transition(
         &mut self,
@@ -1572,13 +1597,7 @@ impl CancelProtocolValidator {
             {
                 self.violation_count += 1;
 
-                // In debug/full validation, we could log or assert here
-                if matches!(
-                    self.validation_level,
-                    ValidationLevel::Debug | ValidationLevel::Full
-                ) {
-                    eprintln!("Cancel protocol violation in region {region_id:?}: {result:?}");
-                }
+                self.log_violation("region", &region_id, &result);
             }
             result
         } else {
@@ -1604,13 +1623,7 @@ impl CancelProtocolValidator {
             {
                 self.violation_count += 1;
 
-                // In debug/full validation, we could log or assert here
-                if matches!(
-                    self.validation_level,
-                    ValidationLevel::Debug | ValidationLevel::Full
-                ) {
-                    eprintln!("Cancel protocol violation in task {task_id:?}: {result:?}");
-                }
+                self.log_violation("task", &task_id, &result);
             }
             result
         } else {
@@ -1657,14 +1670,7 @@ impl CancelProtocolValidator {
                 &result
             {
                 self.violation_count += 1;
-                if matches!(
-                    self.validation_level,
-                    ValidationLevel::Debug | ValidationLevel::Full
-                ) {
-                    eprintln!(
-                        "Cancel protocol violation in obligation {obligation_id:?}: {result:?}"
-                    );
-                }
+                self.log_violation("obligation", &obligation_id, &result);
             }
             result
         } else {
@@ -1689,12 +1695,7 @@ impl CancelProtocolValidator {
                 &result
             {
                 self.violation_count += 1;
-                if matches!(
-                    self.validation_level,
-                    ValidationLevel::Debug | ValidationLevel::Full
-                ) {
-                    eprintln!("Cancel protocol violation in channel {channel_id}: {result:?}");
-                }
+                self.log_violation("channel", &channel_id, &result);
             }
             result
         } else {
@@ -1719,14 +1720,7 @@ impl CancelProtocolValidator {
                 &result
             {
                 self.violation_count += 1;
-                if matches!(
-                    self.validation_level,
-                    ValidationLevel::Debug | ValidationLevel::Full
-                ) {
-                    eprintln!(
-                        "Cancel protocol violation in IO operation {operation_id}: {result:?}"
-                    );
-                }
+                self.log_violation("io", &operation_id, &result);
             }
             result
         } else {
@@ -1751,12 +1745,7 @@ impl CancelProtocolValidator {
                 &result
             {
                 self.violation_count += 1;
-                if matches!(
-                    self.validation_level,
-                    ValidationLevel::Debug | ValidationLevel::Full
-                ) {
-                    eprintln!("Cancel protocol violation in timer {timer_id}: {result:?}");
-                }
+                self.log_violation("timer", &timer_id, &result);
             }
             result
         } else {
@@ -2132,6 +2121,27 @@ mod tests {
         assert_eq!(io_ops, 0);
         assert_eq!(timers, 0);
         assert_eq!(violations, 0);
+    }
+
+    #[test]
+    fn test_validator_counts_invalid_transition_without_panicking() {
+        let mut validator = CancelProtocolValidator::new(ValidationLevel::Full);
+        let task_id = TaskId::new_for_test(9, 0);
+        let region_id = RegionId::new_for_test(1, 0);
+
+        validator.register_task(task_id, region_id);
+
+        let task_context = TaskContext {
+            task_id,
+            region_id,
+            spawned_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+
+        let result =
+            validator.validate_task_transition(task_id, TaskEvent::Complete, &task_context);
+        assert!(matches!(result, TransitionResult::Invalid { .. }));
+        assert_eq!(validator.violation_count(), 1);
     }
 }
 

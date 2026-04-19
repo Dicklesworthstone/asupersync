@@ -32,7 +32,8 @@
 //! Obligation ownership uses three resource algebras:
 //!
 //! 1. **Excl(ObligationState)**: Exclusive ownership of obligation state.
-//!    Ensures exactly one holder can observe or mutate state at a time.
+//!    Ensures exactly one holder can observe or mutate state at a time, and
+//!    terminal states remain exclusive tombstones rather than frame units.
 //!
 //! 2. **Auth(ℕ)**: Authoritative natural number (pending count per region/task).
 //!    Enables fractional reasoning about how many obligations are outstanding.
@@ -42,7 +43,7 @@
 //!
 //! # Specification Structure
 //!
-//! For each obligation type (SendPermit, Ack, Lease, IoOp):
+//! For each obligation type (SendPermit, Ack, Lease, IoOp, SemaphorePermit):
 //!
 //! 1. **Resource predicate** `Obl(o, k, h, r)`:
 //!    ```text
@@ -109,8 +110,9 @@ use super::marking::{MarkingEvent, MarkingEventKind};
 /// Exclusive resource algebra element.
 ///
 /// Models `Excl(A)`: at most one owner can hold the element at a time.
-/// The RA composition `Excl(a) · Excl(b) = ⊥` (always invalid) ensures
-/// no two owners simultaneously hold the same exclusive resource.
+/// The RA is keyed by a single obligation ghost name, so any attempt to
+/// compose two owned fragments is invalid. `Consumed` is a terminal tombstone,
+/// not a unit that can be framed with a live fragment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Excl<A: Clone + PartialEq> {
     /// The resource holds a value — exactly one owner.
@@ -120,14 +122,15 @@ pub enum Excl<A: Clone + PartialEq> {
 }
 
 impl<A: Clone + PartialEq> Excl<A> {
-    /// Attempt to compose two exclusive elements. Returns `None` if
-    /// both are `Some` (disjointness violation).
+    /// Attempt to compose two exclusive elements for the same ghost name.
+    ///
+    /// Composition always fails because exclusive ownership admits at most one
+    /// fragment. This includes `Consumed`, which still occupies the ghost name
+    /// and therefore blocks reuse.
     #[must_use]
     pub fn compose(&self, other: &Self) -> Option<Self> {
-        match (self, other) {
-            (Self::Consumed, x) | (x, Self::Consumed) => Some(x.clone()),
-            (Self::Some(_), Self::Some(_)) => None, // ⊥: aliasing
-        }
+        let _ = (self, other);
+        None
     }
 
     /// Returns true if the element is valid (not a failed composition).
@@ -417,6 +420,13 @@ pub enum SeparationProperty {
         /// The task that must have zero pending.
         task: TaskId,
     },
+    /// Trace events and per-obligation transitions must respect time order.
+    TemporalOrdering {
+        /// The obligation involved, if the violation is obligation-local.
+        obligation: Option<ObligationId>,
+    },
+    /// Authoritative pending counters must match the live obligation fragments.
+    AuthoritativePendingAgreement,
 }
 
 impl SeparationProperty {
@@ -429,6 +439,10 @@ impl SeparationProperty {
             Self::NoUseAfterRelease { .. } => "Obl(o, ..) * Resolved(o) |- False",
             Self::RegionClosureQuiescence { .. } => "RegionClosed(r) |- RegionPending(r) = 0",
             Self::HolderCleanup { .. } => "TaskCompleted(t) |- HolderPending(t) = 0",
+            Self::TemporalOrdering { .. } => "reserve(o) at t0, resolve(o) at t1 |- t0 <= t1",
+            Self::AuthoritativePendingAgreement => {
+                "sum live Obl(o, ..) fragments |- authoritative holder/region counts agree"
+            }
         }
     }
 }
@@ -450,6 +464,12 @@ impl fmt::Display for SeparationProperty {
             }
             Self::HolderCleanup { task } => {
                 write!(f, "HolderCleanup({task:?})")
+            }
+            Self::TemporalOrdering { obligation } => {
+                write!(f, "TemporalOrdering({obligation:?})")
+            }
+            Self::AuthoritativePendingAgreement => {
+                write!(f, "AuthoritativePendingAgreement")
             }
         }
     }
@@ -595,6 +615,13 @@ impl Judgment {
         holder_pending_before: u64,
         region_pending_before: u64,
     ) -> Self {
+        let holder_pending_after = holder_pending_before
+            .checked_add(1)
+            .expect("reserve judgment holder pending overflow");
+        let region_pending_after = region_pending_before
+            .checked_add(1)
+            .expect("reserve judgment region pending overflow");
+
         let mut pre = JudgmentCondition::empty();
         pre.holder_pending.insert(holder, holder_pending_before);
         pre.region_pending.insert(region, region_pending_before);
@@ -604,10 +631,8 @@ impl Judgment {
         post.predicates.push(ResourcePredicate::reserved(
             obligation, kind, holder, region,
         ));
-        post.holder_pending
-            .insert(holder, holder_pending_before + 1);
-        post.region_pending
-            .insert(region, region_pending_before + 1);
+        post.holder_pending.insert(holder, holder_pending_after);
+        post.region_pending.insert(region, region_pending_after);
 
         Self {
             operation: JudgmentOp::Reserve {
@@ -639,6 +664,13 @@ impl Judgment {
         holder_pending_before: u64,
         region_pending_before: u64,
     ) -> Self {
+        let holder_pending_after = holder_pending_before
+            .checked_sub(1)
+            .expect("commit judgment requires positive holder pending count");
+        let region_pending_after = region_pending_before
+            .checked_sub(1)
+            .expect("commit judgment requires positive region pending count");
+
         let mut pre = JudgmentCondition::empty();
         pre.predicates.push(ResourcePredicate::reserved(
             obligation, kind, holder, region,
@@ -650,10 +682,8 @@ impl Judgment {
         post.predicates.push(ResourcePredicate::resolved(
             obligation, kind, holder, region,
         ));
-        post.holder_pending
-            .insert(holder, holder_pending_before.saturating_sub(1));
-        post.region_pending
-            .insert(region, region_pending_before.saturating_sub(1));
+        post.holder_pending.insert(holder, holder_pending_after);
+        post.region_pending.insert(region, region_pending_after);
 
         Self {
             operation: JudgmentOp::Commit { obligation },
@@ -869,6 +899,8 @@ pub struct SeparationLogicVerifier {
     judgments_verified: usize,
     frame_checks: usize,
     separation_checks: usize,
+    /// The most recent event timestamp observed in this trace.
+    last_event_time: Option<Time>,
 }
 
 impl SeparationLogicVerifier {
@@ -909,9 +941,24 @@ impl SeparationLogicVerifier {
         self.judgments_verified = 0;
         self.frame_checks = 0;
         self.separation_checks = 0;
+        self.last_event_time = None;
     }
 
     fn process_event(&mut self, event: &MarkingEvent) {
+        if let Some(last_time) = self.last_event_time
+            && event.time < last_time
+        {
+            self.violations.push(SLViolation {
+                property: SeparationProperty::TemporalOrdering { obligation: None },
+                time: event.time,
+                description: format!(
+                    "event at t={} appears after later event at t={} — trace time must be monotone",
+                    event.time, last_time,
+                ),
+            });
+        }
+        self.last_event_time = Some(event.time);
+
         match &event.kind {
             MarkingEventKind::Reserve {
                 obligation,
@@ -964,6 +1011,8 @@ impl SeparationLogicVerifier {
                 self.verify_region_close(*region, event.time);
             }
         }
+
+        self.check_authoritative_pending_agreement(event.time);
     }
 
     /// Verify the Reserve judgment.
@@ -981,6 +1030,18 @@ impl SeparationLogicVerifier {
         time: Time,
     ) {
         self.judgments_verified += 1;
+
+        if self.resolved.contains(&obligation) {
+            self.violations.push(SLViolation {
+                property: SeparationProperty::NoUseAfterRelease { obligation },
+                time,
+                description: format!(
+                    "reserve({obligation:?}) reuses a resolved obligation id — \
+                     terminal tombstone must remain exclusive",
+                ),
+            });
+            return;
+        }
 
         // Check precondition: no aliasing (Excl RA).
         if self.obligations.contains_key(&obligation) {
@@ -1014,6 +1075,30 @@ impl SeparationLogicVerifier {
         // Frame check: other obligations are untouched.
         self.frame_checks += 1;
 
+        let holder_after = self
+            .holder_pending
+            .get(&holder)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1);
+        let region_after = self
+            .region_pending
+            .get(&region)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1);
+        let (Some(holder_after), Some(region_after)) = (holder_after, region_after) else {
+            self.violations.push(SLViolation {
+                property: SeparationProperty::AuthoritativePendingAgreement,
+                time,
+                description: format!(
+                    "reserve({obligation:?}) would overflow authoritative pending counts \
+                     for holder {holder:?} or region {region:?}",
+                ),
+            });
+            return;
+        };
+
         // Establish postcondition: create ghost state.
         self.obligations.insert(
             obligation,
@@ -1026,8 +1111,8 @@ impl SeparationLogicVerifier {
                 resolved_at: None,
             },
         );
-        *self.holder_pending.entry(holder).or_insert(0) += 1;
-        *self.region_pending.entry(region).or_insert(0) += 1;
+        self.holder_pending.insert(holder, holder_after);
+        self.region_pending.insert(region, region_after);
     }
 
     /// Verify a resolution judgment (commit, abort, or leak).
@@ -1085,6 +1170,21 @@ impl SeparationLogicVerifier {
             return;
         }
 
+        if time < ghost.reserved_at {
+            self.violations.push(SLViolation {
+                property: SeparationProperty::TemporalOrdering {
+                    obligation: Some(obligation),
+                },
+                time,
+                description: format!(
+                    "{new_state:?}({obligation:?}) at t={} precedes reserve at t={} — \
+                     later-modality order violated",
+                    time, ghost.reserved_at,
+                ),
+            });
+            return;
+        }
+
         // Check kind agreement (Agree RA).
         if ghost.kind != kind {
             self.violations.push(SLViolation {
@@ -1116,21 +1216,57 @@ impl SeparationLogicVerifier {
         // Frame check: only this obligation's state changes.
         self.frame_checks += 1;
 
-        // Establish postcondition.
+        // Validate authoritative counts before mutating ghost state.
         let holder = ghost.holder;
         let ghost_region = ghost.region;
+        let Some(count) = self.holder_pending.get_mut(&holder) else {
+            self.violations.push(SLViolation {
+                property: SeparationProperty::AuthoritativePendingAgreement,
+                time,
+                description: format!(
+                    "{new_state:?}({obligation:?}) missing authoritative holder counter for {holder:?}",
+                ),
+            });
+            return;
+        };
+        if *count == 0 {
+            self.violations.push(SLViolation {
+                property: SeparationProperty::AuthoritativePendingAgreement,
+                time,
+                description: format!(
+                    "{new_state:?}({obligation:?}) would underflow holder counter for {holder:?}",
+                ),
+            });
+            return;
+        }
+        *count -= 1;
+
+        let Some(count) = self.region_pending.get_mut(&ghost_region) else {
+            self.violations.push(SLViolation {
+                property: SeparationProperty::AuthoritativePendingAgreement,
+                time,
+                description: format!(
+                    "{new_state:?}({obligation:?}) missing authoritative region counter for {ghost_region:?}",
+                ),
+            });
+            return;
+        };
+        if *count == 0 {
+            self.violations.push(SLViolation {
+                property: SeparationProperty::AuthoritativePendingAgreement,
+                time,
+                description: format!(
+                    "{new_state:?}({obligation:?}) would underflow region counter for {ghost_region:?}",
+                ),
+            });
+            return;
+        }
+        *count -= 1;
+
+        // Establish postcondition.
         ghost.state = new_state;
         ghost.resolved_at = Some(time);
-
         self.resolved.insert(obligation);
-
-        // Decrement pending counts.
-        if let Some(count) = self.holder_pending.get_mut(&holder) {
-            *count = count.saturating_sub(1);
-        }
-        if let Some(count) = self.region_pending.get_mut(&ghost_region) {
-            *count = count.saturating_sub(1);
-        }
     }
 
     /// Verify the RegionClose judgment.
@@ -1194,6 +1330,62 @@ impl SeparationLogicVerifier {
                 });
             }
         }
+
+        self.check_authoritative_pending_agreement(trace_end);
+    }
+
+    fn check_authoritative_pending_agreement(&mut self, time: Time) {
+        let mut expected_holder_pending = BTreeMap::<TaskId, u64>::new();
+        let mut expected_region_pending = BTreeMap::<RegionId, u64>::new();
+
+        for ghost in self
+            .obligations
+            .values()
+            .filter(|ghost| ghost.state == ObligationState::Reserved)
+        {
+            *expected_holder_pending.entry(ghost.holder).or_insert(0) += 1;
+            *expected_region_pending.entry(ghost.region).or_insert(0) += 1;
+        }
+
+        let holder_keys = self
+            .holder_pending
+            .keys()
+            .copied()
+            .chain(expected_holder_pending.keys().copied())
+            .collect::<BTreeSet<_>>();
+        for holder in holder_keys {
+            let actual = self.holder_pending.get(&holder).copied().unwrap_or(0);
+            let expected = expected_holder_pending.get(&holder).copied().unwrap_or(0);
+            if actual != expected {
+                self.violations.push(SLViolation {
+                    property: SeparationProperty::AuthoritativePendingAgreement,
+                    time,
+                    description: format!(
+                        "holder counter mismatch for {holder:?}: authoritative={actual}, fragments={expected}",
+                    ),
+                });
+            }
+        }
+
+        let region_keys = self
+            .region_pending
+            .keys()
+            .copied()
+            .chain(expected_region_pending.keys().copied())
+            .collect::<BTreeSet<_>>();
+        for region in region_keys {
+            let actual = self.region_pending.get(&region).copied().unwrap_or(0);
+            let expected = expected_region_pending.get(&region).copied().unwrap_or(0);
+            if actual != expected {
+                self.violations.push(SLViolation {
+                    property: SeparationProperty::AuthoritativePendingAgreement,
+                    time,
+                    description: format!(
+                        "region counter mismatch for {region:?}: authoritative={actual}, fragments={expected}",
+                    ),
+                });
+            }
+        }
     }
 }
 
@@ -1204,8 +1396,9 @@ impl SeparationLogicVerifier {
 /// Complete Separation Logic specification for one obligation kind.
 ///
 /// Bundles the resource predicate shape, frame condition, and Hoare triples
-/// for a specific obligation kind. All four kinds (SendPermit, Ack, Lease,
-/// IoOp) share the same specification structure (kind-uniform state machine),
+/// for a specific obligation kind. All five kinds (SendPermit, Ack, Lease,
+/// IoOp, SemaphorePermit) share the same specification structure (kind-uniform
+/// state machine),
 /// but are documented separately for completeness.
 #[derive(Debug, Clone)]
 pub struct ObligationSpec {
@@ -1256,9 +1449,9 @@ impl ObligationSpec {
     /// All kinds share the same formal structure (kind-uniform state machine).
     #[must_use]
     pub fn for_kind(kind: ObligationKind) -> Self {
-        // All four obligation kinds share the identical specification shape.
+        // All obligation kinds share the identical specification shape.
         // This is by design: the kind-uniform state machine contract ensures
-        // that SendPermit, Ack, Lease, and IoOp follow the same rules.
+        // that SendPermit, Ack, Lease, IoOp, and SemaphorePermit follow the same rules.
         Self {
             kind,
             resource_predicate: concat!(
@@ -1310,6 +1503,7 @@ impl ObligationSpec {
             Self::for_kind(ObligationKind::Ack),
             Self::for_kind(ObligationKind::Lease),
             Self::for_kind(ObligationKind::IoOp),
+            Self::for_kind(ObligationKind::SemaphorePermit),
         ]
     }
 }
@@ -1611,7 +1805,12 @@ mod tests {
         let a: Excl<ObligationState> = Excl::Some(ObligationState::Reserved);
         let b: Excl<ObligationState> = Excl::Consumed;
         let result = a.compose(&b);
-        crate::assert_with_log!(result.is_some(), "disjoint compose succeeds", true, true);
+        crate::assert_with_log!(
+            result.is_none(),
+            "consumed tombstone still conflicts with live ownership",
+            true,
+            result.is_none()
+        );
         crate::test_complete!("excl_compose_disjoint");
     }
 
@@ -1785,6 +1984,10 @@ mod tests {
             SeparationProperty::NoUseAfterRelease { obligation: o(0) },
             SeparationProperty::RegionClosureQuiescence { region: r(0) },
             SeparationProperty::HolderCleanup { task: t(0) },
+            SeparationProperty::TemporalOrdering {
+                obligation: Some(o(0)),
+            },
+            SeparationProperty::AuthoritativePendingAgreement,
         ];
         for prop in &props {
             let stmt = prop.formal_statement();
@@ -1850,6 +2053,12 @@ mod tests {
             region_post
         );
         crate::test_complete!("judgment_commit_decrements_counts");
+    }
+
+    #[test]
+    #[should_panic(expected = "commit judgment requires positive holder pending count")]
+    fn judgment_commit_rejects_zero_pending() {
+        let _ = Judgment::commit(o(0), ObligationKind::SendPermit, t(0), r(0), 0, 1);
     }
 
     #[test]
@@ -2013,6 +2222,29 @@ mod tests {
     }
 
     #[test]
+    fn verifier_detects_reuse_after_release() {
+        init_test("verifier_detects_reuse_after_release");
+        let events = vec![
+            reserve_event(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            commit_event(10, o(0), r(0), ObligationKind::SendPermit),
+            reserve_event(20, o(0), ObligationKind::SendPermit, t(1), r(1)),
+        ];
+
+        let mut verifier = SeparationLogicVerifier::new();
+        let result = verifier.verify(&events);
+        let reuse_count = result
+            .violations_for_property(|p| matches!(p, SeparationProperty::NoUseAfterRelease { .. }))
+            .count();
+        crate::assert_with_log!(
+            reuse_count >= 1,
+            "reusing a resolved obligation id is use-after-release",
+            true,
+            reuse_count >= 1
+        );
+        crate::test_complete!("verifier_detects_reuse_after_release");
+    }
+
+    #[test]
     fn verifier_detects_region_close_with_pending() {
         init_test("verifier_detects_region_close_with_pending");
         let events = vec![
@@ -2066,6 +2298,50 @@ mod tests {
         let sound = result.is_sound();
         crate::assert_with_log!(!sound, "region mismatch detected", false, sound);
         crate::test_complete!("verifier_detects_region_mismatch");
+    }
+
+    #[test]
+    fn verifier_detects_per_obligation_time_reversal() {
+        init_test("verifier_detects_per_obligation_time_reversal");
+        let events = vec![
+            reserve_event(10, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            commit_event(5, o(0), r(0), ObligationKind::SendPermit),
+        ];
+
+        let mut verifier = SeparationLogicVerifier::new();
+        let result = verifier.verify(&events);
+        let temporal_count = result
+            .violations_for_property(|p| matches!(p, SeparationProperty::TemporalOrdering { .. }))
+            .count();
+        crate::assert_with_log!(
+            temporal_count >= 1,
+            "resolution before reserve timestamp detected",
+            true,
+            temporal_count >= 1
+        );
+        crate::test_complete!("verifier_detects_per_obligation_time_reversal");
+    }
+
+    #[test]
+    fn verifier_detects_non_monotone_trace_times() {
+        init_test("verifier_detects_non_monotone_trace_times");
+        let events = vec![
+            reserve_event(10, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            reserve_event(9, o(1), ObligationKind::Ack, t(1), r(1)),
+        ];
+
+        let mut verifier = SeparationLogicVerifier::new();
+        let result = verifier.verify(&events);
+        let temporal_count = result
+            .violations_for_property(|p| matches!(p, SeparationProperty::TemporalOrdering { .. }))
+            .count();
+        crate::assert_with_log!(
+            temporal_count >= 1,
+            "non-monotone trace time detected",
+            true,
+            temporal_count >= 1
+        );
+        crate::test_complete!("verifier_detects_non_monotone_trace_times");
     }
 
     #[test]
@@ -2192,13 +2468,14 @@ mod tests {
     }
 
     #[test]
-    fn verifier_all_four_kinds_uniform() {
-        init_test("verifier_all_four_kinds_uniform");
+    fn verifier_all_five_kinds_uniform() {
+        init_test("verifier_all_five_kinds_uniform");
         let kinds = [
             ObligationKind::SendPermit,
             ObligationKind::Ack,
             ObligationKind::Lease,
             ObligationKind::IoOp,
+            ObligationKind::SemaphorePermit,
         ];
 
         for (i, kind) in kinds.iter().enumerate() {
@@ -2214,7 +2491,7 @@ mod tests {
             let sound = result.is_sound();
             crate::assert_with_log!(sound, format!("{kind} is sound"), true, sound);
         }
-        crate::test_complete!("verifier_all_four_kinds_uniform");
+        crate::test_complete!("verifier_all_five_kinds_uniform");
     }
 
     #[test]
@@ -2250,7 +2527,7 @@ mod tests {
         init_test("obligation_spec_all_kinds");
         let specs = ObligationSpec::all_specs();
         let count = specs.len();
-        crate::assert_with_log!(count == 4, "4 specs", 4, count);
+        crate::assert_with_log!(count == 5, "5 specs", 5, count);
 
         for spec in &specs {
             let has_predicate = !spec.resource_predicate.is_empty();

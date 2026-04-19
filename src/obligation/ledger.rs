@@ -135,8 +135,10 @@ impl LeakCheckResult {
 pub struct ObligationLedger {
     /// All obligations, keyed by ID. BTreeMap for deterministic iteration.
     obligations: BTreeMap<ObligationId, ObligationRecord>,
-    /// Next generation counter for ID allocation.
-    next_gen: u32,
+    /// Next slot index for ID allocation within the current ledger generation.
+    next_index: u32,
+    /// Current generation for obligation IDs issued by this ledger epoch.
+    generation: u32,
     /// Running statistics.
     stats: LedgerStats,
 }
@@ -148,11 +150,32 @@ impl Default for ObligationLedger {
 }
 
 impl ObligationLedger {
-    fn record_for_token_mut(&mut self, token: &ObligationToken) -> &mut ObligationRecord {
+    fn pending_record_for_id_mut(
+        &mut self,
+        id: ObligationId,
+        operation: &'static str,
+    ) -> &mut ObligationRecord {
         let record = self
             .obligations
-            .get_mut(&token.id)
-            .expect("obligation not found in ledger");
+            .get_mut(&id)
+            .unwrap_or_else(|| panic!("{operation}: obligation {id:?} not found in ledger"));
+        assert!(
+            record.is_pending(),
+            "{operation}: obligation {id:?} is not pending (state={:?})",
+            record.state
+        );
+        record
+    }
+
+    fn resolve_one_pending(&mut self, operation: &'static str) {
+        self.stats.pending =
+            self.stats.pending.checked_sub(1).unwrap_or_else(|| {
+                panic!("{operation}: obligation ledger pending stats underflow")
+            });
+    }
+
+    fn record_for_token_mut(&mut self, token: &ObligationToken) -> &mut ObligationRecord {
+        let record = self.pending_record_for_id_mut(token.id, "token resolve");
         assert_eq!(
             record.kind, token.kind,
             "obligation token kind does not match ledger record"
@@ -173,7 +196,8 @@ impl ObligationLedger {
     pub fn new() -> Self {
         Self {
             obligations: BTreeMap::new(),
-            next_gen: 0,
+            next_index: 0,
+            generation: 0,
             stats: LedgerStats::default(),
         }
     }
@@ -212,12 +236,11 @@ impl ObligationLedger {
         backtrace: Option<Arc<std::backtrace::Backtrace>>,
         description: Option<String>,
     ) -> ObligationToken {
-        let generation = self.next_gen;
-        self.next_gen = self
-            .next_gen
+        let idx = ArenaIndex::new(self.next_index, self.generation);
+        self.next_index = self
+            .next_index
             .checked_add(1)
-            .expect("obligation ledger generation overflow");
-        let idx = ArenaIndex::new(generation, 0);
+            .expect("obligation ledger index overflow within current generation; reset required");
         let id = ObligationId::from_arena(idx);
 
         let record = if let Some(desc) = description {
@@ -252,7 +275,7 @@ impl ObligationLedger {
         let record = self.record_for_token_mut(&token);
         let duration = record.commit(now);
         self.stats.total_committed += 1;
-        self.stats.pending = self.stats.pending.saturating_sub(1);
+        self.resolve_one_pending("commit");
         duration
     }
 
@@ -273,7 +296,7 @@ impl ObligationLedger {
         let record = self.record_for_token_mut(&token);
         let duration = record.abort(now, reason);
         self.stats.total_aborted += 1;
-        self.stats.pending = self.stats.pending.saturating_sub(1);
+        self.resolve_one_pending("abort");
         duration
     }
 
@@ -292,13 +315,10 @@ impl ObligationLedger {
         now: Time,
         reason: ObligationAbortReason,
     ) -> u64 {
-        let record = self
-            .obligations
-            .get_mut(&id)
-            .expect("obligation not found in ledger");
+        let record = self.pending_record_for_id_mut(id, "abort_by_id");
         let duration = record.abort(now, reason);
         self.stats.total_aborted += 1;
-        self.stats.pending = self.stats.pending.saturating_sub(1);
+        self.resolve_one_pending("abort_by_id");
         duration
     }
 
@@ -309,13 +329,10 @@ impl ObligationLedger {
     ///
     /// Panics if the obligation was already resolved or does not exist.
     pub fn mark_leaked(&mut self, id: ObligationId, now: Time) -> u64 {
-        let record = self
-            .obligations
-            .get_mut(&id)
-            .expect("obligation not found in ledger");
+        let record = self.pending_record_for_id_mut(id, "mark_leaked");
         let duration = record.mark_leaked(now);
         self.stats.total_leaked += 1;
-        self.stats.pending = self.stats.pending.saturating_sub(1);
+        self.resolve_one_pending("mark_leaked");
         duration
     }
 
@@ -441,8 +458,10 @@ impl ObligationLedger {
     /// aborted); otherwise it would silently hide active obligations or erase
     /// leak diagnostics.
     ///
-    /// The obligation generation counter is intentionally preserved so
-    /// post-reset acquisitions continue to get fresh IDs.
+    /// Reset clears the live set, rewinds slot allocation back to index `0`,
+    /// and bumps the ledger generation. Post-reset obligations can therefore
+    /// reuse compact index space without allowing stale pre-reset IDs or
+    /// tokens to resolve newly allocated records.
     pub fn reset(&mut self) {
         assert!(
             !self.obligations.values().any(ObligationRecord::is_pending),
@@ -454,6 +473,11 @@ impl ObligationLedger {
         );
         self.obligations.clear();
         self.stats = LedgerStats::default();
+        self.next_index = 0;
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("obligation ledger generation overflow");
     }
 
     /// Iterates over all obligations in deterministic order.
@@ -867,28 +891,104 @@ mod tests {
     }
 
     #[test]
-    fn reset_does_not_reuse_ids_after_clean_reset() {
-        init_test("reset_does_not_reuse_ids_after_clean_reset");
+    fn reset_reuses_index_with_bumped_generation() {
+        init_test("reset_reuses_index_with_bumped_generation");
         let mut ledger = ObligationLedger::new();
         let task = make_task();
         let region = make_region();
 
         let old = ledger.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
         let old_id = old.id();
+        let old_idx = old_id.arena_index();
         ledger.commit(old, Time::from_nanos(1));
 
         ledger.reset();
 
         let fresh = ledger.acquire(ObligationKind::Ack, task, region, Time::from_nanos(2));
+        let fresh_idx = fresh.id().arena_index();
         crate::assert_with_log!(
             fresh.id() != old_id,
             "fresh id differs",
             true,
             fresh.id() != old_id
         );
+        crate::assert_with_log!(
+            fresh_idx.index() == old_idx.index(),
+            "index reused after clean reset",
+            old_idx.index(),
+            fresh_idx.index()
+        );
+        crate::assert_with_log!(
+            fresh_idx.generation() == old_idx.generation().saturating_add(1),
+            "generation bumped after clean reset",
+            old_idx.generation().saturating_add(1),
+            fresh_idx.generation()
+        );
 
         ledger.commit(fresh, Time::from_nanos(3));
-        crate::test_complete!("reset_does_not_reuse_ids_after_clean_reset");
+        crate::test_complete!("reset_reuses_index_with_bumped_generation");
+    }
+
+    #[test]
+    fn stale_id_from_previous_generation_cannot_touch_post_reset_obligation() {
+        init_test("stale_id_from_previous_generation_cannot_touch_post_reset_obligation");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        let stale = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let stale_id = stale.id();
+        ledger.abort_by_id(
+            stale_id,
+            Time::from_nanos(10),
+            ObligationAbortReason::Cancel,
+        );
+
+        ledger.reset();
+
+        let fresh = ledger.acquire(ObligationKind::Lease, task, region, Time::from_nanos(20));
+        let fresh_id = fresh.id();
+        let fresh_idx = fresh_id.arena_index();
+        let stale_idx = stale_id.arena_index();
+        crate::assert_with_log!(
+            fresh_idx.index() == stale_idx.index(),
+            "slot index reused",
+            stale_idx.index(),
+            fresh_idx.index()
+        );
+        crate::assert_with_log!(
+            fresh_idx.generation() != stale_idx.generation(),
+            "generation differs",
+            true,
+            fresh_idx.generation() != stale_idx.generation()
+        );
+
+        let stale_abort = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ledger.abort_by_id(
+                stale_id,
+                Time::from_nanos(30),
+                ObligationAbortReason::Cancel,
+            )
+        }));
+        crate::assert_with_log!(
+            stale_abort.is_err(),
+            "stale id rejected",
+            true,
+            stale_abort.is_err()
+        );
+
+        let fresh_record = ledger.get(fresh_id).expect("fresh obligation exists");
+        crate::assert_with_log!(
+            fresh_record.is_pending(),
+            "fresh obligation remains pending",
+            true,
+            fresh_record.is_pending()
+        );
+
+        ledger.commit(fresh, Time::from_nanos(40));
+        crate::test_complete!(
+            "stale_id_from_previous_generation_cannot_touch_post_reset_obligation"
+        );
     }
 
     // ---- Deterministic iteration -----------------------------------------
@@ -1219,6 +1319,90 @@ mod tests {
             record.abort_reason
         );
         crate::test_complete!("abort_reason_preserved_in_record");
+    }
+
+    #[test]
+    fn forged_token_metadata_panics_without_mutating_ledger() {
+        init_test("forged_token_metadata_panics_without_mutating_ledger");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        let token = ledger.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
+        let id = token.id();
+        let forged = ObligationToken {
+            id,
+            kind: ObligationKind::Ack,
+            holder: task,
+            region,
+        };
+
+        let commit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ledger.commit(forged, Time::from_nanos(10));
+        }));
+        crate::assert_with_log!(
+            commit.is_err(),
+            "forged token rejected",
+            true,
+            commit.is_err()
+        );
+
+        let record = ledger.get(id).expect("record exists");
+        crate::assert_with_log!(
+            record.state == ObligationState::Reserved,
+            "state unchanged",
+            ObligationState::Reserved,
+            record.state
+        );
+
+        let stats = ledger.stats();
+        crate::assert_with_log!(
+            stats.total_committed == 0,
+            "committed",
+            0,
+            stats.total_committed
+        );
+        crate::assert_with_log!(stats.total_aborted == 0, "aborted", 0, stats.total_aborted);
+        crate::assert_with_log!(stats.pending == 1, "pending", 1, stats.pending);
+        crate::test_complete!("forged_token_metadata_panics_without_mutating_ledger");
+    }
+
+    #[test]
+    fn abort_by_id_double_resolve_panics_without_pending_underflow() {
+        init_test("abort_by_id_double_resolve_panics_without_pending_underflow");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        let token = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let id = token.id();
+
+        let duration = ledger.abort_by_id(id, Time::from_nanos(25), ObligationAbortReason::Cancel);
+        crate::assert_with_log!(duration == 25, "duration", 25, duration);
+
+        let second_abort = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ledger.abort_by_id(id, Time::from_nanos(30), ObligationAbortReason::Cancel);
+        }));
+        crate::assert_with_log!(
+            second_abort.is_err(),
+            "double resolve rejected",
+            true,
+            second_abort.is_err()
+        );
+
+        let record = ledger.get(id).expect("record exists");
+        crate::assert_with_log!(
+            record.state == ObligationState::Aborted,
+            "state remains aborted",
+            ObligationState::Aborted,
+            record.state
+        );
+
+        let stats = ledger.stats();
+        crate::assert_with_log!(stats.total_aborted == 1, "aborted", 1, stats.total_aborted);
+        crate::assert_with_log!(stats.total_leaked == 0, "leaked", 0, stats.total_leaked);
+        crate::assert_with_log!(stats.pending == 0, "pending", 0, stats.pending);
+        crate::test_complete!("abort_by_id_double_resolve_panics_without_pending_underflow");
     }
 
     #[test]

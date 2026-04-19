@@ -2663,8 +2663,6 @@ mod tests {
                     verdict.azuma_bound,
                     i
                 );
-
-                let previous_azuma_bound = verdict.azuma_bound;
             }
         }
     }
