@@ -13,11 +13,11 @@
 //! 4. **Capacity Limit Respect** (MR4): copy with cap limit respects the limit
 //! 5. **Buffer Mode Consistency** (MR5): copy between buffered+unbuffered streams consistent
 
-use asupersync::io::{
-    copy, copy_buf, copy_with_progress, AsyncBufRead, AsyncRead, AsyncWrite, BufReader, BufWriter,
-    ReadBuf,
-};
 use asupersync::cx::{Cx, Scope};
+use asupersync::io::{
+    AsyncBufRead, AsyncRead, AsyncWrite, BufReader, BufWriter, ReadBuf, copy, copy_buf,
+    copy_with_progress,
+};
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::{Budget, Outcome, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
@@ -75,43 +75,45 @@ impl Arbitrary for CopyConfig {
 
     fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
         (
-            1usize..=8192,                          // data_size
-            1usize..=1024,                          // max_read_chunk
-            1usize..=1024,                          // max_write_chunk
-            64usize..=2048,                         // buffer_size
-            any::<bool>(),                          // inject_delays
-            prop::option::of(100u64..=4096),        // copy_limit
-            any::<bool>(),                          // test_cancellation
-            0.1f32..=0.9,                           // cancel_at_fraction
-            any::<bool>(),                          // use_buffered
-            any::<u64>(),                           // seed
+            1usize..=8192,                   // data_size
+            1usize..=1024,                   // max_read_chunk
+            1usize..=1024,                   // max_write_chunk
+            64usize..=2048,                  // buffer_size
+            any::<bool>(),                   // inject_delays
+            prop::option::of(100u64..=4096), // copy_limit
+            any::<bool>(),                   // test_cancellation
+            0.1f32..=0.9,                    // cancel_at_fraction
+            any::<bool>(),                   // use_buffered
+            any::<u64>(),                    // seed
         )
-        .prop_map(|(
-            data_size,
-            max_read_chunk,
-            max_write_chunk,
-            buffer_size,
-            inject_delays,
-            copy_limit,
-            test_cancellation,
-            cancel_at_fraction,
-            use_buffered,
-            seed,
-        )| {
-            CopyConfig {
-                data_size,
-                max_read_chunk: max_read_chunk.max(1),
-                max_write_chunk: max_write_chunk.max(1),
-                buffer_size: buffer_size.max(8),
-                inject_delays,
-                copy_limit,
-                test_cancellation,
-                cancel_at_fraction: cancel_at_fraction.clamp(0.1, 0.9),
-                use_buffered,
-                seed,
-            }
-        })
-        .boxed()
+            .prop_map(
+                |(
+                    data_size,
+                    max_read_chunk,
+                    max_write_chunk,
+                    buffer_size,
+                    inject_delays,
+                    copy_limit,
+                    test_cancellation,
+                    cancel_at_fraction,
+                    use_buffered,
+                    seed,
+                )| {
+                    CopyConfig {
+                        data_size,
+                        max_read_chunk: max_read_chunk.max(1),
+                        max_write_chunk: max_write_chunk.max(1),
+                        buffer_size: buffer_size.max(8),
+                        inject_delays,
+                        copy_limit,
+                        test_cancellation,
+                        cancel_at_fraction: cancel_at_fraction.clamp(0.1, 0.9),
+                        use_buffered,
+                        seed,
+                    }
+                },
+            )
+            .boxed()
     }
 }
 
@@ -153,14 +155,19 @@ impl CopyTestHarness {
 
     fn execute<F, T>(&mut self, test_fn: F) -> Outcome<T, ()>
     where
-        F: FnOnce(&Cx, &CopyTestHarness) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + '_>> + Send,
+        F: FnOnce(
+                &Cx,
+                &CopyTestHarness,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + '_>>
+            + Send,
     {
         self.runtime.block_on(|cx| async {
             cx.region(|region| async {
                 let scope = Scope::new(region, "io_copy_test");
                 test_fn(&scope.cx(), self).await;
                 Ok(())
-            }).await
+            })
+            .await
         })
     }
 }
@@ -198,7 +205,9 @@ impl MockReader {
     }
 
     fn remaining(&self) -> usize {
-        self.data.len().saturating_sub(self.position.load(Ordering::SeqCst))
+        self.data
+            .len()
+            .saturating_sub(self.position.load(Ordering::SeqCst))
     }
 }
 
@@ -209,10 +218,7 @@ impl AsyncRead for MockReader {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         if self.cancelled.load(Ordering::SeqCst) {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "cancelled",
-            )));
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
 
         self.read_calls.fetch_add(1, Ordering::SeqCst);
@@ -292,10 +298,7 @@ impl AsyncWrite for MockWriter {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         if self.cancelled.load(Ordering::SeqCst) {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "cancelled",
-            )));
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
 
         self.write_calls.fetch_add(1, Ordering::SeqCst);
@@ -324,8 +327,12 @@ impl AsyncWrite for MockWriter {
         }
 
         if to_write > 0 {
-            self.data.lock().unwrap().extend_from_slice(&buf[..to_write]);
-            self.bytes_written.fetch_add(to_write as u64, Ordering::SeqCst);
+            self.data
+                .lock()
+                .unwrap()
+                .extend_from_slice(&buf[..to_write]);
+            self.bytes_written
+                .fetch_add(to_write as u64, Ordering::SeqCst);
         }
 
         Poll::Ready(Ok(to_write))

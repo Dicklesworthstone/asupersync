@@ -265,11 +265,7 @@ impl IODriverWakerEpochGC {
     fn direct_cleanup_waker(&self, waker_id: u64, source: &str) {
         #[cfg(feature = "tracing-integration")]
         if self.config.enable_integration_logging {
-            tracing::debug!(
-                waker_id = waker_id,
-                source = source,
-                "Direct waker cleanup"
-            );
+            tracing::debug!(waker_id = waker_id, source = source, "Direct waker cleanup");
         }
 
         // Platform-specific direct cleanup

@@ -907,6 +907,119 @@ mod tests {
         crate::test_complete!("copy_large_data");
     }
 
+    struct InterruptingWriter {
+        written: Vec<u8>,
+        remaining_before_interrupt: usize,
+    }
+
+    impl InterruptingWriter {
+        fn new(prefix_len: usize) -> Self {
+            Self {
+                written: Vec::new(),
+                remaining_before_interrupt: prefix_len,
+            }
+        }
+    }
+
+    impl AsyncWrite for InterruptingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            if this.remaining_before_interrupt == 0 {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "writer interrupted",
+                )));
+            }
+
+            let to_write = this.remaining_before_interrupt.min(buf.len());
+            this.written.extend_from_slice(&buf[..to_write]);
+            this.remaining_before_interrupt -= to_write;
+            Poll::Ready(Ok(to_write))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn copy_partial_write_interrupt_preserves_committed_prefix() {
+        init_test("copy_partial_write_interrupt_preserves_committed_prefix");
+        let data: Vec<u8> = (0u32..16384).map(|i| (i % 251) as u8).collect();
+        let committed_prefix_len = 5000usize;
+        let mut reader: &[u8] = &data;
+        let mut writer = InterruptingWriter::new(committed_prefix_len);
+        let mut fut = copy(&mut reader, &mut writer);
+        let mut fut = Pin::new(&mut fut);
+
+        let err = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .expect_err("copy should stop on interrupted writer");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "error kind",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            writer.written.len() == committed_prefix_len,
+            "committed prefix len",
+            committed_prefix_len,
+            writer.written.len()
+        );
+        crate::assert_with_log!(
+            writer.written == data[..committed_prefix_len],
+            "committed prefix data",
+            &data[..committed_prefix_len],
+            writer.written
+        );
+        crate::test_complete!("copy_partial_write_interrupt_preserves_committed_prefix");
+    }
+
+    #[test]
+    fn copy_with_progress_interrupt_reports_only_committed_prefix() {
+        init_test("copy_with_progress_interrupt_reports_only_committed_prefix");
+        let data: Vec<u8> = (0u32..16384).map(|i| ((i * 7) % 253) as u8).collect();
+        let committed_prefix_len = 4097usize;
+        let mut reader: &[u8] = &data;
+        let mut writer = InterruptingWriter::new(committed_prefix_len);
+        let mut progress = Vec::new();
+        let mut fut = copy_with_progress(&mut reader, &mut writer, |total| progress.push(total));
+        let mut fut = Pin::new(&mut fut);
+
+        let err = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .expect_err("copy_with_progress should stop on interrupted writer");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "error kind",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        let last_progress = progress.last().copied().unwrap_or_default() as usize;
+        crate::assert_with_log!(
+            last_progress == committed_prefix_len,
+            "last progress equals committed prefix",
+            committed_prefix_len,
+            last_progress
+        );
+        crate::assert_with_log!(
+            writer.written == data[..committed_prefix_len],
+            "committed prefix data",
+            &data[..committed_prefix_len],
+            writer.written
+        );
+        crate::test_complete!("copy_with_progress_interrupt_reports_only_committed_prefix");
+    }
+
     #[test]
     fn copy_with_progress_tracks_bytes() {
         init_test("copy_with_progress_tracks_bytes");
