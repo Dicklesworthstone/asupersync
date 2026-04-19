@@ -170,7 +170,7 @@ fn cross_module_unresolved_detected_by_sl_and_leak() {
 }
 
 /// A trace with kind mismatch (reserve SendPermit, commit as Lease) must be
-/// detected by both SL verifier and no-aliasing prover.
+/// detected by SL, no-aliasing, and no-leak provers.
 #[test]
 fn cross_module_kind_mismatch_detected_by_sl_and_aliasing() {
     let events = vec![
@@ -195,6 +195,21 @@ fn cross_module_kind_mismatch_detected_by_sl_and_aliasing() {
             .iter()
             .any(|c| c.violation == AliasingViolation::KindDisagreement),
         "should have KindDisagreement counterexample"
+    );
+
+    let mut leak = NoLeakProver::new();
+    let leak_result = leak.check(&events);
+    assert!(
+        !leak_result.is_verified(),
+        "no-leak should detect kind mismatch"
+    );
+    assert!(
+        leak_result
+            .counterexamples
+            .iter()
+            .any(|c| c.property == LivenessProperty::CounterDecrement
+                && c.description.contains("kind mismatch")),
+        "should have kind mismatch counterexample"
     );
 }
 
@@ -535,9 +550,24 @@ fn mutation_region_mismatch_rejected() {
     let mut sl = SeparationLogicVerifier::new();
     let sl_result = sl.verify(&events);
     assert!(!sl_result.is_sound());
+
+    let mut leak_prover = NoLeakProver::new();
+    let leak_result = leak_prover.check(&events);
+    assert!(
+        !leak_result.is_verified(),
+        "region mismatch rejected by no-leak"
+    );
+    assert!(
+        leak_result
+            .counterexamples
+            .iter()
+            .any(|c| c.property == LivenessProperty::CounterDecrement
+                && c.description.contains("region mismatch")),
+        "should have region mismatch counterexample"
+    );
 }
 
-/// Mutation: reserve in closed region → detected by SL verifier.
+/// Mutation: reserve in closed region → detected by SL verifier and no-leak prover.
 #[test]
 fn mutation_reserve_in_closed_region_rejected() {
     let events = vec![
@@ -550,6 +580,21 @@ fn mutation_reserve_in_closed_region_rejected() {
     assert!(
         !result.is_sound(),
         "reserve in closed region rejected by SL"
+    );
+
+    let mut leak_prover = NoLeakProver::new();
+    let leak_result = leak_prover.check(&events);
+    assert!(
+        !leak_result.is_verified(),
+        "reserve in closed region rejected by no-leak"
+    );
+    assert!(
+        leak_result
+            .counterexamples
+            .iter()
+            .any(|c| c.property == LivenessProperty::RegionQuiescence
+                && c.description.contains("reserve")),
+        "should have reserve-after-close counterexample"
     );
 }
 

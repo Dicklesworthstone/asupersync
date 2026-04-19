@@ -5274,10 +5274,10 @@ mod tests {
     fn idempotency_store_evicts_completed_entries_on_ttl() {
         let mut store = IdempotencyStore::new(Duration::from_secs(60));
         let key = IdempotencyKey::from_raw(1);
-        let comp = ComputationName::new("work");
+        let request = test_request_fingerprint("work");
 
         // Record at t=10 (expires at t=70)
-        store.record(key, RemoteTaskId::next(), comp.clone(), Time::from_secs(10));
+        store.record(key, RemoteTaskId::next(), request.clone(), Time::from_secs(10));
         // Complete with success
         store.complete(&key, RemoteOutcome::Success(vec![42]));
         assert_eq!(store.len(), 1);
@@ -5288,7 +5288,7 @@ mod tests {
         assert!(store.is_empty());
 
         // Re-check: the key should be New again
-        let decision = store.check(&key, &comp, Time::from_secs(80));
+        let decision = store.check(&key, &request, Time::from_secs(80));
         assert!(matches!(decision, DedupDecision::New));
     }
 
@@ -5298,12 +5298,12 @@ mod tests {
     fn idempotency_store_check_after_failed_returns_duplicate_with_outcome() {
         let mut store = IdempotencyStore::new(Duration::from_secs(300));
         let key = IdempotencyKey::from_raw(77);
-        let comp = ComputationName::new("fragile_op");
+        let request = test_request_fingerprint("fragile_op");
 
-        store.record(key, RemoteTaskId::next(), comp.clone(), Time::from_secs(10));
+        store.record(key, RemoteTaskId::next(), request.clone(), Time::from_secs(10));
         store.complete(&key, RemoteOutcome::Failed("disk full".into()));
 
-        let decision = store.check(&key, &comp, Time::from_secs(20));
+        let decision = store.check(&key, &request, Time::from_secs(20));
         assert!(
             matches!(
                 decision,
@@ -5326,16 +5326,16 @@ mod tests {
     fn idempotency_store_complete_overwrites_outcome() {
         let mut store = IdempotencyStore::new(Duration::from_secs(300));
         let key = IdempotencyKey::from_raw(88);
-        let comp = ComputationName::new("retry_op");
+        let request = test_request_fingerprint("retry_op");
 
-        store.record(key, RemoteTaskId::next(), comp.clone(), Time::from_secs(10));
+        store.record(key, RemoteTaskId::next(), request.clone(), Time::from_secs(10));
 
         // First complete: Failed
         store.complete(&key, RemoteOutcome::Failed("transient".into()));
         // Second complete: Success (overwrites)
         store.complete(&key, RemoteOutcome::Success(vec![1, 2, 3]));
 
-        let decision = store.check(&key, &comp, Time::from_secs(20));
+        let decision = store.check(&key, &request, Time::from_secs(20));
         assert!(
             matches!(
                 decision,
@@ -5346,6 +5346,31 @@ mod tests {
                         .is_some_and(RemoteOutcome::is_success)
             ),
             "expected Duplicate with the latest successful outcome"
+        );
+    }
+
+    #[test]
+    fn idempotency_store_same_computation_different_input_conflicts() {
+        let mut store = IdempotencyStore::new(Duration::from_secs(300));
+        let key = IdempotencyKey::from_raw(0xfeed);
+        let base = IdempotencyRequestFingerprint::new(
+            ComputationName::new("encode"),
+            RemoteInput::new(vec![1, 2, 3]),
+            Duration::from_secs(30),
+            Some(Budget::MINIMAL),
+            NodeId::new("origin-a"),
+            RegionId::new_for_test(1, 1),
+            TaskId::new_for_test(1, 1),
+        );
+        let mut changed_input = base.clone();
+        changed_input.input = RemoteInput::new(vec![9, 9, 9]);
+
+        store.record(key, RemoteTaskId::next(), base, Time::from_secs(10));
+
+        let decision = store.check(&key, &changed_input, Time::from_secs(20));
+        assert!(
+            matches!(decision, DedupDecision::Conflict),
+            "same key + same computation but different payload must conflict"
         );
     }
 

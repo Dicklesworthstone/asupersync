@@ -15,8 +15,9 @@ use asupersync::distributed::snapshot::{
 };
 use asupersync::record::region::RegionState;
 use asupersync::remote::{
-    ComputationName, DedupDecision, IdempotencyKey, IdempotencyStore, NodeId, RemoteCap,
-    RemoteError, RemoteInput, RemoteOutcome, RemoteTaskId, RemoteTaskState, Saga, SagaState,
+    ComputationName, DedupDecision, IdempotencyKey, IdempotencyRequestFingerprint,
+    IdempotencyStore, NodeId, RemoteCap, RemoteError, RemoteInput, RemoteOutcome, RemoteTaskId,
+    RemoteTaskState, Saga, SagaState,
 };
 use asupersync::trace::causality::{CausalOrderVerifier, CausalityViolationKind};
 use asupersync::trace::certificate::{CertificateVerifier, TraceCertificate};
@@ -1076,19 +1077,27 @@ fn remote_error_is_std_error() {
 fn idempotency_store_duplicate_returns_cached_outcome() {
     let mut store = IdempotencyStore::new(Duration::from_secs(60));
     let key = IdempotencyKey::from_raw(0x42);
-    let computation = ComputationName::new("encode_block");
+    let request = IdempotencyRequestFingerprint::new(
+        ComputationName::new("encode_block"),
+        RemoteInput::empty(),
+        Duration::from_secs(30),
+        None,
+        NodeId::new("origin"),
+        RegionId::testing_default(),
+        TaskId::testing_default(),
+    );
     let now = Time::from_secs(1);
 
     assert!(matches!(
-        store.check(&key, &computation, now),
+        store.check(&key, &request, now),
         DedupDecision::New
     ));
-    assert!(store.record(key, RemoteTaskId::from_raw(7), computation.clone(), now));
+    assert!(store.record(key, RemoteTaskId::from_raw(7), request.clone(), now));
 
     let outcome = RemoteOutcome::Success(vec![1, 2, 3]);
     assert!(store.complete(&key, outcome));
 
-    match store.check(&key, &computation, Time::from_secs(2)) {
+    match store.check(&key, &request, Time::from_secs(2)) {
         DedupDecision::Duplicate(record) => {
             assert_eq!(record.remote_task_id, RemoteTaskId::from_raw(7));
             match record.outcome {
@@ -1101,7 +1110,19 @@ fn idempotency_store_duplicate_returns_cached_outcome() {
         other => panic!("expected duplicate, got {other:?}"),
     }
 
-    let conflict = store.check(&key, &ComputationName::new("other"), Time::from_secs(2));
+    let conflict = store.check(
+        &key,
+        &IdempotencyRequestFingerprint::new(
+            ComputationName::new("other"),
+            RemoteInput::empty(),
+            Duration::from_secs(30),
+            None,
+            NodeId::new("origin"),
+            RegionId::testing_default(),
+            TaskId::testing_default(),
+        ),
+        Time::from_secs(2),
+    );
     assert!(matches!(conflict, DedupDecision::Conflict));
 }
 

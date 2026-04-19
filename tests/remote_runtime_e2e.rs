@@ -36,10 +36,11 @@ use asupersync::lab::network::{
     NetworkConditions, NetworkConfig, NodeEvent,
 };
 use asupersync::remote::{
-    ComputationName, DedupDecision, IdempotencyKey, IdempotencyStore, NodeId, RemoteError,
-    RemoteTaskId, RemoteTaskState, Saga, SagaState, spawn_remote,
+    ComputationName, DedupDecision, IdempotencyKey, IdempotencyRequestFingerprint,
+    IdempotencyStore, NodeId, RemoteError, RemoteInput, RemoteTaskId, RemoteTaskState, Saga,
+    SagaState, spawn_remote,
 };
-use asupersync::types::Time;
+use asupersync::types::{RegionId, TaskId, Time};
 use common::*;
 use std::future::Future;
 use std::sync::Arc;
@@ -706,24 +707,40 @@ fn idempotency_store_conflict_detection() {
     // Unit-level test: same key, different computation → conflict.
     let mut store = IdempotencyStore::new(Duration::from_secs(60));
     let key = IdempotencyKey::from_raw(0xABCD);
-    let comp_a = ComputationName::new("compute_a");
-    let comp_b = ComputationName::new("compute_b");
+    let request_a = IdempotencyRequestFingerprint::new(
+        ComputationName::new("compute_a"),
+        RemoteInput::empty(),
+        Duration::from_secs(30),
+        None,
+        NodeId::new("origin"),
+        RegionId::testing_default(),
+        TaskId::testing_default(),
+    );
+    let request_b = IdempotencyRequestFingerprint::new(
+        ComputationName::new("compute_b"),
+        RemoteInput::empty(),
+        Duration::from_secs(30),
+        None,
+        NodeId::new("origin"),
+        RegionId::testing_default(),
+        TaskId::testing_default(),
+    );
 
     assert!(matches!(
-        store.check(&key, &comp_a, Time::ZERO),
+        store.check(&key, &request_a, Time::ZERO),
         DedupDecision::New
     ));
-    store.record(key, RemoteTaskId::from_raw(1), comp_a.clone(), Time::ZERO);
+    store.record(key, RemoteTaskId::from_raw(1), request_a.clone(), Time::ZERO);
 
     // Same key, same computation → duplicate.
     assert!(matches!(
-        store.check(&key, &comp_a, Time::from_secs(1)),
+        store.check(&key, &request_a, Time::from_secs(1)),
         DedupDecision::Duplicate(_)
     ));
 
     // Same key, different computation → conflict.
     assert!(matches!(
-        store.check(&key, &comp_b, Time::from_secs(1)),
+        store.check(&key, &request_b, Time::from_secs(1)),
         DedupDecision::Conflict
     ));
 }
