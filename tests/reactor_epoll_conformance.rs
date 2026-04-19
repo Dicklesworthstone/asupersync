@@ -1,15 +1,15 @@
-//! Linux epoll edge-triggered semantics conformance tests.
+//! Linux epoll semantics conformance tests.
 //!
 //! This module provides comprehensive conformance testing for Linux epoll
-//! edge-triggered (ET) behavior as specified in epoll(7) and the Linux kernel
-//! documentation. The tests systematically validate the six critical epoll
-//! behaviors required for correct async I/O operation:
+//! behavior as exposed through [`EpollReactor`] and the `polling` crate. The
+//! tests cover the trigger modes and hangup behaviors that this wrapper relies
+//! on for correct async I/O operation:
 //!
 //! 1. **ET fires exactly once per state transition** (epoll(7) §Edge-triggered interface)
 //! 2. **Partial reads leave socket armed** (epoll(7) §When to use edge-triggered)
 //! 3. **EPOLLONESHOT triggers at most once then disarms** (epoll(7) §EPOLLONESHOT)
-//! 4. **EPOLLEXCLUSIVE serializes wakeups** (epoll(7) §EPOLLEXCLUSIVE)
-//! 5. **Mixed LT+ET within same epoll fd honored** (epoll(7) §Level-triggered vs Edge-triggered)
+//! 4. **Current EPOLLEXCLUSIVE wrapper limitation is documented**
+//! 5. **Mixed default-oneshot + ET registrations within one reactor are honored**
 //! 6. **EPOLLRDHUP signals half-close** (epoll(7) §EPOLLRDHUP)
 //!
 //! # Linux epoll(7) Edge-Triggered Semantics
@@ -231,7 +231,7 @@ mod linux_tests {
 
         // Verify we drained approximately the right amount
         assert!(
-            total_drained >= 8000 && total_drained <= 8300,
+            (8000..=8300).contains(&total_drained),
             "Unexpected drain amount: {} (expected ~8192)",
             total_drained
         );
@@ -338,23 +338,22 @@ mod linux_tests {
         asupersync::test_complete!("epolloneshot_triggers_once_then_disarms");
     }
 
-    /// Test 4: EPOLLEXCLUSIVE serializes wakeups across multiple threads.
+    /// Test 4: Document the current EPOLLEXCLUSIVE wrapper limitation.
     ///
-    /// Per epoll(7): "Sets an exclusive wakeup mode for the associated file descriptor.
-    /// When a wakeup event occurs and multiple epoll file descriptors are attached to the
-    /// same target file using EPOLLEXCLUSIVE, one or more of the epoll file descriptors
-    /// will receive an event with epoll_wait(2)."
+    /// The `polling` crate does not currently expose raw `EPOLLEXCLUSIVE`
+    /// registration controls through `EpollReactor`, so this test records the
+    /// current limitation and verifies the baseline behavior we actually rely on.
     ///
     /// This test validates that:
-    /// - Without EPOLLEXCLUSIVE, all waiting threads get the same event (thundering herd)
-    /// - With EPOLLEXCLUSIVE, only one thread gets woken up per event
-    /// - Events are distributed fairly across multiple exclusive waiters
+    /// - A normally registered reactor receives the expected event
+    /// - A second reactor with no matching registration receives nothing
+    /// - The suite does not over-claim EPOLLEXCLUSIVE coverage
     #[test]
-    fn test_epollexclusive_serializes_wakeups() {
-        init_test("epollexclusive_serializes_wakeups");
+    fn test_epollexclusive_current_wrapper_limitation() {
+        init_test("epollexclusive_current_wrapper_limitation");
 
-        // Note: This is a simplified test since the polling crate's EPOLLEXCLUSIVE
-        // support may be limited. We test the behavior we can verify.
+        // Note: This is intentionally a wrapper-level baseline test. It does not
+        // attempt to validate raw EPOLLEXCLUSIVE kernel semantics.
 
         let reactor1 = EpollReactor::new().expect("Failed to create reactor1");
         let reactor2 = EpollReactor::new().expect("Failed to create reactor2");
@@ -393,60 +392,57 @@ mod linux_tests {
             .expect("Reactor1 poll failed");
         assert_eq!(count1, 1, "Expected 1 event from reactor1");
 
-        // Poll from second reactor (should get no events since same fd can't be in two epoll sets)
+        // Poll from second reactor. It has no matching registration, so it should
+        // not observe the event.
         let count2 = reactor2
             .poll(&mut events2, Some(Duration::from_millis(50)))
-            .unwrap_or(0); // Expected - can't register same fd in two epoll instances
+            .unwrap_or(0);
 
-        assert_eq!(
-            count2, 0,
-            "Expected 0 events from reactor2 (fd already registered)"
-        );
+        assert_eq!(count2, 0, "Expected 0 events from unregistered reactor2");
 
         reactor1
             .deregister(token1)
             .expect("Deregister reactor1 failed");
-        asupersync::test_complete!("epollexclusive_serializes_wakeups");
+        asupersync::test_complete!("epollexclusive_current_wrapper_limitation");
     }
 
-    /// Test 5: Mixed LT+ET modes within same epoll fd are honored.
+    /// Test 5: Mixed default-oneshot + ET modes within one reactor are honored.
     ///
-    /// Per epoll(7): "Each file descriptor that is attached to an epoll instance
-    /// can be configured for either edge-triggered or level-triggered event delivery."
-    /// Different fds in the same epoll instance can use different trigger modes.
+    /// `EpollReactor` defaults non-edge registrations to oneshot delivery and
+    /// lets callers opt into EPOLLET with `Interest::EDGE_TRIGGERED`.
     ///
     /// This test validates that:
-    /// - Level-triggered fd fires repeatedly while condition persists
+    /// - Default oneshot fd fires once and then stays silent until re-armed
     /// - Edge-triggered fd fires only on state transitions
     /// - Both can coexist in the same epoll instance without interference
     #[test]
-    fn test_mixed_lt_et_within_same_epoll_fd_honored() {
-        init_test("mixed_lt_et_within_same_epoll_fd_honored");
+    fn test_mixed_oneshot_and_et_within_same_epoll_fd_honored() {
+        init_test("mixed_oneshot_and_et_within_same_epoll_fd_honored");
 
         let reactor = EpollReactor::new().expect("Failed to create reactor");
 
-        // Create two socket pairs for LT and ET testing
-        let (mut lt_read, mut lt_write) =
-            UnixStream::pair().expect("Failed to create LT socket pair");
+        // Create two socket pairs for default-oneshot and ET testing
+        let (mut default_read, mut default_write) =
+            UnixStream::pair().expect("Failed to create default socket pair");
 
         let (mut et_read, mut et_write) =
             UnixStream::pair().expect("Failed to create ET socket pair");
 
-        lt_read
+        default_read
             .set_nonblocking(true)
-            .expect("Failed to set LT nonblocking");
+            .expect("Failed to set default nonblocking");
 
         et_read
             .set_nonblocking(true)
             .expect("Failed to set ET nonblocking");
 
-        let lt_token = Token::new(1005);
+        let default_token = Token::new(1005);
         let et_token = Token::new(2005);
 
-        // Register LT socket with level-triggered (default behavior - no EPOLLET flag)
+        // Register default socket with the reactor's non-edge oneshot behavior.
         reactor
-            .register(&lt_read, lt_token, Interest::READABLE)
-            .expect("Failed to register LT socket");
+            .register(&default_read, default_token, Interest::READABLE)
+            .expect("Failed to register default socket");
 
         // Register ET socket with edge-triggered
         reactor
@@ -454,7 +450,9 @@ mod linux_tests {
             .expect("Failed to register ET socket");
 
         // Write data to both sockets
-        lt_write.write_all(b"level_data").expect("LT write failed");
+        default_write
+            .write_all(b"default_data")
+            .expect("default write failed");
 
         et_write.write_all(b"edge_data").expect("ET write failed");
 
@@ -464,56 +462,77 @@ mod linux_tests {
         let count1 = reactor
             .poll(&mut events, Some(Duration::from_millis(100)))
             .expect("First poll failed");
-        assert_eq!(count1, 2, "Expected 2 events (LT+ET)");
+        assert_eq!(count1, 2, "Expected 2 events (default + ET)");
 
         // Verify we got both tokens
-        let mut found_lt = false;
+        let mut found_default = false;
         let mut found_et = false;
         for event in &events {
-            if event.token == lt_token && event.is_readable() {
-                found_lt = true;
+            if event.token == default_token && event.is_readable() {
+                found_default = true;
             } else if event.token == et_token && event.is_readable() {
                 found_et = true;
             }
         }
         assert!(
-            found_lt && found_et,
-            "Missing events: LT found={}, ET found={}",
-            found_lt,
+            found_default && found_et,
+            "Missing events: default found={}, ET found={}",
+            found_default,
             found_et
         );
 
         // Read partial data from both (leaving data in buffers)
-        let mut lt_buf = [0u8; 5];
+        let mut default_buf = [0u8; 7];
         let mut et_buf = [0u8; 4];
 
-        let lt_count = lt_read.read(&mut lt_buf).expect("LT read failed");
-        assert_eq!(lt_count, 5, "LT read expected 5 bytes");
-        assert_eq!(&lt_buf, b"level", "Wrong LT data");
+        let default_count = default_read
+            .read(&mut default_buf)
+            .expect("default read failed");
+        assert_eq!(default_count, 7, "default read expected 7 bytes");
+        assert_eq!(&default_buf, b"default", "Wrong default data");
 
         let et_count = et_read.read(&mut et_buf).expect("ET read failed");
         assert_eq!(et_count, 4, "ET read expected 4 bytes");
         assert_eq!(&et_buf, b"edge", "Wrong ET data");
 
-        // Second poll: LT should fire again (data remains), ET should not (no state change)
+        // Second poll: the default registration is disarmed until re-arm, and
+        // ET sees no new state change.
         events.clear();
         let count2 = reactor
             .poll(&mut events, Some(Duration::from_millis(100)))
             .expect("Second poll failed");
-        assert_eq!(count2, 1, "Expected 1 event (LT only) on second poll");
+        assert_eq!(count2, 0, "Expected 0 events before default re-arm");
 
-        let mut found_lt_again = false;
+        reactor
+            .modify(default_token, Interest::READABLE)
+            .expect("Failed to re-arm default registration");
+
+        events.clear();
+        let count3 = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("Third poll failed");
+        assert_eq!(count3, 1, "Expected 1 event (default only) after re-arm");
+
+        let mut found_default_again = false;
+        let mut found_et_again = false;
         for event in &events {
-            if event.token == lt_token {
-                found_lt_again = true;
-                break;
+            if event.token == default_token {
+                found_default_again = true;
+            } else if event.token == et_token {
+                found_et_again = true;
             }
         }
-        assert!(found_lt_again, "Expected LT token on second poll");
+        assert!(found_default_again, "Expected default token after re-arm");
+        assert!(
+            !found_et_again,
+            "Did not expect ET token without a new state transition"
+        );
 
-        reactor.deregister(lt_token).expect("LT deregister failed");
+        reactor
+            .deregister(default_token)
+            .expect("default deregister failed");
         reactor.deregister(et_token).expect("ET deregister failed");
-        asupersync::test_complete!("mixed_lt_et_within_same_epoll_fd_honored");
+        asupersync::test_complete!("mixed_oneshot_and_et_within_same_epoll_fd_honored");
     }
 
     /// Test 6: EPOLLRDHUP signals peer half-close (write side closed).
@@ -637,11 +656,6 @@ mod linux_tests {
         println!("✅ All epoll conformance tests passed");
     }
 }
-
-/// Linux-only conformance tests for epoll edge-triggered semantics.
-/// Tests are automatically discovered by the test framework.
-#[cfg(target_os = "linux")]
-use linux_tests as _;
 
 /// Placeholder test for non-Linux platforms.
 /// This ensures the module compiles on all platforms but only runs the actual

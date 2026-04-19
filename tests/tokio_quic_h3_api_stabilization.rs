@@ -155,6 +155,7 @@ fn as_04_h3_types_constructable() {
     let _state = H3ConnectionState::new();
     let _state_cfg = H3ConnectionState::with_config(H3ConnectionConfig {
         qpack_mode: H3QpackMode::StaticOnly,
+        ..H3ConnectionConfig::default()
     });
     let _ctrl = H3ControlState::new();
     let _req_state = H3RequestStreamState::new();

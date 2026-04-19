@@ -1112,6 +1112,8 @@ mod pipeline_e2e {
             FailureReason::SingularMatrix { .. }
             | FailureReason::SymbolEquationArityMismatch { .. }
             | FailureReason::ColumnIndexOutOfRange { .. }
+            | FailureReason::SourceEsiOutOfRange { .. }
+            | FailureReason::InvalidSourceSymbolEquation { .. }
             | FailureReason::CorruptDecodedOutput { .. } => RejectReason::InconsistentEquations,
         }
     }
@@ -1251,6 +1253,8 @@ mod pipeline_e2e {
                     | DecodeError::SymbolSizeMismatch { .. }
                     | DecodeError::SymbolEquationArityMismatch { .. }
                     | DecodeError::ColumnIndexOutOfRange { .. }
+                    | DecodeError::SourceEsiOutOfRange { .. }
+                    | DecodeError::InvalidSourceSymbolEquation { .. }
                     | DecodeError::CorruptDecodedOutput { .. } => {
                         panic!("unexpected decode error {err:?}");
                     }
@@ -1542,6 +1546,8 @@ mod differential_harness {
             DecodeError::SymbolSizeMismatch { .. } => "symbol_size_mismatch",
             DecodeError::SymbolEquationArityMismatch { .. } => "symbol_equation_arity_mismatch",
             DecodeError::ColumnIndexOutOfRange { .. } => "column_out_of_range",
+            DecodeError::SourceEsiOutOfRange { .. } => "source_esi_out_of_range",
+            DecodeError::InvalidSourceSymbolEquation { .. } => "invalid_source_symbol_equation",
             DecodeError::CorruptDecodedOutput { .. } => "corrupt_decoded_output",
         }
     }

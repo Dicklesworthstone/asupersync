@@ -370,7 +370,9 @@ fn descendants_postorder_returns_children_then_grandchildren() {
     let child2 = table.allocate_with_parent(WasmHandleKind::Region, Some(root));
     let grandchild = table.allocate_with_parent(WasmHandleKind::Task, Some(child1));
 
-    let descendants = table.descendants_postorder(&root);
+    let descendants = table
+        .descendants_postorder(&root)
+        .expect("acyclic ownership tree should enumerate descendants");
     // Post-order: grandchild first, then child1 (its parent), then child2
     assert!(descendants.contains(&grandchild));
     assert!(descendants.contains(&child1));
@@ -391,7 +393,9 @@ fn released_children_excluded_from_descendants() {
     close_handle_for_release(&mut table, &child);
     table.release(&child).unwrap();
 
-    let descendants = table.descendants_postorder(&root);
+    let descendants = table
+        .descendants_postorder(&root)
+        .expect("released descendants should still produce a successful traversal");
     assert!(descendants.is_empty());
 }
 

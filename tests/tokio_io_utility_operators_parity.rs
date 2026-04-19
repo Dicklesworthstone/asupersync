@@ -382,17 +382,10 @@ fn markdown_references_all_categories() {
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf, SplitStream};
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
-
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
+use std::task::{Context, Poll, Waker};
 
 fn noop_waker() -> Waker {
-    Waker::from(Arc::new(NoopWaker))
+    Waker::noop().clone()
 }
 
 /// Test stream that stores read data and written data independently.

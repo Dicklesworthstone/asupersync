@@ -649,6 +649,7 @@ fn control_stream_settings_exchange() {
     // Verify DynamicTableAllowed mode accepts nonzero capacity.
     let config = H3ConnectionConfig {
         qpack_mode: H3QpackMode::DynamicTableAllowed,
+        ..H3ConnectionConfig::default()
     };
     let mut permissive_h3 = H3ConnectionState::with_config(config);
     let dynamic_settings_ok = H3Settings {

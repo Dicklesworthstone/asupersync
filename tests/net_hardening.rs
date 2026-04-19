@@ -18,8 +18,7 @@ use futures_lite::future::block_on;
 use std::io;
 use std::net::Shutdown;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll};
 use std::thread;
 use std::time::Duration;
 
@@ -28,16 +27,6 @@ use asupersync::net::UdpSocket;
 use asupersync::net::happy_eyeballs::{self, HappyEyeballsConfig};
 use asupersync::net::tcp::stream::TcpStreamBuilder;
 use asupersync::net::{TcpListener, TcpStream};
-
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
-
-fn noop_waker() -> Waker {
-    Waker::from(Arc::new(NoopWaker))
-}
 
 fn init_test(name: &str) {
     init_test_logging();
@@ -188,8 +177,7 @@ fn tcp_poll_shutdown() {
         thread::sleep(Duration::from_millis(10));
         let mut stream = TcpStream::connect(addr).await.unwrap();
 
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
 
         let poll = Pin::new(&mut stream).poll_shutdown(&mut cx);
         assert!(matches!(poll, Poll::Ready(Ok(()))));

@@ -24,19 +24,12 @@ use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::Duration;
 
-/// Simple no-op waker for polling.
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn noop_waker() -> Waker {
-    Waker::from(Arc::new(NoopWaker))
+    Waker::noop().clone()
 }
 
 /// Helper to poll a future until ready or timeout.

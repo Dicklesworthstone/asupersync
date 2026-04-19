@@ -5,18 +5,17 @@
 //! timeout vs error distinction, stale completion handling, and cancellation
 //! during ring-full conditions.
 //!
-//! Tests use LabRuntime for deterministic synthetic pressure patterns and
-//! controlled race condition timing.
+//! Tests drive the live reactor directly with kernel primitives and
+//! wall-clock timing to exercise high-contention edge cases.
 //!
 //! Requires: Linux kernel 5.1+, feature `io-uring`.
 
 #![cfg(all(target_os = "linux", feature = "io-uring"))]
 #![allow(unsafe_code)]
 
-use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::reactor::{Events, Interest, IoUringReactor, Reactor, Token};
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
@@ -27,9 +26,6 @@ const STRESS_MAX_REGISTRATIONS: usize = 1000;
 
 /// Number of burst operations to test SQE overflow.
 const BURST_OPERATIONS: usize = 512;
-
-/// Duration for sustained pressure tests.
-const PRESSURE_DURATION: Duration = Duration::from_millis(200);
 
 /// Test eventfd timeout threshold for ETIME vs error distinction.
 const TIMEOUT_THRESHOLD_MS: u64 = 50;
@@ -121,15 +117,12 @@ fn drain_eventfd(fd: RawFd) -> io::Result<u64> {
 
 #[test]
 fn stress_sqe_overflow_burst_registrations() {
-    let lab = LabRuntime::new(LabConfig::new(0xDEADBEEF));
-    let _guard = lab.enter();
-
     let reactor = IoUringReactor::new().expect("io_uring reactor creation");
 
     // Create many eventfds for burst registration
     let mut eventfds = Vec::new();
     let mut sources = Vec::new();
-    for i in 0..BURST_OPERATIONS {
+    for _i in 0..BURST_OPERATIONS {
         let eventfd = create_test_eventfd().expect("eventfd creation");
         sources.push(StressFdSource::new(eventfd.as_raw_fd()));
         eventfds.push(eventfd);
@@ -165,7 +158,7 @@ fn stress_sqe_overflow_burst_registrations() {
     );
     assert!(
         registration_duration < Duration::from_secs(5),
-        "Burst registration took too long: {registration_duration:?}"
+        "Burst registration took too long: {registration_duration:?} (retries={overflow_retries})"
     );
 
     // Test SQE overflow recovery by triggering many eventfds simultaneously
@@ -201,10 +194,6 @@ fn stress_sqe_overflow_burst_registrations() {
         "Burst event processing took too long: {poll_duration:?}"
     );
 
-    println!(
-        "SQE Overflow Test: {successful_registrations} registrations, {overflow_retries} retries, {total_events} events in {poll_duration:?}"
-    );
-
     // Cleanup
     for i in 0..successful_registrations {
         let _ = reactor.deregister(Token::new(i + 1));
@@ -217,9 +206,6 @@ fn stress_sqe_overflow_burst_registrations() {
 
 #[test]
 fn stress_etime_timeout_vs_error_distinction() {
-    let lab = LabRuntime::new(LabConfig::new(0xCAFEBABE));
-    let _guard = lab.enter();
-
     let reactor = IoUringReactor::new().expect("io_uring reactor creation");
     let eventfd = create_test_eventfd().expect("eventfd creation");
     let source = StressFdSource::new(eventfd.as_raw_fd());
@@ -296,10 +282,6 @@ fn stress_etime_timeout_vs_error_distinction() {
 
     wake_handle.join().unwrap();
 
-    println!(
-        "ETIME Test: timeout {timeout_elapsed:?}, zero {zero_elapsed:?}, none {none_elapsed:?}"
-    );
-
     reactor_wake.deregister(token).expect("deregistration");
 }
 
@@ -309,9 +291,6 @@ fn stress_etime_timeout_vs_error_distinction() {
 
 #[test]
 fn stress_stale_completion_suppression() {
-    let lab = LabRuntime::new(LabConfig::new(0x1BADB002));
-    let _guard = lab.enter();
-
     let reactor = IoUringReactor::new().expect("io_uring reactor creation");
     let mut test_iterations = 0;
     let mut stale_detected = 0;
@@ -344,10 +323,6 @@ fn stress_stale_completion_suppression() {
             for event in events.iter().take(n) {
                 if event.token == token {
                     stale_detected += 1;
-                    eprintln!(
-                        "STALE COMPLETION DETECTED: iteration {iteration}, token {:?}",
-                        token
-                    );
                 }
             }
 
@@ -369,10 +344,6 @@ fn stress_stale_completion_suppression() {
         stale_detected, 0,
         "Detected {stale_detected} stale completions across {test_iterations} iterations"
     );
-
-    println!(
-        "Stale Completion Test: {test_iterations} iterations, {stale_detected} stale events detected"
-    );
 }
 
 // =========================================================================
@@ -381,9 +352,6 @@ fn stress_stale_completion_suppression() {
 
 #[test]
 fn stress_registration_deregistration_races() {
-    let lab = LabRuntime::new(LabConfig::new(0xFEEDFACE));
-    let _guard = lab.enter();
-
     let reactor = Arc::new(IoUringReactor::new().expect("io_uring reactor creation"));
     let race_iterations = 100;
     let concurrent_operations = 20;
@@ -420,13 +388,17 @@ fn stress_registration_deregistration_races() {
 
                             // Deregister while event might be in-flight
                             match reactor_clone.deregister(token) {
-                                Ok(()) => success_count_clone.fetch_add(1, Ordering::Relaxed),
+                                Ok(()) => {
+                                    success_count_clone.fetch_add(1, Ordering::Relaxed);
+                                }
                                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                                     // Acceptable race - already deregistered
-                                    success_count_clone.fetch_add(1, Ordering::Relaxed)
+                                    success_count_clone.fetch_add(1, Ordering::Relaxed);
                                 }
-                                Err(_) => error_count_clone.fetch_add(1, Ordering::Relaxed),
-                            };
+                                Err(_) => {
+                                    error_count_clone.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
                         } else {
                             let _ = reactor_clone.deregister(token);
                         }
@@ -435,7 +407,9 @@ fn stress_registration_deregistration_races() {
                         // Acceptable race condition
                         race_detected_clone.store(true, Ordering::Relaxed);
                     }
-                    Err(_) => error_count_clone.fetch_add(1, Ordering::Relaxed),
+                    Err(_) => {
+                        error_count_clone.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
 
                 // Small random delay to vary timing
@@ -465,8 +439,6 @@ fn stress_registration_deregistration_races() {
 
     let final_errors = error_count.load(Ordering::Relaxed);
     let final_successes = success_count.load(Ordering::Relaxed);
-    let races_detected = race_detected.load(Ordering::Relaxed);
-
     // Verify acceptable outcomes
     assert!(
         final_errors < final_successes / 10, // Allow up to 10% error rate
@@ -478,10 +450,7 @@ fn stress_registration_deregistration_races() {
         0,
         "All registrations should be cleaned up"
     );
-
-    println!(
-        "Race Test: {final_successes} successes, {final_errors} errors, races_detected: {races_detected}"
-    );
+    let _ = race_detected.load(Ordering::Relaxed);
 }
 
 // =========================================================================
@@ -490,9 +459,6 @@ fn stress_registration_deregistration_races() {
 
 #[test]
 fn stress_ring_full_cancellation_path() {
-    let lab = LabRuntime::new(LabConfig::new(0xDEADC0DE));
-    let _guard = lab.enter();
-
     let reactor = IoUringReactor::new().expect("io_uring reactor creation");
 
     // Create many pipes to fill up the submission queue
@@ -512,10 +478,6 @@ fn stress_ring_full_cancellation_path() {
     }
 
     let pipe_count = pipes.len();
-    println!(
-        "Ring Full Test: Created {} pipes for stress testing",
-        pipe_count
-    );
 
     // Register all pipes rapidly to potentially fill SQ
     let mut registered_tokens = Vec::new();
@@ -537,12 +499,6 @@ fn stress_ring_full_cancellation_path() {
         }
     }
 
-    println!(
-        "Registered {} sources, {} failures",
-        registered_tokens.len(),
-        registration_failures
-    );
-
     // Trigger readiness on half the pipes
     for (_, (_, write_fd)) in pipes.iter().enumerate().take(registered_tokens.len() / 2) {
         let _ = unsafe {
@@ -555,7 +511,7 @@ fn stress_ring_full_cancellation_path() {
     }
 
     // Rapidly deregister tokens while events might be in-flight
-    let mut deregistration_start = Instant::now();
+    let deregistration_start = Instant::now();
     let mut successful_deregisters = 0;
 
     for (i, token) in registered_tokens.iter().enumerate() {
@@ -595,7 +551,7 @@ fn stress_ring_full_cancellation_path() {
     // Verify no crashes occurred during ring full conditions
     assert!(
         successful_deregisters > 0,
-        "Should successfully deregister some tokens even under stress"
+        "Should successfully deregister some tokens even under stress (pipes={pipe_count}, registration_failures={registration_failures})"
     );
 
     assert!(
@@ -605,12 +561,7 @@ fn stress_ring_full_cancellation_path() {
 
     assert!(
         final_poll_duration < Duration::from_secs(2),
-        "Final poll clearing took too long: {final_poll_duration:?}"
-    );
-
-    println!(
-        "Ring Full Test: {} deregisters in {deregistration_duration:?}, {} final events in {final_poll_duration:?}",
-        successful_deregisters, final_events
+        "Final poll clearing took too long: {final_poll_duration:?} (final_events={final_events})"
     );
 
     // Cleanup remaining registrations
@@ -625,11 +576,6 @@ fn stress_ring_full_cancellation_path() {
 
 #[test]
 fn comprehensive_io_uring_stress() {
-    let lab = LabRuntime::new(LabConfig::new(0x31337C0D));
-    let _guard = lab.enter();
-
-    println!("Starting comprehensive io_uring stress test...");
-
     let reactor = Arc::new(IoUringReactor::new().expect("io_uring reactor creation"));
     let test_duration = Duration::from_millis(500);
     let start_time = Instant::now();
@@ -646,7 +592,7 @@ fn comprehensive_io_uring_stress() {
         while start_time.elapsed() < test_duration {
             if let Ok(eventfd) = create_test_eventfd() {
                 let source = StressFdSource::new(eventfd.as_raw_fd());
-                let token = Token::new((local_ops % 10000) + 40000);
+                let token = Token::new(((local_ops % 10000) + 40000) as usize);
 
                 if reactor1
                     .register(&source, token, Interest::READABLE)
@@ -741,17 +687,9 @@ fn comprehensive_io_uring_stress() {
             .expect("final poll");
         final_events.clear();
     }
-
-    println!(
-        "Comprehensive Stress Test completed: {} operations, {} errors, {} duration, {} final registrations",
-        total_operations,
-        total_errors,
-        final_duration.as_millis(),
-        final_registrations
-    );
-
     assert!(
         reactor.is_empty(),
-        "Reactor should be empty after comprehensive test"
+        "Reactor should be empty after comprehensive test (ops={total_operations}, errors={total_errors}, duration_ms={})",
+        final_duration.as_millis()
     );
 }

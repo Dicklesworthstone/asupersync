@@ -579,7 +579,7 @@ fn handle_descendants_postorder_is_deterministic_and_skips_released_children() {
     close_handle_for_release(&mut table, &grandchild_a);
     table.release(&grandchild_a).unwrap();
 
-    let descendants = table.descendants_postorder(&root);
+    let descendants = table.descendants_postorder(&root).unwrap();
     assert_eq!(
         descendants,
         vec![child_a, grandchild_b, child_b],
