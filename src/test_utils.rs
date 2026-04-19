@@ -243,7 +243,7 @@ macro_rules! test_complete {
 /// Log before assertions for context.
 #[macro_export]
 macro_rules! assert_with_log {
-    ($cond:expr, $msg:expr, $expected:expr, $actual:expr) => {
+    ($cond:expr, $msg:expr, $expected:expr, $actual:expr) => {{
         tracing::debug!(
             expected = ?$expected,
             actual = ?$actual,
@@ -251,7 +251,7 @@ macro_rules! assert_with_log {
             $msg
         );
         assert!($cond, "{}: expected {:?}, got {:?}", $msg, $expected, $actual);
-    };
+    }};
 }
 
 /// Assert that an outcome is Ok with a specific value.

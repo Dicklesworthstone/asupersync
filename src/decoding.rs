@@ -11,7 +11,6 @@ use crate::raptorq::decoder::{
     DecodeError as RaptorDecodeError, InactivationDecoder, ReceivedSymbol,
 };
 use crate::raptorq::gf256::Gf256;
-use crate::raptorq::systematic::SystematicParams;
 use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
@@ -721,14 +720,12 @@ fn decode_block(
     }
 
     let object_id = symbols.first().map_or(ObjectId::NIL, Symbol::object_id);
-    let params = SystematicParams::for_source_block(k, symbol_size);
     let block_seed = seed_for_block(object_id, plan.sbn);
     let decoder = InactivationDecoder::new(k, symbol_size, block_seed);
-    let padding_rows = params.k_prime.saturating_sub(k);
 
     // 1. Start with constraint symbols (LDPC + HDPC)
     let mut received = decoder.constraint_symbols();
-    received.reserve(symbols.len() + padding_rows);
+    received.reserve(symbols.len());
 
     // 2. Add received symbols (Source + Repair)
     for symbol in symbols {
@@ -761,18 +758,6 @@ fn decode_block(
                 });
             }
         }
-    }
-
-    // 3. Add zero-padded rows for K..K'.
-    // These act as implicit source symbols with value 0.
-    for esi in k..params.k_prime {
-        received.push(ReceivedSymbol {
-            esi: esi as u32,
-            is_source: false,
-            columns: vec![esi],
-            coefficients: vec![Gf256::ONE],
-            data: vec![0u8; symbol_size],
-        });
     }
 
     let result = match decoder.decode(&received) {
@@ -812,6 +797,23 @@ fn decode_block(
                     sbn: plan.sbn,
                     details: format!(
                         "symbol {esi} references out-of-range column {column} (valid < {max_valid})"
+                    ),
+                },
+                RaptorDecodeError::SourceEsiOutOfRange { esi, max_valid } => {
+                    DecodingError::InconsistentMetadata {
+                        sbn: plan.sbn,
+                        details: format!(
+                            "source symbol {esi} falls outside the systematic domain (valid < {max_valid})"
+                        ),
+                    }
+                }
+                RaptorDecodeError::InvalidSourceSymbolEquation {
+                    esi,
+                    expected_column,
+                } => DecodingError::InconsistentMetadata {
+                    sbn: plan.sbn,
+                    details: format!(
+                        "source symbol {esi} must use the identity equation for column {expected_column}"
                     ),
                 },
                 RaptorDecodeError::CorruptDecodedOutput {

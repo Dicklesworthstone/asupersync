@@ -33,7 +33,8 @@ use crate::supervision::{
     ChildSpec, CompiledSupervisor, RestartPolicy, StartTieBreak, SupervisorBuilder,
     SupervisorCompileError, SupervisorHandle, SupervisorSpawnError,
 };
-use crate::types::{Budget, CancelKind, CancelReason, RegionId};
+use crate::types::{Budget, CancelKind, CancelReason, RegionId, TaskId};
+use std::task::{Context, Poll, Waker};
 
 // ---------------------------------------------------------------------------
 // CompiledApp
@@ -86,9 +87,7 @@ impl CompiledApp {
         regions
     }
 
-    fn cleanup_failed_start(state: &mut RuntimeState, root_region: RegionId) {
-        let _ = state.cancel_request(root_region, &CancelReason::shutdown(), None);
-
+    fn force_complete_tree_tasks(state: &mut RuntimeState, root_region: RegionId) -> usize {
         // Startup may already have registered tasks into the freshly created
         // region tree even though no scheduler ever got a chance to poll them.
         // Complete those records explicitly so region close can reach quiescence.
@@ -101,6 +100,7 @@ impl CompiledApp {
                     .unwrap_or_default()
             })
             .collect();
+        let mut completed = 0;
         for task_id in startup_tasks {
             if let Some(task) = state.task_mut(task_id) {
                 let reason = task
@@ -110,14 +110,49 @@ impl CompiledApp {
                 let _ = task.complete(crate::types::Outcome::Cancelled(reason));
             }
             let _ = state.task_completed(task_id);
+            completed += 1;
         }
+        completed
+    }
+
+    fn drive_bootstrap_task_once(state: &mut RuntimeState, task_id: TaskId) -> bool {
+        let task_cx = state.task(task_id).and_then(|record| record.cx.clone());
+        let Some(task_cx) = task_cx else {
+            return false;
+        };
+        let Some(mut stored) = state.remove_stored_future(task_id) else {
+            return false;
+        };
+
+        let waker = Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
+        let _guard = Cx::set_current(Some(task_cx));
+
+        match stored.poll(&mut poll_cx) {
+            Poll::Ready(outcome) => {
+                let task_outcome = outcome
+                    .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
+                if let Some(task) = state.task_mut(task_id) {
+                    let _ = task.complete(task_outcome);
+                }
+                let _ = state.task_completed(task_id);
+                true
+            }
+            Poll::Pending => {
+                state.store_spawned_task(task_id, stored);
+                false
+            }
+        }
+    }
+
+    fn cleanup_failed_start(state: &mut RuntimeState, root_region: RegionId) {
+        let _ = state.cancel_request(root_region, &CancelReason::shutdown(), None);
+        Self::force_complete_tree_tasks(state, root_region);
 
         let mut previous_region_count = usize::MAX;
         while state.region(root_region).is_some() {
             let current_region_count = state.regions_len();
-            if current_region_count == previous_region_count {
-                break;
-            }
+            let mut made_progress = current_region_count != previous_region_count;
             previous_region_count = current_region_count;
 
             let mut regions = Self::collect_region_tree(state, root_region);
@@ -128,7 +163,68 @@ impl CompiledApp {
                 }
                 state.advance_region_state(region_id);
             }
+
+            let scheduled_finalizers = state.drain_ready_async_finalizers();
+            if !scheduled_finalizers.is_empty() {
+                made_progress = true;
+            }
+            for (task_id, _) in scheduled_finalizers {
+                made_progress |= Self::drive_bootstrap_task_once(state, task_id);
+            }
+
+            // Failed-start cleanup runs before any scheduler worker can poll
+            // the temporary app tree. Any tasks still present here are therefore
+            // unreachable and must be force-resolved to avoid leaked regions.
+            if Self::force_complete_tree_tasks(state, root_region) > 0 {
+                made_progress = true;
+            }
+
+            if state.regions_len() != current_region_count {
+                made_progress = true;
+            }
+            if !made_progress {
+                break;
+            }
         }
+    }
+
+    fn build_app_root_cx(
+        state: &RuntimeState,
+        parent_cx: &Cx,
+        root_region: RegionId,
+        budget: Budget,
+        registry_override: Option<RegistryHandle>,
+    ) -> Cx {
+        let task_id = TaskId::new_ephemeral();
+        let timer_driver = parent_cx.timer_driver();
+        let logical_clock = state
+            .logical_clock_mode()
+            .build_handle(timer_driver.clone());
+        let mut root_cx = Cx::new_with_drivers(
+            root_region,
+            task_id,
+            budget,
+            Some(parent_cx.child_observability(root_region, task_id)),
+            parent_cx.io_driver_handle(),
+            parent_cx.io_cap_handle(),
+            timer_driver,
+            Some(parent_cx.child_entropy(task_id)),
+        )
+        .with_logical_clock(logical_clock)
+        .with_registry_handle(registry_override.or_else(|| parent_cx.registry_handle()))
+        .with_remote_cap_handle(parent_cx.remote_cap_handle())
+        .with_blocking_pool_handle(parent_cx.blocking_pool_handle())
+        .with_evidence_sink(parent_cx.evidence_sink_handle())
+        .with_macaroon_handle(parent_cx.macaroon_handle());
+        if let Some(pressure) = parent_cx.pressure_handle() {
+            root_cx = root_cx.with_pressure(pressure);
+        }
+        root_cx.set_trace_buffer(
+            parent_cx
+                .trace_buffer()
+                .unwrap_or_else(|| state.trace_handle()),
+        );
+        root_cx
     }
 
     /// Application name.
@@ -165,21 +261,19 @@ impl CompiledApp {
             .region(root_region)
             .map_or(parent_budget, crate::record::RegionRecord::budget);
 
-        // If a registry was configured, create a Cx with it attached so all
-        // children spawned by the supervisor inherit the registry capability.
         let registry_for_handle = self.registry.clone();
-        let app_cx;
-        let effective_cx = if self.registry.is_some() {
-            app_cx = cx.clone().with_registry_handle(self.registry);
-            &app_cx
-        } else {
-            cx
-        };
+        let app_cx = Self::build_app_root_cx(
+            state,
+            cx,
+            root_region,
+            effective_budget,
+            registry_for_handle.clone(),
+        );
 
         let supervisor =
             match self
                 .compiled_supervisor
-                .spawn(state, effective_cx, root_region, effective_budget)
+                .spawn(state, &app_cx, root_region, effective_budget)
             {
                 Ok(s) => s,
                 Err(e) => {
@@ -188,7 +282,7 @@ impl CompiledApp {
                 }
             };
 
-        cx.trace("app_started");
+        app_cx.trace("app_started");
 
         Ok(AppHandle {
             name: self.name,
@@ -699,6 +793,7 @@ impl std::error::Error for AppStopError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::{NodeId, RemoteCap};
     use crate::runtime::SpawnError;
     use crate::runtime::state::RuntimeState;
     use crate::supervision::{ChildSpec, NameRegistrationPolicy, SupervisionStrategy};
@@ -1079,6 +1174,72 @@ mod tests {
         );
 
         crate::test_complete!("app_start_spawn_failure_cleans_up_started_tasks");
+    }
+
+    #[test]
+    fn app_start_spawn_failure_drains_async_finalizers() {
+        init_test("app_start_spawn_failure_drains_async_finalizers");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let finalizer_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finalizer_ran_clone = Arc::clone(&finalizer_ran);
+        let failing_child = ChildSpec {
+            name: "broken".into(),
+            start: Box::new(
+                move |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+                      state: &mut RuntimeState,
+                      _cx: &Cx| {
+                    let registered = state.register_async_finalizer(scope.region_id(), {
+                        let finalizer_ran = Arc::clone(&finalizer_ran_clone);
+                        async move {
+                            finalizer_ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    });
+                    assert!(registered, "startup region should accept async finalizer");
+                    Err(SpawnError::RegionClosed(scope.region_id()))
+                },
+            ),
+            restart: SupervisionStrategy::Stop,
+            shutdown_budget: Budget::INFINITE,
+            depends_on: Vec::new(),
+            registration: NameRegistrationPolicy::None,
+            start_immediately: true,
+            required: true,
+        };
+
+        let spec = AppSpec::new("broken_finalizer_app").child(failing_child);
+        let result = spec.start(&mut state, &cx, root);
+
+        assert!(matches!(result, Err(AppStartError::SpawnFailed(_))));
+        assert!(
+            finalizer_ran.load(std::sync::atomic::Ordering::SeqCst),
+            "failed app start should still drain registered async finalizers"
+        );
+        assert_eq!(
+            state.live_task_count(),
+            0,
+            "failed app start should not leave async finalizer tasks behind"
+        );
+        assert_eq!(
+            state.regions_len(),
+            1,
+            "failed app start should remove the temporary app region tree"
+        );
+        assert_eq!(
+            state
+                .region(root)
+                .map(crate::record::RegionRecord::child_count),
+            Some(0),
+            "parent root should not retain leaked app descendants"
+        );
+
+        crate::test_complete!("app_start_spawn_failure_drains_async_finalizers");
     }
 
     #[test]
@@ -1606,6 +1767,78 @@ mod tests {
 
         let _raw = app_handle.into_raw();
         crate::test_complete!("app_with_registry_propagates_to_children");
+    }
+
+    #[test]
+    fn app_bootstrap_cx_targets_app_root_and_preserves_capabilities() {
+        init_test("app_bootstrap_cx_targets_app_root_and_preserves_capabilities");
+
+        let registry = crate::cx::NameRegistry::new();
+        let handle = RegistryHandle::new(Arc::new(registry));
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let parent_task = crate::types::TaskId::new_for_test(77, 9);
+        let cx = Cx::new(root, parent_task, Budget::INFINITE)
+            .with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("origin-test")));
+
+        let seen = Arc::new(parking_lot::Mutex::new(
+            None::<(RegionId, crate::types::TaskId, bool, Option<String>)>,
+        ));
+        let seen_clone = Arc::clone(&seen);
+        let child = ChildSpec {
+            name: "checker".into(),
+            start: Box::new(
+                move |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+                      state: &mut RuntimeState,
+                      cx: &Cx| {
+                    *seen_clone.lock() = Some((
+                        cx.region_id(),
+                        cx.task_id(),
+                        cx.has_registry(),
+                        cx.remote_cap_handle()
+                            .map(|cap| cap.local_node().as_str().to_string()),
+                    ));
+                    state
+                        .create_task(scope.region_id(), scope.budget(), async { 0_u8 })
+                        .map(|(_, stored)| stored.task_id())
+                },
+            ),
+            restart: SupervisionStrategy::Stop,
+            shutdown_budget: Budget::INFINITE,
+            depends_on: vec![],
+            registration: NameRegistrationPolicy::None,
+            start_immediately: true,
+            required: true,
+        };
+
+        let app_handle = AppSpec::new("bootstrap_cx_app")
+            .with_registry(handle)
+            .child(child)
+            .start(&mut state, &cx, root)
+            .expect("start ok");
+
+        let (seen_region, seen_task, saw_registry, remote_origin) = seen
+            .lock()
+            .clone()
+            .expect("child should observe bootstrap cx");
+        assert_eq!(
+            seen_region,
+            app_handle.root_region(),
+            "startup closures must observe the app root region, not the caller's region"
+        );
+        assert_ne!(
+            seen_task, parent_task,
+            "startup closures must not inherit the caller's task identity"
+        );
+        assert!(
+            saw_registry,
+            "app registry override must be visible during startup"
+        );
+        assert_eq!(remote_origin.as_deref(), Some("origin-test"));
+
+        let _raw = app_handle.into_raw();
+        crate::test_complete!("app_bootstrap_cx_targets_app_root_and_preserves_capabilities");
     }
 
     #[test]

@@ -662,6 +662,16 @@ impl TaskRecord {
                 | TaskState::Finalizing { reason, .. },
                 Outcome::Ok(()) | Outcome::Err(_),
             ) => Outcome::Cancelled(reason.clone()),
+            (
+                TaskState::CancelRequested { reason, .. }
+                | TaskState::Cancelling { reason, .. }
+                | TaskState::Finalizing { reason, .. },
+                Outcome::Cancelled(outcome_reason),
+            ) => {
+                let mut final_reason = reason.clone();
+                final_reason.strengthen(&outcome_reason);
+                Outcome::Cancelled(final_reason)
+            }
             (_, outcome) => outcome,
         };
         if matches!(outcome, Outcome::Cancelled(_)) && self.cancel_epoch == 0 {
@@ -1315,6 +1325,38 @@ mod tests {
             witness.phase
         );
         crate::test_complete!("complete_ok_during_cancellation_cleanup_becomes_cancelled");
+    }
+
+    #[test]
+    fn complete_cancelled_during_protocol_does_not_weaken_reason() {
+        init_test("complete_cancelled_during_protocol_does_not_weaken_reason");
+        let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
+        let _ = t.request_cancel(CancelReason::timeout());
+
+        let completed = t.complete(Outcome::Cancelled(CancelReason::user("soft")));
+        crate::assert_with_log!(completed, "complete cancelled", true, completed);
+
+        match &t.state {
+            TaskState::Completed(Outcome::Cancelled(reason)) => {
+                crate::assert_with_log!(
+                    reason.kind == crate::types::CancelKind::Timeout,
+                    "cancel reason stayed strongest",
+                    crate::types::CancelKind::Timeout,
+                    reason.kind
+                );
+            }
+            other => panic!("expected Completed(Cancelled), got {other:?}"),
+        }
+
+        let witness = t.cancel_witness().expect("cancel witness after completion");
+        crate::assert_with_log!(
+            witness.reason.kind == crate::types::CancelKind::Timeout,
+            "witness reason stayed strongest",
+            crate::types::CancelKind::Timeout,
+            witness.reason.kind
+        );
+
+        crate::test_complete!("complete_cancelled_during_protocol_does_not_weaken_reason");
     }
 
     #[test]

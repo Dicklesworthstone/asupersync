@@ -43,6 +43,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::Duration;
 
 use crate::channel::mpsc;
 use crate::channel::mpsc::SendError;
@@ -261,10 +262,11 @@ impl<A: Actor> ActorHandle<A> {
     /// empty, the actor loop will exit and call `on_stop` before returning.
     ///
     /// Unlike [`abort`](Self::abort), this does NOT immediately request
-    /// cancellation, allowing the actor to drain pending work.
+    /// cancellation, allowing the actor to drain pending work. The mailbox is
+    /// sealed immediately so new sends fail fast instead of extending shutdown.
     pub fn stop(&self) {
         self.state.store(ActorState::Stopping);
-        self.sender.wake_receiver();
+        self.sender.close_receiver();
     }
 
     /// Returns true if the actor has finished.
@@ -298,6 +300,7 @@ impl<A: Actor> ActorHandle<A> {
     /// `on_stop` before returning.
     pub fn abort(&self) {
         self.state.store(ActorState::Stopping);
+        self.sender.close_receiver();
         if let Some(inner) = self.inner.upgrade() {
             let cancel_waker = {
                 let mut guard = inner.write();
@@ -314,7 +317,6 @@ impl<A: Actor> ActorHandle<A> {
                 waker.wake_by_ref();
             }
         }
-        self.sender.wake_receiver();
     }
 }
 
@@ -341,6 +343,7 @@ impl<A: Actor> ActorJoinFuture<'_, A> {
 
     fn abort(&self) {
         self.state.store(ActorState::Stopping);
+        self.sender.close_receiver();
         if let Some(inner) = self.cx_inner.upgrade() {
             let cancel_waker = {
                 let mut guard = inner.write();
@@ -357,7 +360,6 @@ impl<A: Actor> ActorJoinFuture<'_, A> {
                 waker.wake_by_ref();
             }
         }
-        self.sender.wake_receiver();
     }
 }
 
@@ -896,6 +898,52 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     actor
 }
 
+fn actor_cancel_join_error(cx: &Cx) -> JoinError {
+    JoinError::Cancelled(
+        cx.cancel_reason()
+            .unwrap_or_else(|| crate::types::CancelReason::user("actor supervision cancelled")),
+    )
+}
+
+fn supervised_restart_timestamp(cx: &Cx) -> u64 {
+    cx.timer_driver().map_or_else(
+        || crate::time::wall_now().as_nanos(),
+        |td| td.now().as_nanos(),
+    )
+}
+
+async fn wait_supervised_restart_delay(cx: &Cx, delay: Duration) -> Result<(), JoinError> {
+    if cx.checkpoint().is_err() {
+        return Err(actor_cancel_join_error(cx));
+    }
+    if delay.is_zero() {
+        return Ok(());
+    }
+
+    let now = cx
+        .timer_driver()
+        .map_or_else(crate::time::wall_now, |td| td.now());
+    let mut sleeper = crate::time::sleep(now, delay);
+    std::future::poll_fn(|task_cx| {
+        if cx.checkpoint().is_err() {
+            return std::task::Poll::Ready(Err(actor_cancel_join_error(cx)));
+        }
+        Pin::new(&mut sleeper).poll(task_cx).map(|()| Ok(()))
+    })
+    .await
+}
+
+fn join_result_to_task_outcome<A>(result: &Result<A, JoinError>) -> Outcome<(), ()> {
+    match result {
+        Ok(_) => Outcome::Ok(()),
+        Err(JoinError::Cancelled(reason)) => Outcome::Cancelled(reason.clone()),
+        Err(JoinError::Panicked(payload)) => Outcome::Panicked(payload.clone()),
+        Err(JoinError::PolledAfterCompletion) => {
+            panic!("actor task produced JoinError::PolledAfterCompletion")
+        }
+    }
+}
+
 // Extension for Scope to spawn actors
 impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
     /// Spawns a new actor in this scope with the given mailbox capacity.
@@ -952,18 +1000,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         );
 
         // Create child context
-        let child_observability = cx.child_observability(self.region_id(), task_id);
-        let child_entropy = cx.child_entropy(task_id);
-        let io_driver = state.io_driver_handle();
-        let child_cx = Cx::new_with_observability(
-            self.region_id(),
-            task_id,
-            self.budget(),
-            Some(child_observability),
-            io_driver,
-            Some(child_entropy),
-        )
-        .with_blocking_pool_handle(cx.blocking_pool_handle());
+        let (_, child_cx) = self.build_child_task_cx(state, cx, task_id);
 
         // Link Cx to TaskRecord
         if let Some(record) = state.task_mut(task_id) {
@@ -986,20 +1023,23 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                 inner: Box::pin(run_actor_loop(actor, child_cx, &mut cell)),
             }
             .await;
-            match result {
+            let outcome = match result {
                 Ok(actor_final) => {
                     let _ = result_tx.send(&cx_for_send, Ok(actor_final));
+                    Outcome::Ok(())
                 }
                 Err(payload) => {
                     let msg = crate::cx::scope::payload_to_string(&payload);
+                    let panic_payload = crate::types::PanicPayload::new(msg);
                     let _ = result_tx.send(
                         &cx_for_send,
-                        Err(JoinError::Panicked(crate::types::PanicPayload::new(msg))),
+                        Err(JoinError::Panicked(panic_payload.clone())),
                     );
+                    Outcome::Panicked(panic_payload)
                 }
-            }
+            };
             state_for_task.store(ActorState::Stopped);
-            Outcome::Ok(())
+            outcome
         };
 
         let stored = StoredTask::new_with_id(wrapped, task_id);
@@ -1017,12 +1057,18 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         Ok((handle, stored))
     }
 
-    /// Spawns a supervised actor with automatic restart on failure.
+    /// Spawns a supervised actor with explicit supervision semantics.
     ///
     /// Unlike `spawn_actor`, this method takes a factory closure that can
     /// produce new actor instances for restarts. The mailbox persists across
-    /// restarts, so messages sent during restart are buffered and processed
-    /// by the new instance.
+    /// restarts, so messages sent while a restartable failure is being handled
+    /// are buffered for the next instance.
+    ///
+    /// Because [`Actor`] has no explicit error return channel, supervised
+    /// crashes are treated as restartable failures when the strategy is
+    /// [`crate::supervision::SupervisionStrategy::Restart`]. If supervision
+    /// ultimately stops or escalates, the original panic payload is still
+    /// surfaced as `JoinError::Panicked`.
     ///
     /// # Arguments
     ///
@@ -1068,18 +1114,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             "supervised actor spawned"
         );
 
-        let child_observability = cx.child_observability(self.region_id(), task_id);
-        let child_entropy = cx.child_entropy(task_id);
-        let io_driver = state.io_driver_handle();
-        let child_cx = Cx::new_with_observability(
-            self.region_id(),
-            task_id,
-            self.budget(),
-            Some(child_observability),
-            io_driver,
-            Some(child_entropy),
-        )
-        .with_blocking_pool_handle(cx.blocking_pool_handle());
+        let (_, child_cx) = self.build_child_task_cx(state, cx, task_id);
 
         if let Some(record) = state.task_mut(task_id) {
             record.set_cx_inner(child_cx.inner.clone());
@@ -1107,9 +1142,10 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                 region_id,
             )
             .await;
+            let outcome = join_result_to_task_outcome(&result).map_err(|_| ());
             let _ = result_tx.send(&cx_for_send, result);
             state_for_task.store(ActorState::Stopped);
-            Outcome::Ok(())
+            outcome
         };
 
         let stored = StoredTask::new_with_id(wrapped, task_id);
@@ -1178,46 +1214,64 @@ where
                 return Ok(actor_final);
             }
             Err(payload) => {
-                // Actor panicked — consult supervisor.
-                // We report this as Failed (not Panicked) because actor crashes
-                // are the expected failure mode for supervision. The Erlang/OTP
-                // model restarts on crashes; Outcome::Panicked would always Stop.
                 let msg = crate::cx::scope::payload_to_string(&payload);
+                let panic_payload = crate::types::PanicPayload::new(msg);
                 cx.trace("supervised_actor::failure");
 
-                let outcome = Outcome::err(());
-                let now = cx.timer_driver().map_or(0, |td| td.now().as_nanos());
+                // Explicit shutdown wins over restart policy. If the owner has
+                // already requested stop/abort, a panic during mailbox drain or
+                // on_stop is terminal and must not resurrect the actor.
+                if cell.state.load() == ActorState::Stopping || cx.checkpoint().is_err() {
+                    cx.trace("supervised_actor::shutdown_panic");
+                    return Err(JoinError::Panicked(panic_payload));
+                }
+
+                // Actors do not have a typed `Err` path. A crash is therefore
+                // the only recoverable failure signal available to the actor
+                // supervision layer, so present it to the generic supervisor as
+                // a restartable failure while preserving the original payload to
+                // surface if supervision ultimately stops or escalates.
+                let outcome = Outcome::Err(());
+                let now = supervised_restart_timestamp(&cx);
                 let decision = supervisor.on_failure(task_id, region_id, None, &outcome, now);
 
                 match decision {
                     SupervisionDecision::Restart { delay, .. } => {
                         cx.trace("supervised_actor::restart");
 
+                        // Graceful shutdown may arrive after the crash but
+                        // before the delayed restart starts running. That stop
+                        // must suppress the restart rather than instantiate a
+                        // fresh actor during shutdown.
+                        if cell.state.load() == ActorState::Stopping {
+                            cx.trace("supervised_actor::restart_suppressed");
+                            return Err(JoinError::Panicked(panic_payload));
+                        }
+
+                        // Apply backoff delay if the supervisor computed one.
+                        if let Some(backoff) = delay {
+                            wait_supervised_restart_delay(&cx, backoff).await?;
+                        }
+
+                        if cell.state.load() == ActorState::Stopping || cx.checkpoint().is_err() {
+                            cx.trace("supervised_actor::restart_suppressed");
+                            return Err(JoinError::Panicked(panic_payload));
+                        }
+
                         // Reset actor state so the restarted actor enters
                         // Running instead of staying in Stopping (which
                         // would cause it to exit immediately on empty
                         // mailbox).
                         cell.state.store(ActorState::Created);
-
-                        // Apply backoff delay if the supervisor computed one.
-                        if let Some(backoff) = delay {
-                            if !backoff.is_zero() {
-                                let now = cx
-                                    .timer_driver()
-                                    .map_or_else(crate::time::wall_now, |td| td.now());
-                                crate::time::sleep(now, backoff).await;
-                            }
-                        }
-
                         current_actor = factory();
                     }
                     SupervisionDecision::Stop { .. } => {
                         cx.trace("supervised_actor::stopped");
-                        return Err(JoinError::Panicked(crate::types::PanicPayload::new(msg)));
+                        return Err(JoinError::Panicked(panic_payload));
                     }
                     SupervisionDecision::Escalate { .. } => {
                         cx.trace("supervised_actor::escalated");
-                        return Err(JoinError::Panicked(crate::types::PanicPayload::new(msg)));
+                        return Err(JoinError::Panicked(panic_payload));
                     }
                 }
             }
@@ -1228,13 +1282,38 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cx::macaroon::MacaroonToken;
+    use crate::cx::registry::{RegistryCap, RegistryHandle};
+    use crate::remote::{NodeId, RemoteCap};
     use crate::runtime::state::RuntimeState;
+    use crate::security::key::AuthKey;
     use crate::types::Budget;
+    use crate::types::SystemPressure;
     use crate::types::policy::FailFast;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn counting_waker(counter: Arc<std::sync::atomic::AtomicUsize>) -> Waker {
+        struct CountingWaker {
+            counter: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl std::task::Wake for CountingWaker {
+            fn wake(self: Arc<Self>) {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        Waker::from(Arc::new(CountingWaker { counter }))
     }
 
     /// Simple counter actor for testing.
@@ -1276,6 +1355,102 @@ mod tests {
 
     fn assert_actor<A: Actor>() {}
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CapabilitySnapshot {
+        same_registry: bool,
+        same_remote: bool,
+        same_io: bool,
+        same_pressure: bool,
+        same_macaroon: bool,
+        has_timer: bool,
+    }
+
+    struct CapabilityProbeActor {
+        snapshot: Arc<parking_lot::Mutex<Option<CapabilitySnapshot>>>,
+        expected_registry: Arc<dyn RegistryCap>,
+        expected_remote_node: String,
+        expected_io: Arc<dyn crate::io::IoCap>,
+        expected_pressure: Arc<SystemPressure>,
+        expected_macaroon: Arc<MacaroonToken>,
+    }
+
+    impl Actor for CapabilityProbeActor {
+        type Message = ();
+
+        fn on_start(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let child_registry = cx
+                .registry_handle()
+                .expect("actor child Cx must inherit registry")
+                .as_arc();
+            let child_io = cx
+                .io_cap_handle()
+                .expect("actor child Cx must inherit io capability");
+            let child_pressure = cx
+                .pressure_handle()
+                .expect("actor child Cx must inherit system pressure");
+            let child_macaroon = cx
+                .macaroon_handle()
+                .expect("actor child Cx must inherit macaroon");
+            let remote_node = cx
+                .remote()
+                .map(|remote| remote.local_node().as_str().to_owned());
+
+            *self.snapshot.lock() = Some(CapabilitySnapshot {
+                same_registry: Arc::ptr_eq(&child_registry, &self.expected_registry),
+                same_remote: remote_node.as_deref() == Some(self.expected_remote_node.as_str()),
+                same_io: Arc::ptr_eq(&child_io, &self.expected_io),
+                same_pressure: Arc::ptr_eq(&child_pressure, &self.expected_pressure),
+                same_macaroon: Arc::ptr_eq(&child_macaroon, &self.expected_macaroon),
+                has_timer: cx.has_timer(),
+            });
+
+            Box::pin(async {})
+        }
+
+        fn handle(&mut self, _cx: &Cx, _msg: ()) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(async {})
+        }
+    }
+
+    fn capability_rich_parent_cx(
+        runtime: &crate::lab::LabRuntime,
+        region: crate::types::RegionId,
+    ) -> (
+        Cx,
+        Arc<dyn RegistryCap>,
+        Arc<dyn crate::io::IoCap>,
+        Arc<SystemPressure>,
+        Arc<MacaroonToken>,
+    ) {
+        let registry = crate::cx::NameRegistry::new();
+        let registry_handle = RegistryHandle::new(Arc::new(registry));
+        let registry_arc = registry_handle.as_arc();
+        let io_cap: Arc<dyn crate::io::IoCap> = Arc::new(crate::io::LabIoCap::new());
+        let pressure = Arc::new(SystemPressure::with_headroom(0.25));
+        let token = MacaroonToken::mint(&AuthKey::from_seed(7), "scope:actor", "actor/tests");
+
+        let parent_cx = Cx::new_with_drivers(
+            region,
+            crate::types::TaskId::new_for_test(77, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            Some(Arc::clone(&io_cap)),
+            runtime.state.timer_driver_handle(),
+            None,
+        )
+        .with_registry_handle(Some(registry_handle))
+        .with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("actor-origin")))
+        .with_pressure(Arc::clone(&pressure))
+        .with_macaroon(token);
+
+        let macaroon = parent_cx
+            .macaroon_handle()
+            .expect("parent actor test Cx must retain macaroon");
+
+        (parent_cx, registry_arc, io_cap, pressure, macaroon)
+    }
+
     #[test]
     fn actor_trait_object_safety() {
         init_test("actor_trait_object_safety");
@@ -1308,6 +1483,114 @@ mod tests {
         assert!(!handle.is_finished());
 
         crate::test_complete!("actor_handle_creation");
+    }
+
+    #[test]
+    fn spawn_actor_inherits_child_cx_capabilities() {
+        init_test("spawn_actor_inherits_child_cx_capabilities");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+        let (parent_cx, registry_arc, io_cap, pressure, macaroon) =
+            capability_rich_parent_cx(&runtime, region);
+        let snapshot = Arc::new(parking_lot::Mutex::new(None));
+
+        let actor = CapabilityProbeActor {
+            snapshot: Arc::clone(&snapshot),
+            expected_registry: registry_arc,
+            expected_remote_node: "actor-origin".to_string(),
+            expected_io: io_cap,
+            expected_pressure: pressure,
+            expected_macaroon: macaroon,
+        };
+
+        let (handle, stored) = scope
+            .spawn_actor(&mut runtime.state, &parent_cx, actor, 8)
+            .expect("spawn actor");
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_idle();
+
+        let observed = snapshot
+            .lock()
+            .clone()
+            .expect("actor on_start should capture inherited capabilities");
+        assert_eq!(
+            observed,
+            CapabilitySnapshot {
+                same_registry: true,
+                same_remote: true,
+                same_io: true,
+                same_pressure: true,
+                same_macaroon: true,
+                has_timer: true,
+            }
+        );
+
+        drop(handle);
+        runtime.run_until_quiescent();
+
+        crate::test_complete!("spawn_actor_inherits_child_cx_capabilities");
+    }
+
+    #[test]
+    fn spawn_supervised_actor_inherits_child_cx_capabilities() {
+        init_test("spawn_supervised_actor_inherits_child_cx_capabilities");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+        let (parent_cx, registry_arc, io_cap, pressure, macaroon) =
+            capability_rich_parent_cx(&runtime, region);
+        let snapshot = Arc::new(parking_lot::Mutex::new(None));
+
+        let snapshot_for_factory = Arc::clone(&snapshot);
+        let strategy = crate::supervision::SupervisionStrategy::Stop;
+        let (handle, stored) = scope
+            .spawn_supervised_actor(
+                &mut runtime.state,
+                &parent_cx,
+                move || CapabilityProbeActor {
+                    snapshot: Arc::clone(&snapshot_for_factory),
+                    expected_registry: Arc::clone(&registry_arc),
+                    expected_remote_node: "actor-origin".to_string(),
+                    expected_io: Arc::clone(&io_cap),
+                    expected_pressure: Arc::clone(&pressure),
+                    expected_macaroon: Arc::clone(&macaroon),
+                },
+                strategy,
+                8,
+            )
+            .expect("spawn supervised actor");
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_idle();
+
+        let observed = snapshot
+            .lock()
+            .clone()
+            .expect("supervised actor on_start should capture inherited capabilities");
+        assert_eq!(
+            observed,
+            CapabilitySnapshot {
+                same_registry: true,
+                same_remote: true,
+                same_io: true,
+                same_pressure: true,
+                same_macaroon: true,
+                has_timer: true,
+            }
+        );
+
+        drop(handle);
+        runtime.run_until_quiescent();
+
+        crate::test_complete!("spawn_supervised_actor_inherits_child_cx_capabilities");
     }
 
     #[test]
@@ -1482,6 +1765,15 @@ mod tests {
         // Cancel the actor BEFORE running.
         // The actor loop will: on_start → check cancel → break → drain → on_stop
         handle.stop();
+        let stopped_ref = handle.sender();
+        assert!(
+            stopped_ref.is_closed(),
+            "stop() seals the mailbox immediately"
+        );
+        assert!(
+            matches!(handle.try_send(99), Err(SendError::Disconnected(99))),
+            "stop() must reject new messages instead of extending shutdown"
+        );
 
         runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_quiescent();
@@ -1578,6 +1870,10 @@ mod tests {
             ActorState::Stopping,
             "dropping join future should mirror ActorHandle::abort state transition"
         );
+        assert!(
+            matches!(handle.try_send(1), Err(SendError::Disconnected(1))),
+            "join-drop abort must seal the mailbox immediately"
+        );
 
         runtime.run_until_quiescent();
         assert!(
@@ -1595,13 +1891,55 @@ mod tests {
         crate::test_complete!("dropped_join_future_marks_actor_stopping_like_abort");
     }
 
-    /// E2E: Supervised actor restarts on panic within budget.
-    /// Actor panics on messages >= threshold, supervisor restarts it.
-    /// After restart, actor processes subsequent normal messages.
     #[test]
-    fn supervised_actor_restarts_on_panic() {
+    fn actor_stop_unblocks_pending_sender_with_disconnect() {
+        init_test("actor_stop_unblocks_pending_sender_with_disconnect");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx: Cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+
+        let (handle, stored) = scope
+            .spawn_actor(&mut state, &cx, Counter::new(), 1)
+            .unwrap();
+        state.store_spawned_task(handle.task_id(), stored);
+
+        handle.try_send(1).expect("fill mailbox");
+        let sender = handle.sender();
+        let mut send_fut = Box::pin(sender.send(&cx, 2));
+        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = counting_waker(Arc::clone(&wake_count));
+        let mut task_cx = Context::from_waker(&waker);
+
+        let first_poll = send_fut.as_mut().poll(&mut task_cx);
+        assert!(
+            matches!(first_poll, Poll::Pending),
+            "send should wait while the mailbox is full"
+        );
+
+        handle.stop();
+
+        assert_eq!(
+            wake_count.load(Ordering::SeqCst),
+            1,
+            "stop() must wake a sender blocked on mailbox capacity"
+        );
+        let second_poll = send_fut.as_mut().poll(&mut task_cx);
+        assert!(
+            matches!(second_poll, Poll::Ready(Err(SendError::Disconnected(2)))),
+            "pending sender must fail fast once stop seals the mailbox"
+        );
+
+        crate::test_complete!("actor_stop_unblocks_pending_sender_with_disconnect");
+    }
+
+    /// E2E: Supervised actor crashes restart under Restart strategy.
+    #[test]
+    fn supervised_actor_panic_restarts_under_restart_strategy() {
         use std::sync::atomic::AtomicU32;
 
+        #[derive(Debug)]
         struct PanickingCounter {
             count: u64,
             panic_on: u64,
@@ -1627,7 +1965,7 @@ mod tests {
             }
         }
 
-        init_test("supervised_actor_restarts_on_panic");
+        init_test("supervised_actor_panic_restarts_under_restart_strategy");
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -1640,10 +1978,11 @@ mod tests {
         let rc = restart_count.clone();
 
         let strategy = crate::supervision::SupervisionStrategy::Restart(
-            crate::supervision::RestartConfig::new(3, std::time::Duration::from_secs(60)),
+            crate::supervision::RestartConfig::new(3, std::time::Duration::from_secs(60))
+                .with_backoff(crate::supervision::BackoffStrategy::None),
         );
 
-        let (handle, stored) = scope
+        let (mut handle, stored) = scope
             .spawn_supervised_actor(
                 &mut runtime.state,
                 &cx,
@@ -1664,35 +2003,419 @@ mod tests {
 
         // Message sequence:
         // 1. Normal message (count += 1)
-        // 2. Panic trigger (actor panics, supervisor restarts)
-        // 3. Normal message after restart (count += 1 on new instance)
+        // 2. Panic trigger
+        // 3. Queued message that should run on the restarted actor instance
         handle.try_send(1).unwrap();
         handle.try_send(999).unwrap(); // triggers panic
-        handle.try_send(1).unwrap(); // processed by restarted actor
+        handle.try_send(1).unwrap();
 
-        // Drop handle to disconnect channel after the restarted actor processes messages
-        drop(handle);
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_idle();
+        handle.abort();
+        runtime.run_until_quiescent();
+
+        let join = futures_lite::future::block_on(handle.join(&cx));
+        let actor = join.expect("aborting the restarted actor should still return final state");
+        assert_eq!(
+            restart_count.load(Ordering::SeqCst),
+            2,
+            "panic must trigger exactly one supervised restart, got {} factory calls",
+            restart_count.load(Ordering::SeqCst)
+        );
+        assert_eq!(
+            actor.count, 1,
+            "restarted actor should keep the post-crash message count"
+        );
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            1,
+            "restarted actor should process the queued post-crash message before abort"
+        );
+
+        crate::test_complete!("supervised_actor_panic_restarts_under_restart_strategy");
+    }
+
+    #[test]
+    fn supervised_restart_window_expires_without_timer_driver() {
+        use std::thread;
+
+        init_test("supervised_restart_window_expires_without_timer_driver");
+
+        let cx = Cx::new(
+            RegionId::testing_default(),
+            TaskId::new_for_test(1, 1),
+            Budget::INFINITE,
+        );
+        let mut supervisor =
+            crate::supervision::Supervisor::new(crate::supervision::SupervisionStrategy::Restart(
+                crate::supervision::RestartConfig::new(1, Duration::from_millis(2))
+                    .with_backoff(crate::supervision::BackoffStrategy::None),
+            ));
+        let outcome = Outcome::Err(());
+        let task_id = TaskId::new_for_test(2, 1);
+
+        let first = supervisor.on_failure(
+            task_id,
+            RegionId::testing_default(),
+            None,
+            &outcome,
+            supervised_restart_timestamp(&cx),
+        );
+        assert!(
+            matches!(
+                first,
+                crate::supervision::SupervisionDecision::Restart { attempt: 1, .. }
+            ),
+            "first failure should allow a restart"
+        );
+
+        thread::sleep(Duration::from_millis(5));
+
+        let second = supervisor.on_failure(
+            task_id,
+            RegionId::testing_default(),
+            None,
+            &outcome,
+            supervised_restart_timestamp(&cx),
+        );
+        assert!(
+            matches!(
+                second,
+                crate::supervision::SupervisionDecision::Restart { attempt: 1, .. }
+            ),
+            "wall-clock fallback must let the restart window expire without a timer driver"
+        );
+
+        crate::test_complete!("supervised_restart_window_expires_without_timer_driver");
+    }
+
+    #[test]
+    fn supervised_actor_stop_prevents_restart_after_panic() {
+        use std::sync::atomic::AtomicU32;
+
+        #[derive(Debug)]
+        struct StopThenPanicActor;
+
+        impl Actor for StopThenPanicActor {
+            type Message = ();
+
+            fn handle(
+                &mut self,
+                _cx: &Cx,
+                _msg: (),
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                panic!("panic during shutdown");
+            }
+        }
+
+        init_test("supervised_actor_stop_prevents_restart_after_panic");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx: Cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let restart_count = Arc::new(AtomicU32::new(0));
+        let rc = Arc::clone(&restart_count);
+        let strategy = crate::supervision::SupervisionStrategy::Restart(
+            crate::supervision::RestartConfig::new(3, Duration::from_secs(60))
+                .with_backoff(crate::supervision::BackoffStrategy::None),
+        );
+
+        let (mut handle, stored) = scope
+            .spawn_supervised_actor(
+                &mut runtime.state,
+                &cx,
+                move || {
+                    rc.fetch_add(1, Ordering::SeqCst);
+                    StopThenPanicActor
+                },
+                strategy,
+                8,
+            )
+            .expect("spawn supervised actor");
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        handle.try_send(()).expect("queue panic message");
+        handle.stop();
 
         runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_quiescent();
 
-        // Factory was called: once for initial + once for restart = fetch_add called twice
-        // (first call was during spawn_supervised_actor, so count starts at 1;
-        //  restart increments to 2)
-        assert!(
-            restart_count.load(Ordering::SeqCst) >= 2,
-            "factory should have been called at least twice (initial + restart), got {}",
-            restart_count.load(Ordering::SeqCst)
-        );
-
-        // After restart, actor processes msg=1, then stops => final_count=1
         assert_eq!(
-            final_count.load(Ordering::SeqCst),
+            restart_count.load(Ordering::SeqCst),
             1,
-            "restarted actor should have processed the post-panic message"
+            "explicit stop must suppress supervised restarts"
         );
 
-        crate::test_complete!("supervised_actor_restarts_on_panic");
+        let join = futures_lite::future::block_on(handle.join(&cx));
+        match join {
+            Err(JoinError::Panicked(payload)) => {
+                assert_eq!(
+                    payload.message(),
+                    "panic during shutdown",
+                    "shutdown panic should surface without restarting"
+                );
+            }
+            other => panic!("expected shutdown panic without restart, got {other:?}"),
+        }
+
+        crate::test_complete!("supervised_actor_stop_prevents_restart_after_panic");
+    }
+
+    #[test]
+    fn supervised_actor_stop_during_restart_backoff_prevents_new_instance() {
+        use std::sync::atomic::AtomicU32;
+
+        #[derive(Debug)]
+        struct DelayedRestartActor {
+            starts: Arc<AtomicU32>,
+        }
+
+        impl Actor for DelayedRestartActor {
+            type Message = ();
+
+            fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let starts = Arc::clone(&self.starts);
+                Box::pin(async move {
+                    starts.fetch_add(1, Ordering::SeqCst);
+                })
+            }
+
+            fn handle(
+                &mut self,
+                _cx: &Cx,
+                _msg: (),
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                panic!("panic before delayed restart");
+            }
+        }
+
+        init_test("supervised_actor_stop_during_restart_backoff_prevents_new_instance");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx: Cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let factory_count = Arc::new(AtomicU32::new(0));
+        let starts = Arc::new(AtomicU32::new(0));
+        let fc = Arc::clone(&factory_count);
+        let starts_for_factory = Arc::clone(&starts);
+        let strategy = crate::supervision::SupervisionStrategy::Restart(
+            crate::supervision::RestartConfig::new(3, Duration::from_secs(60)).with_backoff(
+                crate::supervision::BackoffStrategy::Fixed(Duration::from_secs(5)),
+            ),
+        );
+
+        let (mut handle, stored) = scope
+            .spawn_supervised_actor(
+                &mut runtime.state,
+                &cx,
+                move || {
+                    fc.fetch_add(1, Ordering::SeqCst);
+                    DelayedRestartActor {
+                        starts: Arc::clone(&starts_for_factory),
+                    }
+                },
+                strategy,
+                8,
+            )
+            .expect("spawn supervised actor");
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        handle.try_send(()).expect("queue panic message");
+
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_idle();
+        assert_eq!(
+            runtime.pending_timer_count(),
+            1,
+            "supervised actor should be waiting on restart backoff"
+        );
+
+        handle.stop();
+        let report = runtime.run_with_auto_advance();
+
+        assert!(
+            matches!(
+                report.termination,
+                crate::lab::AutoAdvanceTermination::Quiescent
+            ),
+            "runtime should quiesce after stop suppresses restart: {report:?}"
+        );
+        assert_eq!(
+            factory_count.load(Ordering::SeqCst),
+            1,
+            "graceful stop during backoff must prevent a replacement actor from being constructed"
+        );
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "graceful stop during backoff must prevent restarted actor lifecycle hooks from running"
+        );
+
+        let join = futures_lite::future::block_on(handle.join(&cx));
+        match join {
+            Err(JoinError::Panicked(payload)) => {
+                assert_eq!(
+                    payload.message(),
+                    "panic before delayed restart",
+                    "original panic should surface when restart is suppressed"
+                );
+            }
+            other => panic!(
+                "expected original panic when stop suppresses delayed restart, got {other:?}"
+            ),
+        }
+
+        crate::test_complete!("supervised_actor_stop_during_restart_backoff_prevents_new_instance");
+    }
+
+    #[test]
+    fn spawn_actor_panic_surfaces_as_task_outcome() {
+        init_test("spawn_actor_panic_surfaces_as_task_outcome");
+
+        #[derive(Debug)]
+        struct PanicActor;
+
+        impl Actor for PanicActor {
+            type Message = ();
+
+            fn handle(
+                &mut self,
+                _cx: &Cx,
+                _msg: (),
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                panic!("actor boom");
+            }
+        }
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx: Cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+
+        let (mut handle, mut stored) = scope
+            .spawn_actor(&mut state, &cx, PanicActor, 8)
+            .expect("spawn actor");
+        handle.try_send(()).expect("queue panic message");
+
+        let waker = counting_waker(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let mut poll_cx = Context::from_waker(&waker);
+        match stored.poll(&mut poll_cx) {
+            Poll::Ready(Outcome::Panicked(payload)) => {
+                assert_eq!(payload.message(), "actor boom", "panic payload preserved");
+            }
+            other => panic!("panicking actor task must return Outcome::Panicked: {other:?}"),
+        }
+
+        let join = std::pin::pin!(handle.join(&cx));
+        let mut join = join;
+        match join.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Err(JoinError::Panicked(payload))) => {
+                assert_eq!(
+                    payload.message(),
+                    "actor boom",
+                    "join preserves panic payload"
+                );
+            }
+            other => panic!("join must surface actor panic: {other:?}"),
+        }
+
+        crate::test_complete!("spawn_actor_panic_surfaces_as_task_outcome");
+    }
+
+    #[test]
+    fn spawn_supervised_actor_panic_surfaces_as_task_outcome() {
+        init_test("spawn_supervised_actor_panic_surfaces_as_task_outcome");
+
+        #[derive(Debug)]
+        struct PanicActor;
+
+        impl Actor for PanicActor {
+            type Message = ();
+
+            fn handle(
+                &mut self,
+                _cx: &Cx,
+                _msg: (),
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                panic!("supervised actor boom");
+            }
+        }
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx: Cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+
+        let (mut handle, mut stored) = scope
+            .spawn_supervised_actor(
+                &mut state,
+                &cx,
+                || PanicActor,
+                crate::supervision::SupervisionStrategy::Stop,
+                8,
+            )
+            .expect("spawn supervised actor");
+        handle.try_send(()).expect("queue panic message");
+
+        let waker = counting_waker(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let mut poll_cx = Context::from_waker(&waker);
+        match stored.poll(&mut poll_cx) {
+            Poll::Ready(Outcome::Panicked(payload)) => {
+                assert_eq!(
+                    payload.message(),
+                    "supervised actor boom",
+                    "panic payload preserved"
+                );
+            }
+            other => {
+                panic!("panicking supervised actor task must return Outcome::Panicked: {other:?}")
+            }
+        }
+
+        let join = std::pin::pin!(handle.join(&cx));
+        let mut join = join;
+        match join.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Err(JoinError::Panicked(payload))) => {
+                assert_eq!(
+                    payload.message(),
+                    "supervised actor boom",
+                    "join preserves panic payload"
+                );
+            }
+            other => panic!("join must surface supervised actor panic: {other:?}"),
+        }
+
+        crate::test_complete!("spawn_supervised_actor_panic_surfaces_as_task_outcome");
+    }
+
+    #[test]
+    fn supervised_restart_delay_honors_cancellation() {
+        init_test("supervised_restart_delay_honors_cancellation");
+
+        let cx = Cx::for_testing();
+        cx.cancel_fast(crate::types::CancelKind::User);
+
+        let mut delay = std::pin::pin!(wait_supervised_restart_delay(
+            &cx,
+            std::time::Duration::from_secs(60),
+        ));
+        let first_poll =
+            futures_lite::future::block_on(futures_lite::future::poll_once(&mut delay));
+
+        match first_poll {
+            Some(Err(JoinError::Cancelled(reason))) => {
+                assert_eq!(reason.kind, crate::types::CancelKind::User);
+            }
+            other => panic!("expected immediate cancellation, got {other:?}"),
+        }
+
+        crate::test_complete!("supervised_restart_delay_honors_cancellation");
     }
 
     /// E2E: Deterministic replay — same seed produces same actor execution.

@@ -75,7 +75,7 @@ use std::pin::Pin;
 use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 #[derive(Parser, Debug)]
 #[command(name = "asupersync", version, about = "Asupersync CLI tools")]
@@ -834,7 +834,7 @@ impl Outputtable for TraceDiffOutput {
 fn main() {
     let cli = Cli::parse();
     let common = cli.common.to_common_args();
-    let format = common.output_format();
+    let format = effective_output_format(&cli.command, common.output_format());
     let color = common.color_choice();
 
     let mut output = Output::new(format).with_color(color);
@@ -850,6 +850,49 @@ fn run(command: Command, output: &mut Output) -> Result<(), CliError> {
         Command::Conformance(args) => run_conformance(args, output),
         Command::Lab(args) => run_lab(args, output),
         Command::Doctor(args) => run_doctor(args, output),
+    }
+}
+
+fn effective_output_format(command: &Command, default: OutputFormat) -> OutputFormat {
+    match command {
+        Command::Lab(LabArgs {
+            command: LabCommand::Run(args),
+        }) if args.json => OutputFormat::JsonPretty,
+        Command::Lab(LabArgs {
+            command: LabCommand::Validate(args),
+        }) if args.json => OutputFormat::JsonPretty,
+        Command::Lab(LabArgs {
+            command: LabCommand::Replay(args),
+        }) if args.json => OutputFormat::JsonPretty,
+        Command::Lab(LabArgs {
+            command: LabCommand::Explore(args),
+        }) if args.json => OutputFormat::JsonPretty,
+        Command::Lab(LabArgs {
+            command: LabCommand::Differential(args),
+        }) if args.json => OutputFormat::JsonPretty,
+        Command::Lab(LabArgs {
+            command: LabCommand::DifferentialProfileManifest(args),
+        }) if args.json => OutputFormat::JsonPretty,
+        _ => default,
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(transparent)]
+struct JsonOutputValue<T> {
+    value: T,
+}
+
+impl<T: serde::Serialize> JsonOutputValue<T> {
+    fn new(value: T) -> Self {
+        Self { value }
+    }
+}
+
+impl<T: serde::Serialize> Outputtable for JsonOutputValue<T> {
+    fn human_format(&self) -> String {
+        serde_json::to_string_pretty(&self.value)
+            .unwrap_or_else(|err| format!("{{\"output_error\":\"{err}\"}}"))
     }
 }
 
@@ -3533,7 +3576,7 @@ fn load_scenario(path: &Path) -> Result<asupersync::lab::scenario::Scenario, Cli
         CliError::new("scenario_parse_error", "Failed to parse scenario YAML")
             .detail(format!("{err}. Hint: check indentation and field names"))
             .context("path", path.display().to_string())
-            .exit_code(ExitCode::RUNTIME_ERROR)
+            .exit_code(ExitCode::USER_ERROR)
     })
 }
 
@@ -3554,7 +3597,7 @@ fn scenario_runner_error(err: asupersync::lab::scenario_runner::ScenarioRunnerEr
                     errors.len()
                 ))
                 .context("scenario_id", scenario_id)
-                .exit_code(ExitCode::RUNTIME_ERROR)
+                .exit_code(ExitCode::USER_ERROR)
         }
         asupersync::lab::scenario_runner::ScenarioRunnerError::UnknownOracle(name) => {
             CliError::new("unknown_oracle", "Unknown oracle name in scenario")
@@ -3562,7 +3605,7 @@ fn scenario_runner_error(err: asupersync::lab::scenario_runner::ScenarioRunnerEr
                     "Oracle '{name}' not found. Available: {}",
                     asupersync::lab::meta::mutation::ALL_ORACLE_INVARIANTS.join(", ")
                 ))
-                .exit_code(ExitCode::RUNTIME_ERROR)
+                .exit_code(ExitCode::USER_ERROR)
         }
         asupersync::lab::scenario_runner::ScenarioRunnerError::ReplayDivergence {
             seed,
@@ -3589,14 +3632,11 @@ fn lab_run(args: &LabRunArgs, output: &mut Output) -> Result<(), CliError> {
     let passed = result.passed();
 
     if args.json {
-        let json = result.to_json();
-        let pretty = serde_json::to_string_pretty(&json).map_err(output_cli_error)?;
-        writeln!(io::stdout(), "{pretty}").map_err(output_cli_error)?;
+        let json = JsonOutputValue::new(result.to_json());
+        output.write(&json).map_err(output_cli_error)?;
     } else {
         let report = LabRunOutput::from_result(&result);
-        output.write(&report).map_err(|e| {
-            CliError::new("output_error", "Failed to write output").detail(e.to_string())
-        })?;
+        output.write(&report).map_err(output_cli_error)?;
     }
 
     if !passed {
@@ -3620,20 +3660,12 @@ fn lab_validate(args: &LabValidateArgs, output: &mut Output) -> Result<(), CliEr
         errors: errors.iter().map(ToString::to_string).collect(),
     };
 
-    if args.json {
-        let json = serde_json::to_value(&report).map_err(output_cli_error)?;
-        let pretty = serde_json::to_string_pretty(&json).map_err(output_cli_error)?;
-        writeln!(io::stdout(), "{pretty}").map_err(output_cli_error)?;
-    } else {
-        output.write(&report).map_err(|e| {
-            CliError::new("output_error", "Failed to write output").detail(e.to_string())
-        })?;
-    }
+    output.write(&report).map_err(output_cli_error)?;
 
     if !errors.is_empty() {
         return Err(
             CliError::new("scenario_invalid", "Scenario validation failed")
-                .exit_code(ExitCode::RUNTIME_ERROR),
+                .exit_code(ExitCode::USER_ERROR),
         );
     }
 
@@ -3698,15 +3730,7 @@ fn lab_replay(args: &LabReplayArgs, output: &mut Output) -> Result<(), CliError>
         write_replay_artifact(path, &report)?;
     }
 
-    if args.json {
-        let json = serde_json::to_value(&report).map_err(output_cli_error)?;
-        let pretty = serde_json::to_string_pretty(&json).map_err(output_cli_error)?;
-        writeln!(io::stdout(), "{pretty}").map_err(output_cli_error)?;
-    } else {
-        output.write(&report).map_err(|e| {
-            CliError::new("output_error", "Failed to write output").detail(e.to_string())
-        })?;
-    }
+    output.write(&report).map_err(output_cli_error)?;
 
     if !deterministic {
         let replay_hint = report
@@ -3749,14 +3773,11 @@ fn lab_explore(args: &LabExploreArgs, output: &mut Output) -> Result<(), CliErro
     let all_passed = result.all_passed();
 
     if args.json {
-        let json = result.to_json();
-        let pretty = serde_json::to_string_pretty(&json).map_err(output_cli_error)?;
-        writeln!(io::stdout(), "{pretty}").map_err(output_cli_error)?;
+        let json = JsonOutputValue::new(result.to_json());
+        output.write(&json).map_err(output_cli_error)?;
     } else {
         let report = LabExploreOutput::from_result(&result);
-        output.write(&report).map_err(|e| {
-            CliError::new("output_error", "Failed to write output").detail(e.to_string())
-        })?;
+        output.write(&report).map_err(output_cli_error)?;
     }
 
     if !all_passed {
@@ -4207,8 +4228,7 @@ fn lab_differential_profile_manifest_command(
 ) -> Result<(), CliError> {
     let manifest = lab_differential_profile_manifest();
     if args.json {
-        let pretty = serde_json::to_string_pretty(&manifest).map_err(output_cli_error)?;
-        writeln!(io::stdout(), "{pretty}").map_err(output_cli_error)?;
+        output.write(&manifest).map_err(output_cli_error)?;
         return Ok(());
     }
 
@@ -4449,14 +4469,7 @@ fn lab_differential(args: &LabDifferentialArgs, output: &mut Output) -> Result<(
     let report = run_lab_differential(args)?;
     let success = report.success;
 
-    if args.json {
-        let pretty = serde_json::to_string_pretty(&report).map_err(output_cli_error)?;
-        writeln!(io::stdout(), "{pretty}").map_err(output_cli_error)?;
-    } else {
-        output.write(&report).map_err(|e| {
-            CliError::new("output_error", "Failed to write output").detail(e.to_string())
-        })?;
-    }
+    output.write(&report).map_err(output_cli_error)?;
 
     if !success {
         return Err(CliError::new(
@@ -5523,22 +5536,12 @@ fn counter_i64(value: usize) -> i64 {
     i64::try_from(value).expect("sync differential counters should fit in i64")
 }
 
-struct CliNoopWaker;
-
-impl Wake for CliNoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
-
-fn cli_noop_waker() -> Waker {
-    Waker::from(Arc::new(CliNoopWaker))
-}
-
 fn poll_once<F>(future: &mut F) -> Poll<F::Output>
 where
     F: Future + Unpin,
 {
-    let waker = cli_noop_waker();
-    let mut context = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
     Pin::new(future).poll(&mut context)
 }
 
@@ -6620,6 +6623,10 @@ fn trace_events(
     limit: Option<u64>,
     filters: &[String],
 ) -> Result<Vec<TraceEventRow>, CliError> {
+    if limit == Some(0) {
+        return Ok(Vec::new());
+    }
+
     let mut reader = TraceReader::open(path).map_err(|err| trace_file_error(path, err))?;
     let mut rows = Vec::new();
     let mut index = 0u64;
@@ -6910,10 +6917,12 @@ fn kind_matches(filter: &str, kind: &str) -> bool {
         return true;
     }
     let kind_lower = kind.to_ascii_lowercase();
+    let normalized_filter = normalize_trace_kind_token(filter.as_str());
+    let normalized_kind = normalize_trace_kind_token(kind_lower.as_str());
     if kind_lower == filter {
         return true;
     }
-    if kind_lower.replace('_', "") == filter.replace('_', "") {
+    if normalized_kind == normalized_filter {
         return true;
     }
     match filter.as_str() {
@@ -6926,6 +6935,13 @@ fn kind_matches(filter: &str, kind: &str) -> bool {
         "chaos" => kind_lower.starts_with("chaos"),
         _ => kind_lower.contains(&filter),
     }
+}
+
+fn normalize_trace_kind_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| *ch != '_' && *ch != '-')
+        .collect()
 }
 
 fn compression_label(mode: CompressionMode) -> String {
@@ -7065,8 +7081,8 @@ fn write_cli_error(err: &CliError, format: OutputFormat, color: ColorChoice) -> 
         }
         OutputFormat::JsonPretty => writeln!(stderr, "{}", err.json_pretty_format()),
         OutputFormat::Tsv => {
-            let title = err.title.replace('\n', " ").replace('\t', " ");
-            let detail = err.detail.replace('\n', " ").replace('\t', " ");
+            let title = err.title.replace(['\n', '\t'], " ");
+            let detail = err.detail.replace(['\n', '\t'], " ");
             writeln!(stderr, "{}\t{}\t{}", err.error_type, title, detail)
         }
     }
@@ -7101,7 +7117,34 @@ mod tests {
     use asupersync::observability::{TaskRegionCountWire, TaskStateInfo};
     use asupersync::trace::{TraceMetadata, TraceWriter};
     use clap::Parser;
+    use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
+
+    #[derive(Clone, Default)]
+    struct SharedWrite {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedWrite {
+        fn contents(&self) -> String {
+            String::from_utf8(self.inner.lock().expect("lock shared write").clone())
+                .expect("shared write content should be utf8")
+        }
+    }
+
+    impl Write for SharedWrite {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.inner
+                .lock()
+                .expect("lock shared write")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn sample_task_console_snapshot() -> TaskConsoleWireSnapshot {
         let summary = TaskSummaryWire {
@@ -7179,6 +7222,31 @@ mod tests {
         let rows = trace_events(file.path(), 0, None, &["rng".to_string()]).expect("trace events");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, "RngSeed");
+    }
+
+    #[test]
+    fn trace_events_filtering_accepts_kebab_case_kind_names() {
+        let file = make_sample_trace();
+        let rows = trace_events(file.path(), 0, None, &["time-advanced".to_string()])
+            .expect("trace events");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "TimeAdvanced");
+    }
+
+    #[test]
+    fn trace_events_filtering_accepts_kebab_case_exact_seed_name() {
+        let file = make_sample_trace();
+        let rows =
+            trace_events(file.path(), 0, None, &["rng-seed".to_string()]).expect("trace events");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "RngSeed");
+    }
+
+    #[test]
+    fn trace_events_zero_limit_returns_no_rows() {
+        let file = make_sample_trace();
+        let rows = trace_events(file.path(), 0, Some(0), &[]).expect("trace events");
+        assert!(rows.is_empty());
     }
 
     #[test]
@@ -7323,6 +7391,77 @@ mod tests {
         };
 
         assert!(args.json);
+    }
+
+    #[test]
+    fn effective_output_format_prefers_lab_json_subcommands() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "--format",
+            "tsv",
+            "lab",
+            "differential-profile-manifest",
+            "--json",
+        ])
+        .expect("parse lab manifest command with explicit format");
+
+        let format =
+            effective_output_format(&cli.command, cli.common.to_common_args().output_format());
+
+        assert_eq!(format, OutputFormat::JsonPretty);
+    }
+
+    #[test]
+    fn load_scenario_parse_error_is_user_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("invalid.yaml");
+        fs::write(&path, "schema_version: [").expect("write malformed scenario");
+
+        let err = load_scenario(&path).expect_err("malformed yaml should fail");
+        assert_eq!(err.error_type, "scenario_parse_error");
+        assert_eq!(err.exit_code, ExitCode::USER_ERROR);
+    }
+
+    #[test]
+    fn scenario_runner_error_unknown_oracle_is_user_error() {
+        let err = scenario_runner_error(
+            asupersync::lab::scenario_runner::ScenarioRunnerError::UnknownOracle(
+                "not-real".to_string(),
+            ),
+        );
+
+        assert_eq!(err.error_type, "unknown_oracle");
+        assert_eq!(err.exit_code, ExitCode::USER_ERROR);
+    }
+
+    #[test]
+    fn lab_validate_json_uses_output_writer_and_user_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("invalid_scenario.yaml");
+        fs::write(
+            &path,
+            r#"schema_version: 1
+id: invalid-scenario
+lab:
+  worker_count: 0
+"#,
+        )
+        .expect("write invalid scenario");
+
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::JsonPretty, capture.clone());
+        let args = LabValidateArgs {
+            scenario: path,
+            json: true,
+        };
+
+        let err = lab_validate(&args, &mut output).expect_err("invalid scenario should fail");
+        let written = capture.contents();
+
+        assert_eq!(err.error_type, "scenario_invalid");
+        assert_eq!(err.exit_code, ExitCode::USER_ERROR);
+        assert!(written.contains("\"valid\": false"));
+        assert!(written.contains("\"errors\""));
     }
 
     #[test]

@@ -1358,6 +1358,14 @@ impl CompiledSupervisor {
     /// supervisor's initial `start_immediately` pass. If a runtime later boots
     /// deferred children dynamically, it must layer concrete live-child
     /// knowledge on top when deciding whether they participate in a restart.
+    ///
+    /// Restart planning is failure-aware:
+    /// - `cancel_order` still includes all siblings affected by the supervisor-level
+    ///   [`RestartPolicy`], even if some of them are not restartable.
+    /// - `restart_order` is pruned to children whose own [`SupervisionStrategy`] is
+    ///   [`SupervisionStrategy::Restart`] and whose dependencies within the affected slice are
+    ///   also being restarted. This preserves the documented `Stop` = temporary / never restart
+    ///   contract and avoids scheduling dependents behind non-restarted dependencies.
     #[must_use]
     pub fn restart_plan_for_failure<E>(
         &self,
@@ -1376,13 +1384,13 @@ impl CompiledSupervisor {
         }
 
         match self.children[failed_idx].restart {
-            SupervisionStrategy::Restart(_) => self.restart_plan_for_idx(failed_idx),
+            SupervisionStrategy::Restart(_) => self.restart_plan_for_failure_idx(failed_idx),
             SupervisionStrategy::Stop | SupervisionStrategy::Escalate => None,
         }
     }
 
     #[must_use]
-    fn restart_plan_for_idx(&self, failed_child_idx: usize) -> Option<SupervisorRestartPlan> {
+    fn affected_positions_for_idx(&self, failed_child_idx: usize) -> Option<Vec<usize>> {
         let failed_pos = self.start_pos_for_child_idx(failed_child_idx)?;
 
         let total = self.start_order.len();
@@ -1399,9 +1407,66 @@ impl CompiledSupervisor {
         })
         .collect::<Vec<_>>();
 
-        if affected_positions.is_empty() {
-            return None;
+        (!affected_positions.is_empty()).then_some(affected_positions)
+    }
+
+    #[must_use]
+    fn restart_plan_for_failure_idx(
+        &self,
+        failed_child_idx: usize,
+    ) -> Option<SupervisorRestartPlan> {
+        let affected_positions = self.affected_positions_for_idx(failed_child_idx)?;
+
+        let mut cancel_order = Vec::with_capacity(affected_positions.len());
+        for &pos in affected_positions.iter().rev() {
+            cancel_order.push(self.children[self.start_order[pos]].name.clone());
         }
+
+        let child_index_by_name = self
+            .children
+            .iter()
+            .enumerate()
+            .map(|(idx, child)| (child.name.as_str(), idx))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut affected_children = vec![false; self.children.len()];
+        for &pos in &affected_positions {
+            affected_children[self.start_order[pos]] = true;
+        }
+
+        let mut scheduled_restart = vec![false; self.children.len()];
+        let mut restart_order = Vec::with_capacity(affected_positions.len());
+        for &pos in &affected_positions {
+            let child_idx = self.start_order[pos];
+            let child = &self.children[child_idx];
+
+            if !matches!(child.restart, SupervisionStrategy::Restart(_)) {
+                continue;
+            }
+
+            let dependencies_restartable = child.depends_on.iter().all(|dependency| {
+                let dep_idx = *child_index_by_name
+                    .get(dependency.as_str())
+                    .expect("compiled supervisor dependency index missing");
+                !affected_children[dep_idx] || scheduled_restart[dep_idx]
+            });
+            if !dependencies_restartable {
+                continue;
+            }
+
+            scheduled_restart[child_idx] = true;
+            restart_order.push(child.name.clone());
+        }
+
+        Some(SupervisorRestartPlan {
+            policy: self.restart_policy,
+            cancel_order,
+            restart_order,
+        })
+    }
+
+    #[must_use]
+    fn restart_plan_for_idx(&self, failed_child_idx: usize) -> Option<SupervisorRestartPlan> {
+        let affected_positions = self.affected_positions_for_idx(failed_child_idx)?;
 
         // Hot-path allocation gate: construct orders directly without an
         // intermediate positions Vec of child names, while preserving
@@ -7077,6 +7142,106 @@ mod tests {
         );
 
         crate::test_complete!("conformance_per_child_strategy_vs_supervisor_policy");
+    }
+
+    #[test]
+    fn conformance_failure_plan_prunes_non_restartable_siblings_and_blocked_dependents() {
+        init_test(
+            "conformance_failure_plan_prunes_non_restartable_siblings_and_blocked_dependents",
+        );
+
+        let compiled = SupervisorBuilder::new("sup")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(
+                ChildSpec::new("db", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(
+                ChildSpec::new("cache", noop_start)
+                    .depends_on("db")
+                    .with_restart(SupervisionStrategy::Stop),
+            )
+            .child(
+                ChildSpec::new("web", noop_start)
+                    .depends_on("cache")
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(
+                ChildSpec::new("metrics", noop_start)
+                    .depends_on("db")
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .compile()
+            .expect("compile");
+
+        let err: Outcome<(), ()> = Outcome::Err(());
+        let plan = compiled
+            .restart_plan_for_failure("db", &err)
+            .expect("restart plan");
+
+        assert_eq!(
+            plan.cancel_order,
+            vec![
+                ChildName::from("metrics"),
+                ChildName::from("web"),
+                ChildName::from("cache"),
+                ChildName::from("db"),
+            ]
+        );
+        assert_eq!(
+            plan.restart_order,
+            vec![ChildName::from("db"), ChildName::from("metrics")]
+        );
+
+        crate::test_complete!(
+            "conformance_failure_plan_prunes_non_restartable_siblings_and_blocked_dependents"
+        );
+    }
+
+    #[test]
+    fn conformance_failure_plan_prunes_escalating_siblings_from_restart_order() {
+        init_test("conformance_failure_plan_prunes_escalating_siblings_from_restart_order");
+
+        let compiled = SupervisorBuilder::new("sup")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(
+                ChildSpec::new("db", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(
+                ChildSpec::new("audit", noop_start)
+                    .depends_on("db")
+                    .with_restart(SupervisionStrategy::Escalate),
+            )
+            .child(
+                ChildSpec::new("metrics", noop_start)
+                    .depends_on("db")
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .compile()
+            .expect("compile");
+
+        let err: Outcome<(), ()> = Outcome::Err(());
+        let plan = compiled
+            .restart_plan_for_failure("db", &err)
+            .expect("restart plan");
+
+        assert_eq!(
+            plan.cancel_order,
+            vec![
+                ChildName::from("metrics"),
+                ChildName::from("audit"),
+                ChildName::from("db"),
+            ]
+        );
+        assert_eq!(
+            plan.restart_order,
+            vec![ChildName::from("db"), ChildName::from("metrics")]
+        );
+
+        crate::test_complete!(
+            "conformance_failure_plan_prunes_escalating_siblings_from_restart_order"
+        );
     }
 
     /// Conformance: after the restart window expires, the supervisor can

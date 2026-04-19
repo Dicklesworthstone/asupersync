@@ -343,6 +343,11 @@ pub mod error {
                 SupervisorSpawnError::ChildStartFailed { err, .. } => {
                     Self::runtime_spawn_severity(err)
                 }
+                SupervisorSpawnError::DependencyUnavailable {
+                    dependency_error, ..
+                } => dependency_error
+                    .as_ref()
+                    .map_or(SporkSeverity::Permanent, Self::runtime_spawn_severity),
             }
         }
 
@@ -818,6 +823,25 @@ mod tests {
             assert_eq!(e.severity(), SporkSeverity::Transient);
             assert!(e.is_transient());
             crate::test_complete!("severity_transient_spawn_child_start_region_capacity");
+        }
+
+        #[test]
+        fn severity_transient_spawn_dependency_unavailable_preserves_root_cause() {
+            init_test("severity_transient_spawn_dependency_unavailable_preserves_root_cause");
+            let region = dummy_region_id();
+            let e = SporkError::Spawn(AppSpawnError::SpawnFailed(
+                SupervisorSpawnError::DependencyUnavailable {
+                    child: "api".into(),
+                    dependency: "db".into(),
+                    dependency_error: Some(region_task_capacity_error(region)),
+                    region,
+                },
+            ));
+            assert_eq!(e.severity(), SporkSeverity::Transient);
+            assert!(e.is_transient());
+            crate::test_complete!(
+                "severity_transient_spawn_dependency_unavailable_preserves_root_cause"
+            );
         }
 
         // -- Domain tags --
