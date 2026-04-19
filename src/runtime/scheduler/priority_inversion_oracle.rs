@@ -117,7 +117,7 @@ pub enum InversionSeverity {
 pub struct InversionId(u64);
 
 impl InversionId {
-    fn new(id: u64) -> Self {
+    pub fn new(id: u64) -> Self {
         Self(id)
     }
 }
