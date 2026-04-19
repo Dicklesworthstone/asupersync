@@ -204,7 +204,7 @@ fn test_goaway_existing_stream_processing() {
 /// Test RFC 7540 Section 6.8: Multiple GOAWAY frames with decreasing last_stream_id
 #[test]
 fn test_goaway_multiple_frames_decreasing_stream_id() {
-    let mut connection = Connection::server(Settings::default());
+    let mut connection = Connection::client(Settings::default());
     // Initialize connection to Open state through settings exchange
     initialize_connection(&mut connection);
 
@@ -221,40 +221,54 @@ fn test_goaway_multiple_frames_decreasing_stream_id() {
         let _frame = connection.next_frame();
     }
 
-    // First GOAWAY with high last_stream_id
-    connection.goaway(ErrorCode::NoError, "First GOAWAY".into());
-    let first_goaway = connection.next_frame().unwrap();
+    // Receive GOAWAY with a higher last_stream_id first.
+    let first = connection
+        .process_frame(Frame::GoAway(GoAwayFrame::new(5, ErrorCode::NoError)))
+        .unwrap()
+        .unwrap();
+    match first {
+        asupersync::http::h2::connection::ReceivedFrame::GoAway { last_stream_id, .. } => {
+            assert_eq!(last_stream_id, 5);
+        }
+        _ => panic!("Expected first GOAWAY result"),
+    }
 
-    if let Frame::GoAway(goaway) = first_goaway {
-        let first_last_stream_id = goaway.last_stream_id;
+    // A later GOAWAY may further reduce the bound.
+    let second = connection
+        .process_frame(Frame::GoAway(GoAwayFrame::new(3, ErrorCode::InternalError)))
+        .unwrap()
+        .unwrap();
+    match second {
+        asupersync::http::h2::connection::ReceivedFrame::GoAway {
+            last_stream_id,
+            error_code,
+            ..
+        } => {
+            assert_eq!(
+                last_stream_id, 3,
+                "Subsequent GOAWAY frames should be allowed to decrease last_stream_id"
+            );
+            assert_eq!(error_code, ErrorCode::InternalError);
+        }
+        _ => panic!("Expected second GOAWAY result"),
+    }
 
-        // Send second GOAWAY with lower last_stream_id (allowed by RFC)
-        connection.goaway(ErrorCode::NoError, "Second GOAWAY".into());
-        let second_goaway_opt = connection.next_frame();
-
-        // Check if a second GOAWAY was actually queued (implementation may prevent multiple GOAWAYs)
-        if let Some(second_goaway) = second_goaway_opt {
-            if let Frame::GoAway(second) = second_goaway {
-                // For testing, we manually set a lower value to test the concept
-                // In real implementation, this would be based on actual processing state
-                assert!(
-                    second.last_stream_id <= first_last_stream_id,
-                    "Subsequent GOAWAY frames should have last_stream_id ≤ previous value"
-                );
-                println!("✓ Multiple GOAWAY frames with decreasing stream ID conformance verified");
-            } else {
-                panic!("Expected second GOAWAY frame");
-            }
-        } else {
-            // Implementation prevents multiple GOAWAY frames - this is acceptable behavior
-            println!(
-                "✓ Multiple GOAWAY frames with decreasing stream ID conformance verified \
-                 (implementation prevents multiple GOAWAYs, which is acceptable)"
+    // But the effective boundary must never widen again.
+    let third = connection
+        .process_frame(Frame::GoAway(GoAwayFrame::new(7, ErrorCode::NoError)))
+        .unwrap()
+        .unwrap();
+    match third {
+        asupersync::http::h2::connection::ReceivedFrame::GoAway { last_stream_id, .. } => {
+            assert_eq!(
+                last_stream_id, 3,
+                "Repeated GOAWAY frames must not increase the effective last_stream_id"
             );
         }
-    } else {
-        panic!("Expected first GOAWAY frame");
+        _ => panic!("Expected third GOAWAY result"),
     }
+
+    println!("✓ Multiple GOAWAY frames with decreasing stream ID conformance verified");
 }
 
 /// Test RFC 7540 Section 6.8: GOAWAY reception and connection state transition

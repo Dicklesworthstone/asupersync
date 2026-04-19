@@ -246,6 +246,8 @@ pub struct Connection {
     recv_window: i32,
     /// Last stream ID processed.
     last_stream_id: u32,
+    /// Smallest last-stream-id advertised by received GOAWAY frames.
+    received_goaway_last_stream_id: Option<u32>,
     /// GOAWAY received.
     goaway_received: bool,
     /// GOAWAY sent.
@@ -297,6 +299,7 @@ impl Connection {
             send_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             last_stream_id: 0,
+            received_goaway_last_stream_id: None,
             goaway_received: false,
             goaway_sent: false,
             pending_ops: VecDeque::new(),
@@ -335,6 +338,7 @@ impl Connection {
             send_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             last_stream_id: 0,
+            received_goaway_last_stream_id: None,
             goaway_received: false,
             goaway_sent: false,
             pending_ops: VecDeque::new(),
@@ -1102,12 +1106,18 @@ impl Connection {
     fn process_goaway(&mut self, frame: GoAwayFrame) -> ReceivedFrame {
         self.goaway_received = true;
         self.state = ConnectionState::Closing;
+        let effective_last_stream_id = self
+            .received_goaway_last_stream_id
+            .map_or(frame.last_stream_id, |previous| {
+                previous.min(frame.last_stream_id)
+            });
+        self.received_goaway_last_stream_id = Some(effective_last_stream_id);
 
         // Reset locally-initiated streams that weren't processed by the peer.
         // The last_stream_id only restricts streams initiated by the receiver of the GOAWAY.
         for stream_id in self.streams.active_stream_ids() {
             let is_local = (stream_id % 2 == 1) == self.is_client;
-            if is_local && stream_id > frame.last_stream_id {
+            if is_local && stream_id > effective_last_stream_id {
                 if let Some(stream) = self.streams.get_mut(stream_id) {
                     stream.reset(ErrorCode::RefusedStream);
                 }
@@ -1115,7 +1125,7 @@ impl Connection {
         }
 
         ReceivedFrame::GoAway {
-            last_stream_id: frame.last_stream_id,
+            last_stream_id: effective_last_stream_id,
             error_code: frame.error_code,
             debug_data: frame.debug_data,
         }
@@ -2859,6 +2869,66 @@ mod tests {
         assert!(!conn.stream(1).unwrap().state().is_closed());
 
         // Streams 3 and 5 should be reset
+        assert_eq!(conn.stream(3).unwrap().state(), StreamState::Closed);
+        assert_eq!(conn.stream(5).unwrap().state(), StreamState::Closed);
+    }
+
+    #[test]
+    fn test_goaway_received_last_stream_id_only_narrows() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let _stream1 = conn.open_stream(headers.clone(), false).unwrap();
+        let _ = conn.next_frame();
+        let _stream3 = conn.open_stream(headers.clone(), false).unwrap();
+        let _ = conn.next_frame();
+        let _stream5 = conn.open_stream(headers.clone(), false).unwrap();
+        let _ = conn.next_frame();
+        let _stream7 = conn.open_stream(headers, false).unwrap();
+        let _ = conn.next_frame();
+
+        let first = conn
+            .process_frame(Frame::GoAway(GoAwayFrame::new(5, ErrorCode::NoError)))
+            .unwrap()
+            .unwrap();
+        match first {
+            ReceivedFrame::GoAway { last_stream_id, .. } => assert_eq!(last_stream_id, 5),
+            _ => panic!("expected GoAway"),
+        }
+        assert!(!conn.stream(5).unwrap().state().is_closed());
+        assert_eq!(conn.stream(7).unwrap().state(), StreamState::Closed);
+
+        let second = conn
+            .process_frame(Frame::GoAway(GoAwayFrame::new(7, ErrorCode::InternalError)))
+            .unwrap()
+            .unwrap();
+        match second {
+            ReceivedFrame::GoAway {
+                last_stream_id,
+                error_code,
+                ..
+            } => {
+                assert_eq!(last_stream_id, 5);
+                assert_eq!(error_code, ErrorCode::InternalError);
+            }
+            _ => panic!("expected GoAway"),
+        }
+        assert!(!conn.stream(5).unwrap().state().is_closed());
+
+        let third = conn
+            .process_frame(Frame::GoAway(GoAwayFrame::new(1, ErrorCode::NoError)))
+            .unwrap()
+            .unwrap();
+        match third {
+            ReceivedFrame::GoAway { last_stream_id, .. } => assert_eq!(last_stream_id, 1),
+            _ => panic!("expected GoAway"),
+        }
         assert_eq!(conn.stream(3).unwrap().state(), StreamState::Closed);
         assert_eq!(conn.stream(5).unwrap().state(), StreamState::Closed);
     }
