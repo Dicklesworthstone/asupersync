@@ -21,7 +21,7 @@
 //! # Socket Cleanup
 //!
 //! Unix socket files persist after process exit. This listener handles cleanup:
-//! - Before bind: removes existing stale socket file if present
+//! - Bind is fail-closed: existing paths are not removed automatically
 //! - On drop: removes the socket file created by this listener
 //!
 //! For abstract namespace sockets (Linux only), no cleanup is needed as the
@@ -42,6 +42,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
+
+#[cfg(test)]
+use socket2::{Domain, SockAddr, Type};
 
 const FALLBACK_ACCEPT_BACKOFF: Duration = Duration::from_millis(1);
 
@@ -104,19 +107,38 @@ pub(crate) struct SocketFileIdentity {
 
 pub(crate) fn socket_file_identity(path: &Path) -> io::Result<Option<SocketFileIdentity>> {
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_socket() => Ok(Some(SocketFileIdentity {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-        })),
+        Ok(metadata) if FileTypeExt::is_socket(&metadata.file_type()) => {
+            Ok(Some(SocketFileIdentity {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            }))
+        }
         Ok(_) => Ok(None),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
     }
 }
 
+#[cfg(test)]
 pub(crate) fn remove_stale_socket_file(path: &Path) -> io::Result<()> {
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(path),
+        Ok(metadata) if FileTypeExt::is_socket(&metadata.file_type()) => {
+            if !socket_path_looks_stale(path)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!(
+                        "refusing to remove socket path that may still be live: {}",
+                        path.display()
+                    ),
+                ));
+            }
+
+            match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(err),
+            }
+        }
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!(
@@ -127,6 +149,80 @@ pub(crate) fn remove_stale_socket_file(path: &Path) -> io::Result<()> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err),
     }
+}
+
+#[cfg(test)]
+fn connect_in_progress(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    ) || err.raw_os_error() == Some(libc::EINPROGRESS)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(test)]
+enum SocketLivenessProbe {
+    Live,
+    Stale,
+    WrongType,
+    Uncertain,
+}
+
+#[cfg(test)]
+fn probe_socket_liveness(path: &Path, socket_type: Type) -> io::Result<SocketLivenessProbe> {
+    let socket = socket2::Socket::new(Domain::UNIX, socket_type, None)?;
+    socket.set_nonblocking(true)?;
+
+    let addr = SockAddr::unix(path)?;
+    let verdict = match socket.connect(&addr) {
+        Ok(()) => SocketLivenessProbe::Live,
+        Err(err) if connect_in_progress(&err) => SocketLivenessProbe::Live,
+        Err(err)
+            if err.kind() == io::ErrorKind::ConnectionRefused
+                || err.kind() == io::ErrorKind::NotFound =>
+        {
+            SocketLivenessProbe::Stale
+        }
+        Err(err)
+            if matches!(
+                err.raw_os_error(),
+                Some(
+                    libc::EPROTOTYPE
+                        | libc::EOPNOTSUPP
+                        | libc::ESOCKTNOSUPPORT
+                        | libc::EPROTONOSUPPORT
+                )
+            ) =>
+        {
+            SocketLivenessProbe::WrongType
+        }
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => SocketLivenessProbe::Uncertain,
+        Err(_) => SocketLivenessProbe::Uncertain,
+    };
+
+    Ok(verdict)
+}
+
+#[cfg(test)]
+fn socket_path_looks_stale(path: &Path) -> io::Result<bool> {
+    let stream_probe = probe_socket_liveness(path, Type::STREAM)?;
+    if matches!(
+        stream_probe,
+        SocketLivenessProbe::Live | SocketLivenessProbe::Uncertain
+    ) {
+        return Ok(false);
+    }
+
+    let datagram_probe = probe_socket_liveness(path, Type::DGRAM)?;
+    if matches!(
+        datagram_probe,
+        SocketLivenessProbe::Live | SocketLivenessProbe::Uncertain
+    ) {
+        return Ok(false);
+    }
+
+    Ok(matches!(stream_probe, SocketLivenessProbe::Stale)
+        || matches!(datagram_probe, SocketLivenessProbe::Stale))
 }
 
 pub(crate) fn remove_socket_file_if_same_inode(
@@ -205,7 +301,7 @@ impl UnixListener {
     /// Binds to a filesystem path.
     ///
     /// Creates a new Unix domain socket listener bound to the specified path.
-    /// If a socket file already exists at the path, it will be removed before binding.
+    /// If the path already exists, bind fails rather than deleting the existing entry.
     ///
     /// # Arguments
     ///
@@ -225,9 +321,6 @@ impl UnixListener {
     /// ```
     pub async fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let path = path.as_ref();
-
-        // Remove only stale socket files. Refuse to delete non-socket paths.
-        remove_stale_socket_file(path)?;
 
         let inner = net::UnixListener::bind(path)?;
         Self::from_bound_with(path, inner, |socket| socket.set_nonblocking(true))
@@ -627,8 +720,8 @@ mod tests {
     }
 
     #[test]
-    fn test_bind_replaces_stale_socket_file() {
-        init_test("test_bind_replaces_stale_socket_file");
+    fn test_bind_refuses_stale_socket_file() {
+        init_test("test_bind_refuses_stale_socket_file");
         futures_lite::future::block_on(async {
             let dir = tempdir().expect("create temp dir");
             let path = dir.path().join("stale_socket.sock");
@@ -639,17 +732,46 @@ mod tests {
             let exists = path.exists();
             crate::assert_with_log!(exists, "stale socket exists", true, exists);
 
-            let listener = UnixListener::bind(&path)
+            let err = UnixListener::bind(&path)
                 .await
-                .expect("bind should replace stale socket");
-            let exists = path.exists();
-            crate::assert_with_log!(exists, "socket exists after rebind", true, exists);
-            drop(listener);
+                .expect_err("bind should refuse stale socket path");
+            crate::assert_with_log!(
+                err.kind() == io::ErrorKind::AddrInUse,
+                "bind error kind",
+                io::ErrorKind::AddrInUse,
+                err.kind()
+            );
 
             let exists = path.exists();
-            crate::assert_with_log!(!exists, "socket cleaned after drop", false, exists);
+            crate::assert_with_log!(exists, "stale socket preserved", true, exists);
         });
-        crate::test_complete!("test_bind_replaces_stale_socket_file");
+        crate::test_complete!("test_bind_refuses_stale_socket_file");
+    }
+
+    #[test]
+    fn test_bind_refuses_live_socket_file() {
+        init_test("test_bind_refuses_live_socket_file");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().expect("create temp dir");
+            let path = dir.path().join("live_socket.sock");
+
+            let original = net::UnixListener::bind(&path).expect("create live socket");
+
+            let err = UnixListener::bind(&path)
+                .await
+                .expect_err("bind should refuse live socket path");
+            crate::assert_with_log!(
+                err.kind() == io::ErrorKind::AddrInUse,
+                "bind error kind",
+                io::ErrorKind::AddrInUse,
+                err.kind()
+            );
+            crate::assert_with_log!(path.exists(), "live socket preserved", true, path.exists());
+
+            drop(original);
+            std::fs::remove_file(&path).ok();
+        });
+        crate::test_complete!("test_bind_refuses_live_socket_file");
     }
 
     #[test]

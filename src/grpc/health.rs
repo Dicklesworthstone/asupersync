@@ -20,16 +20,17 @@
 //!     .build();
 //! ```
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll, Waker};
 
 use super::service::{NamedService, ServiceDescriptor, ServiceHandler};
 use super::status::Status;
-use super::streaming::{Request, Response};
+use super::streaming::{Request, Response, Streaming};
 
 /// Service status for health checking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -141,6 +142,10 @@ pub struct HealthService {
     watch_versions: Arc<RwLock<HashMap<String, u64>>>,
     /// Number of active reporters per service.
     reporter_counts: Arc<RwLock<HashMap<String, usize>>>,
+    /// Pending async watch waiters keyed by watched service name.
+    watch_waiters: Arc<Mutex<HashMap<String, HashMap<u64, Waker>>>>,
+    /// Monotonic waiter identifier source.
+    next_waiter_id: Arc<AtomicU64>,
     /// Monotonic version counter, bumped on every status change.
     version: Arc<AtomicU64>,
 }
@@ -153,6 +158,8 @@ impl HealthService {
             statuses: Arc::new(RwLock::new(HashMap::new())),
             watch_versions: Arc::new(RwLock::new(HashMap::new())),
             reporter_counts: Arc::new(RwLock::new(HashMap::new())),
+            watch_waiters: Arc::new(Mutex::new(HashMap::new())),
+            next_waiter_id: Arc::new(AtomicU64::new(1)),
             version: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -177,6 +184,9 @@ impl HealthService {
             self.version.fetch_add(1, Ordering::Release);
         }
         drop(statuses);
+        if changed {
+            self.notify_watch_waiters(&service);
+        }
     }
 
     /// Set the status of the overall server.
@@ -212,10 +222,13 @@ impl HealthService {
             statuses.clear();
             // Bump versions while still holding statuses lock so that
             // concurrent readers see a consistent (status, version) pair.
-            self.bump_watch_versions(affected_services);
+            self.bump_watch_versions(affected_services.iter().cloned());
             self.version.fetch_add(1, Ordering::Release);
         }
         drop(statuses);
+        if changed {
+            self.notify_watch_waiters_for_services(affected_services);
+        }
     }
 
     /// Remove a service from health tracking.
@@ -227,6 +240,9 @@ impl HealthService {
             self.version.fetch_add(1, Ordering::Release);
         }
         drop(statuses);
+        if changed {
+            self.notify_watch_waiters(service);
+        }
     }
 
     /// Get all registered services.
@@ -342,6 +358,11 @@ impl HealthService {
             self.bump_watch_version(service);
             self.version.fetch_add(1, Ordering::Release);
         }
+        drop(statuses);
+        drop(reporter_counts);
+        if changed {
+            self.notify_watch_waiters(service);
+        }
     }
 
     /// Handle a health check request.
@@ -385,6 +406,19 @@ impl HealthService {
         Box::pin(async move { result.map(Response::new) })
     }
 
+    /// Async watch handler for use with server-streaming gRPC integrations.
+    ///
+    /// The returned stream emits the initial effective status immediately, then
+    /// yields subsequent changes as they are published through the health service.
+    #[must_use]
+    pub fn watch_async(
+        &self,
+        request: &Request<HealthCheckRequest>,
+    ) -> Pin<Box<dyn Future<Output = Result<Response<HealthWatchStream>, Status>> + Send>> {
+        let stream = HealthWatchStream::new(self.clone(), request.get_ref().service.clone());
+        Box::pin(async move { Ok(Response::new(stream)) })
+    }
+
     /// Create a watcher that can poll for status changes on a specific service.
     ///
     /// The watcher captures the current status snapshot for that service;
@@ -399,6 +433,65 @@ impl HealthService {
             last_status,
             last_version,
             service_name,
+        }
+    }
+
+    fn register_watch_waiter(&self, service: &str, waiter_id: &mut Option<u64>, waker: &Waker) {
+        let id =
+            *waiter_id.get_or_insert_with(|| self.next_waiter_id.fetch_add(1, Ordering::Relaxed));
+        let mut waiters = self.watch_waiters.lock();
+        waiters
+            .entry(service.to_string())
+            .or_default()
+            .insert(id, waker.clone());
+    }
+
+    fn unregister_watch_waiter(&self, service: &str, waiter_id: &mut Option<u64>) {
+        let Some(id) = waiter_id.take() else {
+            return;
+        };
+        let mut waiters = self.watch_waiters.lock();
+        let remove_service_entry = waiters.get_mut(service).is_some_and(|service_waiters| {
+            service_waiters.remove(&id);
+            service_waiters.is_empty()
+        });
+        if remove_service_entry {
+            waiters.remove(service);
+        }
+    }
+
+    fn notify_watch_waiters(&self, service: &str) {
+        self.notify_watch_waiters_for_services(std::iter::once(service.to_string()));
+    }
+
+    fn notify_watch_waiters_for_services<I>(&self, services: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut keys = Vec::new();
+        for service in services {
+            if !keys.iter().any(|existing| existing == &service) {
+                keys.push(service.clone());
+            }
+            if !service.is_empty() && !keys.iter().any(|existing| existing.is_empty()) {
+                keys.push(String::new());
+            }
+        }
+        if keys.is_empty() {
+            return;
+        }
+
+        let mut waiters = self.watch_waiters.lock();
+        let mut wake_list = Vec::new();
+        for key in keys {
+            if let Some(service_waiters) = waiters.get_mut(&key) {
+                wake_list.extend(service_waiters.values().cloned());
+            }
+        }
+        drop(waiters);
+
+        for waker in wake_list {
+            waker.wake();
         }
     }
 }
@@ -421,6 +514,85 @@ pub struct HealthWatcher {
     service_name: String,
     last_status: ServingStatus,
     last_version: u64,
+}
+
+/// Async health watch stream suitable for server-streaming gRPC handlers.
+#[derive(Debug)]
+pub struct HealthWatchStream {
+    watcher: HealthWatcher,
+    emitted_initial: bool,
+    waiter_id: Option<u64>,
+}
+
+impl HealthWatchStream {
+    fn new(service: HealthService, service_name: String) -> Self {
+        Self {
+            watcher: service.watch(service_name),
+            emitted_initial: false,
+            waiter_id: None,
+        }
+    }
+
+    fn clear_waiter_registration(&mut self) {
+        self.watcher
+            .service
+            .unregister_watch_waiter(&self.watcher.service_name, &mut self.waiter_id);
+    }
+
+    fn poll_next_with_hook<F>(
+        &mut self,
+        cx: &mut Context<'_>,
+        after_first_status_check: F,
+    ) -> Poll<Option<Result<HealthCheckResponse, Status>>>
+    where
+        F: FnOnce(&mut Self),
+    {
+        if !self.emitted_initial {
+            self.emitted_initial = true;
+            self.clear_waiter_registration();
+            return Poll::Ready(Some(Ok(HealthCheckResponse::new(self.watcher.status()))));
+        }
+
+        let (changed, status) = self.watcher.poll_status();
+        if changed {
+            self.clear_waiter_registration();
+            return Poll::Ready(Some(Ok(HealthCheckResponse::new(status))));
+        }
+
+        after_first_status_check(self);
+
+        let service_name = self.watcher.service_name.clone();
+        self.watcher
+            .service
+            .register_watch_waiter(&service_name, &mut self.waiter_id, cx.waker());
+
+        // Re-check after registration to avoid losing a transition that lands
+        // after the first status read but before the waiter becomes visible.
+        let (changed, status) = self.watcher.poll_status();
+        if changed {
+            self.clear_waiter_registration();
+            return Poll::Ready(Some(Ok(HealthCheckResponse::new(status))));
+        }
+
+        Poll::Pending
+    }
+}
+
+impl Drop for HealthWatchStream {
+    fn drop(&mut self) {
+        self.clear_waiter_registration();
+    }
+}
+
+impl Streaming for HealthWatchStream {
+    type Message = HealthCheckResponse;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Self::Message, Status>>> {
+        self.as_mut().get_mut().poll_next_with_hook(cx, |_| {})
+    }
 }
 
 impl HealthWatcher {
@@ -574,10 +746,33 @@ impl HealthServiceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[derive(Default)]
+    struct CountingWake {
+        wakes: AtomicUsize,
+    }
+
+    impl Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn counting_waker(counter: &Arc<CountingWake>) -> Waker {
+        Waker::from(counter.clone())
     }
 
     #[test]
@@ -1014,6 +1209,184 @@ mod tests {
             watcher.status()
         );
         crate::test_complete!("health_watch_initial_snapshot_is_atomic_for_named_services");
+    }
+
+    #[test]
+    fn health_watch_async_emits_initial_status_and_wakes_on_change() {
+        init_test("health_watch_async_emits_initial_status_and_wakes_on_change");
+        let service = HealthService::new();
+        service.set_status("svc", ServingStatus::Serving);
+
+        let request = Request::new(HealthCheckRequest::new("svc"));
+        let response = futures_lite::future::block_on(service.watch_async(&request))
+            .expect("watch_async should construct a stream");
+        let mut stream = response.into_inner();
+
+        let first = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        let first_ok = matches!(
+            first,
+            Some(Ok(HealthCheckResponse {
+                status: ServingStatus::Serving
+            }))
+        );
+        crate::assert_with_log!(
+            first_ok,
+            "initial watch snapshot is emitted immediately",
+            true,
+            first_ok
+        );
+
+        let wake_counter = Arc::new(CountingWake::default());
+        let waker = counting_waker(&wake_counter);
+        let mut cx = Context::from_waker(&waker);
+        let pending = matches!(
+            Streaming::poll_next(Pin::new(&mut stream), &mut cx),
+            Poll::Pending
+        );
+        crate::assert_with_log!(
+            pending,
+            "stream waits for the next health transition",
+            true,
+            pending
+        );
+
+        service.set_status("svc", ServingStatus::NotServing);
+        crate::assert_with_log!(
+            wake_counter.wakes.load(Ordering::SeqCst) == 1,
+            "status change wakes pending async watch",
+            1,
+            wake_counter.wakes.load(Ordering::SeqCst)
+        );
+
+        let next = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        let next_ok = matches!(
+            next,
+            Some(Ok(HealthCheckResponse {
+                status: ServingStatus::NotServing
+            }))
+        );
+        crate::assert_with_log!(
+            next_ok,
+            "watch stream emits changed status after wake",
+            true,
+            next_ok
+        );
+        crate::test_complete!("health_watch_async_emits_initial_status_and_wakes_on_change");
+    }
+
+    #[test]
+    fn health_watch_async_drop_unregisters_pending_waiter() {
+        init_test("health_watch_async_drop_unregisters_pending_waiter");
+        let service = HealthService::new();
+        service.set_status("svc", ServingStatus::Serving);
+
+        let request = Request::new(HealthCheckRequest::new("svc"));
+        let response = futures_lite::future::block_on(service.watch_async(&request))
+            .expect("watch_async should construct a stream");
+        let mut stream = response.into_inner();
+
+        let _ = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+
+        let wake_counter = Arc::new(CountingWake::default());
+        let waker = counting_waker(&wake_counter);
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(
+            Streaming::poll_next(Pin::new(&mut stream), &mut cx),
+            Poll::Pending
+        ));
+
+        let waiter_count_before_drop = service
+            .watch_waiters
+            .lock()
+            .get("svc")
+            .map_or(0, std::collections::HashMap::len);
+        crate::assert_with_log!(
+            waiter_count_before_drop == 1,
+            "pending watch registers exactly one waiter",
+            1,
+            waiter_count_before_drop
+        );
+
+        drop(stream);
+
+        let waiter_count_after_drop = service
+            .watch_waiters
+            .lock()
+            .get("svc")
+            .map_or(0, std::collections::HashMap::len);
+        crate::assert_with_log!(
+            waiter_count_after_drop == 0,
+            "dropping a pending watch unregisters waiter state",
+            0,
+            waiter_count_after_drop
+        );
+        crate::test_complete!("health_watch_async_drop_unregisters_pending_waiter");
+    }
+
+    #[test]
+    fn health_watch_async_rechecks_after_waiter_registration() {
+        init_test("health_watch_async_rechecks_after_waiter_registration");
+        let service = HealthService::new();
+        service.set_status("svc", ServingStatus::Serving);
+
+        let request = Request::new(HealthCheckRequest::new("svc"));
+        let response = futures_lite::future::block_on(service.watch_async(&request))
+            .expect("watch_async should construct a stream");
+        let mut stream = response.into_inner();
+
+        let _ = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+
+        let wake_counter = Arc::new(CountingWake::default());
+        let waker = counting_waker(&wake_counter);
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = stream.poll_next_with_hook(&mut cx, |stream| {
+            stream
+                .watcher
+                .service
+                .set_status("svc", ServingStatus::NotServing);
+        });
+
+        let changed = matches!(
+            poll,
+            Poll::Ready(Some(Ok(HealthCheckResponse {
+                status: ServingStatus::NotServing
+            })))
+        );
+        crate::assert_with_log!(
+            changed,
+            "watch stream must not miss transition between status check and waiter registration",
+            true,
+            format!("{poll:?}")
+        );
+
+        let waiter_count = service
+            .watch_waiters
+            .lock()
+            .get("svc")
+            .map_or(0, std::collections::HashMap::len);
+        crate::assert_with_log!(
+            waiter_count == 0,
+            "caught transition clears waiter registration instead of parking forever",
+            0,
+            waiter_count
+        );
+        crate::assert_with_log!(
+            wake_counter.wakes.load(Ordering::SeqCst) == 0,
+            "recheck path resolves inline without depending on an out-of-band wake",
+            0,
+            wake_counter.wakes.load(Ordering::SeqCst)
+        );
+
+        crate::test_complete!("health_watch_async_rechecks_after_waiter_registration");
     }
 
     #[test]

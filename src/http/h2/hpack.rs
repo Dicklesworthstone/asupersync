@@ -2,6 +2,7 @@
 //!
 //! Implements RFC 7541: HPACK - Header Compression for HTTP/2.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::LazyLock;
 
@@ -330,6 +331,18 @@ impl Encoder {
         self.pending_size_update = Some(capped);
     }
 
+    /// Returns the current dynamic table size in bytes.
+    #[must_use]
+    pub fn dynamic_table_size(&self) -> usize {
+        self.dynamic_table.size()
+    }
+
+    /// Returns the current dynamic table size limit in bytes.
+    #[must_use]
+    pub fn dynamic_table_max_size(&self) -> usize {
+        self.dynamic_table.max_size()
+    }
+
     /// Encode a list of headers.
     ///
     /// If a dynamic table size update is pending (from `set_max_table_size`),
@@ -369,7 +382,12 @@ impl Encoder {
 
     /// Encode a single header.
     fn encode_header(&mut self, header: &Header, dst: &mut BytesMut, index: bool) {
-        let name = header.name.as_str();
+        let normalized_name = if header.name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            Cow::Owned(header.name.to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(header.name.as_str())
+        };
+        let name = normalized_name.as_ref();
         let value = header.value.as_str();
 
         // Try to find exact match in tables
@@ -394,7 +412,9 @@ impl Encoder {
             encode_string(dst, value, self.use_huffman);
 
             // Add to dynamic table
-            self.dynamic_table.insert(header.clone());
+            let mut indexed_header = header.clone();
+            indexed_header.name = normalized_name.into_owned();
+            self.dynamic_table.insert(indexed_header);
         } else {
             // Literal without indexing (never indexed for sensitive)
             if let Some(idx) = name_idx {
@@ -464,6 +484,24 @@ impl Decoder {
     /// This limits what the peer can request via dynamic table size updates.
     pub fn set_allowed_table_size(&mut self, size: usize) {
         self.allowed_table_size = size.min(MAX_ALLOWED_TABLE_SIZE);
+    }
+
+    /// Returns the current dynamic table size in bytes.
+    #[must_use]
+    pub fn dynamic_table_size(&self) -> usize {
+        self.dynamic_table.size()
+    }
+
+    /// Returns the current dynamic table size limit in bytes.
+    #[must_use]
+    pub fn dynamic_table_max_size(&self) -> usize {
+        self.dynamic_table.max_size()
+    }
+
+    /// Returns the maximum table size currently allowed by peer SETTINGS.
+    #[must_use]
+    pub fn allowed_table_size(&self) -> usize {
+        self.allowed_table_size
     }
 
     /// Decode headers from a buffer.
@@ -2387,6 +2425,73 @@ mod tests {
     }
 
     #[test]
+    fn test_encoder_emits_min_then_final_size_update_after_shrink_then_grow() {
+        // RFC 7541 §4.2 requires the smallest size seen since the last block
+        // to be emitted before the final size if the encoder shrinks and then
+        // grows the table between header blocks.
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+
+        encoder.set_max_table_size(128);
+        encoder.set_max_table_size(256);
+
+        let headers = vec![Header::new(":method", "GET")];
+        let mut buf = BytesMut::new();
+        encoder.encode(&headers, &mut buf);
+
+        assert_eq!(
+            buf[0] & 0xe0,
+            0x20,
+            "first instruction should be size update"
+        );
+
+        let mut src = buf.freeze();
+        let first_update = decode_integer(&mut src, 5).unwrap();
+        assert_eq!(first_update, 128);
+        assert_eq!(
+            src[0] & 0xe0,
+            0x20,
+            "second instruction should be size update"
+        );
+        let second_update = decode_integer(&mut src, 5).unwrap();
+        assert_eq!(second_update, 256);
+
+        let mut decoder = Decoder::new();
+        decoder.set_allowed_table_size(256);
+        let decoded_headers = decoder.decode(&mut src).unwrap();
+        assert_eq!(decoded_headers, headers);
+    }
+
+    #[test]
+    fn test_encoder_shrink_to_zero_does_not_reuse_dynamic_entries() {
+        let mut encoder = Encoder::new();
+        let mut decoder = Decoder::new();
+        encoder.set_use_huffman(false);
+
+        let headers = vec![
+            Header::new("cache-control", "gzip, deflate"),
+            Header::new("cache-control", "gzip, deflate"),
+        ];
+
+        let mut initial = BytesMut::new();
+        encoder.encode(&headers, &mut initial);
+        let decoded_initial = decoder.decode(&mut initial.freeze()).unwrap();
+        assert_eq!(decoded_initial, headers);
+        assert!(encoder.dynamic_table_size() > 0);
+        assert!(decoder.dynamic_table_size() > 0);
+
+        encoder.set_max_table_size(0);
+        decoder.set_allowed_table_size(0);
+
+        let mut resized = BytesMut::new();
+        encoder.encode(&headers, &mut resized);
+        let decoded_resized = decoder.decode(&mut resized.freeze()).unwrap();
+        assert_eq!(decoded_resized, headers);
+        assert_eq!(encoder.dynamic_table_size(), 0);
+        assert_eq!(decoder.dynamic_table_size(), 0);
+    }
+
+    #[test]
     fn test_integer_decode_checked_mul_overflow() {
         // On all platforms, verify that the checked_mul path catches
         // values that would silently truncate with plain checked_shl.
@@ -2776,7 +2881,7 @@ mod tests {
 
         // Verify the value "DELETE" is encoded as a literal string
         let mut src = encoded.freeze();
-        src.advance(1); // Skip the 0x42 byte
+        let _ = src.split_to(1); // Skip the 0x42 byte
 
         // Next should be the string "DELETE"
         let value_str = decode_string(&mut src).expect("Should decode DELETE value");
@@ -2852,7 +2957,7 @@ mod tests {
 
         // Set a small dynamic table size to force eviction
         encoder.set_max_table_size(256); // Small size to force eviction
-        decoder.set_max_table_size(256);
+        decoder.set_allowed_table_size(256);
 
         // First, add several headers to fill the dynamic table
         let headers_1 = vec![

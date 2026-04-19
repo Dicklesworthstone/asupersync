@@ -4,7 +4,8 @@
 //! status code propagation. The protocol is:
 //!
 //! 1. Initiator sends Close frame with optional status code and reason
-//! 2. Receiver echoes Close frame back
+//! 2. Receiver replies with a Close frame, typically echoing the peer's
+//!    status code when it is valid for transmission
 //! 3. Both sides enter closed state
 //!
 //! # Cancel-Safety
@@ -133,15 +134,16 @@ impl CloseReason {
     /// Encode this close reason into a frame payload.
     #[must_use]
     pub fn encode(&self) -> Bytes {
-        let code = self.raw_code.or_else(|| self.code.map(u16::from));
-        match (code, &self.text) {
+        match self.outbound_payload_parts() {
+            (DropReasonText::No, code, text) => Self::encode_parts(code, text),
+            (DropReasonText::Yes, code, _) => Self::encode_parts(code, None),
+        }
+    }
+
+    fn encode_parts(code: Option<u16>, text: Option<&str>) -> Bytes {
+        match (code, text) {
             (None, None) => Bytes::new(),
-            (None, Some(text)) => {
-                let mut buf = Vec::with_capacity(2 + text.len());
-                buf.extend_from_slice(&1000u16.to_be_bytes());
-                buf.extend_from_slice(text.as_bytes());
-                Bytes::from(buf)
-            }
+            (None, Some(_text)) => Bytes::new(),
             (Some(code_val), None) => Bytes::copy_from_slice(&code_val.to_be_bytes()),
             (Some(code_val), Some(text)) => {
                 let mut buf = Vec::with_capacity(2 + text.len());
@@ -155,14 +157,50 @@ impl CloseReason {
     /// Convert to a close frame.
     #[must_use]
     pub fn to_frame(&self) -> Frame {
-        let code = self.raw_code.or_else(|| self.code.map(u16::from));
-        Frame::close(code, self.text.as_deref())
+        match self.outbound_payload_parts() {
+            (DropReasonText::No, code, text) => Frame::close(code, text),
+            (DropReasonText::Yes, code, _) => Frame::close(code, None),
+        }
+    }
+
+    /// Returns the outbound wire close code when this reason can be sent
+    /// without violating RFC 6455's send-side close-code rules.
+    #[must_use]
+    fn outbound_wire_code(&self) -> Option<u16> {
+        match self.raw_code {
+            Some(code) if CloseCode::is_valid_code(code) => Some(code),
+            Some(_) => None,
+            None => self
+                .code
+                .map(u16::from)
+                .filter(|code| CloseCode::is_valid_code(*code)),
+        }
+    }
+
+    /// Returns the code/text pair to place on the wire.
+    ///
+    /// A parsed peer code may be valid to receive but forbidden to send
+    /// (for example 1016-2999). In that case we downgrade to an empty close
+    /// frame instead of inventing a different status code.
+    #[must_use]
+    fn outbound_payload_parts(&self) -> (DropReasonText, Option<u16>, Option<&str>) {
+        let code = self.outbound_wire_code();
+        let drop_text = (self.raw_code.is_some() || self.code.is_some()) && code.is_none();
+        (
+            if drop_text {
+                DropReasonText::Yes
+            } else {
+                DropReasonText::No
+            },
+            code,
+            self.text.as_deref(),
+        )
     }
 
     /// Check if this represents a normal closure.
     #[must_use]
     pub fn is_normal(&self) -> bool {
-        self.raw_code == Some(u16::from(CloseCode::Normal))
+        self.wire_code() == Some(u16::from(CloseCode::Normal))
     }
 
     /// Check if this represents a protocol error.
@@ -182,7 +220,11 @@ impl CloseReason {
     /// Returns the wire close code (including custom codes).
     #[must_use]
     pub const fn wire_code(&self) -> Option<u16> {
-        self.raw_code
+        match (self.raw_code, self.code) {
+            (Some(code), _) => Some(code),
+            (None, Some(code)) => Some(code as u16),
+            (None, None) => None,
+        }
     }
 }
 
@@ -190,6 +232,12 @@ impl Default for CloseReason {
     fn default() -> Self {
         Self::empty()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropReasonText {
+    No,
+    Yes,
 }
 
 /// State of the close handshake.
@@ -353,7 +401,9 @@ impl CloseHandshake {
     /// # State Transitions
     ///
     /// - `Open` → `CloseSent`: Returns close frame
-    /// - `CloseReceived` → `Closed`: Returns close frame (response)
+    /// - `CloseReceived` → `CloseReceived`: Returns close frame (response)
+    ///   and waits for [`mark_response_sent`](Self::mark_response_sent)
+    ///   before completing the handshake
     /// - `CloseSent` | `Closed`: Returns `None`
     pub fn initiate(&mut self, reason: CloseReason) -> Option<Frame> {
         match self.state {
@@ -364,8 +414,8 @@ impl CloseHandshake {
                 Some(frame)
             }
             CloseState::CloseReceived => {
-                // We're responding to their close
-                self.state = CloseState::Closed;
+                // We're responding to their close. The handshake is not
+                // complete until the response frame is actually sent.
                 let frame = reason.to_frame();
                 self.our_reason = Some(reason);
                 Some(frame)
@@ -394,13 +444,13 @@ impl CloseHandshake {
             CloseState::Open => {
                 // Peer initiated close - we need to respond
                 self.state = CloseState::CloseReceived;
-                self.peer_reason = Some(reason);
 
-                // Echo the peer's wire payload shape: reflect their status code
-                // verbatim when present, but keep the response body empty if the
-                // peer closed without a status code.
-                let response = if frame.payload.len() >= 2 {
-                    let response_code = u16::from_be_bytes([frame.payload[0], frame.payload[1]]);
+                // Echo the peer's status code only when it is valid for
+                // transmission. Receive-only reserved codes (1016-2999) must
+                // be accepted during parsing but must not be sent back.
+                let response_code = reason.outbound_wire_code();
+                self.peer_reason = Some(reason);
+                let response = if let Some(response_code) = response_code {
                     Frame::close(Some(response_code), None)
                 } else {
                     Frame::close(None, None)
@@ -580,6 +630,28 @@ mod tests {
     }
 
     #[test]
+    fn close_reason_unsendable_received_code_encodes_as_empty_close() {
+        let payload = 2000u16.to_be_bytes();
+        let reason = CloseReason::parse(&payload).unwrap();
+
+        assert_eq!(reason.raw_code, Some(2000));
+        assert!(reason.encode().is_empty());
+        assert!(reason.to_frame().payload.is_empty());
+    }
+
+    #[test]
+    fn close_reason_without_code_drops_text_on_encode() {
+        let reason = CloseReason {
+            code: None,
+            raw_code: None,
+            text: Some("text without code".to_string()),
+        };
+
+        assert!(reason.encode().is_empty());
+        assert!(reason.to_frame().payload.is_empty());
+    }
+
+    #[test]
     fn close_code_valid_ranges() {
         assert!(CloseCode::is_valid_code(1000));
         assert!(CloseCode::is_valid_code(1003));
@@ -705,10 +777,30 @@ mod tests {
         assert!(response.is_some());
         assert_eq!(handshake.state(), CloseState::CloseReceived);
 
-        // 2. We send our close response
+        // 2. We prepare our close response
         let frame = handshake.initiate(CloseReason::normal());
         assert!(frame.is_some());
+        assert_eq!(handshake.state(), CloseState::CloseReceived);
+
+        // 3. The handshake only completes after the response is sent
+        handshake.mark_response_sent();
         assert_eq!(handshake.state(), CloseState::Closed);
+    }
+
+    #[test]
+    fn handshake_response_initiation_does_not_complete_before_send() {
+        let mut handshake = CloseHandshake::new();
+
+        let peer_close = Frame::close(Some(1000), Some("goodbye"));
+        let response = handshake.receive_close(&peer_close).unwrap();
+        assert!(response.is_some());
+        assert_eq!(handshake.state(), CloseState::CloseReceived);
+
+        let frame = handshake.initiate(CloseReason::with_text(CloseCode::Normal, "ack"));
+        assert!(frame.is_some());
+        assert_eq!(handshake.state(), CloseState::CloseReceived);
+        assert!(!handshake.is_open());
+        assert!(!handshake.is_closed());
     }
 
     #[test]
@@ -792,30 +884,81 @@ mod tests {
     }
 
     #[test]
-    fn handshake_receive_close_echoes_unassigned_code() {
-        // RFC 6455 §7.4.2: unassigned codes (1016-2999) must be accepted
-        // when received and echoed back without panicking.
+    fn handshake_receive_close_does_not_echo_unassigned_code() {
+        // RFC 6455 §7.4.2: unassigned codes (1016-2999) must be accepted when
+        // received, but RFC 6455 endpoints must not send them.
         let mut handshake = CloseHandshake::new();
 
-        // Build a close frame with unassigned code 1016 via Frame::close
-        // (this only works after fixing Frame::close to accept received codes).
-        let close_frame = Frame::close(Some(1016), None);
+        let close_frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Close,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::copy_from_slice(&1016u16.to_be_bytes()),
+        };
 
         let response = handshake.receive_close(&close_frame).unwrap().unwrap();
         assert_eq!(response.opcode, Opcode::Close);
-        assert_eq!(&response.payload[..2], &1016u16.to_be_bytes());
+        assert!(response.payload.is_empty());
         assert_eq!(handshake.state(), CloseState::CloseReceived);
     }
 
     #[test]
     fn to_frame_with_unassigned_raw_code_does_not_panic() {
-        // A CloseReason parsed from a peer with an unassigned code must
-        // round-trip through to_frame() without panicking.
+        // A CloseReason parsed from a peer with an unassigned code must not
+        // panic if higher layers serialize it back out.
         let payload = 2000u16.to_be_bytes();
         let reason = CloseReason::parse(&payload).unwrap();
         assert_eq!(reason.raw_code, Some(2000));
         let frame = reason.to_frame();
         assert_eq!(frame.opcode, Opcode::Close);
-        assert_eq!(&frame.payload[..2], &2000u16.to_be_bytes());
+        assert!(frame.payload.is_empty());
+    }
+
+    #[test]
+    fn close_reason_code_falls_back_when_raw_code_is_absent() {
+        let reason = CloseReason {
+            code: Some(CloseCode::Normal),
+            raw_code: None,
+            text: None,
+        };
+
+        assert_eq!(reason.wire_code(), Some(1000));
+        assert!(reason.is_normal());
+        assert_eq!(reason.encode().as_ref(), &1000u16.to_be_bytes());
+        assert_eq!(reason.to_frame().payload.as_ref(), &1000u16.to_be_bytes());
+    }
+
+    #[test]
+    fn typed_unsendable_close_code_fails_closed_without_panicking() {
+        let reason = CloseReason {
+            code: Some(CloseCode::Abnormal),
+            raw_code: None,
+            text: None,
+        };
+
+        assert_eq!(reason.wire_code(), Some(1006));
+        assert!(reason.encode().is_empty());
+        let frame = reason.to_frame();
+        assert_eq!(frame.opcode, Opcode::Close);
+        assert!(frame.payload.is_empty());
+    }
+
+    #[test]
+    fn typed_unsendable_close_code_drops_reason_text_instead_of_synthesizing_normal_close() {
+        let reason = CloseReason {
+            code: Some(CloseCode::NoStatusReceived),
+            raw_code: None,
+            text: Some("must not hit wire".to_string()),
+        };
+
+        assert_eq!(reason.wire_code(), Some(1005));
+        assert!(reason.encode().is_empty());
+        let frame = reason.to_frame();
+        assert_eq!(frame.opcode, Opcode::Close);
+        assert!(frame.payload.is_empty());
     }
 }

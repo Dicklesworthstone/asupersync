@@ -90,17 +90,30 @@ pub enum H3QpackMode {
     DynamicTableAllowed,
 }
 
+/// Local endpoint role for role-sensitive HTTP/3 validation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum H3EndpointRole {
+    /// The local endpoint is an HTTP/3 client receiving server control frames.
+    #[default]
+    Client,
+    /// The local endpoint is an HTTP/3 server receiving client control frames.
+    Server,
+}
+
 /// Connection-level configuration for native HTTP/3 mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct H3ConnectionConfig {
     /// QPACK policy.
     pub qpack_mode: H3QpackMode,
+    /// Endpoint role for GOAWAY validation.
+    pub endpoint_role: H3EndpointRole,
 }
 
 impl Default for H3ConnectionConfig {
     fn default() -> Self {
         Self {
             qpack_mode: H3QpackMode::StaticOnly,
+            endpoint_role: H3EndpointRole::Client,
         }
     }
 }
@@ -515,6 +528,15 @@ impl H3RequestHead {
         headers: Vec<(String, String)>,
     ) -> Result<Self, H3NativeError> {
         validate_request_pseudo_headers(&pseudo)?;
+        for (name, value) in &headers {
+            validate_header_name(name)?;
+            if name.starts_with(':') {
+                return Err(H3NativeError::InvalidRequestPseudoHeader(
+                    "pseudo headers must not appear in regular header list",
+                ));
+            }
+            validate_header_value(value)?;
+        }
         Ok(Self { pseudo, headers })
     }
 }
@@ -536,6 +558,15 @@ impl H3ResponseHead {
             ..H3PseudoHeaders::default()
         };
         validate_response_pseudo_headers(&pseudo)?;
+        for (name, value) in &headers {
+            validate_header_name(name)?;
+            if name.starts_with(':') {
+                return Err(H3NativeError::InvalidResponsePseudoHeader(
+                    "response must not include request pseudo headers",
+                ));
+            }
+            validate_header_value(value)?;
+        }
         Ok(Self { status, headers })
     }
 }
@@ -835,12 +866,20 @@ fn validate_header_name(name: &str) -> Result<(), H3NativeError> {
     if name.is_empty() {
         return Err(H3NativeError::InvalidFrame("empty header field name"));
     }
-    for &b in name.as_bytes() {
+    let bytes = name.as_bytes();
+    let start = if bytes[0] == b':' {
+        if bytes.len() == 1 {
+            return Err(H3NativeError::InvalidFrame("empty header field name"));
+        }
+        1
+    } else {
+        0
+    };
+    for &b in &bytes[start..] {
         match b {
             // RFC 9110 token characters (subset: ALPHA / DIGIT / specials)
             b'a'..=b'z'
             | b'0'..=b'9'
-            | b':'
             | b'!'
             | b'#'
             | b'$'
@@ -881,6 +920,144 @@ fn validate_header_value(value: &str) -> Result<(), H3NativeError> {
         }
     }
     Ok(())
+}
+
+fn validate_method_token(method: &str) -> Result<(), H3NativeError> {
+    if method.is_empty() {
+        return Err(H3NativeError::InvalidRequestPseudoHeader("empty :method"));
+    }
+    for &b in method.as_bytes() {
+        match b {
+            b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b'!'
+            | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'\''
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~' => {}
+            _ => {
+                return Err(H3NativeError::InvalidRequestPseudoHeader(
+                    ":method must be a valid HTTP token",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_scheme_syntax(scheme: &str) -> Result<(), H3NativeError> {
+    let Some((&first, rest)) = scheme.as_bytes().split_first() else {
+        return Err(H3NativeError::InvalidRequestPseudoHeader("empty :scheme"));
+    };
+    if !first.is_ascii_alphabetic() {
+        return Err(H3NativeError::InvalidRequestPseudoHeader(
+            ":scheme must be a valid URI scheme",
+        ));
+    }
+    for &b in rest {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'-' | b'.' => {}
+            _ => {
+                return Err(H3NativeError::InvalidRequestPseudoHeader(
+                    ":scheme must be a valid URI scheme",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_authority_form(authority: &str) -> Result<(), H3NativeError> {
+    if authority.as_bytes().iter().any(u8::is_ascii_whitespace) {
+        return Err(H3NativeError::InvalidRequestPseudoHeader(
+            ":authority must be RFC authority-form without whitespace",
+        ));
+    }
+    if authority.contains('@') {
+        return Err(H3NativeError::InvalidRequestPseudoHeader(
+            ":authority must not include userinfo",
+        ));
+    }
+    if authority.contains(['/', '?', '#']) {
+        return Err(H3NativeError::InvalidRequestPseudoHeader(
+            ":authority must not contain path, query, or fragment",
+        ));
+    }
+    if authority.starts_with('[') {
+        let bracket_end = authority
+            .find(']')
+            .ok_or(H3NativeError::InvalidRequestPseudoHeader(
+                ":authority has invalid IPv6 literal",
+            ))?;
+        let rest = &authority[bracket_end + 1..];
+        if rest.is_empty() {
+            return Ok(());
+        }
+        let Some(port_str) = rest.strip_prefix(':') else {
+            return Err(H3NativeError::InvalidRequestPseudoHeader(
+                ":authority has invalid IPv6 literal",
+            ));
+        };
+        if port_str.is_empty() || port_str.parse::<u16>().is_err() {
+            return Err(H3NativeError::InvalidRequestPseudoHeader(
+                ":authority has invalid port",
+            ));
+        }
+        return Ok(());
+    }
+    if authority.matches(':').count() > 1 {
+        return Err(H3NativeError::InvalidRequestPseudoHeader(
+            ":authority IPv6 literals must use [addr] form",
+        ));
+    }
+    if let Some((host, port_str)) = authority.rsplit_once(':') {
+        if host.is_empty() || port_str.is_empty() || port_str.parse::<u16>().is_err() {
+            return Err(H3NativeError::InvalidRequestPseudoHeader(
+                ":authority has invalid port",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_request_path(method: &str, path: &str) -> Result<(), H3NativeError> {
+    if path == "*" {
+        if method != "OPTIONS" {
+            return Err(H3NativeError::InvalidRequestPseudoHeader(
+                "asterisk-form :path requires OPTIONS",
+            ));
+        }
+        return Ok(());
+    }
+    if !path.starts_with('/') {
+        return Err(H3NativeError::InvalidRequestPseudoHeader(
+            ":path must start with /",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_status_code(value: &str) -> Result<u16, H3NativeError> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 3 || !bytes.iter().all(u8::is_ascii_digit) {
+        return Err(H3NativeError::InvalidResponsePseudoHeader(
+            "invalid :status value",
+        ));
+    }
+    value
+        .parse::<u16>()
+        .map_err(|_| H3NativeError::InvalidResponsePseudoHeader("invalid :status value"))
 }
 
 fn header_fields_to_request_head(
@@ -973,9 +1150,7 @@ fn header_fields_to_response_head(
                             "duplicate :status",
                         ));
                     }
-                    let parsed = value.parse::<u16>().map_err(|_| {
-                        H3NativeError::InvalidResponsePseudoHeader("invalid :status value")
-                    })?;
+                    let parsed = parse_status_code(value)?;
                     status = Some(parsed);
                 }
                 _ => {
@@ -1339,6 +1514,13 @@ impl H3RequestStreamState {
     }
 }
 
+/// Push-stream state: push ID header plus response frame progression.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct H3PushStreamState {
+    push_id: Option<u64>,
+    response: H3RequestStreamState,
+}
+
 /// Lightweight HTTP/3 connection mapping state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct H3ConnectionState {
@@ -1347,7 +1529,8 @@ pub struct H3ConnectionState {
     request_streams: BTreeMap<u64, H3RequestStreamState>,
     finished_request_streams: BTreeSet<u64>,
     max_contiguous_finished_request_stream_id: Option<u64>,
-    push_streams: BTreeMap<u64, H3RequestStreamState>,
+    push_streams: BTreeMap<u64, H3PushStreamState>,
+    used_push_ids: BTreeSet<u64>,
     uni_stream_types: BTreeMap<u64, H3UniStreamType>,
     control_stream_id: Option<u64>,
     qpack_encoder_stream_id: Option<u64>,
@@ -1368,6 +1551,21 @@ impl H3ConnectionState {
         Self::with_config(H3ConnectionConfig::default())
     }
 
+    /// Construct state for a local HTTP/3 client.
+    #[must_use]
+    pub fn new_client() -> Self {
+        Self::new()
+    }
+
+    /// Construct state for a local HTTP/3 server.
+    #[must_use]
+    pub fn new_server() -> Self {
+        Self::with_config(H3ConnectionConfig {
+            endpoint_role: H3EndpointRole::Server,
+            ..H3ConnectionConfig::default()
+        })
+    }
+
     /// Construct state from explicit config.
     #[must_use]
     pub fn with_config(config: H3ConnectionConfig) -> Self {
@@ -1378,6 +1576,7 @@ impl H3ConnectionState {
             finished_request_streams: BTreeSet::new(),
             max_contiguous_finished_request_stream_id: None,
             push_streams: BTreeMap::new(),
+            used_push_ids: BTreeSet::new(),
             uni_stream_types: BTreeMap::new(),
             control_stream_id: None,
             qpack_encoder_stream_id: None,
@@ -1401,7 +1600,21 @@ impl H3ConnectionState {
             self.validate_qpack_settings(settings)?;
         }
         self.control.on_remote_control_frame(frame)?;
+        if self.config.endpoint_role == H3EndpointRole::Client
+            && matches!(frame, H3Frame::MaxPushId(_))
+        {
+            return Err(H3NativeError::ControlProtocol(
+                "client must not receive MAX_PUSH_ID",
+            ));
+        }
         if let H3Frame::Goaway(id) = frame {
+            if self.config.endpoint_role == H3EndpointRole::Client
+                && !is_client_initiated_bidirectional_stream_id(*id)
+            {
+                return Err(H3NativeError::ControlProtocol(
+                    "GOAWAY id must be a client-initiated bidirectional stream id",
+                ));
+            }
             if self.goaway_id.is_some_and(|prev| *id > prev) {
                 return Err(H3NativeError::ControlProtocol(
                     "GOAWAY id must not increase",
@@ -1418,9 +1631,9 @@ impl H3ConnectionState {
         stream_id: u64,
         frame: &H3Frame,
     ) -> Result<(), H3NativeError> {
-        if is_unidirectional_stream_id(stream_id) {
+        if !is_client_initiated_bidirectional_stream_id(stream_id) {
             return Err(H3NativeError::StreamProtocol(
-                "request stream id must be bidirectional",
+                "request stream id must be client-initiated bidirectional",
             ));
         }
         if self.uni_stream_types.contains_key(&stream_id) {
@@ -1433,7 +1646,8 @@ impl H3ConnectionState {
                 "request stream already finished",
             ));
         }
-        if let Some(goaway_id) = self.goaway_id
+        if self.config.endpoint_role == H3EndpointRole::Client
+            && let Some(goaway_id) = self.goaway_id
             && stream_id >= goaway_id
         {
             return Err(H3NativeError::ControlProtocol(
@@ -1476,6 +1690,46 @@ impl H3ConnectionState {
         Ok(())
     }
 
+    /// Process the required push-stream header carrying the promised push ID.
+    pub fn on_push_stream_header(
+        &mut self,
+        stream_id: u64,
+        push_id: u64,
+    ) -> Result<(), H3NativeError> {
+        match self.uni_stream_types.get(&stream_id) {
+            Some(H3UniStreamType::Push) => {}
+            Some(_) => {
+                return Err(H3NativeError::StreamProtocol(
+                    "push stream header requires a push stream",
+                ));
+            }
+            None => {
+                return Err(H3NativeError::StreamProtocol(
+                    "unknown unidirectional stream",
+                ));
+            }
+        }
+
+        let state = self
+            .push_streams
+            .get_mut(&stream_id)
+            .ok_or(H3NativeError::StreamProtocol("unknown push stream"))?;
+
+        if state.push_id.is_some() {
+            return Err(H3NativeError::StreamProtocol(
+                "push stream header already received",
+            ));
+        }
+        if !self.used_push_ids.insert(push_id) {
+            return Err(H3NativeError::StreamProtocol(
+                "duplicate push id in push stream header",
+            ));
+        }
+
+        state.push_id = Some(push_id);
+        Ok(())
+    }
+
     /// Register and validate the type of a newly opened remote unidirectional stream.
     pub fn on_remote_uni_stream_type(
         &mut self,
@@ -1485,6 +1739,11 @@ impl H3ConnectionState {
         if !is_unidirectional_stream_id(stream_id) {
             return Err(H3NativeError::StreamProtocol(
                 "unidirectional stream type requires unidirectional stream id",
+            ));
+        }
+        if !is_peer_initiated_unidirectional_stream_id(stream_id, self.config.endpoint_role) {
+            return Err(H3NativeError::StreamProtocol(
+                "unidirectional stream type requires peer-initiated unidirectional stream id",
             ));
         }
         let kind = H3UniStreamType::decode(stream_type);
@@ -1519,6 +1778,11 @@ impl H3ConnectionState {
                 self.qpack_decoder_stream_id = Some(stream_id);
             }
             H3UniStreamType::Push => {
+                if self.config.endpoint_role != H3EndpointRole::Client {
+                    return Err(H3NativeError::StreamProtocol(
+                        "server endpoint must not receive push streams",
+                    ));
+                }
                 self.push_streams.entry(stream_id).or_default();
             }
             H3UniStreamType::Unknown(_) => {
@@ -1547,7 +1811,10 @@ impl H3ConnectionState {
             H3UniStreamType::Control => self.on_control_frame(frame),
             H3UniStreamType::Push => {
                 let state = self.push_streams.entry(stream_id).or_default();
-                state.on_frame(frame)
+                if state.push_id.is_none() {
+                    return Err(H3NativeError::StreamProtocol("push stream missing push id"));
+                }
+                state.response.on_frame(frame)
             }
             H3UniStreamType::QpackEncoder | H3UniStreamType::QpackDecoder => Err(
                 H3NativeError::StreamProtocol("qpack streams carry instructions, not h3 frames"),
@@ -1587,10 +1854,38 @@ impl H3ConnectionState {
     pub fn qpack_mode(&self) -> H3QpackMode {
         self.config.qpack_mode
     }
+
+    /// Endpoint role configured for this connection mapping.
+    #[must_use]
+    pub fn endpoint_role(&self) -> H3EndpointRole {
+        self.config.endpoint_role
+    }
 }
 
 fn is_unidirectional_stream_id(stream_id: u64) -> bool {
     (stream_id & 0x2) != 0
+}
+
+fn is_client_initiated_bidirectional_stream_id(stream_id: u64) -> bool {
+    stream_id.trailing_zeros() >= 2
+}
+
+fn is_client_initiated_unidirectional_stream_id(stream_id: u64) -> bool {
+    (stream_id & 0x3) == 0x2
+}
+
+fn is_server_initiated_unidirectional_stream_id(stream_id: u64) -> bool {
+    (stream_id & 0x3) == 0x3
+}
+
+fn is_peer_initiated_unidirectional_stream_id(
+    stream_id: u64,
+    endpoint_role: H3EndpointRole,
+) -> bool {
+    match endpoint_role {
+        H3EndpointRole::Client => is_server_initiated_unidirectional_stream_id(stream_id),
+        H3EndpointRole::Server => is_client_initiated_unidirectional_stream_id(stream_id),
+    }
 }
 
 /// Validate request pseudo headers.
@@ -1599,17 +1894,28 @@ pub fn validate_request_pseudo_headers(headers: &H3PseudoHeaders) -> Result<(), 
         .method
         .as_deref()
         .ok_or(H3NativeError::InvalidRequestPseudoHeader("missing :method"))?;
+    validate_header_value(method)?;
+    validate_method_token(method)?;
     if headers.status.is_some() {
         return Err(H3NativeError::InvalidRequestPseudoHeader(
             "request must not include :status",
         ));
     }
     if method == "CONNECT" {
-        if headers.authority.as_deref().is_none() {
+        let authority =
+            headers
+                .authority
+                .as_deref()
+                .ok_or(H3NativeError::InvalidRequestPseudoHeader(
+                    "CONNECT request missing :authority",
+                ))?;
+        validate_header_value(authority)?;
+        if authority.is_empty() {
             return Err(H3NativeError::InvalidRequestPseudoHeader(
                 "CONNECT request missing :authority",
             ));
         }
+        validate_authority_form(authority)?;
         if headers.scheme.is_some() || headers.path.is_some() {
             return Err(H3NativeError::InvalidRequestPseudoHeader(
                 "CONNECT request must not include :scheme or :path",
@@ -1617,11 +1923,32 @@ pub fn validate_request_pseudo_headers(headers: &H3PseudoHeaders) -> Result<(), 
         }
         return Ok(());
     }
-    if headers.scheme.as_deref().is_none() {
-        return Err(H3NativeError::InvalidRequestPseudoHeader("missing :scheme"));
+    let scheme = headers
+        .scheme
+        .as_deref()
+        .ok_or(H3NativeError::InvalidRequestPseudoHeader("missing :scheme"))?;
+    validate_header_value(scheme)?;
+    if scheme.is_empty() {
+        return Err(H3NativeError::InvalidRequestPseudoHeader("empty :scheme"));
     }
-    if headers.path.as_deref().is_none() {
-        return Err(H3NativeError::InvalidRequestPseudoHeader("missing :path"));
+    validate_scheme_syntax(scheme)?;
+    let path = headers
+        .path
+        .as_deref()
+        .ok_or(H3NativeError::InvalidRequestPseudoHeader("missing :path"))?;
+    validate_header_value(path)?;
+    if path.is_empty() {
+        return Err(H3NativeError::InvalidRequestPseudoHeader("empty :path"));
+    }
+    validate_request_path(method, path)?;
+    if let Some(authority) = headers.authority.as_deref() {
+        validate_header_value(authority)?;
+        if authority.is_empty() {
+            return Err(H3NativeError::InvalidRequestPseudoHeader(
+                "empty :authority",
+            ));
+        }
+        validate_authority_form(authority)?;
     }
     Ok(())
 }
@@ -1636,6 +1963,11 @@ pub fn validate_response_pseudo_headers(headers: &H3PseudoHeaders) -> Result<(),
     if !(100..=999).contains(&status) {
         return Err(H3NativeError::InvalidResponsePseudoHeader(
             "status must be in 100..=999",
+        ));
+    }
+    if status == 101 {
+        return Err(H3NativeError::InvalidResponsePseudoHeader(
+            "HTTP/3 does not support 101 Switching Protocols",
         ));
     }
     if headers.method.is_some()
@@ -1834,12 +2166,12 @@ mod tests {
     }
 
     #[test]
-    fn connection_state_applies_goaway_to_new_request_ids() {
+    fn client_role_applies_goaway_to_new_request_ids() {
         let mut c = H3ConnectionState::new();
         c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
             .expect("settings");
-        c.on_control_frame(&H3Frame::Goaway(10)).expect("goaway");
-        assert_eq!(c.goaway_id(), Some(10));
+        c.on_control_frame(&H3Frame::Goaway(12)).expect("goaway");
+        assert_eq!(c.goaway_id(), Some(12));
         c.on_request_stream_frame(8, &H3Frame::Headers(vec![1]))
             .expect("allowed");
         let err = c
@@ -1852,13 +2184,25 @@ mod tests {
     }
 
     #[test]
+    fn server_role_accepts_push_id_goaway_without_blocking_request_streams() {
+        let mut c = H3ConnectionState::new_server();
+        c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        c.on_control_frame(&H3Frame::Goaway(10))
+            .expect("server role accepts client push-id goaway");
+        assert_eq!(c.goaway_id(), Some(10));
+        c.on_request_stream_frame(12, &H3Frame::Headers(vec![1]))
+            .expect("server role must keep accepting request stream ids");
+    }
+
+    #[test]
     fn connection_state_rejects_increasing_goaway_id() {
         let mut c = H3ConnectionState::new();
         c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
             .expect("settings");
-        c.on_control_frame(&H3Frame::Goaway(10)).expect("first");
+        c.on_control_frame(&H3Frame::Goaway(12)).expect("first");
         let err = c
-            .on_control_frame(&H3Frame::Goaway(12))
+            .on_control_frame(&H3Frame::Goaway(16))
             .expect_err("must fail");
         assert_eq!(
             err,
@@ -1876,7 +2220,25 @@ mod tests {
             .expect_err("must fail");
         assert_eq!(
             err,
-            H3NativeError::StreamProtocol("request stream id must be bidirectional")
+            H3NativeError::StreamProtocol(
+                "request stream id must be client-initiated bidirectional"
+            )
+        );
+    }
+
+    #[test]
+    fn request_stream_rejects_server_initiated_bidirectional_stream_id() {
+        let mut c = H3ConnectionState::new();
+        c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        let err = c
+            .on_request_stream_frame(1, &H3Frame::Headers(vec![1]))
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol(
+                "request stream id must be client-initiated bidirectional"
+            )
         );
     }
 
@@ -1899,19 +2261,19 @@ mod tests {
     #[test]
     fn duplicate_remote_control_uni_stream_rejected() {
         let mut c = H3ConnectionState::new();
-        c.on_remote_uni_stream_type(2, H3_STREAM_TYPE_CONTROL)
+        c.on_remote_uni_stream_type(3, H3_STREAM_TYPE_CONTROL)
             .expect("first control");
         let err = c
-            .on_remote_uni_stream_type(6, H3_STREAM_TYPE_CONTROL)
+            .on_remote_uni_stream_type(7, H3_STREAM_TYPE_CONTROL)
             .expect_err("must fail");
         assert_eq!(
             err,
             H3NativeError::StreamProtocol("duplicate remote control stream")
         );
-        c.on_uni_stream_frame(2, &H3Frame::Settings(H3Settings::default()))
+        c.on_uni_stream_frame(3, &H3Frame::Settings(H3Settings::default()))
             .expect("original control stream remains active");
         let err = c
-            .on_uni_stream_frame(6, &H3Frame::Settings(H3Settings::default()))
+            .on_uni_stream_frame(7, &H3Frame::Settings(H3Settings::default()))
             .expect_err("new duplicate stream must not become active");
         assert_eq!(
             err,
@@ -1936,28 +2298,61 @@ mod tests {
     #[test]
     fn push_uni_stream_uses_headers_data_ordering() {
         let mut c = H3ConnectionState::new();
-        c.on_remote_uni_stream_type(10, H3_STREAM_TYPE_PUSH)
+        c.on_remote_uni_stream_type(11, H3_STREAM_TYPE_PUSH)
             .expect("push type");
         let err = c
-            .on_uni_stream_frame(10, &H3Frame::Data(vec![1]))
+            .on_uni_stream_frame(11, &H3Frame::Headers(vec![0x80]))
+            .expect_err("must fail before push header");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("push stream missing push id")
+        );
+        c.on_push_stream_header(11, 7).expect("push header");
+        let err = c
+            .on_uni_stream_frame(11, &H3Frame::Data(vec![1]))
             .expect_err("must fail");
         assert_eq!(
             err,
             H3NativeError::ControlProtocol("DATA before initial HEADERS on request stream")
         );
-        c.on_uni_stream_frame(10, &H3Frame::Headers(vec![0x80]))
+        c.on_uni_stream_frame(11, &H3Frame::Headers(vec![0x80]))
             .expect("headers");
-        c.on_uni_stream_frame(10, &H3Frame::Data(vec![1, 2]))
+        c.on_uni_stream_frame(11, &H3Frame::Data(vec![1, 2]))
             .expect("data");
+    }
+
+    #[test]
+    fn push_stream_duplicate_header_and_push_id_rejected() {
+        let mut c = H3ConnectionState::new();
+        c.on_remote_uni_stream_type(11, H3_STREAM_TYPE_PUSH)
+            .expect("first push stream");
+        c.on_push_stream_header(11, 7).expect("push header");
+        let err = c
+            .on_push_stream_header(11, 8)
+            .expect_err("second push header must fail");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("push stream header already received")
+        );
+
+        c.on_remote_uni_stream_type(15, H3_STREAM_TYPE_PUSH)
+            .expect("second push stream");
+        let err = c
+            .on_push_stream_header(15, 7)
+            .expect_err("duplicate push id must fail");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("duplicate push id in push stream header")
+        );
     }
 
     #[test]
     fn qpack_streams_reject_h3_frame_mapping() {
         let mut c = H3ConnectionState::new();
-        c.on_remote_uni_stream_type(14, H3_STREAM_TYPE_QPACK_ENCODER)
+        c.on_remote_uni_stream_type(15, H3_STREAM_TYPE_QPACK_ENCODER)
             .expect("qpack encoder");
         let err = c
-            .on_uni_stream_frame(14, &H3Frame::Data(vec![1]))
+            .on_uni_stream_frame(15, &H3Frame::Data(vec![1]))
             .expect_err("must fail");
         assert_eq!(
             err,
@@ -2044,11 +2439,23 @@ mod tests {
     fn h3_connection_config_default_debug_copy() {
         let config = H3ConnectionConfig::default();
         assert_eq!(config.qpack_mode, H3QpackMode::StaticOnly);
+        assert_eq!(config.endpoint_role, H3EndpointRole::Client);
         let copied = config; // Copy
         let cloned = config;
         assert_eq!(copied, cloned);
         let dbg = format!("{config:?}");
         assert!(dbg.contains("H3ConnectionConfig"), "{dbg}");
+    }
+
+    #[test]
+    fn h3_endpoint_role_default_debug_copy() {
+        let role = H3EndpointRole::default();
+        assert_eq!(role, H3EndpointRole::Client);
+        let copied = role; // Copy
+        let cloned = role;
+        assert_eq!(copied, cloned);
+        let dbg = format!("{role:?}");
+        assert!(dbg.contains("Client"), "{dbg}");
     }
 
     #[test]
@@ -2237,6 +2644,21 @@ mod tests {
             err,
             H3NativeError::InvalidResponsePseudoHeader(
                 "response must not include request pseudo headers"
+            )
+        );
+    }
+
+    #[test]
+    fn response_pseudo_headers_reject_101_switching_protocols() {
+        let headers = H3PseudoHeaders {
+            status: Some(101),
+            ..H3PseudoHeaders::default()
+        };
+        let err = validate_response_pseudo_headers(&headers).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidResponsePseudoHeader(
+                "HTTP/3 does not support 101 Switching Protocols"
             )
         );
     }
@@ -2525,10 +2947,10 @@ mod tests {
     #[test]
     fn duplicate_qpack_encoder_stream_error() {
         let mut c = H3ConnectionState::new();
-        c.on_remote_uni_stream_type(2, H3_STREAM_TYPE_QPACK_ENCODER)
+        c.on_remote_uni_stream_type(3, H3_STREAM_TYPE_QPACK_ENCODER)
             .expect("first encoder");
         let err = c
-            .on_remote_uni_stream_type(6, H3_STREAM_TYPE_QPACK_ENCODER)
+            .on_remote_uni_stream_type(7, H3_STREAM_TYPE_QPACK_ENCODER)
             .expect_err("must fail");
         assert_eq!(
             err,
@@ -2539,10 +2961,10 @@ mod tests {
     #[test]
     fn duplicate_qpack_decoder_stream_error() {
         let mut c = H3ConnectionState::new();
-        c.on_remote_uni_stream_type(2, H3_STREAM_TYPE_QPACK_DECODER)
+        c.on_remote_uni_stream_type(3, H3_STREAM_TYPE_QPACK_DECODER)
             .expect("first decoder");
         let err = c
-            .on_remote_uni_stream_type(6, H3_STREAM_TYPE_QPACK_DECODER)
+            .on_remote_uni_stream_type(7, H3_STREAM_TYPE_QPACK_DECODER)
             .expect_err("must fail");
         assert_eq!(
             err,
@@ -2553,10 +2975,10 @@ mod tests {
     #[test]
     fn uni_stream_type_already_set_for_same_id_error() {
         let mut c = H3ConnectionState::new();
-        c.on_remote_uni_stream_type(2, H3_STREAM_TYPE_CONTROL)
+        c.on_remote_uni_stream_type(3, H3_STREAM_TYPE_CONTROL)
             .expect("first set");
         let err = c
-            .on_remote_uni_stream_type(2, H3_STREAM_TYPE_PUSH)
+            .on_remote_uni_stream_type(3, H3_STREAM_TYPE_PUSH)
             .expect_err("must fail");
         assert_eq!(
             err,
@@ -2572,13 +2994,43 @@ mod tests {
         c.on_control_frame(&H3Frame::Goaway(100))
             .expect("first goaway=100");
         assert_eq!(c.goaway_id(), Some(100));
-        c.on_control_frame(&H3Frame::Goaway(50))
-            .expect("second goaway=50");
-        assert_eq!(c.goaway_id(), Some(50));
+        c.on_control_frame(&H3Frame::Goaway(96))
+            .expect("second goaway=96");
+        assert_eq!(c.goaway_id(), Some(96));
     }
 
     #[test]
-    fn goaway_zero_blocks_all_request_streams() {
+    fn client_role_rejects_non_request_goaway_id() {
+        let mut c = H3ConnectionState::new();
+        c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        let err = c
+            .on_control_frame(&H3Frame::Goaway(10))
+            .expect_err("must reject invalid goaway id");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol(
+                "GOAWAY id must be a client-initiated bidirectional stream id"
+            )
+        );
+    }
+
+    #[test]
+    fn client_role_rejects_max_push_id_control_frame() {
+        let mut c = H3ConnectionState::new();
+        c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        let err = c
+            .on_control_frame(&H3Frame::MaxPushId(10))
+            .expect_err("client must reject MAX_PUSH_ID from server");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("client must not receive MAX_PUSH_ID")
+        );
+    }
+
+    #[test]
+    fn client_role_goaway_zero_blocks_all_request_streams() {
         let mut c = H3ConnectionState::new();
         c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
             .expect("settings");
@@ -2600,6 +3052,7 @@ mod tests {
     fn dynamic_table_allowed_accepts_nonzero_capacity() {
         let config = H3ConnectionConfig {
             qpack_mode: H3QpackMode::DynamicTableAllowed,
+            ..H3ConnectionConfig::default()
         };
         let mut c = H3ConnectionState::with_config(config);
         let settings = H3Settings {
@@ -2609,6 +3062,46 @@ mod tests {
         };
         c.on_control_frame(&H3Frame::Settings(settings))
             .expect("dynamic table settings accepted");
+    }
+
+    #[test]
+    fn client_role_rejects_locally_initiated_remote_uni_stream_id() {
+        let mut c = H3ConnectionState::new();
+        let err = c
+            .on_remote_uni_stream_type(2, H3_STREAM_TYPE_CONTROL)
+            .expect_err("client must reject locally initiated uni stream id");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol(
+                "unidirectional stream type requires peer-initiated unidirectional stream id"
+            )
+        );
+    }
+
+    #[test]
+    fn server_role_rejects_server_initiated_remote_uni_stream_id() {
+        let mut c = H3ConnectionState::new_server();
+        let err = c
+            .on_remote_uni_stream_type(3, H3_STREAM_TYPE_CONTROL)
+            .expect_err("server must reject its own uni stream ids as remote");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol(
+                "unidirectional stream type requires peer-initiated unidirectional stream id"
+            )
+        );
+    }
+
+    #[test]
+    fn server_role_rejects_push_streams() {
+        let mut c = H3ConnectionState::new_server();
+        let err = c
+            .on_remote_uni_stream_type(2, H3_STREAM_TYPE_PUSH)
+            .expect_err("server must reject client push streams");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("server endpoint must not receive push streams")
+        );
     }
 
     #[test]
@@ -2809,6 +3302,31 @@ mod tests {
     }
 
     #[test]
+    fn response_decode_rejects_zero_padded_status_value() {
+        let fields = vec![(":status".to_string(), "020".to_string())];
+        let err = header_fields_to_response_head(&fields).expect_err("must reject zero-padded");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidResponsePseudoHeader("status must be in 100..=999")
+        );
+    }
+
+    #[test]
+    fn qpack_response_decode_rejects_non_three_digit_status_value() {
+        let plan = vec![QpackFieldPlan::Literal {
+            name: ":status".to_string(),
+            value: "0200".to_string(),
+        }];
+        let wire = qpack_encode_field_section(&plan).expect("encode");
+        let err =
+            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly).expect_err("fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidResponsePseudoHeader("invalid :status value")
+        );
+    }
+
+    #[test]
     fn qpack_response_decode_rejects_request_pseudo_header() {
         let plan = vec![
             QpackFieldPlan::StaticIndex(25), // :status 200
@@ -2939,6 +3457,276 @@ mod tests {
     }
 
     #[test]
+    fn request_empty_method_error() {
+        let pseudo = H3PseudoHeaders {
+            method: Some(String::new()),
+            scheme: Some("https".to_string()),
+            authority: Some("example.com".to_string()),
+            path: Some("/".to_string()),
+            status: None,
+        };
+        let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader("empty :method")
+        );
+    }
+
+    #[test]
+    fn request_invalid_method_token_error() {
+        let pseudo = H3PseudoHeaders {
+            method: Some("GET POST".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("example.com".to_string()),
+            path: Some("/".to_string()),
+            status: None,
+        };
+        let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader(":method must be a valid HTTP token")
+        );
+    }
+
+    #[test]
+    fn request_empty_scheme_error() {
+        let pseudo = H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some(String::new()),
+            authority: Some("example.com".to_string()),
+            path: Some("/".to_string()),
+            status: None,
+        };
+        let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader("empty :scheme")
+        );
+    }
+
+    #[test]
+    fn request_empty_path_error() {
+        let pseudo = H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("example.com".to_string()),
+            path: Some(String::new()),
+            status: None,
+        };
+        let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader("empty :path")
+        );
+    }
+
+    #[test]
+    fn connect_empty_authority_error() {
+        let pseudo = H3PseudoHeaders {
+            method: Some("CONNECT".to_string()),
+            authority: Some(String::new()),
+            ..H3PseudoHeaders::default()
+        };
+        let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader("CONNECT request missing :authority")
+        );
+    }
+
+    #[test]
+    fn connect_invalid_authority_value_error() {
+        let pseudo = H3PseudoHeaders {
+            method: Some("CONNECT".to_string()),
+            authority: Some("example.com\r\nx-bad: 1".to_string()),
+            ..H3PseudoHeaders::default()
+        };
+        let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame(
+                "header field value contains forbidden character (NUL, CR, or LF)"
+            )
+        );
+    }
+
+    #[test]
+    fn connect_rejects_authority_whitespace() {
+        let pseudo = H3PseudoHeaders {
+            method: Some("CONNECT".to_string()),
+            authority: Some("example.com :443".to_string()),
+            ..H3PseudoHeaders::default()
+        };
+        let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader(
+                ":authority must be RFC authority-form without whitespace"
+            )
+        );
+    }
+
+    #[test]
+    fn request_rejects_empty_authority_when_present() {
+        let pseudo = H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some(String::new()),
+            path: Some("/".to_string()),
+            status: None,
+        };
+        let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader("empty :authority")
+        );
+    }
+
+    #[test]
+    fn request_rejects_non_origin_form_path() {
+        let pseudo = H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("example.com".to_string()),
+            path: Some("noslash".to_string()),
+            status: None,
+        };
+        let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader(":path must start with /")
+        );
+    }
+
+    #[test]
+    fn request_rejects_asterisk_form_for_non_options() {
+        let pseudo = H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("example.com".to_string()),
+            path: Some("*".to_string()),
+            status: None,
+        };
+        let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader("asterisk-form :path requires OPTIONS")
+        );
+    }
+
+    #[test]
+    fn options_allows_asterisk_form_path() {
+        let pseudo = H3PseudoHeaders {
+            method: Some("OPTIONS".to_string()),
+            scheme: Some("https".to_string()),
+            path: Some("*".to_string()),
+            status: None,
+            ..H3PseudoHeaders::default()
+        };
+        validate_request_pseudo_headers(&pseudo).expect("OPTIONS * is valid");
+    }
+
+    #[test]
+    fn request_rejects_invalid_scheme_syntax() {
+        let pseudo = H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("1https".to_string()),
+            authority: Some("example.com".to_string()),
+            path: Some("/".to_string()),
+            status: None,
+        };
+        let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader(":scheme must be a valid URI scheme")
+        );
+    }
+
+    #[test]
+    fn request_head_constructor_rejects_pseudo_header_in_regular_headers() {
+        let err = H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("example.com".to_string()),
+                path: Some("/".to_string()),
+                status: None,
+            },
+            vec![(":status".to_string(), "200".to_string())],
+        )
+        .expect_err("must reject pseudo header contamination");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader(
+                "pseudo headers must not appear in regular header list"
+            )
+        );
+    }
+
+    #[test]
+    fn request_head_constructor_rejects_invalid_regular_header_value() {
+        let err = H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("example.com".to_string()),
+                path: Some("/".to_string()),
+                status: None,
+            },
+            vec![("x-test".to_string(), "bad\r\nvalue".to_string())],
+        )
+        .expect_err("must reject invalid regular header value");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame(
+                "header field value contains forbidden character (NUL, CR, or LF)"
+            )
+        );
+    }
+
+    #[test]
+    fn request_head_constructor_rejects_invalid_authority_pseudo_value() {
+        let err = H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("example.com\r\nx-bad: 1".to_string()),
+                path: Some("/".to_string()),
+                status: None,
+            },
+            vec![],
+        )
+        .expect_err("must reject invalid pseudo header value");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame(
+                "header field value contains forbidden character (NUL, CR, or LF)"
+            )
+        );
+    }
+
+    #[test]
+    fn request_head_constructor_rejects_invalid_path_pseudo_value() {
+        let err = H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("example.com".to_string()),
+                path: Some("/ok\nbad".to_string()),
+                status: None,
+            },
+            vec![],
+        )
+        .expect_err("must reject invalid pseudo header value");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame(
+                "header field value contains forbidden character (NUL, CR, or LF)"
+            )
+        );
+    }
+
+    #[test]
     fn response_with_method_contaminant_error() {
         let pseudo = H3PseudoHeaders {
             status: Some(200),
@@ -2951,6 +3739,28 @@ mod tests {
             H3NativeError::InvalidResponsePseudoHeader(
                 "response must not include request pseudo headers"
             )
+        );
+    }
+
+    #[test]
+    fn response_head_constructor_rejects_request_pseudo_header_in_regular_headers() {
+        let err = H3ResponseHead::new(200, vec![(":path".to_string(), "/".to_string())])
+            .expect_err("must reject request pseudo contamination");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidResponsePseudoHeader(
+                "response must not include request pseudo headers"
+            )
+        );
+    }
+
+    #[test]
+    fn response_head_constructor_rejects_invalid_regular_header_name() {
+        let err = H3ResponseHead::new(200, vec![("Bad-Header".to_string(), "ok".to_string())])
+            .expect_err("must reject uppercase regular header");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("header field name must be lowercase in HTTP/3")
         );
     }
 
@@ -3044,6 +3854,15 @@ mod tests {
     }
 
     #[test]
+    fn header_name_rejects_embedded_colon_in_regular_header() {
+        let err = validate_header_name("x:bad").expect_err("must reject embedded colon");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("header field name contains invalid character")
+        );
+    }
+
+    #[test]
     fn header_name_accepts_valid_token() {
         validate_header_name("content-type").expect("valid");
         validate_header_name("x-custom_header.1").expect("valid");
@@ -3083,11 +3902,11 @@ mod tests {
     fn unknown_uni_stream_type_accepted_and_data_ignored() {
         let mut c = H3ConnectionState::new();
         let kind = c
-            .on_remote_uni_stream_type(2, 0x42)
+            .on_remote_uni_stream_type(3, 0x42)
             .expect("unknown type must be accepted per RFC 9114 §6.2");
         assert_eq!(kind, H3UniStreamType::Unknown(0x42));
         // Data on unknown streams is silently discarded.
-        c.on_uni_stream_frame(2, &H3Frame::Data(vec![1, 2, 3]))
+        c.on_uni_stream_frame(3, &H3Frame::Data(vec![1, 2, 3]))
             .expect("data on unknown stream must be accepted");
     }
 
@@ -3103,6 +3922,35 @@ mod tests {
         assert_eq!(
             err,
             H3NativeError::InvalidFrame("header field name must be lowercase in HTTP/3")
+        );
+    }
+
+    #[test]
+    fn request_decode_rejects_embedded_colon_in_regular_header_name() {
+        let fields = vec![
+            (":method".to_string(), "GET".to_string()),
+            (":scheme".to_string(), "https".to_string()),
+            (":path".to_string(), "/".to_string()),
+            ("x:bad".to_string(), "*/*".to_string()),
+        ];
+        let err = header_fields_to_request_head(&fields).expect_err("must reject embedded colon");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("header field name contains invalid character")
+        );
+    }
+
+    #[test]
+    fn request_decode_rejects_invalid_method_token() {
+        let fields = vec![
+            (":method".to_string(), "GET POST".to_string()),
+            (":scheme".to_string(), "https".to_string()),
+            (":path".to_string(), "/".to_string()),
+        ];
+        let err = header_fields_to_request_head(&fields).expect_err("must reject invalid method");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader(":method must be a valid HTTP token")
         );
     }
 
@@ -3507,9 +4355,7 @@ mod tests {
 
             match frame {
                 // DATA and HEADERS are allowed in early data for requests
-                H3Frame::Data { .. } | H3Frame::Headers { .. } if self.allow_early_requests => {
-                    Ok(())
-                }
+                H3Frame::Data(_) | H3Frame::Headers(_) if self.allow_early_requests => Ok(()),
 
                 // SETTINGS may or may not be allowed based on policy
                 H3Frame::Settings(_) if self.allow_early_settings => Ok(()),
@@ -3603,16 +4449,12 @@ mod tests {
         };
 
         // DATA and HEADERS should be allowed for requests
-        let data_frame = H3Frame::Data {
-            payload: vec![1, 2, 3],
-        };
+        let data_frame = H3Frame::Data(vec![1, 2, 3]);
         config
             .validate_early_frame(&data_frame)
             .expect("DATA allowed");
 
-        let headers_frame = H3Frame::Headers {
-            field_block: vec![4, 5, 6],
-        };
+        let headers_frame = H3Frame::Headers(vec![4, 5, 6]);
         config
             .validate_early_frame(&headers_frame)
             .expect("HEADERS allowed");
@@ -3687,17 +4529,13 @@ mod tests {
         };
 
         // DATA and HEADERS rejected when requests not allowed
-        let data_frame = H3Frame::Data {
-            payload: vec![1, 2, 3],
-        };
+        let data_frame = H3Frame::Data(vec![1, 2, 3]);
         let err = config
             .validate_early_frame(&data_frame)
             .expect_err("DATA rejected by policy");
         assert!(matches!(err, H3NativeError::StreamProtocol(_)));
 
-        let headers_frame = H3Frame::Headers {
-            field_block: vec![4, 5, 6],
-        };
+        let headers_frame = H3Frame::Headers(vec![4, 5, 6]);
         let err = config
             .validate_early_frame(&headers_frame)
             .expect_err("HEADERS rejected by policy");
@@ -3724,9 +4562,7 @@ mod tests {
             .validate_early_frame(&goaway_frame)
             .expect("GOAWAY allowed after handshake");
 
-        let data_frame = H3Frame::Data {
-            payload: vec![1, 2, 3],
-        };
+        let data_frame = H3Frame::Data(vec![1, 2, 3]);
         config
             .validate_early_frame(&data_frame)
             .expect("DATA allowed after handshake");

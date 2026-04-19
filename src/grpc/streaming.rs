@@ -6,6 +6,7 @@
 //! - Client streaming: stream of requests, single response
 //! - Bidirectional streaming: stream of requests and responses
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -158,6 +159,33 @@ pub enum MetadataValue {
     Binary(Bytes),
 }
 
+pub(crate) fn normalize_metadata_key(key: &str, binary: bool) -> Option<String> {
+    let mut normalized = key.to_ascii_lowercase();
+    if binary && !normalized.ends_with("-bin") {
+        normalized.push_str("-bin");
+    }
+    if normalized.is_empty() {
+        return None;
+    }
+
+    for ch in normalized.chars() {
+        let valid = ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | '.');
+        if !valid {
+            return None;
+        }
+    }
+
+    Some(normalized)
+}
+
+pub(crate) fn sanitize_metadata_ascii_value(value: &str) -> Cow<'_, str> {
+    if value.contains(['\r', '\n']) {
+        Cow::Owned(value.replace(['\r', '\n'], ""))
+    } else {
+        Cow::Borrowed(value)
+    }
+}
+
 impl Metadata {
     /// Create empty metadata.
     #[must_use]
@@ -173,18 +201,32 @@ impl Metadata {
     }
 
     /// Insert an ASCII value.
-    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        let key = key.into().to_ascii_lowercase();
-        self.entries.push((key, MetadataValue::Ascii(value.into())));
+    ///
+    /// Returns `false` when the metadata key is invalid and the entry is
+    /// rejected. CR/LF are stripped from ASCII values to prevent header or
+    /// trailer injection when metadata is encoded onto the wire.
+    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) -> bool {
+        let key = key.into();
+        let Some(key) = normalize_metadata_key(&key, false) else {
+            return false;
+        };
+        let value = value.into();
+        let sanitized = sanitize_metadata_ascii_value(&value).into_owned();
+        self.entries.push((key, MetadataValue::Ascii(sanitized)));
+        true
     }
 
     /// Insert a binary value.
-    pub fn insert_bin(&mut self, key: impl Into<String>, value: Bytes) {
-        let mut key = key.into().to_ascii_lowercase();
-        if !key.ends_with("-bin") {
-            key.push_str("-bin");
-        }
+    ///
+    /// Returns `false` when the metadata key is invalid and the entry is
+    /// rejected.
+    pub fn insert_bin(&mut self, key: impl Into<String>, value: Bytes) -> bool {
+        let key = key.into();
+        let Some(key) = normalize_metadata_key(&key, true) else {
+            return false;
+        };
         self.entries.push((key, MetadataValue::Binary(value)));
+        true
     }
 
     /// Get a value by key.
@@ -799,6 +841,86 @@ mod tests {
         crate::test_complete!("test_metadata_insert_bin_normalizes_key_case_and_suffix");
     }
 
+    #[test]
+    fn test_metadata_insert_rejects_invalid_key() {
+        init_test("test_metadata_insert_rejects_invalid_key");
+        let mut metadata = Metadata::new();
+
+        let inserted = metadata.insert("x-good\r\nx-evil", "value");
+        crate::assert_with_log!(!inserted, "invalid metadata key rejected", false, inserted);
+        crate::assert_with_log!(
+            metadata.is_empty(),
+            "rejected metadata key not stored",
+            true,
+            metadata.is_empty()
+        );
+        crate::test_complete!("test_metadata_insert_rejects_invalid_key");
+    }
+
+    #[test]
+    fn test_metadata_insert_rejects_pseudo_header_key() {
+        init_test("test_metadata_insert_rejects_pseudo_header_key");
+        let mut metadata = Metadata::new();
+
+        let inserted = metadata.insert(":path", "/evil");
+        crate::assert_with_log!(
+            !inserted,
+            "pseudo-header metadata key rejected",
+            false,
+            inserted
+        );
+        crate::assert_with_log!(
+            metadata.is_empty(),
+            "rejected pseudo-header key not stored",
+            true,
+            metadata.is_empty()
+        );
+        crate::test_complete!("test_metadata_insert_rejects_pseudo_header_key");
+    }
+
+    #[test]
+    fn test_metadata_insert_bin_rejects_pseudo_header_key() {
+        init_test("test_metadata_insert_bin_rejects_pseudo_header_key");
+        let mut metadata = Metadata::new();
+
+        let inserted = metadata.insert_bin(":path", Bytes::from_static(b"/evil"));
+        crate::assert_with_log!(
+            !inserted,
+            "binary pseudo-header metadata key rejected",
+            false,
+            inserted
+        );
+        crate::assert_with_log!(
+            metadata.is_empty(),
+            "rejected binary pseudo-header key not stored",
+            true,
+            metadata.is_empty()
+        );
+        crate::test_complete!("test_metadata_insert_bin_rejects_pseudo_header_key");
+    }
+
+    #[test]
+    fn test_metadata_insert_strips_ascii_crlf() {
+        init_test("test_metadata_insert_strips_ascii_crlf");
+        let mut metadata = Metadata::new();
+
+        let inserted = metadata.insert("x-request-id", "line1\r\nline2");
+        crate::assert_with_log!(inserted, "valid key inserted", true, inserted);
+
+        match metadata.get("x-request-id") {
+            Some(MetadataValue::Ascii(value)) => {
+                crate::assert_with_log!(
+                    value == "line1line2",
+                    "ascii metadata CRLF sanitized",
+                    "line1line2",
+                    value
+                );
+            }
+            _ => panic!("expected sanitized ascii metadata value"),
+        }
+        crate::test_complete!("test_metadata_insert_strips_ascii_crlf");
+    }
+
     // =========================================================================
     // Wave 48 – pure data-type trait coverage
     // =========================================================================
@@ -993,35 +1115,36 @@ mod tests {
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut pinned = Pin::new(&mut stream);
+        {
+            let mut pinned = Pin::new(&mut stream);
 
-        // Consume all responses
-        assert!(
-            matches!(
-                pinned.as_mut().poll_next(&mut cx),
-                Poll::Ready(Some(Ok(ref s))) if s == "response1"
-            ),
-            "first response consumed"
-        );
+            // Consume all responses
+            assert!(
+                matches!(
+                    pinned.as_mut().poll_next(&mut cx),
+                    Poll::Ready(Some(Ok(ref s))) if s == "response1"
+                ),
+                "first response consumed"
+            );
 
-        assert!(
-            matches!(
-                pinned.as_mut().poll_next(&mut cx),
-                Poll::Ready(Some(Ok(ref s))) if s == "response2"
-            ),
-            "second response consumed"
-        );
+            assert!(
+                matches!(
+                    pinned.as_mut().poll_next(&mut cx),
+                    Poll::Ready(Some(Ok(ref s))) if s == "response2"
+                ),
+                "second response consumed"
+            );
 
-        assert!(
-            matches!(
-                pinned.as_mut().poll_next(&mut cx),
-                Poll::Ready(Some(Ok(ref s))) if s == "response3"
-            ),
-            "third response consumed"
-        );
+            assert!(
+                matches!(
+                    pinned.as_mut().poll_next(&mut cx),
+                    Poll::Ready(Some(Ok(ref s))) if s == "response3"
+                ),
+                "third response consumed"
+            );
+        }
 
         // Stream termination - close() signals completion
-        drop(pinned); // Drop the pin before calling close()
         stream.close();
         let mut pinned = Pin::new(&mut stream); // Re-pin after close
 
@@ -1049,34 +1172,35 @@ mod tests {
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut pinned = Pin::new(&mut stream);
+        {
+            let mut pinned = Pin::new(&mut stream);
 
-        // First response should be valid
-        assert!(
-            matches!(
-                pinned.as_mut().poll_next(&mut cx),
-                Poll::Ready(Some(Ok(42)))
-            ),
-            "valid response received before error"
-        );
+            // First response should be valid
+            assert!(
+                matches!(
+                    pinned.as_mut().poll_next(&mut cx),
+                    Poll::Ready(Some(Ok(42)))
+                ),
+                "valid response received before error"
+            );
 
-        // Error response should contain proper status
-        match pinned.as_mut().poll_next(&mut cx) {
-            Poll::Ready(Some(Err(status))) => {
-                assert_eq!(
-                    status.code(),
-                    Code::InvalidArgument,
-                    "error code propagated"
-                );
-                assert!(
-                    status.message().contains("malformed request"),
-                    "error message preserved"
-                );
+            // Error response should contain proper status
+            match pinned.as_mut().poll_next(&mut cx) {
+                Poll::Ready(Some(Err(status))) => {
+                    assert_eq!(
+                        status.code(),
+                        Code::InvalidArgument,
+                        "error code propagated"
+                    );
+                    assert!(
+                        status.message().contains("malformed request"),
+                        "error message preserved"
+                    );
+                }
+                other => panic!("expected error status, got {other:?}"),
             }
-            other => panic!("expected error status, got {other:?}"),
         }
 
-        drop(pinned); // Drop pin before calling close()
         stream.close();
         let mut pinned = Pin::new(&mut stream); // Re-pin after close
         assert!(
@@ -1258,16 +1382,17 @@ mod tests {
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut pinned = Pin::new(&mut stream);
+        {
+            let mut pinned = Pin::new(&mut stream);
 
-        // Poll on empty stream should return Pending
-        assert!(
-            matches!(pinned.as_mut().poll_next(&mut cx), Poll::Pending),
-            "empty open stream should be pending"
-        );
+            // Poll on empty stream should return Pending
+            assert!(
+                matches!(pinned.as_mut().poll_next(&mut cx), Poll::Pending),
+                "empty open stream should be pending"
+            );
+        }
 
         // Close should allow immediate completion on next poll
-        drop(pinned); // Drop pin before calling close()
         stream.close();
         let mut pinned = Pin::new(&mut stream); // Re-pin after close
 

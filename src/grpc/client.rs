@@ -520,6 +520,11 @@ impl<C: Codec> GrpcClient<C> {
         let state = Arc::new(Mutex::new(RequestSinkState::new()));
         let sink = RequestSink::from_state(state.clone());
         let future = ResponseFuture::with_resolver(state, move |state| {
+            if state.sent_count > 1 {
+                return Err(Status::failed_precondition(
+                    "loopback client streaming does not support multiple request messages yet",
+                ));
+            }
             let Some(last) = state.last_message.take() else {
                 return Err(Status::invalid_argument(
                     "client stream closed without any request messages",
@@ -545,9 +550,12 @@ impl<C: Codec> GrpcClient<C> {
         validate_rpc_path(path)?;
         enforce_deadline_budget(self.channel.config.timeout)?;
 
+        let request = Request::new(Bytes::new());
+        let _metadata = self.build_outbound_metadata(&request, path)?;
         let stream = ResponseStream::open();
         let mut send_stream = stream.clone();
         let close_stream = stream.clone();
+        let cancel_stream = stream.clone();
         let sink = RequestSink::with_hooks(
             Some(Box::new(move |message: Req| {
                 let response =
@@ -556,6 +564,10 @@ impl<C: Codec> GrpcClient<C> {
             })),
             Some(Box::new(move || {
                 close_stream.close();
+                Ok(())
+            })),
+            Some(Box::new(move || {
+                cancel_stream.cancel(Status::cancelled("request stream cancelled by client"));
                 Ok(())
             })),
         );
@@ -691,6 +703,8 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 struct ResponseStreamState<T> {
     items: VecDeque<Result<T, Status>>,
     closed: bool,
+    terminal_status: Option<Status>,
+    terminal_metadata: Metadata,
     waiters: Vec<Waker>,
 }
 
@@ -699,6 +713,8 @@ impl<T> ResponseStreamState<T> {
         Self {
             items: VecDeque::new(),
             closed: true,
+            terminal_status: None,
+            terminal_metadata: Metadata::new(),
             waiters: Vec::new(),
         }
     }
@@ -707,6 +723,8 @@ impl<T> ResponseStreamState<T> {
         Self {
             items: VecDeque::new(),
             closed: false,
+            terminal_status: None,
+            terminal_metadata: Metadata::new(),
             waiters: Vec::new(),
         }
     }
@@ -797,6 +815,33 @@ impl<T> ResponseStream<T> {
             waker.wake();
         }
     }
+
+    /// Close the stream with a terminal status.
+    pub fn cancel(&self, status: Status) {
+        self.cancel_with_metadata(status, Metadata::new());
+    }
+
+    /// Close the stream with a terminal status and trailing metadata.
+    pub fn cancel_with_metadata(&self, status: Status, metadata: Metadata) {
+        let waiters = {
+            let mut state = lock_unpoisoned(&self.state);
+            state.closed = true;
+            if state.terminal_status.is_none() {
+                state.terminal_status = Some(status);
+                state.terminal_metadata = metadata;
+            }
+            state.take_waiters()
+        };
+        for waker in waiters {
+            waker.wake();
+        }
+    }
+
+    /// Returns the terminal trailing metadata captured for the stream.
+    #[must_use]
+    pub fn terminal_metadata(&self) -> Metadata {
+        lock_unpoisoned(&self.state).terminal_metadata.clone()
+    }
 }
 
 impl<T> Default for ResponseStream<T> {
@@ -816,6 +861,9 @@ impl<T: Send> Streaming for ResponseStream<T> {
         if let Some(item) = state.items.pop_front() {
             return Poll::Ready(Some(item));
         }
+        if let Some(status) = state.terminal_status.take() {
+            return Poll::Ready(Some(Err(status)));
+        }
         if state.closed {
             return Poll::Ready(None);
         }
@@ -827,12 +875,36 @@ impl<T: Send> Streaming for ResponseStream<T> {
 type SendHook<T> = Box<dyn FnMut(T) -> Result<(), Status> + Send>;
 type CloseHook = Box<dyn FnMut() -> Result<(), Status> + Send>;
 
-#[derive(Default)]
+#[derive(Debug, Clone)]
+enum RequestSinkCloseState {
+    Open,
+    Graceful,
+    Cancelled(Status),
+    Failed(Status),
+}
+
+impl RequestSinkCloseState {
+    fn is_open(&self) -> bool {
+        matches!(self, Self::Open)
+    }
+}
+
 struct RequestSinkState {
-    closed: bool,
+    close_state: RequestSinkCloseState,
     sent_count: usize,
     last_message: Option<Box<dyn Any + Send>>,
     waiter: Option<Waker>,
+}
+
+impl Default for RequestSinkState {
+    fn default() -> Self {
+        Self {
+            close_state: RequestSinkCloseState::Open,
+            sent_count: 0,
+            last_message: None,
+            waiter: None,
+        }
+    }
 }
 
 impl RequestSinkState {
@@ -846,6 +918,7 @@ pub struct RequestSink<T> {
     state: Arc<Mutex<RequestSinkState>>,
     on_send: Option<SendHook<T>>,
     on_close: Option<CloseHook>,
+    on_cancel: Option<CloseHook>,
 }
 
 impl<T> RequestSink<T> {
@@ -856,6 +929,7 @@ impl<T> RequestSink<T> {
             state: Arc::new(Mutex::new(RequestSinkState::new())),
             on_send: None,
             on_close: None,
+            on_cancel: None,
         }
     }
 
@@ -864,14 +938,20 @@ impl<T> RequestSink<T> {
             state,
             on_send: None,
             on_close: None,
+            on_cancel: None,
         }
     }
 
-    fn with_hooks(on_send: Option<SendHook<T>>, on_close: Option<CloseHook>) -> Self {
+    fn with_hooks(
+        on_send: Option<SendHook<T>>,
+        on_close: Option<CloseHook>,
+        on_cancel: Option<CloseHook>,
+    ) -> Self {
         Self {
             state: Arc::new(Mutex::new(RequestSinkState::new())),
             on_send,
             on_close,
+            on_cancel,
         }
     }
 
@@ -887,8 +967,13 @@ impl<T> RequestSink<T> {
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let closed = state.closed;
+                let closed = !state.close_state.is_open();
                 if !closed {
+                    if state.sent_count > 0 {
+                        return Err(Status::failed_precondition(
+                            "loopback client streaming does not support multiple request messages yet",
+                        ));
+                    }
                     state.last_message = Some(Box::new(message));
                     state.sent_count = state.sent_count.saturating_add(1);
                 }
@@ -908,7 +993,7 @@ impl<T> RequestSink<T> {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.closed
+            !state.close_state.is_open()
         };
         if closed {
             return Err(Status::failed_precondition(
@@ -931,22 +1016,46 @@ impl<T> RequestSink<T> {
     /// Close the sink, signaling no more requests.
     #[allow(clippy::unused_async)]
     pub async fn close(&mut self) -> Result<(), Status> {
+        {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &state.close_state {
+                RequestSinkCloseState::Open => {}
+                RequestSinkCloseState::Graceful => return Ok(()),
+                RequestSinkCloseState::Cancelled(status)
+                | RequestSinkCloseState::Failed(status) => {
+                    return Err(status.clone());
+                }
+            }
+        }
+        if let Some(hook) = self.on_close.as_mut() {
+            if let Err(status) = hook() {
+                let waiter = {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.close_state = RequestSinkCloseState::Failed(status.clone());
+                    state.waiter.take()
+                };
+                if let Some(waiter) = waiter {
+                    waiter.wake();
+                }
+                return Err(status);
+            }
+        }
         let waiter = {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.closed {
-                return Ok(());
-            }
-            state.closed = true;
+            state.close_state = RequestSinkCloseState::Graceful;
             state.waiter.take()
         };
         if let Some(waiter) = waiter {
             waiter.wake();
-        }
-        if let Some(hook) = self.on_close.as_mut() {
-            hook()?;
         }
         Ok(())
     }
@@ -954,13 +1063,18 @@ impl<T> RequestSink<T> {
 
 impl<T> Drop for RequestSink<T> {
     fn drop(&mut self) {
-        let (waiter, invoke_close_hook) = {
+        let cancel_status = Status::cancelled("request stream cancelled by client");
+        let (waiter, invoke_cancel_hook, invoke_close_hook) = {
             let mut state = lock_unpoisoned(&self.state);
-            if state.closed {
-                (None, false)
+            if !state.close_state.is_open() {
+                (None, false, false)
             } else {
-                state.closed = true;
-                (state.waiter.take(), true)
+                state.close_state = RequestSinkCloseState::Cancelled(cancel_status);
+                (
+                    state.waiter.take(),
+                    self.on_cancel.is_some(),
+                    self.on_close.is_some(),
+                )
             }
         };
 
@@ -968,7 +1082,11 @@ impl<T> Drop for RequestSink<T> {
             waiter.wake();
         }
 
-        if invoke_close_hook {
+        if invoke_cancel_hook {
+            if let Some(hook) = self.on_cancel.as_mut() {
+                let _ = hook();
+            }
+        } else if invoke_close_hook {
             if let Some(hook) = self.on_close.as_mut() {
                 let _ = hook();
             }
@@ -983,10 +1101,11 @@ impl<T> fmt::Debug for RequestSink<T> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         f.debug_struct("RequestSink")
-            .field("closed", &state.closed)
+            .field("close_state", &state.close_state)
             .field("sent_count", &state.sent_count)
             .field("has_send_hook", &self.on_send.is_some())
             .field("has_close_hook", &self.on_close.is_some())
+            .field("has_cancel_hook", &self.on_cancel.is_some())
             .finish()
     }
 }
@@ -1013,7 +1132,7 @@ impl<T> fmt::Debug for ResponseFuture<T> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         f.debug_struct("ResponseFuture")
-            .field("sink_closed", &state.closed)
+            .field("sink_close_state", &state.close_state)
             .field("sink_sent_count", &state.sent_count)
             .field("has_resolver", &self.resolver.is_some())
             .finish()
@@ -1026,7 +1145,7 @@ impl<T> ResponseFuture<T> {
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(RequestSinkState {
-                closed: true,
+                close_state: RequestSinkCloseState::Graceful,
                 ..RequestSinkState::new()
             })),
             resolver: Some(Box::new(|_| {
@@ -1060,7 +1179,7 @@ impl<T: Send> Future for ResponseFuture<T> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         let mut state = lock_unpoisoned(&this.state);
-        if !state.closed {
+        if state.close_state.is_open() {
             if !state
                 .waiter
                 .as_ref()
@@ -1077,7 +1196,13 @@ impl<T: Send> Future for ResponseFuture<T> {
                 "response future has already completed",
             )));
         };
-        let output = resolver(&mut state);
+        let output = match state.close_state.clone() {
+            RequestSinkCloseState::Graceful => resolver(&mut state),
+            RequestSinkCloseState::Cancelled(status) | RequestSinkCloseState::Failed(status) => {
+                Err(status)
+            }
+            RequestSinkCloseState::Open => unreachable!("open sinks must have returned Pending"),
+        };
         drop(state);
         Poll::Ready(output)
     }
@@ -1708,6 +1833,48 @@ mod tests {
     }
 
     #[test]
+    fn response_stream_terminal_metadata_survives_terminal_error() {
+        let mut stream = ResponseStream::<u32>::open();
+        stream.push(Ok(7)).expect("data item should enqueue");
+
+        let mut trailers = Metadata::new();
+        trailers.insert("grpc-status-details-bin", "ZXJyb3ItZGV0YWlscw==");
+        trailers.insert("x-debug-trailer", "final-hop");
+        stream.cancel_with_metadata(Status::internal("stream failed"), trailers.clone());
+
+        let first = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        assert!(matches!(first, Some(Ok(7))));
+
+        let second = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        match second {
+            Some(Err(status)) => {
+                assert_eq!(status.code(), crate::grpc::Code::Internal);
+                assert_eq!(status.message(), "stream failed");
+            }
+            other => panic!("expected terminal status, got {other:?}"),
+        }
+
+        let stored = stream.terminal_metadata();
+        assert!(matches!(
+            stored.get("grpc-status-details-bin"),
+            Some(crate::grpc::MetadataValue::Ascii(value)) if value == "ZXJyb3ItZGV0YWlscw=="
+        ));
+        assert!(matches!(
+            stored.get("x-debug-trailer"),
+            Some(crate::grpc::MetadataValue::Ascii(value)) if value == "final-hop"
+        ));
+
+        let third = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        assert!(third.is_none());
+    }
+
+    #[test]
     fn request_sink_debug() {
         let sink = RequestSink::<u8>::new();
         let dbg = format!("{sink:?}");
@@ -1734,6 +1901,7 @@ mod tests {
                 hook_count.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             })),
+            None,
         );
 
         futures_lite::future::block_on(sink.close()).expect("close should succeed");
@@ -1753,6 +1921,7 @@ mod tests {
                 Err(Status::internal("send hook rejected the message"))
             })),
             None,
+            None,
         );
 
         let error = futures_lite::future::block_on(sink.send(7))
@@ -1771,7 +1940,7 @@ mod tests {
 
     #[test]
     fn request_sink_successful_send_hook_increments_sent_count() {
-        let mut sink = RequestSink::with_hooks(Some(Box::new(|_: u32| Ok(()))), None);
+        let mut sink = RequestSink::with_hooks(Some(Box::new(|_: u32| Ok(()))), None, None);
 
         futures_lite::future::block_on(sink.send(7))
             .expect("successful send hook should accept the message");
@@ -1845,7 +2014,103 @@ mod tests {
         let first = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
             Streaming::poll_next(Pin::new(&mut stream), cx)
         }));
-        assert!(first.is_none(), "drop should close bidi response stream");
+        let status = first.expect("drop should surface a terminal status");
+        assert_eq!(
+            status
+                .expect_err("drop should cancel bidi response stream")
+                .code(),
+            crate::grpc::Code::Cancelled
+        );
+        let second = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        assert!(second.is_none(), "cancelled bidi stream should then close");
+    }
+
+    #[test]
+    fn client_streaming_drop_after_send_returns_cancelled() {
+        let channel = make_channel("http://loopback:50051");
+        let mut client = GrpcClient::new(channel);
+
+        let (mut sink, future) = futures_lite::future::block_on(
+            client.client_streaming::<u32, u32>("/pkg.Service/Method"),
+        )
+        .expect("client streaming setup");
+
+        futures_lite::future::block_on(sink.send(7)).expect("send should succeed");
+        drop(sink);
+
+        let error = futures_lite::future::block_on(future)
+            .expect_err("dropped request stream must resolve as cancelled");
+        assert_eq!(error.code(), crate::grpc::Code::Cancelled);
+    }
+
+    #[test]
+    fn client_streaming_second_message_fails_closed() {
+        let channel = make_channel("http://loopback:50051");
+        let mut client = GrpcClient::new(channel);
+
+        let (mut sink, future) = futures_lite::future::block_on(
+            client.client_streaming::<u32, u32>("/pkg.Service/Method"),
+        )
+        .expect("client streaming setup");
+
+        futures_lite::future::block_on(sink.send(7)).expect("first send should succeed");
+        let error = futures_lite::future::block_on(sink.send(9))
+            .expect_err("second send must fail closed in loopback mode");
+        assert_eq!(error.code(), crate::grpc::Code::FailedPrecondition);
+
+        futures_lite::future::block_on(sink.close()).expect("close should still succeed");
+        let response =
+            futures_lite::future::block_on(future).expect("first request should still resolve");
+        assert_eq!(*response.get_ref(), 7);
+    }
+
+    #[test]
+    fn request_sink_close_hook_failure_propagates_to_response_future() {
+        let state = Arc::new(Mutex::new(RequestSinkState::new()));
+        let mut sink: RequestSink<u32> = RequestSink {
+            state: Arc::clone(&state),
+            on_send: None,
+            on_close: Some(Box::new(|| Err(Status::internal("close failed")))),
+            on_cancel: None,
+        };
+        let future = ResponseFuture::with_resolver(state, |_| {
+            Ok(Response::with_metadata(7_u32, Metadata::new()))
+        });
+
+        let close_error =
+            futures_lite::future::block_on(sink.close()).expect_err("close hook should fail");
+        assert_eq!(close_error.code(), crate::grpc::Code::Internal);
+
+        let future_error = futures_lite::future::block_on(future)
+            .expect_err("response future should reflect close failure");
+        assert_eq!(future_error.code(), crate::grpc::Code::Internal);
+    }
+
+    #[test]
+    fn bidi_streaming_applies_interceptors() {
+        #[derive(Debug, Clone, Copy)]
+        struct RejectInterceptor;
+
+        impl crate::grpc::server::Interceptor for RejectInterceptor {
+            fn intercept_request(&self, _request: &mut Request<Bytes>) -> Result<(), Status> {
+                Err(Status::unauthenticated("blocked by interceptor"))
+            }
+
+            fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
+                Ok(())
+            }
+        }
+
+        let channel = make_channel("http://loopback:50051");
+        let mut client = GrpcClient::new(channel).with_interceptor(RejectInterceptor);
+
+        let error = futures_lite::future::block_on(
+            client.bidi_streaming::<u32, u32>("/pkg.Service/Method"),
+        )
+        .expect_err("bidi call should respect client interceptors");
+        assert_eq!(error.code(), crate::grpc::Code::Unauthenticated);
     }
 
     #[test]

@@ -26,7 +26,6 @@
 //! - Uncommitted transactions abort on cancellation
 
 use crate::cx::Cx;
-#[cfg(not(feature = "kafka"))]
 use crate::sync::Notify;
 use parking_lot::Mutex;
 #[cfg(feature = "kafka")]
@@ -37,7 +36,7 @@ use std::fmt;
 use std::io;
 #[cfg(not(feature = "kafka"))]
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 #[cfg(feature = "kafka")]
@@ -459,30 +458,89 @@ async fn send_with_producer(
         });
     }
 
-    let (sender, receiver) = delivery_channel(cx);
+    let receiver = retry_immediate_send(cx, config, || {
+        let (sender, receiver) = delivery_channel(cx);
 
-    let mut record =
-        BaseRecord::with_opaque_to(request.topic, Box::new(sender)).payload(request.payload);
-    if let Some(key) = request.key {
-        record = record.key(key);
-    }
-    if let Some(partition) = request.partition {
-        record = record.partition(partition);
-    }
-    if let Some(headers) = request.headers {
-        let mut owned_headers = OwnedHeaders::new();
-        for (key, value) in headers {
-            owned_headers = owned_headers.insert(Header {
-                key,
-                value: Some(*value),
-            });
+        let mut record =
+            BaseRecord::with_opaque_to(request.topic, Box::new(sender)).payload(request.payload);
+        if let Some(key) = request.key {
+            record = record.key(key);
         }
-        record = record.headers(owned_headers);
+        if let Some(partition) = request.partition {
+            record = record.partition(partition);
+        }
+        if let Some(headers) = request.headers {
+            let mut owned_headers = OwnedHeaders::new();
+            for (key, value) in headers {
+                owned_headers = owned_headers.insert(Header {
+                    key,
+                    value: Some(*value),
+                });
+            }
+            record = record.headers(owned_headers);
+        }
+
+        match producer.send(record) {
+            Ok(()) => Ok(receiver),
+            Err((err, _)) => Err(map_rdkafka_error(&err, None)),
+        }
+    })
+    .await?;
+
+    receiver.await
+}
+
+#[cfg(any(feature = "kafka", test))]
+fn producer_retry_backoff(config: &ProducerConfig, attempt: u32) -> Duration {
+    let base_ms = config.linger_ms.max(1);
+    let exp = 1_u64 << attempt.min(6);
+    Duration::from_millis(base_ms.saturating_mul(exp).min(250))
+}
+
+async fn wait_retry_backoff(cx: &Cx, delay: Duration) -> Result<(), KafkaError> {
+    if delay.is_zero() {
+        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        crate::runtime::yield_now().await;
+        return cx.checkpoint().map_err(|_| KafkaError::Cancelled);
     }
 
-    match producer.send(record) {
-        Ok(()) => receiver.await,
-        Err((err, _)) => Err(map_rdkafka_error(&err, None)),
+    let now = cx
+        .timer_driver()
+        .map_or_else(crate::time::wall_now, |driver| driver.now());
+    let mut sleeper = crate::time::sleep(now, delay);
+    std::future::poll_fn(|task_cx| {
+        if cx.checkpoint().is_err() {
+            return std::task::Poll::Ready(Err(KafkaError::Cancelled));
+        }
+        std::pin::Pin::new(&mut sleeper)
+            .poll(task_cx)
+            .map(|()| Ok(()))
+    })
+    .await
+}
+
+#[cfg(any(feature = "kafka", test))]
+async fn retry_immediate_send<T, F>(
+    cx: &Cx,
+    config: &ProducerConfig,
+    mut attempt_send: F,
+) -> Result<T, KafkaError>
+where
+    F: FnMut() -> Result<T, KafkaError>,
+{
+    let mut attempt = 0;
+    loop {
+        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+
+        match attempt_send() {
+            Ok(value) => return Ok(value),
+            Err(err) if err.is_retryable() && attempt < config.retries => {
+                let delay = producer_retry_backoff(config, attempt);
+                attempt = attempt.saturating_add(1);
+                wait_retry_backoff(cx, delay).await?;
+            }
+            Err(err) => return Err(err),
+        }
     }
 }
 
@@ -837,6 +895,8 @@ struct TransactionalProducerState {
 pub struct KafkaProducer {
     config: ProducerConfig,
     closed: AtomicBool,
+    active_ops: AtomicUsize,
+    op_notify: Notify,
     #[cfg(feature = "kafka")]
     producer: ThreadedProducer<KafkaContext>,
 }
@@ -861,6 +921,8 @@ impl KafkaProducer {
         Ok(Self {
             config,
             closed: AtomicBool::new(false),
+            active_ops: AtomicUsize::new(0),
+            op_notify: Notify::new(),
             #[cfg(feature = "kafka")]
             producer,
         })
@@ -887,7 +949,6 @@ impl KafkaProducer {
         partition: Option<i32>,
     ) -> Result<RecordMetadata, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-        self.ensure_open()?;
         validate_topic(topic)?;
 
         // Check message size
@@ -897,6 +958,8 @@ impl KafkaProducer {
                 max_size: self.config.max_message_size,
             });
         }
+
+        let _op_guard = self.begin_operation()?;
 
         #[cfg(feature = "kafka")]
         {
@@ -946,7 +1009,6 @@ impl KafkaProducer {
         headers: &[(&str, &[u8])],
     ) -> Result<RecordMetadata, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-        self.ensure_open()?;
         validate_topic(topic)?;
 
         if payload.len() > self.config.max_message_size {
@@ -955,6 +1017,8 @@ impl KafkaProducer {
                 max_size: self.config.max_message_size,
             });
         }
+
+        let _op_guard = self.begin_operation()?;
 
         #[cfg(feature = "kafka")]
         {
@@ -1038,23 +1102,59 @@ impl KafkaProducer {
             let mut remaining = timeout;
             loop {
                 cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-                if self.producer.in_flight_count() == 0 {
+                if self.active_ops.load(Ordering::Acquire) == 0
+                    && self.producer.in_flight_count() == 0
+                {
                     break;
+                }
+                if remaining.is_zero() {
+                    return Err(KafkaError::Broker("flush timeout elapsed".to_string()));
                 }
                 let tick = remaining.min(Duration::from_millis(10));
                 self.producer.poll(tick);
                 if remaining <= tick {
-                    return Err(KafkaError::Broker("flush timeout elapsed".to_string()));
+                    remaining = Duration::ZERO;
+                } else {
+                    remaining -= tick;
                 }
-                remaining -= tick;
             }
             Ok(())
         }
 
         #[cfg(not(feature = "kafka"))]
         {
-            let _ = timeout;
+            let mut remaining = timeout;
+            while self.active_ops.load(Ordering::Acquire) != 0 {
+                cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+                if remaining.is_zero() {
+                    return Err(KafkaError::Broker("flush timeout elapsed".to_string()));
+                }
+                let tick = remaining.min(Duration::from_millis(10));
+                wait_retry_backoff(cx, tick).await?;
+                if remaining <= tick {
+                    remaining = Duration::ZERO;
+                } else {
+                    remaining -= tick;
+                }
+            }
             Ok(())
+        }
+    }
+
+    fn begin_operation(&self) -> Result<KafkaProducerOperationGuard<'_>, KafkaError> {
+        loop {
+            if self.closed.load(Ordering::Acquire) {
+                return Err(KafkaError::Config("producer is closed".to_string()));
+            }
+
+            self.active_ops.fetch_add(1, Ordering::AcqRel);
+            if !self.closed.load(Ordering::Acquire) {
+                return Ok(KafkaProducerOperationGuard { producer: self });
+            }
+
+            if self.active_ops.fetch_sub(1, Ordering::AcqRel) == 1 {
+                self.op_notify.notify_waiters();
+            }
         }
     }
 
@@ -1070,6 +1170,18 @@ impl KafkaProducer {
     #[must_use]
     pub const fn config(&self) -> &ProducerConfig {
         &self.config
+    }
+}
+
+struct KafkaProducerOperationGuard<'a> {
+    producer: &'a KafkaProducer,
+}
+
+impl Drop for KafkaProducerOperationGuard<'_> {
+    fn drop(&mut self) {
+        if self.producer.active_ops.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.producer.op_notify.notify_waiters();
+        }
     }
 }
 
@@ -1468,10 +1580,14 @@ impl Drop for Transaction<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "kafka"))]
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    #[cfg(not(feature = "kafka"))]
+    use crate::types::{Budget, RegionId, TaskId};
     #[cfg(feature = "kafka")]
     use futures_lite::future;
-    #[cfg(feature = "kafka")]
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
     #[cfg(feature = "kafka")]
     use std::task::{Context, Wake, Waker};
 
@@ -1763,6 +1879,87 @@ mod tests {
         assert_eq!(cfg.linger_ms, 100);
         assert_eq!(cfg.retries, 10);
         assert!(!cfg.enable_idempotence);
+    }
+
+    #[test]
+    fn producer_retry_backoff_grows_and_caps() {
+        let cfg = ProducerConfig::default().linger_ms(5);
+        assert_eq!(producer_retry_backoff(&cfg, 0), Duration::from_millis(5));
+        assert_eq!(producer_retry_backoff(&cfg, 1), Duration::from_millis(10));
+        assert_eq!(producer_retry_backoff(&cfg, 2), Duration::from_millis(20));
+        assert_eq!(producer_retry_backoff(&cfg, 20), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn retry_immediate_send_honors_retry_budget_for_retryable_errors() {
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let cfg = ProducerConfig::default().retries(2).linger_ms(0);
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let attempts_for_closure = Arc::clone(&attempts);
+
+            let result = retry_immediate_send(&cx, &cfg, move || {
+                let attempt = attempts_for_closure.fetch_add(1, Ordering::AcqRel);
+                if attempt < 2 {
+                    Err(KafkaError::QueueFull)
+                } else {
+                    Ok("delivered")
+                }
+            })
+            .await
+            .unwrap();
+
+            assert_eq!(result, "delivered");
+            assert_eq!(attempts.load(Ordering::Acquire), 3);
+        });
+    }
+
+    #[test]
+    fn retry_immediate_send_stops_at_retry_budget() {
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let cfg = ProducerConfig::default().retries(1).linger_ms(0);
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let attempts_for_closure = Arc::clone(&attempts);
+
+            let err = retry_immediate_send(&cx, &cfg, move || {
+                attempts_for_closure.fetch_add(1, Ordering::AcqRel);
+                Err::<(), _>(KafkaError::QueueFull)
+            })
+            .await
+            .unwrap_err();
+
+            assert!(matches!(err, KafkaError::QueueFull));
+            assert_eq!(attempts.load(Ordering::Acquire), 2);
+        });
+    }
+
+    #[test]
+    fn retry_immediate_send_returns_cancelled_while_waiting_for_backoff() {
+        let cx = Cx::for_testing();
+        let cfg = ProducerConfig::default().retries(3).linger_ms(250);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_closure = Arc::clone(&attempts);
+        let mut retry = Box::pin(retry_immediate_send(&cx, &cfg, move || {
+            attempts_for_closure.fetch_add(1, Ordering::AcqRel);
+            Err::<(), _>(KafkaError::QueueFull)
+        }));
+
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(
+            retry.as_mut().poll(&mut task_cx),
+            std::task::Poll::Pending
+        ));
+
+        cx.set_cancel_requested(true);
+
+        assert!(matches!(
+            retry.as_mut().poll(&mut task_cx),
+            std::task::Poll::Ready(Err(KafkaError::Cancelled))
+        ));
+        assert_eq!(
+            attempts.load(Ordering::Acquire),
+            1,
+            "cancellation during backoff must stop before another retry attempt starts"
+        );
     }
 
     #[test]
@@ -2125,6 +2322,60 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(flush_err, KafkaError::Config(msg) if msg.contains("closed")));
         });
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn producer_close_times_out_while_operation_is_in_flight() {
+        let _broker = stub_broker_guard();
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
+            let guard = producer.begin_operation().unwrap();
+
+            let err = producer
+                .close(&cx, Duration::ZERO)
+                .await
+                .expect_err("close should not succeed while a producer op is active");
+            assert!(matches!(err, KafkaError::Broker(msg) if msg.contains("flush timeout")));
+            drop(guard);
+
+            producer
+                .close(&cx, Duration::from_millis(5))
+                .await
+                .expect("retrying close after the active op drains should succeed");
+        });
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn wait_retry_backoff_uses_virtual_timer_driver() {
+        let _broker = stub_broker_guard();
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer),
+            None,
+        );
+        let mut wait = Box::pin(wait_retry_backoff(&cx, Duration::from_millis(5)));
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+
+        assert!(matches!(
+            std::future::Future::poll(wait.as_mut(), &mut task_cx),
+            std::task::Poll::Pending
+        ));
+
+        clock.advance(5_000_000);
+
+        assert!(matches!(
+            std::future::Future::poll(wait.as_mut(), &mut task_cx),
+            std::task::Poll::Ready(Ok(()))
+        ));
     }
 
     #[cfg(feature = "kafka")]

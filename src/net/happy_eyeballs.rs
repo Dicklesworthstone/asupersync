@@ -105,30 +105,55 @@ pub fn sort_addresses(addrs: &[IpAddr]) -> Vec<IpAddr> {
 ///
 /// This follows the same family interleaving policy as [`sort_addresses`], but
 /// operates on full `SocketAddr` values so each address keeps its original port.
+/// The first address family in the input keeps the lead position so prior
+/// resolver ordering is preserved.
 #[must_use]
 fn sort_socket_addrs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    let prefer_v6 = addrs.first().is_none_or(SocketAddr::is_ipv6);
     let mut v6_iter = addrs.iter().copied().filter(SocketAddr::is_ipv6);
     let mut v4_iter = addrs.iter().copied().filter(SocketAddr::is_ipv4);
 
     let mut result = Vec::with_capacity(addrs.len());
 
-    loop {
-        match (v6_iter.next(), v4_iter.next()) {
-            (Some(v6_addr), Some(v4_addr)) => {
-                result.push(v6_addr);
-                result.push(v4_addr);
+    if prefer_v6 {
+        loop {
+            match (v6_iter.next(), v4_iter.next()) {
+                (Some(v6_addr), Some(v4_addr)) => {
+                    result.push(v6_addr);
+                    result.push(v4_addr);
+                }
+                (Some(v6_addr), None) => {
+                    result.push(v6_addr);
+                    result.extend(v6_iter);
+                    break;
+                }
+                (None, Some(v4_addr)) => {
+                    result.push(v4_addr);
+                    result.extend(v4_iter);
+                    break;
+                }
+                (None, None) => break,
             }
-            (Some(v6_addr), None) => {
-                result.push(v6_addr);
-                result.extend(v6_iter);
-                break;
+        }
+    } else {
+        loop {
+            match (v4_iter.next(), v6_iter.next()) {
+                (Some(v4_addr), Some(v6_addr)) => {
+                    result.push(v4_addr);
+                    result.push(v6_addr);
+                }
+                (Some(v4_addr), None) => {
+                    result.push(v4_addr);
+                    result.extend(v4_iter);
+                    break;
+                }
+                (None, Some(v6_addr)) => {
+                    result.push(v6_addr);
+                    result.extend(v6_iter);
+                    break;
+                }
+                (None, None) => break,
             }
-            (None, Some(v4_addr)) => {
-                result.push(v4_addr);
-                result.extend(v4_iter);
-                break;
-            }
-            (None, None) => break,
         }
     }
 
@@ -777,6 +802,34 @@ mod tests {
         crate::test_complete!("sort_socket_addrs_uneven_families");
     }
 
+    #[test]
+    fn sort_socket_addrs_preserves_ipv4_lead_family() {
+        init_test("sort_socket_addrs_preserves_ipv4_lead_family");
+
+        let addrs: Vec<SocketAddr> = vec![
+            "192.0.2.10:8080".parse().unwrap(),
+            "[2001:db8::1]:443".parse().unwrap(),
+            "192.0.2.11:8081".parse().unwrap(),
+            "[2001:db8::2]:444".parse().unwrap(),
+        ];
+
+        let sorted = sort_socket_addrs(&addrs);
+
+        assert_eq!(sorted.len(), 4);
+        assert_eq!(sorted[0], "192.0.2.10:8080".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            sorted[1],
+            "[2001:db8::1]:443".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(sorted[2], "192.0.2.11:8081".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            sorted[3],
+            "[2001:db8::2]:444".parse::<SocketAddr>().unwrap()
+        );
+
+        crate::test_complete!("sort_socket_addrs_preserves_ipv4_lead_family");
+    }
+
     // =======================================================================
     // Config tests
     // =======================================================================
@@ -1088,6 +1141,38 @@ mod tests {
         assert!(matches!(result, Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::TimedOut));
         assert_post_completion_error(race.poll_with_time(test_time(), &mut cx));
         crate::test_complete!("race_connections_timeout_honors_custom_clock");
+    }
+
+    #[test]
+    fn race_connections_zero_deadline_times_out_before_immediate_success() {
+        static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+        fn test_time() -> Time {
+            Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+        }
+
+        init_test("race_connections_zero_deadline_times_out_before_immediate_success");
+
+        TEST_NOW.store(1_000, Ordering::SeqCst);
+        let winner: ConnectFuture = Box::pin(async { Ok(connected_test_stream()) });
+        let mut race = RaceConnections::from_futures(
+            vec![winner],
+            HappyEyeballsConfig::default(),
+            test_time(),
+            test_time,
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let result = race.poll_with_time(test_time(), &mut cx);
+        assert!(matches!(
+            result,
+            Poll::Ready(Err(err))
+                if err.kind() == io::ErrorKind::TimedOut
+                    && err.to_string() == OVERALL_CONNECTION_TIMEOUT_MSG
+        ));
+        assert_post_completion_error(race.poll_with_time(test_time(), &mut cx));
+        crate::test_complete!("race_connections_zero_deadline_times_out_before_immediate_success");
     }
 
     #[test]

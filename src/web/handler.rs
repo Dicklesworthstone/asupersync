@@ -9,9 +9,14 @@ use std::sync::OnceLock;
 
 use crate::Cx;
 use crate::runtime::{Runtime, RuntimeBuilder};
+use crate::types::Budget;
 
 use super::extract::{FromRequest, FromRequestParts, Request};
 use super::response::{IntoResponse, Response, StatusCode};
+
+thread_local! {
+    static HANDLER_RUNTIME: OnceLock<Runtime> = const { OnceLock::new() };
+}
 
 /// A request handler.
 ///
@@ -239,17 +244,42 @@ where
 }
 
 #[inline]
-fn run_async_handler<F, Res>(future: F) -> Response
+pub(crate) fn run_async_handler_with_runtime_cx<F, Fut, Res>(f: F) -> Response
 where
-    F: Future<Output = Res>,
+    F: FnOnce(Cx) -> Fut,
+    Fut: Future<Output = Res>,
     Res: IntoResponse,
 {
-    static HANDLER_RUNTIME: OnceLock<Option<Runtime>> = OnceLock::new();
-    let runtime = HANDLER_RUNTIME.get_or_init(|| RuntimeBuilder::current_thread().build().ok());
-    runtime.as_ref().map_or_else(
-        || Response::empty(StatusCode::INTERNAL_SERVER_ERROR),
-        |rt| rt.block_on(future).into_response(),
-    )
+    let ambient_cx = Cx::current();
+    let runtime_cx = ambient_cx
+        .clone()
+        .filter(|_| Runtime::current_handle().is_some())
+        .or_else(|| Runtime::current_request_cx_with_budget(Budget::INFINITE));
+    if let Some(runtime_cx) = runtime_cx {
+        return Runtime::block_on_current_with_cx(runtime_cx.clone(), f(runtime_cx)).map_or_else(
+            || Response::empty(StatusCode::INTERNAL_SERVER_ERROR),
+            IntoResponse::into_response,
+        );
+    }
+
+    HANDLER_RUNTIME.with(|runtime| {
+        let rt = if let Some(rt) = runtime.get() {
+            rt
+        } else {
+            match RuntimeBuilder::current_thread().build() {
+                Ok(rt) => {
+                    let _ = runtime.set(rt);
+                    runtime
+                        .get()
+                        .expect("handler runtime should be initialized after set")
+                }
+                Err(_) => return Response::empty(StatusCode::INTERNAL_SERVER_ERROR),
+            }
+        };
+
+        let cx = ambient_cx.unwrap_or_else(|| rt.request_cx_with_budget(Budget::INFINITE));
+        rt.block_on_with_cx(cx.clone(), f(cx)).into_response()
+    })
 }
 
 /// Wrapper for async handlers that receive a [`Cx`] and no extractors.
@@ -272,7 +302,7 @@ where
 {
     #[inline]
     fn call(&self, _req: Request) -> Response {
-        run_async_handler((self.func)(Cx::for_request()))
+        run_async_handler_with_runtime_cx(|cx| (self.func)(cx))
     }
 }
 
@@ -305,7 +335,7 @@ where
             Ok(v) => v,
             Err(resp) => return resp,
         };
-        run_async_handler((self.func)(Cx::for_request(), t1))
+        run_async_handler_with_runtime_cx(|cx| (self.func)(cx, t1))
     }
 }
 
@@ -339,7 +369,7 @@ where
             Ok(v) => v,
             Err(resp) => return resp,
         };
-        run_async_handler((self.func)(Cx::for_request(), t1, t2))
+        run_async_handler_with_runtime_cx(|cx| (self.func)(cx, t1, t2))
     }
 }
 
@@ -374,7 +404,7 @@ where
             Ok(v) => v,
             Err(resp) => return resp,
         };
-        run_async_handler((self.func)(Cx::for_request(), t1, t2, t3))
+        run_async_handler_with_runtime_cx(|cx| (self.func)(cx, t1, t2, t3))
     }
 }
 
@@ -410,7 +440,7 @@ where
             Ok(v) => v,
             Err(resp) => return resp,
         };
-        run_async_handler((self.func)(Cx::for_request(), t1, t2, t3, t4))
+        run_async_handler_with_runtime_cx(|cx| (self.func)(cx, t1, t2, t3, t4))
     }
 }
 
@@ -420,8 +450,11 @@ where
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::mpsc;
+    use std::thread;
 
     use crate::bytes::Bytes;
+    use crate::time::TimerDriverHandle;
     use crate::web::extract::{Json, Path, Query};
     use crate::web::response::StatusCode;
 
@@ -556,6 +589,137 @@ mod tests {
             std::str::from_utf8(&resp.body).expect("utf8"),
             "async-hello"
         );
+    }
+
+    #[test]
+    fn async_cx_handler_installs_runtime_backed_current_cx() {
+        async fn inspect(cx: Cx) -> &'static str {
+            assert!(
+                cx.timer_driver().is_some(),
+                "async handler should receive the runtime timer driver"
+            );
+            let current = Cx::current().expect("async handler should install CURRENT_CX");
+            assert_eq!(current.region_id(), cx.region_id());
+            assert_eq!(current.task_id(), cx.task_id());
+            assert!(
+                current.timer_driver().is_some(),
+                "ambient CURRENT_CX should expose the runtime timer driver"
+            );
+            "ok"
+        }
+
+        let handler = AsyncCxFnHandler::new(inspect);
+        let resp = handler.call(Request::new("GET", "/inspect"));
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
+    }
+
+    #[test]
+    fn async_cx_handler_reuses_ambient_request_cx() {
+        async fn inspect(cx: Cx) -> &'static str {
+            let current = Cx::current().expect("ambient CURRENT_CX should be preserved");
+            assert_eq!(
+                cx.task_id(),
+                current.task_id(),
+                "async web handler should reuse the ambient request task"
+            );
+            assert_eq!(
+                cx.region_id(),
+                current.region_id(),
+                "async web handler should stay in the ambient request region"
+            );
+            assert_eq!(
+                cx.budget().deadline,
+                current.budget().deadline,
+                "async web handler should inherit the ambient request deadline"
+            );
+            "ok"
+        }
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let deadline_budget = Budget::with_deadline_secs(7);
+        let request_cx = runtime.request_cx_with_budget(deadline_budget);
+        let expected_task = request_cx.task_id();
+        let expected_region = request_cx.region_id();
+        let expected_deadline = request_cx.budget().deadline;
+
+        runtime.block_on_with_cx(request_cx, async move {
+            let handler = AsyncCxFnHandler::new(inspect);
+            let resp = handler.call(Request::new("GET", "/ambient"));
+            assert_eq!(resp.status, StatusCode::OK);
+            assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
+
+            let after = Cx::current().expect("ambient CURRENT_CX should still be installed");
+            assert_eq!(after.task_id(), expected_task);
+            assert_eq!(after.region_id(), expected_region);
+            assert_eq!(after.budget().deadline, expected_deadline);
+        });
+    }
+
+    #[test]
+    fn async_cx_handler_runtime_cache_is_thread_local() {
+        let (tx, rx) = mpsc::channel::<TimerDriverHandle>();
+
+        let spawn_handler_thread = |tx: mpsc::Sender<TimerDriverHandle>| {
+            thread::spawn(move || {
+                let handler = AsyncCxFnHandler::new(move |cx: Cx| {
+                    let tx = tx.clone();
+                    async move {
+                        let timer = cx
+                            .timer_driver()
+                            .expect("async handler should receive a timer driver")
+                            .clone();
+                        tx.send(timer).expect("send timer handle");
+                        "ok"
+                    }
+                });
+
+                let resp = handler.call(Request::new("GET", "/thread-local-runtime"));
+                assert_eq!(resp.status, StatusCode::OK);
+            })
+        };
+
+        let first = spawn_handler_thread(tx.clone());
+        let second = spawn_handler_thread(tx);
+
+        first.join().expect("first handler thread should complete");
+        second
+            .join()
+            .expect("second handler thread should complete");
+
+        let timer_a = rx.recv().expect("first timer handle");
+        let timer_b = rx.recv().expect("second timer handle");
+        assert!(
+            !timer_a.ptr_eq(&timer_b),
+            "different caller threads must not share the same cached current-thread runtime"
+        );
+    }
+
+    #[test]
+    fn async_cx_handler_falls_back_to_helper_runtime_with_ambient_nonruntime_cx() {
+        let ambient = Cx::for_testing();
+        let expected_task = ambient.task_id();
+        let expected_region = ambient.region_id();
+        let _guard = Cx::set_current(Some(ambient));
+
+        let handler = AsyncCxFnHandler::new(move |cx: Cx| async move {
+            assert_eq!(cx.task_id(), expected_task);
+            assert_eq!(cx.region_id(), expected_region);
+            let current = Cx::current().expect("helper runtime should preserve CURRENT_CX");
+            assert_eq!(current.task_id(), expected_task);
+            assert_eq!(current.region_id(), expected_region);
+            "ok"
+        });
+
+        let resp = handler.call(Request::new("GET", "/ambient-no-runtime"));
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
+
+        let restored = Cx::current().expect("ambient CURRENT_CX should still be installed");
+        assert_eq!(restored.task_id(), expected_task);
+        assert_eq!(restored.region_id(), expected_region);
     }
 
     #[test]

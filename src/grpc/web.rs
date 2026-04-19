@@ -21,7 +21,9 @@
 use crate::bytes::{BufMut, Bytes, BytesMut};
 
 use super::status::{Code, GrpcError, Status};
-use super::streaming::{Metadata, MetadataValue};
+use super::streaming::{
+    Metadata, MetadataValue, normalize_metadata_key, sanitize_metadata_ascii_value,
+};
 
 /// Trailer frame flag — bit 7 set indicates trailers, not data.
 const TRAILER_FLAG: u8 = 0x80;
@@ -119,7 +121,11 @@ pub fn encode_trailers(status: &Status, metadata: &Metadata, dst: &mut BytesMut)
     }
 
     for (key, value) in metadata.iter() {
-        let key_lower = key.to_ascii_lowercase();
+        let Some(key_lower) =
+            normalize_metadata_key(key, matches!(value, MetadataValue::Binary(_)))
+        else {
+            continue;
+        };
         // Skip status/message — already encoded above.
         if key_lower == "grpc-status" || key_lower == "grpc-message" {
             continue;
@@ -127,11 +133,7 @@ pub fn encode_trailers(status: &Status, metadata: &Metadata, dst: &mut BytesMut)
         block.push_str(&key_lower);
         block.push_str(": ");
         match value {
-            // Sanitize CR/LF in ASCII values to prevent trailer injection.
-            MetadataValue::Ascii(s) => {
-                let sanitized = s.replace(['\r', '\n'], "");
-                block.push_str(&sanitized);
-            }
+            MetadataValue::Ascii(s) => block.push_str(sanitize_metadata_ascii_value(s).as_ref()),
             MetadataValue::Binary(b) => {
                 use base64::Engine;
                 block.push_str(&base64::engine::general_purpose::STANDARD.encode(b.as_ref()));
@@ -569,6 +571,58 @@ mod tests {
         let has_id = request_id.is_some();
         crate::assert_with_log!(has_id, "custom metadata present", true, has_id);
         crate::test_complete!("test_trailer_with_custom_metadata");
+    }
+
+    #[test]
+    fn test_trailer_metadata_key_injection_is_rejected() {
+        init_test("test_trailer_metadata_key_injection_is_rejected");
+        let status = Status::ok();
+        let mut metadata = Metadata::new();
+        let inserted = metadata.insert("x-safe\r\nx-evil", "boom");
+        crate::assert_with_log!(
+            !inserted,
+            "malicious trailer metadata key rejected at insertion",
+            false,
+            inserted
+        );
+
+        let mut buf = BytesMut::new();
+        encode_trailers(&status, &metadata, &mut buf);
+        let wire = String::from_utf8(buf[5..].to_vec()).expect("trailer block utf8");
+        let injected = wire.contains("x-evil");
+        crate::assert_with_log!(
+            !injected,
+            "rejected trailer key never reaches the wire format",
+            false,
+            injected
+        );
+        crate::test_complete!("test_trailer_metadata_key_injection_is_rejected");
+    }
+
+    #[test]
+    fn test_trailer_pseudo_header_metadata_is_rejected() {
+        init_test("test_trailer_pseudo_header_metadata_is_rejected");
+        let status = Status::ok();
+        let mut metadata = Metadata::new();
+        let inserted = metadata.insert(":path", "/evil");
+        crate::assert_with_log!(
+            !inserted,
+            "pseudo-header metadata key rejected at insertion",
+            false,
+            inserted
+        );
+
+        let mut buf = BytesMut::new();
+        encode_trailers(&status, &metadata, &mut buf);
+        let wire = String::from_utf8(buf[5..].to_vec()).expect("trailer block utf8");
+        let injected = wire.contains(":path");
+        crate::assert_with_log!(
+            !injected,
+            "rejected pseudo-header never reaches the wire format",
+            false,
+            injected
+        );
+        crate::test_complete!("test_trailer_pseudo_header_metadata_is_rejected");
     }
 
     // ── WebFrameCodec Tests ──────────────────────────────────────────

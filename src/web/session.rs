@@ -429,11 +429,11 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
                 let mut expire_config = self.config.clone();
                 expire_config.max_age = Some(0);
                 let cookie_val = set_cookie_header(&self.config.cookie_name, "", &expire_config);
-                resp.headers.insert("set-cookie".to_string(), cookie_val);
+                resp.set_header("set-cookie", cookie_val);
             }
         } else if session_data.is_modified() {
             let cookie_val = set_cookie_header(&self.config.cookie_name, &session_id, &self.config);
-            resp.headers.insert("set-cookie".to_string(), cookie_val);
+            resp.set_header("set-cookie", cookie_val);
         }
 
         resp

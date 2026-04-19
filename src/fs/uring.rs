@@ -38,13 +38,37 @@ use std::task::{Context, Poll, Waker};
 /// Default io_uring queue size for file operations.
 const DEFAULT_ENTRIES: u32 = 64;
 
-/// User data marker for operations.
-const OP_READ: u64 = 1;
-const OP_WRITE: u64 = 2;
-const OP_FSYNC: u64 = 3;
-const OP_FDATASYNC: u64 = 4;
-#[allow(dead_code)]
-const OP_CLOSE: u64 = 5;
+/// High bits reserved for operation kind tags in io_uring `user_data`.
+const USER_DATA_KIND_SHIFT: u32 = 56;
+const USER_DATA_SEQUENCE_MASK: u64 = (1u64 << USER_DATA_KIND_SHIFT) - 1;
+
+/// Logical operation kind for io_uring requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum OpKind {
+    Read = 1,
+    Write = 2,
+    Fsync = 3,
+    Fdatasync = 4,
+    Close = 5,
+}
+
+impl OpKind {
+    fn encode(self, sequence: u64) -> u64 {
+        (u64::from(self as u8) << USER_DATA_KIND_SHIFT) | (sequence & USER_DATA_SEQUENCE_MASK)
+    }
+
+    fn decode(user_data: u64) -> Option<Self> {
+        match (user_data >> USER_DATA_KIND_SHIFT) as u8 {
+            1 => Some(Self::Read),
+            2 => Some(Self::Write),
+            3 => Some(Self::Fsync),
+            4 => Some(Self::Fdatasync),
+            5 => Some(Self::Close),
+            _ => None,
+        }
+    }
+}
 
 /// State for a pending io_uring operation.
 #[derive(Debug)]
@@ -53,7 +77,10 @@ enum OpState {
     /// Operation not yet submitted.
     Idle,
     /// Operation submitted, waiting for completion.
-    Pending { waker: Option<Waker> },
+    Pending {
+        user_data: u64,
+        waker: Option<Waker>,
+    },
     /// Operation completed with result.
     Complete(i32),
 }
@@ -74,6 +101,8 @@ struct IoUringFileInner {
     write_state: Mutex<OpState>,
     /// State for pending sync operation.
     sync_state: Mutex<OpState>,
+    /// Monotonic request-id source used to disambiguate io_uring completions.
+    next_user_data: AtomicU64,
 }
 
 impl std::fmt::Debug for IoUringFileInner {
@@ -113,13 +142,22 @@ fn any_ops_pending(inner: &IoUringFileInner) -> bool {
         || matches!(&*inner.sync_state.lock(), OpState::Pending { .. })
 }
 
-fn mark_op_complete(state: &Mutex<OpState>, result: i32) {
+fn state_pending_user_data(state: &Mutex<OpState>) -> Option<u64> {
+    match &*state.lock() {
+        OpState::Pending { user_data, .. } => Some(*user_data),
+        _ => None,
+    }
+}
+
+fn mark_op_complete(state: &Mutex<OpState>, user_data: u64, result: i32) -> bool {
     let waker_to_wake = {
         let mut guard = state.lock();
-        let waker = if let OpState::Pending { waker } = &mut *guard {
-            waker.take()
-        } else {
-            None
+        let waker = match &mut *guard {
+            OpState::Pending {
+                user_data: pending_user_data,
+                waker,
+            } if *pending_user_data == user_data => waker.take(),
+            _ => return false,
         };
         *guard = OpState::Complete(result);
         waker
@@ -128,6 +166,32 @@ fn mark_op_complete(state: &Mutex<OpState>, result: i32) {
     if let Some(w) = waker_to_wake {
         w.wake();
     }
+    true
+}
+
+fn mark_tracked_op_complete(inner: &IoUringFileInner, user_data: u64, result: i32) -> bool {
+    match OpKind::decode(user_data) {
+        Some(OpKind::Read) => mark_op_complete(&inner.read_state, user_data, result),
+        Some(OpKind::Write) => mark_op_complete(&inner.write_state, user_data, result),
+        Some(OpKind::Fsync | OpKind::Fdatasync) => {
+            mark_op_complete(&inner.sync_state, user_data, result)
+        }
+        Some(OpKind::Close) | None => false,
+    }
+}
+
+fn tracked_pending_user_data(inner: &IoUringFileInner) -> Vec<u64> {
+    let mut pending = Vec::with_capacity(3);
+    if let Some(user_data) = state_pending_user_data(&inner.read_state) {
+        pending.push(user_data);
+    }
+    if let Some(user_data) = state_pending_user_data(&inner.write_state) {
+        pending.push(user_data);
+    }
+    if let Some(user_data) = state_pending_user_data(&inner.sync_state) {
+        pending.push(user_data);
+    }
+    pending
 }
 
 fn path_to_cstring(path: &Path) -> io::Result<CString> {
@@ -162,6 +226,12 @@ impl Drop for IoUringFile {
             let completions = {
                 let mut ring = self.inner.ring.lock();
 
+                for user_data in tracked_pending_user_data(&self.inner) {
+                    let _ = ring
+                        .submitter()
+                        .register_sync_cancel(None, types::CancelBuilder::user_data(user_data));
+                }
+
                 // Wait for at least one completion. If this fails, we can't reliably
                 // drain, so we bail out (best effort).
                 if ring.submit_and_wait(1).is_err() {
@@ -174,13 +244,7 @@ impl Drop for IoUringFile {
             };
 
             for (user_data, result) in completions {
-                match user_data {
-                    OP_READ => mark_op_complete(&self.inner.read_state, result),
-                    OP_WRITE => mark_op_complete(&self.inner.write_state, result),
-                    OP_FSYNC | OP_FDATASYNC => mark_op_complete(&self.inner.sync_state, result),
-                    // Unknown operations are ignored here; they're not tracked by OpState.
-                    _ => {}
-                }
+                let _ = mark_tracked_op_complete(&self.inner, user_data, result);
             }
         }
     }
@@ -238,6 +302,7 @@ impl IoUringFile {
                 read_state: Mutex::new(OpState::Idle),
                 write_state: Mutex::new(OpState::Idle),
                 sync_state: Mutex::new(OpState::Idle),
+                next_user_data: AtomicU64::new(1),
             }),
         })
     }
@@ -263,6 +328,7 @@ impl IoUringFile {
                 read_state: Mutex::new(OpState::Idle),
                 write_state: Mutex::new(OpState::Idle),
                 sync_state: Mutex::new(OpState::Idle),
+                next_user_data: AtomicU64::new(1),
             }),
         })
     }
@@ -417,38 +483,83 @@ impl IoUringFile {
         self.inner.fd.as_raw_fd()
     }
 
-    /// Helper to submit an SQE and collect completion.
-    fn submit_and_wait(&self, entry: &io_uring::squeue::Entry) -> io::Result<i32> {
-        let result = {
-            let mut ring = self.inner.ring.lock();
+    fn allocate_user_data(&self, kind: OpKind) -> u64 {
+        let sequence = self.inner.next_user_data.fetch_add(1, Ordering::Relaxed);
+        kind.encode(sequence.max(1))
+    }
 
-            // SAFETY: The entry is valid for the duration of the operation.
-            unsafe {
-                ring.submission().push(entry).map_err(|_| {
-                    io::Error::new(io::ErrorKind::WouldBlock, "submission queue full")
-                })?;
+    fn drain_completions_locked(
+        &self,
+        ring: &mut IoUring,
+        expected_user_data: Option<u64>,
+    ) -> Option<i32> {
+        let completions = ring
+            .completion()
+            .map(|cqe| (cqe.user_data(), cqe.result()))
+            .collect::<Vec<_>>();
+
+        let mut expected_result = None;
+        for (user_data, result) in completions {
+            if expected_user_data.is_some_and(|expected| expected == user_data) {
+                expected_result = Some(result);
+            } else {
+                let _ = mark_tracked_op_complete(&self.inner, user_data, result);
+            }
+        }
+
+        expected_result
+    }
+
+    fn push_entry_with_recovery(
+        &self,
+        ring: &mut IoUring,
+        entry: &io_uring::squeue::Entry,
+    ) -> io::Result<()> {
+        for attempt in 0..3 {
+            // SAFETY: The entry points at buffers owned by the caller for the
+            // duration of the synchronous submit/wait cycle below.
+            let push_result = unsafe { ring.submission().push(entry) };
+            if push_result.is_ok() {
+                return Ok(());
             }
 
+            if attempt == 2 {
+                break;
+            }
+
+            ring.submit()?;
+            let _ = self.drain_completions_locked(ring, None);
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "submission queue full",
+        ))
+    }
+
+    /// Helper to submit an SQE and collect completion.
+    fn submit_and_wait(
+        &self,
+        entry: &io_uring::squeue::Entry,
+        expected_user_data: u64,
+    ) -> io::Result<i32> {
+        let mut ring = self.inner.ring.lock();
+        let _ = self.drain_completions_locked(&mut ring, None);
+        self.push_entry_with_recovery(&mut ring, entry)?;
+
+        loop {
             ring.submit_and_wait(1)?;
-
-            // Get the completion - extract result before dropping the iterator.
-            let result = {
-                let mut cq = ring.completion();
-                cq.next().map(|cqe| cqe.result())
-            };
-
-            // Release the ring lock before returning (keeps contention low when io-uring is used
-            // concurrently by multiple filesystem helpers).
-            drop(ring);
-            result
-        };
-
-        result.ok_or_else(|| io::Error::other("no completion received"))
+            if let Some(result) = self.drain_completions_locked(&mut ring, Some(expected_user_data))
+            {
+                return Ok(result);
+            }
+        }
     }
 
     /// Blocking read using io_uring (for poll-based async trait).
     fn blocking_read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         let fd = self.inner.fd.as_raw_fd();
+        let user_data = self.allocate_user_data(OpKind::Read);
         let entry = opcode::Read::new(
             types::Fd(fd),
             buf.as_mut_ptr(),
@@ -456,9 +567,9 @@ impl IoUringFile {
         )
         .offset(offset)
         .build()
-        .user_data(OP_READ);
+        .user_data(user_data);
 
-        let result = self.submit_and_wait(&entry)?;
+        let result = self.submit_and_wait(&entry, user_data)?;
         if result < 0 {
             Err(io::Error::from_raw_os_error(-result))
         } else {
@@ -469,6 +580,7 @@ impl IoUringFile {
     /// Blocking write using io_uring (for poll-based async trait).
     fn blocking_write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
         let fd = self.inner.fd.as_raw_fd();
+        let user_data = self.allocate_user_data(OpKind::Write);
         let entry = opcode::Write::new(
             types::Fd(fd),
             buf.as_ptr(),
@@ -476,9 +588,9 @@ impl IoUringFile {
         )
         .offset(offset)
         .build()
-        .user_data(OP_WRITE);
+        .user_data(user_data);
 
-        let result = self.submit_and_wait(&entry)?;
+        let result = self.submit_and_wait(&entry, user_data)?;
         if result < 0 {
             Err(io::Error::from_raw_os_error(-result))
         } else {
@@ -489,15 +601,19 @@ impl IoUringFile {
     /// Blocking sync using io_uring.
     fn blocking_sync(&self, datasync: bool) -> io::Result<()> {
         let fd = self.inner.fd.as_raw_fd();
+        let kind = if datasync {
+            OpKind::Fdatasync
+        } else {
+            OpKind::Fsync
+        };
+        let user_data = self.allocate_user_data(kind);
         let mut builder = opcode::Fsync::new(types::Fd(fd));
         if datasync {
             builder = builder.flags(types::FsyncFlags::DATASYNC);
         }
-        let entry = builder
-            .build()
-            .user_data(if datasync { OP_FDATASYNC } else { OP_FSYNC });
+        let entry = builder.build().user_data(user_data);
 
-        let result = self.submit_and_wait(&entry)?;
+        let result = self.submit_and_wait(&entry, user_data)?;
         if result < 0 {
             Err(io::Error::from_raw_os_error(-result))
         } else {
@@ -509,6 +625,48 @@ impl IoUringFile {
 impl AsRawFd for IoUringFile {
     fn as_raw_fd(&self) -> RawFd {
         self.inner.fd.as_raw_fd()
+    }
+}
+
+#[cfg(test)]
+impl IoUringFile {
+    fn submit_pending_read_for_test(&self, buf: &mut [u8], offset: u64) -> io::Result<u64> {
+        let user_data = self.allocate_user_data(OpKind::Read);
+        {
+            let mut state = self.inner.read_state.lock();
+            if !matches!(*state, OpState::Idle) {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "test pending read already registered",
+                ));
+            }
+            *state = OpState::Pending {
+                user_data,
+                waker: None,
+            };
+        }
+
+        let entry = opcode::Read::new(
+            types::Fd(self.inner.fd.as_raw_fd()),
+            buf.as_mut_ptr(),
+            u32::try_from(buf.len()).unwrap_or(u32::MAX),
+        )
+        .offset(offset)
+        .build()
+        .user_data(user_data);
+
+        let submit_result = {
+            let mut ring = self.inner.ring.lock();
+            self.push_entry_with_recovery(&mut ring, &entry)?;
+            ring.submit()
+        };
+
+        if let Err(err) = submit_result {
+            *self.inner.read_state.lock() = OpState::Idle;
+            return Err(err);
+        }
+
+        Ok(user_data)
     }
 }
 
@@ -780,28 +938,7 @@ mod tests {
 
         // Submit a read without waiting for it in user code, then rely on Drop to
         // drain the CQE before tearing down the ring mapping.
-        *file.inner.read_state.lock() = OpState::Pending { waker: None };
-        {
-            let fd = file.inner.fd.as_raw_fd();
-            let entry = opcode::Read::new(
-                types::Fd(fd),
-                buf.as_mut_ptr(),
-                u32::try_from(buf.len()).unwrap_or(u32::MAX),
-            )
-            .offset(0)
-            .build()
-            .user_data(OP_READ);
-
-            let mut ring = file.inner.ring.lock();
-            // SAFETY: `buf` lives until after `file` is dropped, and Drop will
-            // wait for completion before releasing the ring mapping.
-            unsafe {
-                ring.submission()
-                    .push(&entry)
-                    .expect("submission queue full");
-            }
-            ring.submit().unwrap();
-        }
+        let _user_data = file.submit_pending_read_for_test(&mut buf, 0).unwrap();
 
         drop(file);
 
@@ -851,6 +988,80 @@ mod tests {
             );
         });
         crate::test_complete!("test_uring_file_read_at_write_at");
+    }
+
+    #[test]
+    fn test_uring_completion_attribution_ignores_unrelated_cqe() {
+        init_test("test_uring_completion_attribution_ignores_unrelated_cqe");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("uring_unrelated_cqe.txt");
+            std::fs::write(&path, b"hello").unwrap();
+
+            let file = IoUringFile::open(&path).unwrap();
+
+            {
+                let entry = opcode::Nop::new().build().user_data(0xDEAD_BEEF);
+                let mut ring = file.inner.ring.lock();
+                // SAFETY: NOP has no external buffer dependencies.
+                unsafe {
+                    ring.submission()
+                        .push(&entry)
+                        .expect("submission queue full");
+                }
+                ring.submit().unwrap();
+            }
+
+            let mut buf = [0u8; 5];
+            let n = file.read(&mut buf).await.unwrap();
+            crate::assert_with_log!(n == 5, "read length", 5usize, n);
+            crate::assert_with_log!(
+                &buf == b"hello",
+                "read ignores unrelated CQE and returns actual data",
+                "hello",
+                String::from_utf8_lossy(&buf)
+            );
+        });
+        crate::test_complete!("test_uring_completion_attribution_ignores_unrelated_cqe");
+    }
+
+    #[test]
+    fn test_uring_sq_full_recovers_by_submitting_and_retrying() {
+        init_test("test_uring_sq_full_recovers_by_submitting_and_retrying");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("uring_sq_full_retry.txt");
+            std::fs::write(&path, b"hello").unwrap();
+
+            let file = IoUringFile::open(&path).unwrap();
+
+            {
+                let mut ring = file.inner.ring.lock();
+                let mut next_user_data = 1u64;
+                loop {
+                    let entry = opcode::Nop::new()
+                        .build()
+                        .user_data(0xAA00_0000 + next_user_data);
+                    // SAFETY: NOP has no external buffer dependencies.
+                    let push_result = unsafe { ring.submission().push(&entry) };
+                    if push_result.is_err() {
+                        break;
+                    }
+                    next_user_data = next_user_data.saturating_add(1);
+                }
+            }
+
+            let mut buf = [0u8; 5];
+            let n = file.read(&mut buf).await.unwrap();
+            crate::assert_with_log!(n == 5, "read length after SQ recovery", 5usize, n);
+            crate::assert_with_log!(
+                &buf == b"hello",
+                "read succeeds after SQ-full recovery",
+                "hello",
+                String::from_utf8_lossy(&buf)
+            );
+        });
+        crate::test_complete!("test_uring_sq_full_recovers_by_submitting_and_retrying");
     }
 
     #[test]

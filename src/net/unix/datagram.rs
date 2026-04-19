@@ -99,7 +99,7 @@ impl UnixDatagram {
     /// Binds to a filesystem path.
     ///
     /// Creates a new Unix datagram socket bound to the specified path.
-    /// If a socket file already exists at the path, it will be removed before binding.
+    /// If the path already exists, bind fails rather than deleting the existing entry.
     ///
     /// # Arguments
     ///
@@ -119,9 +119,6 @@ impl UnixDatagram {
     /// ```
     pub fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let path = path.as_ref();
-
-        // Remove only stale socket files. Refuse to delete non-socket paths.
-        super::listener::remove_stale_socket_file(path)?;
 
         let inner = net::UnixDatagram::bind(path)?;
         Self::from_bound_with(path, inner, |socket| socket.set_nonblocking(true))
@@ -1166,6 +1163,50 @@ mod tests {
         // Clean up manually
         std::fs::remove_file(&path).ok();
         crate::test_complete!("test_datagram_take_path");
+    }
+
+    #[test]
+    fn test_bind_refuses_stale_socket_file() {
+        init_test("test_datagram_bind_refuses_stale_socket_file");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("stale_datagram.sock");
+
+        let stale = net::UnixDatagram::bind(&path).expect("create stale socket");
+        drop(stale);
+
+        crate::assert_with_log!(path.exists(), "stale socket exists", true, path.exists());
+
+        let err = UnixDatagram::bind(&path).expect_err("bind should refuse stale socket path");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::AddrInUse,
+            "bind error kind",
+            io::ErrorKind::AddrInUse,
+            err.kind()
+        );
+        crate::assert_with_log!(path.exists(), "stale socket preserved", true, path.exists());
+        crate::test_complete!("test_datagram_bind_refuses_stale_socket_file");
+    }
+
+    #[test]
+    fn test_bind_refuses_live_socket_file() {
+        init_test("test_datagram_bind_refuses_live_socket_file");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("live_datagram.sock");
+
+        let original = net::UnixDatagram::bind(&path).expect("create live socket");
+
+        let err = UnixDatagram::bind(&path).expect_err("bind should refuse live socket path");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::AddrInUse,
+            "bind error kind",
+            io::ErrorKind::AddrInUse,
+            err.kind()
+        );
+        crate::assert_with_log!(path.exists(), "live socket preserved", true, path.exists());
+
+        drop(original);
+        std::fs::remove_file(&path).ok();
+        crate::test_complete!("test_datagram_bind_refuses_live_socket_file");
     }
 
     #[test]

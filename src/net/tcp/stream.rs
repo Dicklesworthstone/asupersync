@@ -1777,7 +1777,7 @@ mod tests {
         // Test broken pipe detection using direct polling since runtime is complex
         use crate::io::AsyncWrite;
         use std::pin::Pin;
-        use std::task::{Context, Poll, Wake, Waker};
+        use std::task::{Context, Poll};
 
         // Simple manual poll loop for testing
         let waker = noop_waker();
@@ -1826,8 +1826,8 @@ mod tests {
                                 e
                             );
                         } else {
-                            // Some systems may need multiple attempts, this is acceptable for this test
-                            println!("Note: Broken pipe detection may be delayed on this system");
+                            // Some systems need multiple attempts before the
+                            // kernel surfaces the broken-pipe condition.
                         }
                     }
                 }
@@ -1847,7 +1847,6 @@ mod tests {
                 msg_nosignal, 0,
                 "Linux: MSG_NOSIGNAL available for send() calls"
             );
-            println!("Platform: Linux - Uses MSG_NOSIGNAL flag to prevent SIGPIPE");
         }
 
         #[cfg(target_os = "macos")]
@@ -1858,7 +1857,6 @@ mod tests {
                 so_nosigpipe, 0,
                 "macOS: SO_NOSIGPIPE socket option available"
             );
-            println!("Platform: macOS - Uses SO_NOSIGPIPE socket option to prevent SIGPIPE");
         }
 
         #[cfg(target_os = "freebsd")]
@@ -1869,7 +1867,6 @@ mod tests {
                 so_nosigpipe, 0,
                 "FreeBSD: SO_NOSIGPIPE socket option available"
             );
-            println!("Platform: FreeBSD - Uses SO_NOSIGPIPE socket option to prevent SIGPIPE");
         }
 
         #[cfg(target_os = "openbsd")]
@@ -1880,22 +1877,15 @@ mod tests {
                 so_nosigpipe, 0,
                 "OpenBSD: SO_NOSIGPIPE socket option available"
             );
-            println!("Platform: OpenBSD - Uses SO_NOSIGPIPE socket option to prevent SIGPIPE");
         }
 
         #[cfg(windows)]
         {
             // Windows doesn't have SIGPIPE - uses ERROR_BROKEN_PIPE instead
-            println!("Platform: Windows - No SIGPIPE signal, uses ERROR_BROKEN_PIPE (109)");
-            println!("  - WriteFile() returns ERROR_BROKEN_PIPE on broken pipe");
-            println!("  - send()/recv() return WSAECONNABORTED or WSAECONNRESET");
-            println!("  - No signal handling needed for broken pipes");
         }
 
         #[cfg(not(any(unix, windows)))]
-        {
-            println!("Platform: Other - SIGPIPE handling varies by platform");
-        }
+        {}
     }
 
     #[cfg(windows)]
@@ -1938,9 +1928,7 @@ mod tests {
                         os_error == 10053 || // WSAECONNABORTED
                         os_error == 10054; // WSAECONNRESET
 
-                    if is_windows_pipe_error {
-                        println!("Windows broken pipe detected with OS error: {}", os_error);
-                    }
+                    let _ = is_windows_pipe_error;
                 }
             }
             Ok(_) => {

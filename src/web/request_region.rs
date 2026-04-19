@@ -34,6 +34,8 @@
 //! ```
 
 use std::fmt;
+use std::marker::PhantomData;
+use std::rc::Rc;
 
 use crate::cx::{Cx, cap};
 use crate::error::Error;
@@ -93,9 +95,11 @@ impl<'a> RequestRegion<'a> {
     where
         F: FnOnce(&RequestContext<'_>) -> Response,
     {
+        let _cx_guard = Cx::set_current(Some(self.cx.clone()));
         let ctx = RequestContext {
             cx: self.cx,
             request: &self.request,
+            _not_send_sync: PhantomData,
         };
 
         // Check cancellation before running the handler.
@@ -135,9 +139,11 @@ impl<'a> RequestRegion<'a> {
     where
         F: FnOnce(&RequestContext<'_>) -> Result<Response, Error>,
     {
+        let _cx_guard = Cx::set_current(Some(self.cx.clone()));
         let ctx = RequestContext {
             cx: self.cx,
             request: &self.request,
+            _not_send_sync: PhantomData,
         };
 
         if self.cx.checkpoint().is_err() {
@@ -190,10 +196,20 @@ impl<'a> RequestRegion<'a> {
 /// - The capability context [`Cx`] via [`cx()`](Self::cx) for spawning tasks,
 ///   registering finalizers, and checking cancellation
 ///
-/// This type is `!Send` to prevent the context from escaping the region scope.
+/// This type is `!Send`/`!Sync` to prevent the context from crossing thread
+/// boundaries while still borrowed from a request-scoped region.
+///
+/// ```compile_fail
+/// use asupersync::web::request_region::RequestContext;
+///
+/// fn assert_send<T: Send>() {}
+///
+/// assert_send::<RequestContext<'static>>();
+/// ```
 pub struct RequestContext<'a> {
     cx: &'a Cx,
     request: &'a Request,
+    _not_send_sync: PhantomData<Rc<()>>,
 }
 
 impl RequestContext<'_> {
@@ -529,6 +545,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_installs_current_cx_for_handler_body() {
+        let cx = test_cx();
+        let req = test_request("GET", "/current");
+        let expected_task = cx.task_id();
+        let expected_region = cx.region_id();
+        let region = RequestRegion::new(&cx, req);
+
+        let outcome = region.run(|_ctx| {
+            let current = Cx::current().expect("request region should install CURRENT_CX");
+            assert_eq!(current.task_id(), expected_task);
+            assert_eq!(current.region_id(), expected_region);
+            Response::empty(StatusCode::OK)
+        });
+
+        assert!(outcome.is_ok());
+        assert!(
+            Cx::current().is_none(),
+            "request region must restore the prior CURRENT_CX after the handler returns"
+        );
+    }
+
     // --- RequestRegion::run_sync ---
 
     #[test]
@@ -591,6 +629,28 @@ mod tests {
         assert_eq!(
             resp.body.as_ref(),
             b"Client Closed Request: request cancelled"
+        );
+    }
+
+    #[test]
+    fn run_sync_installs_current_cx_for_handler_body() {
+        let cx = test_cx();
+        let req = test_request("POST", "/current");
+        let expected_task = cx.task_id();
+        let expected_region = cx.region_id();
+        let region = RequestRegion::new(&cx, req);
+
+        let outcome = region.run_sync(|_ctx| {
+            let current = Cx::current().expect("request region should install CURRENT_CX");
+            assert_eq!(current.task_id(), expected_task);
+            assert_eq!(current.region_id(), expected_region);
+            Ok(Response::empty(StatusCode::OK))
+        });
+
+        assert!(outcome.is_ok());
+        assert!(
+            Cx::current().is_none(),
+            "request region must restore the prior CURRENT_CX after sync handlers return"
         );
     }
 
@@ -739,7 +799,7 @@ mod tests {
             let cx_clone = cx.clone();
 
             // Simulate client disconnect by setting cancel after a brief delay
-            let _handle = std::thread::spawn(move || {
+            let cancel_thread = std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(1)); // Simulate network delay
                 cx_clone.set_cancel_requested(true);
             });
@@ -759,6 +819,7 @@ mod tests {
                 }
                 Response::new(StatusCode::OK, b"completed".to_vec())
             });
+            cancel_thread.join().expect("cancel thread panicked");
 
             // MR1: Cancel should be observed within reasonable time
             assert!(
@@ -875,11 +936,16 @@ mod tests {
 
             let response_complete = Arc::new(AtomicBool::new(false));
             let response_complete_clone = Arc::clone(&response_complete);
+            let cancel_cx = cx.clone();
+
+            let cancel_thread = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(5));
+                cancel_cx.set_cancel_requested(true);
+            });
 
             let outcome = region.run(|ctx| {
                 // Simulate building a response that could be interrupted
                 let mut response_data = Vec::new();
-
                 for i in 0..10 {
                     if ctx.cx().is_cancel_requested() {
                         // If cancelled, return what we have or a cancellation response
@@ -897,14 +963,7 @@ mod tests {
                 response_complete_clone.store(true, Ordering::SeqCst);
                 Response::new(StatusCode::OK, response_data)
             });
-
-            // Simulate client disconnect during response building
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(5));
-                cx.set_cancel_requested(true);
-            });
-
-            std::thread::sleep(Duration::from_millis(15));
+            cancel_thread.join().expect("cancel thread panicked");
 
             // MR4: Response should be either complete or properly cancelled
             match outcome {

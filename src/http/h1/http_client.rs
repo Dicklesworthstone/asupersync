@@ -76,6 +76,13 @@ pub enum ClientError {
     InvalidConnectInput(String),
     /// Proxy negotiation failed.
     ProxyError(String),
+    /// Connection pool limits prevented a new connection from being opened.
+    PoolExhausted {
+        /// Host name for the attempted request.
+        host: String,
+        /// Port for the attempted request.
+        port: u16,
+    },
     /// The operation was cancelled via the Cx cancellation protocol.
     Cancelled,
 }
@@ -100,6 +107,9 @@ impl std::fmt::Display for ClientError {
             }
             Self::InvalidConnectInput(msg) => write!(f, "invalid CONNECT input: {msg}"),
             Self::ProxyError(msg) => write!(f, "proxy error: {msg}"),
+            Self::PoolExhausted { host, port } => {
+                write!(f, "connection pool exhausted for {host}:{port}")
+            }
             Self::Cancelled => write!(f, "operation cancelled"),
         }
     }
@@ -113,6 +123,7 @@ impl std::error::Error for ClientError {
             Self::ConnectTunnelRefused { .. }
             | Self::InvalidConnectInput(_)
             | Self::ProxyError(_)
+            | Self::PoolExhausted { .. }
             | Self::TlsError(_)
             | Self::InvalidUrl(_)
             | Self::TooManyRedirects { .. }
@@ -346,6 +357,11 @@ impl ParsedUrl {
         if authority.contains('@') && !authority.starts_with('[') {
             return Err(ClientError::InvalidUrl(
                 "URL must not contain userinfo (user@host)".into(),
+            ));
+        }
+        if contains_ctl_or_whitespace(authority) {
+            return Err(ClientError::InvalidUrl(
+                "URL authority cannot contain control characters or whitespace".into(),
             ));
         }
 
@@ -998,6 +1014,7 @@ impl HttpClient {
         }
 
         let req = self.build_request(method, parsed, extra_headers, body, None, None);
+        let request_forbids_reuse = request_forbids_connection_reuse(&req.headers);
 
         let key = parsed.pool_key();
         let acquired = self.acquire_connection(cx, parsed).await?;
@@ -1014,9 +1031,10 @@ impl HttpClient {
         };
         match result {
             Ok((response, io)) => {
+                check_cx(cx)?;
                 guard.defused = true;
                 self.store_response_cookies(&parsed.host, &response.headers);
-                if connection_can_be_reused(&response, method) {
+                if !request_forbids_reuse && connection_can_be_reused(&response, method) {
                     self.release_connection(&key, acquired.pool_id, acquired.fresh, io);
                 } else {
                     self.drop_connection(&key, acquired.pool_id);
@@ -1052,6 +1070,7 @@ impl HttpClient {
         body: &[u8],
     ) -> Result<Response, ClientError> {
         let req = self.build_request(method, parsed, extra_headers, body, None, None);
+        let request_forbids_reuse = request_forbids_connection_reuse(&req.headers);
         let key = parsed.pool_key();
         let acquired = self.acquire_connection(cx, parsed).await?;
         let mut guard = ConnectionGuard::new(self, key.clone(), acquired.pool_id);
@@ -1065,9 +1084,10 @@ impl HttpClient {
         };
         match result {
             Ok((response, io)) => {
+                check_cx(cx)?;
                 guard.defused = true;
                 self.store_response_cookies(&parsed.host, &response.headers);
-                if connection_can_be_reused(&response, method) {
+                if !request_forbids_reuse && connection_can_be_reused(&response, method) {
                     self.release_connection(&key, acquired.pool_id, acquired.fresh, io);
                 } else {
                     self.drop_connection(&key, acquired.pool_id);
@@ -1110,6 +1130,7 @@ impl HttpClient {
         } else {
             Http1Client::request_streaming(stream, req).await?
         };
+        check_cx(cx)?;
         self.store_response_cookies(&parsed.host, &resp.head.headers);
         Ok(resp)
     }
@@ -1140,7 +1161,13 @@ impl HttpClient {
             request_target,
             proxy_conn.proxy_authorization.as_deref(),
         );
-        let (response, _io) = Http1Client::request_with_io(proxy_conn.io, req).await?;
+        let (response, _io) = if let Some(max_body_size) = self.config.max_body_size {
+            Http1Client::request_with_io_and_max_body_size(proxy_conn.io, req, max_body_size)
+                .await?
+        } else {
+            Http1Client::request_with_io(proxy_conn.io, req).await?
+        };
+        check_cx(cx)?;
         self.store_response_cookies(&parsed.host, &response.headers);
         Ok(response)
     }
@@ -1177,6 +1204,7 @@ impl HttpClient {
         } else {
             Http1Client::request_streaming(proxy_conn.io, req).await?
         };
+        check_cx(cx)?;
         self.store_response_cookies(&parsed.host, &resp.head.headers);
         Ok(resp)
     }
@@ -1305,7 +1333,12 @@ impl HttpClient {
         }
 
         builder
-            .headers(extra_headers.iter().cloned())
+            .headers(
+                extra_headers
+                    .iter()
+                    .filter(|(name, _)| !name.eq_ignore_ascii_case("host"))
+                    .cloned(),
+            )
             .body(body.to_vec())
             .build()
     }
@@ -1458,20 +1491,23 @@ impl HttpClient {
         let now = self.pool_now();
         self.cleanup_expired_idle_connections(now);
 
-        let pooled_id = {
+        {
             let mut pool = self.pool.lock();
-            pool.try_acquire(&key, now)
-        };
-        if let Some(pool_id) = pooled_id {
-            if let Some(io) = self.take_idle_connection(&key, pool_id) {
-                return Ok(AcquiredConnection {
-                    pool_id: Some(pool_id),
-                    io,
-                    fresh: false,
-                });
+            let mut idle = self.idle_connections.lock();
+            match pool.try_acquire(&key, now) {
+                Some(pool_id) => {
+                    if let Some(io) = Self::take_idle_connection_locked(&mut idle, &key, pool_id) {
+                        return Ok(AcquiredConnection {
+                            pool_id: Some(pool_id),
+                            io,
+                            fresh: false,
+                        });
+                    }
+                    // Metadata can be stale if a prior request failed before reinserting.
+                    pool.remove(&key, pool_id);
+                }
+                None => {}
             }
-            // Metadata can be stale if a prior request failed before reinserting.
-            self.pool.lock().remove(&key, pool_id);
         }
 
         let fresh_id = {
@@ -1489,6 +1525,13 @@ impl HttpClient {
             id: fresh_id,
         };
 
+        if fresh_id.is_none() {
+            return Err(ClientError::PoolExhausted {
+                host: parsed.host.clone(),
+                port: parsed.port,
+            });
+        }
+
         let io = self.connect_io(cx, parsed).await?;
 
         guard.id = None; // defuse the guard upon success
@@ -1503,16 +1546,20 @@ impl HttpClient {
     fn release_connection(&self, key: &PoolKey, pool_id: Option<u64>, fresh: bool, io: ClientIo) {
         if let Some(id) = pool_id {
             let now = self.pool_now();
+            let mut pool = self.pool.lock();
             let returned_to_pool = if fresh {
-                self.pool.lock().mark_connected(key, id, now)
+                pool.mark_connected(key, id, now)
             } else {
-                self.pool.lock().release(key, id, now)
+                pool.release(key, id, now)
             };
 
             if returned_to_pool {
-                self.store_idle_connection(key.clone(), id, io);
+                let mut idle = self.idle_connections.lock();
+                Self::store_idle_connection_locked(&mut idle, key.clone(), id, io);
             } else {
-                self.drop_connection(key, Some(id));
+                pool.remove(key, id);
+                let mut idle = self.idle_connections.lock();
+                Self::remove_idle_connection_locked(&mut idle, key, id);
             }
         }
     }
@@ -1524,36 +1571,9 @@ impl HttpClient {
         }
     }
 
-    fn take_idle_connection(&self, key: &PoolKey, id: u64) -> Option<ClientIo> {
-        let mut idle = self.idle_connections.lock();
-        let (io, remove_key) = {
-            let entries = idle.get_mut(key)?;
-            let position = entries.iter().position(|(entry_id, _)| *entry_id == id)?;
-            let (_, io) = entries.swap_remove(position);
-            (io, entries.is_empty())
-        };
-        if remove_key {
-            idle.remove(key);
-        }
-        drop(idle);
-        Some(io)
-    }
-
-    fn store_idle_connection(&self, key: PoolKey, id: u64, io: ClientIo) {
-        let mut idle = self.idle_connections.lock();
-        idle.entry(key).or_default().push((id, io));
-    }
-
     fn remove_idle_connection(&self, key: &PoolKey, id: u64) {
         let mut idle = self.idle_connections.lock();
-        if let Some(entries) = idle.get_mut(key) {
-            if let Some(position) = entries.iter().position(|(entry_id, _)| *entry_id == id) {
-                entries.swap_remove(position);
-            }
-            if entries.is_empty() {
-                idle.remove(key);
-            }
-        }
+        Self::remove_idle_connection_locked(&mut idle, key, id);
     }
 
     fn cleanup_expired_idle_connections(&self, now: Time) {
@@ -1578,6 +1598,49 @@ impl HttpClient {
     /// Returns current pool statistics.
     pub fn pool_stats(&self) -> crate::http::pool::PoolStats {
         self.pool.lock().stats()
+    }
+}
+
+impl HttpClient {
+    fn take_idle_connection_locked(
+        idle: &mut HashMap<PoolKey, Vec<(u64, ClientIo)>>,
+        key: &PoolKey,
+        id: u64,
+    ) -> Option<ClientIo> {
+        let (io, remove_key) = {
+            let entries = idle.get_mut(key)?;
+            let position = entries.iter().position(|(entry_id, _)| *entry_id == id)?;
+            let (_, io) = entries.swap_remove(position);
+            (io, entries.is_empty())
+        };
+        if remove_key {
+            idle.remove(key);
+        }
+        Some(io)
+    }
+
+    fn store_idle_connection_locked(
+        idle: &mut HashMap<PoolKey, Vec<(u64, ClientIo)>>,
+        key: PoolKey,
+        id: u64,
+        io: ClientIo,
+    ) {
+        idle.entry(key).or_default().push((id, io));
+    }
+
+    fn remove_idle_connection_locked(
+        idle: &mut HashMap<PoolKey, Vec<(u64, ClientIo)>>,
+        key: &PoolKey,
+        id: u64,
+    ) {
+        if let Some(entries) = idle.get_mut(key) {
+            if let Some(position) = entries.iter().position(|(entry_id, _)| *entry_id == id) {
+                entries.swap_remove(position);
+            }
+            if entries.is_empty() {
+                idle.remove(key);
+            }
+        }
     }
 }
 
@@ -2042,6 +2105,16 @@ fn socks5_reply_message(code: u8) -> &'static str {
 }
 
 fn connection_can_be_reused(response: &Response, req_method: &Method) -> bool {
+    if response.status == 101
+        || response
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("upgrade"))
+        || header_has_token(&response.headers, "connection", "upgrade")
+    {
+        return false;
+    }
+
     // RFC 9112 §6.3: when a response has no Content-Length and no
     // Transfer-Encoding, the body is delimited by connection close (EOF).
     // Such connections must not be reused.
@@ -2064,6 +2137,14 @@ fn connection_can_be_reused(response: &Response, req_method: &Method) -> bool {
         Version::Http11 => !header_has_token(&response.headers, "connection", "close"),
         Version::Http10 => header_has_token(&response.headers, "connection", "keep-alive"),
     }
+}
+
+fn request_forbids_connection_reuse(headers: &[(String, String)]) -> bool {
+    header_has_token(headers, "connection", "close")
+        || header_has_token(headers, "connection", "upgrade")
+        || headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("upgrade"))
 }
 
 fn should_retry_reused_connection_failure(method: &Method, err: &ClientError) -> bool {
@@ -2181,6 +2262,10 @@ fn find_headers_end(buf: &[u8]) -> Option<usize> {
 
 fn contains_ctl_line_break(s: &str) -> bool {
     s.chars().any(|c| matches!(c, '\r' | '\n'))
+}
+
+fn contains_ctl_or_whitespace(s: &str) -> bool {
+    s.chars().any(|c| c.is_ascii_control() || c.is_whitespace())
 }
 
 fn validate_connect_inputs(
@@ -2442,6 +2527,15 @@ mod tests {
     }
 
     #[test]
+    fn parse_url_rejects_control_or_whitespace_in_authority() {
+        let result = ParsedUrl::parse("http://example.com\r\nx-injected: y/path");
+        assert!(matches!(result, Err(ClientError::InvalidUrl(_))));
+
+        let result = ParsedUrl::parse("http://example.com bad/path");
+        assert!(matches!(result, Err(ClientError::InvalidUrl(_))));
+    }
+
+    #[test]
     fn parse_http_proxy_endpoint_with_basic_auth() {
         let proxy = parse_proxy_endpoint("http://alice:secret@proxy.local:8080")
             .expect("proxy should parse");
@@ -2642,6 +2736,14 @@ mod tests {
 
         let err = ClientError::Cancelled;
         assert!(format!("{err}").contains("cancelled"));
+
+        let err = ClientError::PoolExhausted {
+            host: "example.com".into(),
+            port: 80,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("example.com"));
+        assert!(msg.contains("80"));
     }
 
     #[test]
@@ -2963,6 +3065,64 @@ mod tests {
     }
 
     #[test]
+    fn release_connection_holds_pool_lock_until_idle_io_is_recorded() {
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let client = Arc::new(
+            HttpClient::builder()
+                .with_time_getter(http_client_test_time)
+                .build(),
+        );
+        let key = PoolKey::http("example.com", None);
+        let id = client
+            .pool
+            .lock()
+            .register_connecting(key.clone(), Time::ZERO, 1);
+
+        let idle_guard = client.idle_connections.lock();
+        let (tx, rx) = mpsc::channel();
+        let release_client = Arc::clone(&client);
+        let release_key = key.clone();
+        let release_thread = std::thread::spawn(move || {
+            tx.send(()).expect("signal release start");
+            release_client.release_connection(&release_key, Some(id), true, loopback_client_io());
+        });
+
+        rx.recv().expect("release thread should start");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if client.pool.try_lock().is_none() {
+                break;
+            }
+            assert!(
+                Instant::now() <= deadline,
+                "release_connection should hold the pool lock until idle IO is inserted"
+            );
+            std::thread::yield_now();
+        }
+
+        drop(idle_guard);
+        release_thread
+            .join()
+            .expect("release thread should complete");
+
+        assert_eq!(
+            client.idle_connections.lock().get(&key).map_or(0, Vec::len),
+            1,
+            "release must leave idle IO recorded once the lock handoff completes"
+        );
+        let state = client
+            .pool
+            .lock()
+            .get_connection_meta(&key, id)
+            .expect("connection metadata should remain")
+            .state;
+        assert_eq!(state, crate::http::pool::PooledConnectionState::Idle);
+    }
+
+    #[test]
     fn parse_set_cookie_pair_extracts_first_pair() {
         let parsed = parse_set_cookie_pair("session=abc123; Path=/; HttpOnly");
         assert_eq!(parsed, Some(("session".to_string(), "abc123".to_string())));
@@ -3055,6 +3215,28 @@ mod tests {
             get_header(&req.headers, "proxy-authorization"),
             Some("Basic ZXhwbGljaXQ=".to_string())
         );
+    }
+
+    #[test]
+    fn build_request_ignores_explicit_host_header() {
+        let client = HttpClient::builder().build();
+        let parsed = ParsedUrl::parse("http://example.com/path").expect("valid URL");
+        let req = client.build_request(
+            &Method::Get,
+            &parsed,
+            &[("Host".to_string(), "attacker.test".to_string())],
+            &[],
+            None,
+            None,
+        );
+
+        let host_headers: Vec<_> = req
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("host"))
+            .collect();
+        assert_eq!(host_headers.len(), 1);
+        assert_eq!(host_headers[0].1, "example.com");
     }
 
     #[test]
@@ -3400,6 +3582,31 @@ mod tests {
         assert!(connection_can_be_reused(&chunked, &Method::Get));
     }
 
+    #[test]
+    fn connection_not_reused_for_protocol_upgrade() {
+        let response = Response {
+            version: Version::Http11,
+            status: 101,
+            reason: "Switching Protocols".into(),
+            headers: vec![
+                ("Connection".into(), "Upgrade".into()),
+                ("Upgrade".into(), "websocket".into()),
+            ],
+            body: Vec::new(),
+            trailers: Vec::new(),
+        };
+        assert!(!connection_can_be_reused(&response, &Method::Get));
+    }
+
+    #[test]
+    fn request_connection_close_forbids_reuse() {
+        let headers = vec![("Connection".to_string(), "keep-alive, close".to_string())];
+        assert!(request_forbids_connection_reuse(&headers));
+
+        let upgrade_headers = vec![("Upgrade".to_string(), "websocket".to_string())];
+        assert!(request_forbids_connection_reuse(&upgrade_headers));
+    }
+
     // =========================================================================
     // Cancellation via Cx
     // =========================================================================
@@ -3500,6 +3707,121 @@ mod tests {
     }
 
     #[test]
+    fn acquire_connection_respects_pool_limits_before_opening_socket() {
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        listener
+            .set_nonblocking(true)
+            .expect("set nonblocking listener");
+        let addr = listener.local_addr().expect("listener address");
+        let url = format!("http://{addr}/pooled");
+        let parsed = ParsedUrl::parse(&url).expect("parse pooled url");
+        let key = parsed.pool_key();
+
+        let client = HttpClient::builder()
+            .max_connections_per_host(1)
+            .max_total_connections(1)
+            .build();
+        client.pool.lock().register_connecting(key, Time::ZERO, 1);
+
+        let cx = Cx::for_testing();
+        let err = match block_on(client.acquire_connection(&cx, &parsed)) {
+            Ok(_) => panic!("pool exhaustion must reject before dialing"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            ClientError::PoolExhausted { ref host, port }
+                if host == "127.0.0.1" && port == addr.port()
+        ));
+
+        let deadline = Instant::now() + Duration::from_millis(100);
+        loop {
+            match listener.accept() {
+                Ok(_) => panic!("pool-exhausted acquisition must not open a socket"),
+                Err(io_err) if io_err.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(io_err) => panic!("accept failed: {io_err}"),
+            }
+        }
+    }
+
+    #[test]
+    fn request_returns_cancelled_when_cx_is_cancelled_after_exchange() {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, mpsc};
+
+        fn read_request_head(stream: &mut std::net::TcpStream) {
+            let mut buf = [0_u8; 1024];
+            let mut request = Vec::new();
+            loop {
+                let n = stream.read(&mut buf).expect("read request");
+                assert!(n > 0, "request must arrive before peer closes");
+                request.extend_from_slice(&buf[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener address");
+        let (request_seen_tx, request_seen_rx) = mpsc::channel();
+        let (send_response_tx, send_response_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            read_request_head(&mut stream);
+            request_seen_tx.send(()).expect("notify request arrival");
+            send_response_rx
+                .recv()
+                .expect("wait for cancellation before responding");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                )
+                .expect("write response");
+            stream.flush().expect("flush response");
+        });
+
+        let client = Arc::new(
+            HttpClient::builder()
+                .max_connections_per_host(1)
+                .max_total_connections(1)
+                .build(),
+        );
+        let cx = Cx::for_testing();
+        let request_cx = cx.clone();
+        let request_client = Arc::clone(&client);
+        let url = format!("http://{addr}/late-cancel");
+        let request_url = url.clone();
+        let request =
+            std::thread::spawn(move || block_on(request_client.get(&request_cx, &request_url)));
+
+        request_seen_rx
+            .recv()
+            .expect("server should observe the request before cancellation");
+        cx.set_cancel_requested(true);
+        send_response_tx
+            .send(())
+            .expect("allow server to send response");
+
+        let result = request.join().expect("request thread should join");
+        assert!(matches!(result, Err(ClientError::Cancelled)));
+
+        server.join().expect("server thread should join");
+        let stats = client.pool_stats();
+        assert_eq!(
+            stats.idle_connections, 0,
+            "late-cancelled responses must not be returned to the idle pool"
+        );
+    }
+
+    #[test]
     fn safe_method_retries_once_after_stale_pooled_connection_close() {
         use std::io::{Read, Write};
         use std::time::Duration;
@@ -3563,6 +3885,155 @@ mod tests {
         assert!(
             stats.connections_created >= 2,
             "client should establish a fresh connection after stale pooled reuse fails"
+        );
+    }
+
+    #[test]
+    fn request_connection_close_header_prevents_pool_reuse() {
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+
+        fn read_request_head(stream: &mut std::net::TcpStream) -> Vec<u8> {
+            let mut buf = [0_u8; 1024];
+            let mut request = Vec::new();
+            loop {
+                let n = stream.read(&mut buf).expect("read request");
+                assert!(n > 0, "request must arrive before peer closes");
+                request.extend_from_slice(&buf[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            request
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        listener
+            .set_nonblocking(true)
+            .expect("set nonblocking listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let accept = |listener: &TcpListener| -> std::net::TcpStream {
+                loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => return stream,
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() <= deadline,
+                                "timed out waiting for a fresh connection"
+                            );
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(err) => panic!("accept failed: {err}"),
+                    }
+                }
+            };
+
+            let mut first = accept(&listener);
+            let first_req = read_request_head(&mut first);
+            first
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                )
+                .expect("write first response");
+            first.flush().expect("flush first response");
+
+            let mut second = accept(&listener);
+            let second_req = read_request_head(&mut second);
+            second
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("write second response");
+            second.flush().expect("flush second response");
+
+            (first_req, second_req)
+        });
+
+        let client = HttpClient::builder()
+            .max_connections_per_host(1)
+            .max_total_connections(1)
+            .build();
+        let cx = Cx::for_testing();
+        let url = format!("http://{addr}/close-after-response");
+
+        let headers = vec![("Connection".to_string(), "close".to_string())];
+        let first = block_on(client.request(&cx, Method::Get, &url, headers.clone(), Vec::new()))
+            .expect("first request should succeed");
+        assert_eq!(first.status, 200);
+
+        let second = block_on(client.request(&cx, Method::Get, &url, headers, Vec::new()))
+            .expect("second request should succeed");
+        assert_eq!(second.status, 200);
+
+        let (first_req, second_req) = server.join().expect("server thread should join");
+        let first_text = String::from_utf8(first_req).expect("first request should be utf8");
+        let second_text = String::from_utf8(second_req).expect("second request should be utf8");
+        assert!(first_text.contains("Connection: close\r\n"));
+        assert!(second_text.contains("Connection: close\r\n"));
+
+        let stats = client.pool_stats();
+        assert!(
+            stats.connections_created >= 2,
+            "Connection: close requests must not be satisfied from a reused idle connection"
+        );
+        assert_eq!(
+            stats.idle_connections, 0,
+            "Connection: close requests must not leave pooled idle connections behind"
+        );
+    }
+
+    #[test]
+    fn proxy_non_streaming_path_respects_max_body_size() {
+        use crate::http::h1::codec::HttpError;
+        use std::io::{Read, Write};
+
+        fn read_request_head(stream: &mut std::net::TcpStream) -> Vec<u8> {
+            let mut buf = [0_u8; 1024];
+            let mut request = Vec::new();
+            loop {
+                let n = stream.read(&mut buf).expect("read request");
+                assert!(n > 0, "request must arrive before peer closes");
+                request.extend_from_slice(&buf[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            request
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept proxy request");
+            let request = read_request_head(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("write proxy response");
+            stream.flush().expect("flush proxy response");
+            request
+        });
+
+        let client = HttpClient::builder()
+            .proxy(format!("http://{addr}"))
+            .max_body_size(1)
+            .build();
+        let cx = Cx::for_testing();
+        let err = block_on(client.get(&cx, "http://example.com/oversized"))
+            .expect_err("response body should exceed configured limit");
+
+        match err {
+            ClientError::HttpError(HttpError::BodyTooLargeDetailed { actual, limit }) => {
+                assert_eq!(actual, 2);
+                assert_eq!(limit, 1);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let request = server.join().expect("proxy server thread should join");
+        let request_text = String::from_utf8(request).expect("proxy request should be utf8");
+        assert!(
+            request_text.starts_with("GET http://example.com/oversized HTTP/1.1\r\n"),
+            "forward-proxy request must use absolute-form and hit the non-streaming proxy path"
         );
     }
 }

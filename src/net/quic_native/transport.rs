@@ -220,6 +220,14 @@ impl Default for LossRecovery {
 }
 
 impl LossRecovery {
+    fn clear(&mut self) {
+        self.sent_packets.clear();
+        self.largest_acked = [None, None, None];
+        self.bytes_in_flight = 0;
+        self.pto_count = 0;
+        self.congestion_recovery_start_time = None;
+    }
+
     pub fn discard_space(&mut self, space: PacketNumberSpace) {
         let mut retained = VecDeque::with_capacity(self.sent_packets.len());
         while let Some(pkt) = self.sent_packets.pop_front() {
@@ -262,15 +270,6 @@ impl LossRecovery {
         if ack_ranges.is_empty() {
             return AckEvent::empty();
         }
-        let local_largest_acked = ack_ranges
-            .iter()
-            .map(|range| range.largest)
-            .max()
-            .unwrap_or(0);
-        let global_largest_acked = self.largest_acked[space.idx()]
-            .map_or(local_largest_acked, |v| v.max(local_largest_acked));
-        self.largest_acked[space.idx()] = Some(global_largest_acked);
-
         let loss_delay = self.loss_delay_micros();
         let time_threshold = now_micros.saturating_sub(loss_delay);
         let mut event = AckEvent::empty();
@@ -280,9 +279,9 @@ impl LossRecovery {
         // congestion_recovery_start_time) must not contribute to cwnd growth.
         let mut acked_bytes_for_growth: u64 = 0;
 
-        let mut largest_newly_acked_time: Option<u64> = None;
         let mut largest_newly_acked_pn: Option<u64> = None;
-        let mut any_ack_eliciting_newly_acked = false;
+        let mut largest_newly_acked_ack_eliciting_time: Option<u64> = None;
+        let mut largest_newly_acked_ack_eliciting_pn: Option<u64> = None;
 
         let mut retained = VecDeque::with_capacity(self.sent_packets.len());
         while let Some(pkt) = self.sent_packets.pop_front() {
@@ -306,10 +305,12 @@ impl LossRecovery {
 
                 if largest_newly_acked_pn.is_none_or(|pn| pkt.packet_number > pn) {
                     largest_newly_acked_pn = Some(pkt.packet_number);
-                    largest_newly_acked_time = Some(pkt.time_sent_micros);
                 }
-                if pkt.ack_eliciting {
-                    any_ack_eliciting_newly_acked = true;
+                if pkt.ack_eliciting
+                    && largest_newly_acked_ack_eliciting_pn.is_none_or(|pn| pkt.packet_number > pn)
+                {
+                    largest_newly_acked_ack_eliciting_pn = Some(pkt.packet_number);
+                    largest_newly_acked_ack_eliciting_time = Some(pkt.time_sent_micros);
                 }
             } else {
                 retained.push_back(pkt);
@@ -317,16 +318,24 @@ impl LossRecovery {
         }
         self.sent_packets = retained;
 
-        if any_ack_eliciting_newly_acked && largest_newly_acked_pn == Some(local_largest_acked) {
-            if let Some(time_sent) = largest_newly_acked_time {
-                let sample = now_micros.saturating_sub(time_sent);
-                let effective_ack_delay = if space == PacketNumberSpace::ApplicationData {
-                    ack_delay_micros
-                } else {
-                    0
-                };
-                self.rtt.update(sample, effective_ack_delay);
-            }
+        let Some(largest_newly_acked_pn) = largest_newly_acked_pn else {
+            return AckEvent::empty();
+        };
+        let global_largest_acked = self.largest_acked[space.idx()]
+            .map_or(largest_newly_acked_pn, |seen| {
+                seen.max(largest_newly_acked_pn)
+            });
+        self.largest_acked[space.idx()] = Some(global_largest_acked);
+
+        if let Some(time_sent) = largest_newly_acked_ack_eliciting_time {
+            debug_assert!(largest_newly_acked_ack_eliciting_pn.is_some());
+            let sample = now_micros.saturating_sub(time_sent);
+            let effective_ack_delay = if space == PacketNumberSpace::ApplicationData {
+                ack_delay_micros
+            } else {
+                0
+            };
+            self.rtt.update(sample, effective_ack_delay);
         }
 
         // Packet-threshold loss detection (kPacketThreshold = 3)
@@ -400,17 +409,42 @@ impl LossRecovery {
         self.congestion_window_bytes = reduced;
     }
 
-    fn pto_deadline_micros(&self, now_micros: u64) -> Option<u64> {
+    fn pto_deadline_micros(&self, _now_micros: u64) -> Option<u64> {
         if self.bytes_in_flight == 0 {
             return None;
         }
         let srtt = self.rtt.smoothed_rtt_micros().unwrap_or(333_000);
         let rttvar = self.rtt.rttvar_micros().unwrap_or(srtt / 2);
         let granularity = 1_000;
-        let mut timeout = srtt.saturating_add(4u64.saturating_mul(rttvar).max(granularity));
-        timeout = timeout.saturating_add(self.max_ack_delay_micros);
         let backoff = 1u64 << self.pto_count.min(10);
-        Some(now_micros.saturating_add(timeout.saturating_mul(backoff)))
+        let base_timeout = srtt.saturating_add(4u64.saturating_mul(rttvar).max(granularity));
+
+        let mut oldest_ack_eliciting_in_flight: [Option<u64>; 3] = [None; 3];
+        for pkt in &self.sent_packets {
+            if !pkt.in_flight || !pkt.ack_eliciting {
+                continue;
+            }
+            let slot = &mut oldest_ack_eliciting_in_flight[pkt.space.idx()];
+            *slot = Some(slot.map_or(pkt.time_sent_micros, |seen| seen.min(pkt.time_sent_micros)));
+        }
+
+        let mut deadline: Option<u64> = None;
+        for (idx, oldest_sent) in oldest_ack_eliciting_in_flight.iter().copied().enumerate() {
+            let Some(oldest_sent) = oldest_sent else {
+                continue;
+            };
+            let mut timeout = base_timeout;
+            if idx == PacketNumberSpace::ApplicationData.idx() {
+                timeout = timeout.saturating_add(self.max_ack_delay_micros);
+            }
+            let candidate = oldest_sent.saturating_add(timeout.saturating_mul(backoff));
+            deadline = Some(match deadline {
+                Some(seen) => seen.min(candidate),
+                None => candidate,
+            });
+        }
+
+        deadline
     }
 }
 
@@ -547,6 +581,7 @@ impl QuicTransportMachine {
         self.state = QuicConnectionState::Closed;
         self.drain_deadline_micros = None;
         self.close_code = Some(code);
+        self.recovery.clear();
     }
 
     /// Poll draining timer; transitions to `Closed` when deadline is reached.
@@ -557,6 +592,8 @@ impl QuicTransportMachine {
                 .is_some_and(|deadline| now_micros >= deadline)
         {
             self.state = QuicConnectionState::Closed;
+            self.drain_deadline_micros = None;
+            self.recovery.clear();
         }
     }
 
@@ -1020,6 +1057,23 @@ mod tests {
         assert_eq!(event.acked_packets, 0);
     }
 
+    #[test]
+    fn ack_for_unsent_packet_does_not_force_loss() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 10_100));
+
+        let bogus = t.on_ack_received(PacketNumberSpace::ApplicationData, &[99], 0, 20_000);
+        assert_eq!(bogus, AckEvent::empty());
+        assert_eq!(t.bytes_in_flight(), 200);
+        assert_eq!(t.rtt().smoothed_rtt_micros(), None);
+
+        let real = t.on_ack_received(PacketNumberSpace::ApplicationData, &[2], 0, 30_000);
+        assert_eq!(real.acked_packets, 1);
+        assert_eq!(real.lost_packets, 0);
+        assert_eq!(t.bytes_in_flight(), 100);
+    }
+
     // ---- close_immediately ----
 
     #[test]
@@ -1032,6 +1086,19 @@ mod tests {
         t.close_immediately(0);
         assert_eq!(t.state(), QuicConnectionState::Closed);
         assert_eq!(t.close_code(), Some(0));
+    }
+
+    #[test]
+    fn close_immediately_clears_in_flight_recovery_state() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        assert_eq!(t.bytes_in_flight(), 100);
+        assert!(t.pto_deadline_micros(20_000).is_some());
+
+        t.close_immediately(0x33);
+
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert!(t.pto_deadline_micros(20_000).is_none());
     }
 
     #[test]
@@ -1549,6 +1616,22 @@ mod tests {
     }
 
     #[test]
+    fn drain_timeout_closes_and_clears_in_flight_recovery_state() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().unwrap();
+        t.on_established().unwrap();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        assert_eq!(t.bytes_in_flight(), 100);
+
+        t.start_draining(1_000, 5_000).unwrap();
+        t.poll(6_000);
+
+        assert_eq!(t.state(), QuicConnectionState::Closed);
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert!(t.pto_deadline_micros(6_000).is_none());
+    }
+
+    #[test]
     fn loss_delay_micros_saturates_on_extreme_rtt() {
         // Regression: `9 * base_rtt` used to overflow when base_rtt > u64::MAX/9.
         let mut recovery = LossRecovery::default();
@@ -1566,5 +1649,41 @@ mod tests {
             delay > 1_000_000,
             "loss_delay for extreme RTT should be large, got {delay}"
         );
+    }
+
+    #[test]
+    fn pto_deadline_is_anchored_to_oldest_ack_eliciting_send_time() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 1_000));
+
+        let first = t.pto_deadline_micros(2_000).expect("first deadline");
+        let later = t.pto_deadline_micros(200_000).expect("later deadline");
+
+        assert_eq!(first, later);
+        assert_eq!(first, 1_000_000);
+    }
+
+    #[test]
+    fn pto_deadline_skips_max_ack_delay_for_initial_space() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 1_000));
+
+        let deadline = t.pto_deadline_micros(2_000).expect("deadline");
+        assert_eq!(deadline, 1_000_000);
+    }
+
+    #[test]
+    fn pto_deadline_requires_ack_eliciting_packets() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(SentPacketMeta {
+            space: PacketNumberSpace::ApplicationData,
+            packet_number: 1,
+            bytes: 100,
+            ack_eliciting: false,
+            in_flight: true,
+            time_sent_micros: 10_000,
+        });
+
+        assert!(t.pto_deadline_micros(20_000).is_none());
     }
 }

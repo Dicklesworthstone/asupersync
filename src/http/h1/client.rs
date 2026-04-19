@@ -674,13 +674,27 @@ impl Http1Client {
     {
         let request_method = req.method.clone();
 
+        let expect_continue = unique_header_value(&req.headers, "Expect")?
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("100-continue"));
+
         // Encode request to bytes (reuse the existing validated encoder).
         let mut codec = Http1ClientCodec::new();
         let mut write_buf = BytesMut::with_capacity(1024);
         codec.encode(req, &mut write_buf)?;
 
-        // Write request bytes.
-        io.write_all(write_buf.as_ref()).await?;
+        let header_end = find_headers_end(write_buf.as_ref()).ok_or(HttpError::BadRequestLine)?;
+        let (head_bytes, body_bytes) = write_buf.as_ref().split_at(header_end);
+        let mut request_body_sent = !expect_continue || body_bytes.is_empty();
+
+        // With `Expect: 100-continue`, send only the request head first and
+        // wait for either an interim 100 or a final response before sending the
+        // body bytes. This prevents eager upload of large/request-smuggling-
+        // sensitive payloads when the server intends to reject early.
+        if expect_continue {
+            io.write_all(head_bytes).await?;
+        } else {
+            io.write_all(write_buf.as_ref()).await?;
+        }
         io.flush().await?;
 
         // Read response head (status line + headers).
@@ -712,8 +726,15 @@ impl Http1Client {
                 }
 
                 // RFC 9110: 1xx are informational responses. Keep reading
-                // until a final response is received, except 101 which is final.
+                // until a final response is received, except 101 which is
+                // terminal. `100 Continue` is the signal that allows a deferred
+                // request body to be sent.
                 if (100..=199).contains(&status) && status != 101 {
+                    if status == 100 && !request_body_sent {
+                        io.write_all(body_bytes).await?;
+                        io.flush().await?;
+                        request_body_sent = true;
+                    }
                     continue;
                 }
 
@@ -1247,6 +1268,53 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct ExpectContinueIo {
+        read: std::io::Cursor<Vec<u8>>,
+        writes: Vec<Vec<u8>>,
+    }
+
+    impl ExpectContinueIo {
+        fn new(read_bytes: &[u8]) -> Self {
+            Self {
+                read: std::io::Cursor::new(read_bytes.to_vec()),
+                writes: Vec::new(),
+            }
+        }
+    }
+
+    impl AsyncRead for ExpectContinueIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let dst = buf.unfilled();
+            let n = std::io::Read::read(&mut self.read, dst)?;
+            buf.advance(n);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for ExpectContinueIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            src: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.writes.push(src.to_vec());
+            Poll::Ready(Ok(src.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     #[test]
     fn request_streaming_content_length() {
         let response_bytes = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
@@ -1378,6 +1446,90 @@ mod tests {
             }
         }
         assert_eq!(collected, b"hello");
+    }
+
+    #[test]
+    fn request_streaming_expect_continue_sends_body_only_after_continue() {
+        let response_bytes =
+            b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let io = ExpectContinueIo::new(response_bytes);
+
+        let req = Request {
+            method: Method::Post,
+            uri: "/upload".to_string(),
+            version: Version::Http11,
+            headers: vec![
+                ("Host".to_string(), "example.com".to_string()),
+                ("Expect".to_string(), "100-continue".to_string()),
+            ],
+            body: b"hello".to_vec(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let resp = block_on(Http1Client::request_with_io(io, req)).expect("response");
+        assert_eq!(resp.0.status, 200);
+        assert_eq!(resp.0.body, b"ok");
+
+        let writes = resp.1.writes;
+        assert!(
+            writes.len() >= 2,
+            "expect-continue flow should split head and body writes"
+        );
+
+        let first_write = String::from_utf8(writes[0].clone()).expect("headers should be utf8");
+        assert!(first_write.contains("Expect: 100-continue\r\n"));
+        assert!(
+            first_write.ends_with("\r\n\r\n"),
+            "first write should contain only request head"
+        );
+        assert!(
+            !first_write.contains("hello"),
+            "request body must not be sent before 100 Continue"
+        );
+
+        let body_bytes = writes[1..].concat();
+        assert_eq!(body_bytes, b"hello");
+    }
+
+    #[test]
+    fn request_streaming_expect_continue_skips_body_on_early_final_response() {
+        let response_bytes = b"HTTP/1.1 417 Expectation Failed\r\nContent-Length: 0\r\n\r\n";
+        let io = ExpectContinueIo::new(response_bytes);
+
+        let req = Request {
+            method: Method::Post,
+            uri: "/upload".to_string(),
+            version: Version::Http11,
+            headers: vec![
+                ("Host".to_string(), "example.com".to_string()),
+                ("Expect".to_string(), "100-continue".to_string()),
+            ],
+            body: b"hello".to_vec(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let resp = block_on(Http1Client::request_with_io(io, req)).expect("response");
+        assert_eq!(resp.0.status, 417);
+
+        let writes = resp.1.writes;
+        assert_eq!(
+            writes.len(),
+            1,
+            "early final response must suppress body upload"
+        );
+
+        let first_write = String::from_utf8(writes[0].clone()).expect("headers should be utf8");
+        assert!(first_write.contains("Expect: 100-continue\r\n"));
+        assert!(
+            first_write.ends_with("\r\n\r\n"),
+            "only the request head should be written"
+        );
+        assert!(
+            !first_write.contains("hello"),
+            "request body must not be sent after early final response"
+        );
     }
 
     #[test]

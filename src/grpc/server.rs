@@ -326,6 +326,12 @@ pub fn parse_grpc_timeout(header: &str) -> Option<Duration> {
         return None;
     }
     let (digits, unit) = header.split_at(header.len() - 1);
+    // gRPC timeout literals are limited to at most 8 digits. Accepting longer
+    // values lets invalid peer input masquerade as a real timeout and can
+    // accidentally clear deadlines later when checked_add overflows.
+    if digits.is_empty() || digits.len() > 8 {
+        return None;
+    }
     let value: u64 = digits.parse().ok()?;
     match unit {
         "H" => Some(Duration::from_secs(value.checked_mul(3600)?)),
@@ -539,6 +545,55 @@ impl CallContext {
         self.deadline.and_then(|d| d.checked_duration_since(now))
     }
 
+    /// Formats the remaining deadline as a `grpc-timeout` header value.
+    ///
+    /// Expired deadlines propagate as `0n` so downstream calls fail fast
+    /// instead of silently running unbounded.
+    #[must_use]
+    pub fn timeout_header_value(&self) -> Option<String> {
+        self.timeout_header_value_at((self.time_getter)())
+    }
+
+    /// Formats the remaining deadline as a `grpc-timeout` header value using
+    /// an explicit clock sample.
+    #[must_use]
+    pub fn timeout_header_value_at(&self, now: Instant) -> Option<String> {
+        self.deadline
+            .map(|deadline| format_grpc_timeout(deadline.saturating_duration_since(now)))
+    }
+
+    /// Attenuates and writes the effective `grpc-timeout` into outbound metadata.
+    ///
+    /// If outbound metadata already contains a `grpc-timeout`, the effective
+    /// propagated value is the tighter of the existing timeout and this call's
+    /// remaining deadline.
+    ///
+    /// Returns `true` when a timeout header was written.
+    pub fn propagate_timeout_to(&self, metadata: &mut Metadata) -> bool {
+        self.propagate_timeout_to_at(metadata, (self.time_getter)())
+    }
+
+    /// Attenuates and writes the effective `grpc-timeout` into outbound metadata
+    /// using an explicit clock sample.
+    ///
+    /// Expired deadlines are forwarded as `0n`.
+    pub fn propagate_timeout_to_at(&self, metadata: &mut Metadata, now: Instant) -> bool {
+        let Some(parent_remaining) = self
+            .deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
+        else {
+            return false;
+        };
+
+        let effective = match metadata.get("grpc-timeout") {
+            Some(super::streaming::MetadataValue::Ascii(existing)) => parse_grpc_timeout(existing)
+                .map_or(parent_remaining, |child| child.min(parent_remaining)),
+            Some(super::streaming::MetadataValue::Binary(_)) | None => parent_remaining,
+        };
+        metadata.insert("grpc-timeout", format_grpc_timeout(effective));
+        true
+    }
+
     /// Check if the deadline has expired.
     #[must_use]
     pub fn is_expired(&self) -> bool {
@@ -624,6 +679,17 @@ impl CallContextWithCx<'_> {
     #[must_use]
     pub fn remaining(&self) -> Option<Duration> {
         self.call.remaining()
+    }
+
+    /// Formats the remaining deadline as a `grpc-timeout` header value.
+    #[must_use]
+    pub fn timeout_header_value(&self) -> Option<String> {
+        self.call.timeout_header_value()
+    }
+
+    /// Attenuates and writes the effective `grpc-timeout` into outbound metadata.
+    pub fn propagate_timeout_to(&self, metadata: &mut Metadata) -> bool {
+        self.call.propagate_timeout_to(metadata)
     }
 
     /// Returns the full capability context.
@@ -1036,6 +1102,109 @@ mod tests {
         crate::test_complete!(
             "test_call_context_malformed_timeout_without_default_yields_no_deadline"
         );
+    }
+
+    #[test]
+    fn test_parse_grpc_timeout_rejects_more_than_eight_digits() {
+        init_test("test_parse_grpc_timeout_rejects_more_than_eight_digits");
+        let parsed = parse_grpc_timeout("100000000S");
+        crate::assert_with_log!(
+            parsed.is_none(),
+            "oversized timeout literal must be rejected per gRPC 8-digit limit",
+            true,
+            parsed.is_none()
+        );
+        crate::test_complete!("test_parse_grpc_timeout_rejects_more_than_eight_digits");
+    }
+
+    #[test]
+    fn test_call_context_oversized_timeout_header_fails_closed() {
+        init_test("test_call_context_oversized_timeout_header_fails_closed");
+        let now = std::time::Instant::now();
+        let fallback = std::time::Duration::from_secs(3);
+        let mut metadata = Metadata::new();
+        metadata.insert("grpc-timeout", "100000000S");
+        let ctx = CallContext::from_metadata_at(metadata, Some(fallback), None, now);
+
+        let deadline = ctx.deadline();
+        crate::assert_with_log!(
+            deadline.is_none(),
+            "oversized timeout header must not be treated as an unbounded valid deadline",
+            true,
+            deadline.is_none()
+        );
+        crate::test_complete!("test_call_context_oversized_timeout_header_fails_closed");
+    }
+
+    #[test]
+    fn test_call_context_timeout_header_value_uses_remaining_budget() {
+        init_test("test_call_context_timeout_header_value_uses_remaining_budget");
+        let now = std::time::Instant::now();
+        let deadline = now + std::time::Duration::from_millis(250);
+        let ctx = CallContext::with_deadline(deadline);
+
+        let header = ctx.timeout_header_value_at(now);
+        crate::assert_with_log!(
+            header.as_deref() == Some("250m"),
+            "timeout header preserves remaining duration",
+            Some("250m"),
+            header.as_deref()
+        );
+
+        let expired_header =
+            ctx.timeout_header_value_at(deadline + std::time::Duration::from_millis(1));
+        crate::assert_with_log!(
+            expired_header.as_deref() == Some("0n"),
+            "expired deadlines propagate as zero timeout",
+            Some("0n"),
+            expired_header.as_deref()
+        );
+        crate::test_complete!("test_call_context_timeout_header_value_uses_remaining_budget");
+    }
+
+    #[test]
+    fn test_call_context_propagate_timeout_to_clamps_existing_child_timeout() {
+        init_test("test_call_context_propagate_timeout_to_clamps_existing_child_timeout");
+        let now = std::time::Instant::now();
+        let ctx = CallContext::with_deadline(now + std::time::Duration::from_secs(5));
+        let mut metadata = Metadata::new();
+        metadata.insert("grpc-timeout", "10S");
+
+        let wrote = ctx.propagate_timeout_to_at(&mut metadata, now);
+        crate::assert_with_log!(wrote, "propagation writes timeout header", true, wrote);
+        crate::assert_with_log!(
+            matches!(
+                metadata.get("grpc-timeout"),
+                Some(crate::grpc::MetadataValue::Ascii(value)) if value == "5S"
+            ),
+            "existing child timeout is attenuated to parent deadline",
+            true,
+            metadata.get("grpc-timeout").is_some()
+        );
+        crate::test_complete!(
+            "test_call_context_propagate_timeout_to_clamps_existing_child_timeout"
+        );
+    }
+
+    #[test]
+    fn test_call_context_propagate_timeout_to_inserts_when_absent() {
+        init_test("test_call_context_propagate_timeout_to_inserts_when_absent");
+        let now = std::time::Instant::now();
+        let ctx = CallContext::with_deadline(now + std::time::Duration::from_millis(750));
+        let mut metadata = Metadata::new();
+
+        let wrote = ctx.propagate_timeout_to_at(&mut metadata, now);
+        crate::assert_with_log!(wrote, "propagation inserts missing timeout", true, wrote);
+        crate::assert_with_log!(
+            matches!(
+                metadata.get("grpc-timeout"),
+                Some(crate::grpc::MetadataValue::Ascii(value)) if value == "750m"
+            ),
+            "propagation inserts parent remaining timeout when absent",
+            true,
+            metadata.get("grpc-timeout").is_some()
+        );
+        crate::test_complete!("test_call_context_propagate_timeout_to_inserts_when_absent");
     }
 
     #[test]

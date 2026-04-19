@@ -873,7 +873,7 @@ impl<H: Handler> Handler for RequestIdMiddleware<H> {
         req.extensions.insert("trace_id", request_id.clone());
 
         let mut resp = self.inner.call(req);
-        resp.headers.insert(self.header_name.clone(), request_id);
+        resp.set_header(&self.header_name, request_id);
         resp
     }
 }
@@ -966,16 +966,15 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
         let status_code = resp.status.as_u16();
 
         if let Some(header_name) = &self.policy.duration_header {
-            resp.headers
-                .insert(header_name.clone(), duration_ms.to_string());
+            resp.set_header(header_name, duration_ms.to_string());
         }
 
         if let (Some(header_name), Some(id)) = (&self.policy.trace_header, trace_id.as_ref()) {
             // Sanitize CRLF from trace ID to prevent response header injection.
             let sanitized = id.replace(['\r', '\n'], "");
-            resp.headers
-                .entry(header_name.clone())
-                .or_insert_with(|| sanitized);
+            if !resp.has_header(header_name) {
+                resp.set_header(header_name, sanitized);
+            }
         }
 
         if status_code >= 500 {
@@ -1326,12 +1325,10 @@ impl<H: Handler> Handler for SetResponseHeaderMiddleware<H> {
         let mut resp = self.inner.call(req);
         match self.mode {
             HeaderOverwrite::Always => {
-                resp.headers.insert(self.name.clone(), self.value.clone());
+                resp.set_header(&self.name, self.value.clone());
             }
             HeaderOverwrite::IfMissing => {
-                resp.headers
-                    .entry(self.name.clone())
-                    .or_insert_with(|| self.value.clone());
+                resp.ensure_header(&self.name, self.value.clone());
             }
         }
         resp
@@ -2161,6 +2158,28 @@ mod tests {
         assert!(!resp.headers.contains_key("X-Request-Id"));
     }
 
+    #[test]
+    fn request_id_overwrites_mixed_case_inner_header_without_duplication() {
+        fn header_handler() -> Response {
+            let mut resp = Response::new(StatusCode::OK, b"ok".to_vec());
+            resp.headers
+                .insert("X-Request-Id".to_string(), "inner".to_string());
+            resp
+        }
+
+        let mw = RequestIdMiddleware::new(FnHandler::new(header_handler), "x-request-id");
+        let req = Request::new("GET", "/req-id").with_header("x-request-id", "outer");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.header_value("x-request-id"), Some("outer"));
+        assert_eq!(
+            resp.headers.len(),
+            1,
+            "response should not carry duplicate request-id headers"
+        );
+        assert!(!resp.headers.contains_key("X-Request-Id"));
+    }
+
     // --- AuthMiddleware ---
 
     #[test]
@@ -2802,6 +2821,30 @@ mod tests {
     }
 
     #[test]
+    fn request_trace_preserves_mixed_case_existing_trace_header_without_duplication() {
+        fn header_handler() -> Response {
+            let mut resp = Response::new(StatusCode::OK, b"ok".to_vec());
+            resp.headers
+                .insert("X-Trace-Id".to_string(), "inner-trace".to_string());
+            resp
+        }
+
+        let mw = RequestTraceMiddleware::new(
+            FnHandler::new(header_handler),
+            RequestTracePolicy::default(),
+        );
+        let resp = mw.call(make_request().with_header("x-request-id", "outer-trace"));
+
+        assert_eq!(resp.header_value("x-trace-id"), Some("inner-trace"));
+        assert_eq!(
+            resp.headers.len(),
+            2,
+            "only duration and trace headers should be present"
+        );
+        assert!(!resp.headers.contains_key("x-trace-id"));
+    }
+
+    #[test]
     fn request_trace_normalizes_mixed_case_policy_headers() {
         fn header_handler() -> Response {
             Response::new(StatusCode::OK, b"ok".to_vec()).header("x-trace-id", "inner-trace")
@@ -2982,6 +3025,32 @@ mod tests {
         );
         let resp = mw.call(make_request());
 
+        assert_eq!(resp.headers.get("x-custom"), Some(&"original".to_string()));
+        assert!(!resp.headers.contains_key("X-Custom"));
+    }
+
+    #[test]
+    fn set_header_if_missing_respects_mixed_case_existing_header() {
+        fn header_handler() -> Response {
+            let mut resp = Response::new(StatusCode::OK, b"ok".to_vec());
+            resp.headers
+                .insert("X-Custom".to_string(), "original".to_string());
+            resp
+        }
+
+        let mw = SetResponseHeaderMiddleware::if_missing(
+            FnHandler::new(header_handler),
+            "x-custom",
+            "new",
+        );
+        let resp = mw.call(make_request());
+
+        assert_eq!(resp.header_value("x-custom"), Some("original"));
+        assert_eq!(
+            resp.headers.len(),
+            1,
+            "if-missing should not create a duplicate logical header"
+        );
         assert_eq!(resp.headers.get("x-custom"), Some(&"original".to_string()));
         assert!(!resp.headers.contains_key("X-Custom"));
     }

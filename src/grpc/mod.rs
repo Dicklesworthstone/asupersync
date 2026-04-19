@@ -76,7 +76,7 @@ pub use codec::{
 pub use codec::{gzip_frame_compress, gzip_frame_decompress};
 pub use health::{
     HealthCheckRequest, HealthCheckResponse, HealthReporter, HealthService, HealthServiceBuilder,
-    HealthWatcher, ServingStatus,
+    HealthWatchStream, HealthWatcher, ServingStatus,
 };
 pub use interceptor::{
     BearerAuthInterceptor, BearerAuthValidator, FnInterceptor, InterceptorLayer,

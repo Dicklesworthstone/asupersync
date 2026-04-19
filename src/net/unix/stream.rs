@@ -50,6 +50,10 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
     let mut registration: Option<IoRegistration> = None;
     let mut fallback = false;
     std::future::poll_fn(|cx| {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+
         if let Some(err) = socket.take_error()? {
             return Poll::Ready(Err(err));
         }
@@ -116,6 +120,10 @@ fn rearm_connect_registration(
 
 async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
     loop {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+
         if let Some(err) = socket.take_error()? {
             return Err(err);
         }
@@ -501,6 +509,10 @@ impl UnixStream {
         use std::os::unix::io::AsRawFd;
 
         std::future::poll_fn(|cx| {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+
             match send_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -569,6 +581,10 @@ impl UnixStream {
         use std::os::unix::io::AsRawFd;
 
         std::future::poll_fn(|cx| {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+
             match recv_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -1229,6 +1245,93 @@ mod tests {
             nix::unistd::close(fd).expect("close received fd");
         });
         crate::test_complete!("test_send_recv_with_ancillary");
+    }
+
+    #[test]
+    fn wait_for_connect_fallback_returns_interrupted_when_cancel_requested() {
+        init_test("wait_for_connect_fallback_returns_interrupted_when_cancel_requested");
+        let socket = Socket::new(Domain::UNIX, Type::STREAM, None).expect("socket");
+        socket.set_nonblocking(true).expect("nonblocking");
+
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx));
+
+        let result = futures_lite::future::block_on(crate::time::timeout(
+            crate::time::wall_now(),
+            Duration::from_millis(20),
+            wait_for_connect_fallback(&socket),
+        ));
+
+        match result {
+            Ok(Err(err)) => assert_eq!(err.kind(), io::ErrorKind::Interrupted),
+            Ok(Ok(())) => panic!("cancelled fallback connect unexpectedly succeeded"),
+            Err(_) => panic!("cancelled fallback connect hung instead of returning Interrupted"),
+        }
+    }
+
+    #[test]
+    fn send_with_ancillary_returns_interrupted_without_sending_when_cancel_requested() {
+        use crate::net::unix::SocketAncillary;
+
+        init_test("send_with_ancillary_returns_interrupted_without_sending_when_cancel_requested");
+        futures_lite::future::block_on(async {
+            let (tx, mut rx) = UnixStream::pair().expect("pair failed");
+
+            let cx = Cx::for_testing();
+            cx.set_cancel_requested(true);
+            let guard = Cx::set_current(Some(cx));
+
+            let mut ancillary = SocketAncillary::new(64);
+            let err = tx
+                .send_with_ancillary(b"cancelled-send", &mut ancillary)
+                .await
+                .expect_err("cancelled send_with_ancillary must fail");
+            assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+
+            drop(guard);
+
+            let mut buf = [0u8; 32];
+            let err = rx
+                .read(&mut buf)
+                .expect_err("cancelled ancillary send must not publish bytes");
+            assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        });
+    }
+
+    #[test]
+    fn recv_with_ancillary_returns_interrupted_without_consuming_when_cancel_requested() {
+        use crate::net::unix::SocketAncillary;
+
+        init_test(
+            "recv_with_ancillary_returns_interrupted_without_consuming_when_cancel_requested",
+        );
+        futures_lite::future::block_on(async {
+            let (mut tx, rx) = UnixStream::pair().expect("pair failed");
+            std::io::Write::write_all(&mut tx, b"hello").expect("seed bytes");
+
+            let cx = Cx::for_testing();
+            cx.set_cancel_requested(true);
+            let guard = Cx::set_current(Some(cx));
+
+            let mut cancelled_buf = [0u8; 8];
+            let mut cancelled_ancillary = SocketAncillary::new(64);
+            let err = rx
+                .recv_with_ancillary(&mut cancelled_buf, &mut cancelled_ancillary)
+                .await
+                .expect_err("cancelled recv_with_ancillary must fail");
+            assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+
+            drop(guard);
+
+            let mut buf = [0u8; 8];
+            let mut ancillary = SocketAncillary::new(64);
+            let n = rx
+                .recv_with_ancillary(&mut buf, &mut ancillary)
+                .await
+                .expect("bytes should still be readable after cancelled recv");
+            assert_eq!(&buf[..n], b"hello");
+        });
     }
 
     #[test]

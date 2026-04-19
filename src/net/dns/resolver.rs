@@ -263,7 +263,7 @@ impl Resolver {
             return Err(DnsError::Timeout);
         }
         let host = host.to_string();
-        let nameservers = self.effective_nameservers();
+        let nameservers = self.effective_nameservers()?;
         let entropy = Arc::clone(&self.entropy);
 
         let lookup = Box::pin(spawn_blocking_dns(move || {
@@ -347,18 +347,18 @@ impl Resolver {
             return Err(DnsError::NoRecords(host.to_string()));
         }
 
-        // Sort: IPv6 first, then IPv4
-        let mut sorted_addrs: Vec<SocketAddr> =
+        let socket_addrs: Vec<SocketAddr> =
             addrs.iter().map(|ip| SocketAddr::new(*ip, port)).collect();
-        sorted_addrs.sort_by_key(|a| i32::from(!a.is_ipv6()));
 
         // If Happy Eyeballs is disabled, just try sequentially
         if !self.config.happy_eyeballs {
+            let mut sorted_addrs = socket_addrs;
+            sorted_addrs.sort_by_key(|a| i32::from(!a.is_ipv6()));
             return self.connect_sequential(&sorted_addrs).await;
         }
 
         // Happy Eyeballs: race connections with staggered starts
-        self.connect_happy_eyeballs(&sorted_addrs).await
+        self.connect_happy_eyeballs(&socket_addrs).await
     }
 
     /// Connects sequentially to addresses.
@@ -455,7 +455,7 @@ impl Resolver {
     pub async fn lookup_mx(&self, domain: &str) -> Result<LookupMx, DnsError> {
         validate_dns_record_name(domain)?;
         let domain = domain.to_string();
-        let nameservers = self.effective_nameservers();
+        let nameservers = self.effective_nameservers()?;
         let retries = self.config.retries;
         let timeout = self.config.timeout;
         let entropy = Arc::clone(&self.entropy);
@@ -500,7 +500,7 @@ impl Resolver {
     pub async fn lookup_srv(&self, name: &str) -> Result<LookupSrv, DnsError> {
         validate_dns_record_name(name)?;
         let name = name.to_string();
-        let nameservers = self.effective_nameservers();
+        let nameservers = self.effective_nameservers()?;
         let retries = self.config.retries;
         let timeout = self.config.timeout;
         let entropy = Arc::clone(&self.entropy);
@@ -549,7 +549,7 @@ impl Resolver {
     pub async fn lookup_txt(&self, name: &str) -> Result<LookupTxt, DnsError> {
         validate_dns_record_name(name)?;
         let name = name.to_string();
-        let nameservers = self.effective_nameservers();
+        let nameservers = self.effective_nameservers()?;
         let retries = self.config.retries;
         let timeout = self.config.timeout;
         let entropy = Arc::clone(&self.entropy);
@@ -599,11 +599,11 @@ impl Resolver {
         self.cache.stats()
     }
 
-    fn effective_nameservers(&self) -> Vec<SocketAddr> {
+    fn effective_nameservers(&self) -> Result<Vec<SocketAddr>, DnsError> {
         if !self.config.nameservers.is_empty() {
-            return self.config.nameservers.clone();
+            return validate_configured_nameservers(&self.config.nameservers);
         }
-        system_nameservers()
+        Ok(system_nameservers())
     }
 }
 
@@ -882,6 +882,33 @@ fn canonical_dns_name(name: &str) -> String {
     name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase()
 }
 
+fn validate_nameserver_addr(nameserver: SocketAddr) -> Result<SocketAddr, DnsError> {
+    if nameserver.port() == 0 {
+        return Err(DnsError::Io(format!(
+            "invalid DNS nameserver {nameserver}: port must be non-zero"
+        )));
+    }
+    if nameserver.ip().is_unspecified() {
+        return Err(DnsError::Io(format!(
+            "invalid DNS nameserver {nameserver}: unspecified address is not allowed"
+        )));
+    }
+    Ok(nameserver)
+}
+
+fn validate_configured_nameservers(
+    nameservers: &[SocketAddr],
+) -> Result<Vec<SocketAddr>, DnsError> {
+    let mut validated = Vec::with_capacity(nameservers.len());
+    for nameserver in nameservers.iter().copied() {
+        let nameserver = validate_nameserver_addr(nameserver)?;
+        if !validated.contains(&nameserver) {
+            validated.push(nameserver);
+        }
+    }
+    Ok(validated)
+}
+
 fn system_nameservers() -> Vec<SocketAddr> {
     std::fs::read_to_string("/etc/resolv.conf")
         .map(|contents| parse_resolv_conf_nameservers(&contents))
@@ -914,7 +941,7 @@ fn parse_resolv_conf_nameservers(contents: &str) -> Vec<SocketAddr> {
 
         if let Ok(ip) = value.parse::<IpAddr>() {
             let addr = SocketAddr::new(ip, 53);
-            if !nameservers.contains(&addr) {
+            if validate_nameserver_addr(addr).is_ok() && !nameservers.contains(&addr) {
                 nameservers.push(addr);
             }
         }
@@ -1025,13 +1052,17 @@ fn decode_dns_name_inner(
 fn parse_dns_answer(packet: &[u8], offset: &mut usize) -> Result<Option<DnsAnswer>, DnsError> {
     let name = decode_dns_name(packet, offset)?;
     let rr_type = read_u16(packet, offset)?;
-    let _class = read_u16(packet, offset)?;
+    let rr_class = read_u16(packet, offset)?;
     let ttl = read_u32(packet, offset)?;
     let rdlen = usize::from(read_u16(packet, offset)?);
     let rdata_offset = *offset;
     let rdata_end = rdata_offset + rdlen;
     if rdata_end > packet.len() {
         return Err(DnsError::Protocol("truncated DNS RDATA".to_string()));
+    }
+    if rr_class != DnsQueryType::DNS_CLASS_IN {
+        *offset = rdata_end;
+        return Ok(None);
     }
 
     let data = match DnsQueryType::from_code(rr_type) {
@@ -1358,6 +1389,8 @@ impl Resolver {
 
         let attempts = nameservers.len().saturating_mul(retries as usize + 1);
         let mut last_error = None;
+        let mut saw_no_records = false;
+        let mut deferred_alias = None;
 
         for _attempt in 0..=retries {
             for nameserver in nameservers.iter().copied() {
@@ -1378,20 +1411,17 @@ impl Resolver {
                         0 => match select_records_for_query(name, query_type, &response.answers) {
                             QuerySelection::Records(records) => return Ok(records),
                             QuerySelection::Alias(alias) => {
-                                return Self::query_records_inner_sync(
-                                    &alias,
-                                    query_type,
-                                    nameservers,
-                                    retries,
-                                    context,
-                                    cname_depth + 1,
-                                );
+                                if deferred_alias.is_none() {
+                                    deferred_alias = Some(alias);
+                                }
                             }
                             QuerySelection::NoRecords => {
-                                return Err(DnsError::NoRecords(name.to_string()));
+                                saw_no_records = true;
                             }
                         },
-                        3 => return Err(DnsError::NoRecords(name.to_string())),
+                        3 => {
+                            saw_no_records = true;
+                        }
                         rcode => {
                             last_error = Some(DnsError::ServerError(format!(
                                 "DNS server returned rcode {rcode} for {name}"
@@ -1406,6 +1436,20 @@ impl Resolver {
                     }
                 }
             }
+        }
+
+        if let Some(alias) = deferred_alias {
+            return Self::query_records_inner_sync(
+                &alias,
+                query_type,
+                nameservers,
+                retries,
+                context,
+                cname_depth + 1,
+            );
+        }
+        if saw_no_records {
+            return Err(DnsError::NoRecords(name.to_string()));
         }
 
         Err(last_error.unwrap_or(DnsError::Timeout))
@@ -1837,6 +1881,37 @@ mod tests {
         );
 
         crate::test_complete!("decode_dns_name_consumes_compression_pointer_bytes");
+    }
+
+    #[test]
+    fn parse_dns_answer_ignores_non_in_class_records() {
+        init_test("parse_dns_answer_ignores_non_in_class_records");
+
+        let mut packet = Vec::new();
+        encode_dns_name("example.test", &mut packet).expect("encode DNS name");
+        packet.extend_from_slice(&DnsQueryType::A.code().to_be_bytes());
+        packet.extend_from_slice(&3u16.to_be_bytes());
+        packet.extend_from_slice(&60u32.to_be_bytes());
+        packet.extend_from_slice(&4u16.to_be_bytes());
+        packet.extend_from_slice(&[192, 0, 2, 9]);
+
+        let mut offset = 0usize;
+        let answer = parse_dns_answer(&packet, &mut offset).expect("parse answer");
+
+        crate::assert_with_log!(
+            answer.is_none(),
+            "non-IN class record should be ignored",
+            true,
+            format!("{answer:?}")
+        );
+        crate::assert_with_log!(
+            offset == packet.len(),
+            "offset advances past ignored record",
+            packet.len(),
+            offset
+        );
+
+        crate::test_complete!("parse_dns_answer_ignores_non_in_class_records");
     }
 
     fn set_test_time(nanos: u64) {
@@ -2393,6 +2468,73 @@ mod tests {
         );
 
         crate::test_complete!("resolver_record_lookups_use_custom_nameserver_transport");
+    }
+
+    #[test]
+    fn resolver_tries_later_nameserver_after_early_nxdomain() {
+        init_test("resolver_tries_later_nameserver_after_early_nxdomain");
+
+        let stale_server = FakeDnsServer::start(BTreeMap::new(), false);
+
+        let mut live_zone = BTreeMap::new();
+        live_zone.insert(
+            ("example.test".to_string(), 1),
+            vec![FakeDnsRecord::A {
+                ttl: 30,
+                addr: Ipv4Addr::new(192, 0, 2, 77),
+            }],
+        );
+        let live_server = FakeDnsServer::start(live_zone, false);
+
+        let resolver = Resolver::with_config(ResolverConfig {
+            nameservers: vec![stale_server.addr, live_server.addr],
+            cache_enabled: false,
+            retries: 0,
+            timeout: Duration::from_secs(1),
+            ..ResolverConfig::default()
+        });
+
+        let result = future::block_on(async { resolver.lookup_ip("example.test").await });
+        crate::assert_with_log!(
+            result.is_ok(),
+            "resolver should try later nameserver after early NXDOMAIN/no-data response",
+            true,
+            format!("{result:?}")
+        );
+
+        let lookup = result.expect("lookup should succeed via later nameserver");
+        crate::assert_with_log!(
+            lookup
+                .addresses()
+                .contains(&IpAddr::V4(Ipv4Addr::new(192, 0, 2, 77))),
+            "contains address from later nameserver",
+            true,
+            format!("{:?}", lookup.addresses())
+        );
+
+        crate::test_complete!("resolver_tries_later_nameserver_after_early_nxdomain");
+    }
+
+    #[test]
+    fn resolver_rejects_invalid_configured_nameserver_before_query() {
+        init_test("resolver_rejects_invalid_configured_nameserver_before_query");
+
+        let resolver = Resolver::with_config(ResolverConfig {
+            nameservers: vec![SocketAddr::from(([0, 0, 0, 0], 0))],
+            cache_enabled: false,
+            timeout: Duration::from_secs(1),
+            ..ResolverConfig::default()
+        });
+
+        let result = future::block_on(async { resolver.lookup_ip("example.test").await });
+        crate::assert_with_log!(
+            matches!(result, Err(DnsError::Io(ref msg)) if msg.contains("invalid DNS nameserver")),
+            "invalid configured nameserver rejected before transport work",
+            true,
+            format!("{result:?}")
+        );
+
+        crate::test_complete!("resolver_rejects_invalid_configured_nameserver_before_query");
     }
 
     #[test]

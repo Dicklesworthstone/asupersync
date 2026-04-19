@@ -174,13 +174,24 @@ impl Frame {
     #[must_use]
     pub fn close(code: Option<u16>, reason: Option<&str>) -> Self {
         if let Some(c) = code {
-            // Use is_valid_received_code: we may be echoing back an unassigned
-            // code (1016-2999) received from the peer, which is valid per
-            // RFC 6455 §7.4.2.
             assert!(
-                CloseCode::is_valid_received_code(c),
+                CloseCode::is_valid_code(c),
                 "close code {c} is not valid for use in a Close frame (RFC 6455 §7.4)"
             );
+        }
+        if code.is_none() && reason.is_some() {
+            // RFC 6455 §5.5.1: a Close frame body starts with a 2-byte status
+            // code. Fail closed instead of silently inventing Normal (1000).
+            return Self {
+                fin: true,
+                rsv1: false,
+                rsv2: false,
+                rsv3: false,
+                opcode: Opcode::Close,
+                masked: false,
+                mask_key: None,
+                payload: Bytes::new(),
+            };
         }
         if let Some(r) = reason {
             let total = 2 + r.len();
@@ -201,15 +212,7 @@ impl Frame {
                 buf.put_u16(c);
                 buf.freeze()
             }
-            (None, Some(r)) => {
-                // RFC 6455 §5.5.1: if there is a body, it MUST begin with a
-                // 2-byte status code. Use Normal (1000) when caller supplies a
-                // reason without an explicit code.
-                let mut buf = BytesMut::with_capacity(2 + r.len());
-                buf.put_u16(1000);
-                buf.put_slice(r.as_bytes());
-                buf.freeze()
-            }
+            (None, Some(_r)) => Bytes::new(),
             (None, None) => Bytes::new(),
         };
 
@@ -1413,16 +1416,12 @@ mod tests {
     }
 
     #[test]
-    fn test_close_frame_reason_without_code_uses_normal() {
-        // Previously, Frame::close(None, Some("reason")) silently dropped the
-        // reason. Now it defaults to Normal (1000) per RFC 6455 §5.5.1.
+    fn test_close_frame_reason_without_code_fails_closed() {
+        // Regression: do not silently synthesize Normal (1000) when callers
+        // omit the code. That rewrites the protocol meaning of the close.
         let frame = Frame::close(None, Some("going away"));
         assert_eq!(frame.opcode, Opcode::Close);
-        assert!(frame.payload.len() >= 2);
-        let code = u16::from_be_bytes([frame.payload[0], frame.payload[1]]);
-        assert_eq!(code, 1000);
-        let reason = std::str::from_utf8(&frame.payload[2..]).unwrap();
-        assert_eq!(reason, "going away");
+        assert!(frame.payload.is_empty());
     }
 
     #[test]
@@ -1639,6 +1638,14 @@ mod tests {
     fn close_frame_code_1004_panics() {
         // RFC 6455 §7.4.1: 1004 is reserved and MUST NOT be sent.
         let _ = Frame::close(Some(1004), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not valid for use in a Close frame")]
+    fn close_frame_unassigned_received_only_code_panics() {
+        // RFC 6455 §7.4.2: 1016-2999 may be accepted when received, but
+        // endpoints implementing this spec must not send them.
+        let _ = Frame::close(Some(1016), None);
     }
 
     #[test]
