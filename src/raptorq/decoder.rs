@@ -52,7 +52,7 @@ pub enum DecodeError {
     InsufficientSymbols {
         /// Number of symbols received.
         received: usize,
-        /// Minimum required (L = K + S + H).
+        /// Minimum caller-supplied equations required before decoding can proceed.
         required: usize,
     },
     /// Matrix became singular during Gaussian elimination.
@@ -88,6 +88,20 @@ pub enum DecodeError {
         column: usize,
         /// Exclusive upper bound for valid columns.
         max_valid: usize,
+    },
+    /// A source symbol used an ESI outside the systematic source domain [0, K).
+    SourceEsiOutOfRange {
+        /// ESI of the malformed source symbol.
+        esi: u32,
+        /// Exclusive upper bound for valid source ESIs.
+        max_valid: usize,
+    },
+    /// A source symbol did not use the required identity equation `C[esi] = data`.
+    InvalidSourceSymbolEquation {
+        /// ESI of the malformed source symbol.
+        esi: u32,
+        /// Required intermediate column for that source symbol.
+        expected_column: usize,
     },
     /// Internal corruption guard: reconstructed output does not satisfy an
     /// input equation and is therefore unsafe to return as success.
@@ -125,6 +139,8 @@ impl DecodeError {
             Self::SymbolSizeMismatch { .. }
             | Self::SymbolEquationArityMismatch { .. }
             | Self::ColumnIndexOutOfRange { .. }
+            | Self::SourceEsiOutOfRange { .. }
+            | Self::InvalidSourceSymbolEquation { .. }
             | Self::CorruptDecodedOutput { .. } => DecodeFailureClass::Unrecoverable,
         }
     }
@@ -1175,14 +1191,26 @@ impl InactivationDecoder {
         &self.params
     }
 
+    #[inline]
+    const fn implicit_padding_rows(&self) -> usize {
+        self.params.k_prime.saturating_sub(self.params.k)
+    }
+
+    #[inline]
+    const fn minimum_received_symbols(&self) -> usize {
+        self.params.l.saturating_sub(self.implicit_padding_rows())
+    }
+
     fn validate_input(&self, symbols: &[ReceivedSymbol]) -> Result<(), DecodeError> {
+        let k = self.params.k;
         let l = self.params.l;
         let symbol_size = self.params.symbol_size;
+        let required = self.minimum_received_symbols();
 
-        if symbols.len() < l {
+        if symbols.len() < required {
             return Err(DecodeError::InsufficientSymbols {
                 received: symbols.len(),
-                required: l,
+                required,
             });
         }
 
@@ -1211,6 +1239,26 @@ impl InactivationDecoder {
                     });
                 }
             }
+
+            if sym.is_source {
+                let esi = sym.esi as usize;
+                if esi >= k {
+                    return Err(DecodeError::SourceEsiOutOfRange {
+                        esi: sym.esi,
+                        max_valid: k,
+                    });
+                }
+                if sym.columns.len() != 1
+                    || sym.coefficients.len() != 1
+                    || sym.columns[0] != esi
+                    || sym.coefficients[0] != Gf256::ONE
+                {
+                    return Err(DecodeError::InvalidSourceSymbolEquation {
+                        esi: sym.esi,
+                        expected_column: esi,
+                    });
+                }
+            }
         }
 
         Ok(())
@@ -1230,6 +1278,8 @@ impl InactivationDecoder {
             if sym.is_source
                 && sym.columns.len() == 1
                 && sym.coefficients.len() == 1
+                && (sym.esi as usize) < self.params.k
+                && sym.columns[0] == sym.esi as usize
                 && sym.coefficients[0] == Gf256::ONE
             {
                 let source_col = sym.columns[0];
@@ -1267,7 +1317,10 @@ impl InactivationDecoder {
 
     /// Decode from received symbols.
     ///
-    /// `symbols` should contain at least `L` symbols (K source + S LDPC + H HDPC overhead).
+    /// `symbols` must include the LDPC/HDPC constraint rows and enough received
+    /// equations to solve the block. The decoder synthesizes the implicit zero
+    /// LT rows for the padded systematic range `K..K'`, so callers do not need
+    /// to supply them explicitly.
     /// Returns the decoded source symbols on success.
     pub fn decode(&self, symbols: &[ReceivedSymbol]) -> Result<DecodeResult, DecodeError> {
         let k = self.params.k;
@@ -1586,20 +1639,30 @@ impl InactivationDecoder {
     /// Build initial decoder state from received symbols.
     ///
     /// The caller is responsible for including LDPC/HDPC constraint equations
-    /// (with zero RHS) in the received symbols if needed. The higher-level
-    /// `decoding.rs` module handles this by building constraint rows from
-    /// the constraint matrix.
+    /// (with zero RHS) in the received symbols if needed. The decoder
+    /// synthesizes the implicit zero LT rows for the padded systematic range
+    /// `K..K'` so direct callers cannot accidentally omit them.
     fn build_state(&self, symbols: &[ReceivedSymbol]) -> DecoderState {
         let l = self.params.l;
+        let symbol_size = self.params.symbol_size;
 
-        let mut equations = Vec::with_capacity(symbols.len());
-        let mut rhs = Vec::with_capacity(symbols.len());
+        let mut equations = Vec::with_capacity(symbols.len() + self.implicit_padding_rows());
+        let mut rhs = Vec::with_capacity(symbols.len() + self.implicit_padding_rows());
 
         // Add received symbol equations
         for sym in symbols {
             let eq = Equation::new(sym.columns.clone(), sym.coefficients.clone());
             equations.push(eq);
             rhs.push(sym.data.clone());
+        }
+
+        // Systematic encoding includes K' LT rows. When K' > K the encoder
+        // appends padded LT rows K..K' with an explicit zero RHS; synthesize
+        // those rows here so the direct decoder path matches the encoder's
+        // constraint system even when callers only provide real source symbols.
+        for column in self.params.k..self.params.k_prime {
+            equations.push(Equation::new(vec![column], vec![Gf256::ONE]));
+            rhs.push(vec![0u8; symbol_size]);
         }
 
         let active_cols: BTreeSet<usize> = (0..l).collect();
@@ -3195,6 +3258,62 @@ mod tests {
     }
 
     #[test]
+    fn decode_sources_only_auto_synthesizes_padded_lt_rows() {
+        let k = 50;
+        let symbol_size = 32;
+        let seed = 77u64;
+
+        let source = make_source_data(k, symbol_size);
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        assert!(
+            decoder.params().k_prime > k,
+            "test requires a padded systematic parameter set"
+        );
+
+        let mut received = decoder.constraint_symbols();
+        received.extend(make_received_source(&decoder, &source));
+
+        let result = decoder
+            .decode(&received)
+            .expect("decoder should synthesize K..K' zero LT rows");
+
+        for (idx, original) in source.iter().enumerate() {
+            assert_eq!(
+                &result.source[idx], original,
+                "source symbol {idx} mismatch after synthesized padding rows"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_rejects_source_esi_in_padded_range() {
+        let k = 50;
+        let symbol_size = 32;
+        let seed = 91u64;
+
+        let source = make_source_data(k, symbol_size);
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        assert!(
+            decoder.params().k_prime > k,
+            "test requires a padded systematic parameter set"
+        );
+
+        let mut received = decoder.constraint_symbols();
+        received.extend(make_received_source(&decoder, &source));
+        received.push(ReceivedSymbol::source(k as u32, vec![0xA5; symbol_size]));
+
+        let err = decoder.decode(&received).unwrap_err();
+        assert_eq!(
+            err,
+            DecodeError::SourceEsiOutOfRange {
+                esi: k as u32,
+                max_valid: k,
+            }
+        );
+        assert!(err.is_unrecoverable());
+    }
+
+    #[test]
     fn decode_symbol_equation_arity_mismatch_fails() {
         let k = 8;
         let symbol_size = 32;
@@ -3694,6 +3813,20 @@ mod tests {
                 esi: 1,
                 column: 99,
                 max_valid: 12
+            }
+            .is_unrecoverable()
+        );
+        assert!(
+            DecodeError::SourceEsiOutOfRange {
+                esi: 12,
+                max_valid: 8
+            }
+            .is_unrecoverable()
+        );
+        assert!(
+            DecodeError::InvalidSourceSymbolEquation {
+                esi: 3,
+                expected_column: 3
             }
             .is_unrecoverable()
         );

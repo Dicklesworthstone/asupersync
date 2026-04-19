@@ -194,16 +194,10 @@ struct NibbleTables {
 impl NibbleTables {
     #[inline]
     fn for_scalar(c: Gf256) -> Self {
-        let t = &MUL_TABLES[c.0 as usize];
+        let (lo_tbl, hi_tbl) = mul_nibble_tables(c);
         Self {
-            lo: Simd::from_array([
-                t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], t[12],
-                t[13], t[14], t[15],
-            ]),
-            hi: Simd::from_array([
-                t[0x00], t[0x10], t[0x20], t[0x30], t[0x40], t[0x50], t[0x60], t[0x70], t[0x80],
-                t[0x90], t[0xA0], t[0xB0], t[0xC0], t[0xD0], t[0xE0], t[0xF0],
-            ]),
+            lo: Simd::from_slice(lo_tbl),
+            hi: Simd::from_slice(hi_tbl),
         }
     }
 
@@ -1156,7 +1150,7 @@ fn parse_profile_pack_request(raw: &str) -> Option<ProfilePackRequest> {
     }
 }
 
-fn architecture_class_for_kernel(kernel: Gf256Kernel) -> Gf256ArchitectureClass {
+const fn architecture_class_for_kernel(kernel: Gf256Kernel) -> Gf256ArchitectureClass {
     match kernel {
         Gf256Kernel::Scalar => Gf256ArchitectureClass::GenericScalar,
         #[cfg(all(
@@ -1492,9 +1486,100 @@ fn dual_mul_decision_detail_with_policy(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DualExecutionPath {
+    Sequential,
+    FusedSharedSetup,
+    FusedArchWide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SingleMulExecutionPath {
+    ScalarTable,
+    WideTable,
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    ArchWide,
+}
+
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddPairExecutionPath {
+    PerLaneDispatch,
+    FusedArchWide,
+}
+
 #[inline]
-fn should_use_dual_mul_fused(len_a: usize, len_b: usize) -> bool {
-    dual_mul_kernel_decision_detail(len_a, len_b).is_fused()
+const fn arch_pair_kernel_min_lane(kind: Gf256Kernel) -> usize {
+    match architecture_class_for_kernel(kind) {
+        Gf256ArchitectureClass::GenericScalar => usize::MAX,
+        Gf256ArchitectureClass::X86Avx2 => 32,
+        Gf256ArchitectureClass::Aarch64Neon => 16,
+    }
+}
+
+#[inline]
+fn can_use_arch_pair_kernel(kind: Gf256Kernel, len_a: usize, len_b: usize) -> bool {
+    let min_lane = arch_pair_kernel_min_lane(kind);
+    min_lane != usize::MAX && len_a.min(len_b) >= min_lane
+}
+
+#[inline]
+fn single_mul_execution_path(kind: Gf256Kernel, len: usize) -> SingleMulExecutionPath {
+    let arch_min_lane = arch_pair_kernel_min_lane(kind);
+    if arch_min_lane != usize::MAX && len >= arch_min_lane {
+        #[cfg(all(
+            feature = "simd-intrinsics",
+            any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        {
+            return SingleMulExecutionPath::ArchWide;
+        }
+    }
+
+    if len >= MUL_TABLE_THRESHOLD {
+        SingleMulExecutionPath::WideTable
+    } else {
+        SingleMulExecutionPath::ScalarTable
+    }
+}
+
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[inline]
+fn add_pair_execution_path(kind: Gf256Kernel, len_a: usize, len_b: usize) -> AddPairExecutionPath {
+    if can_use_arch_pair_kernel(kind, len_a, len_b) {
+        AddPairExecutionPath::FusedArchWide
+    } else {
+        AddPairExecutionPath::PerLaneDispatch
+    }
+}
+
+#[inline]
+fn dual_mul_execution_path_with_policy(
+    policy: &DualKernelPolicy,
+    kind: Gf256Kernel,
+    len_a: usize,
+    len_b: usize,
+) -> DualExecutionPath {
+    if !dual_mul_decision_detail_with_policy(policy, len_a, len_b).is_fused() {
+        return DualExecutionPath::Sequential;
+    }
+    if can_use_arch_pair_kernel(kind, len_a, len_b) {
+        DualExecutionPath::FusedArchWide
+    } else {
+        // Below the ISA pair-kernel floor we still keep the fused contract by
+        // falling back to the shared-setup generic path instead of issuing two
+        // independent lane operations.
+        DualExecutionPath::FusedSharedSetup
+    }
 }
 
 #[inline]
@@ -1633,8 +1718,20 @@ pub fn dual_addmul_kernel_decision_detail(len_a: usize, len_b: usize) -> DualKer
 }
 
 #[inline]
-fn should_use_dual_addmul_fused(len_a: usize, len_b: usize) -> bool {
-    dual_addmul_kernel_decision_detail(len_a, len_b).is_fused()
+fn dual_addmul_execution_path_with_policy(
+    policy: &DualKernelPolicy,
+    kind: Gf256Kernel,
+    len_a: usize,
+    len_b: usize,
+) -> DualExecutionPath {
+    if !dual_addmul_decision_detail_with_policy(policy, len_a, len_b).is_fused() {
+        return DualExecutionPath::Sequential;
+    }
+    if can_use_arch_pair_kernel(kind, len_a, len_b) {
+        DualExecutionPath::FusedArchWide
+    } else {
+        DualExecutionPath::FusedSharedSetup
+    }
 }
 /// Returns the active runtime-selected GF(256) bulk kernel family.
 #[inline]
@@ -1854,32 +1951,40 @@ pub fn gf256_add_slices2(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b
         any(target_arch = "x86", target_arch = "x86_64")
     ))]
     if matches!(dispatch.kind, Gf256Kernel::X86Avx2) {
-        if src_a.len().min(src_b.len()) < 32 {
-            (dispatch.add_slice)(dst_a, src_a);
-            (dispatch.add_slice)(dst_b, src_b);
-            return;
+        match add_pair_execution_path(dispatch.kind, src_a.len(), src_b.len()) {
+            AddPairExecutionPath::PerLaneDispatch => {
+                (dispatch.add_slice)(dst_a, src_a);
+                (dispatch.add_slice)(dst_b, src_b);
+                return;
+            }
+            AddPairExecutionPath::FusedArchWide => {
+                // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
+                // detection succeeds; slice lengths were checked above.
+                unsafe {
+                    gf256_add_slices2_x86_avx2_impl(dst_a, src_a, dst_b, src_b);
+                }
+                return;
+            }
         }
-        // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
-        // detection succeeds; slice lengths were checked above.
-        unsafe {
-            gf256_add_slices2_x86_avx2_impl(dst_a, src_a, dst_b, src_b);
-        }
-        return;
     }
 
     #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
     if matches!(dispatch.kind, Gf256Kernel::Aarch64Neon) {
-        if src_a.len().min(src_b.len()) < 16 {
-            (dispatch.add_slice)(dst_a, src_a);
-            (dispatch.add_slice)(dst_b, src_b);
-            return;
+        match add_pair_execution_path(dispatch.kind, src_a.len(), src_b.len()) {
+            AddPairExecutionPath::PerLaneDispatch => {
+                (dispatch.add_slice)(dst_a, src_a);
+                (dispatch.add_slice)(dst_b, src_b);
+                return;
+            }
+            AddPairExecutionPath::FusedArchWide => {
+                // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
+                // detection succeeds; slice lengths were checked above.
+                unsafe {
+                    gf256_add_slices2_aarch64_neon_impl(dst_a, src_a, dst_b, src_b);
+                }
+                return;
+            }
         }
-        // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
-        // detection succeeds; slice lengths were checked above.
-        unsafe {
-            gf256_add_slices2_aarch64_neon_impl(dst_a, src_a, dst_b, src_b);
-        }
-        return;
     }
 
     gf256_add_slices2_scalar(dst_a, src_a, dst_b, src_b);
@@ -2097,9 +2202,17 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
         return;
     }
     let dispatch = dispatch();
-    if !should_use_dual_mul_fused(dst_a.len(), dst_b.len()) {
-        mul_slices2_sequential_with_shared_setup(dst_a, dst_b, c, dispatch);
-        return;
+    match dual_mul_execution_path_with_policy(
+        dual_policy(),
+        dispatch.kind,
+        dst_a.len(),
+        dst_b.len(),
+    ) {
+        DualExecutionPath::Sequential => {
+            mul_slices2_sequential_with_shared_setup(dst_a, dst_b, c, dispatch);
+            return;
+        }
+        DualExecutionPath::FusedSharedSetup | DualExecutionPath::FusedArchWide => {}
     }
 
     let table = mul_table_for(c);
@@ -2111,36 +2224,38 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
         any(target_arch = "x86", target_arch = "x86_64")
     ))]
     if matches!(dispatch.kind, Gf256Kernel::X86Avx2) {
-        if dst_a.len().min(dst_b.len()) < 32 {
-            mul_slices2_sequential_with_shared_setup(dst_a, dst_b, c, dispatch);
+        if can_use_arch_pair_kernel(dispatch.kind, dst_a.len(), dst_b.len()) {
+            // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
+            // detection succeeds; pointers remain within provided slice bounds.
+            unsafe {
+                gf256_mul_slices2_x86_avx2_impl_tables(
+                    dst_a,
+                    dst_b,
+                    low_tbl_arr,
+                    high_tbl_arr,
+                    table,
+                );
+            }
             return;
         }
-        // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
-        // detection succeeds; pointers remain within provided slice bounds.
-        unsafe {
-            gf256_mul_slices2_x86_avx2_impl_tables(dst_a, dst_b, low_tbl_arr, high_tbl_arr, table);
-        }
-        return;
     }
 
     #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
     if matches!(dispatch.kind, Gf256Kernel::Aarch64Neon) {
-        if dst_a.len().min(dst_b.len()) < 16 {
-            mul_slices2_sequential_with_shared_setup(dst_a, dst_b, c, dispatch);
+        if can_use_arch_pair_kernel(dispatch.kind, dst_a.len(), dst_b.len()) {
+            // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
+            // detection succeeds; pointers remain within provided slice bounds.
+            unsafe {
+                gf256_mul_slices2_aarch64_neon_impl_tables(
+                    dst_a,
+                    dst_b,
+                    low_tbl_arr,
+                    high_tbl_arr,
+                    table,
+                );
+            }
             return;
         }
-        // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
-        // detection succeeds; pointers remain within provided slice bounds.
-        unsafe {
-            gf256_mul_slices2_aarch64_neon_impl_tables(
-                dst_a,
-                dst_b,
-                low_tbl_arr,
-                high_tbl_arr,
-                table,
-            );
-        }
-        return;
     }
 
     let nib = NibbleTables::for_scalar(c);
@@ -2156,37 +2271,35 @@ fn mul_slices2_sequential_with_shared_setup(
     dispatch: &Gf256Dispatch,
 ) {
     let table = mul_table_for(c);
+    let nib = NibbleTables::for_scalar(c);
     #[cfg(feature = "simd-intrinsics")]
     let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
 
-    #[cfg(all(
-        feature = "simd-intrinsics",
-        any(target_arch = "x86", target_arch = "x86_64")
-    ))]
-    if matches!(dispatch.kind, Gf256Kernel::X86Avx2) {
-        // SAFETY: `dispatch` only carries X86Avx2 when runtime feature
-        // detection succeeds; both helpers stay within the provided slices.
-        unsafe {
-            gf256_mul_slice_x86_avx2_impl_tables(dst_a, low_tbl_arr, high_tbl_arr, table);
-            gf256_mul_slice_x86_avx2_impl_tables(dst_b, low_tbl_arr, high_tbl_arr, table);
+    for dst in [dst_a, dst_b] {
+        match single_mul_execution_path(dispatch.kind, dst.len()) {
+            SingleMulExecutionPath::ScalarTable => mul_with_table_scalar(dst, table),
+            SingleMulExecutionPath::WideTable => mul_with_table_wide(dst, &nib, table),
+            #[cfg(all(
+                feature = "simd-intrinsics",
+                any(target_arch = "x86", target_arch = "x86_64")
+            ))]
+            SingleMulExecutionPath::ArchWide => {
+                // SAFETY: `dispatch` only carries X86Avx2 when runtime feature
+                // detection succeeds; helper stays within the provided slice.
+                unsafe {
+                    gf256_mul_slice_x86_avx2_impl_tables(dst, low_tbl_arr, high_tbl_arr, table);
+                }
+            }
+            #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+            SingleMulExecutionPath::ArchWide => {
+                // SAFETY: `dispatch` only carries Aarch64Neon when runtime feature
+                // detection succeeds; helper stays within the provided slice.
+                unsafe {
+                    gf256_mul_slice_aarch64_neon_impl_tables(dst, low_tbl_arr, high_tbl_arr, table);
+                }
+            }
         }
-        return;
     }
-
-    #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
-    if matches!(dispatch.kind, Gf256Kernel::Aarch64Neon) {
-        // SAFETY: `dispatch` only carries Aarch64Neon when runtime feature
-        // detection succeeds; both helpers stay within the provided slices.
-        unsafe {
-            gf256_mul_slice_aarch64_neon_impl_tables(dst_a, low_tbl_arr, high_tbl_arr, table);
-            gf256_mul_slice_aarch64_neon_impl_tables(dst_b, low_tbl_arr, high_tbl_arr, table);
-        }
-        return;
-    }
-
-    let nib = NibbleTables::for_scalar(c);
-    mul_with_table_wide(dst_a, &nib, table);
-    mul_with_table_wide(dst_b, &nib, table);
 }
 
 fn gf256_mul_slice_scalar(dst: &mut [u8], c: Gf256) {
@@ -2654,10 +2767,18 @@ pub fn gf256_addmul_slices2(
         gf256_add_slices2(dst_a, src_a, dst_b, src_b);
         return;
     }
-    if !should_use_dual_addmul_fused(dst_a.len(), dst_b.len()) {
-        (dispatch.addmul_slice)(dst_a, src_a, c);
-        (dispatch.addmul_slice)(dst_b, src_b, c);
-        return;
+    match dual_addmul_execution_path_with_policy(
+        dual_policy(),
+        dispatch.kind,
+        dst_a.len(),
+        dst_b.len(),
+    ) {
+        DualExecutionPath::Sequential => {
+            (dispatch.addmul_slice)(dst_a, src_a, c);
+            (dispatch.addmul_slice)(dst_b, src_b, c);
+            return;
+        }
+        DualExecutionPath::FusedSharedSetup | DualExecutionPath::FusedArchWide => {}
     }
 
     let table = mul_table_for(c);
@@ -2669,48 +2790,42 @@ pub fn gf256_addmul_slices2(
         any(target_arch = "x86", target_arch = "x86_64")
     ))]
     if matches!(dispatch.kind, Gf256Kernel::X86Avx2) {
-        if src_a.len().min(src_b.len()) < 32 {
-            (dispatch.addmul_slice)(dst_a, src_a, c);
-            (dispatch.addmul_slice)(dst_b, src_b, c);
+        if can_use_arch_pair_kernel(dispatch.kind, src_a.len(), src_b.len()) {
+            // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
+            // detection succeeds; both pairs are length-checked.
+            unsafe {
+                gf256_addmul_slices2_x86_avx2_impl_tables(
+                    dst_a,
+                    src_a,
+                    dst_b,
+                    src_b,
+                    low_tbl_arr,
+                    high_tbl_arr,
+                    table,
+                );
+            }
             return;
         }
-        // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
-        // detection succeeds; both pairs are length-checked.
-        unsafe {
-            gf256_addmul_slices2_x86_avx2_impl_tables(
-                dst_a,
-                src_a,
-                dst_b,
-                src_b,
-                low_tbl_arr,
-                high_tbl_arr,
-                table,
-            );
-        }
-        return;
     }
 
     #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
     if matches!(dispatch.kind, Gf256Kernel::Aarch64Neon) {
-        if src_a.len().min(src_b.len()) < 16 {
-            (dispatch.addmul_slice)(dst_a, src_a, c);
-            (dispatch.addmul_slice)(dst_b, src_b, c);
+        if can_use_arch_pair_kernel(dispatch.kind, src_a.len(), src_b.len()) {
+            // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
+            // detection succeeds; both pairs are length-checked.
+            unsafe {
+                gf256_addmul_slices2_aarch64_neon_impl_tables(
+                    dst_a,
+                    src_a,
+                    dst_b,
+                    src_b,
+                    low_tbl_arr,
+                    high_tbl_arr,
+                    table,
+                );
+            }
             return;
         }
-        // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
-        // detection succeeds; both pairs are length-checked.
-        unsafe {
-            gf256_addmul_slices2_aarch64_neon_impl_tables(
-                dst_a,
-                src_a,
-                dst_b,
-                src_b,
-                low_tbl_arr,
-                high_tbl_arr,
-                table,
-            );
-        }
-        return;
     }
 
     let nib = NibbleTables::for_scalar(c);
@@ -5298,6 +5413,179 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn dual_execution_paths_preserve_fused_contract_below_arch_pair_floor() {
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-dual-policy-v4";
+        let context = failure_context(
+            "RQ-U-GF256-DUAL-POLICY",
+            seed,
+            "dual_execution_paths_preserve_fused_contract_below_arch_pair_floor",
+            replay_ref,
+        );
+
+        let forced = DualKernelPolicy {
+            mode: DualKernelOverride::ForceFused,
+            ..x86_profile_pack_policy_fixture()
+        };
+
+        #[cfg(all(
+            feature = "simd-intrinsics",
+            any(target_arch = "x86", target_arch = "x86_64")
+        ))]
+        {
+            assert_eq!(
+                dual_mul_execution_path_with_policy(&forced, Gf256Kernel::X86Avx2, 31, 95),
+                DualExecutionPath::FusedSharedSetup,
+                "{context}"
+            );
+            assert_eq!(
+                dual_addmul_execution_path_with_policy(&forced, Gf256Kernel::X86Avx2, 31, 95),
+                DualExecutionPath::FusedSharedSetup,
+                "{context}"
+            );
+            assert_eq!(
+                dual_mul_execution_path_with_policy(&forced, Gf256Kernel::X86Avx2, 32, 95),
+                DualExecutionPath::FusedArchWide,
+                "{context}"
+            );
+            assert_eq!(
+                dual_addmul_execution_path_with_policy(&forced, Gf256Kernel::X86Avx2, 32, 95),
+                DualExecutionPath::FusedArchWide,
+                "{context}"
+            );
+        }
+
+        #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+        {
+            assert_eq!(
+                dual_mul_execution_path_with_policy(&forced, Gf256Kernel::Aarch64Neon, 15, 95),
+                DualExecutionPath::FusedSharedSetup,
+                "{context}"
+            );
+            assert_eq!(
+                dual_addmul_execution_path_with_policy(&forced, Gf256Kernel::Aarch64Neon, 15, 95),
+                DualExecutionPath::FusedSharedSetup,
+                "{context}"
+            );
+            assert_eq!(
+                dual_mul_execution_path_with_policy(&forced, Gf256Kernel::Aarch64Neon, 16, 95),
+                DualExecutionPath::FusedArchWide,
+                "{context}"
+            );
+            assert_eq!(
+                dual_addmul_execution_path_with_policy(&forced, Gf256Kernel::Aarch64Neon, 16, 95),
+                DualExecutionPath::FusedArchWide,
+                "{context}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn add_pair_execution_path_preserves_per_lane_dispatch_below_arch_pair_floor() {
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-dual-policy-v4";
+        let context = failure_context(
+            "RQ-U-GF256-DUAL-POLICY",
+            seed,
+            "add_pair_execution_path_preserves_per_lane_dispatch_below_arch_pair_floor",
+            replay_ref,
+        );
+
+        #[cfg(all(
+            feature = "simd-intrinsics",
+            any(target_arch = "x86", target_arch = "x86_64")
+        ))]
+        {
+            assert_eq!(
+                add_pair_execution_path(Gf256Kernel::X86Avx2, 31, 95),
+                AddPairExecutionPath::PerLaneDispatch,
+                "{context}"
+            );
+            assert_eq!(
+                add_pair_execution_path(Gf256Kernel::X86Avx2, 32, 95),
+                AddPairExecutionPath::FusedArchWide,
+                "{context}"
+            );
+        }
+
+        #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+        {
+            assert_eq!(
+                add_pair_execution_path(Gf256Kernel::Aarch64Neon, 15, 95),
+                AddPairExecutionPath::PerLaneDispatch,
+                "{context}"
+            );
+            assert_eq!(
+                add_pair_execution_path(Gf256Kernel::Aarch64Neon, 16, 95),
+                AddPairExecutionPath::FusedArchWide,
+                "{context}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_mul_execution_path_respects_single_lane_thresholds() {
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-dual-policy-v4";
+        let context = failure_context(
+            "RQ-U-GF256-DUAL-POLICY",
+            seed,
+            "single_mul_execution_path_respects_single_lane_thresholds",
+            replay_ref,
+        );
+
+        assert_eq!(
+            single_mul_execution_path(Gf256Kernel::Scalar, MUL_TABLE_THRESHOLD - 1),
+            SingleMulExecutionPath::ScalarTable,
+            "{context}"
+        );
+        assert_eq!(
+            single_mul_execution_path(Gf256Kernel::Scalar, MUL_TABLE_THRESHOLD),
+            SingleMulExecutionPath::WideTable,
+            "{context}"
+        );
+
+        #[cfg(all(
+            feature = "simd-intrinsics",
+            any(target_arch = "x86", target_arch = "x86_64")
+        ))]
+        {
+            assert_eq!(
+                single_mul_execution_path(Gf256Kernel::X86Avx2, 31),
+                SingleMulExecutionPath::ScalarTable,
+                "{context}"
+            );
+            assert_eq!(
+                single_mul_execution_path(Gf256Kernel::X86Avx2, 32),
+                SingleMulExecutionPath::ArchWide,
+                "{context}"
+            );
+        }
+
+        #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+        {
+            assert_eq!(
+                single_mul_execution_path(Gf256Kernel::Aarch64Neon, 15),
+                SingleMulExecutionPath::ScalarTable,
+                "{context}"
+            );
+            assert_eq!(
+                single_mul_execution_path(Gf256Kernel::Aarch64Neon, 16),
+                SingleMulExecutionPath::ArchWide,
+                "{context}"
+            );
+        }
+    }
+
     #[test]
     fn dual_policy_window_reason_classification_and_strings_are_stable() {
         let seed = 0u64;
@@ -5392,15 +5680,31 @@ mod tests {
         ] {
             let mul_decision = dual_mul_kernel_decision(len_a, len_b);
             let addmul_decision = dual_addmul_kernel_decision(len_a, len_b);
-            assert_eq!(
-                mul_decision.is_fused(),
-                should_use_dual_mul_fused(len_a, len_b),
-                "public mul decision helper should match internal gate",
+            let expected_mul = expected_decision_detail_from_snapshot(
+                snapshot.mode,
+                snapshot.mul_min_total,
+                snapshot.mul_max_total,
+                0,
+                snapshot.max_lane_ratio,
+                len_a,
+                len_b,
+            );
+            let expected_addmul = expected_decision_detail_from_snapshot(
+                snapshot.mode,
+                snapshot.addmul_min_total,
+                snapshot.addmul_max_total,
+                snapshot.addmul_min_lane,
+                snapshot.max_lane_ratio,
+                len_a,
+                len_b,
             );
             assert_eq!(
-                addmul_decision.is_fused(),
-                should_use_dual_addmul_fused(len_a, len_b),
-                "public addmul decision helper should match internal gate",
+                mul_decision, expected_mul.decision,
+                "public mul decision helper should match snapshot-derived policy contract",
+            );
+            assert_eq!(
+                addmul_decision, expected_addmul.decision,
+                "public addmul decision helper should match snapshot-derived policy contract",
             );
         }
     }

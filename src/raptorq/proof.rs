@@ -673,6 +673,20 @@ pub enum FailureReason {
         /// Exclusive upper bound for valid columns.
         max_valid: usize,
     },
+    /// A source symbol used an ESI outside the systematic source domain [0, K).
+    SourceEsiOutOfRange {
+        /// ESI of malformed source symbol.
+        esi: u32,
+        /// Exclusive upper bound for valid source ESIs.
+        max_valid: usize,
+    },
+    /// A source symbol did not use the required identity equation `C[esi] = data`.
+    InvalidSourceSymbolEquation {
+        /// ESI of malformed source symbol.
+        esi: u32,
+        /// Required intermediate column for that source symbol.
+        expected_column: usize,
+    },
     /// Decoder produced output that failed equation verification.
     CorruptDecodedOutput {
         /// ESI of mismatched equation row.
@@ -718,6 +732,17 @@ impl From<&DecodeError> for FailureReason {
                 esi: *esi,
                 column: *column,
                 max_valid: *max_valid,
+            },
+            DecodeError::SourceEsiOutOfRange { esi, max_valid } => Self::SourceEsiOutOfRange {
+                esi: *esi,
+                max_valid: *max_valid,
+            },
+            DecodeError::InvalidSourceSymbolEquation {
+                esi,
+                expected_column,
+            } => Self::InvalidSourceSymbolEquation {
+                esi: *esi,
+                expected_column: *expected_column,
             },
             DecodeError::CorruptDecodedOutput {
                 esi,

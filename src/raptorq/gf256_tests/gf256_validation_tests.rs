@@ -62,6 +62,20 @@ impl ValidationConfig {
     }
 }
 
+fn reference_mul_slice(data: &mut [u8], scalar: Gf256) {
+    for byte in data {
+        *byte = Gf256::new(*byte).mul_field(scalar).raw();
+    }
+}
+
+fn reference_addmul_slice(dst: &mut [u8], src: &[u8], scalar: Gf256) {
+    assert_eq!(dst.len(), src.len(), "slice length mismatch");
+    for (dst_byte, src_byte) in dst.iter_mut().zip(src) {
+        let product = Gf256::new(*src_byte).mul_field(scalar);
+        *dst_byte = Gf256::new(*dst_byte).add(product).raw();
+    }
+}
+
 /// Validation test scenarios covering different sizes and edge cases.
 const VALIDATION_SCENARIOS: &[ValidationConfig] = &[
     // Small sizes for exhaustive coverage
@@ -160,8 +174,8 @@ fn test_mul_slice_bit_exact() {
 
         let scalar = Gf256::new(config.scalar);
 
-        // Apply operation to both datasets
-        gf256_mul_slice(&mut reference_data, scalar);
+        // Compare the active kernel path against an independent field-arithmetic reference.
+        reference_mul_slice(&mut reference_data, scalar);
         gf256_mul_slice(&mut test_data, scalar);
 
         // Verify bit-exact match
@@ -207,8 +221,8 @@ fn test_addmul_slice_bit_exact() {
 
         let scalar = Gf256::new(config.scalar);
 
-        // Apply operation to both datasets
-        gf256_addmul_slice(&mut dst_reference, &src_reference, scalar);
+        // Compare the active kernel path against an independent field-arithmetic reference.
+        reference_addmul_slice(&mut dst_reference, &src_reference, scalar);
         gf256_addmul_slice(&mut dst_test, &src_test, scalar);
 
         // Verify bit-exact match
@@ -474,13 +488,12 @@ fn test_alignment_robustness() {
         let dst_slice = &mut dst_data[offset..];
         let src_slice = &src_data[offset..];
 
-        // Reference calculation on aligned data
+        // Reference calculation on aligned data using independent field arithmetic.
         let mut reference_dst = dst_slice.to_vec();
         let reference_src = src_slice.to_vec();
 
-        // Apply operations
+        reference_addmul_slice(&mut reference_dst, &reference_src, scalar);
         gf256_addmul_slice(dst_slice, src_slice, scalar);
-        gf256_addmul_slice(&mut reference_dst, &reference_src, scalar);
 
         let alignment_robust = dst_slice == reference_dst;
 
@@ -534,19 +547,9 @@ fn test_exhaustive_scalar_coverage() {
         // Test that operation completes without panic
         gf256_addmul_slice(&mut dst, &src, scalar);
 
-        // For scalar == 0, dst should be unchanged
-        // For scalar == 1, dst should be XOR'd with src
-        let expected_behavior = if scalar_value == 0 {
-            dst == original_dst
-        } else if scalar_value == 1 {
-            dst == original_dst
-                .iter()
-                .zip(src.iter())
-                .map(|(&d, &s)| d ^ s)
-                .collect::<Vec<_>>()
-        } else {
-            true // General case - just check it didn't panic
-        };
+        let mut expected = original_dst.clone();
+        reference_addmul_slice(&mut expected, &src, scalar);
+        let expected_behavior = dst == expected;
 
         let details = format!(
             "kernel={:?} scalar={} size={} behavior_correct={}",

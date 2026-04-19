@@ -8,7 +8,6 @@ use crate::config::RaptorQConfig;
 use crate::cx::Cx;
 use crate::raptorq::builder::RaptorQSenderBuilder;
 use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
-use crate::raptorq::gf256::Gf256;
 use crate::security::AuthenticatedSymbol;
 use crate::transport::sink::SymbolSink;
 use crate::types::symbol::ObjectId;
@@ -80,24 +79,65 @@ fn generate_test_data(size: usize, seed: u64) -> Vec<u8> {
     (0..size).map(|_| rng.next_u32() as u8).collect()
 }
 
-/// Create a minimal viable decoder for testing.
-fn create_test_decoder(k: usize, symbol_size: usize) -> InactivationDecoder {
-    InactivationDecoder::new(k, symbol_size, 0)
+fn seed_for_block(object_id: ObjectId, sbn: u8) -> u64 {
+    let obj = object_id.as_u128();
+    let hi = (obj >> 64) as u64;
+    let lo = obj as u64;
+    let mut seed = hi ^ lo.rotate_left(13);
+    seed ^= u64::from(sbn) << 56;
+    if seed == 0 { 1 } else { seed }
+}
+
+fn create_test_decoder(
+    symbols: &[AuthenticatedSymbol],
+    k: usize,
+    symbol_size: usize,
+) -> InactivationDecoder {
+    let first_symbol = symbols
+        .first()
+        .expect("metamorphic decode sets must contain at least one symbol")
+        .symbol();
+    let seed = seed_for_block(first_symbol.object_id(), first_symbol.sbn());
+    InactivationDecoder::new(k, symbol_size, seed)
 }
 
 /// Convert authenticated symbols to received symbols for decoder.
 fn symbols_to_received(symbols: &[AuthenticatedSymbol], k: usize) -> Vec<ReceivedSymbol> {
-    symbols
-        .iter()
-        .enumerate()
-        .map(|(i, auth_symbol)| ReceivedSymbol {
-            esi: i as u32,
-            is_source: i < k,
-            columns: vec![i],
-            coefficients: vec![Gf256::ONE],
-            data: auth_symbol.symbol().data().to_vec(),
-        })
-        .collect()
+    let Some(first) = symbols.first() else {
+        return Vec::new();
+    };
+
+    let first_symbol = first.symbol();
+    let seed = seed_for_block(first_symbol.object_id(), first_symbol.sbn());
+    let decoder = InactivationDecoder::new(k, first_symbol.len(), seed);
+    let mut received = Vec::with_capacity(symbols.len());
+
+    for auth_symbol in symbols {
+        let symbol = auth_symbol.symbol();
+        assert_eq!(
+            symbol.object_id(),
+            first_symbol.object_id(),
+            "metamorphic helper requires a single object per decode set"
+        );
+        assert_eq!(
+            symbol.sbn(),
+            first_symbol.sbn(),
+            "metamorphic helper requires a single source block per decode set"
+        );
+
+        let row = match symbol.kind() {
+            crate::types::SymbolKind::Source => {
+                ReceivedSymbol::source(symbol.esi(), symbol.data().to_vec())
+            }
+            crate::types::SymbolKind::Repair => {
+                let (columns, coefficients) = decoder.repair_equation(symbol.esi());
+                ReceivedSymbol::repair(symbol.esi(), columns, coefficients, symbol.data().to_vec())
+            }
+        };
+        received.push(row);
+    }
+
+    received
 }
 
 /// Flatten source symbols into original data format.
@@ -145,7 +185,7 @@ fn mr_encode_decode_identity() {
         // Decode phase - use enough symbols for guaranteed decode
         let symbol_size = config.encoding.symbol_size as usize;
         let k = send_outcome.source_symbols;
-        let decoder = create_test_decoder(k, symbol_size);
+        let decoder = create_test_decoder(&symbols, k, symbol_size);
 
         // Take K + extra symbols to ensure decodability
         let received_symbols = symbols_to_received(
@@ -206,7 +246,7 @@ fn mr_symbol_order_invariance() {
 
         let k = send_outcome.source_symbols;
         let symbol_size = config.encoding.symbol_size as usize;
-        let decoder = create_test_decoder(k, symbol_size);
+        let decoder = create_test_decoder(&symbols, k, symbol_size);
 
         // Create received symbols in original order (minimal decodable set)
         let original_symbols = &symbols[..std::cmp::min(symbols.len(), k + 3)];
@@ -284,7 +324,7 @@ fn mr_symbol_abundance_monotonicity() {
 
         let k = send_outcome.source_symbols;
         let symbol_size = config.encoding.symbol_size as usize;
-        let decoder = create_test_decoder(k, symbol_size);
+        let decoder = create_test_decoder(symbols, k, symbol_size);
 
         // Create minimal symbol set that should decode
         let minimal_count = std::cmp::min(symbols.len(), k + 2);
@@ -382,7 +422,7 @@ fn mr_repair_symbol_orthogonality() {
 
         let k = base_outcome.source_symbols;
         let symbol_size = base_config.encoding.symbol_size as usize;
-        let decoder = create_test_decoder(k, symbol_size);
+        let decoder = create_test_decoder(&base_symbols, k, symbol_size);
 
         // Take enough base symbols for decoding
         let base_symbol_count = std::cmp::min(base_symbols.len(), k + 5);
@@ -460,7 +500,7 @@ fn mr_erasure_resilience() {
 
         let k = outcome.source_symbols;
         let symbol_size = config.encoding.symbol_size as usize;
-        let decoder = create_test_decoder(k, symbol_size);
+        let decoder = create_test_decoder(&symbols, k, symbol_size);
 
         // Simulate erasures by removing symbols from the middle (burst erasure pattern)
         let mut with_erasures = symbols.clone();
@@ -604,7 +644,7 @@ fn mr_repair_symbol_substitutability() {
 
         let k = outcome.source_symbols;
         let symbol_size = config.encoding.symbol_size as usize;
-        let decoder = create_test_decoder(k, symbol_size);
+        let decoder = create_test_decoder(&symbols, k, symbol_size);
 
         // Ensure we have enough symbols for substitution
         if symbols.len() < k + substitution_count {
@@ -705,7 +745,7 @@ fn mr_symbol_duplication_idempotence() {
 
         let k = outcome.source_symbols;
         let symbol_size = config.encoding.symbol_size as usize;
-        let decoder = create_test_decoder(k, symbol_size);
+        let decoder = create_test_decoder(&symbols, k, symbol_size);
 
         // Create decodable symbol set
         let symbol_count = std::cmp::min(symbols.len(), k + 5);
@@ -786,7 +826,7 @@ fn mr_composite_encode_decode_properties() {
 
         let k = send_outcome.source_symbols;
         let symbol_size = config.encoding.symbol_size as usize;
-        let decoder = create_test_decoder(k, symbol_size);
+        let decoder = create_test_decoder(&symbols, k, symbol_size);
 
         // Create abundant symbol set (more than minimal)
         let abundant_count = std::cmp::min(symbols.len(), k + 8);
@@ -886,7 +926,7 @@ mod validation_tests {
 
             let k = outcome.source_symbols;
             let symbol_size = config.encoding.symbol_size as usize;
-            let decoder = create_test_decoder(k, symbol_size);
+            let decoder = create_test_decoder(&symbols, k, symbol_size);
 
             let symbol_count = std::cmp::min(symbols.len(), k + 8);
             let received = symbols_to_received(&symbols[..symbol_count], k);
@@ -936,7 +976,7 @@ mod validation_tests {
 
         let k = outcome.source_symbols;
         let symbol_size = config.encoding.symbol_size as usize;
-        let decoder = create_test_decoder(k, symbol_size);
+        let decoder = create_test_decoder(&symbols, k, symbol_size);
 
         // Test various erasure patterns
         let original_count = std::cmp::min(symbols.len(), k + 12);

@@ -1917,7 +1917,9 @@ mod edge_cases {
 
         let source: Vec<Vec<u8>> = (0..k).map(|i| vec![i as u8; symbol_size]).collect();
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
-        let l = decoder.params().l;
+        let params = decoder.params();
+        let l = params.l;
+        let minimum_required = l - params.k_prime.saturating_sub(k);
 
         // Only k-1 symbols (less than L)
         let received: Vec<ReceivedSymbol> = source[..(l - 1).min(k)]
@@ -1938,8 +1940,8 @@ mod edge_cases {
                     "{context} unexpected received count in error payload"
                 );
                 assert_eq!(
-                    required, l,
-                    "{context} expected required symbol count to match L"
+                    required, minimum_required,
+                    "{context} expected required symbol count to account for implicit K..K' padding rows"
                 );
             }
             other => {
