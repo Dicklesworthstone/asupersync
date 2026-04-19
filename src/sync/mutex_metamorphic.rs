@@ -375,7 +375,7 @@ fn mr4_concurrent_poison_consistency() {
                 let cx = create_test_context(i as u32 + 10, i as u32 + 10);
 
                 let result = futures_lite::future::block_on(async move {
-                    mutex_clone.lock(&cx).await
+                    mutex_clone.lock(&cx).await.map(|_| ())
                 });
 
                 // Store the result

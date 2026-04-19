@@ -1986,7 +1986,7 @@ mod tests {
                 let (lock, cvar) = &*finish_gate_clone;
                 let mut finish = lock.lock();
                 while !*finish {
-                    finish = cvar.wait(finish);
+                    cvar.wait(&mut finish);
                 }
                 // Task completes after gate opens
             });
@@ -2339,11 +2339,9 @@ mod tests {
             // Verify handle spawning works identically to pool spawning
             let executed = Arc::new(AtomicBool::new(false));
             let executed_clone = executed.clone();
-
-            let task_handle = handle.spawn(move || {
-                executed_clone.store(true, Ordering::SeqCst);
-                "handle result"
-            });
+let task_handle = handle.spawn(move || {
+    executed_clone.store(true, Ordering::SeqCst);
+});
 
             assert!(task_handle.wait_timeout(Duration::from_secs(5)));
             assert!(

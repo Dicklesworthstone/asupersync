@@ -418,7 +418,7 @@ mod tests {
                 timer_driver: None,
                 logical_clock_mode: crate::trace::distributed::LogicalClockMode::Lamport,
                 cancel_attribution: crate::types::CancelAttributionConfig::default(),
-                entropy_source: Arc::new(crate::util::det_rng::DetRng::new(0)),
+                entropy_source: Arc::new(crate::util::entropy::DetEntropy::new(0)),
                 blocking_pool: None,
                 obligation_leak_response: crate::runtime::config::ObligationLeakResponse::Panic,
                 leak_escalation: None,

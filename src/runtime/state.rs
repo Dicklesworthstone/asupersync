@@ -8449,26 +8449,21 @@ mod tests {
                     if i % 3 == 0 && !close_flag.load(Ordering::Relaxed) {
                         // Attempt to close region
                         close_flag.store(true, Ordering::Relaxed);
-                        let _close_task = futures_lite::future::block_on(region_id, Budget::default(), move |_cx| async move {
+                        let _close_task = futures_lite::future::block_on(async move {
                             // Simulate close operation
-                            Box::pin(async {
-                                // Close logic would go here in real concurrent scenario
-                                Ok(())
-                            }).await
+                            Ok::<(), ()>(())
                         });
                     } else {
                         // Spawn task in region
                         let task_spawned = spawned_count.clone();
                         let task_completed = completed_count.clone();
 
-                        let task_result = futures_lite::future::block_on(region_id, Budget::default(), move |_cx| async move {
+                        let task_result = futures_lite::future::block_on(async move {
                             task_spawned.fetch_add(1, Ordering::Relaxed);
 
                             // Simulate some work
-                            Box::pin(async {
-                                task_completed.fetch_add(1, Ordering::Relaxed);
-                                Ok(())
-                            }).await
+                            task_completed.fetch_add(1, Ordering::Relaxed);
+                            Ok::<(), ()>(())
                         });
 
                         // Task spawn might fail if region is closing/closed
@@ -8546,7 +8541,7 @@ mod tests {
                             // Cancel parent
                             let state = &mut runtime.state;
                             if let Some(parent) = state.regions.get_mut(parent_id.arena_index()) {
-                                let _ = parent.begin_close(Some(CancelReason::user()));
+                                let _ = parent.begin_close(Some(CancelReason::user("close")));
                                 cancel_attempts += 1;
                             }
                         }
@@ -8554,7 +8549,7 @@ mod tests {
                             // Cancel child
                             let state = &mut runtime.state;
                             if let Some(child) = state.regions.get_mut(child_id.arena_index()) {
-                                let _ = child.begin_close(Some(CancelReason::user()));
+                                let _ = child.begin_close(Some(CancelReason::user("close")));
                                 cancel_attempts += 1;
                             }
                         }
