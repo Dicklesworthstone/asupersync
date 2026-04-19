@@ -715,6 +715,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "bytes_mut_boundaries"
+path = "fuzz_targets/bytes_mut_boundaries.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "gf256_simd_edge_cases"
 path = "fuzz_targets/gf256_simd_edge_cases.rs"
 test = false
