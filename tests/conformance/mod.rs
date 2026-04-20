@@ -9,11 +9,11 @@ pub mod h1_rfc9112;
 pub mod h2_alpn_negotiation_rfc7540;
 pub mod h2_connect;
 pub mod h2_rst_stream_ping_rfc9113;
+pub mod hpack_rfc7541;
 pub mod hpack_table_size;
 // pub mod h2_stream_state_machine_rfc7540;
 // pub mod h3_rfc9114;
 // pub mod hpack_metamorphic;
-// pub mod hpack_rfc7541;
 pub mod cancel_dag_determinism;
 pub mod kafka_offsets;
 pub mod kafka_record_batch_v2;
@@ -266,6 +266,23 @@ pub struct ConformanceTestResult {
     pub verdict: TestVerdict,
     pub error_message: Option<String>,
     pub execution_time_ms: u64,
+}
+
+fn map_hpack_requirement_level(level: hpack_rfc7541::RequirementLevel) -> RequirementLevel {
+    match level {
+        hpack_rfc7541::RequirementLevel::Must => RequirementLevel::Must,
+        hpack_rfc7541::RequirementLevel::Should => RequirementLevel::Should,
+        hpack_rfc7541::RequirementLevel::May => RequirementLevel::May,
+    }
+}
+
+fn map_hpack_verdict(verdict: hpack_rfc7541::TestVerdict) -> TestVerdict {
+    match verdict {
+        hpack_rfc7541::TestVerdict::Pass => TestVerdict::Pass,
+        hpack_rfc7541::TestVerdict::Fail => TestVerdict::Fail,
+        hpack_rfc7541::TestVerdict::Skipped => TestVerdict::Skipped,
+        hpack_rfc7541::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+    }
 }
 
 /// Run all available conformance test suites.
@@ -790,9 +807,7 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         results.extend(race_loser_drain_results);
     }
 
-    // TODO: HPACK RFC 7541 conformance (temporarily disabled during H1 integration)
-    /*
-    let hpack_harness = HpackConformanceHarness::new();
+    let hpack_harness = hpack_rfc7541::HpackConformanceHarness::new();
     let hpack_results: Vec<ConformanceTestResult> = hpack_harness
         .run_all_tests()
         .into_iter()
@@ -808,14 +823,13 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                 hpack_rfc7541::TestCategory::ErrorHandling => TestCategory::ErrorHandling,
                 hpack_rfc7541::TestCategory::RoundTrip => TestCategory::RoundTrip,
             },
-            requirement_level: r.requirement_level,
-            verdict: r.verdict,
+            requirement_level: map_hpack_requirement_level(r.requirement_level),
+            verdict: map_hpack_verdict(r.verdict),
             error_message: r.error_message,
             execution_time_ms: r.execution_time_ms,
         })
         .collect();
     results.extend(hpack_results);
-    */
 
     // TODO: Add other conformance suites when implemented:
     /*
@@ -1214,6 +1228,33 @@ mod tests {
         if !failures.is_empty() {
             panic!("H2 conformance tests failed: {:#?}", failures);
         }
+    }
+
+    #[test]
+    fn test_hpack_conformance_integration() {
+        let hpack_harness = hpack_rfc7541::HpackConformanceHarness::new();
+        let results = hpack_harness.run_all_tests();
+
+        assert!(!results.is_empty(), "HPACK conformance should have tests");
+
+        assert!(
+            results
+                .iter()
+                .any(|r| r.category == hpack_rfc7541::TestCategory::StaticTable),
+            "Should test HPACK static table compliance"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|r| r.category == hpack_rfc7541::TestCategory::DynamicTable),
+            "Should test HPACK dynamic table behavior"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|r| r.category == hpack_rfc7541::TestCategory::RoundTrip),
+            "Should test HPACK round-trip conformance"
+        );
     }
 
     #[test]

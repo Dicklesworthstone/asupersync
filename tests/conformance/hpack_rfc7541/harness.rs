@@ -25,7 +25,7 @@ pub enum TestVerdict {
 }
 
 /// Test category classification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestCategory {
     StaticTable,
@@ -104,6 +104,12 @@ impl HpackConformanceHarness {
             test_result.execution_time_ms = execution_time_ms;
             results.push(test_result);
         }
+
+        results.extend(
+            super::differential_tests::HpackDifferentialTester::new().run_all_differential_tests(),
+        );
+        results.extend(super::error_tests::HpackErrorTester::run_all_error_tests());
+        results.extend(super::error_tests::HpackEdgeCaseTester::run_all_edge_case_tests());
 
         results
     }
@@ -322,13 +328,14 @@ impl ConformanceTest for DynamicTableSizeUpdateTest {
         let headers = vec![Header::new(":method", "GET")];
         let mut encoded = BytesMut::new();
         encoder.encode(&headers, &mut encoded);
+        let first_is_size_update = encoded.first().is_some_and(|byte| byte & 0xe0 == 0x20);
 
         let mut decoder = Decoder::new();
         decoder.set_allowed_table_size(256);
         let mut src = encoded.freeze();
         let decoded = decoder.decode(&mut src);
 
-        let verdict = if encoded.first().is_some_and(|byte| byte & 0xe0 == 0x20)
+        let verdict = if first_is_size_update
             && matches!(decoded.as_ref(), Ok(decoded_headers) if *decoded_headers == headers)
         {
             TestVerdict::Pass
