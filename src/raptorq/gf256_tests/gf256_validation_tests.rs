@@ -6,10 +6,10 @@
 #![cfg(test)]
 
 use crate::raptorq::gf256::{
-    Gf256, Gf256Kernel, active_kernel, dual_addmul_kernel_decision_detail, dual_policy_snapshot,
+    Gf256, active_kernel, dual_addmul_kernel_decision_detail, dual_kernel_policy_snapshot,
     gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
 };
-use crate::test_logging::{TestOutcome, UnitLogEntry, test_log_sink};
+use crate::raptorq::test_log_schema::{UnitLogEntry, validate_unit_log_json};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEST_SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -43,23 +43,45 @@ impl ValidationConfig {
         data
     }
 
-    /// Create structured log entry for this test.
-    fn log_entry(&self, sequence: u64, outcome: TestOutcome, details: &str) -> UnitLogEntry {
+    /// Create a canonical unit-log entry for this test scenario.
+    fn log_entry(&self, sequence: u64, outcome: &str) -> UnitLogEntry {
+        let scenario_slug = self.scenario.replace('_', "-");
+        let scenario_id = format!("RQ-U-GF256-{}", self.scenario.to_ascii_uppercase());
+        let replay_ref = format!("replay:rq-u-gf256-{scenario_slug}-v1");
+        let repro_command = format!(
+            "rch exec -- cargo test --lib raptorq::gf256_tests::gf256_validation_tests::test_{} -- --nocapture",
+            self.scenario
+        );
+
         UnitLogEntry::new(
-            sequence,
-            format!("gf256_validation_{}", self.scenario),
-            format!(
-                "size={} scalar={} seed={}",
-                self.size, self.scalar, self.seed
-            ),
+            &scenario_id,
+            self.seed,
+            &format!("size={},scalar={}", self.size, self.scalar),
+            &replay_ref,
+            &repro_command,
             outcome,
-            details.to_string(),
-            format!(
-                "cargo test gf256_validation_tests::test_{} -- --nocapture",
-                self.scenario
-            ),
         )
+        .with_artifact_path(&format!(
+            "artifacts/raptorq/gf256_validation/{scenario_slug}-{sequence}.json"
+        ))
     }
+}
+
+fn test_outcome(passed: bool) -> &'static str {
+    if passed { "ok" } else { "fail" }
+}
+
+fn validate_validation_log(entry: &UnitLogEntry) -> String {
+    let json = entry
+        .to_json()
+        .expect("serialize GF(256) validation unit log entry");
+    let violations = validate_unit_log_json(&json);
+    let context = entry.to_context_string();
+    assert!(
+        violations.is_empty(),
+        "{context}: GF(256) validation unit log schema violations: {violations:?}"
+    );
+    context
 }
 
 fn reference_mul_slice(data: &mut [u8], scalar: Gf256) {
@@ -186,18 +208,13 @@ fn test_mul_slice_bit_exact() {
             kernel, config.size, config.scalar, bit_exact
         );
 
-        let outcome = if bit_exact {
-            TestOutcome::Pass
-        } else {
-            TestOutcome::Fail
-        };
-        let log_entry = config.log_entry(sequence, outcome, &details);
-        test_log_sink().write_log_entry(log_entry);
+        let log_entry = config.log_entry(sequence, test_outcome(bit_exact));
+        let context = validate_validation_log(&log_entry);
 
         assert!(
             bit_exact,
-            "mul_slice not bit-exact for scenario: {}",
-            config.scenario
+            "{context}: mul_slice not bit-exact for scenario {} ({details})",
+            config.scenario,
         );
     }
 }
@@ -233,18 +250,13 @@ fn test_addmul_slice_bit_exact() {
             kernel, config.size, config.scalar, bit_exact
         );
 
-        let outcome = if bit_exact {
-            TestOutcome::Pass
-        } else {
-            TestOutcome::Fail
-        };
-        let log_entry = config.log_entry(sequence, outcome, &details);
-        test_log_sink().write_log_entry(log_entry);
+        let log_entry = config.log_entry(sequence, test_outcome(bit_exact));
+        let context = validate_validation_log(&log_entry);
 
         assert!(
             bit_exact,
-            "addmul_slice not bit-exact for scenario: {}",
-            config.scenario
+            "{context}: addmul_slice not bit-exact for scenario {} ({details})",
+            config.scenario,
         );
     }
 }
@@ -284,18 +296,13 @@ fn test_dual_slice_equivalence() {
             kernel, config.size, config.scalar, mul_equivalent
         );
 
-        let outcome = if mul_equivalent {
-            TestOutcome::Pass
-        } else {
-            TestOutcome::Fail
-        };
-        let log_entry = config.log_entry(sequence, outcome, &details);
-        test_log_sink().write_log_entry(log_entry);
+        let log_entry = config.log_entry(sequence, test_outcome(mul_equivalent));
+        let context = validate_validation_log(&log_entry);
 
         assert!(
             mul_equivalent,
-            "dual mul_slices2 not equivalent for scenario: {}",
-            config.scenario
+            "{context}: dual mul_slices2 not equivalent for scenario {} ({details})",
+            config.scenario,
         );
     }
 }
@@ -347,18 +354,13 @@ fn test_dual_addmul_equivalence() {
             kernel, config.size, config.scalar, addmul_equivalent, decision.decision
         );
 
-        let outcome = if addmul_equivalent {
-            TestOutcome::Pass
-        } else {
-            TestOutcome::Fail
-        };
-        let log_entry = config.log_entry(sequence, outcome, &details);
-        test_log_sink().write_log_entry(log_entry);
+        let log_entry = config.log_entry(sequence, test_outcome(addmul_equivalent));
+        let context = validate_validation_log(&log_entry);
 
         assert!(
             addmul_equivalent,
-            "dual addmul_slices2 not equivalent for scenario: {}",
-            config.scenario
+            "{context}: dual addmul_slices2 not equivalent for scenario {} ({details})",
+            config.scenario,
         );
     }
 }
@@ -396,18 +398,13 @@ fn test_fast_path_correctness() {
             kernel, size, unchanged
         );
 
-        let outcome = if unchanged {
-            TestOutcome::Pass
-        } else {
-            TestOutcome::Fail
-        };
-        let log_entry = config.log_entry(sequence, outcome, &details);
-        test_log_sink().write_log_entry(log_entry);
+        let log_entry = config.log_entry(sequence, test_outcome(unchanged));
+        let context = validate_validation_log(&log_entry);
 
         assert!(
             unchanged,
-            "Zero scalar should not change dst for size: {}",
-            size
+            "{context}: zero scalar should not change dst for size {} ({details})",
+            size,
         );
     }
 
@@ -442,15 +439,14 @@ fn test_fast_path_correctness() {
             kernel, size, correct_xor
         );
 
-        let outcome = if correct_xor {
-            TestOutcome::Pass
-        } else {
-            TestOutcome::Fail
-        };
-        let log_entry = config.log_entry(sequence, outcome, &details);
-        test_log_sink().write_log_entry(log_entry);
+        let log_entry = config.log_entry(sequence, test_outcome(correct_xor));
+        let context = validate_validation_log(&log_entry);
 
-        assert!(correct_xor, "Identity scalar should XOR for size: {}", size);
+        assert!(
+            correct_xor,
+            "{context}: identity scalar should XOR for size {} ({details})",
+            size,
+        );
     }
 }
 
@@ -502,18 +498,13 @@ fn test_alignment_robustness() {
             kernel, offset, base_size, alignment_robust
         );
 
-        let outcome = if alignment_robust {
-            TestOutcome::Pass
-        } else {
-            TestOutcome::Fail
-        };
-        let log_entry = config.log_entry(sequence, outcome, &details);
-        test_log_sink().write_log_entry(log_entry);
+        let log_entry = config.log_entry(sequence, test_outcome(alignment_robust));
+        let context = validate_validation_log(&log_entry);
 
         assert!(
             alignment_robust,
-            "Alignment sensitive at offset: {}",
-            offset
+            "{context}: alignment sensitive at offset {} ({details})",
+            offset,
         );
     }
 }
@@ -556,18 +547,13 @@ fn test_exhaustive_scalar_coverage() {
             kernel, scalar_value, test_size, expected_behavior
         );
 
-        let outcome = if expected_behavior {
-            TestOutcome::Pass
-        } else {
-            TestOutcome::Fail
-        };
-        let log_entry = config.log_entry(sequence, outcome, &details);
-        test_log_sink().write_log_entry(log_entry);
+        let log_entry = config.log_entry(sequence, test_outcome(expected_behavior));
+        let context = validate_validation_log(&log_entry);
 
         assert!(
             expected_behavior,
-            "Incorrect behavior for scalar: {}",
-            scalar_value
+            "{context}: incorrect behavior for scalar {} ({details})",
+            scalar_value,
         );
     }
 }
@@ -578,8 +564,8 @@ fn test_policy_determinism() {
     let sequence = next_test_sequence();
 
     // Test that policy decisions are deterministic
-    let snapshot1 = dual_policy_snapshot();
-    let snapshot2 = dual_policy_snapshot();
+    let snapshot1 = dual_kernel_policy_snapshot();
+    let snapshot2 = dual_kernel_policy_snapshot();
 
     let deterministic = snapshot1 == snapshot2;
 
@@ -598,23 +584,21 @@ fn test_policy_determinism() {
     );
 
     let overall_deterministic = deterministic && decisions_deterministic;
-    let outcome = if overall_deterministic {
-        TestOutcome::Pass
-    } else {
-        TestOutcome::Fail
-    };
-
     let log_entry = UnitLogEntry::new(
+        "RQ-U-GF256-POLICY-DETERMINISM",
         sequence,
-        "gf256_validation_policy_determinism".to_string(),
-        "determinism_check".to_string(),
-        outcome,
-        details,
-        "cargo test test_policy_determinism -- --nocapture".to_string(),
-    );
-    test_log_sink().write_log_entry(log_entry);
+        "check=policy_snapshot,decision=dual_addmul",
+        "replay:rq-u-gf256-policy-determinism-v1",
+        "rch exec -- cargo test --lib raptorq::gf256_tests::gf256_validation_tests::test_policy_determinism -- --nocapture",
+        test_outcome(overall_deterministic),
+    )
+    .with_artifact_path("artifacts/raptorq/gf256_validation/policy-determinism.json");
+    let context = validate_validation_log(&log_entry);
 
-    assert!(overall_deterministic, "Policy decisions not deterministic");
+    assert!(
+        overall_deterministic,
+        "{context}: policy decisions not deterministic ({details})"
+    );
 }
 
 /// Performance regression test - ensure SIMD is faster than scalar for large sizes.
@@ -669,19 +653,10 @@ fn test_performance_regression() {
 
     // Expect at least 1 GB/s for reasonable SIMD performance
     let adequate_performance = throughput_gbps >= 1.0;
-    let outcome = if adequate_performance {
-        TestOutcome::Pass
-    } else {
-        TestOutcome::Fail
-    };
+    let log_entry = config.log_entry(sequence, test_outcome(adequate_performance));
+    let _context = validate_validation_log(&log_entry);
 
-    let log_entry = config.log_entry(sequence, outcome, &details);
-    test_log_sink().write_log_entry(log_entry);
-
-    println!(
-        "Performance: {} GB/s with kernel {:?}",
-        throughput_gbps, kernel
-    );
+    println!("Performance validation: {details}");
 
     // Don't assert for now - just collect performance data
     // assert!(adequate_performance, "Performance regression: {} GB/s", throughput_gbps);

@@ -45,3 +45,6 @@ mod tests;
 
 #[cfg(test)]
 mod metamorphic_tests;
+
+#[cfg(test)]
+mod gf256_tests;
