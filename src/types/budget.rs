@@ -855,6 +855,15 @@ pub fn delay_bound(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn scrub_budget_event(deadline: Option<Time>) -> &'static str {
+        if deadline.is_some() {
+            "[DEADLINE]"
+        } else {
+            "[NONE]"
+        }
+    }
 
     // =========================================================================
     // Constants Tests
@@ -1821,5 +1830,46 @@ mod tests {
         assert_eq!(cb, cb2);
         let dbg = format!("{cb:?}");
         assert!(dbg.contains("CurveBudget"));
+    }
+
+    #[test]
+    fn budget_event_snapshot_scrubbed() {
+        let mut budget = Budget::new()
+            .with_deadline(Time::from_secs(12))
+            .with_poll_quota(3)
+            .with_cost_quota(40)
+            .with_priority(180);
+
+        let before = budget;
+        let poll_before = budget.consume_poll();
+        let after_poll = budget;
+        let cost_ok = budget.consume_cost(15);
+        let after_cost = budget;
+
+        insta::assert_json_snapshot!(
+            "budget_event_scrubbed",
+            json!({
+                "events": [
+                    {
+                        "event": "created",
+                        "deadline": scrub_budget_event(before.deadline),
+                        "poll_quota": before.poll_quota,
+                        "cost_quota": before.cost_quota,
+                        "priority": before.priority,
+                    },
+                    {
+                        "event": "consume_poll",
+                        "returned": poll_before,
+                        "poll_quota_after": after_poll.poll_quota,
+                    },
+                    {
+                        "event": "consume_cost",
+                        "accepted": cost_ok,
+                        "cost_quota_after": after_cost.cost_quota,
+                        "exhausted": after_cost.is_exhausted(),
+                    }
+                ]
+            })
+        );
     }
 }
