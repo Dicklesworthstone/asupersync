@@ -42,4 +42,6 @@ mod resolver;
 pub use cache::{CacheConfig, CacheStats, DnsCache};
 pub use error::DnsError;
 pub use lookup::{HappyEyeballs, LookupIp, LookupMx, LookupSrv, LookupTxt, MxRecord, SrvRecord};
+#[cfg(any(test, feature = "test-internals"))]
+pub use resolver::parse_resolv_conf_nameservers_for_test;
 pub use resolver::{Resolver, ResolverConfig};

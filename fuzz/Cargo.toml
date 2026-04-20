@@ -346,6 +346,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "dns_resolv_conf_parser"
+path = "fuzz_targets/dns_resolv_conf_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_trace_file_parsing"
 path = "fuzz_targets/trace_file_parsing.rs"
 test = false

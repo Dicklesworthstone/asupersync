@@ -947,6 +947,12 @@ fn parse_resolv_conf_nameservers(contents: &str) -> Vec<SocketAddr> {
     nameservers
 }
 
+#[cfg(any(test, feature = "test-internals"))]
+/// Test-internals hook exposing the resolv.conf nameserver parser.
+pub fn parse_resolv_conf_nameservers_for_test(contents: &str) -> Vec<SocketAddr> {
+    parse_resolv_conf_nameservers(contents)
+}
+
 fn build_dns_query(name: &str, query_type: DnsQueryType, id: u16) -> Result<Vec<u8>, DnsError> {
     let mut query = Vec::with_capacity(512);
     query.extend_from_slice(&id.to_be_bytes());
