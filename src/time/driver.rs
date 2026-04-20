@@ -2320,5 +2320,3 @@ mod tests {
         crate::test_complete!("conformance_timer_driver_browser_clock_monotonic");
     }
 }
-
-}

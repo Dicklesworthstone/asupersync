@@ -853,5 +853,3 @@ mod tests {
         assert!(mr3_cancel_propagation(1, 5, 1212));
     }
 }
-}
-}
