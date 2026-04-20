@@ -572,6 +572,86 @@ mod tests {
         assert!(Time::from_nanos(500) >= effective_expiry);
     }
 
+    #[test]
+    fn metamorphic_readonly_observations_preserve_guarded_lease_evolution() {
+        let renew_at = t(200);
+        let release_at = t(450);
+        let release_retry_at = t(700);
+
+        let mut baseline = LeaseModel::new(t(0), dur(1000));
+        let baseline_renewed = baseline.renew(dur(400), renew_at);
+        let baseline_released = baseline.release(release_at);
+        let baseline_release_retry = baseline.release(release_retry_at);
+
+        let mut observed = LeaseModel::new(t(0), dur(1000));
+        let before_renew_active = observed.is_active(renew_at);
+        let before_renew_remaining = observed.remaining(renew_at);
+        let observed_renewed = observed.renew(dur(400), renew_at);
+
+        let before_release_active = observed.is_active(release_at);
+        let before_release_remaining = observed.remaining(release_at);
+        let observed_released = observed.release(release_at);
+
+        let after_release_active = observed.is_active(release_retry_at);
+        let after_release_expired = observed.is_expired(release_retry_at);
+        let after_release_remaining = observed.remaining(release_retry_at);
+        let observed_release_retry = observed.release(release_retry_at);
+
+        assert!(
+            before_renew_active,
+            "lease should be active before timely renewal"
+        );
+        assert_eq!(
+            before_renew_remaining,
+            dur(800),
+            "remaining time before renewal should reflect the original guard horizon"
+        );
+        assert!(
+            before_release_active,
+            "lease should remain active before release"
+        );
+        assert_eq!(
+            before_release_remaining,
+            dur(150),
+            "remaining time before release should reflect renewal-from-now semantics"
+        );
+        assert!(!after_release_active, "released lease must stay inactive");
+        assert!(
+            !after_release_expired,
+            "released lease is terminal rather than time-expired"
+        );
+        assert_eq!(
+            after_release_remaining,
+            Duration::ZERO,
+            "released lease has no remaining guarded time"
+        );
+
+        assert_eq!(
+            observed_renewed, baseline_renewed,
+            "read-only observations must not perturb renewal outcome"
+        );
+        assert_eq!(
+            observed_released, baseline_released,
+            "read-only observations must not perturb release outcome"
+        );
+        assert_eq!(
+            observed_release_retry, baseline_release_retry,
+            "read-only observations must not perturb terminal-state irreversibility"
+        );
+        assert_eq!(
+            observed.expires_at, baseline.expires_at,
+            "read-only observations must not perturb the guarded expiry frontier"
+        );
+        assert_eq!(
+            observed.renewal_count, baseline.renewal_count,
+            "read-only observations must not perturb renewal accounting"
+        );
+        assert_eq!(
+            observed.released, baseline.released,
+            "read-only observations must not perturb terminal release state"
+        );
+    }
+
     // ========================================================================
     // Actor step-indexed properties
     // ========================================================================
