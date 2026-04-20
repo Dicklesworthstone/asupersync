@@ -1957,6 +1957,8 @@ impl InactivationDecoder {
         state.stats.dense_core_rows = n_rows;
         state.stats.dense_core_cols = n_cols;
 
+        let mut b: Vec<Vec<u8>> = Vec::with_capacity(n_rows);
+
         if n_rows < n_cols {
             reactivate_unsolved_columns(state, &unsolved);
             return Err(singular_matrix_error(&unsolved, n_rows));
@@ -1966,16 +1968,20 @@ impl InactivationDecoder {
         // Flat layout avoids per-row heap allocation and improves cache locality.
         // Move (take) RHS data from state instead of cloning to avoid O(n_rows * symbol_size)
         // heap allocation in this hot path.
-        let total_cells = n_rows
-            .checked_mul(n_cols)
-            .ok_or(DecodeError::InsufficientSymbols {
-                received: n_rows,
-                required: n_cols,
-            })?;
+        let total_cells = match n_rows.checked_mul(n_cols) {
+            Some(total_cells) => total_cells,
+            None => {
+                let err = DecodeError::InsufficientSymbols {
+                    received: n_rows,
+                    required: n_cols,
+                };
+                reactivate_unsolved_columns(state, &unsolved);
+                return Err(err);
+            }
+        };
         let mut a = vec![Gf256::ZERO; total_cells];
         let mut dense_nonzeros = 0usize;
         let mut dense_col_support = vec![0usize; n_cols];
-        let mut b: Vec<Vec<u8>> = Vec::with_capacity(n_rows);
 
         for (row, &eq_idx) in dense_rows.iter().enumerate() {
             let row_off = row * n_cols;
@@ -2218,6 +2224,8 @@ impl InactivationDecoder {
         state.stats.dense_core_rows = n_rows;
         state.stats.dense_core_cols = n_cols;
 
+        let mut b: Vec<Vec<u8>> = Vec::with_capacity(n_rows);
+
         if n_rows < n_cols {
             reactivate_unsolved_columns(state, &unsolved);
             return Err(singular_matrix_error(&unsolved, n_rows));
@@ -2226,16 +2234,20 @@ impl InactivationDecoder {
         // Build flat row-major dense matrix A and RHS vector b.
         // Move (take) RHS data from state instead of cloning to avoid O(n_rows * symbol_size)
         // heap allocation in this hot path.
-        let total_cells = n_rows
-            .checked_mul(n_cols)
-            .ok_or(DecodeError::InsufficientSymbols {
-                received: n_rows,
-                required: n_cols,
-            })?;
+        let total_cells = match n_rows.checked_mul(n_cols) {
+            Some(total_cells) => total_cells,
+            None => {
+                let err = DecodeError::InsufficientSymbols {
+                    received: n_rows,
+                    required: n_cols,
+                };
+                reactivate_unsolved_columns(state, &unsolved);
+                return Err(err);
+            }
+        };
         let mut a = vec![Gf256::ZERO; total_cells];
         let mut dense_nonzeros = 0usize;
         let mut dense_col_support = vec![0usize; n_cols];
-        let mut b: Vec<Vec<u8>> = Vec::with_capacity(n_rows);
 
         for (row, &eq_idx) in dense_rows.iter().enumerate() {
             let row_off = row * n_cols;
@@ -4283,6 +4295,40 @@ mod tests {
             proof_state.stats.peeling_fallback_reason, plain_state.stats.peeling_fallback_reason,
             "proof capture must not change dense-core fallback telemetry"
         );
+    }
+
+    #[test]
+    fn underdetermined_dense_failure_restores_decoder_state_before_rhs_take() {
+        let decoder = InactivationDecoder::new(8, 16, 3200);
+        let params = decoder.params().clone();
+        let mut state = make_underdetermined_dense_core_state(&params, 16, 3, 7);
+        let initial_rhs = state.rhs.clone();
+        let initial_active = state.active_cols.clone();
+
+        let err = decoder.inactivate_and_solve(&mut state).unwrap_err();
+        assert_eq!(err, DecodeError::SingularMatrix { row: 7 });
+        assert_eq!(state.rhs, initial_rhs);
+        assert_eq!(state.active_cols, initial_active);
+        assert!(state.inactive_cols.is_empty());
+    }
+
+    #[test]
+    fn underdetermined_dense_failure_with_proof_restores_decoder_state_before_rhs_take() {
+        let decoder = InactivationDecoder::new(8, 16, 3200);
+        let params = decoder.params().clone();
+        let mut state = make_underdetermined_dense_core_state(&params, 16, 3, 7);
+        let initial_rhs = state.rhs.clone();
+        let initial_active = state.active_cols.clone();
+        let mut trace = EliminationTrace::default();
+
+        let err = decoder
+            .inactivate_and_solve_with_proof(&mut state, &mut trace)
+            .unwrap_err();
+        assert_eq!(err, DecodeError::SingularMatrix { row: 7 });
+        assert_eq!(state.rhs, initial_rhs);
+        assert_eq!(state.active_cols, initial_active);
+        assert!(state.inactive_cols.is_empty());
+        assert_eq!(trace.inactive_cols, vec![3, 7]);
     }
 
     #[test]
