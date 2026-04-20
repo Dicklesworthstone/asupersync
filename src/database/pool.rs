@@ -1204,6 +1204,8 @@ impl<M: AsyncConnectionManager> fmt::Debug for AsyncPooledConnection<'_, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+    use crate::runtime::yield_now;
     use futures_lite::future::block_on;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1580,6 +1582,154 @@ mod tests {
         );
         assert_eq!(pool.manager.disconnects(), 1);
         crate::test_complete!("async_get_cancellation_during_validation_discards_connection");
+    }
+
+    #[test]
+    fn async_pool_contention_retries_under_lab_runtime() {
+        init_test("async_pool_contention_retries_under_lab_runtime");
+        let config = TestConfig::new()
+            .with_seed(0xD8A5_E001)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let pool = Arc::new(AsyncDbPool::new(
+            AsyncTestManager::new(),
+            DbPoolConfig::with_max_size(1)
+                .validate_on_checkout(false)
+                .connection_timeout(Duration::from_millis(200)),
+        ));
+        let retry_policy = RetryPolicy::fixed_delay(Duration::from_millis(5), 32);
+        let checkpoints = Arc::new(Mutex::new(Vec::new()));
+        let result_checkpoints = Arc::clone(&checkpoints);
+
+        let (holder_id, waiter_id, final_stats) =
+            LabRuntimeTarget::block_on(&mut runtime, async move {
+                let cx = Cx::current().expect("lab runtime should install a current Cx");
+                let holder_spawn_cx = cx.clone();
+                let waiter_spawn_cx = cx.clone();
+
+                let holder_pool = Arc::clone(&pool);
+                let holder_checkpoints = Arc::clone(&checkpoints);
+                let holder_task_cx = holder_spawn_cx.clone();
+                let holder =
+                    LabRuntimeTarget::spawn(&holder_spawn_cx, Budget::INFINITE, async move {
+                        let lease = holder_pool
+                            .get(&holder_task_cx)
+                            .await
+                            .expect("holder acquires pool lease");
+                        let holder_id = lease.id;
+                        let acquired = serde_json::json!({
+                            "phase": "holder_acquired",
+                            "connection_id": holder_id,
+                        });
+                        tracing::info!(event = %acquired, "pool_contention_lab_checkpoint");
+                        holder_checkpoints.lock().push(acquired);
+
+                        crate::time::sleep(holder_task_cx.now(), Duration::from_millis(25)).await;
+                        yield_now().await;
+                        lease.return_to_pool();
+
+                        let returned = serde_json::json!({
+                            "phase": "holder_returned",
+                            "connection_id": holder_id,
+                        });
+                        tracing::info!(event = %returned, "pool_contention_lab_checkpoint");
+                        holder_checkpoints.lock().push(returned);
+                        holder_id
+                    });
+
+                let waiter_pool = Arc::clone(&pool);
+                let waiter_checkpoints = Arc::clone(&checkpoints);
+                let waiter_task_cx = waiter_spawn_cx.clone();
+                let waiter =
+                    LabRuntimeTarget::spawn(&waiter_spawn_cx, Budget::INFINITE, async move {
+                        let started = serde_json::json!({
+                            "phase": "waiter_started",
+                            "max_attempts": retry_policy.max_attempts,
+                        });
+                        tracing::info!(event = %started, "pool_contention_lab_checkpoint");
+                        waiter_checkpoints.lock().push(started);
+
+                        let lease = waiter_pool
+                            .get_with_retry(&waiter_task_cx, &retry_policy)
+                            .await
+                            .expect("waiter retries until the pool returns capacity");
+                        let waiter_id = lease.id;
+                        let acquired = serde_json::json!({
+                            "phase": "waiter_acquired",
+                            "connection_id": waiter_id,
+                        });
+                        tracing::info!(event = %acquired, "pool_contention_lab_checkpoint");
+                        waiter_checkpoints.lock().push(acquired);
+                        lease.return_to_pool();
+                        waiter_id
+                    });
+
+                yield_now().await;
+
+                let holder_outcome = holder.await;
+                crate::assert_with_log!(
+                    matches!(holder_outcome, crate::types::Outcome::Ok(_)),
+                    "holder task completes successfully",
+                    true,
+                    matches!(holder_outcome, crate::types::Outcome::Ok(_))
+                );
+                let crate::types::Outcome::Ok(holder_id) = holder_outcome else {
+                    unreachable!("validated successful holder outcome");
+                };
+
+                let waiter_outcome = waiter.await;
+                crate::assert_with_log!(
+                    matches!(waiter_outcome, crate::types::Outcome::Ok(_)),
+                    "waiter task completes successfully",
+                    true,
+                    matches!(waiter_outcome, crate::types::Outcome::Ok(_))
+                );
+                let crate::types::Outcome::Ok(waiter_id) = waiter_outcome else {
+                    unreachable!("validated successful waiter outcome");
+                };
+
+                (holder_id, waiter_id, pool.stats())
+            });
+
+        crate::assert_with_log!(
+            holder_id == waiter_id,
+            "waiter reuses returned connection",
+            holder_id,
+            waiter_id
+        );
+        crate::assert_with_log!(
+            final_stats.total_creates == 1,
+            "contention path creates only one connection",
+            1,
+            final_stats.total_creates
+        );
+        crate::assert_with_log!(
+            final_stats.idle == 1,
+            "connection returns to idle pool after both tasks",
+            1,
+            final_stats.idle
+        );
+        crate::assert_with_log!(
+            final_stats.active == 0,
+            "contention path leaves no active leases",
+            0,
+            final_stats.active
+        );
+        crate::assert_with_log!(
+            result_checkpoints.lock().len() == 4,
+            "lab runtime emits contention checkpoints",
+            4,
+            result_checkpoints.lock().len()
+        );
+        crate::assert_with_log!(
+            runtime.is_quiescent(),
+            "lab runtime reaches quiescence after pool contention",
+            true,
+            runtime.is_quiescent()
+        );
+
+        crate::test_complete!("async_pool_contention_retries_under_lab_runtime");
     }
 
     #[test]
