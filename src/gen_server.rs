@@ -2121,6 +2121,7 @@ where
 mod tests {
     use super::*;
     use crate::runtime::state::RuntimeState;
+    use crate::runtime::yield_now;
     use crate::supervision::ChildStart;
     use crate::types::Budget;
     use crate::types::CancelKind;
@@ -2128,7 +2129,7 @@ mod tests {
     use crate::util::ArenaIndex;
     use parking_lot::Mutex;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -2250,6 +2251,58 @@ mod tests {
         }
     }
 
+    enum InitProbeCall {
+        GetStarted,
+    }
+
+    struct InitProbe {
+        started: Arc<AtomicU8>,
+        checkpoints: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl GenServer for InitProbe {
+        type Call = InitProbeCall;
+        type Reply = bool;
+        type Cast = ();
+        type Info = SystemMsg;
+
+        fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.started.store(1, Ordering::SeqCst);
+            let started = Arc::clone(&self.started);
+            let checkpoints = Arc::clone(&self.checkpoints);
+            Box::pin(async move {
+                let event = serde_json::json!({
+                    "phase": "on_start",
+                    "started": started.load(Ordering::SeqCst),
+                });
+                tracing::info!(event = %event, "gen_server_lab_checkpoint");
+                checkpoints.lock().push(event);
+                yield_now().await;
+            })
+        }
+
+        fn handle_call(
+            &mut self,
+            _cx: &Cx,
+            request: InitProbeCall,
+            reply: Reply<bool>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            match request {
+                InitProbeCall::GetStarted => {
+                    let started = self.started.load(Ordering::SeqCst) == 1;
+                    let event = serde_json::json!({
+                        "phase": "handle_call",
+                        "started": started,
+                    });
+                    tracing::info!(event = %event, "gen_server_lab_checkpoint");
+                    self.checkpoints.lock().push(event);
+                    let _ = reply.send(started);
+                }
+            }
+            Box::pin(async {})
+        }
+    }
+
     fn assert_gen_server<S: GenServer>() {}
 
     #[test]
@@ -2327,6 +2380,118 @@ mod tests {
         assert_eq!(result, 5);
 
         crate::test_complete!("gen_server_spawn_and_call");
+    }
+
+    #[test]
+    fn gen_server_init_runs_before_queued_call_under_lab_runtime() {
+        init_test("gen_server_init_runs_before_queued_call_under_lab_runtime");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x6E57_1001));
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+        let started = Arc::new(AtomicU8::new(0));
+        let checkpoints = Arc::new(Mutex::new(Vec::new()));
+
+        let (mut handle, stored) = scope
+            .spawn_gen_server(
+                &mut runtime.state,
+                &cx,
+                InitProbe {
+                    started: Arc::clone(&started),
+                    checkpoints: Arc::clone(&checkpoints),
+                },
+                8,
+            )
+            .expect("spawn should succeed");
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        let server_ref = handle.server_ref();
+        let checkpoints_for_client = Arc::clone(&checkpoints);
+        let (mut client_handle, client_stored) = scope
+            .spawn(&mut runtime.state, &cx, move |cx| async move {
+                let started = server_ref
+                    .call(&cx, InitProbeCall::GetStarted)
+                    .await
+                    .expect("init probe call should succeed");
+                let event = serde_json::json!({
+                    "phase": "client_completed",
+                    "started": started,
+                });
+                tracing::info!(event = %event, "gen_server_lab_checkpoint");
+                checkpoints_for_client.lock().push(event);
+                started
+            })
+            .expect("client spawn should succeed");
+        let client_task_id = client_handle.task_id();
+        runtime
+            .state
+            .store_spawned_task(client_task_id, client_stored);
+
+        {
+            runtime.scheduler.lock().schedule(client_task_id, 0);
+        }
+        runtime.run_until_idle();
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
+        runtime.run_until_idle();
+        {
+            runtime.scheduler.lock().schedule(client_task_id, 0);
+        }
+        runtime.run_until_idle();
+
+        let call_saw_initialized =
+            futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
+        crate::assert_with_log!(
+            call_saw_initialized,
+            "queued call observes completed gen_server init",
+            true,
+            call_saw_initialized
+        );
+        crate::assert_with_log!(
+            started.load(Ordering::SeqCst) == 1,
+            "on_start marks server initialized",
+            1,
+            started.load(Ordering::SeqCst)
+        );
+
+        handle.stop();
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
+        runtime.run_until_quiescent();
+
+        let server = futures_lite::future::block_on(handle.join(&cx)).expect("server join ok");
+        crate::assert_with_log!(
+            server.started.load(Ordering::SeqCst) == 1,
+            "joined server preserves initialized state",
+            1,
+            server.started.load(Ordering::SeqCst)
+        );
+
+        let checkpoint_snapshot = checkpoints.lock().clone();
+        crate::assert_with_log!(
+            checkpoint_snapshot.len() == 3,
+            "lab runtime emits init/call/client checkpoints",
+            3,
+            checkpoint_snapshot.len()
+        );
+        crate::assert_with_log!(
+            checkpoint_snapshot[0]["phase"] == "on_start",
+            "on_start checkpoint recorded first",
+            "on_start",
+            checkpoint_snapshot[0]["phase"].clone()
+        );
+        crate::assert_with_log!(
+            runtime.is_quiescent(),
+            "gen_server init test reaches lab quiescence",
+            true,
+            runtime.is_quiescent()
+        );
+
+        crate::test_complete!("gen_server_init_runs_before_queued_call_under_lab_runtime");
     }
 
     #[test]
