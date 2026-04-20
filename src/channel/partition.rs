@@ -459,6 +459,7 @@ mod tests {
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
+    use proptest::prelude::*;
     use std::future::Future;
     use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
@@ -494,6 +495,34 @@ mod tests {
         let sink: Arc<dyn EvidenceSink> = collector.clone();
         let ctrl = Arc::new(PartitionController::new(behavior, sink));
         (ctrl, collector)
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RouteOutcome {
+        Delivered(u32),
+        Dropped,
+        Disconnected(u32),
+    }
+
+    fn route_outcome(
+        sender: &PartitionSender<u32>,
+        receiver: &mut crate::channel::mpsc::Receiver<u32>,
+        cx: &crate::cx::Cx,
+        value: u32,
+    ) -> RouteOutcome {
+        match block_on(sender.send(cx, value)) {
+            Ok(()) => match receiver.try_recv() {
+                Ok(received) => RouteOutcome::Delivered(received),
+                Err(_) => RouteOutcome::Dropped,
+            },
+            Err(SendError::Disconnected(returned)) => RouteOutcome::Disconnected(returned),
+            Err(SendError::Full(returned)) => {
+                panic!("unexpected full channel while routing value {returned}")
+            }
+            Err(SendError::Cancelled(returned)) => {
+                panic!("unexpected cancellation while routing value {returned}")
+            }
+        }
     }
 
     #[test]
@@ -871,5 +900,91 @@ mod tests {
     fn actor_id_display() {
         let id = ActorId::new(42);
         assert_eq!(format!("{id}"), "actor-42");
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_unrelated_partition_churn_preserves_route_outcome(
+            a_id in 1u64..1000,
+            b_id in 1001u64..2000,
+            c_id in 2001u64..3000,
+            d_id in 3001u64..4000,
+            baseline_value in any::<u32>(),
+            churn_value in any::<u32>(),
+            blocked_value in any::<u32>(),
+            blocked_churn_value in any::<u32>(),
+            drop_mode in any::<bool>(),
+        ) {
+            let behavior = if drop_mode {
+                PartitionBehavior::Drop
+            } else {
+                PartitionBehavior::Error
+            };
+            let (ctrl, _) = make_controller(behavior);
+            let a = ActorId::new(a_id);
+            let b = ActorId::new(b_id);
+            let c = ActorId::new(c_id);
+            let d = ActorId::new(d_id);
+            let (ptx, mut rx) = partition_channel::<u32>(16, ctrl.clone(), a, b);
+            let cx = test_cx();
+
+            let baseline = route_outcome(&ptx, &mut rx, &cx, baseline_value);
+            prop_assert_eq!(
+                baseline,
+                RouteOutcome::Delivered(baseline_value),
+                "unpartitioned route should deliver"
+            );
+
+            ctrl.partition(c, d);
+            ctrl.partition(d, c);
+            ctrl.heal(c, d);
+            prop_assert!(
+                !ctrl.is_partitioned(a, b),
+                "unrelated edge churn must not partition the target route"
+            );
+
+            let after_unrelated_churn = route_outcome(&ptx, &mut rx, &cx, churn_value);
+            prop_assert_eq!(
+                after_unrelated_churn,
+                RouteOutcome::Delivered(churn_value),
+                "disjoint partition churn must not change delivery on the target route"
+            );
+
+            ctrl.partition(a, b);
+            let blocked = route_outcome(&ptx, &mut rx, &cx, blocked_value);
+            match behavior {
+                PartitionBehavior::Drop => prop_assert_eq!(blocked, RouteOutcome::Dropped),
+                PartitionBehavior::Error => {
+                    prop_assert_eq!(blocked, RouteOutcome::Disconnected(blocked_value));
+                }
+            }
+
+            ctrl.partition(c, d);
+            ctrl.heal(d, c);
+            ctrl.partition(d, c);
+            prop_assert!(
+                ctrl.is_partitioned(a, b),
+                "unrelated churn must not heal an existing target partition"
+            );
+
+            let blocked_after_unrelated_churn =
+                route_outcome(&ptx, &mut rx, &cx, blocked_churn_value);
+            match behavior {
+                PartitionBehavior::Drop => {
+                    prop_assert_eq!(
+                        blocked_after_unrelated_churn,
+                        RouteOutcome::Dropped,
+                        "disjoint churn must preserve dropped routing behavior"
+                    );
+                }
+                PartitionBehavior::Error => {
+                    prop_assert_eq!(
+                        blocked_after_unrelated_churn,
+                        RouteOutcome::Disconnected(blocked_churn_value),
+                        "disjoint churn must preserve rejected routing behavior"
+                    );
+                }
+            }
+        }
     }
 }
