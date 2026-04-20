@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{Budget, CancelKind, CancelReason, Time};
@@ -1089,6 +1089,7 @@ impl Default for CleanupCoordinator {
 mod tests {
     use super::*;
     use crate::types::symbol::{ObjectId, Symbol};
+    use std::sync::atomic::AtomicUsize;
 
     struct NullSink;
 
@@ -1879,6 +1880,83 @@ mod tests {
             token.state.listeners.read().len(),
             0,
             "strengthened cancellations must not repopulate drained listeners"
+        );
+    }
+
+    #[test]
+    fn test_listener_registered_during_cancel_can_spawn_child_without_leak() {
+        let mut rng = DetRng::new(94);
+        let token = SymbolCancelToken::new(ObjectId::new_for_test(8), &mut rng);
+        let spawned_child = Arc::new(std::sync::Mutex::new(None::<SymbolCancelToken>));
+        let spawned_child_clone = Arc::clone(&spawned_child);
+        let child_notification_count = Arc::new(AtomicUsize::new(0));
+        let child_notification_count_clone = Arc::clone(&child_notification_count);
+        let token_for_listener = token.clone();
+
+        token.add_listener(move |_: &CancelReason, _: Time| {
+            token_for_listener.add_listener({
+                let spawned_child_clone = Arc::clone(&spawned_child_clone);
+                let child_notification_count_clone = Arc::clone(&child_notification_count_clone);
+                let token_for_listener = token_for_listener.clone();
+                move |reason: &CancelReason, at: Time| {
+                    child_notification_count_clone.fetch_add(1, Ordering::SeqCst);
+                    let mut child_rng = DetRng::new(95);
+                    let child = token_for_listener.child(&mut child_rng);
+                    assert!(
+                        child.is_cancelled(),
+                        "child created from a late listener must be cancelled inline"
+                    );
+                    assert_eq!(
+                        child.reason().unwrap().kind,
+                        CancelKind::ParentCancelled,
+                        "late child should inherit parent-cancelled semantics"
+                    );
+                    assert_eq!(
+                        child.cancelled_at(),
+                        Some(at),
+                        "late child should observe the current cancellation timestamp"
+                    );
+                    assert_eq!(
+                        reason.kind,
+                        CancelKind::Shutdown,
+                        "late listener should observe the active cancellation reason"
+                    );
+                    *spawned_child_clone.lock().unwrap() = Some(child);
+                }
+            });
+        });
+
+        let now = Time::from_millis(250);
+        assert!(
+            token.cancel(&CancelReason::shutdown(), now),
+            "first caller should trigger cancellation"
+        );
+
+        let child = spawned_child
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("late listener should have spawned a child");
+        assert_eq!(
+            child_notification_count.load(Ordering::SeqCst),
+            1,
+            "late listener should run exactly once during drain"
+        );
+        assert!(child.is_cancelled(), "spawned child must remain cancelled");
+        assert_eq!(
+            child.cancelled_at(),
+            Some(now),
+            "spawned child should be cancelled before cancel() returns"
+        );
+        assert_eq!(
+            token.state.listeners.read().len(),
+            0,
+            "drain must leave no late listeners queued"
+        );
+        assert_eq!(
+            token.state.children.read().len(),
+            0,
+            "drain must leave no late children queued"
         );
     }
 
