@@ -169,6 +169,29 @@ mod parameter_id_tests {
             );
         }
     }
+
+    #[test]
+    fn grease_parameter_exact_wire_vector() {
+        let params = TransportParameters {
+            max_idle_timeout: Some(30),
+            unknown: vec![UnknownTransportParameter {
+                id: 0x1b,
+                value: vec![0x42, 0x43, 0x44],
+            }],
+            ..Default::default()
+        };
+
+        let mut encoded = Vec::new();
+        params.encode(&mut encoded).expect("encode with GREASE");
+
+        assert_eq!(
+            encoded,
+            vec![0x01, 0x01, 0x1e, 0x1b, 0x03, 0x42, 0x43, 0x44]
+        );
+
+        let decoded = TransportParameters::decode(&encoded).expect("decode exact wire vector");
+        assert_eq!(decoded, params);
+    }
 }
 
 /// Test parameter value constraints per RFC 9000 §18.2
