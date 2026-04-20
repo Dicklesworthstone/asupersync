@@ -1128,12 +1128,7 @@ mod tests {
     fn scrubbed_headers_snapshot(headers: &[(String, String)]) -> Vec<Value> {
         headers
             .iter()
-            .map(|(name, value)| {
-                json!([
-                    name,
-                    scrub_snapshot_header_value(name, value)
-                ])
-            })
+            .map(|(name, value)| json!([name, scrub_snapshot_header_value(name, value)]))
             .collect()
     }
 
@@ -1683,6 +1678,17 @@ mod tests {
         let auth = req.header_value("authorization").unwrap();
         // "alice:" => base64 "YWxpY2U6"
         assert_eq!(auth, "Basic YWxpY2U6");
+    }
+
+    #[test]
+    fn request_basic_auth_matches_rfc7617_example() {
+        let req = Request::get("/auth")
+            .basic_auth("Aladdin", Some("open sesame"))
+            .build();
+        assert_eq!(
+            req.header_value("authorization"),
+            Some("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==")
+        );
     }
 
     #[test]
