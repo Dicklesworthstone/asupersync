@@ -2155,6 +2155,72 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_framed_subtrace_reordering_preserves_verifier_outcome() {
+        init_test("metamorphic_framed_subtrace_reordering_preserves_verifier_outcome");
+
+        let interleaved = vec![
+            reserve_event(0, o(0), ObligationKind::Lease, t(0), r(0)),
+            reserve_event(1, o(1), ObligationKind::SendPermit, t(1), r(1)),
+            commit_event(10, o(0), r(0), ObligationKind::Lease),
+            abort_event(11, o(1), r(1), ObligationKind::SendPermit),
+            close_event(20, r(0)),
+            close_event(21, r(1)),
+        ];
+        let reordered = vec![
+            reserve_event(0, o(1), ObligationKind::SendPermit, t(1), r(1)),
+            abort_event(1, o(1), r(1), ObligationKind::SendPermit),
+            close_event(2, r(1)),
+            reserve_event(10, o(0), ObligationKind::Lease, t(0), r(0)),
+            commit_event(11, o(0), r(0), ObligationKind::Lease),
+            close_event(12, r(0)),
+        ];
+
+        let mut interleaved_verifier = SeparationLogicVerifier::new();
+        let interleaved_result = interleaved_verifier.verify(&interleaved);
+
+        let mut reordered_verifier = SeparationLogicVerifier::new();
+        let reordered_result = reordered_verifier.verify(&reordered);
+
+        crate::assert_with_log!(
+            interleaved_result.is_sound(),
+            "interleaved framed trace is sound",
+            true,
+            interleaved_result.is_sound()
+        );
+        crate::assert_with_log!(
+            reordered_result.is_sound(),
+            "reordered framed trace is sound",
+            true,
+            reordered_result.is_sound()
+        );
+        crate::assert_with_log!(
+            interleaved_result.violations.len() == reordered_result.violations.len(),
+            "framed reorder preserves violation count",
+            interleaved_result.violations.len(),
+            reordered_result.violations.len()
+        );
+        crate::assert_with_log!(
+            interleaved_result.judgments_verified == reordered_result.judgments_verified,
+            "framed reorder preserves judgment count",
+            interleaved_result.judgments_verified,
+            reordered_result.judgments_verified
+        );
+        crate::assert_with_log!(
+            interleaved_result.frame_checks == reordered_result.frame_checks,
+            "framed reorder preserves frame checks",
+            interleaved_result.frame_checks,
+            reordered_result.frame_checks
+        );
+        crate::assert_with_log!(
+            interleaved_result.separation_checks == reordered_result.separation_checks,
+            "framed reorder preserves separation checks",
+            interleaved_result.separation_checks,
+            reordered_result.separation_checks
+        );
+        crate::test_complete!("metamorphic_framed_subtrace_reordering_preserves_verifier_outcome");
+    }
+
+    #[test]
     fn verifier_leak_is_terminal() {
         init_test("verifier_leak_is_terminal");
         let events = vec![
