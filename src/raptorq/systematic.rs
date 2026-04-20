@@ -27,7 +27,7 @@
 
 #![allow(clippy::many_single_char_names)]
 
-use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
+use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
 use crate::raptorq::rfc6330::repair_indices_for_esi;
 #[cfg(test)]
 use crate::util::DetRng;
@@ -827,7 +827,11 @@ pub struct SystematicEncoder {
     seed: u64,
     /// Running statistics.
     stats: EncodingStats,
-    /// Whether systematic symbols have been emitted via `emit_systematic()`.
+    /// Whether the systematic emission lane has been consumed or skipped.
+    ///
+    /// Once any repair symbol is emitted, lower source ESIs can no longer be
+    /// emitted without violating the encoder's source-before-repair wire-order
+    /// contract, so the systematic lane closes permanently.
     systematic_emitted: bool,
     /// Next repair ESI to emit (monotonic cursor, starts at K).
     next_repair_esi: u32,
@@ -1003,6 +1007,10 @@ impl SystematicEncoder {
     ///
     /// This method updates internal statistics and advances the emission cursor.
     /// Multiple calls emit non-overlapping, monotonically increasing ESI sequences.
+    ///
+    /// Emitting any repair symbol permanently closes the systematic lane. This
+    /// prevents later source emission from retroactively outputting low ESIs
+    /// after higher repair ESIs have already been observed on the wire.
     pub fn emit_repair(&mut self, count: usize) -> Vec<EmittedSymbol> {
         let start_esi = self.next_repair_esi;
         let symbol_size = self.params.symbol_size;
@@ -1042,6 +1050,9 @@ impl SystematicEncoder {
         self.next_repair_esi = start_esi
             .checked_add(u32::try_from(count).expect("repair count exceeds u32"))
             .expect("repair ESI cursor overflow");
+        if count != 0 {
+            self.systematic_emitted = true;
+        }
 
         // Invariant: all emitted ESIs are strictly ascending and >= K
         debug_assert!(
@@ -1085,6 +1096,9 @@ impl SystematicEncoder {
     }
 
     /// Returns whether systematic symbols have been emitted.
+    ///
+    /// This flag also becomes true once repair emission begins, because source
+    /// symbols can no longer be emitted without violating wire-ordering.
     #[must_use]
     pub const fn systematic_emitted(&self) -> bool {
         self.systematic_emitted
@@ -1796,6 +1810,31 @@ mod tests {
     }
 
     #[test]
+    fn systematic_lane_closes_after_repair_emission() {
+        let symbol_size = 16;
+        let mut enc = make_encoder(16, symbol_size, 42);
+
+        assert!(!enc.systematic_emitted(), "not emitted initially");
+        let repairs = enc.emit_repair(1);
+        assert_eq!(repairs.len(), 1, "repair batch should emit one symbol");
+        assert!(
+            enc.systematic_emitted(),
+            "repair-first usage must close the systematic lane to preserve wire order"
+        );
+
+        let source_after_repair = enc.emit_systematic();
+        assert!(
+            source_after_repair.is_empty(),
+            "source symbols must not be emitted after repairs have started"
+        );
+        assert_eq!(
+            enc.stats().systematic_bytes_emitted,
+            0,
+            "closing the systematic lane via repair-first emission must not count source bytes"
+        );
+    }
+
+    #[test]
     fn stats_bytes_tracking() {
         let symbol_size = 32;
         let mut enc = make_encoder(16, symbol_size, 42);
@@ -2007,6 +2046,43 @@ mod tests {
             enc.stats().systematic_bytes_emitted,
             k * symbol_size,
             "emit_all must not double-count systematic bytes after a source pass"
+        );
+    }
+
+    #[test]
+    fn emit_all_after_repair_only_emits_new_repairs() {
+        let symbol_size = 24;
+        let first_repair_count = 3;
+        let second_repair_count = 5;
+        let mut enc = make_encoder(16, symbol_size, 42);
+        let k = enc.params().k;
+
+        let first_batch = enc.emit_repair(first_repair_count);
+        assert_eq!(
+            first_batch.first().map(|symbol| symbol.esi),
+            Some(k as u32),
+            "repair-first usage still starts at the first repair ESI"
+        );
+
+        let combined = enc.emit_all(second_repair_count);
+        assert_eq!(
+            combined.len(),
+            second_repair_count,
+            "emit_all after repair-first usage should only emit fresh repairs"
+        );
+        assert!(
+            combined.iter().all(|symbol| !symbol.is_source),
+            "emit_all must not retroactively emit source symbols after repair emission"
+        );
+        assert_eq!(
+            combined.first().map(|symbol| symbol.esi),
+            Some(k as u32 + first_repair_count as u32),
+            "emit_all should resume from the advanced repair cursor"
+        );
+        assert_eq!(
+            enc.stats().systematic_bytes_emitted,
+            0,
+            "repair-first flows must not backfill systematic byte accounting"
         );
     }
 
