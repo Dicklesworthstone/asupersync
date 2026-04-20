@@ -616,6 +616,7 @@ fn bytes_to_nanos(len: usize, bandwidth: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::lab::network::{JitterModel, LatencyModel, NetworkConfig};
+    use std::collections::BTreeMap;
 
     #[test]
     fn deterministic_delivery_same_seed() {
@@ -1096,5 +1097,70 @@ mod tests {
         // Distinct variants
         assert_ne!(NetworkTraceKind::Send, NetworkTraceKind::Deliver);
         assert_ne!(NetworkTraceKind::Drop, NetworkTraceKind::Duplicate);
+    }
+
+    #[test]
+    fn topology_snapshot_scrubbed() {
+        let mut net = SimulatedNetwork::new(NetworkConfig::default());
+        let h1 = net.add_host("alpha");
+        let h2 = net.add_host("beta");
+        let h3 = net.add_host("gamma");
+
+        net.inject_fault(&Fault::Partition {
+            hosts_a: vec![h1],
+            hosts_b: vec![h2, h3],
+        });
+
+        let mut host_labels = BTreeMap::new();
+        for (index, host_id) in [h1, h2, h3].into_iter().enumerate() {
+            host_labels.insert(host_id, format!("HOST_{}", index + 1));
+        }
+
+        let mut hosts = net
+            .hosts
+            .iter()
+            .map(|(host_id, host)| {
+                serde_json::json!({
+                    "host": host_labels.get(host_id).expect("scrub host label"),
+                    "crashed": host.crashed,
+                    "inbox_len": host.inbox.len(),
+                })
+            })
+            .collect::<Vec<_>>();
+        hosts.sort_by(|left, right| {
+            left["host"]
+                .as_str()
+                .cmp(&right["host"].as_str())
+        });
+
+        let mut partitions = net
+            .partitions
+            .iter()
+            .map(|link| {
+                serde_json::json!({
+                    "src": host_labels.get(&link.src).expect("scrub src label"),
+                    "dst": host_labels.get(&link.dst).expect("scrub dst label"),
+                })
+            })
+            .collect::<Vec<_>>();
+        partitions.sort_by(|left, right| {
+            left["src"]
+                .as_str()
+                .cmp(&right["src"].as_str())
+                .then_with(|| left["dst"].as_str().cmp(&right["dst"].as_str()))
+        });
+
+        let snapshot = serde_json::json!({
+            "hosts": hosts,
+            "partitions": partitions,
+            "metrics": {
+                "sent": net.metrics.packets_sent,
+                "delivered": net.metrics.packets_delivered,
+                "dropped": net.metrics.packets_dropped,
+            },
+            "queue_depth": net.queue.len(),
+        });
+
+        insta::assert_json_snapshot!("topology_scrubbed", snapshot);
     }
 }
