@@ -110,4 +110,53 @@ mod tests {
             "unexpected panic message: {message}"
         );
     }
+
+    #[test]
+    fn metamorphic_waker_substitution_preserves_yield_protocol() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("metamorphic_waker_substitution_preserves_yield_protocol");
+
+        let baseline_counter = Arc::new(WakeCounter::default());
+        let baseline_waker = std::task::Waker::from(Arc::clone(&baseline_counter));
+        let mut baseline_cx = Context::from_waker(&baseline_waker);
+        let mut baseline = std::pin::pin!(yield_now());
+
+        assert!(matches!(
+            baseline.as_mut().poll(&mut baseline_cx),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            baseline.as_mut().poll(&mut baseline_cx),
+            Poll::Ready(())
+        ));
+        assert_eq!(baseline_counter.wakes.load(Ordering::Relaxed), 1);
+
+        let first_counter = Arc::new(WakeCounter::default());
+        let second_counter = Arc::new(WakeCounter::default());
+        let first_waker = std::task::Waker::from(Arc::clone(&first_counter));
+        let second_waker = std::task::Waker::from(Arc::clone(&second_counter));
+        let mut first_cx = Context::from_waker(&first_waker);
+        let mut second_cx = Context::from_waker(&second_waker);
+        let mut transformed = std::pin::pin!(yield_now());
+
+        assert!(matches!(
+            transformed.as_mut().poll(&mut first_cx),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            transformed.as_mut().poll(&mut second_cx),
+            Poll::Ready(())
+        ));
+
+        assert_eq!(
+            first_counter.wakes.load(Ordering::Relaxed),
+            baseline_counter.wakes.load(Ordering::Relaxed),
+            "changing the second-poll waker must not perturb the initial self-wake"
+        );
+        assert_eq!(
+            second_counter.wakes.load(Ordering::Relaxed),
+            0,
+            "completion after substitution must not spuriously wake the replacement waker"
+        );
+    }
 }
