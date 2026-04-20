@@ -187,6 +187,10 @@ impl Resolver {
 
         validate_lookup_hostname(host)?;
 
+        if is_invalid_special_use_domain(host) {
+            return Err(DnsError::NoRecords(host.to_string()));
+        }
+
         // Preserve absolute-name semantics in the cache: `example.com.` may be
         // resolved differently from `example.com` when the system resolver
         // applies search domains to the non-dotted form.
@@ -763,6 +767,11 @@ fn is_valid_lookup_hostname_label(label: &str) -> bool {
     }
 
     last.is_ascii_alphanumeric()
+}
+
+fn is_invalid_special_use_domain(host: &str) -> bool {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    host.eq_ignore_ascii_case("invalid") || host.to_ascii_lowercase().ends_with(".invalid")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2684,6 +2693,32 @@ mod tests {
         crate::assert_with_log!(timed_out, "timed out", true, timed_out);
 
         crate::test_complete!("resolver_timeout_zero");
+    }
+
+    #[test]
+    fn resolver_rfc6761_invalid_domain_short_circuits_to_no_records() {
+        init_test("resolver_rfc6761_invalid_domain_short_circuits_to_no_records");
+
+        let config = ResolverConfig {
+            timeout: Duration::ZERO,
+            cache_enabled: false,
+            ..Default::default()
+        };
+        let resolver = Resolver::with_config(config);
+
+        let result = future::block_on(async { resolver.lookup_ip("example.invalid").await });
+        let special_use = matches!(
+            result,
+            Err(DnsError::NoRecords(ref host)) if host == "example.invalid"
+        );
+        crate::assert_with_log!(
+            special_use,
+            "rfc6761 invalid domain short-circuits locally",
+            true,
+            special_use
+        );
+
+        crate::test_complete!("resolver_rfc6761_invalid_domain_short_circuits_to_no_records");
     }
 
     #[test]
