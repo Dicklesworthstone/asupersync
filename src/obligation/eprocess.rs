@@ -174,7 +174,11 @@ impl LeakMonitor {
         self.observations += 1;
 
         #[allow(clippy::cast_precision_loss)]
-        let ratio = age_ns as f64 / self.config.expected_lifetime_ns as f64;
+        let ratio = if self.config.expected_lifetime_ns == 0 {
+            0.0
+        } else {
+            age_ns as f64 / self.config.expected_lifetime_ns as f64
+        };
 
         // Likelihood ratio: evidence grows when age exceeds expected.
         // We use a safe mixture: LR = max(1, ratio).
