@@ -198,15 +198,11 @@ impl RegionStateMachine {
                 Ok(())
             }
             RegionState::Active {
-                active_tasks,
-                pending_finalizers,
+                active_tasks: _,
+                pending_finalizers: _,
             } => {
-                // Active region invariants
-                if *active_tasks == 0 && *pending_finalizers == 0 {
-                    return Err(
-                        "Active region with no tasks or finalizers should be closed".to_string()
-                    );
-                }
+                // An active region may legitimately be empty between activation,
+                // task admission, and an explicit RequestClose transition.
                 Ok(())
             }
             RegionState::Cancelling {
@@ -1817,6 +1813,35 @@ mod tests {
         );
         assert!(matches!(machine.current_state(), RegionState::Finalized));
         assert!(machine.is_terminal());
+    }
+
+    #[test]
+    fn test_region_activate_allows_empty_active_state() {
+        let region_id = RegionId::new_for_test(10, 0);
+        let mut machine = RegionStateMachine::new(region_id, ValidationLevel::Full);
+        let context = RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+
+        assert_eq!(
+            machine.transition(RegionEvent::Activate, &context),
+            TransitionResult::Valid
+        );
+        assert!(matches!(
+            machine.current_state(),
+            RegionState::Active {
+                active_tasks: 0,
+                pending_finalizers: 0
+            }
+        ));
+        assert_eq!(
+            machine.transition(RegionEvent::RequestClose, &context),
+            TransitionResult::Valid
+        );
+        assert!(matches!(machine.current_state(), RegionState::Finalized));
     }
 
     #[test]
