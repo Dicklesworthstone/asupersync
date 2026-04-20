@@ -53,6 +53,7 @@ pub mod obligation_tracker;
 #[cfg(feature = "metrics")]
 pub mod otel;
 pub mod otel_structured_concurrency;
+pub mod performance_budget_monitor;
 pub mod resource_accounting;
 pub mod runtime_integration;
 pub mod spectral_health;
@@ -113,6 +114,10 @@ pub use otel::{
 };
 pub use otel_structured_concurrency::{
     EntityId, OtelStructuredConcurrencyConfig, SpanStorage, SpanType,
+};
+pub use performance_budget_monitor::{
+    BudgetAlert, BudgetDirection, BudgetEvaluation, BudgetSample, BudgetSeverity,
+    PerformanceBudget, PerformanceBudgetMonitor, PerformanceBudgetSnapshot,
 };
 pub use resource_accounting::{
     AdmissionKindStats, ObligationKindStats, ResourceAccounting, ResourceAccountingSnapshot,
