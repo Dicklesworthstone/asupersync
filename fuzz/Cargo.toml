@@ -1332,3 +1332,10 @@ path = "fuzz_targets/resource_accounting_sm.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "det_rng"
+path = "fuzz_targets/det_rng.rs"
+test = false
+doc = false
+bench = false
