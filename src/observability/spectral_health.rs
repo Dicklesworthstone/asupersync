@@ -2242,6 +2242,63 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_edge_addition_only_improves_connectivity_health() {
+        fn health_rank(classification: &HealthClassification) -> u8 {
+            match classification {
+                HealthClassification::Fragmented { .. } => 0,
+                HealthClassification::Critical { .. } => 1,
+                HealthClassification::Degraded { .. } => 2,
+                HealthClassification::Healthy { .. } => 3,
+                HealthClassification::Deadlocked => 4,
+            }
+        }
+
+        let thresholds = SpectralThresholds::default();
+
+        let fragmented_edges = vec![(0, 1), (2, 3)];
+        let fragmented_lap = DependencyLaplacian::new(4, &fragmented_edges);
+        let fragmented_decomp = compute_spectral_decomposition(&fragmented_lap, &thresholds);
+        let fragmented_health =
+            classify_health(&fragmented_decomp, &fragmented_lap, &thresholds, false);
+
+        let bridged_edges = vec![(0, 1), (1, 2), (2, 3)];
+        let bridged_lap = DependencyLaplacian::new(4, &bridged_edges);
+        let bridged_decomp = compute_spectral_decomposition(&bridged_lap, &thresholds);
+        let bridged_health = classify_health(&bridged_decomp, &bridged_lap, &thresholds, false);
+
+        let redundant_edges = vec![(0, 1), (1, 2), (2, 3), (0, 3)];
+        let redundant_lap = DependencyLaplacian::new(4, &redundant_edges);
+        let redundant_decomp = compute_spectral_decomposition(&redundant_lap, &thresholds);
+        let redundant_health =
+            classify_health(&redundant_decomp, &redundant_lap, &thresholds, false);
+
+        assert!(
+            matches!(fragmented_health, HealthClassification::Fragmented { .. }),
+            "baseline graph should be fragmented, got {fragmented_health}"
+        );
+        assert!(
+            bridged_decomp.fiedler_value + 1e-9 >= fragmented_decomp.fiedler_value,
+            "adding a bridge edge must not reduce algebraic connectivity: fragmented={} bridged={}",
+            fragmented_decomp.fiedler_value,
+            bridged_decomp.fiedler_value
+        );
+        assert!(
+            health_rank(&bridged_health) >= health_rank(&fragmented_health),
+            "adding a bridge edge must not worsen health: fragmented={fragmented_health}, bridged={bridged_health}"
+        );
+        assert!(
+            redundant_decomp.fiedler_value + 1e-9 >= bridged_decomp.fiedler_value,
+            "adding a redundant edge must not reduce algebraic connectivity: bridged={} redundant={}",
+            bridged_decomp.fiedler_value,
+            redundant_decomp.fiedler_value
+        );
+        assert!(
+            health_rank(&redundant_health) >= health_rank(&bridged_health),
+            "adding a redundant edge must not worsen health: bridged={bridged_health}, redundant={redundant_health}"
+        );
+    }
+
+    #[test]
     fn health_classification_display_all_variants() {
         let variants: Vec<HealthClassification> = vec![
             HealthClassification::Deadlocked,
