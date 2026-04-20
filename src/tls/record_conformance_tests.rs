@@ -135,10 +135,12 @@ mod tests {
             Self::new(TLS_13_RECORD_TYPE, TLS_13_VERSION, payload)
         }
 
+        #[allow(dead_code)]
         fn handshake(payload: Vec<u8>) -> Self {
             Self::new(CONTENT_TYPE_HANDSHAKE, TLS_13_VERSION, payload)
         }
 
+        #[allow(dead_code)]
         fn alert(payload: Vec<u8>) -> Self {
             Self::new(CONTENT_TYPE_ALERT, TLS_13_VERSION, payload)
         }
@@ -230,7 +232,7 @@ mod tests {
         init_test_logging();
         crate::test_phase!("test_tls_inner_plaintext_content_types");
 
-        run_test_with_cx(|_cx| {
+        run_test_with_cx(|_cx| async move {
             let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
             // Complete handshake first
@@ -290,7 +292,7 @@ mod tests {
         init_test_logging();
         crate::test_phase!("test_record_padding_zero_padding");
 
-        run_test_with_cx(|_cx| {
+        run_test_with_cx(|_cx| async move {
             let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
             harness.complete_handshake().expect("Handshake failed");
@@ -321,7 +323,7 @@ mod tests {
         init_test_logging();
         crate::test_phase!("test_record_padding_maximum_padding");
 
-        run_test_with_cx(|_cx| {
+        run_test_with_cx(|_cx| async move {
             let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
             harness.complete_handshake().expect("Handshake failed");
@@ -360,7 +362,7 @@ mod tests {
         init_test_logging();
         crate::test_phase!("test_record_length_exceeds_maximum");
 
-        run_test_with_cx(|_cx| {
+        run_test_with_cx(|_cx| async move {
             let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
             harness.complete_handshake().expect("Handshake failed");
@@ -414,7 +416,7 @@ mod tests {
         init_test_logging();
         crate::test_phase!("test_record_length_edge_cases");
 
-        run_test_with_cx(|_cx| {
+        run_test_with_cx(|_cx| async move {
             let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
             harness.complete_handshake().expect("Handshake failed");
@@ -453,7 +455,7 @@ mod tests {
         init_test_logging();
         crate::test_phase!("test_ciphertext_header_not_integrity_protected");
 
-        run_test_with_cx(|_cx| {
+        run_test_with_cx(|_cx| async move {
             let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
             harness.complete_handshake().expect("Handshake failed");
@@ -523,7 +525,7 @@ mod tests {
         init_test_logging();
         crate::test_phase!("test_early_data_record_semantics");
 
-        run_test_with_cx(|_cx| {
+        run_test_with_cx(|_cx| async move {
             // Note: 0-RTT requires PSK or session resumption, which is complex to set up.
             // This test validates the record-layer aspects rather than full 0-RTT flow.
 
@@ -589,7 +591,7 @@ mod tests {
         init_test_logging();
         crate::test_phase!("test_record_fragmentation_conformance");
 
-        run_test_with_cx(|_cx| {
+        run_test_with_cx(|_cx| async move {
             let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
             harness.complete_handshake().expect("Handshake failed");
@@ -629,7 +631,7 @@ mod tests {
         init_test_logging();
         crate::test_phase!("test_malformed_record_handling");
 
-        run_test_with_cx(|_cx| {
+        run_test_with_cx(|_cx| async move {
             let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
             harness.complete_handshake().expect("Handshake failed");
@@ -670,7 +672,7 @@ mod tests {
         init_test_logging();
         crate::test_phase!("test_record_layer_integration");
 
-        run_test_with_cx(|_cx| {
+        run_test_with_cx(|_cx| async move {
             let mut harness = TlsTestHarness::new().expect("Failed to create test harness");
 
             harness.complete_handshake().expect("Handshake failed");
