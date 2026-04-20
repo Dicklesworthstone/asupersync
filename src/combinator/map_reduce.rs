@@ -861,6 +861,39 @@ mod tests {
         // Our implementation always does left fold for determinism
     }
 
+    #[test]
+    fn metamorphic_commutative_reducer_is_permutation_invariant() {
+        let outcomes_a: Vec<Outcome<i32, &str>> = vec![
+            Outcome::Ok(3),
+            Outcome::Ok(1),
+            Outcome::Ok(4),
+            Outcome::Ok(2),
+        ];
+        let outcomes_b: Vec<Outcome<i32, &str>> = vec![
+            Outcome::Ok(2),
+            Outcome::Ok(4),
+            Outcome::Ok(1),
+            Outcome::Ok(3),
+        ];
+
+        let (decision_a, reduced_a, successes_a) = map_reduce_outcomes(outcomes_a, |a, b| a + b);
+        let (decision_b, reduced_b, successes_b) = map_reduce_outcomes(outcomes_b, |a, b| a + b);
+
+        assert!(matches!(decision_a, AggregateDecision::AllOk));
+        assert!(matches!(decision_b, AggregateDecision::AllOk));
+        assert_eq!(
+            reduced_a, reduced_b,
+            "commutative reduction should be invariant under permutation of successful inputs"
+        );
+        assert_eq!(reduced_a, Some(10));
+        assert_eq!(successes_a.len(), successes_b.len());
+        assert_eq!(successes_a.len(), 4);
+        assert_ne!(
+            successes_a, successes_b,
+            "permuted inputs should still preserve their own input-order success traces"
+        );
+    }
+
     // --- wave 79 trait coverage ---
 
     #[test]
