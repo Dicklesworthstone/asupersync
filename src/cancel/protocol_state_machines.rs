@@ -187,7 +187,13 @@ impl RegionStateMachine {
     /// Check if the region is quiesced (no active tasks, no finalizers).
     #[must_use]
     pub fn is_quiesced(&self) -> bool {
-        matches!(self.state, RegionState::Finalized)
+        matches!(
+            self.state,
+            RegionState::Active {
+                active_tasks: 0,
+                pending_finalizers: 0
+            } | RegionState::Finalized
+        )
     }
 
     /// Check region-specific invariants.
@@ -1842,6 +1848,27 @@ mod tests {
             TransitionResult::Valid
         );
         assert!(matches!(machine.current_state(), RegionState::Finalized));
+    }
+
+    #[test]
+    fn test_region_empty_active_state_is_quiesced() {
+        let region_id = RegionId::new_for_test(11, 0);
+        let mut machine = RegionStateMachine::new(region_id, ValidationLevel::Full);
+        let context = RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+
+        assert_eq!(
+            machine.transition(RegionEvent::Activate, &context),
+            TransitionResult::Valid
+        );
+        assert!(
+            machine.is_quiesced(),
+            "an active region with no tasks or finalizers should report quiescence"
+        );
     }
 
     #[test]
