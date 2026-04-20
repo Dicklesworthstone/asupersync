@@ -107,6 +107,20 @@ impl FromStr for LogLevel {
 mod tests {
     use super::*;
 
+    fn level_table() -> String {
+        [
+            LogLevel::Trace,
+            LogLevel::Debug,
+            LogLevel::Info,
+            LogLevel::Warn,
+            LogLevel::Error,
+        ]
+        .into_iter()
+        .map(|level| format!("{level}|{}|{}", level.as_char(), level.as_str_lower()))
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+
     #[test]
     fn test_level_ordering() {
         assert!(LogLevel::Trace < LogLevel::Debug);
@@ -163,5 +177,10 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(l);
         assert!(set.contains(&LogLevel::Warn));
+    }
+
+    #[test]
+    fn log_level_table_snapshot() {
+        insta::assert_snapshot!("log_level_table", level_table());
     }
 }
