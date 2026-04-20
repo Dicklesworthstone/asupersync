@@ -1478,4 +1478,30 @@ mod tests {
         assert_eq!(copied, cloned);
         assert_ne!(fmt, SerializationFormat::Bincode);
     }
+
+    #[test]
+    fn typed_symbol_json_snapshot_scrubbed_ids() {
+        let value = Demo {
+            id: 11,
+            name: "typed".to_string(),
+        };
+        let symbol = TypedSymbol::from_value(&value, SerializationFormat::Json)
+            .expect("create typed symbol");
+
+        insta::assert_json_snapshot!(
+            "typed_symbol_json_scrubbed_ids",
+            serde_json::json!({
+                "symbol_id": {
+                    "object_id": "[OBJECT_ID]",
+                    "sbn": symbol.symbol().sbn(),
+                    "esi": symbol.symbol().esi(),
+                },
+                "kind": symbol.symbol().kind().to_string(),
+                "format": format!("{:?}", symbol.format()),
+                "version": symbol.version(),
+                "payload_len": symbol.payload_len(),
+                "value": symbol.value().expect("decode typed symbol"),
+            })
+        );
+    }
 }
