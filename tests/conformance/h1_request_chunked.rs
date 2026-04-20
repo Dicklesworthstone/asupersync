@@ -94,7 +94,12 @@ fn verify_chunked_wire_format(data: &[u8], expected_body: &[u8]) -> bool {
     }
 
     // Verify body content appears in the encoded data
-    if !expected_body.is_empty() && !data_str.as_bytes().windows(expected_body.len()).any(|w| w == expected_body) {
+    if !expected_body.is_empty()
+        && !data_str
+            .as_bytes()
+            .windows(expected_body.len())
+            .any(|w| w == expected_body)
+    {
         return false;
     }
 
@@ -126,8 +131,11 @@ fn test_mr1_chunked_request_allowed() {
             // Verify chunk size line exists (hex encoding of body length)
             let encoded_str = String::from_utf8_lossy(&encoded);
             let expected_chunk_size = format!("{:X}\r\n", test_body.len());
-            assert!(encoded_str.contains(&expected_chunk_size),
-                   "Should contain chunk size line: {}", expected_chunk_size);
+            assert!(
+                encoded_str.contains(&expected_chunk_size),
+                "Should contain chunk size line: {}",
+                expected_chunk_size
+            );
         }
         Err(e) => {
             panic!("Chunked request encoding should succeed: {e:?}");
@@ -155,22 +163,28 @@ fn test_mr2_zero_length_final_chunk() {
             .body(body.clone())
             .build();
 
-        let encoded = encode_chunked_request(req)
-            .expect(&format!("Should encode request with {}", desc));
+        let encoded =
+            encode_chunked_request(req).expect(&format!("Should encode request with {}", desc));
 
         // Must end with zero-length chunk and final CRLF
-        assert!(encoded.ends_with(b"0\r\n\r\n"),
-               "Request with {} should end with zero-length chunk", desc);
+        assert!(
+            encoded.ends_with(b"0\r\n\r\n"),
+            "Request with {} should end with zero-length chunk",
+            desc
+        );
 
         // Verify proper chunked structure
         let encoded_str = String::from_utf8_lossy(&encoded);
-        let zero_chunk_pos = encoded_str.find("0\r\n")
+        let zero_chunk_pos = encoded_str
+            .find("0\r\n")
             .expect("Should contain zero-length chunk");
 
         // After zero chunk, should only have trailers and final CRLF
         let after_zero = &encoded_str[zero_chunk_pos + 3..];
-        assert!(after_zero == "\r\n" || after_zero.ends_with("\r\n\r\n"),
-               "After zero chunk should only contain trailers and final CRLF");
+        assert!(
+            after_zero == "\r\n" || after_zero.ends_with("\r\n\r\n"),
+            "After zero chunk should only contain trailers and final CRLF"
+        );
     }
 }
 
@@ -193,8 +207,7 @@ fn test_mr3_chunked_http10_rejected() {
         Ok(_) => {
             panic!("HTTP/1.0 request with Transfer-Encoding should be rejected");
         }
-        Err(HttpError::UnsupportedVersion) |
-        Err(HttpError::BadTransferEncoding) => {
+        Err(HttpError::UnsupportedVersion) | Err(HttpError::BadTransferEncoding) => {
             // Expected error - HTTP/1.0 doesn't support chunked encoding
         }
         Err(e) => {
@@ -222,19 +235,23 @@ fn test_mr4_chunk_extensions_tolerated() {
         .body(test_body.to_vec())
         .build();
 
-    let encoded = encode_chunked_request(req)
-        .expect("Should encode chunked request");
+    let encoded = encode_chunked_request(req).expect("Should encode chunked request");
 
     // Verify the basic chunked structure is correct
     // (extensions would be handled by the chunk encoding function)
     let wire_valid = verify_chunked_wire_format(&encoded, test_body);
-    assert!(wire_valid, "Chunked request with extensions should produce valid wire format");
+    assert!(
+        wire_valid,
+        "Chunked request with extensions should produce valid wire format"
+    );
 
     // Verify chunk size line format (hex + CRLF)
     let encoded_str = String::from_utf8_lossy(&encoded);
     let chunk_size_hex = format!("{:X}", test_body.len());
-    assert!(encoded_str.contains(&format!("{chunk_size_hex}\r\n")),
-           "Should contain properly formatted chunk size");
+    assert!(
+        encoded_str.contains(&format!("{chunk_size_hex}\r\n")),
+        "Should contain properly formatted chunk size"
+    );
 }
 
 /// MR5: Trailer Content-Type allowed (RFC 9112 §7.1.2)
@@ -256,24 +273,30 @@ fn test_mr5_trailer_content_type_allowed() {
         ])
         .build();
 
-    let encoded = encode_chunked_request(req)
-        .expect("Should encode request with trailers");
+    let encoded = encode_chunked_request(req).expect("Should encode request with trailers");
 
     let encoded_str = String::from_utf8_lossy(&encoded);
 
     // Verify trailer fields appear after zero-length chunk
-    let zero_pos = encoded_str.find("0\r\n")
+    let zero_pos = encoded_str
+        .find("0\r\n")
         .expect("Should contain zero-length chunk");
     let trailer_section = &encoded_str[zero_pos + 3..];
 
-    assert!(trailer_section.contains("Content-Type: application/json"),
-           "Should contain Content-Type trailer");
-    assert!(trailer_section.contains("X-Custom-Trailer: trailer-value"),
-           "Should contain custom trailer");
+    assert!(
+        trailer_section.contains("Content-Type: application/json"),
+        "Should contain Content-Type trailer"
+    );
+    assert!(
+        trailer_section.contains("X-Custom-Trailer: trailer-value"),
+        "Should contain custom trailer"
+    );
 
     // Verify final CRLF after trailers
-    assert!(encoded.ends_with(b"\r\n"),
-           "Should end with final CRLF after trailers");
+    assert!(
+        encoded.ends_with(b"\r\n"),
+        "Should end with final CRLF after trailers"
+    );
 }
 
 /// Property-based test for chunked encoding invariants
@@ -344,7 +367,6 @@ fn test_integration_all_mrs() {
                 .build(),
             true, // should succeed
         ),
-
         // MR2: Empty body with chunked encoding
         (
             "empty_body_chunked",
@@ -355,7 +377,6 @@ fn test_integration_all_mrs() {
                 .build(),
             true, // should succeed
         ),
-
         // MR5: Chunked with trailers
         (
             "chunked_with_trailers",
@@ -379,13 +400,15 @@ fn test_integration_all_mrs() {
             let encoded = result.expect(&format!("Test '{}' should succeed", test_name));
 
             // Verify all MRs are satisfied
-            assert!(verify_chunked_wire_format(&encoded, &req.body),
-                   "Test '{}' should produce valid wire format", test_name);
+            assert!(
+                verify_chunked_wire_format(&encoded, &req.body),
+                "Test '{}' should produce valid wire format",
+                test_name
+            );
 
             println!("✓ Integration test '{}' passed", test_name);
         } else {
-            assert!(result.is_err(),
-                   "Test '{}' should fail", test_name);
+            assert!(result.is_err(), "Test '{}' should fail", test_name);
 
             println!("✓ Integration test '{}' correctly failed", test_name);
         }
@@ -413,19 +436,25 @@ mod benchmarks {
             let iterations = 1000;
 
             for _ in 0..iterations {
-                let _encoded = encode_chunked_request(req.clone())
-                    .expect("Benchmark encoding should succeed");
+                let _encoded =
+                    encode_chunked_request(req.clone()).expect("Benchmark encoding should succeed");
             }
 
             let duration = start.elapsed();
             let per_op = duration / iterations;
 
-            println!("Chunked encoding {} bytes: {:.2}µs per operation",
-                    size, per_op.as_micros());
+            println!(
+                "Chunked encoding {} bytes: {:.2}µs per operation",
+                size,
+                per_op.as_micros()
+            );
 
             // Performance requirement: should encode within reasonable time
-            assert!(per_op < Duration::from_millis(1),
-                   "Encoding {} bytes should complete within 1ms", size);
+            assert!(
+                per_op < Duration::from_millis(1),
+                "Encoding {} bytes should complete within 1ms",
+                size
+            );
         }
     }
 }
