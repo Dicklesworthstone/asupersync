@@ -600,6 +600,52 @@ macro_rules! join {
 mod tests {
     use super::*;
     use crate::types::policy::{CollectAll, FailFast};
+    use proptest::prelude::*;
+
+    #[derive(Debug, Clone)]
+    enum JoinCase {
+        Ok(i32),
+        Err,
+        CancelUser,
+        CancelTimeout,
+        CancelShutdown,
+        Panic,
+    }
+
+    impl JoinCase {
+        fn into_outcome(self) -> Outcome<i32, &'static str> {
+            match self {
+                Self::Ok(value) => Outcome::Ok(value),
+                Self::Err => Outcome::Err("err"),
+                Self::CancelUser => Outcome::Cancelled(CancelReason::user("user")),
+                Self::CancelTimeout => Outcome::Cancelled(CancelReason::timeout()),
+                Self::CancelShutdown => Outcome::Cancelled(CancelReason::shutdown()),
+                Self::Panic => Outcome::Panicked(PanicPayload::new("boom")),
+            }
+        }
+    }
+
+    fn join_case_strategy() -> impl Strategy<Value = JoinCase> {
+        prop_oneof![
+            any::<i16>().prop_map(|value| JoinCase::Ok(i32::from(value))),
+            Just(JoinCase::Err),
+            Just(JoinCase::CancelUser),
+            Just(JoinCase::CancelTimeout),
+            Just(JoinCase::CancelShutdown),
+            Just(JoinCase::Panic),
+        ]
+    }
+
+    fn decision_signature(
+        decision: &AggregateDecision<&'static str>,
+    ) -> (&'static str, Option<u8>) {
+        match decision {
+            AggregateDecision::AllOk => ("ok", None),
+            AggregateDecision::FirstError(_) => ("err", None),
+            AggregateDecision::Cancelled(reason) => ("cancelled", Some(reason.severity())),
+            AggregateDecision::Panicked { .. } => ("panic", None),
+        }
+    }
 
     #[test]
     fn join2_both_ok() {
@@ -1109,5 +1155,63 @@ mod tests {
         let debug = format!("{result:?}");
         assert!(debug.contains("JoinAllResult"));
         assert!(debug.contains("AllOk"));
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_join_all_rotation_preserves_decision_and_projection(
+            cases in prop::collection::vec(join_case_strategy(), 1..12),
+            raw_shift in 0usize..32,
+        ) {
+            let shift = raw_shift % cases.len();
+
+            let base_result = make_join_all_result(
+                cases
+                    .iter()
+                    .cloned()
+                    .map(JoinCase::into_outcome)
+                    .collect::<Vec<_>>(),
+            );
+
+            let mut rotated_cases = cases.clone();
+            rotated_cases.rotate_left(shift);
+            let rotated_result = make_join_all_result(
+                rotated_cases
+                    .iter()
+                    .cloned()
+                    .map(JoinCase::into_outcome)
+                    .collect::<Vec<_>>(),
+            );
+
+            prop_assert_eq!(base_result.total_count, rotated_result.total_count);
+            prop_assert_eq!(
+                decision_signature(&base_result.decision),
+                decision_signature(&rotated_result.decision),
+                "rotating branch order must not change the aggregate decision class"
+            );
+
+            let mut base_success_values =
+                base_result.successes.iter().map(|(_, value)| *value).collect::<Vec<_>>();
+            let mut rotated_success_values = rotated_result
+                .successes
+                .iter()
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>();
+            base_success_values.sort_unstable();
+            rotated_success_values.sort_unstable();
+            prop_assert_eq!(
+                base_success_values,
+                rotated_success_values,
+                "rotating branch order must preserve the success multiset"
+            );
+
+            let mut expected_rotated_projection = base_result.into_ordered_values();
+            expected_rotated_projection.rotate_left(shift);
+            prop_assert_eq!(
+                rotated_result.into_ordered_values(),
+                expected_rotated_projection,
+                "a quiescent join must preserve the ordered branch projection under the same rotation"
+            );
+        }
     }
 }
