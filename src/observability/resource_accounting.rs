@@ -14,8 +14,8 @@
 //!    ordering (sufficient for monotone counters). No wall-clock dependencies.
 //! 3. **Zero hot-path allocations**: uses fixed-size atomic arrays indexed by
 //!    `ObligationKind` discriminant and `AdmissionKind` discriminant.
-//! 4. **Per-kind granularity**: tracks `SendPermit`, `Ack`, `Lease`, `IoOp`
-//!    separately for obligation lifecycle events.
+//! 4. **Per-kind granularity**: tracks `SendPermit`, `Ack`, `Lease`, `IoOp`,
+//!    and `SemaphorePermit` separately for obligation lifecycle events.
 //!
 //! # Usage
 //!
@@ -48,7 +48,7 @@ use crate::record::region::AdmissionKind;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 /// Number of [`ObligationKind`] variants.
-const OBLIGATION_KIND_COUNT: usize = 4;
+const OBLIGATION_KIND_COUNT: usize = 5;
 /// Number of [`AdmissionKind`] variants.
 const ADMISSION_KIND_COUNT: usize = 4;
 
@@ -79,6 +79,7 @@ const ALL_OBLIGATION_KINDS: [ObligationKind; OBLIGATION_KIND_COUNT] = [
     ObligationKind::Ack,
     ObligationKind::Lease,
     ObligationKind::IoOp,
+    ObligationKind::SemaphorePermit,
 ];
 
 /// All admission kinds for iteration.
@@ -1048,9 +1049,29 @@ mod tests {
             acc.obligation_committed(kind);
         }
 
-        assert_eq!(acc.obligations_reserved_total(), 4);
-        assert_eq!(acc.obligations_committed_total(), 4);
+        assert_eq!(acc.obligations_reserved_total(), 5);
+        assert_eq!(acc.obligations_committed_total(), 5);
         assert_eq!(acc.obligations_pending(), 0);
+    }
+
+    #[test]
+    fn semaphore_permit_is_included_in_snapshot_and_totals() {
+        let acc = ResourceAccounting::new();
+
+        acc.obligation_reserved(ObligationKind::SemaphorePermit);
+        acc.obligation_leaked(ObligationKind::SemaphorePermit);
+
+        let snapshot = acc.snapshot();
+        let stats = snapshot
+            .obligation_stats
+            .iter()
+            .find(|stats| stats.kind == ObligationKind::SemaphorePermit)
+            .expect("SemaphorePermit stats must be present");
+
+        assert_eq!(stats.reserved, 1);
+        assert_eq!(stats.leaked, 1);
+        assert_eq!(snapshot.total_reserved(), 1);
+        assert_eq!(snapshot.total_leaked(), 1);
     }
 
     #[test]
