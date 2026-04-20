@@ -237,6 +237,7 @@ mod tests {
     use super::super::SignalKind;
     use super::super::signal::inject_test_signal;
     use super::*;
+    use serde_json::json;
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
     use std::thread;
@@ -473,7 +474,12 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        panic!("signal listener did not trigger shutdown in time");
+        crate::assert_with_log!(
+            false,
+            "signal listener triggered shutdown before timeout",
+            true,
+            false
+        );
     }
 
     #[cfg(any(unix, windows))]
@@ -500,5 +506,36 @@ mod tests {
             shutting_down
         );
         crate::test_complete!("listen_for_signals_is_idempotent");
+    }
+
+    #[test]
+    fn shutdown_sequence_snapshot_scrubbed() {
+        let controller = ShutdownController::new();
+        let rx_a = controller.subscribe();
+        let rx_b = controller.subscribe();
+
+        let before = json!({
+            "controller": controller.is_shutting_down(),
+            "receivers": [
+                {"receiver": "[RX_A]", "shutting_down": rx_a.is_shutting_down()},
+                {"receiver": "[RX_B]", "shutting_down": rx_b.is_shutting_down()},
+            ],
+        });
+
+        controller.shutdown();
+
+        insta::assert_json_snapshot!(
+            "shutdown_sequence_scrubbed",
+            json!({
+                "before": before,
+                "after": {
+                    "controller": controller.is_shutting_down(),
+                    "receivers": [
+                        {"receiver": "[RX_A]", "shutting_down": rx_a.is_shutting_down()},
+                        {"receiver": "[RX_B]", "shutting_down": rx_b.is_shutting_down()},
+                    ],
+                }
+            })
+        );
     }
 }

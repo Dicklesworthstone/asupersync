@@ -1,0 +1,42 @@
+---
+source: src/signal/shutdown.rs
+expression: |-
+  json!({
+      "before": before,
+      "after": {
+          "controller": controller.is_shutting_down(),
+          "receivers": [
+              {"receiver": "[RX_A]", "shutting_down": rx_a.is_shutting_down()},
+              {"receiver": "[RX_B]", "shutting_down": rx_b.is_shutting_down()},
+          ],
+      }
+  })
+---
+{
+  "after": {
+    "controller": true,
+    "receivers": [
+      {
+        "receiver": "[RX_A]",
+        "shutting_down": true
+      },
+      {
+        "receiver": "[RX_B]",
+        "shutting_down": true
+      }
+    ]
+  },
+  "before": {
+    "controller": false,
+    "receivers": [
+      {
+        "receiver": "[RX_A]",
+        "shutting_down": false
+      },
+      {
+        "receiver": "[RX_B]",
+        "shutting_down": false
+      }
+    ]
+  }
+}
