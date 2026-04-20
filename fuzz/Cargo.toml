@@ -883,6 +883,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "length_delimited_decoder_state"
+path = "fuzz_targets/length_delimited_decoder_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "postgres_scram"
 path = "fuzz_targets/postgres_scram.rs"
 test = false

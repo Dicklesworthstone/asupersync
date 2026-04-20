@@ -19,6 +19,7 @@ cargo +nightly install cargo-fuzz
 | `fuzz_http1_response` | HTTP/1.1 response parser | High |
 | `h1_parsed_url` | HTTP/1 client URL parser | High |
 | `length_delimited_encode_width` | Length-delimited encode width and round-trip invariants | High |
+| `length_delimited_decoder_state` | Length-delimited decoder chunking and invalid-header invariants | High |
 | `fuzz_hpack_decode` | HPACK header compression decoder | Critical |
 | `fuzz_http2_frame` | HTTP/2 frame parser | Critical |
 | `fuzz_interest_flags` | Reactor Interest bitflags | Low |
@@ -60,6 +61,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `seeds/hpack/` - Valid HPACK-encoded headers
 - `corpus/h1_parsed_url/` - Valid and invalid HTTP/1 client URLs
 - `corpus/length_delimited_encode_width/` - Width-sensitive length-delimited encode scenarios
+- `corpus/length_delimited_decoder_state/` - Decoder chunking and invalid-header scenarios
 
 To run with seeds:
 
