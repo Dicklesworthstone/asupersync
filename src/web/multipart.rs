@@ -517,6 +517,10 @@ fn parse_part_headers(data: &[u8]) -> HashMap<String, String> {
 /// - `form-data; name="field1"`
 /// - `form-data; name=field1`
 fn parse_disposition_param(disposition: &str, param: &str) -> Option<String> {
+    if let Some(value) = parse_disposition_ext_param(disposition, param) {
+        return Some(value);
+    }
+
     let search = format!("{param}=");
     let lower = disposition.to_ascii_lowercase();
     // Find the param ensuring it's not a suffix of another param (e.g. "name=" inside "filename=").
@@ -562,6 +566,56 @@ fn parse_disposition_param(disposition: &str, param: &str) -> Option<String> {
             Some(result)
         },
     )
+}
+
+fn parse_disposition_ext_param(disposition: &str, param: &str) -> Option<String> {
+    let search = format!("{param}*=");
+    let lower = disposition.to_ascii_lowercase();
+    let idx = {
+        let mut start = 0;
+        loop {
+            let pos = lower[start..].find(&search)?;
+            let abs = start + pos;
+            if abs == 0 || matches!(lower.as_bytes()[abs - 1], b';' | b' ' | b'\t') {
+                break abs;
+            }
+            start = abs + 1;
+        }
+    };
+
+    let after = &disposition[idx + search.len()..];
+    let end = after.find([';', ' ', '\t']).unwrap_or(after.len());
+    decode_rfc8187_ext_value(after[..end].trim())
+}
+
+fn decode_rfc8187_ext_value(value: &str) -> Option<String> {
+    let (charset, rest) = value.split_once('\'')?;
+    let (_, encoded) = rest.split_once('\'')?;
+    if !charset.eq_ignore_ascii_case("utf-8") {
+        return None;
+    }
+
+    let mut decoded = Vec::with_capacity(encoded.len());
+    let bytes = encoded.as_bytes();
+    let mut idx = 0;
+
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'%' if idx + 2 < bytes.len() => {
+                let hi = (bytes[idx + 1] as char).to_digit(16)?;
+                let lo = (bytes[idx + 2] as char).to_digit(16)?;
+                decoded.push(((hi << 4) | lo) as u8);
+                idx += 3;
+            }
+            byte if byte.is_ascii() => {
+                decoded.push(byte);
+                idx += 1;
+            }
+            _ => return None,
+        }
+    }
+
+    String::from_utf8(decoded).ok()
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -787,6 +841,23 @@ mod tests {
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name(), "doc");
         assert_eq!(fields[0].filename().unwrap(), "readme.txt");
+        assert_eq!(fields[0].content_type().unwrap(), "text/plain");
+        assert_eq!(fields[0].text().unwrap(), "Hello, world!");
+    }
+
+    #[test]
+    fn parse_file_upload_prefers_rfc8187_extended_filename() {
+        let body = make_multipart_body(
+            "X",
+            &[(
+                "Content-Disposition: form-data; name=\"doc\"; filename=\"EURO rates\"; filename*=UTF-8''%e2%82%ac%20exchange%20rates\r\nContent-Type: text/plain",
+                b"Hello, world!",
+            )],
+        );
+        let fields = parse_multipart(&body, "X", &MultipartLimits::default()).unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name(), "doc");
+        assert_eq!(fields[0].filename().unwrap(), "€ exchange rates");
         assert_eq!(fields[0].content_type().unwrap(), "text/plain");
         assert_eq!(fields[0].text().unwrap(), "Hello, world!");
     }
