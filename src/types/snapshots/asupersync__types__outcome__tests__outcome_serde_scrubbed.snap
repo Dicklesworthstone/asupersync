@@ -1,0 +1,39 @@
+---
+source: src/types/outcome.rs
+expression: |-
+  scrub_outcome_serde(json!({
+      "ok": Outcome::<u8, &str>::ok(7), "err": Outcome::<u8,
+      &str>::err("denied"), "cancelled":
+      Outcome::<u8,
+      &str>::cancelled(CancelReason::user("req-9f4c36b1")), "panicked":
+      OutcomeError::<&str>::Panicked(PanicPayload::new("boom")),
+  }))
+---
+{
+  "cancelled": {
+    "Cancelled": {
+      "cause": null,
+      "kind": "User",
+      "message": "[MESSAGE]",
+      "origin_region": {
+        "generation": 0,
+        "index": 0
+      },
+      "origin_task": null,
+      "timestamp": 0,
+      "truncated": false,
+      "truncated_at_depth": null
+    }
+  },
+  "err": {
+    "Err": "denied"
+  },
+  "ok": {
+    "Ok": 7
+  },
+  "panicked": {
+    "Panicked": {
+      "message": "boom"
+    }
+  }
+}

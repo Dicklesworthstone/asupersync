@@ -692,6 +692,17 @@ pub fn join_outcomes<T, E>(a: Outcome<T, E>, b: Outcome<T, E>) -> Outcome<T, E> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
+
+    fn scrub_outcome_serde(value: Value) -> Value {
+        let mut scrubbed = value;
+
+        if let Some(message) = scrubbed.pointer_mut("/cancelled/Cancelled/message") {
+            *message = Value::String("[MESSAGE]".to_string());
+        }
+
+        scrubbed
+    }
 
     // =========================================================================
     // Severity Ordering Tests
@@ -1135,5 +1146,18 @@ mod tests {
         assert_ne!(a, PanicPayload::new("other"));
         let dbg = format!("{a:?}");
         assert!(dbg.contains("PanicPayload"));
+    }
+
+    #[test]
+    fn outcome_serde_snapshot_scrubbed() {
+        insta::assert_json_snapshot!(
+            "outcome_serde_scrubbed",
+            scrub_outcome_serde(json!({
+                "ok": Outcome::<u8, &str>::ok(7),
+                "err": Outcome::<u8, &str>::err("denied"),
+                "cancelled": Outcome::<u8, &str>::cancelled(CancelReason::user("req-9f4c36b1")),
+                "panicked": OutcomeError::<&str>::Panicked(PanicPayload::new("boom")),
+            }))
+        );
     }
 }
