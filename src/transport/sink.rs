@@ -1175,6 +1175,66 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_batching_preserves_sink_send_order() {
+        init_test("metamorphic_batching_preserves_sink_send_order");
+
+        let symbols = vec![
+            create_symbol(11),
+            create_symbol(12),
+            create_symbol(13),
+            create_symbol(14),
+        ];
+
+        let mut baseline_sink = TrackingSink::new(TrackingSinkState::new());
+        for symbol in symbols.clone() {
+            future::block_on(async { baseline_sink.send(symbol).await.unwrap() });
+        }
+        let baseline_ids = {
+            let state = baseline_sink.state.lock();
+            state
+                .sent
+                .iter()
+                .map(|symbol| symbol.symbol().id().esi())
+                .collect::<Vec<_>>()
+        };
+
+        let mut transformed_sink = TrackingSink::new(TrackingSinkState::new());
+        let transformed_count =
+            future::block_on(async { transformed_sink.send_all(symbols).await.unwrap() });
+        let (transformed_ids, transformed_flushes) = {
+            let state = transformed_sink.state.lock();
+            (
+                state
+                    .sent
+                    .iter()
+                    .map(|symbol| symbol.symbol().id().esi())
+                    .collect::<Vec<_>>(),
+                state.flush_count,
+            )
+        };
+
+        crate::assert_with_log!(
+            transformed_ids == baseline_ids,
+            "batching the same symbol sequence must preserve sink emission order",
+            baseline_ids,
+            transformed_ids
+        );
+        crate::assert_with_log!(
+            transformed_count == 4,
+            "send_all reports the full batched symbol count",
+            4usize,
+            transformed_count
+        );
+        crate::assert_with_log!(
+            transformed_flushes == 1,
+            "send_all still flushes exactly once after batching",
+            1usize,
+            transformed_flushes
+        );
+        crate::test_complete!("metamorphic_batching_preserves_sink_send_order");
+    }
+
+    #[test]
     fn test_flush_future_repoll_after_completion_fails_closed() {
         init_test("test_flush_future_repoll_after_completion_fails_closed");
         let mut sink = TrackingSink::new(TrackingSinkState::new());
