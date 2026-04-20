@@ -1408,6 +1408,7 @@ pub fn read_trace(path: impl AsRef<Path>) -> TraceFileResult<(TraceMetadata, Vec
 mod tests {
     use super::*;
     use crate::trace::replay::CompactTaskId;
+    use serde_json::json;
     use std::io::Write;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1458,6 +1459,52 @@ mod tests {
         file.write_all(&meta_bytes).expect("write metadata");
     }
 
+    fn trace_file_layout_summary(path: &std::path::Path) -> serde_json::Value {
+        let bytes = std::fs::read(path).expect("read trace bytes");
+        let version = u16::from_le_bytes(
+            bytes[TRACE_MAGIC.len()..TRACE_MAGIC.len() + 2]
+                .try_into()
+                .expect("version bytes"),
+        );
+        let flags = u16::from_le_bytes(
+            bytes[TRACE_MAGIC.len() + 2..TRACE_MAGIC.len() + 4]
+                .try_into()
+                .expect("flag bytes"),
+        );
+        let compression_byte = bytes[TRACE_MAGIC.len() + 4];
+        let meta_len = u32::from_le_bytes(
+            bytes[TRACE_MAGIC.len() + 5..HEADER_SIZE]
+                .try_into()
+                .expect("metadata length bytes"),
+        );
+        let event_count_offset = HEADER_SIZE + meta_len as usize;
+        let event_count = u64::from_le_bytes(
+            bytes[event_count_offset..event_count_offset + 8]
+                .try_into()
+                .expect("event count bytes"),
+        );
+
+        let mut metadata =
+            serde_json::to_value(TraceReader::open(path).expect("open reader").metadata())
+                .expect("serialize metadata");
+        if let Some(obj) = metadata.as_object_mut() {
+            if let Some(recorded_at) = obj.get_mut("recorded_at") {
+                *recorded_at = json!("[recorded_at]");
+            }
+        }
+
+        json!({
+            "magic": std::str::from_utf8(TRACE_MAGIC).expect("trace magic is valid utf8"),
+            "version": version,
+            "flags_hex": format!("{flags:#06x}"),
+            "compression_byte": compression_byte,
+            "meta_len": meta_len,
+            "event_count": event_count,
+            "metadata": metadata,
+            "events": sample_events(),
+        })
+    }
+
     // =========================================================================
     // Pure data-type tests (wave 40 – CyanBarn)
     // =========================================================================
@@ -1500,6 +1547,28 @@ mod tests {
         };
         let display2 = format!("{version_err}");
         assert!(display2.contains("99"));
+    }
+
+    #[test]
+    fn trace_file_layout_snapshot_scrubs_recorded_at() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let path = temp.path();
+
+        let metadata = TraceMetadata {
+            version: REPLAY_SCHEMA_VERSION,
+            seed: 42,
+            recorded_at: 1_726_133_456_789_000_000,
+            config_hash: 0xfeed_beef_cafe_babe,
+            description: Some("trace file layout snapshot".to_string()),
+        };
+        let events = sample_events();
+
+        write_trace(path, &metadata, &events).expect("write trace");
+
+        insta::assert_json_snapshot!(
+            "trace_file_layout_scrubbed_recorded_at",
+            trace_file_layout_summary(path)
+        );
     }
 
     #[test]
