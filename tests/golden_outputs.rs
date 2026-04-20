@@ -630,6 +630,14 @@ impl<T> SharedHandle<T> {
 }
 
 #[test]
+fn snapshot_trace_fixture_seed_7_pretty_json() {
+    let fixture = build_golden_trace_fixture(7);
+    let json = serde_json::to_string_pretty(&fixture).expect("serialize trace fixture");
+
+    assert_snapshot!("trace_fixture_seed_7_pretty_json", json);
+}
+
+#[test]
 fn snapshot_trace_tla_region_obligation_behavior() {
     let events = [
         TraceEvent::region_created(1, Time::ZERO, RegionId::new_for_test(1, 0), None),

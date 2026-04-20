@@ -1,0 +1,71 @@
+---
+source: tests/golden_outputs.rs
+expression: json
+---
+{
+  "schema_version": 1,
+  "config": {
+    "seed": 7,
+    "entropy_seed": 7,
+    "worker_count": 2,
+    "trace_capacity": 2048,
+    "max_steps": 5000,
+    "canonical_prefix_layers": 4,
+    "canonical_prefix_events": 16
+  },
+  "fingerprint": 5286518520354602670,
+  "event_count": 7,
+  "canonical_prefix": [
+    [
+      {
+        "kind": 10,
+        "primary": 0,
+        "secondary": 0,
+        "tertiary": 0
+      },
+      {
+        "kind": 29,
+        "primary": 17841621336708427690,
+        "secondary": 0,
+        "tertiary": 0
+      },
+      {
+        "kind": 29,
+        "primary": 17841621336708427690,
+        "secondary": 0,
+        "tertiary": 0
+      }
+    ],
+    [
+      {
+        "kind": 0,
+        "primary": 0,
+        "secondary": 0,
+        "tertiary": 0
+      },
+      {
+        "kind": 0,
+        "primary": 4294967296,
+        "secondary": 0,
+        "tertiary": 0
+      }
+    ],
+    [
+      {
+        "kind": 5,
+        "primary": 0,
+        "secondary": 0,
+        "tertiary": 0
+      },
+      {
+        "kind": 5,
+        "primary": 4294967296,
+        "secondary": 0,
+        "tertiary": 0
+      }
+    ]
+  ],
+  "oracle_summary": {
+    "violations": []
+  }
+}
