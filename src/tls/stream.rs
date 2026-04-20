@@ -624,6 +624,29 @@ impl<IO: std::fmt::Debug> std::fmt::Debug for TlsStream<IO> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "tls")]
+    use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+    #[cfg(feature = "tls")]
+    use crate::net::tcp::VirtualTcpStream;
+    #[cfg(feature = "tls")]
+    use crate::test_utils::init_test_logging;
+    #[cfg(feature = "tls")]
+    use crate::tls::{Certificate, CertificateChain, PrivateKey, TlsAcceptorBuilder, TlsConnectorBuilder};
+    #[cfg(feature = "tls")]
+    use futures_lite::future::{poll_fn, zip};
+    #[cfg(feature = "tls")]
+    use rustls::ClientConnection;
+    #[cfg(feature = "tls")]
+    use rustls::ServerConnection;
+    #[cfg(feature = "tls")]
+    use rustls::pki_types::ServerName;
+    #[cfg(feature = "tls")]
+    use std::sync::Arc;
+
+    #[cfg(feature = "tls")]
+    const TEST_CERT_PEM: &[u8] = include_bytes!("../../tests/fixtures/tls/server.crt");
+    #[cfg(feature = "tls")]
+    const TEST_KEY_PEM: &[u8] = include_bytes!("../../tests/fixtures/tls/server.key");
 
     #[test]
     fn test_tls_state_transitions() {
@@ -674,5 +697,110 @@ mod tests {
         let cloned = state; // Clone
         assert_eq!(state, copied);
         assert_eq!(state, cloned);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn tls_stream_handshake_completes_under_lab_runtime() {
+        init_test_logging();
+        let config = TestConfig::new()
+            .with_seed(0x715A_CCE8)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+
+        let (
+            client_state_ready,
+            server_state_ready,
+            client_protocol,
+            server_protocol,
+            client_alpn,
+            server_alpn,
+            checkpoints,
+        ) = LabRuntimeTarget::block_on(&mut runtime, async move {
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain, key)
+                .alpn_http()
+                .build()
+                .unwrap();
+
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .alpn_http()
+                .build()
+                .unwrap();
+
+            let server_name = ServerName::try_from("localhost".to_string()).unwrap();
+            let client_conn =
+                ClientConnection::new(Arc::clone(connector.config()), server_name).unwrap();
+            let server_conn = ServerConnection::new(Arc::clone(acceptor.config())).unwrap();
+
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5200".parse().unwrap(),
+                "127.0.0.1:5201".parse().unwrap(),
+            );
+
+            let mut client_stream = TlsStream::new_client(client_io, client_conn);
+            let mut server_stream = TlsStream::new_server(server_io, server_conn);
+
+            let checkpoints = vec![serde_json::json!({
+                "phase": "tls_stream_handshake_started",
+                "client_state": format!("{:?}", client_stream.state),
+                "server_state": format!("{:?}", server_stream.state),
+                "client_addr": "127.0.0.1:5200",
+                "server_addr": "127.0.0.1:5201",
+            })];
+            for checkpoint in &checkpoints {
+                tracing::info!(event = %checkpoint, "tls_stream_lab_checkpoint");
+            }
+
+            let (client_result, server_result) = zip(
+                poll_fn(|cx| client_stream.poll_handshake(cx)),
+                poll_fn(|cx| server_stream.poll_handshake(cx)),
+            )
+            .await;
+            client_result.expect("client handshake should succeed");
+            server_result.expect("server handshake should succeed");
+
+            let client_state_ready = client_stream.state == TlsState::Ready && client_stream.is_ready();
+            let server_state_ready = server_stream.state == TlsState::Ready && server_stream.is_ready();
+            let client_protocol = client_stream.protocol_version().is_some();
+            let server_protocol = server_stream.protocol_version().is_some();
+            let client_alpn = client_stream.alpn_protocol().map(|protocol| protocol.to_vec());
+            let server_alpn = server_stream.alpn_protocol().map(|protocol| protocol.to_vec());
+
+            let mut checkpoints = checkpoints;
+            checkpoints.push(serde_json::json!({
+                "phase": "tls_stream_handshake_completed",
+                "client_state": format!("{:?}", client_stream.state),
+                "server_state": format!("{:?}", server_stream.state),
+                "client_protocol_present": client_protocol,
+                "server_protocol_present": server_protocol,
+                "client_alpn": client_alpn.as_ref().map(|protocol| String::from_utf8_lossy(protocol).to_string()),
+                "server_alpn": server_alpn.as_ref().map(|protocol| String::from_utf8_lossy(protocol).to_string()),
+            }));
+            tracing::info!(event = %checkpoints[1], "tls_stream_lab_checkpoint");
+
+            (
+                client_state_ready,
+                server_state_ready,
+                client_protocol,
+                server_protocol,
+                client_alpn,
+                server_alpn,
+                checkpoints,
+            )
+        });
+
+        assert!(client_state_ready);
+        assert!(server_state_ready);
+        assert!(client_protocol);
+        assert!(server_protocol);
+        assert_eq!(client_alpn.as_deref(), Some(b"h2".as_slice()));
+        assert_eq!(server_alpn.as_deref(), Some(b"h2".as_slice()));
+        assert_eq!(checkpoints.len(), 2);
+        assert!(runtime.is_quiescent());
     }
 }
