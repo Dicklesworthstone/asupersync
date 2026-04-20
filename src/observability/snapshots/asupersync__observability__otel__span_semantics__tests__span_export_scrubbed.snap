@@ -1,0 +1,63 @@
+---
+source: src/observability/otel.rs
+expression: |-
+  json!({
+      "parent": test_span_snapshot(&parent), "remote_child":
+      test_span_snapshot(&remote_child),
+  })
+---
+{
+  "parent": {
+    "attributes": {
+      "component": "orders",
+      "request_id": "[ID]"
+    },
+    "baggage": {
+      "tenant": "alpha"
+    },
+    "end_time": "[TIMESTAMP]",
+    "events": [
+      {
+        "attributes": {
+          "statement": "select",
+          "traceparent": "[ID]"
+        },
+        "name": "db.query",
+        "timestamp": "[TIMESTAMP]"
+      }
+    ],
+    "is_remote": false,
+    "kind": "Server",
+    "name": "checkout",
+    "parent_span_id": null,
+    "sampled": true,
+    "span_id": "[ID]",
+    "start_time": "[TIMESTAMP]",
+    "status": {
+      "description": "timeout",
+      "kind": "error"
+    },
+    "trace_id": "[ID]",
+    "trace_state_vendor": null
+  },
+  "remote_child": {
+    "attributes": {},
+    "baggage": {
+      "tenant": "alpha"
+    },
+    "end_time": null,
+    "events": [],
+    "is_remote": false,
+    "kind": "Client",
+    "name": "cache.lookup",
+    "parent_span_id": "[ID]",
+    "sampled": true,
+    "span_id": "[ID]",
+    "start_time": "[TIMESTAMP]",
+    "status": {
+      "kind": "unset"
+    },
+    "trace_id": "[ID]",
+    "trace_state_vendor": "edge"
+  }
+}

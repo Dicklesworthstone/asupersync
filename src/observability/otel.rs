@@ -2682,6 +2682,61 @@ pub mod span_semantics {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use serde_json::{Value, json};
+        use std::collections::BTreeMap;
+
+        fn scrub_span_field(key: &str, value: &str) -> String {
+            match key {
+                "trace_id" | "span_id" | "parent_span_id" => "[ID]".to_string(),
+                "start_time" | "end_time" | "timestamp" => "[TIMESTAMP]".to_string(),
+                "request_id" | "traceparent" => "[ID]".to_string(),
+                _ => value.to_string(),
+            }
+        }
+
+        fn sorted_string_map_snapshot(map: &HashMap<String, String>) -> BTreeMap<String, String> {
+            map.iter()
+                .map(|(key, value)| (key.clone(), scrub_span_field(key, value)))
+                .collect()
+        }
+
+        fn span_status_snapshot(status: &Status) -> Value {
+            match status {
+                Status::Unset => json!({"kind": "unset"}),
+                Status::Ok => json!({"kind": "ok"}),
+                Status::Error { description } => json!({
+                    "kind": "error",
+                    "description": description,
+                }),
+            }
+        }
+
+        fn span_event_snapshot(event: &SpanEvent) -> Value {
+            json!({
+                "name": event.name,
+                "timestamp": "[TIMESTAMP]",
+                "attributes": sorted_string_map_snapshot(&event.attributes),
+            })
+        }
+
+        fn test_span_snapshot(span: &TestSpan) -> Value {
+            json!({
+                "name": span.name,
+                "kind": format!("{:?}", span.kind),
+                "trace_id": "[ID]",
+                "span_id": "[ID]",
+                "parent_span_id": span.parent_context.as_ref().map(|_| "[ID]"),
+                "is_remote": span.context.is_remote(),
+                "sampled": span.context.trace_flags().is_sampled(),
+                "trace_state_vendor": span.context.trace_state().get("vendor"),
+                "start_time": "[TIMESTAMP]",
+                "end_time": span.end_time.map(|_| "[TIMESTAMP]"),
+                "status": span_status_snapshot(&span.status),
+                "attributes": sorted_string_map_snapshot(&span.attributes),
+                "baggage": sorted_string_map_snapshot(&span.baggage),
+                "events": span.events.iter().map(span_event_snapshot).collect::<Vec<_>>(),
+            })
+        }
 
         #[test]
         fn test_span_conformance_config_default() {
@@ -2841,6 +2896,59 @@ pub mod span_semantics {
                 result.is_success(),
                 "span conformance failures: {:?}",
                 result.failures
+            );
+        }
+
+        #[test]
+        fn span_export_snapshot_scrubs_ids_and_timestamps() {
+            let config = SpanConformanceConfig {
+                max_attributes: 4,
+                max_events: 2,
+                max_attribute_length: Some(16),
+                test_sampling: true,
+                test_context_propagation: true,
+            };
+
+            let mut parent = TestSpan::new_with_config("checkout", SpanKind::Server, &config);
+            parent.set_attribute("component", "orders");
+            parent.set_attribute("request_id", "req-7c1f7ecf-54ff-4ac8-8ec5-6aa64500a161");
+            parent.set_baggage_item("tenant", "alpha");
+            parent.add_event(
+                "db.query",
+                HashMap::from([
+                    ("statement".to_string(), "select".to_string()),
+                    ("traceparent".to_string(), "00-abcdef-0123456789".to_string()),
+                ]),
+            );
+            parent.set_status(Status::Error {
+                description: "timeout".into(),
+            });
+            parent.end();
+
+            let remote_parent = SpanContext::new(
+                TraceId::from_bytes([
+                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x11, 0x12, 0x13, 0x14,
+                    0x15, 0x16, 0x17, 0x18,
+                ]),
+                SpanId::from_bytes([0x11; 8]),
+                TraceFlags::SAMPLED,
+                true,
+                TraceState::from_key_value([("vendor", "edge")]).expect("valid trace state"),
+            );
+            let remote_child = TestSpan::child_from_remote_parent(
+                remote_parent,
+                HashMap::from([("tenant".to_string(), "alpha".to_string())]),
+                "cache.lookup",
+                SpanKind::Client,
+                &config,
+            );
+
+            insta::assert_json_snapshot!(
+                "span_export_scrubbed",
+                json!({
+                    "parent": test_span_snapshot(&parent),
+                    "remote_child": test_span_snapshot(&remote_child),
+                })
             );
         }
     }
