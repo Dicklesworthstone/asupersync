@@ -9,6 +9,7 @@
 use crate::net::quic_core::{decode_varint, encode_varint};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::net::Ipv6Addr;
 
 const H3_FRAME_DATA: u64 = 0x0;
 const H3_FRAME_HEADERS: u64 = 0x1;
@@ -1007,6 +1008,12 @@ fn validate_authority_form(authority: &str) -> Result<(), H3NativeError> {
             .ok_or(H3NativeError::InvalidRequestPseudoHeader(
                 ":authority has invalid IPv6 literal",
             ))?;
+        let literal = &authority[1..bracket_end];
+        if literal.parse::<Ipv6Addr>().is_err() {
+            return Err(H3NativeError::InvalidRequestPseudoHeader(
+                ":authority has invalid IPv6 literal",
+            ));
+        }
         let rest = &authority[bracket_end + 1..];
         if rest.is_empty() {
             return Ok(());
@@ -3582,6 +3589,31 @@ mod tests {
             H3NativeError::InvalidRequestPseudoHeader(
                 ":authority must be RFC authority-form without whitespace"
             )
+        );
+    }
+
+    #[test]
+    fn request_authority_rfc4291_ipv6_literal_vector() {
+        let valid = H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("[2001:db8::8:800:200c:417a]:443".to_string()),
+            path: Some("/".to_string()),
+            status: None,
+        };
+        validate_request_pseudo_headers(&valid).expect("compressed RFC 4291 IPv6 literal valid");
+
+        let invalid = H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("[2001:db8:::1]:443".to_string()),
+            path: Some("/".to_string()),
+            status: None,
+        };
+        let err = validate_request_pseudo_headers(&invalid).expect_err("must reject bad IPv6");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader(":authority has invalid IPv6 literal")
         );
     }
 
