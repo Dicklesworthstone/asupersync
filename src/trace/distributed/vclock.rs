@@ -892,11 +892,35 @@ impl CausalTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
     use crate::time::VirtualClock;
     use std::sync::Arc;
 
     fn node(name: &str) -> NodeId {
         NodeId::new(name)
+    }
+
+    fn scrub_vclock_output(value: Value) -> Value {
+        fn scrub_node_names(text: &str) -> String {
+            text.replace("alpha-node", "[NODE_A]")
+                .replace("beta-node", "[NODE_B]")
+        }
+
+        let mut scrubbed = value;
+
+        if let Some(display) = scrubbed.pointer_mut("/display") {
+            if let Some(text) = display.as_str() {
+                *display = Value::String(scrub_node_names(text));
+            }
+        }
+
+        if let Some(debug) = scrubbed.pointer_mut("/debug") {
+            if let Some(text) = debug.as_str() {
+                *debug = Value::String(scrub_node_names(text));
+            }
+        }
+
+        scrubbed
     }
 
     #[test]
@@ -1091,6 +1115,28 @@ mod tests {
         a.receive(&na, &b); // merge → {A:1, B:2}, then increment → {A:2, B:2}
         assert_eq!(a.get(&na), 2);
         assert_eq!(a.get(&nb), 2);
+    }
+
+    #[test]
+    fn vector_clock_output_snapshot_scrubbed() {
+        let na = node("alpha-node");
+        let nb = node("beta-node");
+        let mut a = VectorClock::new();
+        a.increment(&na);
+        a.increment(&na);
+
+        let mut b = VectorClock::new();
+        b.increment(&nb);
+
+        let merged = a.merge(&b);
+        insta::assert_json_snapshot!(
+            "vector_clock_output_scrubbed",
+            scrub_vclock_output(json!({
+                "display": merged.to_string(),
+                "debug": format!("{merged:?}"),
+                "order_vs_a": format!("{:?}", merged.causal_order(&a)),
+            }))
+        );
     }
 
     #[test]
