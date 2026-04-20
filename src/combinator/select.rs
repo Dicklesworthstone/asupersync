@@ -313,6 +313,7 @@ impl<F: Future + Unpin> Future for SelectAllDrain<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::sync::Arc;
     use std::task::Wake;
 
@@ -329,6 +330,52 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         Pin::new(fut).poll(&mut cx)
+    }
+
+    #[derive(Debug)]
+    struct ReadyAfterPolls {
+        id: usize,
+        ready_on: u8,
+        polls: u8,
+    }
+
+    impl ReadyAfterPolls {
+        fn new(id: usize, ready_on: u8) -> Self {
+            Self {
+                id,
+                ready_on,
+                polls: 0,
+            }
+        }
+    }
+
+    impl Future for ReadyAfterPolls {
+        type Output = usize;
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.polls = self.polls.saturating_add(1);
+            if self.polls >= self.ready_on {
+                Poll::Ready(self.id)
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    fn drain_ready_after_polls(mut losers: Vec<ReadyAfterPolls>) -> Vec<usize> {
+        let mut drained = Vec::with_capacity(losers.len());
+        for loser in &mut losers {
+            loop {
+                match poll_once(loser) {
+                    Poll::Ready(id) => {
+                        drained.push(id);
+                        break;
+                    }
+                    Poll::Pending => {}
+                }
+            }
+        }
+        drained
     }
 
     // ========== Either tests ==========
@@ -985,5 +1032,78 @@ mod tests {
             result2,
             Poll::Ready(Err(SelectAllError::PolledAfterCompletion))
         ));
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_select_all_drain_rotation_preserves_winner_and_losers(
+            branch_count in 1usize..10,
+            raw_winner_index in 0usize..16,
+            raw_shift in 0usize..16,
+            loser_ready_on in prop::collection::vec(2u8..6, 1..10),
+        ) {
+            let winner_index = raw_winner_index % branch_count;
+            let shift = raw_shift % branch_count;
+
+            let base_futures = (0..branch_count)
+                .map(|id| {
+                    let ready_on = if id == winner_index {
+                        1
+                    } else {
+                        loser_ready_on[id % loser_ready_on.len()]
+                    };
+                    ReadyAfterPolls::new(id, ready_on)
+                })
+                .collect::<Vec<_>>();
+
+            let mut base_select = SelectAllDrain::new(base_futures);
+            let base_result = match poll_once(&mut base_select) {
+                Poll::Ready(Ok(result)) => result,
+                Poll::Ready(Err(err)) => panic!("unexpected SelectAllDrain error: {err}"),
+                Poll::Pending => panic!("exactly one branch should be immediately ready"),
+            };
+
+            prop_assert_eq!(base_result.value, winner_index);
+            prop_assert_eq!(base_result.winner_index, winner_index);
+            prop_assert_eq!(base_result.losers.len(), branch_count.saturating_sub(1));
+
+            let mut rotated_order = (0..branch_count).collect::<Vec<_>>();
+            rotated_order.rotate_left(shift);
+            let rotated_futures = rotated_order
+                .iter()
+                .map(|&id| {
+                    let ready_on = if id == winner_index {
+                        1
+                    } else {
+                        loser_ready_on[id % loser_ready_on.len()]
+                    };
+                    ReadyAfterPolls::new(id, ready_on)
+                })
+                .collect::<Vec<_>>();
+
+            let mut rotated_select = SelectAllDrain::new(rotated_futures);
+            let rotated_result = match poll_once(&mut rotated_select) {
+                Poll::Ready(Ok(result)) => result,
+                Poll::Ready(Err(err)) => panic!("unexpected SelectAllDrain error: {err}"),
+                Poll::Pending => panic!("rotation must preserve the immediate winner"),
+            };
+
+            let expected_rotated_winner_index =
+                (winner_index + branch_count - shift) % branch_count;
+            prop_assert_eq!(rotated_result.value, winner_index);
+            prop_assert_eq!(rotated_result.winner_index, expected_rotated_winner_index);
+            prop_assert_eq!(rotated_result.losers.len(), branch_count.saturating_sub(1));
+
+            let mut base_drained = drain_ready_after_polls(base_result.losers);
+            let mut rotated_drained = drain_ready_after_polls(rotated_result.losers);
+            base_drained.sort_unstable();
+            rotated_drained.sort_unstable();
+
+            let expected_losers = (0..branch_count)
+                .filter(|&id| id != winner_index)
+                .collect::<Vec<_>>();
+            prop_assert_eq!(base_drained, expected_losers.clone());
+            prop_assert_eq!(rotated_drained, expected_losers);
+        }
     }
 }
