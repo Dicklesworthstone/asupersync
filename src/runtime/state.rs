@@ -4266,6 +4266,7 @@ mod tests {
     use crate::types::{CancelAttributionConfig, CancelKind};
     use crate::util::ArenaIndex;
     use parking_lot::Mutex;
+    use serde_json::Value;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
@@ -4324,6 +4325,49 @@ mod tests {
     impl Wake for TestWaker {
         fn wake(self: Arc<Self>) {
             self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn scrub_runtime_snapshot_for_snapshot_test(value: Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                if map.len() == 2
+                    && map.get("index").is_some_and(Value::is_number)
+                    && map.get("generation").is_some_and(Value::is_number)
+                {
+                    return Value::String("[id]".to_string());
+                }
+
+                Value::Object(
+                    map.into_iter()
+                        .map(|(key, value)| {
+                            let scrubbed = match key.as_str() {
+                                "timestamp" if value.is_number() => {
+                                    Value::String("[timestamp]".to_string())
+                                }
+                                "created_at" if value.is_number() => {
+                                    Value::String("[created_at]".to_string())
+                                }
+                                "time" if value.is_number() => {
+                                    Value::String("[event_time]".to_string())
+                                }
+                                "deadline" if value.is_number() => {
+                                    Value::String("[deadline]".to_string())
+                                }
+                                _ => scrub_runtime_snapshot_for_snapshot_test(value),
+                            };
+                            (key, scrubbed)
+                        })
+                        .collect(),
+                )
+            }
+            Value::Array(items) => Value::Array(
+                items
+                    .into_iter()
+                    .map(scrub_runtime_snapshot_for_snapshot_test)
+                    .collect(),
+            ),
+            other => other,
         }
     }
 
@@ -5045,6 +5089,46 @@ mod tests {
             event_snapshot.version
         );
         crate::test_complete!("snapshot_preserves_event_version");
+    }
+
+    #[test]
+    fn snapshot_json_scrubs_ids_and_timestamps() {
+        init_test("snapshot_json_scrubs_ids_and_timestamps");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+
+        let (task_id, _handle) = state
+            .create_task(region, Budget::INFINITE, async { 42 })
+            .expect("task create");
+
+        let obligation_idx = state.obligations.insert(ObligationRecord::new(
+            ObligationId::from_arena(ArenaIndex::new(0, 0)),
+            ObligationKind::SendPermit,
+            task_id,
+            region,
+            state.now,
+        ));
+        let obligation_id = ObligationId::from_arena(obligation_idx);
+        state
+            .obligations
+            .get_mut(obligation_idx)
+            .expect("obligation missing")
+            .id = obligation_id;
+
+        state.trace.push_event(TraceEvent::new(
+            99,
+            Time::from_millis(42),
+            TraceEventKind::UserTrace,
+            TraceData::None,
+        ));
+
+        let snapshot = state.snapshot();
+
+        insta::assert_json_snapshot!(
+            "runtime_snapshot_entities_scrubbed",
+            scrub_runtime_snapshot_for_snapshot_test(serde_json::to_value(&snapshot).unwrap())
+        );
+        crate::test_complete!("snapshot_json_scrubs_ids_and_timestamps");
     }
 
     #[test]

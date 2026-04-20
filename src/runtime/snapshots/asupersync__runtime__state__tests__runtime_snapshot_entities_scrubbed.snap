@@ -1,0 +1,79 @@
+---
+source: src/runtime/state.rs
+expression: scrub_runtime_snapshot_for_snapshot_test(serde_json::to_value(&snapshot).unwrap())
+---
+{
+  "obligations": [
+    {
+      "created_at": "[created_at]",
+      "holder_task": "[id]",
+      "id": "[id]",
+      "kind": "SendPermit",
+      "owning_region": "[id]",
+      "state": "Reserved"
+    }
+  ],
+  "recent_events": [
+    {
+      "data": {
+        "Region": {
+          "parent": null,
+          "region": "[id]"
+        }
+      },
+      "kind": "RegionCreated",
+      "seq": 0,
+      "time": "[event_time]",
+      "version": 1
+    },
+    {
+      "data": {
+        "Task": {
+          "region": "[id]",
+          "task": "[id]"
+        }
+      },
+      "kind": "Spawn",
+      "seq": 1,
+      "time": "[event_time]",
+      "version": 1
+    },
+    {
+      "data": "None",
+      "kind": "UserTrace",
+      "seq": 99,
+      "time": "[event_time]",
+      "version": 1
+    }
+  ],
+  "regions": [
+    {
+      "budget": {
+        "cost_quota": null,
+        "deadline": null,
+        "poll_quota": 4294967295,
+        "priority": 0
+      },
+      "child_count": 0,
+      "id": "[id]",
+      "name": null,
+      "parent_id": null,
+      "state": "Open",
+      "task_count": 1
+    }
+  ],
+  "tasks": [
+    {
+      "created_at": "[created_at]",
+      "id": "[id]",
+      "name": null,
+      "obligations": [
+        "[id]"
+      ],
+      "poll_count": 0,
+      "region_id": "[id]",
+      "state": "Created"
+    }
+  ],
+  "timestamp": "[timestamp]"
+}
