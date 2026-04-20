@@ -816,6 +816,9 @@ impl NameRegistry {
     /// pending set (e.g., if the permit was already committed or the registry
     /// was cleaned up).
     pub fn commit_permit(&mut self, mut permit: NamePermit) -> Result<NameLease, NameLeaseError> {
+        if !permit.is_pending() {
+            return Err(NameLeaseError::AlreadyResolved);
+        }
         let name = permit.name().to_string();
         let Some(entry) = self.pending.remove(&name) else {
             // Abort the permit to defuse the drop bomb before returning error.
@@ -2878,6 +2881,42 @@ mod tests {
         lease.release().unwrap();
 
         crate::test_complete!("cancel_permit_rejects_stale_same_identity_replay");
+    }
+
+    #[test]
+    fn commit_permit_rejects_aborted_permit_without_mutating_registry() {
+        init_test("commit_permit_rejects_aborted_permit_without_mutating_registry");
+
+        let mut reg = NameRegistry::new();
+        let mut permit = reg
+            .reserve("svc", tid(1), rid(0), Time::ZERO)
+            .expect("reserve ok");
+        permit.abort().expect("abort permit");
+
+        let err = reg.commit_permit(permit).unwrap_err();
+        assert_eq!(err, NameLeaseError::AlreadyResolved);
+        assert_eq!(reg.whereis("svc"), None);
+        assert_eq!(
+            reg.reserve("svc", tid(2), rid(0), Time::from_secs(1))
+                .unwrap_err(),
+            NameLeaseError::NameTaken {
+                name: "svc".into(),
+                current_holder: tid(1),
+            }
+        );
+
+        let mut cleanup = NamePermit::new("svc", tid(1), rid(0), Time::ZERO, 1);
+        reg.cancel_permit(&cleanup, Time::from_secs(1))
+            .expect("cleanup pending entry");
+        cleanup.abort().expect("resolve cleanup permit");
+        let replacement = reg
+            .reserve("svc", tid(2), rid(0), Time::from_secs(2))
+            .expect("reserve after cleanup");
+        let mut lease = reg.commit_permit(replacement).expect("commit replacement");
+        reg.unregister("svc").expect("unregister replacement");
+        lease.release().expect("release replacement");
+
+        crate::test_complete!("commit_permit_rejects_aborted_permit_without_mutating_registry");
     }
 
     // ---------------------------------------------------------------
