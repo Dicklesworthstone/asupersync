@@ -1783,6 +1783,26 @@ mod tests {
     }
 
     #[test]
+    fn request_patch_matches_rfc5789_simple_example() {
+        let req = Request::patch("/file.txt")
+            .header("Host", "www.example.com")
+            .content_type("application/example")
+            .header("If-Match", "\"e0023aa4e\"")
+            .body("[description of changes]")
+            .build();
+
+        assert_eq!(req.method, Method::Patch);
+        assert_eq!(req.uri, "/file.txt");
+        assert_eq!(req.header_value("host"), Some("www.example.com"));
+        assert_eq!(req.content_type(), Some("application/example"));
+        assert_eq!(req.header_value("if-match"), Some("\"e0023aa4e\""));
+        assert_eq!(
+            std::str::from_utf8(&req.body).unwrap(),
+            "[description of changes]"
+        );
+    }
+
+    #[test]
     fn request_content_type_and_accept() {
         let req = Request::post("/api")
             .content_type("application/xml")
