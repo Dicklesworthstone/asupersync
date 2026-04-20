@@ -1822,5 +1822,69 @@ mod tests {
                 "both wheels should be empty after draining surviving timers",
             );
         }
+
+        #[test]
+        fn metamorphic_intrusive_wheel_split_advance_matches_direct_frontier(
+            offsets in prop::collection::vec(1u16..96u16, 1..12),
+            raw_split_ms in 0u16..96u16,
+        ) {
+            let base = Instant::now();
+            let mut split_wheel: TimerWheel<16> = TimerWheel::new_at(Duration::from_millis(1), base);
+            let mut direct_wheel: TimerWheel<16> = TimerWheel::new_at(Duration::from_millis(1), base);
+            let counter = Arc::new(AtomicU64::new(0));
+            let mut split_nodes: Vec<Pin<Box<TimerNode>>> =
+                (0..offsets.len()).map(|_| Box::pin(TimerNode::new())).collect();
+            let mut direct_nodes: Vec<Pin<Box<TimerNode>>> =
+                (0..offsets.len()).map(|_| Box::pin(TimerNode::new())).collect();
+
+            for (index, offset_ms) in offsets.iter().copied().enumerate() {
+                let deadline = base + Duration::from_millis(u64::from(offset_ms));
+                unsafe {
+                    split_wheel.insert(
+                        split_nodes[index].as_mut(),
+                        deadline,
+                        counter_waker(counter.clone()),
+                    );
+                    direct_wheel.insert(
+                        direct_nodes[index].as_mut(),
+                        deadline,
+                        counter_waker(counter.clone()),
+                    );
+                }
+            }
+
+            let max_offset_ms = offsets.iter().copied().max().unwrap_or(0);
+            let split_ms = raw_split_ms.min(max_offset_ms);
+            let early_target = base + Duration::from_millis(u64::from(split_ms));
+            let late_target = base + Duration::from_millis(u64::from(max_offset_ms) + 2);
+
+            let early_wakers = unsafe { split_wheel.advance_to(early_target) };
+            let late_wakers = unsafe { split_wheel.advance_to(late_target) };
+            let direct_wakers = unsafe { direct_wheel.advance_to(late_target) };
+
+            prop_assert!(
+                early_wakers.len() <= direct_wakers.len(),
+                "an earlier frontier cannot fire more timers than the later direct frontier",
+            );
+            prop_assert_eq!(
+                early_wakers.len() + late_wakers.len(),
+                direct_wakers.len(),
+                "splitting the advance must preserve the total timers fired by the final frontier",
+            );
+            prop_assert!(
+                split_wheel.is_empty() && direct_wheel.is_empty(),
+                "both wheels should be empty after advancing past the latest deadline",
+            );
+            prop_assert_eq!(
+                split_nodes.iter().filter(|node| node.is_linked()).count(),
+                0,
+                "split advance must unlink every timer node",
+            );
+            prop_assert_eq!(
+                direct_nodes.iter().filter(|node| node.is_linked()).count(),
+                0,
+                "direct advance must unlink every timer node",
+            );
+        }
     }
 }
