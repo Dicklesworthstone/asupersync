@@ -90,10 +90,15 @@ impl DecodeProof {
 
 #[inline]
 fn recovered_source_hash(source: &[Vec<u8>]) -> u64 {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hasher;
 
     let mut hasher = DetHasher::default();
-    source.hash(&mut hasher);
+    hasher.write_u64(0x5251_5052_4f4f_4653);
+    hasher.write_usize(source.len());
+    for row in source {
+        hasher.write_usize(row.len());
+        hasher.write(row);
+    }
     hasher.finish()
 }
 
@@ -1012,6 +1017,35 @@ mod tests {
         let proof2 = builder2.build();
 
         assert_eq!(proof1.content_hash(), proof2.content_hash());
+    }
+
+    #[test]
+    fn recovered_source_hash_binds_symbol_boundaries() {
+        let split_symbols = vec![vec![0x10, 0x20], vec![0x30, 0x40]];
+        let merged_suffix = vec![vec![0x10], vec![0x20, 0x30, 0x40]];
+
+        assert_eq!(
+            split_symbols.concat(),
+            merged_suffix.concat(),
+            "test setup should keep the flattened payload identical"
+        );
+        assert_ne!(
+            recovered_source_hash(&split_symbols),
+            recovered_source_hash(&merged_suffix),
+            "proof success hash must bind per-symbol boundaries, not just flattened bytes"
+        );
+    }
+
+    #[test]
+    fn recovered_source_hash_binds_symbol_order() {
+        let ordered = vec![vec![0xAA, 0x01], vec![0xBB, 0x02], vec![0xCC, 0x03]];
+        let reordered = vec![vec![0xCC, 0x03], vec![0xBB, 0x02], vec![0xAA, 0x01]];
+
+        assert_ne!(
+            recovered_source_hash(&ordered),
+            recovered_source_hash(&reordered),
+            "proof success hash must distinguish reordered recovered source symbols"
+        );
     }
 
     #[test]
