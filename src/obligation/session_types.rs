@@ -99,7 +99,9 @@
 //!
 //! The async methods (`send_async`, `recv_async`, `select_*_async`, `offer_async`)
 //! require transport backing and take `&Cx` for cancellation and budget enforcement.
-//! When the peer drops or `Cx` is cancelled, they return `SessionError`.
+//! When called on a pure typestate channel they fail closed with
+//! `SessionError::NoTransport`; when the peer drops or `Cx` is cancelled, they
+//! return the corresponding `SessionError`.
 //!
 //! # Supported Scope
 //!
@@ -1171,6 +1173,7 @@ pub struct TracingContract;
 ///
 /// | Condition | Behavior |
 /// |-----------|----------|
+/// | Pure typestate channel | `SessionError::NoTransport` — async transport surface is unavailable |
 /// | Cancelled Cx | `SessionError::Cancelled` — permit aborted |
 /// | Receiver dropped | `SessionError::Closed` — send returns error |
 /// | Sender dropped | `SessionError::Closed` — recv returns None |
