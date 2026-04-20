@@ -107,8 +107,6 @@ mod tests {
     use std::task::Waker;
     use tempfile::tempdir;
 
-
-
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }

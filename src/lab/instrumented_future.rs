@@ -1049,16 +1049,9 @@ mod tests {
     use std::task::{Poll, Wake, Waker};
 
     /// A simple noop waker for testing.
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-        fn wake_by_ref(self: &Arc<Self>) {}
-    }
-
     /// Creates a noop waker for testing.
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     /// A future that yields a specific number of times before completing.

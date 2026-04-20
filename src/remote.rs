@@ -2644,14 +2644,8 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
 
-    struct TestNoopWaker;
-
-    impl Wake for TestNoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(TestNoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     fn lamport_raw(time: &LogicalTime) -> u64 {

@@ -16,8 +16,6 @@ mod tests {
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
-
-
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }

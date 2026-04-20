@@ -456,15 +456,8 @@ mod tests {
     use std::sync::Arc;
     use std::task::Wake;
 
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-        fn wake_by_ref(self: &Arc<Self>) {}
-    }
-
     fn test_waker() -> Waker {
-        Arc::new(NoopWaker).into()
+        std::task::Waker::noop().clone()
     }
 
     fn init_test(name: &str) {

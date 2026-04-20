@@ -1195,7 +1195,7 @@ mod tests {
     }
 
     fn noop_waker() -> Waker {
-        Waker::from(std::sync::Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {

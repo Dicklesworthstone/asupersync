@@ -1019,15 +1019,8 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
 
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-        fn wake_by_ref(self: &Arc<Self>) {}
-    }
-
     fn noop_waker() -> Waker {
-        Arc::new(NoopWaker).into()
+        std::task::Waker::noop().clone()
     }
 
     #[derive(Clone, Debug)]
@@ -1494,15 +1487,8 @@ mod tests {
         use std::task::{Context, Poll, Wake, Waker};
         use std::time::Duration;
 
-        struct NoopWaker;
-
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-            fn wake_by_ref(self: &Arc<Self>) {}
-        }
-
         fn noop_waker() -> Waker {
-            Arc::new(NoopWaker).into()
+            std::task::Waker::noop().clone()
         }
 
         fn test_cx_with_timer() -> (Cx, Arc<VirtualClock>, TimerDriverHandle) {

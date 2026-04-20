@@ -1731,7 +1731,11 @@ mod tests {
         dag.set_root(outer);
 
         let report = dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::JoinAssoc]);
-        assert_eq!(report.steps().len(), 1, "expected a single join-assoc rewrite");
+        assert_eq!(
+            report.steps().len(),
+            1,
+            "expected a single join-assoc rewrite"
+        );
 
         insta::assert_snapshot!(
             "rewrite_report_summary_scrubbed",

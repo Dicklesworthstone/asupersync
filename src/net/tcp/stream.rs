@@ -1018,12 +1018,6 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
     use std::time::Duration;
 
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
     struct CountingWaker {
         hits: Arc<AtomicUsize>,
     }
@@ -1039,7 +1033,7 @@ mod tests {
     }
 
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     struct CountingReactor {

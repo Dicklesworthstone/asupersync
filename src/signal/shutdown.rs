@@ -243,8 +243,6 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-
-
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }

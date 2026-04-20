@@ -1217,14 +1217,6 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-
-        fn wake_by_ref(self: &Arc<Self>) {}
-    }
-
     #[test]
     fn writer_permit_release_wakes_first_waiter() {
         future::block_on(async {
@@ -1278,8 +1270,8 @@ mod tests {
             let mut first_waiter = Box::pin(acquire_write_permit(&read.shared));
             let mut second_waiter = Box::pin(acquire_write_permit(&read.shared));
 
-            let first_waker: Waker = Waker::from(Arc::new(NoopWake));
-            let second_waker: Waker = Waker::from(Arc::new(NoopWake));
+            let first_waker: Waker = std::task::Waker::noop().clone();
+            let second_waker: Waker = std::task::Waker::noop().clone();
             let mut first_context = Context::from_waker(&first_waker);
             let mut second_context = Context::from_waker(&second_waker);
 
@@ -1464,7 +1456,7 @@ mod tests {
             let expected_cancelled = encode_server_frame(Frame::from(cancelled.clone()));
             let expected_delivered = encode_server_frame(Frame::from(delivered.clone()));
             let mut cancelled_send = Box::pin(write.send(&cx, cancelled));
-            let waker = Waker::from(Arc::new(NoopWake));
+            let waker = std::task::Waker::noop().clone();
             let mut poll_cx = Context::from_waker(&waker);
 
             assert!(
@@ -1505,7 +1497,7 @@ mod tests {
             let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0x46, 0xD0, 0x1B, 0x0A]));
             let cx = test_cx_with_entropy(Arc::clone(&entropy));
             let mut cancelled_recv = Box::pin(read.recv(&cx));
-            let waker = Waker::from(Arc::new(NoopWake));
+            let waker = std::task::Waker::noop().clone();
             let mut poll_cx = Context::from_waker(&waker);
 
             assert!(
@@ -1558,7 +1550,7 @@ mod tests {
             let expected =
                 encode_client_frame_with_entropy(&Frame::close(Some(1000), None), entropy.as_ref());
             let mut cancelled_recv = Box::pin(read.recv(&cx));
-            let waker = Waker::from(Arc::new(NoopWake));
+            let waker = std::task::Waker::noop().clone();
             let mut poll_cx = Context::from_waker(&waker);
 
             assert!(
@@ -1617,7 +1609,7 @@ mod tests {
             let expected =
                 encode_client_frame_with_entropy(&Frame::close(Some(1001), None), entropy.as_ref());
             let mut cancelled_close = Box::pin(write.close(CloseReason::going_away()));
-            let waker = Waker::from(Arc::new(NoopWake));
+            let waker = std::task::Waker::noop().clone();
             let mut poll_cx = Context::from_waker(&waker);
 
             assert!(

@@ -317,13 +317,8 @@ mod tests {
     use std::sync::Arc;
     use std::task::Wake;
 
-    struct NoopWaker;
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn noop_waker() -> std::task::Waker {
-        Arc::new(NoopWaker).into()
+        std::task::Waker::noop().clone()
     }
 
     fn poll_once<F: Future + Unpin>(fut: &mut F) -> Poll<F::Output> {

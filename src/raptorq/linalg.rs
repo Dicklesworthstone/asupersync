@@ -33,8 +33,8 @@
 //! ```
 
 use super::gf256::{
-    gf256_add_slice, gf256_add_slices2, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice,
-    gf256_mul_slices2, Gf256,
+    Gf256, gf256_add_slice, gf256_add_slices2, gf256_addmul_slice, gf256_addmul_slices2,
+    gf256_mul_slice, gf256_mul_slices2,
 };
 
 // ============================================================================
@@ -1162,11 +1162,7 @@ mod tests {
         let lo = obj as u64;
         let mut seed = hi ^ lo.rotate_left(13);
         seed ^= u64::from(sbn) << 56;
-        if seed == 0 {
-            1
-        } else {
-            seed
-        }
+        if seed == 0 { 1 } else { seed }
     }
 
     fn create_test_decoder(symbols: &[AuthenticatedSymbol], k: usize) -> InactivationDecoder {

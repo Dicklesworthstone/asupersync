@@ -1035,7 +1035,7 @@ mod tests {
 
         {
             let mut guard = inner.lock();
-            guard.waker = Some(Waker::from(Arc::new(TestNoopWaker)));
+            guard.waker = Some(std::task::Waker::noop().clone());
             guard.waker_id = Some(7);
         }
 

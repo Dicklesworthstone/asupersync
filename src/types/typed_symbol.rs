@@ -1026,12 +1026,6 @@ mod tests {
         value: f64,
     }
 
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }

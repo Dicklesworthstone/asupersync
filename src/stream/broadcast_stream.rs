@@ -59,7 +59,7 @@ impl<T: Clone> BroadcastStream<T> {
         self.inner.clear_waiter_registration(&mut self.waiter);
 
         let mut md = std::mem::ManuallyDrop::new(self);
-        
+
         // Use ptr::read to extract inner without running Drop.
         // SAFETY: We've wrapped in ManuallyDrop, so the outer Drop will never run,
         // preventing double-frees even if cx drop panics.
@@ -131,14 +131,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Wake, Waker};
 
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     struct CountWaker(Arc<AtomicUsize>);

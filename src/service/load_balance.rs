@@ -1076,14 +1076,7 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
 
     fn noop_waker() -> Waker {
-        struct NoopWaker;
-
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-            fn wake_by_ref(self: &Arc<Self>) {}
-        }
-
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     fn init_test(name: &str) {

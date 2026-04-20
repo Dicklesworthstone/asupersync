@@ -194,29 +194,74 @@ impl FlowControlViolation {
     /// Returns a human-readable description.
     pub fn description(&self) -> String {
         match self {
-            Self::PotentialDeadlock { involved_channels, involved_tasks, cycle_description, .. } => {
-                format!("Deadlock detected: {} channels, {} tasks - {}",
-                       involved_channels.len(), involved_tasks.len(), cycle_description)
+            Self::PotentialDeadlock {
+                involved_channels,
+                involved_tasks,
+                cycle_description,
+                ..
+            } => {
+                format!(
+                    "Deadlock detected: {} channels, {} tasks - {}",
+                    involved_channels.len(),
+                    involved_tasks.len(),
+                    cycle_description
+                )
             }
-            Self::ProducerStarvation { channel_id, starved_task, starvation_duration_s, .. } => {
-                format!("Producer {:?} starved on channel {} for {}s",
-                       starved_task, channel_id, starvation_duration_s)
+            Self::ProducerStarvation {
+                channel_id,
+                starved_task,
+                starvation_duration_s,
+                ..
+            } => {
+                format!(
+                    "Producer {:?} starved on channel {} for {}s",
+                    starved_task, channel_id, starvation_duration_s
+                )
             }
-            Self::AtomicityViolation { channel_id, task_id, violation_type, .. } => {
-                format!("Atomicity violated on channel {} by task {:?}: {}",
-                       channel_id, task_id, violation_type)
+            Self::AtomicityViolation {
+                channel_id,
+                task_id,
+                violation_type,
+                ..
+            } => {
+                format!(
+                    "Atomicity violated on channel {} by task {:?}: {}",
+                    channel_id, task_id, violation_type
+                )
             }
-            Self::IndefiniteBlocking { channel_id, blocked_task, flow_control_type, block_duration_s, .. } => {
-                format!("Task {:?} blocked indefinitely on channel {} ({:?}) for {}s",
-                       blocked_task, channel_id, flow_control_type, block_duration_s)
+            Self::IndefiniteBlocking {
+                channel_id,
+                blocked_task,
+                flow_control_type,
+                block_duration_s,
+                ..
+            } => {
+                format!(
+                    "Task {:?} blocked indefinitely on channel {} ({:?}) for {}s",
+                    blocked_task, channel_id, flow_control_type, block_duration_s
+                )
             }
-            Self::CancellationUnblockFailure { channel_id, cancelled_task, time_since_cancel_s, .. } => {
-                format!("Cancelled task {:?} still blocked on channel {} after {}s",
-                       cancelled_task, channel_id, time_since_cancel_s)
+            Self::CancellationUnblockFailure {
+                channel_id,
+                cancelled_task,
+                time_since_cancel_s,
+                ..
+            } => {
+                format!(
+                    "Cancelled task {:?} still blocked on channel {} after {}s",
+                    cancelled_task, channel_id, time_since_cancel_s
+                )
             }
-            Self::FlowControlInconsistency { channel_id, expected_state, actual_state, .. } => {
-                format!("Flow control inconsistency on channel {}: expected '{}', got '{}'",
-                       channel_id, expected_state, actual_state)
+            Self::FlowControlInconsistency {
+                channel_id,
+                expected_state,
+                actual_state,
+                ..
+            } => {
+                format!(
+                    "Flow control inconsistency on channel {}: expected '{}', got '{}'",
+                    channel_id, expected_state, actual_state
+                )
             }
         }
     }
@@ -401,7 +446,9 @@ impl DeadlockDetector {
                     }
 
                     if !visited.contains(&next_task) {
-                        if let Some(cycle) = self.dfs_detect_cycle(next_task, visited, recursion_stack, current_path) {
+                        if let Some(cycle) =
+                            self.dfs_detect_cycle(next_task, visited, recursion_stack, current_path)
+                        {
                             return Some(cycle);
                         }
                     }
@@ -537,7 +584,13 @@ impl FlowControlMonitor {
     /// Updates internal state based on a flow control event.
     fn update_state_from_event(&mut self, event: &FlowControlEvent) {
         match event {
-            FlowControlEvent::ProducerBlocked { channel_id, task_id, reason, timestamp, .. } => {
+            FlowControlEvent::ProducerBlocked {
+                channel_id,
+                task_id,
+                reason,
+                timestamp,
+                ..
+            } => {
                 let task_state = self
                     .task_states
                     .entry(*task_id)
@@ -561,7 +614,12 @@ impl FlowControlMonitor {
                 self.deadlock_detector.add_dependency(*task_id, *channel_id);
             }
 
-            FlowControlEvent::ProducerUnblocked { channel_id, task_id, blocked_duration_ms, .. } => {
+            FlowControlEvent::ProducerUnblocked {
+                channel_id,
+                task_id,
+                blocked_duration_ms,
+                ..
+            } => {
                 if let Some(task_state) = self.task_states.get_mut(task_id) {
                     task_state.blocked_channels.remove(channel_id);
                     task_state.total_blocked_time_ms += blocked_duration_ms;
@@ -576,7 +634,8 @@ impl FlowControlMonitor {
                 }
 
                 // Update deadlock detection graph
-                self.deadlock_detector.remove_dependency(*task_id, *channel_id);
+                self.deadlock_detector
+                    .remove_dependency(*task_id, *channel_id);
 
                 // Update statistics
                 if *blocked_duration_ms > self.stats.max_block_time_ms {
@@ -584,7 +643,12 @@ impl FlowControlMonitor {
                 }
             }
 
-            FlowControlEvent::BackpressureApplied { channel_id, consumer_task, queue_depth, timestamp } => {
+            FlowControlEvent::BackpressureApplied {
+                channel_id,
+                consumer_task,
+                queue_depth,
+                timestamp,
+            } => {
                 let channel_state = self
                     .channel_states
                     .entry(*channel_id)
@@ -599,7 +663,11 @@ impl FlowControlMonitor {
                 }
             }
 
-            FlowControlEvent::BackpressureReleased { channel_id, consumer_task, .. } => {
+            FlowControlEvent::BackpressureReleased {
+                channel_id,
+                consumer_task,
+                ..
+            } => {
                 if let Some(channel_state) = self.channel_states.get_mut(channel_id) {
                     channel_state.backpressure_consumers.remove(consumer_task);
 
@@ -610,7 +678,13 @@ impl FlowControlMonitor {
                 }
             }
 
-            FlowControlEvent::ReserveBlocked { channel_id, task_id, permit_id, timestamp, .. } => {
+            FlowControlEvent::ReserveBlocked {
+                channel_id,
+                task_id,
+                permit_id,
+                timestamp,
+                ..
+            } => {
                 let task_state = self
                     .task_states
                     .entry(*task_id)
@@ -649,7 +723,8 @@ impl FlowControlMonitor {
                 if let Some(channel_state) = self.channel_states.get_mut(channel_id) {
                     channel_state.blocked_tasks.remove(task_id);
                 }
-                self.deadlock_detector.remove_dependency(*task_id, *channel_id);
+                self.deadlock_detector
+                    .remove_dependency(*task_id, *channel_id);
 
                 if *blocked_duration_ms > self.stats.max_block_time_ms {
                     self.stats.max_block_time_ms = *blocked_duration_ms;
@@ -673,7 +748,8 @@ impl FlowControlMonitor {
                 if let Some(channel_state) = self.channel_states.get_mut(channel_id) {
                     channel_state.blocked_tasks.remove(task_id);
                 }
-                self.deadlock_detector.remove_dependency(*task_id, *channel_id);
+                self.deadlock_detector
+                    .remove_dependency(*task_id, *channel_id);
             }
 
             FlowControlEvent::CommitFlowControlled { .. } => {} // Handle other events as needed
@@ -721,12 +797,17 @@ impl FlowControlMonitor {
 
         for (&task_id, task_state) in &self.task_states {
             if let Some(first_block_time) = task_state.first_block_time {
-                let blocked_duration_ns = current_time.as_nanos().saturating_sub(first_block_time.as_nanos());
+                let blocked_duration_ns = current_time
+                    .as_nanos()
+                    .saturating_sub(first_block_time.as_nanos());
 
-                if blocked_duration_ns >= starvation_threshold_ns && !task_state.blocked_channels.is_empty() {
+                if blocked_duration_ns >= starvation_threshold_ns
+                    && !task_state.blocked_channels.is_empty()
+                {
                     for &channel_id in &task_state.blocked_channels {
                         // Count other producers that were served recently
-                        let other_producers_served = self.count_recently_served_producers(channel_id, current_time);
+                        let other_producers_served =
+                            self.count_recently_served_producers(channel_id, current_time);
 
                         let violation = FlowControlViolation::ProducerStarvation {
                             channel_id,
@@ -754,7 +835,9 @@ impl FlowControlMonitor {
 
         for (&task_id, task_state) in &self.task_states {
             if let Some(first_block_time) = task_state.first_block_time {
-                let blocked_duration_ns = current_time.as_nanos().saturating_sub(first_block_time.as_nanos());
+                let blocked_duration_ns = current_time
+                    .as_nanos()
+                    .saturating_sub(first_block_time.as_nanos());
 
                 if blocked_duration_ns >= blocking_threshold_ns {
                     for &channel_id in &task_state.blocked_channels {
@@ -794,8 +877,9 @@ impl FlowControlMonitor {
                 continue;
             }
 
-            let time_since_cancel_ns =
-                current_time.as_nanos().saturating_sub(cancel_time.as_nanos());
+            let time_since_cancel_ns = current_time
+                .as_nanos()
+                .saturating_sub(cancel_time.as_nanos());
             if time_since_cancel_ns < cancellation_threshold_ns {
                 continue;
             }
@@ -839,8 +923,8 @@ impl FlowControlMonitor {
                             channel_id: *channel_id,
                             task_id: *task_id,
                             permit_id: *permit_id,
-                            violation_type:
-                                "commit_flow_controlled_without_pending_reserve".to_string(),
+                            violation_type: "commit_flow_controlled_without_pending_reserve"
+                                .to_string(),
                             timestamp: current_time,
                         },
                         current_time,
@@ -891,13 +975,13 @@ impl FlowControlMonitor {
 
         self.events
             .iter()
-            .filter(|event| {
-                match event {
-                    FlowControlEvent::ProducerUnblocked { channel_id: cid, timestamp, .. } => {
-                        *cid == channel_id && timestamp.as_nanos() >= cutoff_time
-                    }
-                    _ => false,
-                }
+            .filter(|event| match event {
+                FlowControlEvent::ProducerUnblocked {
+                    channel_id: cid,
+                    timestamp,
+                    ..
+                } => *cid == channel_id && timestamp.as_nanos() >= cutoff_time,
+                _ => false,
             })
             .count()
     }
@@ -920,7 +1004,8 @@ impl FlowControlMonitor {
             _ => {}
         }
 
-        let related_events = self.events
+        let related_events = self
+            .events
             .iter()
             .rev()
             .take(10) // Last 10 events for context
@@ -960,19 +1045,22 @@ impl FlowControlMonitor {
         let mut stats = self.stats.clone();
 
         // Update dynamic statistics
-        stats.channels_under_flow_control = self.channel_states
+        stats.channels_under_flow_control = self
+            .channel_states
             .values()
             .filter(|state| !state.active_controls.is_empty())
             .count() as u64;
 
-        stats.tasks_currently_blocked = self.task_states
+        stats.tasks_currently_blocked = self
+            .task_states
             .values()
             .filter(|state| !state.blocked_channels.is_empty())
             .count() as u64;
 
         // Calculate average block time
         if stats.total_events > 0 {
-            let total_block_time: u64 = self.task_states
+            let total_block_time: u64 = self
+                .task_states
                 .values()
                 .map(|state| state.total_blocked_time_ms)
                 .sum();
@@ -1001,7 +1089,9 @@ impl FlowControlMonitor {
     pub fn cleanup_old_state(&mut self, current_time: Time) {
         const MAX_TASK_AGE_S: u64 = 300; // 5 minutes
         let cutoff_time = Time::from_nanos(
-            current_time.as_nanos().saturating_sub(MAX_TASK_AGE_S * 1_000_000_000)
+            current_time
+                .as_nanos()
+                .saturating_sub(MAX_TASK_AGE_S * 1_000_000_000),
         );
 
         // Remove old task states for completed/cancelled tasks
@@ -1021,9 +1111,9 @@ impl FlowControlMonitor {
 
         // Clean up empty channel states
         self.channel_states.retain(|_, state| {
-            !state.blocked_tasks.is_empty() ||
-            state.backpressure_active ||
-            !state.active_controls.is_empty()
+            !state.blocked_tasks.is_empty()
+                || state.backpressure_active
+                || !state.active_controls.is_empty()
         });
     }
 }
@@ -1085,7 +1175,11 @@ mod tests {
 
         let violation = &monitor.violations[0];
         match &violation.violation {
-            FlowControlViolation::ProducerStarvation { starved_task, starvation_duration_s, .. } => {
+            FlowControlViolation::ProducerStarvation {
+                starved_task,
+                starvation_duration_s,
+                ..
+            } => {
                 assert_eq!(*starved_task, task_id);
                 assert_eq!(*starvation_duration_s, 2);
             }
@@ -1117,7 +1211,11 @@ mod tests {
 
         assert!(!deadlocks.is_empty());
         match &deadlocks[0] {
-            FlowControlViolation::PotentialDeadlock { involved_tasks, involved_channels, .. } => {
+            FlowControlViolation::PotentialDeadlock {
+                involved_tasks,
+                involved_channels,
+                ..
+            } => {
                 assert!(involved_tasks.contains(&task1));
                 assert!(involved_tasks.contains(&task2));
                 assert!(involved_channels.contains(&channel1));
@@ -1159,7 +1257,11 @@ mod tests {
 
         let violation = &monitor.violations[0];
         match &violation.violation {
-            FlowControlViolation::IndefiniteBlocking { blocked_task, block_duration_s, .. } => {
+            FlowControlViolation::IndefiniteBlocking {
+                blocked_task,
+                block_duration_s,
+                ..
+            } => {
                 assert_eq!(*blocked_task, task_id);
                 assert_eq!(*block_duration_s, 2);
             }

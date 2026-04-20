@@ -2917,7 +2917,10 @@ pub mod span_semantics {
                 "db.query",
                 HashMap::from([
                     ("statement".to_string(), "select".to_string()),
-                    ("traceparent".to_string(), "00-abcdef-0123456789".to_string()),
+                    (
+                        "traceparent".to_string(),
+                        "00-abcdef-0123456789".to_string(),
+                    ),
                 ]),
             );
             parent.set_status(Status::Error {
@@ -2927,8 +2930,8 @@ pub mod span_semantics {
 
             let remote_parent = SpanContext::new(
                 TraceId::from_bytes([
-                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x11, 0x12, 0x13, 0x14,
-                    0x15, 0x16, 0x17, 0x18,
+                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x11, 0x12, 0x13, 0x14, 0x15,
+                    0x16, 0x17, 0x18,
                 ]),
                 SpanId::from_bytes([0x11; 8]),
                 TraceFlags::SAMPLED,

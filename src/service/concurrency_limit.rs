@@ -389,13 +389,6 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-        fn wake_by_ref(self: &Arc<Self>) {}
-    }
-
     struct CountingWaker(AtomicUsize);
 
     impl CountingWaker {
@@ -419,7 +412,7 @@ mod tests {
     }
 
     fn noop_waker() -> Waker {
-        Arc::new(NoopWaker).into()
+        std::task::Waker::noop().clone()
     }
 
     fn has_ready_permit<S>(svc: &ConcurrencyLimit<S>) -> bool {

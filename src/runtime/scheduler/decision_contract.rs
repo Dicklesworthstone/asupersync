@@ -290,7 +290,10 @@ mod tests {
     fn scrub_decision_output(value: Value) -> Value {
         let mut scrubbed = value;
 
-        if let Some(audit) = scrubbed.get_mut("audit_entry").and_then(Value::as_object_mut) {
+        if let Some(audit) = scrubbed
+            .get_mut("audit_entry")
+            .and_then(Value::as_object_mut)
+        {
             if let Some(decision_id) = audit.get_mut("decision_id") {
                 *decision_id = Value::String("[DECISION_ID]".into());
             }

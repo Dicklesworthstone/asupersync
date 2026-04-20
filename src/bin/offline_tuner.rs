@@ -350,15 +350,19 @@ fn emit_profile_pack(
 
     // Extract selected candidate from results
     let selected_candidate = results["selected_candidate"].clone();
-    let arch_str = results["target_architecture"].as_str().unwrap_or("GenericScalar");
+    let arch_str = results["target_architecture"]
+        .as_str()
+        .unwrap_or("GenericScalar");
     let arch = match arch_str {
         "X86Avx2" => Gf256ArchitectureClass::X86Avx2,
         "Aarch64Neon" => Gf256ArchitectureClass::Aarch64Neon,
         _ => Gf256ArchitectureClass::GenericScalar,
     };
-    
-    let criteria: OptimizationCriteria = serde_json::from_value(results["optimization_criteria"].clone())?;
-    let optimal: asupersync::raptorq::offline_tuner::CandidateConfiguration = serde_json::from_value(selected_candidate.clone())?;
+
+    let criteria: OptimizationCriteria =
+        serde_json::from_value(results["optimization_criteria"].clone())?;
+    let optimal: asupersync::raptorq::offline_tuner::CandidateConfiguration =
+        serde_json::from_value(selected_candidate.clone())?;
 
     if verbose {
         println!(

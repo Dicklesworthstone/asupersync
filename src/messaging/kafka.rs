@@ -1621,7 +1621,7 @@ mod tests {
 
     #[cfg(feature = "kafka")]
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     #[test]

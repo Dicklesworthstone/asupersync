@@ -650,8 +650,6 @@ mod tests {
     }
 
     fn noop_waker() -> Waker {
-
-
         std::task::Waker::noop().clone()
     }
 

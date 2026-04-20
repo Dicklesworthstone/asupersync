@@ -423,15 +423,8 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
 
     /// A no-op waker for testing.
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-        fn wake_by_ref(self: &Arc<Self>) {}
-    }
-
     fn noop_waker() -> Waker {
-        Arc::new(NoopWaker).into()
+        std::task::Waker::noop().clone()
     }
 
     struct CountingWaker(AtomicUsize);

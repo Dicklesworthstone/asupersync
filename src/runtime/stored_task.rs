@@ -279,14 +279,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     fn init_test(test_name: &str) {

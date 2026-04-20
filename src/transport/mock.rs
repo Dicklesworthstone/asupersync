@@ -922,8 +922,6 @@ mod tests {
         assert_ne!(corrupted.symbol().data(), original.symbol().data());
     }
 
-
-
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }

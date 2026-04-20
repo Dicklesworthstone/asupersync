@@ -3810,9 +3810,9 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
 #[allow(unsafe_code)]
 mod tests {
     use super::*;
-    use crate::record::TaskRecord;
     use crate::cx::Cx;
     use crate::lab::{LabConfig, LabRuntime};
+    use crate::record::TaskRecord;
     use crate::runtime::reactor::{Event, Interest, LabReactor, Reactor};
     use crate::test_utils::init_test_logging;
     use crate::time::sleep;
@@ -3848,14 +3848,8 @@ mod tests {
         }
     }
 
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {

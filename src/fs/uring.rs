@@ -846,14 +846,8 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct TestNoopWaker;
-
-    impl std::task::Wake for TestNoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(TestNoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     fn assert_polled_after_completion(err: &io::Error, operation: &str) {

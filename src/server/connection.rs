@@ -418,8 +418,6 @@ mod tests {
 
     static TEST_NOW: AtomicU64 = AtomicU64::new(0);
 
-
-
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);

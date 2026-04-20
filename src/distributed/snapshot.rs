@@ -649,7 +649,8 @@ mod tests {
     }
 
     fn format_hex(bytes: &[u8]) -> String {
-        bytes.iter()
+        bytes
+            .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<Vec<_>>()
             .join(" ")
@@ -748,11 +749,7 @@ mod tests {
             format_hex(polls_remaining)
         );
         let _ = writeln!(out, "budget.cost_presence: {cost_presence:02x}");
-        let _ = writeln!(
-            out,
-            "budget.cost_remaining: {}",
-            format_hex(cost_remaining)
-        );
+        let _ = writeln!(out, "budget.cost_remaining: {}", format_hex(cost_remaining));
         let _ = writeln!(out, "cancel_reason.presence: {cancel_presence:02x}");
         let _ = writeln!(out, "cancel_reason.len: {}", format_hex(cancel_len));
         let _ = writeln!(out, "cancel_reason.utf8: {}", format_hex(cancel_reason));

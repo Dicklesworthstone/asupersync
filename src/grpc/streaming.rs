@@ -635,14 +635,8 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     fn init_test(name: &str) {
@@ -1410,7 +1404,9 @@ mod tests {
     fn conformance_server_streaming_completion_idempotence() {
         init_test("conformance_server_streaming_completion_idempotence");
         let mut stream = ResponseStream::<f64>::open();
-        stream.push(Ok(std::f64::consts::PI)).expect("single message");
+        stream
+            .push(Ok(std::f64::consts::PI))
+            .expect("single message");
         stream.close();
 
         let waker = noop_waker();

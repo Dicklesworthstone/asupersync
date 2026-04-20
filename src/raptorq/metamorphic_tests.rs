@@ -150,9 +150,188 @@ fn flatten_source_symbols(source_symbols: &[Vec<u8>], original_len: usize) -> Ve
         .collect()
 }
 
+fn encode_symbols(
+    data_size: usize,
+    seed: u64,
+    repair_overhead: f64,
+) -> (Vec<u8>, usize, usize, Vec<AuthenticatedSymbol>) {
+    let cx = Cx::for_testing();
+    let data = generate_test_data(data_size, seed);
+    let object_id = ObjectId::new_for_test(seed);
+    let config = RaptorQConfig {
+        encoding: crate::config::EncodingConfig {
+            repair_overhead,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let sink = CollectorSink::new();
+    let mut sender = RaptorQSenderBuilder::new()
+        .config(config.clone())
+        .transport(sink)
+        .build()
+        .expect("sender build");
+
+    let send_outcome = sender
+        .send_object(&cx, object_id, &data)
+        .expect("encoding should succeed");
+    (
+        data,
+        send_outcome.source_symbols,
+        config.encoding.symbol_size as usize,
+        sender.transport_mut().symbols().to_vec(),
+    )
+}
+
+fn decode_payload(
+    symbols: &[AuthenticatedSymbol],
+    k: usize,
+    symbol_size: usize,
+    original_len: usize,
+) -> Result<Vec<u8>, crate::raptorq::decoder::DecodeError> {
+    let decoder = create_test_decoder(symbols, k, symbol_size);
+    let received = symbols_to_received(symbols, k);
+    decoder
+        .decode(&received)
+        .map(|decoded| flatten_source_symbols(&decoded.source, original_len))
+}
+
+fn repair_backed_subset(
+    symbols: &[AuthenticatedSymbol],
+    k: usize,
+    symbol_size: usize,
+    original: &[u8],
+) -> Vec<AuthenticatedSymbol> {
+    let withheld_sources = 2.min(k.saturating_sub(1));
+    let kept_source_count = k.saturating_sub(withheld_sources);
+    let (source_symbols, repair_symbols): (Vec<_>, Vec<_>) = symbols
+        .iter()
+        .cloned()
+        .partition(|symbol| matches!(symbol.symbol().kind(), crate::types::SymbolKind::Source));
+
+    assert_eq!(
+        source_symbols.len(),
+        k,
+        "fixture should expose exactly K source symbols"
+    );
+    assert!(
+        !repair_symbols.is_empty(),
+        "fixture should expose repair symbols for subset decode"
+    );
+
+    let mut candidates = Vec::with_capacity(symbols.len());
+    candidates.extend(source_symbols.iter().take(kept_source_count).cloned());
+    candidates.extend(repair_symbols.iter().cloned());
+    candidates.extend(source_symbols.iter().skip(kept_source_count).cloned());
+
+    let mut subset = Vec::new();
+    let mut used_repairs = 0usize;
+    for symbol in candidates {
+        if matches!(symbol.symbol().kind(), crate::types::SymbolKind::Repair) {
+            used_repairs += 1;
+        }
+        subset.push(symbol);
+        if let Ok(payload) = decode_payload(&subset, k, symbol_size, original.len()) {
+            if payload == original && used_repairs > 0 && subset.len() < symbols.len() {
+                return subset;
+            }
+        }
+    }
+
+    panic!("failed to find a repair-backed decodable subset for deterministic fixture");
+}
+
 // ============================================================================
 // Metamorphic Relations
 // ============================================================================
+
+#[test]
+fn mr_subset_roundtrip_identity_on_fixed_fixture() {
+    let (data, k, symbol_size, symbols) = encode_symbols(1280, 0x1A2B_3C4D, 2.2);
+    let subset = repair_backed_subset(&symbols, k, symbol_size, &data);
+
+    assert!(
+        subset.len() < symbols.len(),
+        "subset relation should use fewer symbols than the full emission"
+    );
+    assert!(
+        subset
+            .iter()
+            .any(|symbol| matches!(symbol.symbol().kind(), crate::types::SymbolKind::Repair)),
+        "subset relation should exercise repair-backed recovery"
+    );
+
+    let payload = decode_payload(&subset, k, symbol_size, data.len())
+        .expect("repair-backed subset should decode");
+    assert_eq!(payload, data, "subset roundtrip must preserve payload");
+}
+
+#[test]
+fn mr_symbol_permutation_preserves_payload_on_fixed_fixture() {
+    let (data, k, symbol_size, symbols) = encode_symbols(1280, 0x5566_7788, 2.2);
+    let subset = repair_backed_subset(&symbols, k, symbol_size, &data);
+    let original_payload =
+        decode_payload(&subset, k, symbol_size, data.len()).expect("original subset should decode");
+
+    use crate::util::DetRng;
+    let mut rng = DetRng::new(0xABCD_EF01);
+    let mut permuted = subset.clone();
+    for i in (1..permuted.len()).rev() {
+        let j = (rng.next_u32() as usize) % (i + 1);
+        permuted.swap(i, j);
+    }
+
+    let permuted_payload = decode_payload(&permuted, k, symbol_size, data.len())
+        .expect("permuted subset should still decode");
+    assert_eq!(
+        permuted_payload, original_payload,
+        "permuting received symbols must not change decoded payload"
+    );
+    assert_eq!(
+        permuted_payload, data,
+        "permuted decode must preserve identity"
+    );
+}
+
+#[test]
+fn mr_extra_repair_symbols_do_not_reduce_success_on_fixed_fixture() {
+    let (data, k, symbol_size, symbols) = encode_symbols(1280, 0xCAFEBABE, 2.4);
+    let base_subset = repair_backed_subset(&symbols, k, symbol_size, &data);
+    let base_payload = decode_payload(&base_subset, k, symbol_size, data.len())
+        .expect("base repair-backed subset should decode");
+
+    let used_esis: Vec<_> = base_subset
+        .iter()
+        .map(|symbol| symbol.symbol().esi())
+        .collect();
+    let mut extended_subset = base_subset.clone();
+    extended_subset.extend(
+        symbols
+            .iter()
+            .filter(|symbol| {
+                matches!(symbol.symbol().kind(), crate::types::SymbolKind::Repair)
+                    && !used_esis.contains(&symbol.symbol().esi())
+            })
+            .take(2)
+            .cloned(),
+    );
+
+    assert!(
+        extended_subset.len() > base_subset.len(),
+        "fixture should provide extra repair symbols beyond the base subset"
+    );
+
+    let extended_payload = decode_payload(&extended_subset, k, symbol_size, data.len())
+        .expect("adding extra repair symbols must not break decode");
+    assert_eq!(
+        extended_payload, base_payload,
+        "additional repair symbols must preserve decoded payload"
+    );
+    assert_eq!(
+        extended_payload, data,
+        "extended repair set must preserve identity"
+    );
+}
 
 /// MR1: Encode-Decode Identity (Invertive)
 /// Property: decode(encode(data)) = data

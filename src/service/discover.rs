@@ -837,20 +837,24 @@ mod tests {
         let discovery = Arc::new(DnsServiceDiscovery::new(
             DnsDiscoveryConfig::new("service.test", 80)
                 .poll_interval(Duration::ZERO)
-                .with_resolver(move |_, _| match call_count_for_resolver.fetch_add(1, Ordering::SeqCst) {
-                    0 => {
-                        first_started_tx
-                            .send(())
-                            .expect("first-started channel should be open");
-                        let (lock, ready) = &*release_first_for_resolver;
-                        let mut released = lock.lock().expect("release lock poisoned");
-                        while !*released {
-                            released = ready.wait(released).expect("release wait poisoned");
+                .with_resolver(move |_, _| {
+                    match call_count_for_resolver.fetch_add(1, Ordering::SeqCst) {
+                        0 => {
+                            first_started_tx
+                                .send(())
+                                .expect("first-started channel should be open");
+                            let (lock, ready) = &*release_first_for_resolver;
+                            let mut released = lock.lock().expect("release lock poisoned");
+                            while !*released {
+                                released = ready.wait(released).expect("release wait poisoned");
+                            }
+                            drop(released);
+                            Ok(socket_set(&["127.0.0.1:80"]))
                         }
-                        drop(released);
-                        Ok(socket_set(&["127.0.0.1:80"]))
+                        other => {
+                            panic!("concurrent follower should not start resolver call {other}")
+                        }
                     }
-                    other => panic!("concurrent follower should not start resolver call {other}"),
                 }),
         ));
 
@@ -865,10 +869,7 @@ mod tests {
             .join()
             .expect("second worker should not panic")
             .expect("second poll should succeed");
-        assert_eq!(
-            second_result,
-            Vec::<Change<SocketAddr>>::new()
-        );
+        assert_eq!(second_result, Vec::<Change<SocketAddr>>::new());
 
         let (lock, ready) = &*release_first;
         *lock.lock().expect("release lock poisoned") = true;
@@ -885,9 +886,7 @@ mod tests {
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
         assert_eq!(discovery.endpoints(), vec!["127.0.0.1:80".parse().unwrap()]);
         assert_eq!(discovery.resolve_count(), 1);
-        crate::test_complete!(
-            "dns_discovery_concurrent_followers_coalesce_onto_inflight_success"
-        );
+        crate::test_complete!("dns_discovery_concurrent_followers_coalesce_onto_inflight_success");
     }
 
     #[test]
@@ -901,20 +900,24 @@ mod tests {
         let discovery = Arc::new(DnsServiceDiscovery::new(
             DnsDiscoveryConfig::new("service.test", 80)
                 .poll_interval(Duration::ZERO)
-                .with_resolver(move |_, _| match call_count_for_resolver.fetch_add(1, Ordering::SeqCst) {
-                    0 => {
-                        first_started_tx
-                            .send(())
-                            .expect("first-started channel should be open");
-                        let (lock, ready) = &*release_first_for_resolver;
-                        let mut released = lock.lock().expect("release lock poisoned");
-                        while !*released {
-                            released = ready.wait(released).expect("release wait poisoned");
+                .with_resolver(move |_, _| {
+                    match call_count_for_resolver.fetch_add(1, Ordering::SeqCst) {
+                        0 => {
+                            first_started_tx
+                                .send(())
+                                .expect("first-started channel should be open");
+                            let (lock, ready) = &*release_first_for_resolver;
+                            let mut released = lock.lock().expect("release lock poisoned");
+                            while !*released {
+                                released = ready.wait(released).expect("release wait poisoned");
+                            }
+                            drop(released);
+                            Err(std::io::Error::other("shared failure"))
                         }
-                        drop(released);
-                        Err(std::io::Error::other("shared failure"))
+                        other => {
+                            panic!("concurrent follower should not start resolver call {other}")
+                        }
                     }
-                    other => panic!("concurrent follower should not start resolver call {other}"),
                 }),
         ));
 
@@ -939,15 +942,19 @@ mod tests {
             .join()
             .expect("second worker should not panic")
             .expect_err("follower should receive shared resolver failure");
-        assert_eq!(first_err.to_string(), "DNS resolution failed: shared failure");
-        assert_eq!(second_err.to_string(), "DNS resolution failed: shared failure");
+        assert_eq!(
+            first_err.to_string(),
+            "DNS resolution failed: shared failure"
+        );
+        assert_eq!(
+            second_err.to_string(),
+            "DNS resolution failed: shared failure"
+        );
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
         assert!(discovery.endpoints().is_empty());
         assert_eq!(discovery.resolve_count(), 0);
         assert_eq!(discovery.error_count(), 1);
-        crate::test_complete!(
-            "dns_discovery_concurrent_followers_share_inflight_failure"
-        );
+        crate::test_complete!("dns_discovery_concurrent_followers_share_inflight_failure");
     }
 
     #[test]
@@ -966,7 +973,10 @@ mod tests {
         let first_err = discovery
             .poll_discover()
             .expect_err("first refresh should fail");
-        assert_eq!(first_err.to_string(), "DNS resolution failed: first failure");
+        assert_eq!(
+            first_err.to_string(),
+            "DNS resolution failed: first failure"
+        );
 
         let first_result = discovery
             .poll_discover()

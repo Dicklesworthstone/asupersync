@@ -1578,11 +1578,6 @@ mod tests {
         use crate::remote::{NodeId, RemoteCap};
         use std::task::{Context, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
 
         let registry = crate::cx::NameRegistry::new();
@@ -1609,7 +1604,7 @@ mod tests {
             })
             .unwrap();
 
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
 
         let stored = state
@@ -1634,11 +1629,6 @@ mod tests {
     fn spawn_inherits_runtime_timer_driver() {
         use std::task::{Context, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
         let clock = Arc::new(crate::time::VirtualClock::new());
         state.set_timer_driver(crate::time::TimerDriverHandle::with_virtual_clock(clock));
@@ -1651,7 +1641,7 @@ mod tests {
             .spawn(&mut state, &cx, |cx| async move { cx.has_timer() })
             .expect("spawn should succeed");
 
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
         assert!(stored.poll(&mut poll_cx).is_ready());
 
@@ -1688,11 +1678,6 @@ mod tests {
     fn spawn_blocking_inherits_runtime_timer_driver() {
         use std::task::{Context, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
         let clock = Arc::new(crate::time::VirtualClock::new());
         state.set_timer_driver(crate::time::TimerDriverHandle::with_virtual_clock(clock));
@@ -1705,7 +1690,7 @@ mod tests {
             .spawn_blocking(&mut state, &cx, |cx| cx.has_timer())
             .expect("spawn_blocking should succeed");
 
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
         assert!(stored.poll(&mut poll_cx).is_ready());
 
@@ -1743,11 +1728,6 @@ mod tests {
         use std::sync::Arc;
         use std::task::{Context, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let region = state.create_root_region(Budget::INFINITE);
@@ -1758,7 +1738,7 @@ mod tests {
             .unwrap();
 
         // Get the stored future and poll it
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
 
         let stored = state.get_stored_future(handle.task_id()).unwrap();
@@ -1836,11 +1816,6 @@ mod tests {
         use std::sync::Arc;
         use std::task::{Context, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let region = state.create_root_region(Budget::INFINITE);
@@ -1869,7 +1844,7 @@ mod tests {
         };
 
         let mut join_fut = std::pin::pin!(handle.join(&cx));
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut ctx = Context::from_waker(&waker);
 
         assert!(join_fut.as_mut().poll(&mut ctx).is_pending());
@@ -1942,11 +1917,6 @@ mod tests {
         use std::sync::Arc;
         use std::task::{Context, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let region = state.create_root_region(Budget::INFINITE);
@@ -1961,7 +1931,7 @@ mod tests {
         let mut join_fut = std::pin::pin!(handle.join(&cx));
 
         // Create waker context
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut ctx = Context::from_waker(&waker);
 
         // Poll join - should be pending
@@ -1981,11 +1951,6 @@ mod tests {
     fn spawn_abort_cancels_task() {
         use std::sync::Arc;
         use std::task::{Context, Poll, Waker};
-
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2007,7 +1972,7 @@ mod tests {
         handle.abort();
 
         // Drive the task
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut ctx = Context::from_waker(&waker);
 
         // Task should run, see cancellation, and return "cancelled"
@@ -2153,11 +2118,6 @@ mod tests {
     fn region_spawns_tasks_in_child() {
         use std::task::{Context, Poll, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let parent = state.create_root_region(Budget::INFINITE);
@@ -2184,7 +2144,7 @@ mod tests {
                     .task_ids()
                     .contains(&handle.task_id());
 
-                let waker = Waker::from(Arc::new(NoopWaker));
+                let waker = std::task::Waker::noop().clone();
                 let mut poll_cx = Context::from_waker(&waker);
                 let poll_result = stored.poll(&mut poll_cx);
                 if let Poll::Ready(outcome) = poll_result {
@@ -2224,11 +2184,6 @@ mod tests {
         use std::sync::Arc;
         use std::task::{Context, Poll, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let region = state.create_root_region(Budget::INFINITE);
@@ -2241,7 +2196,7 @@ mod tests {
             .unwrap();
 
         // Drive the task
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut ctx = Context::from_waker(&waker);
 
         // Polling stored task should return Ready(Panicked) even if it panics (caught inside)
@@ -2265,11 +2220,6 @@ mod tests {
         use std::sync::Arc;
         use std::task::{Context, Poll, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let region = state.create_root_region(Budget::INFINITE);
@@ -2279,7 +2229,7 @@ mod tests {
         let (h2, mut t2) = scope.spawn(&mut state, &cx, |_| async { 2 }).unwrap();
 
         // Drive tasks to completion
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut ctx = Context::from_waker(&waker);
         assert!(t1.poll(&mut ctx).is_ready());
         assert!(t2.poll(&mut ctx).is_ready());
@@ -2301,11 +2251,6 @@ mod tests {
     fn race_all_aborted_task_is_drained() {
         use std::sync::Arc;
         use std::task::{Context, Poll, Waker};
-
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2345,7 +2290,7 @@ mod tests {
             })
             .unwrap();
 
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut ctx = Context::from_waker(&waker);
 
         // Drive t1 to completion (winner)
@@ -2398,11 +2343,6 @@ mod tests {
         use std::sync::Arc;
         use std::task::{Context, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let region = state.create_root_region(Budget::INFINITE);
@@ -2415,7 +2355,7 @@ mod tests {
             })
             .unwrap();
 
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
         assert!(t1.poll(&mut poll_cx).is_ready());
         assert!(t2.poll(&mut poll_cx).is_ready());
@@ -2431,11 +2371,6 @@ mod tests {
     fn race_preserves_winner_panic_over_loser_panic() {
         use std::sync::Arc;
         use std::task::{Context, Poll, Waker};
-
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2462,7 +2397,7 @@ mod tests {
             })
             .unwrap();
 
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
         assert!(t1.poll(&mut poll_cx).is_ready());
         assert!(t2.poll(&mut poll_cx).is_pending());
@@ -2481,11 +2416,6 @@ mod tests {
         use std::sync::Arc;
         use std::task::{Context, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let region = state.create_root_region(Budget::INFINITE);
@@ -2499,7 +2429,7 @@ mod tests {
             .unwrap();
         let (h3, mut t3) = scope.spawn(&mut state, &cx, |_| async { 3_i32 }).unwrap();
 
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
         assert!(t1.poll(&mut poll_cx).is_ready());
         assert!(t2.poll(&mut poll_cx).is_ready());
@@ -2516,11 +2446,6 @@ mod tests {
     fn race_all_preserves_winner_panic_over_loser_panic() {
         use std::sync::Arc;
         use std::task::{Context, Poll, Waker};
-
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2547,7 +2472,7 @@ mod tests {
             })
             .unwrap();
 
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
         assert!(t1.poll(&mut poll_cx).is_ready());
         assert!(t2.poll(&mut poll_cx).is_pending());
@@ -2644,11 +2569,6 @@ mod tests {
         use std::sync::Arc;
         use std::task::{Context, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let region = state.create_root_region(Budget::INFINITE);
@@ -2656,7 +2576,7 @@ mod tests {
 
         let (mut handle, mut stored) = scope.spawn(&mut state, &cx, |_| async { 123_i32 }).unwrap();
 
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
 
         // Before task completion, join should be pending
@@ -2686,11 +2606,6 @@ mod tests {
         // INVARIANT: Tasks spawned in child regions belong to the child, not the parent
         use std::sync::Arc;
         use std::task::{Context, Waker};
-
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2727,7 +2642,7 @@ mod tests {
                     .unwrap_or(false);
 
                 // Complete the task for clean shutdown
-                let waker = Waker::from(Arc::new(NoopWaker));
+                let waker = std::task::Waker::noop().clone();
                 let mut poll_cx = Context::from_waker(&waker);
                 if let std::task::Poll::Ready(outcome) = stored.poll(&mut poll_cx) {
                     if let Some(task) = state.task_mut(handle.task_id()) {
@@ -2775,11 +2690,6 @@ mod tests {
         use crate::types::SystemPressure;
         use std::sync::Arc;
         use std::task::{Context, Waker};
-
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
 
         let mut state = RuntimeState::new();
         let region = state.create_root_region(Budget::INFINITE);
@@ -2859,7 +2769,7 @@ mod tests {
             .unwrap();
 
         // Complete the task and verify results
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
 
         let stored = state
@@ -2910,11 +2820,6 @@ mod tests {
         use std::sync::Arc;
         use std::task::{Context, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let region = state.create_root_region(Budget::INFINITE);
@@ -2934,7 +2839,7 @@ mod tests {
         // Abort the task before it runs
         handle.abort();
 
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
 
         // Task should complete and see the cancellation
@@ -2961,11 +2866,6 @@ mod tests {
         // INVARIANT: In race operations, losers are cancelled and fully drained
         use std::sync::Arc;
         use std::task::{Context, Poll, Waker};
-
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -3008,7 +2908,7 @@ mod tests {
             })
             .unwrap();
 
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
 
         // Complete winner immediately
@@ -3120,11 +3020,6 @@ mod tests {
         use std::sync::Arc;
         use std::task::{Context, Poll, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let region = state.create_root_region(Budget::INFINITE);
@@ -3135,7 +3030,7 @@ mod tests {
         let (h2, mut t2) = scope.spawn(&mut state, &cx, |_| async { 200_i32 }).unwrap();
         let (h3, mut t3) = scope.spawn(&mut state, &cx, |_| async { 300_i32 }).unwrap();
 
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
 
         // Complete all tasks
@@ -3178,11 +3073,6 @@ mod tests {
         use std::sync::Arc;
         use std::task::{Context, Poll, Waker};
 
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let region = state.create_root_region(Budget::INFINITE);
@@ -3195,7 +3085,7 @@ mod tests {
             })
             .unwrap();
 
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
 
         // Task execution should complete with Panicked outcome

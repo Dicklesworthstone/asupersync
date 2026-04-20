@@ -866,13 +866,6 @@ mod tests {
     }
     use std::task::{Wake, Waker};
 
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-        fn wake_by_ref(self: &Arc<Self>) {}
-    }
-
     struct TrackWaker(Arc<AtomicBool>);
 
     impl Wake for TrackWaker {
@@ -886,7 +879,7 @@ mod tests {
     }
 
     fn noop_waker() -> Waker {
-        Arc::new(NoopWaker).into()
+        std::task::Waker::noop().clone()
     }
 
     // A service that fails N times then succeeds

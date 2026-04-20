@@ -175,25 +175,19 @@ pub(crate) struct DeadlineTaskSnapshot {
 impl DeadlineTaskSnapshot {
     #[must_use]
     pub(crate) fn from_task_record(task: &TaskRecord) -> Self {
-        let (
-            deadline,
-            last_checkpoint,
-            last_checkpoint_message,
-            checkpoint_count,
-            task_type,
-        ) = task.cx_inner.as_ref().map_or(
-            (None, None, None, 0, None),
-            |inner| {
-                let guard = inner.read();
-                (
-                    guard.budget.deadline,
-                    guard.checkpoint_state.last_checkpoint,
-                    guard.checkpoint_state.last_message.clone(),
-                    guard.checkpoint_state.checkpoint_count,
-                    guard.task_type.clone(),
-                )
-            },
-        );
+        let (deadline, last_checkpoint, last_checkpoint_message, checkpoint_count, task_type) =
+            task.cx_inner
+                .as_ref()
+                .map_or((None, None, None, 0, None), |inner| {
+                    let guard = inner.read();
+                    (
+                        guard.budget.deadline,
+                        guard.checkpoint_state.last_checkpoint,
+                        guard.checkpoint_state.last_message.clone(),
+                        guard.checkpoint_state.checkpoint_count,
+                        guard.task_type.clone(),
+                    )
+                });
 
         Self {
             task_id: task.id,
@@ -378,7 +372,12 @@ impl DeadlineMonitor {
     where
         I: IntoIterator<Item = &'a TaskRecord>,
     {
-        self.check_snapshots(now, tasks.into_iter().map(DeadlineTaskSnapshot::from_task_record));
+        self.check_snapshots(
+            now,
+            tasks
+                .into_iter()
+                .map(DeadlineTaskSnapshot::from_task_record),
+        );
     }
 
     pub(crate) fn check_snapshots<I>(&mut self, now: Time, tasks: I)

@@ -821,7 +821,7 @@ mod tests {
     }
 
     fn noop_waker() -> std::task::Waker {
-        std::sync::Arc::new(NoopWaker).into()
+        std::sync::std::task::Waker::noop().clone()
     }
 
     #[allow(clippy::type_complexity)]

@@ -792,8 +792,6 @@ mod tests {
         AuthenticatedSymbol::new_verified(symbol, tag)
     }
 
-
-
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }

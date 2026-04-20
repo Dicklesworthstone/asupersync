@@ -942,7 +942,7 @@ mod tests {
         impl std::task::Wake for NoopWaker {
             fn wake(self: std::sync::Arc<Self>) {}
         }
-        let waker = Waker::from(std::sync::Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut cx = Context::from_waker(&waker);
         let mut pinned = Box::pin(f);
         loop {
@@ -1206,7 +1206,7 @@ mod tests {
         impl std::task::Wake for NoopWaker {
             fn wake(self: std::sync::Arc<Self>) {}
         }
-        Waker::from(std::sync::Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     fn counting_waker(counter: Arc<AtomicUsize>) -> Waker {
@@ -2134,14 +2134,7 @@ pub mod backpressure_metamorphic {
     }
 
     fn metamorphic_noop_waker() -> Waker {
-        struct NoopWaker;
-
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-            fn wake_by_ref(self: &Arc<Self>) {}
-        }
-
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     fn projected_sender_sequences(

@@ -1270,9 +1270,9 @@ mod tests {
             total_steps: 2,
         };
 
-        let report = result.check_sheaf_consistency(Some(&[vec![crate::types::ObligationId::new_for_test(
-            0, 0,
-        )]]));
+        let report = result.check_sheaf_consistency(Some(&[vec![
+            crate::types::ObligationId::new_for_test(0, 0),
+        ]]));
 
         assert!(
             report.pairwise_conflicts.is_empty(),

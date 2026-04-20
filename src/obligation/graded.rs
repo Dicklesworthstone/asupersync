@@ -1129,7 +1129,12 @@ mod tests {
             ch.commit_send(forged, "hello".to_string())
         }));
 
-        crate::assert_with_log!(result.is_err(), "wrong kind rejected", true, result.is_err());
+        crate::assert_with_log!(
+            result.is_err(),
+            "wrong kind rejected",
+            true,
+            result.is_err()
+        );
         crate::assert_with_log!(ch.is_empty(), "no message enqueued", true, ch.is_empty());
         let retry = ch.reserve_send();
         crate::assert_with_log!(
@@ -1150,7 +1155,12 @@ mod tests {
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ch.abort_send(forged)));
 
-        crate::assert_with_log!(result.is_err(), "wrong kind rejected", true, result.is_err());
+        crate::assert_with_log!(
+            result.is_err(),
+            "wrong kind rejected",
+            true,
+            result.is_err()
+        );
         crate::assert_with_log!(ch.is_empty(), "abort does not enqueue", true, ch.is_empty());
         let retry = ch.reserve_send();
         crate::assert_with_log!(

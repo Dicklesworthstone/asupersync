@@ -4,13 +4,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use asupersync::sync::Notify;
 
-struct NoopWaker;
-impl std::task::Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-    fn wake_by_ref(self: &Arc<Self>) {}
-}
-
-fn noop_waker() -> Waker { Arc::new(NoopWaker).into() }
+fn noop_waker() -> Waker { std::task::Waker::noop().clone() }
 fn poll_once<F: Future + Unpin>(fut: &mut F) -> Poll<F::Output> {
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);

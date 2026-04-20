@@ -320,6 +320,11 @@ impl<R, S> Chan<R, S> {
         self.obligation_kind
     }
 
+    /// Take the transport backing or fail closed for async session operations.
+    fn take_transport_or_fail_closed(&mut self) -> Result<SessionTransport, SessionError> {
+        self.transport.take().ok_or(SessionError::NoTransport)
+    }
+
     /// Unsafe state transition (used by protocol methods).
     ///
     /// Consumes `self` in state `S`, returns a channel in state `S2`.
@@ -376,13 +381,9 @@ fn map_transport_send_error<T>(error: &mpsc::SendError<T>) -> SessionError {
 impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
     /// Send a value over the transport, transitioning to the continuation state.
     ///
-    /// Returns `SessionError::Cancelled` if the `Cx` is cancelled, or
+    /// Returns `SessionError::NoTransport` if this channel has no transport
+    /// backing, `SessionError::Cancelled` if the `Cx` is cancelled, or
     /// `SessionError::Closed` if the peer endpoint was dropped.
-    ///
-    /// # Panics
-    ///
-    /// Panics if this channel has no transport backing. Use [`is_transport_backed`]
-    /// to check, or construct with [`new_transport_pair`].
     pub fn send_async<'a>(
         mut self,
         cx: &'a Cx,
@@ -397,9 +398,7 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
         self.closed = true;
 
         async move {
-            let Some(transport) = self.transport.take() else {
-                return Err(SessionError::NoTransport);
-            };
+            let transport = self.take_transport_or_fail_closed()?;
 
             let boxed = Box::new(value) as Box<dyn std::any::Any + std::marker::Send>;
             if let Err(error) = transport.tx.send(cx, boxed).await {
@@ -428,7 +427,8 @@ impl<R, T, S> Chan<R, Recv<T, S>> {
 impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
     /// Receive a value from the transport, transitioning to the continuation state.
     ///
-    /// Returns `SessionError::Cancelled` if the `Cx` is cancelled, or
+    /// Returns `SessionError::NoTransport` if this channel has no transport
+    /// backing, `SessionError::Cancelled` if the `Cx` is cancelled, or
     /// `SessionError::Closed` if the peer endpoint was dropped.
     pub fn recv_async<'a>(
         mut self,
@@ -444,9 +444,7 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
         self.closed = true;
 
         async move {
-            let Some(mut transport) = self.transport.take() else {
-                return Err(SessionError::NoTransport);
-            };
+            let mut transport = self.take_transport_or_fail_closed()?;
 
             let boxed = match transport.rx.recv(cx).await {
                 Ok(boxed) => boxed,
@@ -506,10 +504,8 @@ impl<R, A, B> Chan<R, Select<A, B>> {
 
     /// Select the left branch and notify the peer via transport.
     ///
-    /// # Panics
-    ///
-    /// Panics if this channel has no transport backing. Use [`is_transport_backed`]
-    /// to check, or use [`select_left`](Self::select_left) for pure typestate mode.
+    /// Returns `SessionError::NoTransport` if this channel has no transport
+    /// backing. Use [`select_left`](Self::select_left) for pure typestate mode.
     pub fn select_left_async<'a>(
         mut self,
         cx: &'a Cx,
@@ -524,9 +520,7 @@ impl<R, A, B> Chan<R, Select<A, B>> {
         self.closed = true;
 
         async move {
-            let Some(transport) = self.transport.take() else {
-                return Err(SessionError::NoTransport);
-            };
+            let transport = self.take_transport_or_fail_closed()?;
 
             let branch = Box::new(Branch::Left) as Box<dyn std::any::Any + std::marker::Send>;
             if let Err(error) = transport.tx.send(cx, branch).await {
@@ -541,10 +535,8 @@ impl<R, A, B> Chan<R, Select<A, B>> {
 
     /// Select the right branch and notify the peer via transport.
     ///
-    /// # Panics
-    ///
-    /// Panics if this channel has no transport backing. Use [`is_transport_backed`]
-    /// to check, or use [`select_right`](Self::select_right) for pure typestate mode.
+    /// Returns `SessionError::NoTransport` if this channel has no transport
+    /// backing. Use [`select_right`](Self::select_right) for pure typestate mode.
     pub fn select_right_async<'a>(
         mut self,
         cx: &'a Cx,
@@ -559,9 +551,7 @@ impl<R, A, B> Chan<R, Select<A, B>> {
         self.closed = true;
 
         async move {
-            let Some(transport) = self.transport.take() else {
-                return Err(SessionError::NoTransport);
-            };
+            let transport = self.take_transport_or_fail_closed()?;
 
             let branch = Box::new(Branch::Right) as Box<dyn std::any::Any + std::marker::Send>;
             if let Err(error) = transport.tx.send(cx, branch).await {
@@ -590,7 +580,8 @@ impl<R, A, B> Chan<R, Offer<A, B>> {
 
     /// Wait for the peer's branch selection via transport.
     ///
-    /// Returns the channel in the chosen branch's state.
+    /// Returns `SessionError::NoTransport` if this channel has no transport
+    /// backing, otherwise the channel in the chosen branch's state.
     pub fn offer_async<'a>(
         mut self,
         cx: &'a Cx,
@@ -605,9 +596,7 @@ impl<R, A, B> Chan<R, Offer<A, B>> {
         self.closed = true;
 
         async move {
-            let Some(mut transport) = self.transport.take() else {
-                return Err(SessionError::NoTransport);
-            };
+            let mut transport = self.take_transport_or_fail_closed()?;
 
             let boxed = match transport.rx.recv(cx).await {
                 Ok(boxed) => boxed,
@@ -2414,6 +2403,33 @@ mod tests {
         futures_lite::future::block_on(async {
             let cx = Cx::for_testing();
             let result = receiver.recv_async(&cx).await;
+            assert_eq!(result.map(|_| ()), Err(SessionError::NoTransport));
+        });
+    }
+
+    #[test]
+    fn send_async_fails_without_transport_backing() {
+        let (sender, receiver) = send_permit::new_session::<u64>(312);
+        receiver.disarm_for_test();
+
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let sender = sender.send(send_permit::ReserveMsg);
+            let sender = sender.select_left();
+            let result = sender.send_async(&cx, 7).await;
+            assert_eq!(result.map(|_| ()), Err(SessionError::NoTransport));
+        });
+    }
+
+    #[test]
+    fn offer_async_fails_without_transport_backing() {
+        let (sender, receiver) = send_permit::new_session::<u64>(313);
+        sender.disarm_for_test();
+
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let (_, receiver) = receiver.recv(send_permit::ReserveMsg);
+            let result = receiver.offer_async(&cx).await;
             assert_eq!(result.map(|_| ()), Err(SessionError::NoTransport));
         });
     }

@@ -631,7 +631,9 @@ mod tests {
     #[cfg(feature = "tls")]
     use crate::test_utils::init_test_logging;
     #[cfg(feature = "tls")]
-    use crate::tls::{Certificate, CertificateChain, PrivateKey, TlsAcceptorBuilder, TlsConnectorBuilder};
+    use crate::tls::{
+        Certificate, CertificateChain, PrivateKey, TlsAcceptorBuilder, TlsConnectorBuilder,
+    };
     #[cfg(feature = "tls")]
     use futures_lite::future::{poll_fn, zip};
     #[cfg(feature = "tls")]
@@ -764,12 +766,18 @@ mod tests {
             client_result.expect("client handshake should succeed");
             server_result.expect("server handshake should succeed");
 
-            let client_state_ready = client_stream.state == TlsState::Ready && client_stream.is_ready();
-            let server_state_ready = server_stream.state == TlsState::Ready && server_stream.is_ready();
+            let client_state_ready =
+                client_stream.state == TlsState::Ready && client_stream.is_ready();
+            let server_state_ready =
+                server_stream.state == TlsState::Ready && server_stream.is_ready();
             let client_protocol = client_stream.protocol_version().is_some();
             let server_protocol = server_stream.protocol_version().is_some();
-            let client_alpn = client_stream.alpn_protocol().map(|protocol| protocol.to_vec());
-            let server_alpn = server_stream.alpn_protocol().map(|protocol| protocol.to_vec());
+            let client_alpn = client_stream
+                .alpn_protocol()
+                .map(|protocol| protocol.to_vec());
+            let server_alpn = server_stream
+                .alpn_protocol()
+                .map(|protocol| protocol.to_vec());
 
             let mut checkpoints = checkpoints;
             checkpoints.push(serde_json::json!({

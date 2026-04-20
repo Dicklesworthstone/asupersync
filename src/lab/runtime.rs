@@ -2811,7 +2811,7 @@ mod tests {
 
     #[cfg(unix)]
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     /// Waker that sets an `AtomicBool` when woken (for virtual time tests).

@@ -1071,14 +1071,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
 
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     fn counting_waker(counter: Arc<AtomicUsize>) -> Waker {

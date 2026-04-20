@@ -108,12 +108,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
 
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
     struct CountWaker {
         wakes: AtomicUsize,
     }
@@ -125,7 +119,7 @@ mod tests {
     }
 
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     fn poll_next<S: Stream + Unpin>(stream: &mut S) -> Poll<Option<S::Item>> {

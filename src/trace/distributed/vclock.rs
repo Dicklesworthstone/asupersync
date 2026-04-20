@@ -892,8 +892,8 @@ impl CausalTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
     use crate::time::VirtualClock;
+    use serde_json::{Value, json};
     use std::sync::Arc;
 
     fn node(name: &str) -> NodeId {

@@ -2199,10 +2199,7 @@ mod tests {
             payload: b"{\"event\":\"published\",\"seq\":12}".to_vec(),
         };
 
-        insta::assert_json_snapshot!(
-            "nats_pubsub_event_scrubbed",
-            message_event_snapshot(&msg)
-        );
+        insta::assert_json_snapshot!("nats_pubsub_event_scrubbed", message_event_snapshot(&msg));
     }
 
     #[test]

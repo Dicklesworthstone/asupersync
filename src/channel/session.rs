@@ -366,7 +366,7 @@ mod tests {
         impl std::task::Wake for NoopWaker {
             fn wake(self: std::sync::Arc<Self>) {}
         }
-        let waker = Waker::from(std::sync::Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut cx = Context::from_waker(&waker);
         let mut pinned = Box::pin(f);
         loop {
@@ -1428,10 +1428,7 @@ mod tests {
 
                 let sender_task_cx = sender_cx.clone();
                 let sender = LabRuntimeTarget::spawn(&sender_cx, Budget::INFINITE, async move {
-                    let permit = tx
-                        .reserve(&sender_task_cx)
-                        .await
-                        .expect("reserve failed");
+                    let permit = tx.reserve(&sender_task_cx).await.expect("reserve failed");
                     tracing::info!(
                         event = %serde_json::json!({
                             "phase": "reserved",
@@ -1445,10 +1442,7 @@ mod tests {
                 let receiver_task_cx = receiver_cx.clone();
                 let receiver =
                     LabRuntimeTarget::spawn(&receiver_cx, Budget::INFINITE, async move {
-                        let value = rx
-                            .recv(&receiver_task_cx)
-                            .await
-                            .expect("recv failed");
+                        let value = rx.recv(&receiver_task_cx).await.expect("recv failed");
                         tracing::info!(
                             event = %serde_json::json!({
                                 "phase": "received",

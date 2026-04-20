@@ -1127,11 +1127,7 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        hosts.sort_by(|left, right| {
-            left["host"]
-                .as_str()
-                .cmp(&right["host"].as_str())
-        });
+        hosts.sort_by(|left, right| left["host"].as_str().cmp(&right["host"].as_str()));
 
         let mut partitions = net
             .partitions
