@@ -485,6 +485,7 @@ impl Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -755,5 +756,41 @@ mod tests {
         let ok = b"hello"[..] == b1;
         crate::assert_with_log!(ok, "slice == b1", b1, b"hello".as_slice());
         crate::test_complete!("test_bytes_equality");
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_slice_matches_split_extraction(
+            data in prop::collection::vec(any::<u8>(), 0..128),
+            start in 0usize..128,
+            end in 0usize..128,
+        ) {
+            let bytes = Bytes::copy_from_slice(&data);
+            let len = bytes.len();
+            let start = start.min(len);
+            let end = end.min(len);
+            let (start, end) = if start <= end {
+                (start, end)
+            } else {
+                (end, start)
+            };
+
+            let direct = bytes.slice(start..end);
+
+            let mut split_view = bytes.clone();
+            let _prefix = split_view.split_to(start);
+            let middle = split_view.split_to(end - start);
+
+            prop_assert_eq!(
+                &direct[..],
+                &middle[..],
+                "direct slicing and split-based extraction must expose identical contiguous bytes",
+            );
+            prop_assert_eq!(
+                &direct[..],
+                &data[start..end],
+                "both extraction paths must match the original contiguous source slice",
+            );
+        }
     }
 }
