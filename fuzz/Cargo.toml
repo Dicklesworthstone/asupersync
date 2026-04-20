@@ -876,6 +876,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "length_delimited_encode_width"
+path = "fuzz_targets/length_delimited_encode_width.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "postgres_scram"
 path = "fuzz_targets/postgres_scram.rs"
 test = false

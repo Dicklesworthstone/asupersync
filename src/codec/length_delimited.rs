@@ -28,6 +28,17 @@ enum DecodeState {
     Data(usize),
 }
 
+fn max_length_field_value(length_field_length: usize) -> io::Result<u64> {
+    match length_field_length {
+        1..=7 => Ok((1u64 << (length_field_length * 8)) - 1),
+        8 => Ok(u64::MAX),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid length_field_length",
+        )),
+    }
+}
+
 impl LengthDelimitedCodec {
     /// Creates a codec with default settings.
     #[inline]
@@ -277,6 +288,14 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
         let length_to_encode = u64::try_from(adjusted_len).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "encoded length exceeds u64")
         })?;
+
+        let max_length_value = max_length_field_value(self.builder.length_field_length)?;
+        if length_to_encode > max_length_value {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "encoded length exceeds length_field_length capacity",
+            ));
+        }
 
         // Check max frame length limit
         if frame_len > self.builder.max_frame_length {
@@ -668,6 +687,28 @@ mod tests {
         assert!(err.to_string().contains("max_frame_length"));
     }
 
+    #[test]
+    fn test_encode_rejects_length_that_exceeds_length_field_capacity() {
+        let mut codec = LengthDelimitedCodec::builder()
+            .length_field_length(1)
+            .length_adjustment(-32)
+            .num_skip(1)
+            .max_frame_length(512)
+            .new_codec();
+        let mut dst = BytesMut::from(&b"existing"[..]);
+        let original = dst.clone();
+        let payload = BytesMut::from(vec![0xAB; 240].as_slice());
+
+        let err = codec.encode(payload, &mut dst).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string()
+                .contains("encoded length exceeds length_field_length capacity")
+        );
+        assert_eq!(dst, original, "encode must not partially mutate dst");
+    }
+
     // ================================================================================
     // METAMORPHIC TESTING SUITE
     // ================================================================================
@@ -791,32 +832,57 @@ mod tests {
                         .encode(original_payload.clone(), &mut encoded)
                         .is_ok()
                     {
-                        // Decode the encoded data
-                        let decoded_frame = decoder.decode(&mut encoded).unwrap();
+                        let header_len = config.length_field_offset + config.length_field_length;
+                        let total_frame_len = header_len + original_payload.len();
 
-                        if let Some(frame) = decoded_frame {
-                            // The frame should contain the original payload
-                            // Note: The frame might include header bytes if num_skip < header_len
-                            let header_len =
-                                config.length_field_offset + config.length_field_length;
-                            if config.num_skip >= header_len {
-                                // Full header skipped, frame should be just the payload
-                                assert_eq!(
-                                    frame, original_payload,
-                                    "Round-trip failed for config {:?}, size {}",
-                                    config, size
+                        match decoder.decode(&mut encoded) {
+                            Ok(Some(frame)) => {
+                                // The frame should contain the original payload
+                                // Note: The frame might include header bytes if num_skip < header_len
+                                if config.num_skip >= header_len {
+                                    let skipped_payload = config.num_skip - header_len;
+                                    let expected_payload = &original_payload[skipped_payload..];
+                                    // Full header skipped; if num_skip extends past the header,
+                                    // the returned frame is the remaining payload suffix.
+                                    assert_eq!(
+                                        &frame[..],
+                                        expected_payload,
+                                        "Round-trip failed for config {:?}, size {}",
+                                        config,
+                                        size
+                                    );
+                                } else {
+                                    // Partial header retained, payload should be at the end
+                                    let payload_start = header_len - config.num_skip;
+                                    assert_eq!(
+                                        &frame[payload_start..],
+                                        &original_payload[..],
+                                        "Round-trip payload mismatch for config {:?}, size {}",
+                                        config,
+                                        size
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                assert!(
+                                    config.num_skip > total_frame_len,
+                                    "Decode error {err:?} for decodable config {:?}, size {}",
+                                    config,
+                                    size
                                 );
-                            } else {
-                                // Partial header retained, payload should be at the end
-                                let payload_start = header_len - config.num_skip;
-                                assert_eq!(
-                                    &frame[payload_start..],
-                                    &original_payload[..],
-                                    "Round-trip payload mismatch for config {:?}, size {}",
+                                assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+                                assert!(
+                                    err.to_string()
+                                        .contains("num_skip exceeds total frame length"),
+                                    "Unexpected decode error for config {:?}, size {}: {err:?}",
                                     config,
                                     size
                                 );
                             }
+                            Ok(None) => panic!(
+                                "Complete encoded frame did not decode for config {:?}, size {}",
+                                config, size
+                            ),
                         }
                     }
                 }
@@ -844,12 +910,10 @@ mod tests {
         let mut encoded = BytesMut::new();
         encoder.encode(payload.clone(), &mut encoded).unwrap();
 
-        // Test partial frame handling
-        let mut decoder1 = config.build_codec();
-        let mut decoder2 = config.build_codec();
-
         // Split the encoded data at various points
         for split_point in 1..encoded.len() {
+            let mut decoder1 = config.build_codec();
+            let mut decoder2 = config.build_codec();
             let mut part1 = encoded.clone();
             let part2 = part1.split_off(split_point);
 
@@ -860,8 +924,8 @@ mod tests {
                 "Partial frame should return None"
             );
 
-            let mut remaining = part2;
-            let result1_complete = decoder1.decode(&mut remaining).unwrap();
+            part1.extend_from_slice(&part2);
+            let result1_complete = decoder1.decode(&mut part1).unwrap();
 
             // Decoder 2: Process complete data at once
             let mut complete_data = encoded.clone();
