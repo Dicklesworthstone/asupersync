@@ -617,6 +617,154 @@ mod tests {
         }
     }
 
+    fn create_all_fields_snapshot() -> RegionSnapshot {
+        RegionSnapshot {
+            region_id: RegionId::new_for_test(5, 2),
+            state: RegionState::Closing,
+            timestamp: Time::from_secs(999),
+            sequence: 42,
+            tasks: vec![
+                TaskSnapshot {
+                    task_id: TaskId::new_for_test(1, 0),
+                    state: TaskState::Running,
+                    priority: 5,
+                },
+                TaskSnapshot {
+                    task_id: TaskId::new_for_test(2, 1),
+                    state: TaskState::Completed,
+                    priority: 3,
+                },
+            ],
+            children: vec![RegionId::new_for_test(10, 0), RegionId::new_for_test(11, 0)],
+            finalizer_count: 7,
+            budget: BudgetSnapshot {
+                deadline_nanos: Some(5_000_000_000),
+                polls_remaining: Some(50),
+                cost_remaining: Some(1000),
+            },
+            cancel_reason: Some("timeout".to_string()),
+            parent: Some(RegionId::new_for_test(0, 0)),
+            metadata: vec![1, 2, 3, 4, 5],
+        }
+    }
+
+    fn format_hex(bytes: &[u8]) -> String {
+        bytes.iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn scrub_snapshot_wire_layout_for_snapshot_test(bytes: &[u8], task_count: usize) -> String {
+        use std::fmt::Write;
+
+        let mut cursor = 0usize;
+        let mut out = String::new();
+
+        let magic = &bytes[cursor..cursor + 4];
+        cursor += 4;
+        let version = bytes[cursor];
+        cursor += 1;
+        let region_id = &bytes[cursor..cursor + 8];
+        cursor += 8;
+        let state = bytes[cursor];
+        cursor += 1;
+        let timestamp = &bytes[cursor..cursor + 8];
+        cursor += 8;
+        let sequence = &bytes[cursor..cursor + 8];
+        cursor += 8;
+        let task_count_bytes = &bytes[cursor..cursor + 4];
+        cursor += 4;
+
+        let _ = writeln!(out, "magic: {}", format_hex(magic));
+        let _ = writeln!(out, "version: {version:02x}");
+        let _ = writeln!(out, "region_id: [{} bytes]", region_id.len());
+        let _ = writeln!(out, "state: {state:02x}");
+        let _ = writeln!(out, "timestamp_nanos: [{} bytes]", timestamp.len());
+        let _ = writeln!(out, "sequence: {}", format_hex(sequence));
+        let _ = writeln!(out, "task_count: {}", format_hex(task_count_bytes));
+
+        for task_index in 0..task_count {
+            let task_id = &bytes[cursor..cursor + 8];
+            cursor += 8;
+            let task_state = bytes[cursor];
+            cursor += 1;
+            let priority = bytes[cursor];
+            cursor += 1;
+
+            let _ = writeln!(out, "task[{task_index}].task_id: [{} bytes]", task_id.len());
+            let _ = writeln!(out, "task[{task_index}].state: {task_state:02x}");
+            let _ = writeln!(out, "task[{task_index}].priority: {priority:02x}");
+        }
+
+        let child_count =
+            u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+        let child_count_bytes = &bytes[cursor..cursor + 4];
+        cursor += 4;
+        let _ = writeln!(out, "child_count: {}", format_hex(child_count_bytes));
+
+        for child_index in 0..child_count {
+            let child = &bytes[cursor..cursor + 8];
+            cursor += 8;
+            let _ = writeln!(out, "child[{child_index}]: [{} bytes]", child.len());
+        }
+
+        let finalizer_count = &bytes[cursor..cursor + 4];
+        cursor += 4;
+        let deadline_presence = bytes[cursor];
+        cursor += 1;
+        let deadline = &bytes[cursor..cursor + 8];
+        cursor += 8;
+        let polls_presence = bytes[cursor];
+        cursor += 1;
+        let polls_remaining = &bytes[cursor..cursor + 4];
+        cursor += 4;
+        let cost_presence = bytes[cursor];
+        cursor += 1;
+        let cost_remaining = &bytes[cursor..cursor + 8];
+        cursor += 8;
+        let cancel_presence = bytes[cursor];
+        cursor += 1;
+        let cancel_len = &bytes[cursor..cursor + 4];
+        cursor += 4;
+        let cancel_reason = &bytes[cursor..cursor + 7];
+        cursor += 7;
+        let parent_presence = bytes[cursor];
+        cursor += 1;
+        let parent = &bytes[cursor..cursor + 8];
+        cursor += 8;
+        let metadata_len = &bytes[cursor..cursor + 4];
+        cursor += 4;
+        let metadata = &bytes[cursor..cursor + 5];
+        cursor += 5;
+
+        let _ = writeln!(out, "finalizer_count: {}", format_hex(finalizer_count));
+        let _ = writeln!(out, "budget.deadline_presence: {deadline_presence:02x}");
+        let _ = writeln!(out, "budget.deadline_nanos: [{} bytes]", deadline.len());
+        let _ = writeln!(out, "budget.polls_presence: {polls_presence:02x}");
+        let _ = writeln!(
+            out,
+            "budget.polls_remaining: {}",
+            format_hex(polls_remaining)
+        );
+        let _ = writeln!(out, "budget.cost_presence: {cost_presence:02x}");
+        let _ = writeln!(
+            out,
+            "budget.cost_remaining: {}",
+            format_hex(cost_remaining)
+        );
+        let _ = writeln!(out, "cancel_reason.presence: {cancel_presence:02x}");
+        let _ = writeln!(out, "cancel_reason.len: {}", format_hex(cancel_len));
+        let _ = writeln!(out, "cancel_reason.utf8: {}", format_hex(cancel_reason));
+        let _ = writeln!(out, "parent.presence: {parent_presence:02x}");
+        let _ = writeln!(out, "parent.region_id: [{} bytes]", parent.len());
+        let _ = writeln!(out, "metadata.len: {}", format_hex(metadata_len));
+        let _ = writeln!(out, "metadata.bytes: {}", format_hex(metadata));
+
+        assert_eq!(cursor, bytes.len(), "wire-layout scrubber missed bytes");
+        out
+    }
+
     #[test]
     fn snapshot_roundtrip() {
         let snapshot = create_test_snapshot();
@@ -702,34 +850,7 @@ mod tests {
 
     #[test]
     fn snapshot_with_all_fields() {
-        let snapshot = RegionSnapshot {
-            region_id: RegionId::new_for_test(5, 2),
-            state: RegionState::Closing,
-            timestamp: Time::from_secs(999),
-            sequence: 42,
-            tasks: vec![
-                TaskSnapshot {
-                    task_id: TaskId::new_for_test(1, 0),
-                    state: TaskState::Running,
-                    priority: 5,
-                },
-                TaskSnapshot {
-                    task_id: TaskId::new_for_test(2, 1),
-                    state: TaskState::Completed,
-                    priority: 3,
-                },
-            ],
-            children: vec![RegionId::new_for_test(10, 0), RegionId::new_for_test(11, 0)],
-            finalizer_count: 7,
-            budget: BudgetSnapshot {
-                deadline_nanos: Some(5_000_000_000),
-                polls_remaining: Some(50),
-                cost_remaining: Some(1000),
-            },
-            cancel_reason: Some("timeout".to_string()),
-            parent: Some(RegionId::new_for_test(0, 0)),
-            metadata: vec![1, 2, 3, 4, 5],
-        };
+        let snapshot = create_all_fields_snapshot();
 
         let bytes = snapshot.to_bytes();
         let restored = RegionSnapshot::from_bytes(&bytes).unwrap();
@@ -743,6 +864,17 @@ mod tests {
         assert_eq!(restored.cancel_reason.as_deref(), Some("timeout"));
         assert!(restored.parent.is_some());
         assert_eq!(restored.metadata, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn snapshot_wire_layout_snapshot_scrubs_ids_and_timestamps() {
+        let snapshot = create_all_fields_snapshot();
+        let bytes = snapshot.to_bytes();
+
+        insta::assert_snapshot!(
+            "region_snapshot_wire_layout_scrubbed",
+            scrub_snapshot_wire_layout_for_snapshot_test(&bytes, snapshot.tasks.len())
+        );
     }
 
     #[test]

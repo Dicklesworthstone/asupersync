@@ -1,0 +1,34 @@
+---
+source: src/distributed/snapshot.rs
+expression: scrub_snapshot_wire_layout_for_snapshot_test(&bytes, snapshot.tasks.len())
+---
+magic: 53 4e 41 50
+version: 01
+region_id: [8 bytes]
+state: 01
+timestamp_nanos: [8 bytes]
+sequence: 2a 00 00 00 00 00 00 00
+task_count: 02 00 00 00
+task[0].task_id: [8 bytes]
+task[0].state: 01
+task[0].priority: 05
+task[1].task_id: [8 bytes]
+task[1].state: 02
+task[1].priority: 03
+child_count: 02 00 00 00
+child[0]: [8 bytes]
+child[1]: [8 bytes]
+finalizer_count: 07 00 00 00
+budget.deadline_presence: 01
+budget.deadline_nanos: [8 bytes]
+budget.polls_presence: 01
+budget.polls_remaining: 32 00 00 00
+budget.cost_presence: 01
+budget.cost_remaining: e8 03 00 00 00 00 00 00
+cancel_reason.presence: 01
+cancel_reason.len: 07 00 00 00
+cancel_reason.utf8: 74 69 6d 65 6f 75 74
+parent.presence: 01
+parent.region_id: [8 bytes]
+metadata.len: 05 00 00 00
+metadata.bytes: 01 02 03 04 05
