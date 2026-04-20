@@ -35,9 +35,9 @@ use core::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
 
+use crate::types::Outcome;
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
-use crate::types::Outcome;
 
 // ============================================================================
 // Cancel Trait
@@ -770,6 +770,15 @@ mod tests {
         Panic,
     }
 
+    #[derive(Debug, Clone)]
+    enum RaceLoserCase {
+        Ok(i32),
+        Err,
+        CancelRaceLost,
+        CancelTimeout,
+        CancelShutdown,
+    }
+
     impl RaceWinnerCase {
         fn into_outcome(self) -> Outcome<i32, &'static str> {
             match self {
@@ -782,6 +791,18 @@ mod tests {
         }
     }
 
+    impl RaceLoserCase {
+        fn into_outcome(self) -> Outcome<i32, &'static str> {
+            match self {
+                Self::Ok(value) => Outcome::Ok(value),
+                Self::Err => Outcome::Err("loser-error"),
+                Self::CancelRaceLost => Outcome::Cancelled(CancelReason::race_loser()),
+                Self::CancelTimeout => Outcome::Cancelled(CancelReason::timeout()),
+                Self::CancelShutdown => Outcome::Cancelled(CancelReason::shutdown()),
+            }
+        }
+    }
+
     fn race_winner_case_strategy() -> impl Strategy<Value = RaceWinnerCase> {
         prop_oneof![
             any::<i16>().prop_map(|value| RaceWinnerCase::Ok(i32::from(value))),
@@ -789,6 +810,16 @@ mod tests {
             Just(RaceWinnerCase::CancelTimeout),
             Just(RaceWinnerCase::CancelShutdown),
             Just(RaceWinnerCase::Panic),
+        ]
+    }
+
+    fn race_loser_case_strategy() -> impl Strategy<Value = RaceLoserCase> {
+        prop_oneof![
+            any::<i16>().prop_map(|value| RaceLoserCase::Ok(i32::from(value))),
+            Just(RaceLoserCase::Err),
+            Just(RaceLoserCase::CancelRaceLost),
+            Just(RaceLoserCase::CancelTimeout),
+            Just(RaceLoserCase::CancelShutdown),
         ]
     }
 
@@ -813,6 +844,18 @@ mod tests {
                 reason,
             } => ("cancelled", *winner_index, Some(reason.severity())),
             RaceAllError::Panicked { index, .. } => ("panic", *index, None),
+        }
+    }
+
+    fn race_all_result_signature(
+        result: &Result<i32, RaceAllError<&'static str>>,
+    ) -> (&'static str, Option<i32>, usize, Option<u8>) {
+        match result {
+            Ok(value) => ("ok", Some(*value), 0, None),
+            Err(error) => {
+                let (kind, index, severity) = race_all_error_signature(error);
+                (kind, None, index, severity)
+            }
         }
     }
 
@@ -1378,6 +1421,41 @@ mod tests {
                 }
                 _ => prop_assert!(false, "rotation changed race_all terminal class"),
             }
+        }
+
+        #[test]
+        fn metamorphic_drained_loser_substitution_preserves_race_all_result(
+            branch_count in 1usize..12,
+            raw_winner_index in 0usize..24,
+            winner_case in race_winner_case_strategy(),
+            mutated_loser_cases in prop::collection::vec(race_loser_case_strategy(), 0usize..11),
+        ) {
+            let winner_index = raw_winner_index % branch_count;
+
+            let mut baseline_outcomes =
+                vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
+            baseline_outcomes[winner_index] = winner_case.clone().into_outcome();
+
+            let loser_indices = (0..branch_count)
+                .filter(|index| *index != winner_index)
+                .collect::<Vec<_>>();
+            let mut substituted_outcomes = baseline_outcomes.clone();
+            for (slot, loser_index) in loser_indices.into_iter().enumerate() {
+                let loser_case = mutated_loser_cases
+                    .get(slot)
+                    .cloned()
+                    .unwrap_or(RaceLoserCase::CancelRaceLost);
+                substituted_outcomes[loser_index] = loser_case.into_outcome();
+            }
+
+            let baseline_result = make_race_all_result(winner_index, baseline_outcomes);
+            let substituted_result = make_race_all_result(winner_index, substituted_outcomes);
+
+            prop_assert_eq!(
+                race_all_result_signature(&baseline_result),
+                race_all_result_signature(&substituted_result),
+                "non-panicking drained loser substitution must not perturb the race_all result"
+            );
         }
     }
 
