@@ -357,27 +357,32 @@ impl QueueState {
 
     #[allow(clippy::cast_precision_loss)]
     fn debt_accumulation_rate(&self, window_ns: u64, now: Time) -> f64 {
-        if self.pending_items.len() < 2 {
-            return 0.0;
-        }
-
         let cutoff_time = Time::from_nanos(now.as_nanos().saturating_sub(window_ns));
-        let items_added_in_window = self
-            .pending_items
+        let arrivals_in_window: usize = self
+            .arrival_times
             .iter()
-            .filter(|item| item.created_at >= cutoff_time)
-            .count();
+            .filter(|(time, _)| *time >= cutoff_time)
+            .map(|(_, count)| *count)
+            .sum();
 
         let completion_rate = self.completion_rate_over_window(window_ns, now);
         let window_seconds = window_ns as f64 / 1_000_000_000.0;
-        let addition_rate = items_added_in_window as f64 / window_seconds;
+        let addition_rate = arrivals_in_window as f64 / window_seconds;
 
         addition_rate - completion_rate
     }
 
     fn stall_duration(&self, now: Time) -> u64 {
-        self.last_completion
-            .map_or(0, |last| now.as_nanos().saturating_sub(last.as_nanos()))
+        let Some(oldest) = self.pending_items.front() else {
+            return 0;
+        };
+
+        let stall_start_ns = match self.last_completion {
+            Some(last) => std::cmp::max(last.as_nanos(), oldest.created_at.as_nanos()),
+            None => oldest.created_at.as_nanos(),
+        };
+
+        now.as_nanos().saturating_sub(stall_start_ns)
     }
 }
 
