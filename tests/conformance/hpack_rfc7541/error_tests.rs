@@ -582,9 +582,9 @@ impl HpackEdgeCaseTester {
 
         // Test table size updates at boundaries (0, 1, max)
         let boundary_sizes = vec![
-            Self::encode_table_size_update(0),
-            Self::encode_table_size_update(1),
-            Self::encode_table_size_update(4096),
+            HpackErrorTester::encode_table_size_update(0),
+            HpackErrorTester::encode_table_size_update(1),
+            HpackErrorTester::encode_table_size_update(4096),
         ];
 
         let mut success_count = 0;

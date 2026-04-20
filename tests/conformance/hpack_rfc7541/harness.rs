@@ -325,10 +325,11 @@ impl ConformanceTest for DynamicTableSizeUpdateTest {
 
         let mut decoder = Decoder::new();
         decoder.set_allowed_table_size(256);
+        let first_byte_is_size_update = encoded.first().is_some_and(|byte| byte & 0xe0 == 0x20);
         let mut src = encoded.freeze();
         let decoded = decoder.decode(&mut src);
 
-        let verdict = if encoded.first().is_some_and(|byte| byte & 0xe0 == 0x20)
+        let verdict = if first_byte_is_size_update
             && matches!(decoded.as_ref(), Ok(decoded_headers) if *decoded_headers == headers)
         {
             TestVerdict::Pass
@@ -587,15 +588,65 @@ impl ConformanceTest for ContextSynchronizationTest {
     }
 
     fn run(&self, _harness: &HpackConformanceHarness) -> ConformanceTestResult {
-        // Placeholder - would need stateful encoder/decoder pairs
+        let start_time = Instant::now();
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+        let mut decoder = Decoder::new();
+
+        let first_headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/context-sync"),
+            Header::new("x-shared-header", "alpha"),
+        ];
+        let second_headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/context-sync"),
+            Header::new("x-shared-header", "alpha"),
+            Header::new("x-followup", "beta"),
+        ];
+
+        let mut first_block = BytesMut::new();
+        encoder.encode(&first_headers, &mut first_block);
+        let first_len = first_block.len();
+        let mut first_src = first_block.freeze();
+        let first_decoded = decoder.decode(&mut first_src);
+
+        let mut second_block = BytesMut::new();
+        encoder.encode(&second_headers, &mut second_block);
+        let second_len = second_block.len();
+        let mut second_src = second_block.freeze();
+        let second_decoded = decoder.decode(&mut second_src);
+
+        let verdict = match (first_decoded, second_decoded) {
+            (Ok(decoded_first), Ok(decoded_second))
+                if decoded_first == first_headers
+                    && decoded_second == second_headers
+                    && second_len < first_len + 32 =>
+            {
+                TestVerdict::Pass
+            }
+            (Ok(decoded_first), Ok(decoded_second)) => {
+                let _ = (decoded_first, decoded_second);
+                TestVerdict::Fail
+            }
+            _ => TestVerdict::Fail
+        };
+
         ConformanceTestResult {
             test_id: self.id().to_string(),
             description: self.description().to_string(),
             category: self.category(),
             requirement_level: self.requirement_level(),
-            verdict: TestVerdict::ExpectedFailure,
-            error_message: Some("Context sync test not implemented".to_string()),
-            execution_time_ms: 0,
+            verdict: verdict.clone(),
+            error_message: if verdict == TestVerdict::Fail {
+                Some(
+                    "encoder/decoder contexts failed to stay synchronized across sequential header blocks"
+                        .to_string(),
+                )
+            } else {
+                None
+            },
+            execution_time_ms: start_time.elapsed().as_millis() as u64,
         }
     }
 }

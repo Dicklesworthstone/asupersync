@@ -13,7 +13,7 @@ pub mod hpack_table_size;
 // pub mod h2_stream_state_machine_rfc7540;
 // pub mod h3_rfc9114;
 // pub mod hpack_metamorphic;
-// pub mod hpack_rfc7541;
+pub mod hpack_rfc7541;
 pub mod cancel_dag_determinism;
 pub mod kafka_offsets;
 pub mod kafka_record_batch_v2;
@@ -56,7 +56,7 @@ pub use hpack_table_size::{
     HpackTableSizeConformanceResult, TestCategory as HpackTableSizeTestCategory,
 };
 // pub use h3_rfc9114::{H3ConformanceHarness, H3ConformanceResult};
-// pub use hpack_rfc7541::{HpackConformanceHarness, RequirementLevel, TestVerdict};
+pub use hpack_rfc7541::HpackConformanceHarness;
 pub use kafka_record_batch_v2::{
     ConformanceTestResult as KafkaConformanceTestResult, KafkaConformanceHarness,
     TestCategory as KafkaTestCategory,
@@ -790,8 +790,6 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         results.extend(race_loser_drain_results);
     }
 
-    // TODO: HPACK RFC 7541 conformance (temporarily disabled during H1 integration)
-    /*
     let hpack_harness = HpackConformanceHarness::new();
     let hpack_results: Vec<ConformanceTestResult> = hpack_harness
         .run_all_tests()
@@ -808,14 +806,22 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                 hpack_rfc7541::TestCategory::ErrorHandling => TestCategory::ErrorHandling,
                 hpack_rfc7541::TestCategory::RoundTrip => TestCategory::RoundTrip,
             },
-            requirement_level: r.requirement_level,
-            verdict: r.verdict,
+            requirement_level: match r.requirement_level {
+                hpack_rfc7541::RequirementLevel::Must => RequirementLevel::Must,
+                hpack_rfc7541::RequirementLevel::Should => RequirementLevel::Should,
+                hpack_rfc7541::RequirementLevel::May => RequirementLevel::May,
+            },
+            verdict: match r.verdict {
+                hpack_rfc7541::TestVerdict::Pass => TestVerdict::Pass,
+                hpack_rfc7541::TestVerdict::Fail => TestVerdict::Fail,
+                hpack_rfc7541::TestVerdict::Skipped => TestVerdict::Skipped,
+                hpack_rfc7541::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+            },
             error_message: r.error_message,
             execution_time_ms: r.execution_time_ms,
         })
         .collect();
     results.extend(hpack_results);
-    */
 
     // TODO: Add other conformance suites when implemented:
     /*
