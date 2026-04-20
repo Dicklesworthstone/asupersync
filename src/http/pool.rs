@@ -875,6 +875,45 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_connection_reuse_ignores_ineligible_noise() {
+        let config = PoolConfig::builder()
+            .idle_timeout(Duration::from_millis(100))
+            .build();
+        let key = PoolKey::https("example.com", None);
+        let now = make_time(100);
+
+        let mut baseline = Pool::with_config(config.clone());
+        let baseline_id = baseline.register_connecting(key.clone(), make_time(10), 2);
+        assert!(baseline.mark_connected(&key, baseline_id, make_time(10)));
+        let baseline_acquired = baseline.try_acquire(&key, now);
+        assert_eq!(baseline_acquired, Some(baseline_id));
+
+        let mut transformed = Pool::with_config(config);
+        let valid_id = transformed.register_connecting(key.clone(), make_time(10), 2);
+        assert!(transformed.mark_connected(&key, valid_id, make_time(10)));
+
+        let expired_id = transformed.register_connecting(key.clone(), make_time(0), 2);
+        assert!(transformed.mark_connected(&key, expired_id, make_time(0)));
+
+        let transformed_acquired = transformed.try_acquire(&key, now);
+        assert_eq!(
+            transformed_acquired, baseline_acquired,
+            "expired idle noise must not perturb reuse of the valid idle connection"
+        );
+
+        let connecting_noise_id = transformed.register_connecting(key.clone(), make_time(20), 2);
+        let transformed_again = transformed.try_acquire(&key, now);
+        assert_eq!(
+            transformed_again, None,
+            "adding only connecting noise must not fabricate reusable capacity after the valid idle connection was consumed"
+        );
+        let connecting_meta = transformed
+            .get_connection_meta(&key, connecting_noise_id)
+            .expect("connecting entry remains tracked");
+        assert_eq!(connecting_meta.state, PooledConnectionState::Connecting);
+    }
+
+    #[test]
     fn pool_key_debug_clone_eq_ord_hash() {
         use std::collections::HashSet;
         let a = PoolKey::new("example.com", 443, true);
