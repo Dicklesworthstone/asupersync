@@ -1,0 +1,17 @@
+---
+source: src/types/outcome.rs
+expression: |-
+  scrub_outcome_json_ids(serde_json::to_value(cancelled).expect("serialize outcome"))
+---
+{
+  "Cancelled": {
+    "cause": null,
+    "kind": "LinkedExit",
+    "message": "upstream closed",
+    "origin_region": "[REGION_ID]",
+    "origin_task": "[TASK_ID]",
+    "timestamp": 55,
+    "truncated": false,
+    "truncated_at_depth": null
+  }
+}

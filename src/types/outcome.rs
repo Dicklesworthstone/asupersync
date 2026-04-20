@@ -704,6 +704,20 @@ mod tests {
         scrubbed
     }
 
+    fn scrub_outcome_json_ids(value: Value) -> Value {
+        let mut scrubbed = value;
+
+        if let Some(origin_region) = scrubbed.pointer_mut("/Cancelled/origin_region") {
+            *origin_region = json!("[REGION_ID]");
+        }
+
+        if let Some(origin_task) = scrubbed.pointer_mut("/Cancelled/origin_task") {
+            *origin_task = json!("[TASK_ID]");
+        }
+
+        scrubbed
+    }
+
     // =========================================================================
     // Severity Ordering Tests
     // =========================================================================
@@ -1158,6 +1172,22 @@ mod tests {
                 "cancelled": Outcome::<u8, &str>::cancelled(CancelReason::user("req-9f4c36b1")),
                 "panicked": OutcomeError::<&str>::Panicked(PanicPayload::new("boom")),
             }))
+        );
+    }
+
+    #[test]
+    fn outcome_json_snapshot_scrubs_ids_only() {
+        let cancelled: Outcome<(), ()> = Outcome::cancelled(
+            CancelReason::linked_exit()
+                .with_region(crate::types::RegionId::new_for_test(42, 7))
+                .with_task(crate::types::TaskId::new_for_test(9, 3))
+                .with_timestamp(crate::types::Time::from_nanos(55))
+                .with_message("upstream closed"),
+        );
+
+        insta::assert_json_snapshot!(
+            "outcome_json_scrubbed_ids",
+            scrub_outcome_json_ids(serde_json::to_value(cancelled).expect("serialize outcome"))
         );
     }
 }
