@@ -247,6 +247,7 @@ struct ChannelFlowState {
     /// Tasks currently blocked on this channel.
     blocked_tasks: HashSet<TaskId>,
     /// Current capacity/credits available.
+    #[allow(dead_code)]
     available_capacity: Option<usize>,
     /// Maximum observed queue depth.
     max_queue_depth: usize,
@@ -428,10 +429,12 @@ impl DeadlockDetector {
         }
     }
 
+    #[allow(dead_code)]
     fn add_channel_owner(&mut self, channel: u64, owner: TaskId) {
         self.channel_to_task.insert(channel, owner);
     }
 
+    #[allow(dead_code)]
     fn remove_channel_owner(&mut self, channel: u64) {
         self.channel_to_task.remove(&channel);
     }
