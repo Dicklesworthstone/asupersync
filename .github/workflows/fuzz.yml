@@ -24,6 +24,7 @@ on:
           - h1_parsed_url
           - length_delimited_encode_width
           - length_delimited_decoder_state
+          - bytes_slice_split_to
           - fuzz_hpack_decode
           - fuzz_http2_frame
           - fuzz_interest_flags
@@ -53,6 +54,7 @@ jobs:
           - h1_parsed_url
           - length_delimited_encode_width
           - length_delimited_decoder_state
+          - bytes_slice_split_to
           - fuzz_hpack_decode
           - fuzz_http2_frame
           - fuzz_interest_flags
