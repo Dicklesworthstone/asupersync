@@ -400,7 +400,7 @@ impl Worker {
         let poll_result = self.panic_isolator.isolate_task_execution(
             task_id,
             region_id,
-            poll_count,
+            1, // TODO: Track actual poll attempt count
             || stored.poll(&mut cx),
         );
 
@@ -2015,18 +2015,6 @@ mod tests {
         // Property 3: No single worker dominance in deterministic case
         let total_visits = results_run1.len();
         let max_visits = *worker_visits.values().max().unwrap();
-        let dominance_ratio = max_visits as f64 / total_visits as f64;
-
-        assert!(
-            dominance_ratio <= 0.7,
-            "Deterministic stealing shows dominance: worker visited {}/{} times ({:.1}%)",
-            max_visits,
-            total_visits,
-            dominance_ratio * 100.0
-        );
-    }
-}
-worker_visits.values().max().unwrap();
         let dominance_ratio = max_visits as f64 / total_visits as f64;
 
         assert!(

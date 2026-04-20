@@ -712,6 +712,7 @@ impl FlowControlMonitor {
     /// Checks for producer starvation.
     fn check_starvation(&mut self, current_time: Time) {
         let starvation_threshold_ns = self.config.starvation_threshold_s * 1_000_000_000;
+        let mut new_violations = Vec::new();
 
         for (&task_id, task_state) in &self.task_states {
             if let Some(first_block_time) = task_state.first_block_time {
@@ -730,16 +731,21 @@ impl FlowControlMonitor {
                             timestamp: current_time,
                         };
 
-                        self.record_violation(violation, current_time);
+                        new_violations.push(violation);
                     }
                 }
             }
+        }
+
+        for violation in new_violations {
+            self.record_violation(violation, current_time);
         }
     }
 
     /// Checks for indefinite blocking.
     fn check_indefinite_blocking(&mut self, current_time: Time) {
         let blocking_threshold_ns = self.config.deadlock_detection_threshold_s * 1_000_000_000;
+        let mut new_violations = Vec::new();
 
         for (&task_id, task_state) in &self.task_states {
             if let Some(first_block_time) = task_state.first_block_time {
@@ -757,12 +763,16 @@ impl FlowControlMonitor {
                                     timestamp: current_time,
                                 };
 
-                                self.record_violation(violation, current_time);
+                                new_violations.push(violation);
                             }
                         }
                     }
                 }
             }
+        }
+
+        for violation in new_violations {
+            self.record_violation(violation, current_time);
         }
     }
 

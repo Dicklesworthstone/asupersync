@@ -47,9 +47,7 @@ impl Default for TestData {
             value: 42,
             counter: 0,
         }
-    }
-}
-
+        }
 /// Inject a controlled panic during mutex operations
 fn panic_injector(should_panic: bool, panic_message: &str) {
     assert!(!should_panic, "{}", panic_message);
@@ -568,5 +566,4 @@ mod tests {
         assert!(!clean_mutex.is_poisoned());
         assert!(clean_mutex.try_lock().is_ok());
     }
-}
 }
