@@ -804,6 +804,9 @@ impl ChaosStats {
             .saturating_add(self.io_errors)
             .saturating_add(self.wakeup_storms)
             .saturating_add(self.budget_exhaustions);
+        if self.decision_points == 0 {
+            return 0.0;
+        }
         injections as f64 / self.decision_points as f64
     }
 }
