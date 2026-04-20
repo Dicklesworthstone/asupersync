@@ -1318,3 +1318,10 @@ path = "fuzz_targets/hpack_indexed.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "budget_arithmetic"
+path = "fuzz_targets/budget_arithmetic.rs"
+test = false
+doc = false
+bench = false
