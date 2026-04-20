@@ -1105,6 +1105,15 @@ mod tests {
     }
 
     #[test]
+    fn json_top_level_scalar_matches_rfc7159() {
+        let req = Request::new("POST", "/data")
+            .with_header("content-type", "application/json")
+            .with_body(Bytes::from_static(b"123"));
+        let Json(value) = Json::<serde_json::Value>::from_request(req).unwrap();
+        assert_eq!(value, serde_json::Value::Number(123.into()));
+    }
+
+    #[test]
     fn form_wrong_content_type() {
         let req = Request::new("POST", "/form")
             .with_header("content-type", "text/plain")
