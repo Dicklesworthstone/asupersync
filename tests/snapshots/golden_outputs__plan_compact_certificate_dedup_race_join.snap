@@ -1,0 +1,25 @@
+---
+source: tests/golden_outputs.rs
+expression: compact
+---
+CompactCertificate {
+    version: CertificateVersion(
+        1,
+    ),
+    policy_bits: 29,
+    before_hash: PlanHash(
+        12664835006891767254,
+    ),
+    after_hash: PlanHash(
+        9330920261498496924,
+    ),
+    before_node_count: 6,
+    after_node_count: 8,
+    steps: [
+        CompactStep {
+            rule: 5,
+            before: 5,
+            after: 7,
+        },
+    ],
+}

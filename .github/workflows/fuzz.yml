@@ -21,6 +21,7 @@ on:
           - all
           - fuzz_http1_request
           - fuzz_http1_response
+          - h1_parsed_url
           - fuzz_hpack_decode
           - fuzz_http2_frame
           - fuzz_interest_flags
@@ -47,6 +48,7 @@ jobs:
         target:
           - fuzz_http1_request
           - fuzz_http1_response
+          - h1_parsed_url
           - fuzz_hpack_decode
           - fuzz_http2_frame
           - fuzz_interest_flags

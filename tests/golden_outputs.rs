@@ -28,13 +28,20 @@ use asupersync::plan::{PlanDag, PlanId, PlanNode, RewritePolicy};
 use asupersync::runtime::RuntimeState;
 use asupersync::runtime::{JoinError, TaskHandle, yield_now};
 use asupersync::trace::TraceEvent;
+use asupersync::trace::event::{TraceData, TraceEventKind as RuntimeTraceEventKind};
 use asupersync::trace::format::{GoldenTraceConfig, GoldenTraceFixture};
 use asupersync::types::{
     Budget, CancelKind, CancelReason, Outcome, RegionId, Severity, TaskId, Time,
 };
 use asupersync::util::Arena;
+use conformance::logging::{TestEvent, TestEventKind};
+use conformance::report::render_console_summary;
+use conformance::runner::{SuiteResult, SuiteTestResult};
+use conformance::{Checkpoint, TestCategory, TestResult};
 use futures_lite::future;
+use insta::{assert_debug_snapshot, assert_snapshot};
 use parking_lot::Mutex;
+use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
@@ -620,6 +627,123 @@ impl<T> SharedHandle<T> {
             }
         }
     }
+}
+
+#[test]
+fn snapshot_trace_tla_region_obligation_behavior() {
+    let events = [
+        TraceEvent::region_created(1, Time::ZERO, RegionId::new_for_test(1, 0), None),
+        TraceEvent::spawn(
+            2,
+            Time::from_nanos(5),
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::obligation_reserve(
+            3,
+            Time::from_nanos(8),
+            asupersync::types::ObligationId::new_for_test(1, 0),
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+            asupersync::record::ObligationKind::SendPermit,
+        ),
+        TraceEvent::obligation_commit(
+            4,
+            Time::from_nanos(13),
+            asupersync::types::ObligationId::new_for_test(1, 0),
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+            asupersync::record::ObligationKind::SendPermit,
+            64,
+        ),
+        TraceEvent::complete(
+            5,
+            Time::from_nanos(21),
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::new(
+            6,
+            Time::from_nanos(34),
+            RuntimeTraceEventKind::RegionCloseComplete,
+            TraceData::Region {
+                region: RegionId::new_for_test(1, 0),
+                parent: None,
+            },
+        ),
+    ];
+    let module = asupersync::trace::tla_export::TlaExporter::from_trace(&events)
+        .export_behavior("GoldenTraceBehavior");
+
+    assert_snapshot!("trace_tla_region_obligation_behavior", module.source);
+}
+
+#[test]
+fn snapshot_plan_compact_certificate_dedup_race_join() {
+    let mut dag = PlanDag::new();
+    let shared = dag.leaf("shared");
+    let left = dag.leaf("left");
+    let right = dag.leaf("right");
+    let join_a = dag.join(vec![shared, left]);
+    let join_b = dag.join(vec![shared, right]);
+    let race = dag.race(vec![join_a, join_b]);
+    dag.set_root(race);
+
+    let (_rewritten, cert) = dag.apply_rewrites_certified(
+        RewritePolicy::conservative(),
+        &[asupersync::plan::rewrite::RewriteRule::DedupRaceJoin],
+    );
+    let compact = cert
+        .minimize()
+        .compact()
+        .expect("compact certificate fits snapshot wire format");
+
+    assert_debug_snapshot!("plan_compact_certificate_dedup_race_join", compact);
+}
+
+#[test]
+fn snapshot_conformance_console_summary_scrubbed_durations() {
+    let summary = SuiteResult {
+        runtime_name: "golden-runtime".to_string(),
+        total: 2,
+        passed: 1,
+        failed: 1,
+        skipped: 0,
+        duration_ms: 37,
+        results: vec![
+            SuiteTestResult {
+                test_id: "spawn.basic".to_string(),
+                test_name: "spawns a task".to_string(),
+                category: TestCategory::Spawn,
+                expected: "spawn completes successfully".to_string(),
+                result: TestResult::passed()
+                    .with_checkpoint(Checkpoint::new("after_spawn", json!({"task": 1})))
+                    .with_duration(11),
+                events: vec![TestEvent::new(
+                    TestEventKind::Phase,
+                    "spawned",
+                    3,
+                    json!({"region": 1}),
+                )],
+            },
+            SuiteTestResult {
+                test_id: "cancel.propagation".to_string(),
+                test_name: "propagates cancellation".to_string(),
+                category: TestCategory::Cancel,
+                expected: "child sees cancellation reason".to_string(),
+                result: TestResult::failed("child task never observed cancellation")
+                    .with_duration(26),
+                events: vec![TestEvent::new(
+                    TestEventKind::Assertion,
+                    "cancel_reason_missing",
+                    19,
+                    json!({"task": 7}),
+                )],
+            },
+        ],
+    };
+    let rendered = render_console_summary(&summary);
+    assert_snapshot!("conformance_console_summary_scrubbed_durations", rendered);
 }
 
 #[derive(Debug)]

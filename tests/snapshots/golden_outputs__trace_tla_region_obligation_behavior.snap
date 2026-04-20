@@ -1,0 +1,72 @@
+---
+source: tests/golden_outputs.rs
+expression: module.source
+---
+---- MODULE GoldenTraceBehavior ----
+EXTENDS Integers, Sequences, TLC
+
+VARIABLES tasks, regions, obligations, time, step
+
+TaskStates == {"Spawned", "Scheduled", "Polling", "Yielded", "Completed", "Cancelled"}
+RegionStates == {"Open", "Closing", "Closed", "Cancelled"}
+ObligationStates == {"Reserved", "Committed", "Aborted", "Leaked"}
+
+Init ==
+    /\ tasks = <<>>
+    /\ regions = <<>>
+    /\ obligations = <<>>
+    /\ time = 0
+    /\ step = 0
+
+Next ==
+    \/ /\ step = 0 /\ step' = 1
+       /\ tasks' = <<>>
+       /\ regions' = (1 :> <<"Open", "NONE">>)
+       /\ obligations' = <<>>
+       /\ time' = 0
+    \/ /\ step = 1 /\ step' = 2
+       /\ tasks' = (1 :> <<"Spawned", 1>>)
+       /\ regions' = (1 :> <<"Open", "NONE">>)
+       /\ obligations' = <<>>
+       /\ time' = 5
+    \/ /\ step = 2 /\ step' = 3
+       /\ tasks' = (1 :> <<"Spawned", 1>>)
+       /\ regions' = (1 :> <<"Open", "NONE">>)
+       /\ obligations' = (1 :> <<"Reserved", 1, 1>>)
+       /\ time' = 8
+    \/ /\ step = 3 /\ step' = 4
+       /\ tasks' = (1 :> <<"Spawned", 1>>)
+       /\ regions' = (1 :> <<"Open", "NONE">>)
+       /\ obligations' = (1 :> <<"Committed", 1, 1>>)
+       /\ time' = 13
+    \/ /\ step = 4 /\ step' = 5
+       /\ tasks' = (1 :> <<"Completed", 1>>)
+       /\ regions' = (1 :> <<"Open", "NONE">>)
+       /\ obligations' = (1 :> <<"Committed", 1, 1>>)
+       /\ time' = 21
+    \/ /\ step = 5 /\ step' = 6
+       /\ tasks' = (1 :> <<"Completed", 1>>)
+       /\ regions' = (1 :> <<"Closed", "NONE">>)
+       /\ obligations' = (1 :> <<"Committed", 1, 1>>)
+       /\ time' = 34
+
+\* Safety: no leaked obligations in terminal states
+NoObligationLeaks ==
+    \A o \in DOMAIN obligations:
+        obligations[o][1] /= "Leaked"
+
+\* Safety: completed tasks are not in open regions
+QuiescenceOnClose ==
+    \A r \in DOMAIN regions:
+        regions[r][1] = "Closed" =>
+            \A t \in DOMAIN tasks:
+                tasks[t][2] = r => tasks[t][1] \in {"Completed", "Cancelled"}
+
+\* Safety: obligation linearity (no double-commit/abort)
+ObligationLinearity ==
+    \A o \in DOMAIN obligations:
+        obligations[o][1] \in ObligationStates
+
+Spec == Init /\ [][Next]_<<tasks, regions, obligations, time, step>>
+
+====
