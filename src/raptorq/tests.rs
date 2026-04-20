@@ -1296,6 +1296,7 @@ mod fuzz {
     use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
     use crate::raptorq::systematic::SystematicEncoder;
     use crate::raptorq::test_log_schema::UnitLogEntry;
+    use crate::types::symbol::ObjectId;
     use crate::util::DetRng;
 
     /// Configuration for a single fuzz iteration.
@@ -1404,6 +1405,26 @@ mod fuzz {
         }
     }
 
+    fn alternating_extremes(symbols: &[ReceivedSymbol]) -> Vec<ReceivedSymbol> {
+        let mut ordered = Vec::with_capacity(symbols.len());
+        if symbols.is_empty() {
+            return ordered;
+        }
+
+        let mut lo = 0usize;
+        let mut hi = symbols.len() - 1;
+        while lo < hi {
+            ordered.push(symbols[hi].clone());
+            ordered.push(symbols[lo].clone());
+            lo += 1;
+            hi -= 1;
+        }
+        if lo == hi {
+            ordered.push(symbols[lo].clone());
+        }
+        ordered
+    }
+
     /// Deterministic fuzz with varied parameters.
     #[test]
     fn fuzz_varied_parameters() {
@@ -1494,6 +1515,90 @@ mod fuzz {
                     config.k, config.seed, e
                 )
             });
+        }
+    }
+
+    #[test]
+    fn adversarial_erasure_frontiers_decode_with_proof_across_orderings() {
+        let k = 24;
+        let symbol_size = 40;
+        let seed = 2026u64;
+        let config = FuzzConfig {
+            k,
+            symbol_size,
+            seed,
+            overhead_percent: 75,
+            drop_percent: 0,
+        };
+        let replay_ref = "replay:rq-u-adversarial-erasure-frontiers-v1";
+
+        let mut rng = DetRng::new(seed);
+        let source: Vec<Vec<u8>> = (0..k)
+            .map(|_| (0..symbol_size).map(|_| rng.next_u64() as u8).collect())
+            .collect();
+
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+            .expect("adversarial frontier test should construct encoder");
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+        let constraints = decoder.constraint_symbols();
+
+        let total_target = l + (l * config.overhead_percent / 100);
+        let mut all_symbols: Vec<ReceivedSymbol> = Vec::with_capacity(total_target);
+        for (i, data) in source.iter().enumerate() {
+            all_symbols.push(ReceivedSymbol::source(i as u32, data.clone()));
+        }
+        for esi in (k as u32)..(total_target as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            all_symbols.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        for (ordering_name, preferred) in [
+            ("source_then_repair", all_symbols.clone()),
+            ("alternating_extremes", alternating_extremes(&all_symbols)),
+        ] {
+            let context = format!(
+                "{} candidate_order={ordering_name}",
+                failure_context(&config, "RQ-U-ADVERSARIAL-ERASURE-FRONTIER", replay_ref)
+            );
+            let selected = super::select_first_decodable_prefix(
+                &decoder,
+                &constraints,
+                &preferred,
+                l,
+                &context,
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+            assert!(
+                selected.iter().any(|symbol| symbol.is_source),
+                "{context} selected frontier should keep at least one source symbol"
+            );
+            assert!(
+                selected.iter().any(|symbol| !symbol.is_source),
+                "{context} selected frontier should require repair promotion"
+            );
+
+            let mut with_constraints = constraints.clone();
+            with_constraints.extend(selected);
+
+            let result = decoder
+                .decode_with_proof(&with_constraints, ObjectId::new_for_test(8100), 0)
+                .unwrap_or_else(|(err, _proof)| {
+                    panic!(
+                        "{context} decode_with_proof should succeed after deterministic frontier promotion; got {err:?}"
+                    )
+                });
+            assert_eq!(
+                result.result.source, source,
+                "{context} decoded source must match the original payload"
+            );
+            result
+                .proof
+                .replay_and_verify(&with_constraints)
+                .unwrap_or_else(|err| {
+                    panic!("{context} replay verification should succeed; got {err}")
+                });
         }
     }
 
