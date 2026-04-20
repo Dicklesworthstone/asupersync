@@ -919,10 +919,7 @@ fn parse_resolv_conf_nameservers(contents: &str) -> Vec<SocketAddr> {
     let mut nameservers = Vec::new();
 
     for line in contents.lines() {
-        let line = line
-            .split_once('#')
-            .map_or(line, |(before_comment, _)| before_comment)
-            .trim();
+        let line = line.split(['#', ';']).next().unwrap_or(line).trim();
         if line.is_empty() {
             continue;
         }
@@ -1023,6 +1020,11 @@ fn decode_dns_name_inner(
                 .get(offset + 1)
                 .ok_or_else(|| DnsError::Protocol("truncated DNS name pointer".to_string()))?;
             let pointer = ((u16::from(len & 0x3F) << 8) | u16::from(next)) as usize;
+            if pointer >= start {
+                return Err(DnsError::Protocol(
+                    "forward DNS compression pointer".to_string(),
+                ));
+            }
             let (suffix, _) = decode_dns_name_inner(packet, pointer, depth + 1)?;
             if !suffix.is_empty() {
                 labels.push(suffix);
@@ -1065,6 +1067,16 @@ fn parse_dns_answer(packet: &[u8], offset: &mut usize) -> Result<Option<DnsAnswe
         return Ok(None);
     }
 
+    let ensure_rdata_consumed = |cursor: usize, record_kind: &str| -> Result<(), DnsError> {
+        if cursor > rdata_end {
+            Err(DnsError::Protocol(format!(
+                "{record_kind} record name exceeds DNS RDATA length"
+            )))
+        } else {
+            Ok(())
+        }
+    };
+
     let data = match DnsQueryType::from_code(rr_type) {
         Some(DnsQueryType::A) if rdlen == 4 => {
             let bytes = &packet[rdata_offset..rdata_end];
@@ -1095,12 +1107,15 @@ fn parse_dns_answer(packet: &[u8], offset: &mut usize) -> Result<Option<DnsAnswe
         }
         Some(DnsQueryType::Cname) => {
             let mut name_offset = rdata_offset;
-            DnsRecordData::Cname(decode_dns_name(packet, &mut name_offset)?)
+            let alias = decode_dns_name(packet, &mut name_offset)?;
+            ensure_rdata_consumed(name_offset, "CNAME")?;
+            DnsRecordData::Cname(alias)
         }
         Some(DnsQueryType::Mx) => {
             let mut mx_offset = rdata_offset;
             let preference = read_u16(packet, &mut mx_offset)?;
             let exchange = decode_dns_name(packet, &mut mx_offset)?;
+            ensure_rdata_consumed(mx_offset, "MX")?;
             DnsRecordData::Mx {
                 preference,
                 exchange,
@@ -1130,6 +1145,7 @@ fn parse_dns_answer(packet: &[u8], offset: &mut usize) -> Result<Option<DnsAnswe
             let weight = read_u16(packet, &mut srv_offset)?;
             let port = read_u16(packet, &mut srv_offset)?;
             let target = decode_dns_name(packet, &mut srv_offset)?;
+            ensure_rdata_consumed(srv_offset, "SRV")?;
             DnsRecordData::Srv {
                 priority,
                 weight,
@@ -1884,6 +1900,28 @@ mod tests {
     }
 
     #[test]
+    fn decode_dns_name_rejects_forward_compression_pointer() {
+        init_test("decode_dns_name_rejects_forward_compression_pointer");
+
+        let packet = vec![
+            0xC0, 0x02, // pointer at offset 0 jumps forward to offset 2
+            0x00, // target is the root label, but forward pointers are forbidden
+        ];
+
+        let mut offset = 0usize;
+        let error = decode_dns_name(&packet, &mut offset).expect_err("forward pointer rejected");
+
+        crate::assert_with_log!(
+            matches!(error, DnsError::Protocol(ref message) if message.contains("forward DNS compression pointer")),
+            "forward compression pointers must be rejected",
+            true,
+            format!("{error:?}")
+        );
+
+        crate::test_complete!("decode_dns_name_rejects_forward_compression_pointer");
+    }
+
+    #[test]
     fn parse_dns_answer_ignores_non_in_class_records() {
         init_test("parse_dns_answer_ignores_non_in_class_records");
 
@@ -1912,6 +1950,93 @@ mod tests {
         );
 
         crate::test_complete!("parse_dns_answer_ignores_non_in_class_records");
+    }
+
+    #[test]
+    fn parse_dns_answer_rejects_cname_rdata_that_overruns_rdlen() {
+        init_test("parse_dns_answer_rejects_cname_rdata_that_overruns_rdlen");
+
+        let mut packet = vec![0u8; 12];
+        encode_dns_name("example.test", &mut packet).expect("encode owner name");
+        packet.extend_from_slice(&DnsQueryType::Cname.code().to_be_bytes());
+        packet.extend_from_slice(&DnsQueryType::DNS_CLASS_IN.to_be_bytes());
+        packet.extend_from_slice(&60u32.to_be_bytes());
+        packet.extend_from_slice(&1u16.to_be_bytes());
+        packet.push(3);
+        packet.extend_from_slice(b"www");
+        packet.extend_from_slice(&[7]);
+        packet.extend_from_slice(b"example");
+        packet.extend_from_slice(&[4]);
+        packet.extend_from_slice(b"test");
+        packet.push(0);
+
+        let mut offset = 12usize;
+        let err = parse_dns_answer(&packet, &mut offset).unwrap_err();
+
+        crate::assert_with_log!(
+            matches!(err, DnsError::Protocol(ref msg) if msg.contains("CNAME record name exceeds DNS RDATA length")),
+            "CNAME parser rejects names that read past rdlen",
+            true,
+            format!("{err:?}")
+        );
+
+        crate::test_complete!("parse_dns_answer_rejects_cname_rdata_that_overruns_rdlen");
+    }
+
+    #[test]
+    fn parse_dns_answer_rejects_srv_rdata_that_overruns_rdlen() {
+        init_test("parse_dns_answer_rejects_srv_rdata_that_overruns_rdlen");
+
+        let mut packet = vec![0u8; 12];
+        encode_dns_name("_sip._tcp.example.test", &mut packet).expect("encode owner name");
+        packet.extend_from_slice(&DnsQueryType::Srv.code().to_be_bytes());
+        packet.extend_from_slice(&DnsQueryType::DNS_CLASS_IN.to_be_bytes());
+        packet.extend_from_slice(&60u32.to_be_bytes());
+        packet.extend_from_slice(&7u16.to_be_bytes());
+        packet.extend_from_slice(&10u16.to_be_bytes());
+        packet.extend_from_slice(&20u16.to_be_bytes());
+        packet.extend_from_slice(&443u16.to_be_bytes());
+        packet.push(3);
+        packet.extend_from_slice(b"sip");
+        packet.extend_from_slice(&[7]);
+        packet.extend_from_slice(b"example");
+        packet.extend_from_slice(&[4]);
+        packet.extend_from_slice(b"test");
+        packet.push(0);
+
+        let mut offset = 12usize;
+        let err = parse_dns_answer(&packet, &mut offset).unwrap_err();
+
+        crate::assert_with_log!(
+            matches!(err, DnsError::Protocol(ref msg) if msg.contains("SRV record name exceeds DNS RDATA length")),
+            "SRV parser rejects targets that read past rdlen",
+            true,
+            format!("{err:?}")
+        );
+
+        crate::test_complete!("parse_dns_answer_rejects_srv_rdata_that_overruns_rdlen");
+    }
+
+    #[test]
+    fn parse_resolv_conf_nameservers_ignores_semicolon_comments() {
+        init_test("parse_resolv_conf_nameservers_ignores_semicolon_comments");
+
+        let nameservers = parse_resolv_conf_nameservers(
+            "nameserver 1.1.1.1 ; primary resolver\nnameserver 8.8.8.8;secondary\n",
+        );
+
+        crate::assert_with_log!(
+            nameservers
+                == vec![
+                    SocketAddr::from(([1, 1, 1, 1], 53)),
+                    SocketAddr::from(([8, 8, 8, 8], 53)),
+                ],
+            "semicolon comments must be stripped before parsing nameservers",
+            true,
+            format!("{nameservers:?}")
+        );
+
+        crate::test_complete!("parse_resolv_conf_nameservers_ignores_semicolon_comments");
     }
 
     fn set_test_time(nanos: u64) {
