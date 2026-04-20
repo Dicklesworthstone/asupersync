@@ -1768,6 +1768,21 @@ mod tests {
     }
 
     #[test]
+    fn request_prefer_respond_async_matches_rfc7240_example() {
+        let req = Request::post("/collection")
+            .content_type("text/plain")
+            .header("Prefer", "respond-async, wait=10")
+            .body("{Data}")
+            .build();
+
+        assert_eq!(req.method, Method::Post);
+        assert_eq!(req.uri, "/collection");
+        assert_eq!(req.content_type(), Some("text/plain"));
+        assert_eq!(req.header_value("prefer"), Some("respond-async, wait=10"));
+        assert_eq!(std::str::from_utf8(&req.body).unwrap(), "{Data}");
+    }
+
+    #[test]
     fn request_content_type_and_accept() {
         let req = Request::post("/api")
             .content_type("application/xml")
