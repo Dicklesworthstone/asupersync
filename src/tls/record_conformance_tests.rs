@@ -224,7 +224,35 @@ mod tests {
         }
     }
 
-    // ---- Test 1: TLSInnerPlaintext opaque type validation ----
+    // ---- Test 1: TLSCiphertext header wire image ----
+
+    /// RFC 8446 §5.1 - TLSCiphertext uses outer ContentType=application_data and
+    /// legacy_record_version=0x0303 with a 16-bit big-endian length field.
+    #[test]
+    fn test_tls_ciphertext_header_matches_rfc8446_wire_image() {
+        init_test_logging();
+        crate::test_phase!("test_tls_ciphertext_header_matches_rfc8446_wire_image");
+
+        let record = TlsRecord::application_data(vec![0x01, 0x02, 0x03]);
+
+        assert_eq!(
+            record.to_bytes(),
+            vec![
+                CONTENT_TYPE_APPLICATION_DATA,
+                0x03,
+                0x03,
+                0x00,
+                0x03,
+                0x01,
+                0x02,
+                0x03
+            ]
+        );
+
+        crate::test_complete!("test_tls_ciphertext_header_matches_rfc8446_wire_image");
+    }
+
+    // ---- Test 2: TLSInnerPlaintext opaque type validation ----
 
     /// RFC 8446 §5.4 - Test TLSInnerPlaintext content types 0x17/0x16/0x15
     #[test]
