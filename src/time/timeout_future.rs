@@ -817,9 +817,6 @@ mod tests {
     // Helper Functions
     // =========================================================================
 
-    use std::sync::Arc;
-    use std::task::Wake;
-
     /// Creates a no-op waker for testing.
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

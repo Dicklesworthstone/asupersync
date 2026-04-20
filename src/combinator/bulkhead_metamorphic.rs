@@ -440,7 +440,7 @@ fn mr2_rejection_accuracy(
 ///
 /// Cancel of outer scope cancels all bulkhead in-flight operations.
 /// Verifies that cancellation protocol works correctly with bulkheads.
-fn mr3_cancel_propagation(worker_count: u32, in_flight_count: u32, seed: u64) -> bool {
+fn mr3_cancel_propagation(worker_count: u32, in_flight_count: u32, _seed: u64) -> bool {
     let global_state = GlobalBulkheadState::new();
 
     let policy = BulkheadPolicy {
@@ -852,4 +852,6 @@ mod tests {
         // All operations cancelled
         assert!(mr3_cancel_propagation(1, 5, 1212));
     }
+}
+}
 }

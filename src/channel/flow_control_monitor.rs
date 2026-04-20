@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Channel Flow Control Invariant Validator
 //!
 //! Ensures flow control mechanisms don't violate channel atomicity or cause deadlocks
@@ -417,7 +418,7 @@ impl DeadlockDetector {
     fn add_dependency(&mut self, task: TaskId, channel: u64) {
         self.task_to_channel
             .entry(task)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(channel);
     }
 
@@ -675,7 +676,7 @@ impl FlowControlMonitor {
                 self.deadlock_detector.remove_dependency(*task_id, *channel_id);
             }
 
-            FlowControlEvent::CommitFlowControlled { .. } | FlowControlEvent::AbortDueToFlowControl { .. } => {} // Handle other events as needed
+            FlowControlEvent::CommitFlowControlled { .. } => {} // Handle other events as needed
         }
     }
 
