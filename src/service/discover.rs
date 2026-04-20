@@ -23,7 +23,7 @@
 //! ```
 
 use crate::types::Time;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use std::collections::HashSet;
 use std::fmt;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -266,6 +266,7 @@ impl fmt::Debug for DnsDiscoveryConfig {
 pub struct DnsServiceDiscovery {
     config: DnsDiscoveryConfig,
     state: Mutex<DnsDiscoveryState>,
+    resolve_done: Condvar,
 }
 
 struct DnsDiscoveryState {
@@ -275,12 +276,37 @@ struct DnsDiscoveryState {
     last_resolve: Option<Time>,
     /// Monotonic generation for started resolution attempts.
     resolve_generation: u64,
+    /// Generation currently being resolved, if any.
+    in_flight_generation: Option<u64>,
     /// Generation of the last successful resolution applied to `current`.
     applied_generation: u64,
     /// Number of successful resolutions applied to `current`.
     resolve_count: u64,
     /// Number of failed resolutions.
     error_count: u64,
+    /// Last resolver failure produced by an in-flight generation.
+    last_resolution_error: Option<StoredDnsError>,
+}
+
+#[derive(Clone)]
+struct StoredDnsError {
+    generation: u64,
+    kind: std::io::ErrorKind,
+    message: String,
+}
+
+impl StoredDnsError {
+    fn from_error(generation: u64, error: &std::io::Error) -> Self {
+        Self {
+            generation,
+            kind: error.kind(),
+            message: error.to_string(),
+        }
+    }
+
+    fn into_error(self) -> DnsDiscoveryError {
+        DnsDiscoveryError::Resolve(std::io::Error::new(self.kind, self.message))
+    }
 }
 
 fn sorted_socket_addrs(addrs: &HashSet<SocketAddr>) -> Vec<SocketAddr> {
@@ -320,10 +346,13 @@ impl DnsServiceDiscovery {
                 current: HashSet::new(),
                 last_resolve: None,
                 resolve_generation: 0,
+                in_flight_generation: None,
                 applied_generation: 0,
                 resolve_count: 0,
                 error_count: 0,
+                last_resolution_error: None,
             }),
+            resolve_done: Condvar::new(),
         }
     }
 
@@ -381,8 +410,20 @@ impl Discover for DnsServiceDiscovery {
 
     fn poll_discover(&self) -> Result<Vec<Change<SocketAddr>>, DnsDiscoveryError> {
         let now = (self.config.time_getter)();
-        let resolve_generation = {
+        let resolve_generation = loop {
             let mut state = self.state.lock();
+            if let Some(in_flight_generation) = state.in_flight_generation {
+                self.resolve_done.wait(&mut state);
+                if let Some(err) = state
+                    .last_resolution_error
+                    .clone()
+                    .filter(|err| err.generation == in_flight_generation)
+                {
+                    return Err(err.into_error());
+                }
+                return Ok(Vec::new());
+            }
+
             if !self.needs_resolve(now, &state) {
                 return Ok(Vec::new());
             }
@@ -394,24 +435,28 @@ impl Discover for DnsServiceDiscovery {
                 .resolve_generation
                 .checked_add(1)
                 .expect("dns discovery resolve generation overflow");
-            state.resolve_generation
+            state.in_flight_generation = Some(state.resolve_generation);
+            break state.resolve_generation;
         };
 
         let resolution = self.resolve();
         let mut state = self.state.lock();
+        state.in_flight_generation = None;
         let result = match resolution {
             Ok(new_addrs) => {
+                state.last_resolution_error = None;
                 if resolve_generation <= state.applied_generation {
                     // A newer successful poll already committed fresher state
                     // after this resolve began, so this older success must not
                     // clobber it.
-                    return Ok(Vec::new());
+                    Ok(Vec::new())
+                } else {
+                    state.resolve_count += 1;
+                    let changes = dns_changes(&state.current, &new_addrs);
+                    state.current = new_addrs;
+                    state.applied_generation = resolve_generation;
+                    Ok(changes)
                 }
-                state.resolve_count += 1;
-                let changes = dns_changes(&state.current, &new_addrs);
-                state.current = new_addrs;
-                state.applied_generation = resolve_generation;
-                Ok(changes)
             }
             Err(e) => {
                 // Failed attempts still count as resolver errors even if a newer
@@ -421,10 +466,13 @@ impl Discover for DnsServiceDiscovery {
                 // resolutions so callers that poll frequently do not hot-loop
                 // on an unhealthy hostname.
                 state.error_count += 1;
+                state.last_resolution_error =
+                    Some(StoredDnsError::from_error(resolve_generation, &e));
                 Err(DnsDiscoveryError::Resolve(e))
             }
         };
         drop(state);
+        self.resolve_done.notify_all();
         result
     }
 
@@ -454,7 +502,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
-    use std::sync::{Arc, Condvar, Mutex as StdMutex};
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::thread;
 
     thread_local! {
@@ -779,33 +827,30 @@ mod tests {
     }
 
     #[test]
-    fn dns_discovery_stale_concurrent_resolution_cannot_clobber_newer_state() {
-        init_test("dns_discovery_stale_concurrent_resolution_cannot_clobber_newer_state");
+    fn dns_discovery_concurrent_followers_coalesce_onto_inflight_success() {
+        init_test("dns_discovery_concurrent_followers_coalesce_onto_inflight_success");
         let (first_started_tx, first_started_rx) = mpsc::channel();
-        let release_first = Arc::new((StdMutex::new(false), Condvar::new()));
+        let release_first = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
         let release_first_for_resolver = Arc::clone(&release_first);
-        let call_index = Arc::new(AtomicUsize::new(0));
-        let call_index_for_resolver = Arc::clone(&call_index);
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_for_resolver = Arc::clone(&call_count);
         let discovery = Arc::new(DnsServiceDiscovery::new(
             DnsDiscoveryConfig::new("service.test", 80)
                 .poll_interval(Duration::ZERO)
-                .with_resolver(move |_, _| {
-                    match call_index_for_resolver.fetch_add(1, Ordering::SeqCst) {
-                        0 => {
-                            first_started_tx
-                                .send(())
-                                .expect("first-started channel should be open");
-                            let (lock, ready) = &*release_first_for_resolver;
-                            let mut released = lock.lock().expect("release lock poisoned");
-                            while !*released {
-                                released = ready.wait(released).expect("release wait poisoned");
-                            }
-                            drop(released);
-                            Ok(socket_set(&["127.0.0.1:80"]))
+                .with_resolver(move |_, _| match call_count_for_resolver.fetch_add(1, Ordering::SeqCst) {
+                    0 => {
+                        first_started_tx
+                            .send(())
+                            .expect("first-started channel should be open");
+                        let (lock, ready) = &*release_first_for_resolver;
+                        let mut released = lock.lock().expect("release lock poisoned");
+                        while !*released {
+                            released = ready.wait(released).expect("release wait poisoned");
                         }
-                        1 => Ok(socket_set(&["127.0.0.2:80"])),
-                        other => panic!("unexpected resolver invocation {other}"),
+                        drop(released);
+                        Ok(socket_set(&["127.0.0.1:80"]))
                     }
+                    other => panic!("concurrent follower should not start resolver call {other}"),
                 }),
         ));
 
@@ -822,7 +867,7 @@ mod tests {
             .expect("second poll should succeed");
         assert_eq!(
             second_result,
-            vec![Change::Insert("127.0.0.2:80".parse().unwrap())]
+            Vec::<Change<SocketAddr>>::new()
         );
 
         let (lock, ready) = &*release_first;
@@ -833,45 +878,43 @@ mod tests {
             .join()
             .expect("first worker should not panic")
             .expect("first poll should not fail");
-        assert!(
-            first_result.is_empty(),
-            "stale completion should not publish changes"
+        assert_eq!(
+            first_result,
+            vec![Change::Insert("127.0.0.1:80".parse().unwrap())]
         );
-        assert_eq!(discovery.endpoints(), vec!["127.0.0.2:80".parse().unwrap()]);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(discovery.endpoints(), vec!["127.0.0.1:80".parse().unwrap()]);
         assert_eq!(discovery.resolve_count(), 1);
         crate::test_complete!(
-            "dns_discovery_stale_concurrent_resolution_cannot_clobber_newer_state"
+            "dns_discovery_concurrent_followers_coalesce_onto_inflight_success"
         );
     }
 
     #[test]
-    fn dns_discovery_stale_concurrent_resolution_still_reports_error_to_caller() {
-        init_test("dns_discovery_stale_concurrent_resolution_still_reports_error_to_caller");
+    fn dns_discovery_concurrent_followers_share_inflight_failure() {
+        init_test("dns_discovery_concurrent_followers_share_inflight_failure");
         let (first_started_tx, first_started_rx) = mpsc::channel();
-        let release_first = Arc::new((StdMutex::new(false), Condvar::new()));
+        let release_first = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
         let release_first_for_resolver = Arc::clone(&release_first);
-        let call_index = Arc::new(AtomicUsize::new(0));
-        let call_index_for_resolver = Arc::clone(&call_index);
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_for_resolver = Arc::clone(&call_count);
         let discovery = Arc::new(DnsServiceDiscovery::new(
             DnsDiscoveryConfig::new("service.test", 80)
                 .poll_interval(Duration::ZERO)
-                .with_resolver(move |_, _| {
-                    match call_index_for_resolver.fetch_add(1, Ordering::SeqCst) {
-                        0 => {
-                            first_started_tx
-                                .send(())
-                                .expect("first-started channel should be open");
-                            let (lock, ready) = &*release_first_for_resolver;
-                            let mut released = lock.lock().expect("release lock poisoned");
-                            while !*released {
-                                released = ready.wait(released).expect("release wait poisoned");
-                            }
-                            drop(released);
-                            Err(std::io::Error::other("stale failure"))
+                .with_resolver(move |_, _| match call_count_for_resolver.fetch_add(1, Ordering::SeqCst) {
+                    0 => {
+                        first_started_tx
+                            .send(())
+                            .expect("first-started channel should be open");
+                        let (lock, ready) = &*release_first_for_resolver;
+                        let mut released = lock.lock().expect("release lock poisoned");
+                        while !*released {
+                            released = ready.wait(released).expect("release wait poisoned");
                         }
-                        1 => Ok(socket_set(&["127.0.0.2:80"])),
-                        other => panic!("unexpected resolver invocation {other}"),
+                        drop(released);
+                        Err(std::io::Error::other("shared failure"))
                     }
+                    other => panic!("concurrent follower should not start resolver call {other}"),
                 }),
         ));
 
@@ -882,86 +925,52 @@ mod tests {
             .expect("first resolver call should start");
 
         let second_discovery = Arc::clone(&discovery);
-        let second_result = thread::spawn(move || second_discovery.poll_discover())
-            .join()
-            .expect("second worker should not panic")
-            .expect("second poll should succeed");
-        assert_eq!(
-            second_result,
-            vec![Change::Insert("127.0.0.2:80".parse().unwrap())]
-        );
+        let second_worker = thread::spawn(move || second_discovery.poll_discover());
 
         let (lock, ready) = &*release_first;
         *lock.lock().expect("release lock poisoned") = true;
         ready.notify_all();
 
-        let first_result = first_worker.join().expect("first worker should not panic");
-        let err = first_result.expect_err("stale failed resolution should still report error");
-        assert_eq!(err.to_string(), "DNS resolution failed: stale failure");
-        assert_eq!(discovery.endpoints(), vec!["127.0.0.2:80".parse().unwrap()]);
-        assert_eq!(discovery.resolve_count(), 1);
-        assert_eq!(discovery.error_count(), 1);
-        crate::test_complete!(
-            "dns_discovery_stale_concurrent_resolution_still_reports_error_to_caller"
-        );
-    }
-
-    #[test]
-    fn dns_discovery_older_success_still_applies_after_newer_failure() {
-        init_test("dns_discovery_older_success_still_applies_after_newer_failure");
-        let (first_started_tx, first_started_rx) = mpsc::channel();
-        let release_first = Arc::new((StdMutex::new(false), Condvar::new()));
-        let release_first_for_resolver = Arc::clone(&release_first);
-        let call_index = Arc::new(AtomicUsize::new(0));
-        let call_index_for_resolver = Arc::clone(&call_index);
-        let discovery = Arc::new(DnsServiceDiscovery::new(
-            DnsDiscoveryConfig::new("service.test", 80)
-                .poll_interval(Duration::ZERO)
-                .with_resolver(move |_, _| {
-                    match call_index_for_resolver.fetch_add(1, Ordering::SeqCst) {
-                        0 => {
-                            first_started_tx
-                                .send(())
-                                .expect("first-started channel should be open");
-                            let (lock, ready) = &*release_first_for_resolver;
-                            let mut released = lock.lock().expect("release lock poisoned");
-                            while !*released {
-                                released = ready.wait(released).expect("release wait poisoned");
-                            }
-                            drop(released);
-                            Ok(socket_set(&["127.0.0.1:80"]))
-                        }
-                        1 => Err(std::io::Error::other("newer failure")),
-                        other => panic!("unexpected resolver invocation {other}"),
-                    }
-                }),
-        ));
-
-        let first_discovery = Arc::clone(&discovery);
-        let first_worker = thread::spawn(move || first_discovery.poll_discover());
-        first_started_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("first resolver call should start");
-
-        let second_discovery = Arc::clone(&discovery);
-        let second_result = thread::spawn(move || second_discovery.poll_discover())
-            .join()
-            .expect("second worker should not panic");
-        let second_err =
-            second_result.expect_err("newer failed resolution should still report error");
-        assert_eq!(
-            second_err.to_string(),
-            "DNS resolution failed: newer failure"
-        );
-
-        let (lock, ready) = &*release_first;
-        *lock.lock().expect("release lock poisoned") = true;
-        ready.notify_all();
-
-        let first_result = first_worker
+        let first_err = first_worker
             .join()
             .expect("first worker should not panic")
-            .expect("older success should still apply when newer attempt failed");
+            .expect_err("leader should report resolver failure");
+        let second_err = second_worker
+            .join()
+            .expect("second worker should not panic")
+            .expect_err("follower should receive shared resolver failure");
+        assert_eq!(first_err.to_string(), "DNS resolution failed: shared failure");
+        assert_eq!(second_err.to_string(), "DNS resolution failed: shared failure");
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        assert!(discovery.endpoints().is_empty());
+        assert_eq!(discovery.resolve_count(), 0);
+        assert_eq!(discovery.error_count(), 1);
+        crate::test_complete!(
+            "dns_discovery_concurrent_followers_share_inflight_failure"
+        );
+    }
+
+    #[test]
+    fn dns_discovery_new_refresh_after_failure_retries_normally() {
+        init_test("dns_discovery_new_refresh_after_failure_retries_normally");
+        let resolver = scripted_resolver(vec![
+            Err(std::io::Error::other("first failure")),
+            Ok(socket_set(&["127.0.0.1:80"])),
+        ]);
+        let discovery = Arc::new(DnsServiceDiscovery::new(
+            DnsDiscoveryConfig::new("service.test", 80)
+                .poll_interval(Duration::ZERO)
+                .with_resolver(resolver),
+        ));
+
+        let first_err = discovery
+            .poll_discover()
+            .expect_err("first refresh should fail");
+        assert_eq!(first_err.to_string(), "DNS resolution failed: first failure");
+
+        let first_result = discovery
+            .poll_discover()
+            .expect("next refresh should retry successfully");
         assert_eq!(
             first_result,
             vec![Change::Insert("127.0.0.1:80".parse().unwrap())]
@@ -969,7 +978,7 @@ mod tests {
         assert_eq!(discovery.endpoints(), vec!["127.0.0.1:80".parse().unwrap()]);
         assert_eq!(discovery.resolve_count(), 1);
         assert_eq!(discovery.error_count(), 1);
-        crate::test_complete!("dns_discovery_older_success_still_applies_after_newer_failure");
+        crate::test_complete!("dns_discovery_new_refresh_after_failure_retries_normally");
     }
 
     #[test]
