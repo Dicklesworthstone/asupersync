@@ -768,6 +768,7 @@ impl FlowControlMonitor {
 
     fn check_cancellation_unblock_failures(&mut self, current_time: Time) {
         let cancellation_threshold_ns = self.config.deadlock_detection_threshold_s * 1_000_000_000;
+        let mut new_violations = Vec::new();
 
         for (&task_id, task_state) in &self.task_states {
             let Some(cancel_time) = task_state.cancel_time else {
@@ -787,19 +788,20 @@ impl FlowControlMonitor {
             for &channel_id in &task_state.blocked_channels {
                 if let Some(channel_state) = self.channel_states.get(&channel_id) {
                     for &flow_control_type in &channel_state.active_controls {
-                        self.record_violation(
-                            FlowControlViolation::CancellationUnblockFailure {
-                                channel_id,
-                                cancelled_task: task_id,
-                                flow_control_type,
-                                time_since_cancel_s: time_since_cancel_ns / 1_000_000_000,
-                                timestamp: current_time,
-                            },
-                            current_time,
-                        );
+                        new_violations.push(FlowControlViolation::CancellationUnblockFailure {
+                            channel_id,
+                            cancelled_task: task_id,
+                            flow_control_type,
+                            time_since_cancel_s: time_since_cancel_ns / 1_000_000_000,
+                            timestamp: current_time,
+                        });
                     }
                 }
             }
+        }
+
+        for violation in new_violations {
+            self.record_violation(violation, current_time);
         }
     }
 

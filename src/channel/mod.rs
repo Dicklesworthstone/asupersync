@@ -42,6 +42,7 @@ pub mod broadcast;
 pub mod clock_skew;
 pub mod crash;
 pub mod fault;
+pub mod flow_control_monitor;
 pub mod mpsc;
 pub mod oneshot;
 pub mod partition;
