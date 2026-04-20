@@ -21,6 +21,7 @@ on:
           - all
           - fuzz_http1_request
           - fuzz_http1_response
+          - dns_resolver_name_compression
           - h1_parsed_url
           - length_delimited_encode_width
           - length_delimited_decoder_state
@@ -52,6 +53,7 @@ jobs:
         target:
           - fuzz_http1_request
           - fuzz_http1_response
+          - dns_resolver_name_compression
           - h1_parsed_url
           - length_delimited_encode_width
           - length_delimited_decoder_state

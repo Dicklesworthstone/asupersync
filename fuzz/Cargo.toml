@@ -330,6 +330,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "dns_resolver_name_compression"
+path = "fuzz_targets/dns_resolver_name_compression.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_trace_file_parsing"
 path = "fuzz_targets/trace_file_parsing.rs"
 test = false

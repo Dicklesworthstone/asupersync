@@ -1363,7 +1363,7 @@ fn validate_governance_fallback_consistency(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     fn sample_governance_decision() -> UnitGovernanceDecision {
         UnitGovernanceDecision {
@@ -1481,6 +1481,34 @@ mod tests {
                 "equations_used": 16
             }
         })
+    }
+
+    fn scrub_log_value_for_snapshot_test(value: Value) -> Value {
+        match value {
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(key, value)| {
+                        let scrubbed = match key.as_str() {
+                            "replay_ref" | "replay_id" | "run_id" if value.is_string() => {
+                                Value::String(format!("[{key}]"))
+                            }
+                            "repro_command" if value.is_string() => {
+                                Value::String("[rch-command]".to_string())
+                            }
+                            _ => scrub_log_value_for_snapshot_test(value),
+                        };
+                        (key, scrubbed)
+                    })
+                    .collect(),
+            ),
+            Value::Array(items) => Value::Array(
+                items
+                    .into_iter()
+                    .map(scrub_log_value_for_snapshot_test)
+                    .collect(),
+            ),
+            other => other,
+        }
     }
 
     #[test]
@@ -2585,5 +2613,11 @@ mod tests {
                 .chosen_action,
             "continue"
         );
+    }
+
+    #[test]
+    fn unit_log_with_governance_snapshot_scrubbed() {
+        let value = scrub_log_value_for_snapshot_test(valid_unit_log_value_with_governance());
+        insta::assert_json_snapshot!("unit_log_with_governance_scrubbed", value);
     }
 }

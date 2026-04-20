@@ -1,0 +1,69 @@
+---
+source: src/raptorq/test_log_schema.rs
+expression: value
+---
+{
+  "decode_stats": {
+    "conservative_fallback_reason": "none",
+    "dense_core_cols": 4,
+    "dense_core_dropped_rows": 1,
+    "dense_core_rows": 4,
+    "dropped": 2,
+    "fallback_reason": "none",
+    "gauss_ops": 12,
+    "governance": {
+      "chosen_action": "continue",
+      "confidence_score": 910,
+      "deterministic_fallback_trigger": {
+        "fired": false,
+        "reason": "none"
+      },
+      "expected_loss_terms": {
+        "canary_hold": 17,
+        "continue": 11,
+        "fallback": 71,
+        "rollback": 43
+      },
+      "replay_ref": "[replay_ref]",
+      "state_posterior": {
+        "degraded": 120,
+        "healthy": 820,
+        "regression": 40,
+        "unknown": 20
+      },
+      "top_evidence_contributors": [
+        {
+          "contribution_permille": 470,
+          "name": "decode_success_rate"
+        },
+        {
+          "contribution_permille": 320,
+          "name": "fallback_incidence"
+        },
+        {
+          "contribution_permille": 210,
+          "name": "tail_latency_guardrail"
+        }
+      ],
+      "uncertainty_score": 90
+    },
+    "hard_regime_activated": false,
+    "hard_regime_branch": "markowitz",
+    "hard_regime_fallbacks": 0,
+    "inactivated": 1,
+    "k": 8,
+    "loss_pct": 25,
+    "peel_frontier_peak": 3,
+    "peel_queue_pops": 9,
+    "peel_queue_pushes": 9,
+    "peeled": 6,
+    "pivots": 4
+  },
+  "outcome": "ok",
+  "parameter_set": "k=8,symbol_size=32",
+  "replay_ref": "[replay_ref]",
+  "repro_command": "[rch-command]",
+  "scenario_id": "RQ-U-G7-GOVERNANCE-VALIDATOR",
+  "schema_version": "raptorq-unit-log-v1",
+  "seed": 42
+}
