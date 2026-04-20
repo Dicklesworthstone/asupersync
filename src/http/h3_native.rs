@@ -3496,6 +3496,18 @@ mod tests {
     }
 
     #[test]
+    fn request_method_accepts_rfc5234_tchar_vector() {
+        let pseudo = H3PseudoHeaders {
+            method: Some("M!#$%&'*+-.^_`|~09".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("example.com".to_string()),
+            path: Some("/".to_string()),
+            status: None,
+        };
+        validate_request_pseudo_headers(&pseudo).expect("RFC 5234 tchar vector must be valid");
+    }
+
+    #[test]
     fn request_empty_scheme_error() {
         let pseudo = H3PseudoHeaders {
             method: Some("GET".to_string()),
