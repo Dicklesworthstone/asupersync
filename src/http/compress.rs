@@ -1441,6 +1441,26 @@ mod tests {
 
     #[cfg(feature = "compression")]
     #[test]
+    fn deflate_empty_stream_matches_rfc1951_empty_final_block_vector() {
+        let mut comp = DeflateCompressor::new();
+        let mut compressed = Vec::new();
+        comp.finish(&mut compressed).unwrap();
+
+        assert_eq!(
+            compressed,
+            vec![0x03, 0x00],
+            "empty raw DEFLATE stream should be a final empty block"
+        );
+
+        let mut dec = DeflateDecompressor::new(None);
+        let mut decompressed = Vec::new();
+        dec.decompress(&compressed, &mut decompressed).unwrap();
+        dec.finish(&mut decompressed).unwrap();
+        assert!(decompressed.is_empty());
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
     fn deflate_compressor_default() {
         let comp = DeflateCompressor::default();
         assert_eq!(comp.encoding(), ContentEncoding::Deflate);
