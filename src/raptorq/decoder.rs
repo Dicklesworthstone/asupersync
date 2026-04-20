@@ -574,6 +574,23 @@ fn build_dense_core_rows(
     Ok((dense_rows, dropped_zero_rows))
 }
 
+fn validate_dense_core_rhs_widths(
+    state: &DecoderState,
+    dense_rows: &[usize],
+    symbol_size: usize,
+) -> Result<(), DecodeError> {
+    for &eq_idx in dense_rows {
+        let actual = state.rhs[eq_idx].len();
+        if actual != symbol_size {
+            return Err(DecodeError::SymbolSizeMismatch {
+                expected: symbol_size,
+                actual,
+            });
+        }
+    }
+    Ok(())
+}
+
 const DENSE_COL_ABSENT: usize = usize::MAX;
 const DENSE_COL_DIRECT_MAP_RANGE_RATIO: usize = 8;
 
@@ -1914,6 +1931,7 @@ impl InactivationDecoder {
             .collect();
         let (dense_rows, dropped_zero_rows) = build_dense_core_rows(state, &unused_eqs, &unsolved)?;
         state.stats.dense_core_dropped_rows += dropped_zero_rows;
+        validate_dense_core_rhs_widths(state, &dense_rows, symbol_size)?;
 
         // Mark all remaining unsolved columns as inactive
         for &col in &unsolved {
@@ -2175,6 +2193,7 @@ impl InactivationDecoder {
             .collect();
         let (dense_rows, dropped_zero_rows) = build_dense_core_rows(state, &unused_eqs, &unsolved)?;
         state.stats.dense_core_dropped_rows += dropped_zero_rows;
+        validate_dense_core_rhs_widths(state, &dense_rows, symbol_size)?;
 
         // Mark all remaining unsolved columns as inactive
         for &col in &unsolved {
@@ -4250,6 +4269,111 @@ mod tests {
             proof_state.stats.peeling_fallback_reason, plain_state.stats.peeling_fallback_reason,
             "proof capture must not change dense-core fallback telemetry"
         );
+    }
+
+    #[test]
+    fn dense_failure_restores_decoder_state_after_early_termination() {
+        let decoder = InactivationDecoder::new(8, 16, 3201);
+        let params = decoder.params().clone();
+        let mut state = make_rank_deficient_state(&params, 16, 3, 7);
+        let initial_rhs = state.rhs.clone();
+        let initial_active = state.active_cols.clone();
+
+        let err = decoder.inactivate_and_solve(&mut state).unwrap_err();
+        assert_eq!(err, DecodeError::SingularMatrix { row: 7 });
+        assert_eq!(
+            state.rhs, initial_rhs,
+            "dense-failure cleanup must restore RHS rows taken into the dense core"
+        );
+        assert_eq!(
+            state.active_cols, initial_active,
+            "dense-failure cleanup must reactivate unsolved columns for postmortem inspection"
+        );
+        assert!(
+            state.inactive_cols.is_empty(),
+            "dense-failure cleanup must not leak inactive-column bookkeeping"
+        );
+    }
+
+    #[test]
+    fn dense_failure_with_proof_restores_decoder_state_after_early_termination() {
+        let decoder = InactivationDecoder::new(8, 16, 3202);
+        let params = decoder.params().clone();
+        let mut state = make_rank_deficient_state(&params, 16, 3, 7);
+        let initial_rhs = state.rhs.clone();
+        let initial_active = state.active_cols.clone();
+        let mut trace = EliminationTrace::default();
+
+        let err = decoder
+            .inactivate_and_solve_with_proof(&mut state, &mut trace)
+            .unwrap_err();
+        assert_eq!(err, DecodeError::SingularMatrix { row: 7 });
+        assert_eq!(
+            state.rhs, initial_rhs,
+            "proof dense-failure cleanup must restore RHS rows taken into the dense core"
+        );
+        assert_eq!(
+            state.active_cols, initial_active,
+            "proof dense-failure cleanup must reactivate unsolved columns for postmortem inspection"
+        );
+        assert!(
+            state.inactive_cols.is_empty(),
+            "proof dense-failure cleanup must not leak inactive-column bookkeeping"
+        );
+    }
+
+    #[test]
+    fn dense_core_rhs_width_drift_fails_closed_before_plain_snapshot() {
+        let decoder = InactivationDecoder::new(8, 16, 3203);
+        let params = decoder.params().clone();
+        let mut state = make_rank_deficient_state(&params, 16, 3, 7);
+        let initial_rhs = state.rhs.clone();
+        let initial_active = state.active_cols.clone();
+        state.rhs[0].truncate(15);
+
+        let err = decoder.inactivate_and_solve(&mut state).unwrap_err();
+        assert_eq!(
+            err,
+            DecodeError::SymbolSizeMismatch {
+                expected: 16,
+                actual: 15,
+            },
+            "dense-core RHS width drift must fail closed instead of panicking during snapshot"
+        );
+        assert_eq!(state.rhs[0].len(), 15);
+        assert_eq!(state.rhs[1], initial_rhs[1]);
+        assert_eq!(state.active_cols, initial_active);
+        assert!(state.inactive_cols.is_empty());
+    }
+
+    #[test]
+    fn dense_core_rhs_width_drift_fails_closed_before_proof_snapshot() {
+        let decoder = InactivationDecoder::new(8, 16, 3204);
+        let params = decoder.params().clone();
+        let mut state = make_rank_deficient_state(&params, 16, 3, 7);
+        let initial_rhs = state.rhs.clone();
+        let initial_active = state.active_cols.clone();
+        let mut trace = EliminationTrace::default();
+        state.rhs[0].truncate(15);
+
+        let err = decoder
+            .inactivate_and_solve_with_proof(&mut state, &mut trace)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DecodeError::SymbolSizeMismatch {
+                expected: 16,
+                actual: 15,
+            },
+            "proof dense-core RHS width drift must fail closed instead of panicking during snapshot"
+        );
+        assert_eq!(state.rhs[0].len(), 15);
+        assert_eq!(state.rhs[1], initial_rhs[1]);
+        assert_eq!(state.active_cols, initial_active);
+        assert!(state.inactive_cols.is_empty());
+        assert_eq!(trace.inactive_cols, vec![3, 7]);
+        assert_eq!(trace.inactivated, 2);
+        assert!(trace.pivot_events.is_empty());
     }
 
     #[test]
