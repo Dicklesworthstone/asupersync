@@ -57,6 +57,7 @@ enum MutationKind {
     AddCoefficient { coefficient: u8 },
     DropAllColumns,
     DuplicatePacket,
+    DuplicateWithPayloadCorruption { offset: u16, mask: u8 },
 }
 
 #[derive(Debug, Clone, Copy, Arbitrary)]
@@ -221,6 +222,16 @@ fn apply_mutations(packets: &mut Vec<ReceivedSymbol>, mutations: &[PacketMutatio
             }
             MutationKind::DuplicatePacket => {
                 let duplicate = packets[idx].clone();
+                packets.push(duplicate);
+            }
+            MutationKind::DuplicateWithPayloadCorruption { offset, mask } => {
+                let mut duplicate = packets[idx].clone();
+                if duplicate.data.is_empty() {
+                    duplicate.data.push(mask);
+                } else {
+                    let byte = offset as usize % duplicate.data.len();
+                    duplicate.data[byte] ^= mask;
+                }
                 packets.push(duplicate);
             }
         }
@@ -390,3 +401,37 @@ fuzz_target!(|data: &[u8]| {
         );
     }
 });
+
+#[cfg(test)]
+mod tests {
+    use super::{MutationKind, PacketMutation, apply_mutations};
+    use asupersync::raptorq::decoder::ReceivedSymbol;
+
+    #[test]
+    fn duplicate_with_payload_corruption_keeps_metadata_and_changes_payload() {
+        let original = ReceivedSymbol::source(3, vec![0xAA, 0x55, 0x11]);
+        let mut packets = vec![original.clone()];
+
+        apply_mutations(
+            &mut packets,
+            &[PacketMutation {
+                target: 0,
+                kind: MutationKind::DuplicateWithPayloadCorruption {
+                    offset: 1,
+                    mask: 0x0F,
+                },
+            }],
+        );
+
+        assert_eq!(packets.len(), 2, "mutation should append a duplicate packet");
+        assert_eq!(packets[0].esi, packets[1].esi);
+        assert_eq!(packets[0].is_source, packets[1].is_source);
+        assert_eq!(packets[0].columns, packets[1].columns);
+        assert_eq!(packets[0].coefficients, packets[1].coefficients);
+        assert_ne!(
+            packets[0].data, packets[1].data,
+            "duplicate corruption must actually perturb payload bytes"
+        );
+        assert_eq!(packets[1].data, vec![0xAA, 0x5A, 0x11]);
+    }
+}
