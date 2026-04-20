@@ -740,6 +740,7 @@ impl TraceRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -749,6 +750,33 @@ mod tests {
 
     fn make_region_id(index: u32, generation: u32) -> RegionId {
         RegionId::new_for_test(index, generation)
+    }
+
+    fn scrub_replay_trace_for_snapshot_test(value: Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut scrubbed = serde_json::Map::with_capacity(map.len());
+                for (key, value) in map {
+                    let replacement = match key.as_str() {
+                        "recorded_at" => Value::String("[TIMESTAMP]".to_string()),
+                        "task" | "region" | "parent" => match value {
+                            Value::Null => Value::Null,
+                            _ => Value::String("[ID]".to_string()),
+                        },
+                        _ => scrub_replay_trace_for_snapshot_test(value),
+                    };
+                    scrubbed.insert(key, replacement);
+                }
+                Value::Object(scrubbed)
+            }
+            Value::Array(values) => Value::Array(
+                values
+                    .into_iter()
+                    .map(scrub_replay_trace_for_snapshot_test)
+                    .collect(),
+            ),
+            other => other,
+        }
     }
 
     #[test]
@@ -1116,6 +1144,33 @@ mod tests {
     fn snapshot_on_disabled_returns_none() {
         let recorder = TraceRecorder::disabled();
         assert!(recorder.snapshot().is_none());
+    }
+
+    #[test]
+    fn snapshot_scrubs_ids_and_recorded_at() {
+        let mut metadata = TraceMetadata::new(42)
+            .with_config_hash(0xfeed_beef)
+            .with_description("trace recorder snapshot");
+        metadata.recorded_at = 1_726_133_456_789_000_000;
+        let mut recorder = TraceRecorder::new(metadata);
+
+        let task = make_task_id(7, 3);
+        let region = make_region_id(4, 1);
+
+        recorder.record_rng_seed(42);
+        recorder.record_task_spawned(task, region, 0);
+        recorder.record_task_scheduled(task, 1);
+        recorder.record_time_advanced(Time::from_nanos(10), Time::from_nanos(75));
+        recorder.record_io_ready(17, true, true, false, false);
+        recorder.record_delay_injection(Some(task), 50_000);
+        recorder.record_waker_batch_wake(3);
+
+        let snapshot = recorder.snapshot().expect("should have snapshot");
+
+        insta::assert_json_snapshot!(
+            "trace_recorder_snapshot_scrubbed",
+            scrub_replay_trace_for_snapshot_test(serde_json::to_value(&snapshot).unwrap())
+        );
     }
 
     // ── take on disabled ───────────────────────────────────────────

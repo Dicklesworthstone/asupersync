@@ -1,0 +1,50 @@
+---
+source: src/trace/recorder.rs
+expression: scrub_replay_trace_for_snapshot_test(serde_json::to_value(&snapshot).unwrap())
+---
+{
+  "events": [
+    {
+      "seed": 42,
+      "type": "RngSeed"
+    },
+    {
+      "at_tick": 0,
+      "region": "[ID]",
+      "task": "[ID]",
+      "type": "TaskSpawned"
+    },
+    {
+      "at_tick": 1,
+      "task": "[ID]",
+      "type": "TaskScheduled"
+    },
+    {
+      "from_nanos": 10,
+      "to_nanos": 75,
+      "type": "TimeAdvanced"
+    },
+    {
+      "readiness": 3,
+      "token": 17,
+      "type": "IoReady"
+    },
+    {
+      "data": 50000,
+      "kind": 1,
+      "task": "[ID]",
+      "type": "ChaosInjection"
+    },
+    {
+      "count": 3,
+      "type": "WakerBatchWake"
+    }
+  ],
+  "metadata": {
+    "config_hash": 4276993775,
+    "description": "trace recorder snapshot",
+    "recorded_at": "[TIMESTAMP]",
+    "seed": 42,
+    "version": 1
+  }
+}
