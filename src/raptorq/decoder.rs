@@ -3263,6 +3263,70 @@ mod tests {
     }
 
     #[test]
+    fn decode_wavefront_corrupted_repair_symbol_matches_direct_and_proof_failure() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 1u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut received = decoder.constraint_symbols();
+        received.extend(make_received_source(&decoder, &source));
+        for esi in (k as u32)..(l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let tampered = received
+            .iter_mut()
+            .find(|sym| !sym.is_source && sym.esi >= k as u32)
+            .expect("must include at least one repair symbol");
+        tampered.data[0] ^= 0x3C;
+
+        let direct = decoder
+            .decode(&received)
+            .expect_err("corrupted repair symbol must fail in direct decode");
+        let wavefront = decoder
+            .decode_wavefront(&received, 3)
+            .expect_err("corrupted repair symbol must fail in wavefront decode");
+        let (proof_err, proof) = decoder
+            .decode_with_proof(&received, ObjectId::new_for_test(9191), 0)
+            .expect_err("corrupted repair symbol must fail in proof decode");
+
+        assert_eq!(
+            direct, wavefront,
+            "wavefront decode must report the same failure as direct decode"
+        );
+        assert_eq!(
+            direct, proof_err,
+            "proof decode must report the same failure as direct decode"
+        );
+        assert!(
+            matches!(direct, DecodeError::SingularMatrix { .. })
+                || matches!(direct, DecodeError::CorruptDecodedOutput { .. }),
+            "expected corruption or inconsistency, got: {direct:?}"
+        );
+        assert!(
+            matches!(
+                proof.outcome,
+                crate::raptorq::proof::ProofOutcome::Failure {
+                    reason: FailureReason::SingularMatrix { .. }
+                }
+            ) || matches!(
+                proof.outcome,
+                crate::raptorq::proof::ProofOutcome::Failure {
+                    reason: FailureReason::CorruptDecodedOutput { .. }
+                }
+            ),
+            "expected corruption or inconsistency in proof"
+        );
+    }
+
+    #[test]
     fn decode_insufficient_symbols_fails() {
         let k = 8;
         let symbol_size = 32;
