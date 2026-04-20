@@ -2200,6 +2200,100 @@ mod tests {
         crate::test_complete!("mark_seen_acknowledges_latest_version_not_prior_borrow_snapshot");
     }
 
+    #[test]
+    fn metamorphic_subscription_snapshot_ordering() {
+        init_test("metamorphic_subscription_snapshot_ordering");
+        let cx = test_cx();
+        let (tx, mut rx1) = channel(0u32);
+
+        tx.send(10).expect("send failed");
+        let rx1_snapshot = rx1.borrow().clone_inner();
+        crate::assert_with_log!(
+            rx1_snapshot == 10,
+            "existing receiver sees first value via borrow",
+            10u32,
+            rx1_snapshot
+        );
+
+        let mut rx2 = tx.subscribe();
+        crate::assert_with_log!(
+            *rx2.borrow() == 10,
+            "new subscriber borrows current snapshot immediately",
+            10u32,
+            *rx2.borrow()
+        );
+        crate::assert_with_log!(
+            !rx2.has_changed(),
+            "new subscriber starts caught up to current version",
+            false,
+            rx2.has_changed()
+        );
+
+        tx.send(20).expect("send failed");
+        tx.send(30).expect("send failed");
+
+        let mut rx2_changed = rx2.changed(&cx);
+        let rx2_change = poll_ready(&mut rx2_changed);
+        drop(rx2_changed);
+        crate::assert_with_log!(
+            rx2_change.is_ok(),
+            "subscriber observes burst as a single pending change",
+            true,
+            rx2_change.is_ok()
+        );
+        crate::assert_with_log!(
+            *rx2.borrow() == 30,
+            "subscriber lands on latest burst value",
+            30u32,
+            *rx2.borrow()
+        );
+
+        let rx1_latest = {
+            let snapshot = rx1.borrow_and_update();
+            *snapshot
+        };
+        crate::assert_with_log!(
+            rx1_latest == 30,
+            "older receiver also lands on latest burst value",
+            30u32,
+            rx1_latest
+        );
+        crate::assert_with_log!(
+            !rx1.has_changed(),
+            "borrow_and_update fully acknowledges latest snapshot",
+            false,
+            rx1.has_changed()
+        );
+
+        let mut rx2_pending = rx2.changed(&cx);
+        let pending_waker = Waker::noop();
+        let mut pending_cx = Context::from_waker(pending_waker);
+        let pending_poll = Pin::new(&mut rx2_pending).poll(&mut pending_cx);
+        crate::assert_with_log!(
+            matches!(pending_poll, Poll::Pending),
+            "subscriber receives no duplicate notification after acknowledging burst",
+            true,
+            matches!(pending_poll, Poll::Pending)
+        );
+        drop(rx2_pending);
+
+        tx.send(40).expect("send failed");
+        crate::assert_with_log!(
+            rx1.has_changed(),
+            "next send is visible to older receiver after prior acknowledgement",
+            true,
+            rx1.has_changed()
+        );
+        crate::assert_with_log!(
+            rx2.has_changed(),
+            "next send is visible to subscriber after prior acknowledgement",
+            true,
+            rx2.has_changed()
+        );
+
+        crate::test_complete!("metamorphic_subscription_snapshot_ordering");
+    }
+
     /// MR3: changed() exactness - returns Ok(()) exactly once per distinct send,
     /// never stutters. Property: count(changed() == Ok(())) == count(distinct sends)
     #[test]
