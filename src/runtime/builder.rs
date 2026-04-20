@@ -156,7 +156,8 @@ use crate::runtime::RuntimeState;
 use crate::runtime::SpawnError;
 use crate::runtime::config::RuntimeConfig;
 use crate::runtime::deadline_monitor::{
-    AdaptiveDeadlineConfig, DeadlineWarning, MonitorConfig, default_warning_handler,
+    AdaptiveDeadlineConfig, DeadlineTaskSnapshot, DeadlineWarning, MonitorConfig,
+    default_warning_handler,
 };
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::reactor::Reactor;
@@ -389,7 +390,12 @@ impl NativeThreadHostServices {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let now = guard.now;
-                    monitor.check(now, guard.tasks_iter().map(|(_, record)| record));
+                    let tasks = guard
+                        .tasks_iter()
+                        .map(|(_, record)| DeadlineTaskSnapshot::from_task_record(record))
+                        .collect::<Vec<_>>();
+                    drop(guard);
+                    monitor.check_snapshots(now, tasks);
                 }
             })
             .ok();
@@ -3804,13 +3810,15 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
 #[allow(unsafe_code)]
 mod tests {
     use super::*;
+    use crate::record::TaskRecord;
     use crate::cx::Cx;
     use crate::lab::{LabConfig, LabRuntime};
     use crate::runtime::reactor::{Event, Interest, LabReactor, Reactor};
     use crate::test_utils::init_test_logging;
     use crate::time::sleep;
     use crate::trace::{TraceEvent, TraceEventKind};
-    use crate::types::{Budget, CancelReason, Time};
+    use crate::types::{Budget, CancelReason, CxInner, Time};
+    use parking_lot::RwLock;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
     use std::time::Duration;
@@ -4625,6 +4633,73 @@ mod tests {
             host_services.deadline_monitor_calls.load(Ordering::SeqCst),
             1,
             "deadline-monitor startup should route through the host-services seam"
+        );
+    }
+
+    #[test]
+    fn native_deadline_monitor_releases_runtime_state_before_warning_callback() {
+        init_test_logging();
+
+        let state = Arc::new(crate::sync::ContendedMutex::new(
+            "runtime-state",
+            RuntimeState::new(),
+        ));
+        {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let region = guard.create_root_region(Budget::INFINITE);
+            guard.now = Time::from_secs(100);
+            let budget = Budget::new().with_deadline(Time::from_secs(110));
+            let idx = guard.insert_task_with(|idx| {
+                let task_id = crate::types::TaskId::from_arena(idx);
+                let mut record = TaskRecord::new_with_time(task_id, region, budget, Time::ZERO);
+                let mut inner = CxInner::new(region, task_id, budget);
+                inner.checkpoint_state.last_checkpoint = Some(Time::ZERO);
+                inner.checkpoint_state.checkpoint_count = 1;
+                record.set_cx_inner(Arc::new(RwLock::new(inner)));
+                record
+            });
+            let task_id = crate::types::TaskId::from_arena(idx);
+            guard
+                .regions
+                .get(region.arena_index())
+                .expect("root region exists")
+                .add_task(task_id)
+                .expect("task admission succeeds");
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let state_for_handler = Arc::clone(&state);
+        let mut config = RuntimeConfig::default();
+        config.thread_name_prefix = "deadline-monitor-test".to_string();
+        config.deadline_monitor = Some(MonitorConfig {
+            check_interval: Duration::from_millis(1),
+            warning_threshold_fraction: 0.2,
+            checkpoint_timeout: Duration::from_millis(1),
+            adaptive: AdaptiveDeadlineConfig::default(),
+            enabled: true,
+        });
+        config.deadline_warning_handler = Some(Arc::new(move |_| {
+            let reacquired = state_for_handler.try_lock().is_ok();
+            let _ = tx.send(reacquired);
+        }));
+
+        let service = NativeThreadHostServices::start_deadline_monitor(&config, &state);
+        let reacquired = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("deadline warning callback should fire");
+
+        if let Some(shutdown) = service.shutdown.as_ref() {
+            shutdown.store(true, Ordering::Relaxed);
+        }
+        if let Some(thread) = service.thread {
+            thread.join().expect("deadline monitor thread should stop");
+        }
+
+        assert!(
+            reacquired,
+            "warning callback must run after dropping the runtime-state lock"
         );
     }
 

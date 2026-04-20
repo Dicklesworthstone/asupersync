@@ -159,6 +159,56 @@ struct MonitoredTask {
     seen_gen: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct DeadlineTaskSnapshot {
+    task_id: TaskId,
+    region_id: RegionId,
+    is_terminal: bool,
+    created_at: Time,
+    deadline: Option<Time>,
+    last_checkpoint: Option<Time>,
+    last_checkpoint_message: Option<String>,
+    checkpoint_count: u64,
+    task_type: Option<String>,
+}
+
+impl DeadlineTaskSnapshot {
+    #[must_use]
+    pub(crate) fn from_task_record(task: &TaskRecord) -> Self {
+        let (
+            deadline,
+            last_checkpoint,
+            last_checkpoint_message,
+            checkpoint_count,
+            task_type,
+        ) = task.cx_inner.as_ref().map_or(
+            (None, None, None, 0, None),
+            |inner| {
+                let guard = inner.read();
+                (
+                    guard.budget.deadline,
+                    guard.checkpoint_state.last_checkpoint,
+                    guard.checkpoint_state.last_message.clone(),
+                    guard.checkpoint_state.checkpoint_count,
+                    guard.task_type.clone(),
+                )
+            },
+        );
+
+        Self {
+            task_id: task.id,
+            region_id: task.owner,
+            is_terminal: task.state.is_terminal(),
+            created_at: task.created_at(),
+            deadline,
+            last_checkpoint,
+            last_checkpoint_message,
+            checkpoint_count,
+            task_type,
+        }
+    }
+}
+
 /// Monitors tasks for approaching deadlines and lack of progress.
 pub struct DeadlineMonitor {
     config: MonitorConfig,
@@ -328,6 +378,13 @@ impl DeadlineMonitor {
     where
         I: IntoIterator<Item = &'a TaskRecord>,
     {
+        self.check_snapshots(now, tasks.into_iter().map(DeadlineTaskSnapshot::from_task_record));
+    }
+
+    pub(crate) fn check_snapshots<I>(&mut self, now: Time, tasks: I)
+    where
+        I: IntoIterator<Item = DeadlineTaskSnapshot>,
+    {
         if !self.config.enabled {
             return;
         }
@@ -353,34 +410,25 @@ impl DeadlineMonitor {
         let scan_generation = self.scan_generation;
 
         for task in tasks {
-            if task.state.is_terminal() {
+            if task.is_terminal {
                 continue;
             }
 
-            let Some(inner) = task.cx_inner.as_ref() else {
-                continue;
-            };
-            let inner_guard = inner.read();
-            let Some(deadline) = inner_guard.budget.deadline else {
+            let Some(deadline) = task.deadline else {
                 continue;
             };
 
-            let last_checkpoint = inner_guard.checkpoint_state.last_checkpoint;
-            let checkpoint_count = inner_guard.checkpoint_state.checkpoint_count;
-            let task_type_raw = inner_guard
-                .task_type
-                .clone()
-                .unwrap_or_else(|| "default".to_string());
-            let task_type = normalize_task_type(&task_type_raw);
-            drop(inner_guard);
+            let last_checkpoint = task.last_checkpoint;
+            let checkpoint_count = task.checkpoint_count;
+            let task_type = normalize_task_type(task.task_type.as_deref().unwrap_or("default"));
 
             let remaining_nanos = deadline.duration_since(now);
             let remaining = Duration::from_nanos(remaining_nanos);
-            let total_nanos = deadline.duration_since(task.created_at());
+            let total_nanos = deadline.duration_since(task.created_at);
             let total = Duration::from_nanos(total_nanos);
             let adaptive_threshold = self.adaptive_warning_threshold(task_type, total);
             let approaching_deadline = if self.config.adaptive.adaptive_enabled {
-                let elapsed = Duration::from_nanos(now.duration_since(task.created_at()));
+                let elapsed = Duration::from_nanos(now.duration_since(task.created_at));
                 elapsed >= adaptive_threshold
             } else {
                 remaining_nanos
@@ -392,23 +440,23 @@ impl DeadlineMonitor {
             let mut warning_to_emit: Option<(DeadlineWarning, WarningReason, Duration)> = None;
 
             {
-                let slot = task.id.arena_index().index() as usize;
+                let slot = task.task_id.arena_index().index() as usize;
                 if slot >= self.monitored.len() {
                     self.monitored.resize_with(slot + 1, || None);
                 }
 
                 if let Some(existing) = &self.monitored[slot] {
-                    if existing.task_id != task.id {
+                    if existing.task_id != task.task_id {
                         self.monitored[slot] = None;
                     }
                 }
 
                 let entry = self.monitored[slot].get_or_insert_with(|| MonitoredTask {
-                    task_id: task.id,
-                    region_id: task.owner,
+                    task_id: task.task_id,
+                    region_id: task.region_id,
                     deadline,
                     last_progress_wall: now_instant,
-                    last_progress_time: last_checkpoint.unwrap_or_else(|| task.created_at()),
+                    last_progress_time: last_checkpoint.unwrap_or(task.created_at),
                     last_checkpoint_seen: last_checkpoint,
                     last_checkpoint_count_seen: checkpoint_count,
                     warned: false,
@@ -418,7 +466,7 @@ impl DeadlineMonitor {
 
                 // Keep metadata up to date.
                 entry.seen_gen = scan_generation;
-                entry.region_id = task.owner;
+                entry.region_id = task.region_id;
                 entry.deadline = deadline;
                 if checkpoint_count > entry.last_checkpoint_count_seen {
                     if let (Some(prev), Some(checkpoint)) =
@@ -458,16 +506,13 @@ impl DeadlineMonitor {
 
                     if let Some(reason) = warning {
                         entry.warned = true;
-                        // Clone last_message lazily — only when a warning is
-                        // actually emitted (once per task lifetime).
-                        let last_message = inner.read().checkpoint_state.last_message.clone();
                         let warning = DeadlineWarning {
                             task_id: entry.task_id,
                             region_id: entry.region_id,
                             deadline,
                             remaining,
                             last_checkpoint,
-                            last_checkpoint_message: last_message,
+                            last_checkpoint_message: task.last_checkpoint_message.clone(),
                             reason,
                         };
                         warning_to_emit = Some((warning, reason, remaining));
