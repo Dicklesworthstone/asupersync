@@ -1692,6 +1692,29 @@ mod tests {
     }
 
     #[test]
+    fn request_oauth_client_credentials_matches_rfc6749_example() {
+        let req = Request::post("/token")
+            .basic_auth("s6BhdRkqt3", Some("gX1fBat3bV"))
+            .form([("grant_type", "client_credentials")])
+            .build();
+
+        assert_eq!(req.method, Method::Post);
+        assert_eq!(req.uri, "/token");
+        assert_eq!(
+            req.header_value("authorization"),
+            Some("Basic czZCaGRSa3F0MzpnWDFmQmF0M2JW")
+        );
+        assert_eq!(
+            req.content_type(),
+            Some("application/x-www-form-urlencoded")
+        );
+        assert_eq!(
+            std::str::from_utf8(&req.body).unwrap(),
+            "grant_type=client_credentials"
+        );
+    }
+
+    #[test]
     fn request_content_type_and_accept() {
         let req = Request::post("/api")
             .content_type("application/xml")
