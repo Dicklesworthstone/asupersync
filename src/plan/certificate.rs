@@ -1223,6 +1223,23 @@ mod tests {
         init_test_logging();
     }
 
+    fn dedup_race_join_ledger() -> ExplanationLedger {
+        let mut before_dag = PlanDag::new();
+        let shared = before_dag.leaf("shared");
+        let left = before_dag.leaf("left");
+        let right = before_dag.leaf("right");
+        let join_a = before_dag.join(vec![shared, left]);
+        let join_b = before_dag.join(vec![shared, right]);
+        let race = before_dag.race(vec![join_a, join_b]);
+        before_dag.set_root(race);
+
+        let mut after_dag = before_dag.clone();
+        let (_, cert) = after_dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
+
+        cert.explain(&before_dag, &after_dag)
+    }
+
     #[test]
     fn hash_deterministic_across_calls() {
         init_test();
@@ -1897,20 +1914,7 @@ mod tests {
     #[test]
     fn explain_render_is_deterministic() {
         init_test();
-        let mut before_dag = PlanDag::new();
-        let shared = before_dag.leaf("shared");
-        let left = before_dag.leaf("left");
-        let right = before_dag.leaf("right");
-        let join_a = before_dag.join(vec![shared, left]);
-        let join_b = before_dag.join(vec![shared, right]);
-        let race = before_dag.race(vec![join_a, join_b]);
-        before_dag.set_root(race);
-
-        let mut after_dag = before_dag.clone();
-        let (_, cert) = after_dag
-            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
-
-        let ledger = cert.explain(&before_dag, &after_dag);
+        let ledger = dedup_race_join_ledger();
         let r1 = ledger.render();
         let r2 = ledger.render();
         assert_eq!(r1, r2);
@@ -1924,26 +1928,21 @@ mod tests {
     #[test]
     fn explain_shows_cost_delta() {
         init_test();
-        let mut before_dag = PlanDag::new();
-        let shared = before_dag.leaf("shared");
-        let left = before_dag.leaf("left");
-        let right = before_dag.leaf("right");
-        let join_a = before_dag.join(vec![shared, left]);
-        let join_b = before_dag.join(vec![shared, right]);
-        let race = before_dag.race(vec![join_a, join_b]);
-        before_dag.set_root(race);
-
-        let mut after_dag = before_dag.clone();
-        let (_, cert) = after_dag
-            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
-
-        let ledger = cert.explain(&before_dag, &after_dag);
+        let ledger = dedup_race_join_ledger();
         // DedupRaceJoin adds nodes (the new Join+Race structure), so after >= before.
         assert!(ledger.after.node_count >= ledger.before.node_count);
         // The render should show the delta.
         let rendered = ledger.render();
         assert!(rendered.contains("nodes="));
         assert!(rendered.contains("depth="));
+    }
+
+    #[test]
+    fn explain_render_snapshot_dedup_race_join() {
+        init_test();
+        let ledger = dedup_race_join_ledger();
+
+        insta::assert_snapshot!("plan_certificate_dedup_race_join_render", ledger.render());
     }
 
     #[test]

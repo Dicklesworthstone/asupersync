@@ -1,0 +1,14 @@
+---
+source: src/plan/certificate.rs
+expression: ledger.render()
+---
+=== Plan Rewrite Explanation ===
+Before: 6 nodes (J=2 R=1 T=0, depth=3)
+After:  8 nodes (J=3 R=2 T=0, depth=3)
+Delta:  nodes=+2, depth=+0
+Steps:  1
+
+  [0] Race-Join Deduplication: node 5 (Race[2]) -> node 7 (Join[2])
+       condition: shared child across race branches
+       condition: distributivity enabled
+       condition: binary joins required (conservative)
