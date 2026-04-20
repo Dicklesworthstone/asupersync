@@ -35,7 +35,7 @@ mod sqlite_wal_tests {
         impl std::task::Wake for NoopWaker {
             fn wake(self: std::sync::Arc<Self>) {}
         }
-        let waker = Waker::from(std::sync::Arc::new(NoopWaker));
+        let waker = std::task::Waker::noop().clone();
         let mut cx = Context::from_waker(&waker);
         let mut pinned = Box::pin(f);
         loop {

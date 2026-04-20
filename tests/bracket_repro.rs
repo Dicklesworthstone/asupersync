@@ -56,7 +56,7 @@ mod tests {
 
         // Poll it once to enter the "use" phase
         let mut boxed = Box::pin(bracket_fut);
-        let waker = std::task::Waker::from(Arc::new(NoopWaker));
+        let waker = std::task::std::task::Waker::noop().clone();
         let mut cx = Context::from_waker(&waker);
 
         test_section!("poll_once");
@@ -79,8 +79,4 @@ mod tests {
         test_complete!("bracket_leak_on_cancel");
     }
 
-    struct NoopWaker;
-    impl std::task::Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
     }
-}

@@ -48,15 +48,8 @@ fn test_lab_runtime_with_seed(seed: u64) -> LabRuntime {
 }
 
 /// Mock waker for testing token slab operations.
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-    fn wake_by_ref(self: &Arc<Self>) {}
-}
-
 fn test_waker() -> Waker {
-    Arc::new(NoopWaker).into()
+    std::task::Waker::noop().clone()
 }
 
 /// Tracker for monitoring token allocation and deallocation patterns.

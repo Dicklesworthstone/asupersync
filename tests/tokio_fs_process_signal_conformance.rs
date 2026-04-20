@@ -67,11 +67,6 @@ fn ff_02_poll_shutdown_is_noop() {
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
 
-    struct NoopWaker;
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("shutdown_noop.txt");
     std::fs::write(&path, b"data").expect("write");
@@ -79,7 +74,7 @@ fn ff_02_poll_shutdown_is_noop() {
     let file = futures_lite::future::block_on(asupersync::fs::File::open(&path)).expect("open");
     let mut file = file;
 
-    let waker: Waker = Arc::new(NoopWaker).into();
+    let waker: Waker = std::task::Waker::noop().clone();
     let mut cx = Context::from_waker(&waker);
 
     let result = Pin::new(&mut file).poll_shutdown(&mut cx);

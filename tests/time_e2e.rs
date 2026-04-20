@@ -38,12 +38,6 @@ use std::time::Duration;
 // Test Infrastructure
 // ============================================================================
 
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
-
 struct DropTracker(Arc<AtomicBool>);
 
 impl Drop for DropTracker {
@@ -59,7 +53,7 @@ fn get_virtual_time() -> Time {
 }
 
 fn noop_waker() -> Waker {
-    Waker::from(Arc::new(NoopWaker))
+    std::task::Waker::noop().clone()
 }
 
 struct NotifyWaker {

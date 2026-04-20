@@ -11,7 +11,7 @@
 #![recursion_limit = "512"]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use serde_json;
+
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -54,6 +54,7 @@ struct WorkloadBudget {
 }
 
 #[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
 struct PerformanceBudgets {
     workload_budgets: HashMap<String, WorkloadBudget>,
     budget_enforcement: serde_json::Value,

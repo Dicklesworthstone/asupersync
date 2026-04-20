@@ -35,15 +35,8 @@ use asupersync::runtime::{Events, LabReactor, Reactor, Token};
 // TEST WAKERS
 // =============================================================================
 
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-    fn wake_by_ref(self: &Arc<Self>) {}
-}
-
 fn noop_waker() -> Waker {
-    Arc::new(NoopWaker).into()
+    std::task::Waker::noop().clone()
 }
 
 struct CountingWaker {

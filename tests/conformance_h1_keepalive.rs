@@ -200,15 +200,16 @@ fn test_100_continue_with_keepalive() {
 
     rt.block_on(async {
         // Request with Expect: 100-continue
-        let req1 = format!(
-            "POST /upload HTTP/1.1\r\n\
-             Host: example.com\r\n\
-             Connection: keep-alive\r\n\
-             Expect: 100-continue\r\n\
-             Content-Length: 11\r\n\
-             \r\n\
-             Hello World"
-        );
+        let req1 = "\
+POST /upload HTTP/1.1\r\n\
+Host: example.com\r\n\
+Connection: keep-alive\r\n\
+Expect: 100-continue\r\n\
+Content-Length: 11\r\n\
+\r\n\
+Hello World\
+        "
+        .to_string();
 
         // Follow-up request after successful POST
         let req2 = make_http_request(

@@ -92,15 +92,8 @@ use asupersync::types::Time;
 // TEST WAKER
 // =============================================================================
 
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-    fn wake_by_ref(self: &Arc<Self>) {}
-}
-
 fn noop_waker() -> Waker {
-    Arc::new(NoopWaker).into()
+    std::task::Waker::noop().clone()
 }
 
 struct CounterWaker {

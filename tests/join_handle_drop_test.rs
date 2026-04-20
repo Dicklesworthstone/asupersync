@@ -14,11 +14,6 @@ impl Future for HangFuture {
     }
 }
 
-struct NoopWaker;
-impl std::task::Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
-
 #[test]
 fn test_join_handle_does_not_hang_if_runtime_dropped() {
     let runtime = RuntimeBuilder::new().worker_threads(1).build().unwrap();
@@ -29,7 +24,7 @@ fn test_join_handle_does_not_hang_if_runtime_dropped() {
 
     // If we block on the handle now, it shouldn't hang forever!
     // It should panic because the task was dropped before completion.
-    let waker = std::task::Waker::from(Arc::new(NoopWaker));
+    let waker = std::task::std::task::Waker::noop().clone();
     let mut cx = Context::from_waker(&waker);
     let mut handle = Box::pin(handle);
 

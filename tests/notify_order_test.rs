@@ -6,12 +6,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
-struct NoopWaker;
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
 fn noop_waker() -> Waker {
-    Arc::new(NoopWaker).into()
+    std::task::Waker::noop().clone()
 }
 fn poll_once<F: Future + Unpin>(fut: &mut F) -> Poll<F::Output> {
     let waker = noop_waker();
