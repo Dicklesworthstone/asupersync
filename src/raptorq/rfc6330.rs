@@ -269,6 +269,8 @@ pub struct LtTuple {
     pub b1: usize,
 }
 
+const RFC6330_MAX_LT_DEGREE: usize = 30;
+
 /// Return the smallest prime number greater than or equal to `n`.
 #[must_use]
 pub fn next_prime_ge(n: usize) -> usize {
@@ -413,8 +415,14 @@ pub fn tuple_indices(tuple: LtTuple, w: usize, p: usize, p1: usize) -> Vec<usize
         p1 == expected_p1,
         "P1 must equal smallest prime >= P (expected {expected_p1}, got {p1})"
     );
-    assert!(tuple.d > 0, "LT degree must be > 0");
-    assert!(tuple.d1 > 0, "PI degree must be > 0");
+    assert!(
+        (1..=RFC6330_MAX_LT_DEGREE).contains(&tuple.d),
+        "LT degree must satisfy 1 <= d <= {RFC6330_MAX_LT_DEGREE}"
+    );
+    assert!(
+        matches!(tuple.d1, 2 | 3),
+        "PI degree must satisfy d1 in {{2, 3}}"
+    );
     assert!(
         tuple.a > 0 && tuple.a < w,
         "LT step must satisfy 1 <= a < W"
@@ -769,6 +777,32 @@ mod tests {
                 b1: 10,
             },
             "tuple_indices should reject zero PI step instead of risking a non-terminating PI-side walk",
+        );
+    }
+
+    #[test]
+    fn tuple_indices_reject_oversized_degrees() {
+        assert_tuple_indices_rejects_invalid_tuple(
+            LtTuple {
+                d: RFC6330_MAX_LT_DEGREE + 1,
+                a: 4,
+                b: 9,
+                d1: 2,
+                a1: 5,
+                b1: 1,
+            },
+            "tuple_indices should reject oversized LT degree instead of expanding an out-of-contract walk",
+        );
+        assert_tuple_indices_rejects_invalid_tuple(
+            LtTuple {
+                d: 2,
+                a: 4,
+                b: 9,
+                d1: 4,
+                a1: 5,
+                b1: 1,
+            },
+            "tuple_indices should reject oversized PI degree instead of allocating extra PI-side work",
         );
     }
 
