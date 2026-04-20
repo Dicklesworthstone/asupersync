@@ -718,6 +718,7 @@ mod tests {
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
+    use proptest::prelude::*;
     use std::future::Future;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -770,6 +771,109 @@ mod tests {
         Waker::from(Arc::new(CountWaker(counter)))
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum SendScenario {
+        LiveNoWaiter,
+        LivePendingWaiter,
+        ReceiverDropped,
+    }
+
+    fn send_scenario_strategy() -> impl Strategy<Value = SendScenario> {
+        prop_oneof![
+            Just(SendScenario::LiveNoWaiter),
+            Just(SendScenario::LivePendingWaiter),
+            Just(SendScenario::ReceiverDropped),
+        ]
+    }
+
+    fn send_path_signature(
+        reserve_first: bool,
+        scenario: SendScenario,
+        value: i32,
+    ) -> (
+        bool,
+        Option<i32>,
+        usize,
+        &'static str,
+        Option<i32>,
+        bool,
+        bool,
+    ) {
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>();
+        let inner = Arc::clone(&rx.inner);
+        let wake_counter = Arc::new(AtomicUsize::new(0));
+
+        let (send_ok, disconnected_value, recv_state, recv_value) = match scenario {
+            SendScenario::LiveNoWaiter => {
+                let send_result = if reserve_first {
+                    tx.reserve(&cx).send(value)
+                } else {
+                    tx.send(&cx, value)
+                };
+                let (send_ok, disconnected_value) = match send_result {
+                    Ok(()) => (true, None),
+                    Err(SendError::Disconnected(v)) => (false, Some(v)),
+                };
+                let (recv_state, recv_value) = match rx.try_recv() {
+                    Ok(v) => ("value", Some(v)),
+                    Err(TryRecvError::Empty) => ("empty", None),
+                    Err(TryRecvError::Closed) => ("closed", None),
+                };
+                (send_ok, disconnected_value, recv_state, recv_value)
+            }
+            SendScenario::LivePendingWaiter => {
+                let recv_waker = counting_waker(Arc::clone(&wake_counter));
+                let mut task_cx = Context::from_waker(&recv_waker);
+                let mut fut = Box::pin(rx.recv(&cx));
+                assert!(matches!(fut.as_mut().poll(&mut task_cx), Poll::Pending));
+
+                let send_result = if reserve_first {
+                    tx.reserve(&cx).send(value)
+                } else {
+                    tx.send(&cx, value)
+                };
+                let (send_ok, disconnected_value) = match send_result {
+                    Ok(()) => (true, None),
+                    Err(SendError::Disconnected(v)) => (false, Some(v)),
+                };
+                let (recv_state, recv_value) = match fut.as_mut().poll(&mut task_cx) {
+                    Poll::Ready(Ok(v)) => ("value", Some(v)),
+                    Poll::Ready(Err(RecvError::Closed)) => ("closed", None),
+                    Poll::Ready(Err(RecvError::Cancelled)) => ("cancelled", None),
+                    Poll::Ready(Err(RecvError::PolledAfterCompletion)) => ("repoll", None),
+                    Poll::Pending => ("pending", None),
+                };
+                drop(fut);
+                (send_ok, disconnected_value, recv_state, recv_value)
+            }
+            SendScenario::ReceiverDropped => {
+                drop(rx);
+                let send_result = if reserve_first {
+                    tx.reserve(&cx).send(value)
+                } else {
+                    tx.send(&cx, value)
+                };
+                let (send_ok, disconnected_value) = match send_result {
+                    Ok(()) => (true, None),
+                    Err(SendError::Disconnected(v)) => (false, Some(v)),
+                };
+                (send_ok, disconnected_value, "receiver-dropped", None)
+            }
+        };
+
+        let inner = inner.lock();
+        (
+            send_ok,
+            disconnected_value,
+            wake_counter.load(Ordering::SeqCst),
+            recv_state,
+            recv_value,
+            inner.waker.is_none(),
+            inner.is_closed(),
+        )
+    }
+
     #[test]
     fn basic_send_recv() {
         init_test("basic_send_recv");
@@ -780,6 +884,52 @@ mod tests {
         let value = block_on(rx.recv(&cx)).expect("recv should succeed");
         crate::assert_with_log!(value == 42, "recv value", 42, value);
         crate::test_complete!("basic_send_recv");
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_send_matches_reserve_send_atomicity(
+            scenario in send_scenario_strategy(),
+            value in any::<i16>(),
+        ) {
+            let value = i32::from(value);
+
+            let direct_signature = send_path_signature(false, scenario, value);
+            let reserved_signature = send_path_signature(true, scenario, value);
+
+            prop_assert_eq!(
+                direct_signature,
+                reserved_signature,
+                "oneshot convenience send must match explicit reserve().send() semantics",
+            );
+
+            match scenario {
+                SendScenario::LiveNoWaiter => {
+                    prop_assert!(direct_signature.0, "live receiver should accept the send");
+                    prop_assert_eq!(direct_signature.2, 0, "no waiter means no wakeup");
+                    prop_assert_eq!(direct_signature.3, "value");
+                    prop_assert_eq!(direct_signature.4, Some(value));
+                    prop_assert!(direct_signature.5, "terminal receive path clears stale waker");
+                    prop_assert!(direct_signature.6, "channel should be closed after value is consumed");
+                }
+                SendScenario::LivePendingWaiter => {
+                    prop_assert!(direct_signature.0, "live pending waiter should accept the send");
+                    prop_assert_eq!(direct_signature.2, 1, "pending waiter should be woken exactly once");
+                    prop_assert_eq!(direct_signature.3, "value");
+                    prop_assert_eq!(direct_signature.4, Some(value));
+                    prop_assert!(direct_signature.5, "recv completion clears the waiter slot");
+                    prop_assert!(direct_signature.6, "channel should be closed after waiter consumes the value");
+                }
+                SendScenario::ReceiverDropped => {
+                    prop_assert!(!direct_signature.0, "dropped receiver must reject the send");
+                    prop_assert_eq!(direct_signature.1, Some(value), "disconnected send returns ownership of the value");
+                    prop_assert_eq!(direct_signature.2, 0, "no receiver means no wakeup");
+                    prop_assert_eq!(direct_signature.3, "receiver-dropped");
+                    prop_assert!(direct_signature.5, "disconnected send path clears any stale waker");
+                    prop_assert!(direct_signature.6, "sender-consumed disconnected channel is closed");
+                }
+            }
+        }
     }
 
     #[test]
