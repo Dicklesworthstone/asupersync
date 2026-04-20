@@ -271,7 +271,7 @@ fn mr1_isolation_invariant(
     total_work_units: u32,
     _seed: u64,
 ) -> bool {
-    let global_state = GlobalBulkheadState::new();
+    let _global_state = GlobalBulkheadState::new();
     let mut bulkheads: Vec<(String, Arc<Bulkhead>)> = Vec::new();
 
     // Create N bulkheads with N workers each
@@ -373,7 +373,7 @@ fn mr2_rejection_accuracy(
     work_burst_size: u32,
     _seed: u64,
 ) -> bool {
-    let global_state = GlobalBulkheadState::new();
+    let _global_state = GlobalBulkheadState::new();
 
     let policy = BulkheadPolicy {
         name: "test_bulkhead".to_string(),
@@ -441,7 +441,7 @@ fn mr2_rejection_accuracy(
 /// Cancel of outer scope cancels all bulkhead in-flight operations.
 /// Verifies that cancellation protocol works correctly with bulkheads.
 fn mr3_cancel_propagation(worker_count: u32, in_flight_count: u32, _seed: u64) -> bool {
-    let global_state = GlobalBulkheadState::new();
+    let _global_state = GlobalBulkheadState::new();
 
     let policy = BulkheadPolicy {
         name: "cancel_test".to_string(),
@@ -527,7 +527,7 @@ fn mr4_metrics_accuracy(
     concurrency_level: u32,
     _seed: u64,
 ) -> bool {
-    let global_state = GlobalBulkheadState::new();
+    let _global_state = GlobalBulkheadState::new();
 
     let policy = BulkheadPolicy {
         name: "metrics_test".to_string(),
@@ -628,7 +628,7 @@ fn run_deterministic_sequence(
     work_sequence: &[u32],
     _seed: u64,
 ) -> DeterministicResult {
-    let global_state = GlobalBulkheadState::new();
+    let _global_state = GlobalBulkheadState::new();
     let _rng = DetRng::new(_seed);
 
     let policy = BulkheadPolicy {
@@ -777,7 +777,7 @@ mod tests {
     /// Comprehensive integration test combining all MRs
     #[test]
     fn test_bulkhead_metamorphic_integration() {
-        let global_state = GlobalBulkheadState::new();
+        let _global_state = GlobalBulkheadState::new();
 
         // Test scenario: Multiple bulkheads under mixed load
         let bulkhead_count = 3;
