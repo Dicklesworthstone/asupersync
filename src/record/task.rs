@@ -983,6 +983,7 @@ mod tests {
     use super::*;
     use crate::error::{Error, ErrorKind};
     use crate::util::ArenaIndex;
+    use serde_json::{Value, json};
     use std::sync::atomic::AtomicUsize;
 
     fn init_test(name: &str) {
@@ -996,6 +997,28 @@ mod tests {
 
     fn region() -> RegionId {
         RegionId::from_arena(ArenaIndex::new(0, 0))
+    }
+
+    fn scrub_task_record_ids(value: Value) -> Value {
+        let mut scrubbed = value;
+
+        if let Some(task_id) = scrubbed.pointer_mut("/task_id") {
+            *task_id = json!("[TASK_ID]");
+        }
+
+        if let Some(region_id) = scrubbed.pointer_mut("/region_id") {
+            *region_id = json!("[REGION_ID]");
+        }
+
+        if let Some(origin_region) = scrubbed.pointer_mut("/reason/origin_region") {
+            *origin_region = json!("[REGION_ID]");
+        }
+
+        if let Some(origin_task) = scrubbed.pointer_mut("/reason/origin_task") {
+            *origin_task = json!("[TASK_ID]");
+        }
+
+        scrubbed
     }
 
     #[test]
@@ -1694,6 +1717,33 @@ mod tests {
             requested_state
         );
         crate::test_complete!("request_cancel_updates_shared_cx");
+    }
+
+    #[test]
+    fn task_record_cancel_witness_snapshot_scrubs_ids() {
+        init_test("task_record_cancel_witness_snapshot_scrubs_ids");
+        let mut record = TaskRecord::new(
+            TaskId::new_for_test(4, 2),
+            RegionId::new_for_test(8, 1),
+            Budget::new().with_poll_quota(5),
+        );
+        let requested = record.request_cancel(
+            CancelReason::linked_exit()
+                .with_region(RegionId::new_for_test(77, 6))
+                .with_task(TaskId::new_for_test(11, 5))
+                .with_timestamp(Time::from_nanos(44))
+                .with_message("peer closed"),
+        );
+        crate::assert_with_log!(requested, "request_cancel", true, requested);
+
+        insta::assert_json_snapshot!(
+            "task_record_cancel_witness_scrubbed_ids",
+            scrub_task_record_ids(
+                serde_json::to_value(record.cancel_witness().expect("cancel witness"))
+                    .expect("serialize witness")
+            )
+        );
+        crate::test_complete!("task_record_cancel_witness_snapshot_scrubs_ids");
     }
 
     // =================================================================
