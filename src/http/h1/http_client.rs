@@ -1788,7 +1788,8 @@ fn parse_set_cookie_pair(raw: &str) -> Option<(String, String)> {
     if name.is_empty() {
         return None;
     }
-    Some((name.to_owned(), value.trim().to_owned()))
+    let value = value.trim().trim_matches('"');
+    Some((name.to_owned(), value.to_owned()))
 }
 
 fn parse_proxy_endpoint(proxy_url: &str) -> Result<ProxyEndpoint, ClientError> {
@@ -3130,6 +3131,38 @@ mod tests {
         assert_eq!(parse_set_cookie_pair(""), None);
         assert_eq!(parse_set_cookie_pair("invalid"), None);
         assert_eq!(parse_set_cookie_pair(" =value"), None);
+    }
+
+    #[test]
+    fn cookie_store_replays_quoted_set_cookie_value_without_quotes() {
+        fn rfc6265_reference_pair(raw: &str) -> Option<(String, String)> {
+            let pair = raw.split(';').next()?.trim();
+            let (name, value) = pair.split_once('=')?;
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let value = value.trim();
+            let value = value
+                .strip_prefix('"')
+                .and_then(|inner| inner.strip_suffix('"'))
+                .unwrap_or(value);
+            Some((name.to_string(), value.to_string()))
+        }
+
+        let raw = r#"session="abc123=="; Path=/; HttpOnly"#;
+        assert_eq!(parse_set_cookie_pair(raw), rfc6265_reference_pair(raw));
+
+        let client = HttpClient::builder().cookie_store(true).build();
+        client.store_response_cookies(
+            "example.com",
+            &[("Set-Cookie".to_string(), raw.to_string())],
+        );
+
+        let cookie_header = client
+            .cookie_header_for_host("example.com")
+            .expect("cookie header");
+        assert_eq!(cookie_header, "session=abc123==");
     }
 
     #[test]
