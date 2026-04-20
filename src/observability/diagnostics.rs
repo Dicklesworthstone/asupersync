@@ -3168,7 +3168,7 @@ mod tests {
         let region_explanation = diagnostics.explain_region_open(root);
 
         let mut found_running = false;
-        let mut found_completed = false;
+        let found_completed = false;
         let mut found_cancel = false;
 
         for reason in &region_explanation.reasons {

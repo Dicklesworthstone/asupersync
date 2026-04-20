@@ -2046,7 +2046,7 @@ mod tests {
         let short_duration = Duration::from_millis(5);
         let start_time = wall_clock.now();
 
-        let timer_id = handle.register(
+        let _timer_id = handle.register(
             handle
                 .now()
                 .saturating_add_nanos(short_duration.as_nanos().min(u128::from(u64::MAX)) as u64),
@@ -2112,7 +2112,7 @@ mod tests {
 
         let mut timer_ids = Vec::new();
         for duration in &durations {
-            let timer_id = handle.register(
+            let _timer_id = handle.register(
                 handle
                     .now()
                     .saturating_add_nanos(duration.as_nanos().min(u128::from(u64::MAX)) as u64),
@@ -2170,7 +2170,7 @@ mod tests {
         let mut timer_ids = Vec::new();
         for (i, counter) in counters.iter().enumerate() {
             let duration = Duration::from_millis(10 + (i as u64 % 100)); // Varying durations
-            let timer_id = handle.register(
+            let _timer_id = handle.register(
                 handle
                     .now()
                     .saturating_add_nanos(duration.as_nanos().min(u128::from(u64::MAX)) as u64),
@@ -2225,7 +2225,7 @@ mod tests {
         let counter = Arc::new(AtomicU64::new(0));
 
         // Register timer and immediately cancel
-        let timer_id = handle.register(
+        let _timer_id = handle.register(
             handle.now().saturating_add_nanos(
                 Duration::from_millis(100)
                     .as_nanos()
@@ -2310,7 +2310,7 @@ mod tests {
         }
 
         // Register a timer and verify it works with browser clock
-        let timer_id = handle.register(
+        let _timer_id = handle.register(
             handle.now().saturating_add_nanos(
                 Duration::from_millis(5)
                     .as_nanos()

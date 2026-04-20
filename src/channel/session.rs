@@ -1008,7 +1008,7 @@ mod tests {
         init_test("meta_proof_composition");
         let cx = test_cx();
 
-        let (tx, mut rx) = tracked_channel::<i32>(10);
+        let (tx, _rx) = tracked_channel::<i32>(10);
         let mut reserved_permits = 0;
         let mut committed_proofs = 0;
         let mut aborted_proofs = 0;

@@ -359,7 +359,7 @@ mod tests {
         // Use frame codec with fixed entropy to get predictable mask key
         let entropy = DeterministicEntropy::new(0x123456789ABCDEF0);
         // Ensure deterministic entropy produces our expected key
-        let generated_key = entropy.next_key();
+        let _generated_key = entropy.next_key();
         let entropy_with_target_key = DeterministicEntropy {
             sequence: [
                 0x37, 0xFA, 0x21, 0x3D, 0x37, 0xFA, 0x21, 0x3D, 0x37, 0xFA, 0x21, 0x3D, 0x37, 0xFA,

@@ -290,7 +290,7 @@ fn mr1_isolation_invariant(
     }
 
     // Generate work units distributed across bulkheads
-    let mut rng = DetRng::new(seed);
+    let _rng = DetRng::new(seed);
     let mut work_assignments: HashMap<String, Vec<TestWorkUnit>> = HashMap::new();
 
     for work_id in 0..total_work_units {
@@ -629,7 +629,7 @@ fn run_deterministic_sequence(
     seed: u64,
 ) -> DeterministicResult {
     let global_state = GlobalBulkheadState::new();
-    let mut rng = DetRng::new(seed);
+    let _rng = DetRng::new(seed);
 
     let policy = BulkheadPolicy {
         name: "deterministic_test".to_string(),

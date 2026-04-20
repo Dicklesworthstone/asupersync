@@ -1847,7 +1847,7 @@ mod tests {
 
         // Test multiple random permutations of the trace
         for test_iteration in 0..20 {
-            let mut reordered_trace = base_trace.clone();
+            let reordered_trace = base_trace.clone();
 
             // Only reorder events that are logically independent:
             // - Reserves can be reordered among themselves

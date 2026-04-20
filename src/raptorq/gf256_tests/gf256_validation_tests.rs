@@ -603,7 +603,7 @@ fn test_policy_determinism() {
 
 /// Performance regression test - ensure SIMD is faster than scalar for large sizes.
 #[test]
-#[ignore] // Run manually for performance validation
+#[ignore = "Run manually for performance validation"]
 fn test_performance_regression() {
     use std::time::Instant;
 

@@ -303,7 +303,7 @@ fn mr1_loser_drain_completeness(
     seed: u64,
 ) -> bool {
     let global_state = GlobalTestState::new();
-    let mut rng = DetRng::new(seed);
+    let _rng = DetRng::new(seed);
 
     // Create test futures - winner completes quickly, losers take longer
     let mut futures = Vec::new();

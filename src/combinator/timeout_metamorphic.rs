@@ -184,7 +184,7 @@ impl Future for TestOperation {
 
         // Check for cancellation
         if this.cancelled.load(Ordering::SeqCst) {
-            let reason = this
+            let _reason = this
                 .cancel_reason
                 .lock()
                 .take()
@@ -193,7 +193,7 @@ impl Future for TestOperation {
         }
 
         // Update poll count
-        let polls = this.polls_completed.fetch_add(1, Ordering::SeqCst) + 1;
+        let _polls = this.polls_completed.fetch_add(1, Ordering::SeqCst) + 1;
         this.global_state.total_polls.fetch_add(1, Ordering::SeqCst);
 
         // Check if enough time has elapsed

@@ -2244,7 +2244,7 @@ mod tests {
             let mut handles = Vec::new();
 
             // Submit 3 tasks to test concurrent execution
-            for i in 0..3 {
+            for _i in 0..3 {
                 let tracker_clone = tracker.clone();
                 let barrier_clone = barrier.clone();
 

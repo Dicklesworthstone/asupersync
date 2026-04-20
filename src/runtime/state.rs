@@ -9106,7 +9106,7 @@ mod tests {
                 let region_id = runtime.state.create_root_region(Budget::default());
 
                 // First close attempt
-                let first_close_result = {
+                let _first_close_result = {
                     let state = &mut runtime.state;
                     let region = state.regions.get_mut(region_id.arena_index()).unwrap();
                     let begin_result = region.begin_close(None);

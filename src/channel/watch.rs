@@ -1878,7 +1878,7 @@ mod tests {
     #[test]
     fn metamorphic_borrow_and_update_consistency() {
         init_test("metamorphic_borrow_and_update_consistency");
-        let cx = test_cx();
+        let _cx = test_cx();
         let (tx, mut rx) = channel(0u64);
 
         // Initial state - should see the initial value

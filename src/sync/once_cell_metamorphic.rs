@@ -476,7 +476,7 @@ mod metamorphic_state_monotonicity {
     fn test_state_monotonic_progression() {
         let config = OnceCellTestConfig::basic(1, vec![77], 44444);
 
-        run_once_cell_test(&config, |global_state| async move {
+        run_once_cell_test(&config, |_global_state| async move {
             let cell = OnceCell::new();
 
             // Initially uninitialized
@@ -521,7 +521,7 @@ mod metamorphic_value_immutability {
     fn test_value_reference_stability() {
         let config = OnceCellTestConfig::basic(1, vec![88], 55555);
 
-        run_once_cell_test(&config, |global_state| async move {
+        run_once_cell_test(&config, |_global_state| async move {
             let cell = OnceCell::with_value(88);
 
             // Get multiple references and verify they point to the same memory

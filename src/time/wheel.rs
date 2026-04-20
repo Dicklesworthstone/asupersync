@@ -2678,7 +2678,7 @@ mod tests {
 
         // Test that multiple advancement calls are idempotent
         let test_time = Time::from_secs(30);
-        let wakers1 = wheel.collect_expired(test_time);
+        let _wakers1 = wheel.collect_expired(test_time);
         let wakers2 = wheel.collect_expired(test_time);
 
         crate::assert_with_log!(

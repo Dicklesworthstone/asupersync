@@ -4997,7 +4997,7 @@ mod tests {
 
         let run_sequence = || -> (Vec<usize>, Vec<usize>, Vec<usize>) {
             let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(3));
-            let runtime =
+            let _runtime =
                 crate::lab::runtime::LabRuntime::new(crate::lab::config::LabConfig::default());
 
             let (active_history, idle_history, total_history) =
@@ -5083,7 +5083,7 @@ mod tests {
         // Test determinism with timing-dependent operations
         let timed_sequence = || -> Vec<u32> {
             let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(2));
-            let runtime =
+            let _runtime =
                 crate::lab::runtime::LabRuntime::new(crate::lab::config::LabConfig::default());
 
             futures_lite::future::block_on(async {

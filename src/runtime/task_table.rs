@@ -744,7 +744,7 @@ mod tests {
                         let mut local_tasks = Vec::new();
 
                         // Create tasks
-                        for i in 0..25 {
+                        for _i in 0..25 {
                             let mut guard = ShardGuard::for_spawn(&shards);
                             let tasks = guard.tasks.as_mut().unwrap();
 

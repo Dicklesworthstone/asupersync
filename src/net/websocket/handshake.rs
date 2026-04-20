@@ -2165,7 +2165,7 @@ Connection: Upgrade\n\
         // Test complete handshake flow with all components
 
         let entropy = crate::util::entropy::DetEntropy::new(12345);
-        let mut client = ClientHandshake::new("ws://localhost:8080/socket", &entropy)
+        let client = ClientHandshake::new("ws://localhost:8080/socket", &entropy)
             .expect("Client handshake should initialize")
             .protocol("chat")
             .protocol("echo")

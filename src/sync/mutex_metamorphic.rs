@@ -262,7 +262,7 @@ fn mr3_poison_recovery() {
         // Phase 1: Capture state before panic
         let expected_state = {
             let cx = create_test_context(1, 1);
-            let lab = LabRuntime::new(LabConfig::default());
+            let _lab = LabRuntime::new(LabConfig::default());
 
             futures_lite::future::block_on(async {
                 let mut guard = mutex.lock(&cx).await.expect("initial lock should succeed");
@@ -286,7 +286,7 @@ fn mr3_poison_recovery() {
         let mutex_clone = Arc::clone(&mutex);
         let handle = std::thread::spawn(move || {
             let cx = create_test_context(2, 1);
-            let lab = LabRuntime::new(LabConfig::default());
+            let _lab = LabRuntime::new(LabConfig::default());
 
             futures_lite::future::block_on(async {
                 let mut guard = mutex_clone.lock(&cx).await.expect("lock for poison should succeed");
@@ -480,7 +480,7 @@ fn mr_composite_cancel_during_poison_recovery() {
         let mutex_clone = Arc::clone(&mutex);
         let handle = std::thread::spawn(move || {
             let cx = create_test_context(1, 1);
-            let lab = LabRuntime::new(LabConfig::default());
+            let _lab = LabRuntime::new(LabConfig::default());
 
             futures_lite::future::block_on(async {
                 let _guard = mutex_clone.lock(&cx).await.expect("lock for poison should succeed");
@@ -494,7 +494,7 @@ fn mr_composite_cancel_during_poison_recovery() {
         // Phase 2: Attempt recovery with cancellation
         for i in 0..recovery_attempts {
             let cx = create_test_context(2, i as u32 + 2);
-            let lab = LabRuntime::new(LabConfig::default());
+            let _lab = LabRuntime::new(LabConfig::default());
 
             // Cancel during recovery attempt
             cx.set_cancel_requested(true);
@@ -543,7 +543,7 @@ mod tests {
         let mutex_clone = Arc::clone(&mutex);
         let handle = std::thread::spawn(move || {
             let cx = create_test_context(1, 1);
-            let lab = LabRuntime::new(LabConfig::default());
+            let _lab = LabRuntime::new(LabConfig::default());
 
             futures_lite::future::block_on(async {
                 let _guard = mutex_clone.lock(&cx).await.expect("lock");
@@ -568,4 +568,5 @@ mod tests {
         assert!(!clean_mutex.is_poisoned());
         assert!(clean_mutex.try_lock().is_ok());
     }
+}
 }

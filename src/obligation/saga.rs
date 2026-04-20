@@ -1588,7 +1588,7 @@ mod tests {
             LatticeState::Reserved,
             LatticeState::Committed,
         ]);
-        let full_result = executor.execute(&exec_plan, &mut full_exec);
+        let _full_result = executor.execute(&exec_plan, &mut full_exec);
 
         // Partial execution scenario (failure at step 4)
         let mut partial_exec = FixedExecutor::new(vec![

@@ -1518,7 +1518,7 @@ mod tests {
             (0xFFFFFFFF, 4, 4), // Maximum 32-bit value requires 4 bytes
         ];
 
-        for (packet_number, min_width, max_width) in test_cases {
+        for (packet_number, min_width, _max_width) in test_cases {
             // Test that minimum width succeeds
             assert!(
                 ensure_pn_fits(packet_number, min_width).is_ok(),
