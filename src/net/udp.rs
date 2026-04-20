@@ -732,6 +732,24 @@ mod tests {
     }
 
     #[test]
+    fn udp_mdns_multicast_tuple_matches_rfc6762() {
+        let std_socket = StdUdpSocket::bind("0.0.0.0:0").expect("bind socket");
+        let socket = UdpSocket::from_std(std_socket).expect("wrap socket");
+
+        let mdns_group = Ipv4Addr::new(224, 0, 0, 251);
+        let mdns_interface = Ipv4Addr::UNSPECIFIED;
+        socket
+            .join_multicast_v4(mdns_group, mdns_interface)
+            .expect("join mDNS group");
+        socket
+            .leave_multicast_v4(mdns_group, mdns_interface)
+            .expect("leave mDNS group");
+
+        let mdns_socket = std::net::SocketAddrV4::new(mdns_group, 5353);
+        assert_eq!(mdns_socket.to_string(), "224.0.0.251:5353");
+    }
+
+    #[test]
     fn udp_socket_registers_on_wouldblock() {
         // Create a socket pair
         let std_server = StdUdpSocket::bind("127.0.0.1:0").expect("bind server");
