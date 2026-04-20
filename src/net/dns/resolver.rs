@@ -1912,7 +1912,7 @@ mod tests {
         let error = decode_dns_name(&packet, &mut offset).expect_err("forward pointer rejected");
 
         crate::assert_with_log!(
-            matches!(error, DnsError::Protocol(message) if message.contains("forward DNS compression pointer")),
+            matches!(error, DnsError::Protocol(ref message) if message.contains("forward DNS compression pointer")),
             "forward compression pointers must be rejected",
             true,
             format!("{error:?}")
