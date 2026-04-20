@@ -124,6 +124,7 @@ mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
     use crate::util::ArenaIndex;
+    use proptest::prelude::*;
 
     fn init_test(name: &str) {
         init_test_logging();
@@ -320,5 +321,41 @@ mod tests {
             expired.contains(&task(1)) && expired.contains(&task(2))
         );
         crate::test_complete!("generation_counter_wraps_without_panicking");
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_split_pop_matches_direct_later_frontier(
+            deadlines in prop::collection::vec(0u16..512u16, 1..24),
+            split_ms in 0u16..512u16,
+        ) {
+            let mut split_heap = TimerHeap::new();
+            let mut direct_heap = TimerHeap::new();
+
+            for (index, deadline_ms) in deadlines.iter().copied().enumerate() {
+                let task = task(index as u32 + 1);
+                let deadline = Time::from_millis(u64::from(deadline_ms));
+                split_heap.insert(task, deadline);
+                direct_heap.insert(task, deadline);
+            }
+
+            let late_ms = deadlines.iter().copied().max().unwrap_or(0);
+            let early_ms = split_ms.min(late_ms);
+
+            let mut split_result = split_heap.pop_expired(Time::from_millis(u64::from(early_ms)));
+            split_result.extend(split_heap.pop_expired(Time::from_millis(u64::from(late_ms))));
+
+            let direct_result = direct_heap.pop_expired(Time::from_millis(u64::from(late_ms)));
+
+            prop_assert_eq!(
+                split_result,
+                direct_result,
+                "splitting timer expiration at an earlier frontier must preserve final wake ordering",
+            );
+            prop_assert!(
+                split_heap.is_empty() && direct_heap.is_empty(),
+                "both heaps should be drained after popping at the latest inserted deadline",
+            );
+        }
     }
 }
