@@ -81,6 +81,17 @@ impl fmt::Debug for AuthKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
+
+    fn hotp_dynamic_truncation(mac: &[u8], digits: u32) -> u32 {
+        let offset = usize::from(mac[mac.len() - 1] & 0x0f);
+        let binary = ((u32::from(mac[offset]) & 0x7f) << 24)
+            | (u32::from(mac[offset + 1]) << 16)
+            | (u32::from(mac[offset + 2]) << 8)
+            | u32::from(mac[offset + 3]);
+        binary % 10_u32.pow(digits)
+    }
 
     #[test]
     fn test_from_seed_deterministic() {
@@ -180,15 +191,6 @@ mod tests {
 
     #[test]
     fn derive_subkey_matches_rfc6238_sha256_time_59_vector() {
-        fn hotp_dynamic_truncation(mac: &[u8]) -> u32 {
-            let offset = usize::from(mac[mac.len() - 1] & 0x0f);
-            let binary = ((u32::from(mac[offset]) & 0x7f) << 24)
-                | (u32::from(mac[offset + 1]) << 16)
-                | (u32::from(mac[offset + 2]) << 8)
-                | u32::from(mac[offset + 3]);
-            binary % 100_000_000
-        }
-
         // RFC 6238 Appendix B, SHA-256 test secret for 8-digit TOTP vectors.
         let secret = *b"12345678901234567890123456789012";
         let key = AuthKey::from_bytes(secret);
@@ -196,8 +198,24 @@ mod tests {
         // Time = 59s, T0 = 0, X = 30 => moving factor = 1.
         let moving_factor = 1u64.to_be_bytes();
         let mac = key.derive_subkey(&moving_factor);
-        let totp = hotp_dynamic_truncation(mac.as_bytes());
+        let totp = hotp_dynamic_truncation(mac.as_bytes(), 8);
 
         assert_eq!(totp, 46_119_246);
+    }
+
+    #[test]
+    fn hotp_matches_rfc4226_counter_0_golden_vector() {
+        type HmacSha1 = Hmac<Sha1>;
+
+        // RFC 4226 Appendix D test secret and counter 0 vector.
+        let secret = b"12345678901234567890";
+        let counter = 0u64.to_be_bytes();
+
+        let mut mac = HmacSha1::new_from_slice(secret).expect("HMAC accepts any key length");
+        mac.update(&counter);
+        let digest = mac.finalize().into_bytes();
+        let hotp = hotp_dynamic_truncation(&digest, 6);
+
+        assert_eq!(hotp, 755_224);
     }
 }
