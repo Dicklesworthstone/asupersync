@@ -1105,7 +1105,9 @@ impl rusqlite::ToSql for SqliteValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
     use crate::cx::Cx;
+    use crate::test_utils::init_test_logging;
     use crate::types::Budget;
     use crate::types::Outcome;
     use crate::util::ArenaIndex;
@@ -1468,6 +1470,124 @@ mod tests {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].get_str("name").unwrap(), "alice");
         });
+    }
+
+    #[test]
+    fn sqlite_file_persists_while_memory_resets_under_lab_runtime() {
+        init_test_logging();
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("lab_runtime_persistence.sqlite3");
+        let config = TestConfig::new()
+            .with_seed(0x51A7_1001)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+
+        let (persisted_name, memory_table_count) =
+            LabRuntimeTarget::block_on(&mut runtime, async move {
+                let cx = Cx::current().expect("lab runtime should install a current Cx");
+
+                let file_conn = match SqliteConnection::open(&cx, &db_path).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("file open failed: {other:?}"),
+                };
+                match file_conn
+                    .execute_batch(
+                        &cx,
+                        "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT);
+                         INSERT INTO t(name) VALUES ('persisted');",
+                    )
+                    .await
+                {
+                    Outcome::Ok(()) => {}
+                    other => panic!("file schema setup failed: {other:?}"),
+                }
+                tracing::info!(
+                    event = %serde_json::json!({
+                        "phase": "file_seeded",
+                        "path": db_path.display().to_string(),
+                    }),
+                    "sqlite_lab_checkpoint"
+                );
+                file_conn.close().unwrap();
+
+                let reopened_file = match SqliteConnection::open(&cx, &db_path).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("file reopen failed: {other:?}"),
+                };
+                let file_rows = match reopened_file.query(&cx, "SELECT name FROM t", &[]).await {
+                    Outcome::Ok(rows) => rows,
+                    other => panic!("file query failed after reopen: {other:?}"),
+                };
+                let persisted_name = file_rows[0].get_str("name").unwrap().to_string();
+                tracing::info!(
+                    event = %serde_json::json!({
+                        "phase": "file_reopened",
+                        "row_count": file_rows.len(),
+                        "name": persisted_name,
+                    }),
+                    "sqlite_lab_checkpoint"
+                );
+                reopened_file.close().unwrap();
+
+                let memory_conn = match SqliteConnection::open_in_memory(&cx).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("memory open failed: {other:?}"),
+                };
+                match memory_conn
+                    .execute_batch(
+                        &cx,
+                        "CREATE TABLE ephemeral (id INTEGER PRIMARY KEY, name TEXT);
+                         INSERT INTO ephemeral(name) VALUES ('transient');",
+                    )
+                    .await
+                {
+                    Outcome::Ok(()) => {}
+                    other => panic!("memory schema setup failed: {other:?}"),
+                }
+                tracing::info!(
+                    event = %serde_json::json!({
+                        "phase": "memory_seeded",
+                        "table": "ephemeral",
+                    }),
+                    "sqlite_lab_checkpoint"
+                );
+                memory_conn.close().unwrap();
+
+                let reopened_memory = match SqliteConnection::open_in_memory(&cx).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("memory reopen failed: {other:?}"),
+                };
+                let memory_rows = match reopened_memory
+                    .query(
+                        &cx,
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='ephemeral'",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(rows) => rows,
+                    other => panic!("memory table probe failed after reopen: {other:?}"),
+                };
+                tracing::info!(
+                    event = %serde_json::json!({
+                        "phase": "memory_reopened",
+                        "table_count": memory_rows.len(),
+                    }),
+                    "sqlite_lab_checkpoint"
+                );
+                reopened_memory.close().unwrap();
+
+                (persisted_name, memory_rows.len())
+            });
+
+        assert_eq!(persisted_name, "persisted");
+        assert_eq!(memory_table_count, 0);
+        let violations = runtime.oracles.check_all(runtime.now());
+        assert!(
+            violations.is_empty(),
+            "sqlite lab persistence test should leave runtime invariants clean: {violations:?}"
+        );
     }
 
     #[test]
