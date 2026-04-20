@@ -921,6 +921,24 @@ mod tests {
     }
 
     #[test]
+    fn from_request_accepts_rfc2046_quoted_boundary_with_space() {
+        let body = make_multipart_body(
+            "simple boundary",
+            &[("Content-Disposition: form-data; name=\"field\"", b"value")],
+        );
+        let mut req = Request::new("POST", "/upload");
+        req.headers.insert(
+            "content-type".to_string(),
+            "multipart/form-data; boundary=\"simple boundary\"".to_string(),
+        );
+        req.body = body;
+
+        let mp = Multipart::from_request(req).unwrap();
+        assert_eq!(mp.len(), 1);
+        assert_eq!(mp.field("field").unwrap().text().unwrap(), "value");
+    }
+
+    #[test]
     fn from_request_wrong_content_type() {
         let mut req = Request::new("POST", "/upload");
         req.headers
