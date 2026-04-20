@@ -323,19 +323,20 @@ pub use pg::{PgSavepoint, with_pg_transaction, with_pg_transaction_retry};
 mod sqlite {
     use super::{Cx, Future, Outcome, RetryPolicy, validate_savepoint_name, wait_retry_delay};
     use crate::database::sqlite::{SqliteConnection, SqliteError, SqliteTransaction};
-    use std::fmt;
+    use std::{fmt, pin::Pin};
+
+    type SqliteTxFuture<'a, T> = Pin<Box<dyn Future<Output = Outcome<T, SqliteError>> + Send + 'a>>;
 
     /// Run a closure inside a SQLite transaction.
     ///
     /// See [`with_pg_transaction`](super::with_pg_transaction) for semantics.
-    pub async fn with_sqlite_transaction<T, F, Fut>(
+    pub async fn with_sqlite_transaction<T, F>(
         conn: &SqliteConnection,
         cx: &Cx,
         f: F,
     ) -> Outcome<T, SqliteError>
     where
-        F: FnOnce(&SqliteTransaction<'_>, &Cx) -> Fut,
-        Fut: Future<Output = Outcome<T, SqliteError>>,
+        F: for<'a> FnOnce(&'a SqliteTransaction<'_>, &'a Cx) -> SqliteTxFuture<'a, T>,
     {
         let tx = match conn.begin(cx).await {
             Outcome::Ok(tx) => tx,
@@ -372,14 +373,13 @@ mod sqlite {
     ///
     /// Acquires the write lock immediately, avoiding SQLITE_BUSY in the
     /// middle of a transaction.
-    pub async fn with_sqlite_transaction_immediate<T, F, Fut>(
+    pub async fn with_sqlite_transaction_immediate<T, F>(
         conn: &SqliteConnection,
         cx: &Cx,
         f: F,
     ) -> Outcome<T, SqliteError>
     where
-        F: FnOnce(&SqliteTransaction<'_>, &Cx) -> Fut,
-        Fut: Future<Output = Outcome<T, SqliteError>>,
+        F: for<'a> FnOnce(&'a SqliteTransaction<'_>, &'a Cx) -> SqliteTxFuture<'a, T>,
     {
         let tx = match conn.begin_immediate(cx).await {
             Outcome::Ok(tx) => tx,
@@ -419,15 +419,14 @@ mod sqlite {
     ///
     /// For write-heavy workloads, prefer [`with_sqlite_transaction_immediate`]
     /// which acquires the write lock upfront to reduce contention.
-    pub async fn with_sqlite_transaction_retry<T, F, MkFut>(
+    pub async fn with_sqlite_transaction_retry<T, F>(
         conn: &SqliteConnection,
         cx: &Cx,
         policy: &RetryPolicy,
         mut f: F,
     ) -> Outcome<T, SqliteError>
     where
-        F: FnMut(&SqliteTransaction<'_>, &Cx) -> MkFut,
-        MkFut: Future<Output = Outcome<T, SqliteError>>,
+        F: for<'a> FnMut(&'a SqliteTransaction<'_>, &'a Cx) -> SqliteTxFuture<'a, T>,
     {
         let mut attempt = 0u32;
         loop {
@@ -709,6 +708,12 @@ pub use mysql::{MySqlSavepoint, with_mysql_transaction, with_mysql_transaction_r
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "sqlite")]
+    use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+    #[cfg(feature = "sqlite")]
+    use crate::cx::Cx;
+    #[cfg(feature = "sqlite")]
+    use crate::database::sqlite::{SqliteConnection, SqliteValue};
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
 
@@ -861,5 +866,118 @@ mod tests {
             other => panic!("expected cancelled zero-delay retry wait, got {other:?}"),
         }
         crate::test_complete!("wait_retry_delay_zero_delay_returns_cancelled_after_yield");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn with_sqlite_transaction_commit_persists_under_lab_runtime() {
+        init_test("with_sqlite_transaction_commit_persists_under_lab_runtime");
+        let config = TestConfig::new()
+            .with_seed(0x7A11_7E01)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+
+        let (count_inside_tx, count_after_commit, committed_name) =
+            LabRuntimeTarget::block_on(&mut runtime, async move {
+                let cx = Cx::current().expect("lab runtime should install a current Cx");
+
+                let conn = match SqliteConnection::open_in_memory(&cx).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("open_in_memory failed: {other:?}"),
+                };
+                match conn
+                    .execute_batch(
+                        &cx,
+                        "CREATE TABLE tx_items (id INTEGER PRIMARY KEY, name TEXT);",
+                    )
+                    .await
+                {
+                    Outcome::Ok(()) => {}
+                    other => panic!("schema setup failed: {other:?}"),
+                }
+
+                let count_inside_tx = match with_sqlite_transaction(&conn, &cx, |tx, cx| {
+                    Box::pin(async move {
+                        match tx
+                            .execute(
+                                cx,
+                                "INSERT INTO tx_items(name) VALUES (?1)",
+                                &[SqliteValue::Text("helper_committed".to_string())],
+                            )
+                            .await
+                        {
+                            Outcome::Ok(1) => {}
+                            other => panic!("insert in helper transaction failed: {other:?}"),
+                        }
+
+                        let rows_inside = match tx
+                            .query(cx, "SELECT COUNT(*) AS count FROM tx_items", &[])
+                            .await
+                        {
+                            Outcome::Ok(rows) => rows,
+                            other => {
+                                panic!("count query inside helper transaction failed: {other:?}")
+                            }
+                        };
+                        let count_inside_tx = rows_inside[0]
+                            .get_i64("count")
+                            .expect("count column should be present");
+                        tracing::info!(
+                            event = %serde_json::json!({
+                                "phase": "helper_inserted",
+                                "count_inside_tx": count_inside_tx,
+                            }),
+                            "sqlite_transaction_lab_checkpoint"
+                        );
+
+                        Outcome::Ok(count_inside_tx)
+                    })
+                })
+                .await
+                {
+                    Outcome::Ok(count) => count,
+                    other => panic!("with_sqlite_transaction failed: {other:?}"),
+                };
+
+                let rows_after = match conn
+                    .query(
+                        &cx,
+                        "SELECT COUNT(*) AS count, MIN(name) AS name FROM tx_items",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(rows) => rows,
+                    other => panic!("query after helper commit failed: {other:?}"),
+                };
+                let count_after_commit = rows_after[0]
+                    .get_i64("count")
+                    .expect("count column should be present");
+                let committed_name = rows_after[0]
+                    .get_str("name")
+                    .expect("name column should be present")
+                    .to_string();
+                tracing::info!(
+                    event = %serde_json::json!({
+                        "phase": "helper_committed",
+                        "count_after_commit": count_after_commit,
+                        "name": committed_name,
+                    }),
+                    "sqlite_transaction_lab_checkpoint"
+                );
+                conn.close().unwrap();
+
+                (count_inside_tx, count_after_commit, committed_name)
+            });
+
+        assert_eq!(count_inside_tx, 1);
+        assert_eq!(count_after_commit, 1);
+        assert_eq!(committed_name, "helper_committed");
+        let violations = runtime.oracles.check_all(runtime.now());
+        assert!(
+            violations.is_empty(),
+            "transaction helper lab-runtime test should leave runtime invariants clean: {violations:?}"
+        );
     }
 }
