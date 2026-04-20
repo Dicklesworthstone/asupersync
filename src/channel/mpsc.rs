@@ -2054,6 +2054,7 @@ pub mod backpressure_metamorphic {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Wake;
 
     /// Configuration for MPSC backpressure metamorphic tests.
     #[derive(Debug, Clone)]
@@ -2130,6 +2131,17 @@ pub mod backpressure_metamorphic {
 
     fn decode_sender_message(value: u32) -> (usize, u32) {
         (((value >> 16) & 0xffff) as usize, value & 0xffff)
+    }
+
+    fn metamorphic_noop_waker() -> Waker {
+        struct NoopWaker;
+
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+            fn wake_by_ref(self: &Arc<Self>) {}
+        }
+
+        Waker::from(Arc::new(NoopWaker))
     }
 
     fn projected_sender_sequences(
@@ -2231,6 +2243,78 @@ pub mod backpressure_metamorphic {
         };
         let remaining_senders = shared.sender_count.load(Ordering::Acquire);
         (projections, final_state, remaining_senders)
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct CloseDrainTranscript {
+        drained: Vec<u32>,
+        reserve_disconnected: bool,
+        try_reserve_disconnected: bool,
+        try_send_disconnected: bool,
+        send_disconnected: bool,
+        final_recv_disconnected: bool,
+        queued_waiters_after_close: usize,
+    }
+
+    fn run_close_drain_transcript(
+        cx: &crate::cx::Cx,
+        capacity: usize,
+        queued_messages: usize,
+        close_via_sender: bool,
+    ) -> CloseDrainTranscript {
+        let (tx, mut rx) = channel::<u32>(capacity);
+
+        for ordinal in 0..queued_messages {
+            tx.try_send(ordinal as u32)
+                .expect("pre-close queue fill should succeed");
+        }
+
+        let mut reserve_fut = Box::pin(tx.reserve(cx));
+        let waker = metamorphic_noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let first_poll = reserve_fut.as_mut().poll(&mut task_cx);
+        assert!(
+            matches!(first_poll, Poll::Pending),
+            "reserve should be pending before closure on a full queue"
+        );
+
+        if close_via_sender {
+            tx.close_receiver();
+        } else {
+            rx.close();
+        }
+
+        let reserve_disconnected = matches!(
+            reserve_fut.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(SendError::<()>::Disconnected(())))
+        );
+        drop(reserve_fut);
+
+        let queued_waiters_after_close = tx.shared.inner.lock().send_wakers.len();
+        let try_reserve_disconnected =
+            matches!(tx.try_reserve(), Err(SendError::<()>::Disconnected(())));
+        let try_send_disconnected =
+            matches!(tx.try_send(u32::MAX), Err(SendError::Disconnected(_)));
+        let send_disconnected = matches!(
+            futures_lite::future::block_on(tx.send(cx, u32::MAX - 1)),
+            Err(SendError::Disconnected(_))
+        );
+
+        let mut drained = Vec::new();
+        while let Ok(value) = rx.try_recv() {
+            drained.push(value);
+        }
+        let final_recv_disconnected = matches!(rx.try_recv(), Err(RecvError::Disconnected));
+
+        CloseDrainTranscript {
+            drained,
+            reserve_disconnected,
+            try_reserve_disconnected,
+            try_send_disconnected,
+            send_disconnected,
+            final_recv_disconnected,
+            queued_waiters_after_close,
+        }
     }
 
     /// MR1: Capacity Conservation
@@ -2479,6 +2563,72 @@ pub mod backpressure_metamorphic {
                         }
                         .await;
                     }).unwrap();
+                    lab.scheduler.lock().schedule(test_task, 0);
+                    let _ = lab.run_until_quiescent_with_report();
+                });
+                Ok(())
+            })
+            .expect("Property test failed");
+    }
+
+    /// MR2c: Receiver-side close and sender-side close induce the same close/drain transcript.
+    ///
+    /// Property: Closing the receiver via `Receiver::close()` or `Sender::close_receiver()`
+    /// preserves the queued receive prefix and disconnects both pending and future senders
+    /// without leaving waiter residue.
+    #[test]
+    fn metamorphic_close_paths_preserve_close_drain_transcript() {
+        use proptest::test_runner::TestRunner;
+
+        let mut runner = TestRunner::default();
+        runner
+            .run(&backpressure_config_strategy(), |config| {
+                crate::lab::runtime::test(config.seed, |lab| {
+                    let root = lab.state.create_root_region(Budget::INFINITE);
+                    let (test_task, _) = lab
+                        .state
+                        .create_task(root, Budget::INFINITE, async move {
+                            let cx = crate::cx::Cx::for_testing();
+                            let _test_res: Result<(), proptest::test_runner::TestCaseError> =
+                                async {
+                                    let capacity = config.capacity.max(1);
+                                    let queued_messages = capacity;
+
+                                    let receiver_closed = run_close_drain_transcript(
+                                        &cx,
+                                        capacity,
+                                        queued_messages,
+                                        false,
+                                    );
+                                    let sender_closed = run_close_drain_transcript(
+                                        &cx,
+                                        capacity,
+                                        queued_messages,
+                                        true,
+                                    );
+
+                                    let expected_drained: Vec<u32> = (0..queued_messages)
+                                        .map(|ordinal| ordinal as u32)
+                                        .collect();
+
+                                    assert_eq!(
+                                        receiver_closed.drained, expected_drained,
+                                        "receiver-side close changed queued drain prefix"
+                                    );
+                                    assert_eq!(
+                                        sender_closed.drained, expected_drained,
+                                        "sender-side close changed queued drain prefix"
+                                    );
+                                    assert_eq!(
+                                        receiver_closed, sender_closed,
+                                        "close path changed disconnect/drain transcript"
+                                    );
+
+                                    Ok(())
+                                }
+                                .await;
+                        })
+                        .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let _ = lab.run_until_quiescent_with_report();
                 });
