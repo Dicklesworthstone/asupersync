@@ -1092,6 +1092,10 @@ mod tests {
         }
     }
 
+    fn scrub_divergence_text(text: &str) -> String {
+        text.replace("Seed:       0x000000000000beef", "Seed:       [SEED]")
+    }
+
     // -------------------------------------------------------------------------
     // Classification tests
     // -------------------------------------------------------------------------
@@ -1745,5 +1749,44 @@ mod tests {
         assert!(dbg.contains("AffectedEntities"), "{dbg}");
         let cloned = ae;
         assert!(cloned.tasks.is_empty());
+    }
+
+    #[test]
+    fn divergence_report_text_snapshot_scrubbed() {
+        let trace = make_trace(
+            0xBEEF,
+            vec![
+                ReplayEvent::TaskScheduled {
+                    task: CompactTaskId(1),
+                    at_tick: 0,
+                },
+                ReplayEvent::TaskScheduled {
+                    task: CompactTaskId(2),
+                    at_tick: 1,
+                },
+                ReplayEvent::TaskCompleted {
+                    task: CompactTaskId(2),
+                    outcome: 0,
+                },
+            ],
+        );
+
+        let error = make_error(
+            1,
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(2),
+                at_tick: 1,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(3),
+                at_tick: 1,
+            },
+        );
+
+        let report = diagnose_divergence(&trace, &error, &DiagnosticConfig::default());
+        insta::assert_snapshot!(
+            "divergence_report_text_scrubbed",
+            scrub_divergence_text(&report.to_text())
+        );
     }
 }
