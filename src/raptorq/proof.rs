@@ -224,13 +224,25 @@ fn compare_prefix<T: PartialEq + fmt::Debug>(
     actual: &[T],
     truncated: bool,
 ) -> Result<(), ReplayError> {
-    if actual.len() < expected.len() {
-        return Err(sequence_mismatch(
-            label,
-            actual.len(),
-            format!("{:?}", expected.get(actual.len())),
-            "missing".to_string(),
-        ));
+    if actual.len() != expected.len() {
+        let idx = expected.len().min(actual.len());
+        let (expected_item, actual_item) = if actual.len() < expected.len() {
+            (
+                format!("{:?}", expected.get(actual.len())),
+                "missing".to_string(),
+            )
+        } else if truncated {
+            (
+                format!("len {}", expected.len()),
+                format!("len {}", actual.len()),
+            )
+        } else {
+            (
+                "missing".to_string(),
+                format!("{:?}", actual.get(expected.len())),
+            )
+        };
+        return Err(sequence_mismatch(label, idx, expected_item, actual_item));
     }
     for (idx, (exp, act)) in expected.iter().zip(actual.iter()).enumerate() {
         if exp != act {
@@ -241,13 +253,6 @@ fn compare_prefix<T: PartialEq + fmt::Debug>(
                 format!("{act:?}"),
             ));
         }
-    }
-    if !truncated && actual.len() != expected.len() {
-        return Err(mismatch(
-            label,
-            format!("len {}", expected.len()),
-            format!("len {}", actual.len()),
-        ));
     }
     Ok(())
 }
@@ -1210,6 +1215,40 @@ mod tests {
         assert!(
             err.to_string().contains("elimination.pivot_events"),
             "mismatch should point directly at the non-truncated elimination sub-trace"
+        );
+    }
+
+    #[test]
+    fn replay_verification_rejects_extra_entries_in_truncated_subtraces() {
+        let config = make_test_config();
+        let recovered = make_test_recovered(&config);
+        let mut expected_builder = DecodeProof::builder(config);
+        expected_builder.set_received(ReceivedSummary {
+            total: 10,
+            source_count: 10,
+            repair_count: 0,
+            esi_multiset_hash: 321,
+            esis: (0..10).collect(),
+            truncated: false,
+        });
+        expected_builder.set_success(&recovered);
+
+        let elimination = expected_builder.elimination_mut();
+        for col in 0..=MAX_PIVOT_EVENTS {
+            elimination.record_inactivation(col);
+        }
+
+        let expected = expected_builder.build();
+        assert!(expected.elimination.inactive_cols_truncated);
+
+        let mut actual = expected.clone();
+        actual.elimination.inactive_cols.push(MAX_PIVOT_EVENTS + 99);
+
+        let err = compare_proofs(&expected, &actual)
+            .expect_err("truncated previews must still reject extra recorded entries");
+        assert!(
+            err.to_string().contains("elimination.inactive_cols"),
+            "mismatch should point directly at the truncated elimination preview"
         );
     }
 
