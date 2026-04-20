@@ -308,6 +308,18 @@ mod tests {
     }
 
     #[test]
+    fn det_entropy_seed_42_matches_stable_vector() {
+        let e = DetEntropy::new(42);
+
+        assert_eq!(e.next_u64(), 0x0000_000A_9551_4AAA);
+
+        let mut bytes = [0u8; 8];
+        let e = DetEntropy::new(42);
+        e.fill_bytes(&mut bytes);
+        assert_eq!(bytes, [0xAA, 0x4A, 0x51, 0x95, 0x0A, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
     fn det_entropy_fork_deterministic() {
         let parent1 = DetEntropy::new(99);
         let parent2 = DetEntropy::new(99);
