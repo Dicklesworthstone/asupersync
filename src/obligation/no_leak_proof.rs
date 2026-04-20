@@ -782,10 +782,12 @@ impl NoLeakProver {
     /// { RegionClosed(r) ∗ n == 0 }
     /// ```
     fn on_region_close(&mut self, region: RegionId, time: Time) {
+        let mut precondition_ok = true;
         let rc = self.region_counters.entry(region).or_default();
         let pending = rc.pending;
 
         if pending > 0 {
+            precondition_ok = false;
             self.counterexamples.push(LeakCounterexample {
                 property: LivenessProperty::RegionQuiescence,
                 subject: ProofSubject::Region(region),
@@ -801,16 +803,42 @@ impl NoLeakProver {
                 verified: false,
                 description: format!("region pending = {pending}, expected 0"),
             });
-        } else {
+        }
+
+        if rc.closed {
+            precondition_ok = false;
+            self.counterexamples.push(LeakCounterexample {
+                property: LivenessProperty::RegionQuiescence,
+                subject: ProofSubject::Region(region),
+                time,
+                description: format!(
+                    "region {region:?} closed twice (first close at t={})",
+                    rc.closed_at.unwrap_or(Time::ZERO),
+                ),
+            });
             self.steps.push(ProofStep {
                 property: LivenessProperty::RegionQuiescence,
                 subject: ProofSubject::Region(region),
                 time,
-                verified: true,
-                description: format!("region {region:?} quiescent (0 pending)"),
+                verified: false,
+                description: format!(
+                    "region {region:?} already closed at t={}",
+                    rc.closed_at.unwrap_or(Time::ZERO),
+                ),
             });
         }
 
+        if !precondition_ok {
+            return;
+        }
+
+        self.steps.push(ProofStep {
+            property: LivenessProperty::RegionQuiescence,
+            subject: ProofSubject::Region(region),
+            time,
+            verified: true,
+            description: format!("region {region:?} quiescent (0 pending)"),
+        });
         rc.closed = true;
         rc.closed_at = Some(time);
     }
@@ -1442,8 +1470,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_resolve_after_region_close() {
-        init_test("rejects_resolve_after_region_close");
+    fn failed_close_does_not_reject_later_resolution() {
+        init_test("failed_close_does_not_reject_later_resolution");
         let events = vec![
             reserve_ev(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
             close_ev(5, r(0)),
@@ -1453,18 +1481,83 @@ mod tests {
         let mut prover = NoLeakProver::new();
         let result = prover.check(&events);
         let verified = result.is_verified();
-        crate::assert_with_log!(!verified, "resolve-after-close rejected", false, verified);
+        crate::assert_with_log!(!verified, "failed close still rejected", false, verified);
         let quiescence_count = result
             .counterexamples_of(LivenessProperty::RegionQuiescence)
-            .filter(|ce| ce.description.contains("closed region"))
             .count();
         crate::assert_with_log!(
-            quiescence_count >= 2,
-            "close + resolve-after-close CE",
-            true,
-            quiescence_count >= 2
+            quiescence_count == 1,
+            "only the failed close should violate quiescence",
+            1,
+            quiescence_count
         );
-        crate::test_complete!("rejects_resolve_after_region_close");
+        let poisoned_close = result.counterexamples.iter().any(|ce| {
+            ce.description.contains("already closed") || ce.description.contains("closed twice")
+        });
+        crate::assert_with_log!(
+            !poisoned_close,
+            "failed close should not mark region closed",
+            false,
+            poisoned_close
+        );
+        crate::test_complete!("failed_close_does_not_reject_later_resolution");
+    }
+
+    #[test]
+    fn rejects_double_region_close() {
+        init_test("rejects_double_region_close");
+        let events = vec![close_ev(0, r(0)), close_ev(10, r(0))];
+
+        let mut prover = NoLeakProver::new();
+        let result = prover.check(&events);
+        let verified = result.is_verified();
+        crate::assert_with_log!(!verified, "double close rejected", false, verified);
+        let quiescence_count = result
+            .counterexamples_of(LivenessProperty::RegionQuiescence)
+            .filter(|ce| ce.description.contains("closed twice"))
+            .count();
+        crate::assert_with_log!(
+            quiescence_count == 1,
+            "double-close CE",
+            1,
+            quiescence_count
+        );
+        crate::test_complete!("rejects_double_region_close");
+    }
+
+    #[test]
+    fn failed_close_with_pending_does_not_poison_later_close() {
+        init_test("failed_close_with_pending_does_not_poison_later_close");
+        let events = vec![
+            reserve_ev(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            close_ev(10, r(0)),
+            commit_ev(20, o(0), r(0), ObligationKind::SendPermit),
+            close_ev(30, r(0)),
+        ];
+
+        let mut prover = NoLeakProver::new();
+        let result = prover.check(&events);
+        let verified = result.is_verified();
+        crate::assert_with_log!(!verified, "first close still rejected", false, verified);
+        let quiescence_count = result
+            .counterexamples_of(LivenessProperty::RegionQuiescence)
+            .count();
+        crate::assert_with_log!(
+            quiescence_count == 1,
+            "only the first close should violate quiescence",
+            1,
+            quiescence_count
+        );
+        let poisoned_close = result.counterexamples.iter().any(|ce| {
+            ce.description.contains("already closed") || ce.description.contains("closed twice")
+        });
+        crate::assert_with_log!(
+            !poisoned_close,
+            "failed close should not mark region closed",
+            false,
+            poisoned_close
+        );
+        crate::test_complete!("failed_close_with_pending_does_not_poison_later_close");
     }
 
     // ========================================================================
