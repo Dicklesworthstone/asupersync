@@ -173,6 +173,10 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
             count += 1;
         }
         poll_flush_blocking(&mut self.transport)?;
+        if let Some(ref mut m) = self.metrics {
+            m.counter("raptorq.symbols_sent")
+                .add(count.try_into().unwrap_or(u64::MAX));
+        }
         Ok(count)
     }
 
@@ -915,6 +919,29 @@ mod tests {
     }
 
     #[test]
+    fn test_send_symbols_successful_flush_records_metrics() {
+        let cx: Cx = Cx::for_testing();
+        let sink = VecSink::new();
+        let mut metrics = Metrics::new();
+        let symbols_sent_counter = metrics.counter("raptorq.symbols_sent");
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, Some(metrics));
+
+        let symbols: Vec<AuthenticatedSymbol> = (0..4)
+            .map(|i| {
+                let sym = Symbol::new_for_test(1, 0, i, &[i as u8; 256]);
+                AuthenticatedSymbol::new_verified(sym, AuthenticationTag::zero())
+            })
+            .collect();
+
+        let count = sender
+            .send_symbols(&cx, symbols)
+            .expect("successful direct symbol flush should record metrics");
+
+        assert_eq!(count, 4);
+        assert_eq!(symbols_sent_counter.get(), 4);
+    }
+
+    #[test]
     fn test_send_object_pending_sink_returns_rejected() {
         let cx: Cx = Cx::for_testing();
         let sink = PendingSink;
@@ -979,6 +1006,33 @@ mod tests {
             sender.transport_mut().symbols.len(),
             2,
             "all symbols may be staged before flush reports pending"
+        );
+    }
+
+    #[test]
+    fn test_send_symbols_pending_flush_does_not_increment_metrics() {
+        let cx: Cx = Cx::for_testing();
+        let sink = FlushPendingSink::new();
+        let mut metrics = Metrics::new();
+        let symbols_sent_counter = metrics.counter("raptorq.symbols_sent");
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, Some(metrics));
+
+        let symbols: Vec<AuthenticatedSymbol> = (0..2)
+            .map(|i| {
+                let sym = Symbol::new_for_test(1, 0, i, &[i as u8; 256]);
+                AuthenticatedSymbol::new_verified(sym, AuthenticationTag::zero())
+            })
+            .collect();
+
+        let err = sender
+            .send_symbols(&cx, symbols)
+            .expect_err("pending flush must not report direct send success");
+
+        assert_eq!(err.kind(), ErrorKind::SinkRejected);
+        assert_eq!(
+            symbols_sent_counter.get(),
+            0,
+            "flush failure must not overcount direct symbol sends"
         );
     }
 
