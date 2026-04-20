@@ -313,6 +313,7 @@ fn pop_next_queued_waiter(waiters: &mut Vec<SimWaiter>) -> Option<SimWaiter> {
 #[derive(Debug)]
 struct SimQueueState {
     queue: VecDeque<AuthenticatedSymbol>,
+    delayed_in_flight: usize,
     sent_symbols: Vec<AuthenticatedSymbol>,
     send_wakers: Vec<SimWaiter>,
     recv_wakers: Vec<SimWaiter>,
@@ -333,6 +334,7 @@ impl SimQueue {
             config,
             state: Mutex::new(SimQueueState {
                 queue: VecDeque::new(),
+                delayed_in_flight: 0,
                 sent_symbols: Vec::new(),
                 send_wakers: Vec::new(),
                 recv_wakers: Vec::new(),
@@ -357,6 +359,10 @@ impl SimQueue {
             waiter.waker.wake();
         }
     }
+}
+
+fn in_flight_len(state: &SimQueueState) -> usize {
+    state.queue.len().saturating_add(state.delayed_in_flight)
 }
 
 #[derive(Debug)]
@@ -530,7 +536,7 @@ impl SymbolSink for SimSymbolSink {
         if state.closed {
             return Poll::Ready(Err(SinkError::Closed));
         }
-        if state.queue.len() < this.inner.config.capacity {
+        if in_flight_len(&state) < this.inner.config.capacity {
             // Mark as no longer queued if we had a waiter
             if let Some(waiter) = this.waiter.as_ref() {
                 waiter.store(false, Ordering::Release);
@@ -590,7 +596,7 @@ impl SymbolSink for SimSymbolSink {
             if state.closed {
                 return Poll::Ready(Err(SinkError::Closed));
             }
-            if inner.config.capacity == 0 || state.queue.len() >= inner.config.capacity {
+            if inner.config.capacity == 0 || in_flight_len(&state) >= inner.config.capacity {
                 return Poll::Ready(Err(SinkError::BufferFull));
             }
             if let Some(limit) = inner.config.fail_after {
@@ -616,7 +622,7 @@ impl SymbolSink for SimSymbolSink {
         if state.closed {
             return Poll::Ready(Err(SinkError::Closed));
         }
-        if inner.config.capacity == 0 || state.queue.len() >= inner.config.capacity {
+        if inner.config.capacity == 0 || in_flight_len(&state) >= inner.config.capacity {
             return Poll::Ready(Err(SinkError::BufferFull));
         }
         if let Some(limit) = inner.config.fail_after {
@@ -686,6 +692,19 @@ impl SymbolStream for SimSymbolStream {
                 return Poll::Pending;
             }
             let pending = this.pending.take().expect("pending symbol missing");
+            let send_waiter = {
+                let mut state = this.inner.state.lock();
+                debug_assert!(
+                    state.delayed_in_flight > 0,
+                    "delayed receive completed without reserving in-flight capacity"
+                );
+                state.delayed_in_flight = state.delayed_in_flight.saturating_sub(1);
+                pop_next_queued_waiter(&mut state.send_wakers)
+            };
+            if let Some(waiter) = send_waiter {
+                waiter.queued.store(false, Ordering::Release);
+                waiter.waker.wake();
+            }
             return Poll::Ready(Some(Ok(pending.symbol)));
         }
 
@@ -713,7 +732,12 @@ impl SymbolStream for SimSymbolStream {
                 waiter.store(false, Ordering::Release);
             }
             let delay = sample_latency(&this.inner.config, &mut state.rng);
-            let send_waiter = pop_next_queued_waiter(&mut state.send_wakers);
+            let send_waiter = if delay > Duration::ZERO {
+                state.delayed_in_flight = state.delayed_in_flight.saturating_add(1);
+                None
+            } else {
+                pop_next_queued_waiter(&mut state.send_wakers)
+            };
             drop(state);
             if let Some(waiter) = send_waiter {
                 waiter.queued.store(false, Ordering::Release);
@@ -736,6 +760,19 @@ impl SymbolStream for SimSymbolStream {
                     return Poll::Pending;
                 }
                 let pending = this.pending.take().expect("pending symbol missing");
+                let send_waiter = {
+                    let mut state = this.inner.state.lock();
+                    debug_assert!(
+                        state.delayed_in_flight > 0,
+                        "immediate delayed delivery completed without reserving in-flight capacity"
+                    );
+                    state.delayed_in_flight = state.delayed_in_flight.saturating_sub(1);
+                    pop_next_queued_waiter(&mut state.send_wakers)
+                };
+                if let Some(waiter) = send_waiter {
+                    waiter.queued.store(false, Ordering::Release);
+                    waiter.waker.wake();
+                }
                 return Poll::Ready(Some(Ok(pending.symbol)));
             }
             return Poll::Ready(Some(Ok(symbol)));
@@ -781,6 +818,28 @@ impl SymbolStream for SimSymbolStream {
     fn is_exhausted(&self) -> bool {
         let state = self.inner.state.lock();
         self.pending.is_none() && state.closed && state.queue.is_empty()
+    }
+}
+
+impl Drop for SimSymbolStream {
+    fn drop(&mut self) {
+        if self.pending.is_none() {
+            return;
+        }
+
+        let send_waiter = {
+            let mut state = self.inner.state.lock();
+            if state.delayed_in_flight == 0 {
+                None
+            } else {
+                state.delayed_in_flight -= 1;
+                pop_next_queued_waiter(&mut state.send_wakers)
+            }
+        };
+        if let Some(waiter) = send_waiter {
+            waiter.queued.store(false, Ordering::Release);
+            waiter.waker.wake();
+        }
     }
 }
 
@@ -842,6 +901,7 @@ mod tests {
     static STREAM_TEST_NOW: AtomicU64 = AtomicU64::new(0);
     static SINK_TEST_NOW: AtomicU64 = AtomicU64::new(0);
     static CONFIG_TEST_NOW: AtomicU64 = AtomicU64::new(0);
+    static SHARED_TEST_NOW: AtomicU64 = AtomicU64::new(0);
 
     fn create_symbol(i: u32) -> AuthenticatedSymbol {
         let id = SymbolId::new_for_test(1, 0, i);
@@ -908,6 +968,14 @@ mod tests {
 
     fn config_test_time() -> Time {
         Time::from_nanos(CONFIG_TEST_NOW.load(Ordering::SeqCst))
+    }
+
+    fn set_shared_test_time(nanos: u64) {
+        SHARED_TEST_NOW.store(nanos, Ordering::SeqCst);
+    }
+
+    fn shared_test_time() -> Time {
+        Time::from_nanos(SHARED_TEST_NOW.load(Ordering::SeqCst))
     }
 
     #[test]
@@ -1232,6 +1300,56 @@ mod tests {
         let poll = Pin::new(&mut stream).poll_next(&mut context);
         assert!(matches!(poll, Poll::Pending));
         assert!(!stream.is_empty());
+    }
+
+    #[test]
+    fn delayed_receive_keeps_capacity_reserved_until_delivery() {
+        set_shared_test_time(0);
+        let shared = Arc::new(SimQueue::new(
+            SimTransportConfig {
+                capacity: 1,
+                ..SimTransportConfig::with_latency(Duration::from_nanos(5), Duration::ZERO)
+            }
+            .with_time_getter(shared_test_time),
+        ));
+        {
+            let mut state = shared.state.lock();
+            state.queue.push_back(create_symbol(1));
+        }
+        let (mut sink, mut stream) = channel_from_shared(shared);
+
+        let recv_waker = noop_waker();
+        let mut recv_cx = Context::from_waker(&recv_waker);
+        assert!(matches!(
+            Pin::new(&mut stream).poll_next(&mut recv_cx),
+            Poll::Pending
+        ));
+
+        let send_ready_woken = Arc::new(AtomicBool::new(false));
+        let send_waker = flagged_waker(Arc::clone(&send_ready_woken));
+        let mut send_cx = Context::from_waker(&send_waker);
+        assert!(matches!(
+            Pin::new(&mut sink).poll_ready(&mut send_cx),
+            Poll::Pending
+        ));
+        assert!(
+            !send_ready_woken.load(Ordering::SeqCst),
+            "capacity must stay reserved while the delayed symbol is still pending"
+        );
+
+        set_shared_test_time(5);
+        assert!(matches!(
+            Pin::new(&mut stream).poll_next(&mut recv_cx),
+            Poll::Ready(Some(Ok(_)))
+        ));
+        assert!(
+            send_ready_woken.load(Ordering::SeqCst),
+            "delayed delivery completion must wake blocked senders"
+        );
+        assert!(matches!(
+            Pin::new(&mut sink).poll_ready(&mut send_cx),
+            Poll::Ready(Ok(()))
+        ));
     }
 
     // Pure data-type tests (wave 14 – CyanBarn)
