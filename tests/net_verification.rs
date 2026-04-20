@@ -21,6 +21,7 @@
 //! - NET-VERIFY-004: TcpSocket bind then listen lifecycle
 //! - NET-VERIFY-005: TcpSocket bind then connect lifecycle
 //! - NET-VERIFY-006: TcpSocket family mismatch error
+//! - NET-VERIFY-006A: TcpSocket IPv6 unspecified wildcard bind
 //! - NET-VERIFY-007: TcpSocket reuseport (unix-only)
 //!
 //! ## TCP Listener Builder
@@ -76,7 +77,7 @@ use asupersync::stream::Stream;
 use common::*;
 use futures_lite::future::block_on;
 use std::io::{self, Write};
-use std::net::{SocketAddr, SocketAddrV6};
+use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
@@ -278,6 +279,38 @@ fn net_verify_006_tcp_socket_family_mismatch() {
     tracing::info!(?err, "correctly rejected family mismatch");
 
     test_complete!("net_verify_006_tcp_socket_family_mismatch");
+}
+
+/// NET-VERIFY-006A: TcpSocket IPv6 unspecified wildcard bind (RFC 8200 vector)
+///
+/// Verifies that binding an IPv6 listener to the unspecified wildcard address
+/// `[::]:0` preserves the IPv6 address family and returns an ephemeral port
+/// without mutating the wildcard address fields.
+#[test]
+fn net_verify_006a_tcp_socket_ipv6_unspecified_wildcard_bind_rfc8200() {
+    init_test("net_verify_006a_tcp_socket_ipv6_unspecified_wildcard_bind_rfc8200");
+
+    let socket = TcpSocket::new_v6().expect("new_v6");
+    let requested = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
+    socket.bind(requested).expect("bind wildcard v6");
+
+    let listener = socket.listen(128).expect("listen wildcard v6");
+    let local = listener.local_addr().expect("listener local_addr");
+    assert!(local.is_ipv6(), "listener must remain IPv6: {local:?}");
+
+    let SocketAddr::V6(local_v6) = local else {
+        unreachable!("checked IPv6 address family");
+    };
+    assert_eq!(
+        *local_v6.ip(),
+        Ipv6Addr::UNSPECIFIED,
+        "wildcard bind should preserve the unspecified IPv6 address"
+    );
+    assert_ne!(local_v6.port(), 0, "OS should allocate a non-zero ephemeral port");
+    assert_eq!(local_v6.flowinfo(), 0, "wildcard bind should keep zero flowinfo");
+    assert_eq!(local_v6.scope_id(), 0, "wildcard bind should keep zero scope ID");
+
+    test_complete!("net_verify_006a_tcp_socket_ipv6_unspecified_wildcard_bind_rfc8200");
 }
 
 /// NET-VERIFY-007: TcpSocket reuseport (unix-only)
