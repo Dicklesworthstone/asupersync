@@ -1967,19 +1967,6 @@ mod tests {
 
     use std::task::Wake;
 
-    /// A no-op waker implementation for testing.
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {
-            // No-op
-        }
-
-        fn wake_by_ref(self: &Arc<Self>) {
-            // No-op
-        }
-    }
-
     /// Creates a no-op waker for testing.
     fn futures_waker() -> Waker {
         std::task::Waker::noop().clone()
