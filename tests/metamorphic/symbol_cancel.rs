@@ -441,6 +441,114 @@ fn mr5_cancel_token_cleanup_releases_memory() {
     });
 }
 
+/// MR6: Children created during cancel callbacks are drained inline
+/// (Drain-before-finalize Invariant, Score: 8.5)
+/// Property: listener(on_cancel => parent.child()) -> child.is_cancelled() before cancel() returns
+/// Catches: late-child queue retention, incomplete drain ordering, reentrancy leaks
+#[test]
+fn mr6_listener_created_child_is_drained_before_cancel_returns() {
+    let mut rng = test_rng();
+    let token = SymbolCancelToken::new(test_object_id(7, 9), &mut rng);
+    let observed_child = Arc::new(StdMutex::new(None::<SymbolCancelToken>));
+    let observed_child_clone = Arc::clone(&observed_child);
+
+    token.add_listener(move |_: &CancelReason, _: Time| {
+        let mut child_rng = DetRng::from_seed(777);
+        let child = token.child(&mut child_rng);
+        *observed_child_clone.lock().unwrap() = Some(child);
+    });
+
+    let reason = CancelReason::new(CancelKind::Shutdown);
+    let cancelled_at = Time::from_millis(4242);
+    assert!(
+        token.cancel(&reason, cancelled_at),
+        "first cancel should trigger notification and drain"
+    );
+
+    let child = observed_child
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("listener should create a child during cancellation");
+    assert!(
+        child.is_cancelled(),
+        "child created during cancellation must be cancelled before cancel() returns"
+    );
+    assert_eq!(
+        child.reason().map(|reason| reason.kind()),
+        Some(CancelKind::ParentCancelled),
+        "late child should inherit parent-cancelled semantics"
+    );
+    assert_eq!(
+        child.cancelled_at(),
+        Some(cancelled_at),
+        "late child must observe the same drain timestamp"
+    );
+}
+
+/// MR7: Listeners registered during cancel callbacks are notified inline once
+/// (Drain-before-finalize Invariant, Score: 8.0)
+/// Property: listener(on_cancel => token.add_listener(late)) -> late notified exactly once
+/// Catches: listener requeue bugs, post-drain duplicate delivery, incomplete callback drain
+#[test]
+fn mr7_listener_registered_during_cancel_is_not_requeued() {
+    let mut rng = test_rng();
+    let token = SymbolCancelToken::new(test_object_id(11, 13), &mut rng);
+    let late_listener_notifications = Arc::new(AtomicUsize::new(0));
+    let late_listener_reason = Arc::new(StdMutex::new(None::<CancelKind>));
+    let late_listener_time = Arc::new(StdMutex::new(None::<Time>));
+
+    let late_listener_notifications_clone = Arc::clone(&late_listener_notifications);
+    let late_listener_reason_clone = Arc::clone(&late_listener_reason);
+    let late_listener_time_clone = Arc::clone(&late_listener_time);
+
+    token.add_listener(move |_: &CancelReason, _: Time| {
+        token.add_listener({
+            let late_listener_notifications_clone = Arc::clone(&late_listener_notifications_clone);
+            let late_listener_reason_clone = Arc::clone(&late_listener_reason_clone);
+            let late_listener_time_clone = Arc::clone(&late_listener_time_clone);
+            move |reason: &CancelReason, at: Time| {
+                late_listener_notifications_clone.fetch_add(1, Ordering::SeqCst);
+                *late_listener_reason_clone.lock().unwrap() = Some(reason.kind());
+                *late_listener_time_clone.lock().unwrap() = Some(at);
+            }
+        });
+    });
+
+    let first_reason = CancelReason::new(CancelKind::Timeout);
+    let first_cancelled_at = Time::from_millis(8080);
+    assert!(
+        token.cancel(&first_reason, first_cancelled_at),
+        "first cancel should trigger listener drain"
+    );
+
+    assert_eq!(
+        late_listener_notifications.load(Ordering::SeqCst),
+        1,
+        "listener registered during cancellation must be notified inline exactly once"
+    );
+    assert_eq!(
+        *late_listener_reason.lock().unwrap(),
+        Some(CancelKind::Timeout),
+        "late listener must observe the active cancellation reason"
+    );
+    assert_eq!(
+        *late_listener_time.lock().unwrap(),
+        Some(first_cancelled_at),
+        "late listener must observe the active cancellation timestamp"
+    );
+
+    token.cancel(
+        &CancelReason::new(CancelKind::Shutdown),
+        Time::from_millis(9090),
+    );
+    assert_eq!(
+        late_listener_notifications.load(Ordering::SeqCst),
+        1,
+        "late listener must not be retained for a second notification after drain completes"
+    );
+}
+
 /// Integration test: Complex token hierarchy with propagation
 #[test]
 fn integration_complex_token_hierarchy() {
