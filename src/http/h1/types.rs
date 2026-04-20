@@ -1115,6 +1115,49 @@ pub fn default_reason(status: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
+
+    fn scrub_snapshot_header_value(name: &str, value: &str) -> String {
+        match name.to_ascii_lowercase().as_str() {
+            "date" => "[TIMESTAMP]".to_string(),
+            "x-request-id" | "x-trace-id" => "[ID]".to_string(),
+            _ => value.to_string(),
+        }
+    }
+
+    fn scrubbed_headers_snapshot(headers: &[(String, String)]) -> Vec<Value> {
+        headers
+            .iter()
+            .map(|(name, value)| {
+                json!([
+                    name,
+                    scrub_snapshot_header_value(name, value)
+                ])
+            })
+            .collect()
+    }
+
+    fn request_response_builder_snapshot(request: &Request, response: &Response) -> Value {
+        json!({
+            "request": {
+                "method": request.method.as_str(),
+                "uri": request.uri,
+                "version": request.version.as_str(),
+                "headers": scrubbed_headers_snapshot(&request.headers),
+                "trailers": scrubbed_headers_snapshot(&request.trailers),
+                "peer_addr": request.peer_addr.map(|_| "[PEER_ADDR]"),
+                "body_utf8": String::from_utf8_lossy(&request.body),
+            },
+            "response": {
+                "status": response.status,
+                "reason": response.reason,
+                "version": response.version.as_str(),
+                "headers": scrubbed_headers_snapshot(&response.headers),
+                "trailers": scrubbed_headers_snapshot(&response.trailers),
+                "body_utf8": String::from_utf8_lossy(&response.body),
+            }
+        })
+    }
 
     #[test]
     fn method_roundtrip() {
@@ -1787,5 +1830,39 @@ mod tests {
     fn base64_encode_credentials() {
         assert_eq!(base64_encode(b"alice:secret"), "YWxpY2U6c2VjcmV0");
         assert_eq!(base64_encode(b"alice:"), "YWxpY2U6");
+    }
+
+    #[test]
+    fn request_response_builder_snapshot_scrubs_dynamic_headers() {
+        let peer_addr: SocketAddr = "10.20.30.40:4567".parse().unwrap();
+        let request = Request::post("/api/orders")
+            .version(Version::Http10)
+            .header("Date", "Sun, 20 Apr 2026 07:59:14 GMT")
+            .header("X-Request-Id", "req-9f4c36b1-92a5-4d59-aac8-62a17f936827")
+            .query([("page", "2"), ("cursor", "after:2026-04-20T07:59:14Z")])
+            .json(&json!({
+                "customer_id": "cust_123",
+                "items": [
+                    {"sku": "A-1", "qty": 2},
+                    {"sku": "B-4", "qty": 1}
+                ]
+            }))
+            .unwrap()
+            .trailer("X-Trace-Id", "trace-2026-04-20T07:59:14Z")
+            .peer_addr(peer_addr)
+            .build();
+
+        let response = Response::builder(202)
+            .header("Date", "Sun, 20 Apr 2026 07:59:15 GMT")
+            .header("X-Request-Id", "req-9f4c36b1-92a5-4d59-aac8-62a17f936827")
+            .header("Location", "/api/orders/accepted/42")
+            .body(br#"{"accepted":true,"batch":"batch-17"}"#.to_vec())
+            .trailer("X-Trace-Id", "trace-2026-04-20T07:59:15Z")
+            .build();
+
+        insta::assert_json_snapshot!(
+            "request_response_builder_scrubbed",
+            request_response_builder_snapshot(&request, &response)
+        );
     }
 }
