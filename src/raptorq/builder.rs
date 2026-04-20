@@ -325,6 +325,32 @@ mod tests {
     }
 
     #[test]
+    fn test_sender_builder_same_inputs_are_idempotent() {
+        let mut config = RaptorQConfig::default();
+        config.encoding.symbol_size = 512;
+        config.encoding.repair_overhead = 1.25;
+        let expected = format!("{config:?}");
+
+        let sender_a = RaptorQSenderBuilder::new()
+            .config(config.clone())
+            .transport(NoopSink)
+            .build()
+            .unwrap();
+        let sender_b = RaptorQSenderBuilder::new()
+            .config(config)
+            .transport(NoopSink)
+            .build()
+            .unwrap();
+
+        assert_eq!(format!("{:?}", sender_a.config()), expected);
+        assert_eq!(format!("{:?}", sender_b.config()), expected);
+        assert_eq!(
+            format!("{:?}", sender_a.config()),
+            format!("{:?}", sender_b.config())
+        );
+    }
+
+    #[test]
     fn test_receiver_builder_accepts_security_and_metrics() {
         let security = SecurityContext::for_testing(7);
         let metrics = Metrics::new();
