@@ -923,6 +923,7 @@ impl RegionBridge {
 #[allow(clippy::similar_names)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     // =====================================================================
     // RegionMode Tests
@@ -1521,6 +1522,35 @@ mod tests {
             .collect()
     }
 
+    fn scrub_region_snapshot_for_snapshot_test(snapshot: &RegionSnapshot) -> serde_json::Value {
+        json!({
+            "region_id": "[region_id]",
+            "state": format!("{:?}", snapshot.state),
+            "timestamp_nanos": "[timestamp_nanos]",
+            "sequence": snapshot.sequence,
+            "tasks": snapshot.tasks.iter().map(|task| {
+                json!({
+                    "task_id": "[task_id]",
+                    "state": format!("{:?}", task.state),
+                    "priority": task.priority,
+                })
+            }).collect::<Vec<_>>(),
+            "children": snapshot.children.iter().map(|_| "[child_region_id]").collect::<Vec<_>>(),
+            "finalizer_count": snapshot.finalizer_count,
+            "budget": {
+                "deadline_nanos": snapshot
+                    .budget
+                    .deadline_nanos
+                    .map(|_| "[deadline_nanos]"),
+                "polls_remaining": snapshot.budget.polls_remaining,
+                "cost_remaining": snapshot.budget.cost_remaining,
+            },
+            "cancel_reason": snapshot.cancel_reason,
+            "parent": snapshot.parent.map(|_| "[parent_region_id]"),
+            "metadata": snapshot.metadata,
+        })
+    }
+
     // =====================================================================
     // Lifecycle Race / Edge Case Tests (bd-fgs0)
     // =====================================================================
@@ -1848,6 +1878,34 @@ mod tests {
 
         let snap = bridge.create_snapshot(Time::from_secs(60));
         assert_eq!(snap.children.len(), 2);
+    }
+
+    #[test]
+    fn region_snapshot_json_snapshot_scrubs_ids_and_wall_clock() {
+        let budget = Budget::new()
+            .with_deadline(Time::from_secs(90))
+            .with_poll_quota(12)
+            .with_cost_quota(34);
+        let mut bridge = RegionBridge::new_local(
+            RegionId::new_for_test(7, 0),
+            Some(RegionId::new_for_test(4, 1)),
+            budget,
+        );
+
+        bridge.add_task(TaskId::new_for_test(3, 0)).unwrap();
+        bridge.add_task(TaskId::new_for_test(5, 2)).unwrap();
+        bridge.add_child(RegionId::new_for_test(8, 0)).unwrap();
+        bridge.add_child(RegionId::new_for_test(9, 1)).unwrap();
+        bridge
+            .begin_close(Some(CancelReason::timeout()), Time::from_secs(55))
+            .unwrap();
+
+        let snapshot = bridge.create_snapshot(Time::from_secs(56));
+
+        insta::assert_json_snapshot!(
+            "region_snapshot_scrubbed",
+            scrub_region_snapshot_for_snapshot_test(&snapshot)
+        );
     }
 
     #[test]
