@@ -340,6 +340,8 @@ pub fn tracked_oneshot<T>() -> (TrackedOneshotSender<T>, oneshot::Receiver<T>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+    use crate::runtime::yield_now;
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
@@ -858,35 +860,43 @@ mod tests {
             let (tx, rx) = tracked_channel::<i32>(1);
             drop(rx); // Disconnect
 
-            if let Err(mpsc::SendError::Disconnected(returned_value)) =
-                block_on(tx.send(&cx, original_value))
-            {
-                crate::assert_with_log!(
-                    returned_value == original_value,
-                    "MPSC error value preservation",
-                    original_value,
-                    returned_value
-                );
-            } else {
-                panic!("Expected Disconnected error for MPSC");
-            }
+            let mpsc_result = block_on(tx.send(&cx, original_value));
+            crate::assert_with_log!(
+                matches!(mpsc_result, Err(mpsc::SendError::Disconnected(_))),
+                "MPSC send returns disconnected error",
+                true,
+                matches!(mpsc_result, Err(mpsc::SendError::Disconnected(_)))
+            );
+            let Err(mpsc::SendError::Disconnected(returned_value)) = mpsc_result else {
+                unreachable!("validated disconnected MPSC send result");
+            };
+            crate::assert_with_log!(
+                returned_value == original_value,
+                "MPSC error value preservation",
+                original_value,
+                returned_value
+            );
 
             // Oneshot case
             let (tx, rx) = tracked_oneshot::<i32>();
             drop(rx); // Disconnect
 
-            if let Err(oneshot::SendError::Disconnected(returned_value)) =
-                tx.send(&cx, original_value)
-            {
-                crate::assert_with_log!(
-                    returned_value == original_value,
-                    "Oneshot error value preservation",
-                    original_value,
-                    returned_value
-                );
-            } else {
-                panic!("Expected Disconnected error for oneshot");
-            }
+            let oneshot_result = tx.send(&cx, original_value);
+            crate::assert_with_log!(
+                matches!(oneshot_result, Err(oneshot::SendError::Disconnected(_))),
+                "oneshot send returns disconnected error",
+                true,
+                matches!(oneshot_result, Err(oneshot::SendError::Disconnected(_)))
+            );
+            let Err(oneshot::SendError::Disconnected(returned_value)) = oneshot_result else {
+                unreachable!("validated disconnected oneshot send result");
+            };
+            crate::assert_with_log!(
+                returned_value == original_value,
+                "Oneshot error value preservation",
+                original_value,
+                returned_value
+            );
         }
 
         crate::test_complete!("meta_error_value_preservation");
@@ -1397,5 +1407,120 @@ mod tests {
         }
 
         crate::test_complete!("meta_channel_state_transition_determinism");
+    }
+
+    #[test]
+    fn tracked_mpsc_send_recv_under_lab_runtime() {
+        init_test("tracked_mpsc_send_recv_under_lab_runtime");
+
+        let config = TestConfig::new()
+            .with_seed(0x05E5_5104)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+
+        let (received, proof_kind, checkpoints) =
+            LabRuntimeTarget::block_on(&mut runtime, async move {
+                let cx = Cx::current().expect("lab runtime should install a current Cx");
+                let sender_cx = cx.clone();
+                let receiver_cx = cx.clone();
+                let (tx, mut rx) = tracked_channel::<i32>(1);
+
+                let sender_task_cx = sender_cx.clone();
+                let sender = LabRuntimeTarget::spawn(&sender_cx, Budget::INFINITE, async move {
+                    let permit = tx
+                        .reserve(&sender_task_cx)
+                        .await
+                        .expect("reserve failed");
+                    tracing::info!(
+                        event = %serde_json::json!({
+                            "phase": "reserved",
+                            "capacity": 1,
+                        }),
+                        "session_lab_checkpoint"
+                    );
+                    permit.send(42).expect("send failed").kind()
+                });
+
+                let receiver_task_cx = receiver_cx.clone();
+                let receiver =
+                    LabRuntimeTarget::spawn(&receiver_cx, Budget::INFINITE, async move {
+                        let value = rx
+                            .recv(&receiver_task_cx)
+                            .await
+                            .expect("recv failed");
+                        tracing::info!(
+                            event = %serde_json::json!({
+                                "phase": "received",
+                                "value": value,
+                            }),
+                            "session_lab_checkpoint"
+                        );
+                        value
+                    });
+
+                yield_now().await;
+
+                let sender_outcome = sender.await;
+                crate::assert_with_log!(
+                    matches!(sender_outcome, crate::types::Outcome::Ok(_)),
+                    "sender task completes successfully",
+                    true,
+                    matches!(sender_outcome, crate::types::Outcome::Ok(_))
+                );
+                let crate::types::Outcome::Ok(proof_kind) = sender_outcome else {
+                    unreachable!("validated successful sender outcome");
+                };
+
+                let receiver_outcome = receiver.await;
+                crate::assert_with_log!(
+                    matches!(receiver_outcome, crate::types::Outcome::Ok(_)),
+                    "receiver task completes successfully",
+                    true,
+                    matches!(receiver_outcome, crate::types::Outcome::Ok(_))
+                );
+                let crate::types::Outcome::Ok(received) = receiver_outcome else {
+                    unreachable!("validated successful receiver outcome");
+                };
+
+                let checkpoints = vec![
+                    serde_json::json!({
+                        "phase": "sender_completed",
+                        "proof_kind": format!("{proof_kind:?}"),
+                    }),
+                    serde_json::json!({
+                        "phase": "receiver_completed",
+                        "value": received,
+                    }),
+                ];
+
+                for checkpoint in &checkpoints {
+                    tracing::info!(event = %checkpoint, "session_lab_checkpoint");
+                }
+
+                (received, proof_kind, checkpoints)
+            });
+
+        crate::assert_with_log!(received == 42, "lab runtime recv value", 42, received);
+        crate::assert_with_log!(
+            proof_kind == crate::record::ObligationKind::SendPermit,
+            "lab runtime proof kind",
+            crate::record::ObligationKind::SendPermit,
+            proof_kind
+        );
+        crate::assert_with_log!(
+            checkpoints.len() == 2,
+            "lab runtime emitted completion checkpoints",
+            2,
+            checkpoints.len()
+        );
+        crate::assert_with_log!(
+            runtime.is_quiescent(),
+            "lab runtime reaches quiescence",
+            true,
+            runtime.is_quiescent()
+        );
+
+        crate::test_complete!("tracked_mpsc_send_recv_under_lab_runtime");
     }
 }
