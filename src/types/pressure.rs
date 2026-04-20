@@ -139,8 +139,7 @@ mod tests {
         if let Some(headroom) = scrubbed.pointer_mut("/headroom") {
             let formatted = headroom
                 .as_f64()
-                .map(|value| format!("{value:.2}"))
-                .unwrap_or_else(|| headroom.to_string());
+                .map_or_else(|| headroom.to_string(), |value| format!("{value:.2}"));
             *headroom = Value::String(formatted);
         }
 

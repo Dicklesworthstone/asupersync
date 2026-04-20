@@ -1982,7 +1982,7 @@ mod tests {
 
     /// Creates a no-op waker for testing.
     fn futures_waker() -> Waker {
-        Arc::new(NoopWaker).into()
+        std::task::Waker::noop().clone()
     }
 
     /// Creates a waker that sets an AtomicBool when woken.
@@ -2192,7 +2192,7 @@ mod tests {
 
         let fired_count = counters
             .iter()
-            .map(|c| if c.load(Ordering::SeqCst) > 0 { 1 } else { 0 })
+            .map(|c| usize::from(c.load(Ordering::SeqCst) > 0))
             .sum::<usize>();
 
         crate::assert_with_log!(

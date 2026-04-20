@@ -2136,7 +2136,7 @@ mod tests {
         let recv = rx.recv_timeout(std::time::Duration::from_secs(1));
         if recv.is_err() {
             #[allow(clippy::cast_possible_wrap)]
-            let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };
             join.join().expect("wait thread panicked after timeout");
             panic!("wait() should close stdin and finish without hanging");
         }
@@ -2175,7 +2175,7 @@ mod tests {
         let recv = rx.recv_timeout(std::time::Duration::from_secs(1));
         if recv.is_err() {
             #[allow(clippy::cast_possible_wrap)]
-            let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };
             join.join()
                 .expect("async wait thread panicked after timeout");
             panic!("wait_async() should close stdin and finish without hanging");
@@ -2336,7 +2336,7 @@ mod tests {
         };
 
         #[allow(clippy::cast_possible_wrap)]
-        let pid = pid as i32;
+        let pid = pid.cast_signed();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
             let mut status = 0;
@@ -2807,7 +2807,7 @@ mod tests {
         let start = Instant::now();
 
         // Send SIGTERM first (graceful)
-        let sigterm_result = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        let sigterm_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };
         crate::assert_with_log!(
             sigterm_result == 0,
             "SIGTERM sent successfully",
@@ -2820,7 +2820,7 @@ mod tests {
 
         // Check if process is still alive (should be, since it ignores SIGTERM)
         let still_alive = unsafe {
-            libc::kill(pid as i32, 0) == 0 // Signal 0 checks existence
+            libc::kill(pid.cast_signed(), 0) == 0 // Signal 0 checks existence
         };
         crate::assert_with_log!(
             still_alive,
@@ -2830,7 +2830,7 @@ mod tests {
         );
 
         // Now send SIGKILL (force kill)
-        let sigkill_result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        let sigkill_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };
         crate::assert_with_log!(
             sigkill_result == 0,
             "SIGKILL sent successfully",
@@ -2875,7 +2875,7 @@ mod tests {
         for i in 0..3 {
             let mut child = Command::new("sh")
                 .arg("-c")
-                .arg(&format!("exit {}", i))
+                .arg(format!("exit {}", i))
                 .spawn()
                 .expect("spawn failed");
 
@@ -2899,7 +2899,7 @@ mod tests {
             // After wait(), the process should be reaped (not zombie)
             // Sending signal 0 should fail with ESRCH (No such process)
             let process_gone = unsafe {
-                libc::kill(pid as i32, 0) == -1 && *libc::__errno_location() == libc::ESRCH
+                libc::kill(pid.cast_signed(), 0) == -1 && *libc::__errno_location() == libc::ESRCH
             };
 
             crate::assert_with_log!(
@@ -2978,7 +2978,7 @@ mod tests {
         let our_pgid = unsafe { libc::getpgid(0) };
 
         // Get child's process group (should be different after setsid)
-        let child_pgid = unsafe { libc::getpgid(child_pid as i32) };
+        let child_pgid = unsafe { libc::getpgid(child_pid.cast_signed()) };
 
         crate::assert_with_log!(
             child_pgid != our_pgid,
@@ -3002,7 +3002,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
 
         // Child should still be alive (signal was isolated)
-        let child_alive = unsafe { libc::kill(child_pid as i32, 0) == 0 };
+        let child_alive = unsafe { libc::kill(child_pid.cast_signed(), 0) == 0 };
         crate::assert_with_log!(
             child_alive,
             "Child survived signal to parent group",
@@ -3031,7 +3031,7 @@ mod tests {
         for &exit_code in &test_codes {
             let mut child = Command::new("sh")
                 .arg("-c")
-                .arg(&format!("exit {}", exit_code))
+                .arg(format!("exit {}", exit_code))
                 .spawn()
                 .expect("spawn failed");
 

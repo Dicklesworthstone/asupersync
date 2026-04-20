@@ -835,6 +835,6 @@ mod tests {
 
     /// Creates a no-op waker for testing.
     fn noop_waker() -> Waker {
-        Arc::new(NoopWaker).into()
+        std::task::Waker::noop().clone()
     }
 }

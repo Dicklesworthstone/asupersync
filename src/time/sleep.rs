@@ -1155,7 +1155,7 @@ mod tests {
             fn wake(self: Arc<Self>) {}
         }
 
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     fn waker_that_sets(flag: Arc<AtomicBool>) -> Waker {

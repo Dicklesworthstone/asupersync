@@ -2057,7 +2057,8 @@ mod tests {
     }
 
     fn scrub_endpoint_region(region: Option<RegionId>) -> Option<&'static str> {
-        region.map(|_| "<region>")
+        let _ = region?;
+        Some("<region>")
     }
 
     fn scrub_route_key(key: &RouteKey) -> &'static str {

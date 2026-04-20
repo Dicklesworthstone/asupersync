@@ -4959,7 +4959,7 @@ mod tests {
             let result = handle.join().unwrap();
             results.push(result);
         }
-        results.sort();
+        results.sort_unstable();
 
         // Verify all tasks completed
         let expected: Vec<_> = (0..num_tasks).collect();

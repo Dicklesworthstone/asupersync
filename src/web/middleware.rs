@@ -2241,7 +2241,7 @@ mod tests {
             AuthPolicy::exact_bearer(detached_jws),
         );
         let req = Request::new("GET", "/auth")
-            .with_header("authorization", &format!("Bearer {detached_jws}"));
+            .with_header("authorization", format!("Bearer {detached_jws}"));
         let resp = mw.call(req);
         assert_eq!(resp.status, StatusCode::OK);
     }

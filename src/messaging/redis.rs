@@ -2076,7 +2076,7 @@ mod tests {
     }
 
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     fn poll_once<F>(mut fut: Pin<&mut F>) -> Poll<F::Output>

@@ -251,7 +251,7 @@ mod tests {
     }
 
     fn noop_waker() -> Waker {
-        Arc::new(NoopWaker).into()
+        std::task::Waker::noop().clone()
     }
 
     fn poll_once<F: std::future::Future + Unpin>(fut: &mut F) -> Poll<F::Output> {

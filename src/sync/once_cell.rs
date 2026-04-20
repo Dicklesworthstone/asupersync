@@ -657,7 +657,7 @@ mod tests {
             fn wake_by_ref(self: &Arc<Self>) {}
         }
 
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     #[derive(Default)]

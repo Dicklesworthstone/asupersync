@@ -2465,7 +2465,7 @@ mod tests {
                 let wakers = wheel.collect_expired(*deadline);
                 crate::assert_with_log!(
                     wakers.is_empty(),
-                    &format!("cancelled overflow timer does not fire"),
+                    "cancelled overflow timer does not fire".to_string(),
                     true,
                     wakers.is_empty()
                 );
@@ -2545,7 +2545,7 @@ mod tests {
         );
 
         // Advance time to bring timers back into wheel range and fire them
-        let start_promotion = Time::from_secs(1 * 3600 + 30 * 60); // 1h30m (close to first deadline)
+        let start_promotion = Time::from_secs(3600 + 30 * 60); // 1h30m (close to first deadline)
         let _ = wheel.collect_expired(start_promotion);
 
         // Continue advancing time and collecting expired timers
@@ -2747,7 +2747,7 @@ mod tests {
         // Count how many fired
         let fired_count = counters
             .iter()
-            .map(|c| if c.load(Ordering::SeqCst) > 0 { 1 } else { 0 })
+            .map(|c| u32::from(c.load(Ordering::SeqCst) > 0))
             .sum::<u32>();
 
         // With coalescing enabled and min_group_size=3, should fire multiple timers together

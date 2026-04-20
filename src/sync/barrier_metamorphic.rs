@@ -354,7 +354,7 @@ fn mr1_party_count_invariant(
     }
 
     // Verify exactly one leader per barrier trip
-    let expected_leaders = if summary.completed > 0 { 1 } else { 0 };
+    let expected_leaders = usize::from(summary.completed > 0);
     if summary.leaders != expected_leaders {
         return Err(format!(
             "MR1 leader violation: expected {} leaders, got {}. Summary: {:?}",

@@ -52,9 +52,7 @@ impl Default for TestData {
 
 /// Inject a controlled panic during mutex operations
 fn panic_injector(should_panic: bool, panic_message: &str) {
-    if should_panic {
-        panic!("{}", panic_message);
-    }
+    assert!(!should_panic, "{}", panic_message);
 }
 
 /// Create a test context with unique identifiers

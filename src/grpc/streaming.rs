@@ -1410,7 +1410,7 @@ mod tests {
     fn conformance_server_streaming_completion_idempotence() {
         init_test("conformance_server_streaming_completion_idempotence");
         let mut stream = ResponseStream::<f64>::open();
-        stream.push(Ok(3.14159)).expect("single message");
+        stream.push(Ok(std::f64::consts::PI)).expect("single message");
         stream.close();
 
         let waker = noop_waker();
@@ -1421,7 +1421,7 @@ mod tests {
         assert!(
             matches!(
                 pinned.as_mut().poll_next(&mut cx),
-                Poll::Ready(Some(Ok(val))) if (val - 3.14159).abs() < f64::EPSILON
+                Poll::Ready(Some(Ok(val))) if (val - std::f64::consts::PI).abs() < f64::EPSILON
             ),
             "message received on first poll"
         );

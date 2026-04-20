@@ -1462,12 +1462,11 @@ mod tests {
     use std::thread;
 
     fn scrub_reply_subject(reply_to: Option<&str>) -> Option<&str> {
-        reply_to.map(|value| {
-            if value.starts_with("_INBOX.") {
-                "_INBOX.[SCRUBBED]"
-            } else {
-                value
-            }
+        let value = reply_to?;
+        Some(if value.starts_with("_INBOX.") {
+            "_INBOX.[SCRUBBED]"
+        } else {
+            value
         })
     }
 

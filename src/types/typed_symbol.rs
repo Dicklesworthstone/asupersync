@@ -1033,7 +1033,7 @@ mod tests {
     }
 
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWake))
+        std::task::Waker::noop().clone()
     }
 
     struct ReadyThenPendingStream {

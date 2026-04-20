@@ -506,15 +506,15 @@ fn test_random_operations_stress() {
         };
 
         // Verify no panics occurred and results are valid field elements
-        assert!(sum.raw() <= 255, "Sum result out of range");
+        let _ = sum.raw();
         if let Some(prod) = product {
-            assert!(prod.raw() <= 255, "Product result out of range");
+            let _ = prod.raw();
         }
 
         // Test division when possible
         if b != 0 {
             let division = gf_a.div_field(gf_b);
-            assert!(division.raw() <= 255, "Division result out of range");
+            let _ = division.raw();
 
             // Verify division correctness: (a / b) * b = a
             assert_eq!(

@@ -9485,7 +9485,7 @@ mod tests {
                                 assert_eq!(plan.restart_order.len(), config.child_count);
                             }
                         }
-                        _ => {}
+                        RestartPolicy::RestForOne => {}
                     }
                 }
 
