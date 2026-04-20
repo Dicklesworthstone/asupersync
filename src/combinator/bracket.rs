@@ -903,6 +903,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn commit_section_nested_masking_is_idempotent_once_budget_is_sufficient() {
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+        let baseline_cx = cx.clone();
+        let nested_inner_cx = cx.clone();
+
+        let baseline = poll_ready(commit_section(
+            &cx,
+            1,
+            async move { baseline_cx.checkpoint() },
+        ));
+        let nested = poll_ready(commit_section(
+            &cx,
+            1,
+            commit_section(&cx, 1, async move { nested_inner_cx.checkpoint() }),
+        ));
+
+        assert!(baseline.is_ok(), "{baseline:?}");
+        assert!(nested.is_ok(), "{nested:?}");
+    }
+
     // =========================================================================
     // try_commit_section() Tests
     // =========================================================================

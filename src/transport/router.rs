@@ -2040,6 +2040,7 @@ mod tests {
     use crate::transport::error::SinkError;
     use crate::types::{Symbol, SymbolId, SymbolKind};
     use futures_lite::future;
+    use serde_json::json;
     use std::collections::HashSet;
     use std::io;
     use std::pin::Pin;
@@ -2053,6 +2054,76 @@ mod tests {
         let id = SymbolId::new_for_test(1, 0, esi);
         let symbol = Symbol::new(id, vec![esi as u8], SymbolKind::Source);
         AuthenticatedSymbol::new_verified(symbol, AuthenticationTag::zero())
+    }
+
+    fn scrub_endpoint_region(region: Option<RegionId>) -> Option<&'static str> {
+        region.map(|_| "<region>")
+    }
+
+    fn scrub_route_key(key: &RouteKey) -> &'static str {
+        match key {
+            RouteKey::Object(_) => "object:<object>",
+            RouteKey::Region(_) => "region:<region>",
+            RouteKey::ObjectAndRegion(_, _) => "object+region:<object>:<region>",
+            RouteKey::Default => "default",
+        }
+    }
+
+    fn routing_entry_snapshot(entry: &RoutingEntry) -> serde_json::Value {
+        json!({
+            "strategy": format!("{:?}", entry.load_balancer.strategy),
+            "priority": entry.priority,
+            "ttl_ms": entry.ttl.map(Time::as_millis),
+            "endpoint_ids": entry
+                .endpoints
+                .iter()
+                .map(|endpoint| endpoint.id.to_string())
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn routing_table_snapshot(table: &RoutingTable) -> serde_json::Value {
+        let mut endpoints = table.endpoints.read().values().cloned().collect::<Vec<_>>();
+        endpoints.sort_unstable_by_key(|endpoint| endpoint.id);
+
+        let mut routes = table
+            .routes
+            .read()
+            .iter()
+            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .collect::<Vec<_>>();
+        routes.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+
+        json!({
+            "route_count": table.route_count(),
+            "dispatchable_endpoint_ids": table
+                .dispatchable_endpoints()
+                .into_iter()
+                .map(|endpoint| endpoint.id.to_string())
+                .collect::<Vec<_>>(),
+            "endpoints": endpoints
+                .into_iter()
+                .map(|endpoint| json!({
+                    "id": endpoint.id.to_string(),
+                    "address": endpoint.address,
+                    "state": format!("{:?}", endpoint.state()),
+                    "weight": endpoint.weight,
+                    "region": scrub_endpoint_region(endpoint.region),
+                }))
+                .collect::<Vec<_>>(),
+            "default_route": table
+                .default_route
+                .read()
+                .as_ref()
+                .map(routing_entry_snapshot),
+            "routes": routes
+                .into_iter()
+                .map(|(key, entry)| json!({
+                    "key": scrub_route_key(&key),
+                    "entry": routing_entry_snapshot(&entry),
+                }))
+                .collect::<Vec<_>>(),
+        })
     }
 
     struct InterruptedSink;
@@ -3258,5 +3329,54 @@ mod tests {
     fn routing_table_debug() {
         let table = RoutingTable::new();
         assert!(format!("{table:?}").contains("RoutingTable"));
+    }
+
+    #[test]
+    fn routing_table_state_snapshot_scrubbed() {
+        let table = RoutingTable::new();
+        let region = RegionId::new_for_test(9, 2);
+        let object_id = ObjectId::new_for_test(44);
+
+        let primary = table.register_endpoint(
+            test_endpoint(1)
+                .with_weight(200)
+                .with_region(region)
+                .with_state(EndpointState::Healthy),
+        );
+        let backup = table.register_endpoint(
+            test_endpoint(2)
+                .with_weight(50)
+                .with_state(EndpointState::Degraded),
+        );
+        let draining = table.register_endpoint(
+            test_endpoint(3)
+                .with_weight(10)
+                .with_state(EndpointState::Draining),
+        );
+
+        table.add_route(
+            RouteKey::Default,
+            RoutingEntry::new(vec![backup.clone()], Time::ZERO)
+                .with_priority(90)
+                .with_strategy(LoadBalanceStrategy::FirstAvailable),
+        );
+        table.add_route(
+            RouteKey::Object(object_id),
+            RoutingEntry::new(vec![primary, backup], Time::ZERO)
+                .with_priority(10)
+                .with_ttl(Time::from_secs(30))
+                .with_strategy(LoadBalanceStrategy::WeightedRoundRobin),
+        );
+        table.add_route(
+            RouteKey::Region(region),
+            RoutingEntry::new(vec![draining], Time::ZERO)
+                .with_priority(40)
+                .with_strategy(LoadBalanceStrategy::RoundRobin),
+        );
+
+        insta::assert_json_snapshot!(
+            "routing_table_state_scrubbed",
+            routing_table_snapshot(&table)
+        );
     }
 }
