@@ -2506,6 +2506,130 @@ mod tests {
         crate::test_complete!("metamorphic_try_acquire_never_blocks");
     }
 
+    /// MR5: Partitioning an acquisition preserves downstream observables.
+    /// Property: acquiring `k` permits in one chunk or in multiple chunks whose
+    /// sum is `k` leaves the same remaining capacity and the same readiness for
+    /// a later waiter of size `w`.
+    #[test]
+    fn metamorphic_partitioned_acquire_preserves_capacity_and_waiter_readiness() {
+        init_test("metamorphic_partitioned_acquire_preserves_capacity_and_waiter_readiness");
+
+        let aggregate = Semaphore::new(6);
+        let partitioned = Semaphore::new(6);
+
+        let aggregate_permit = aggregate.try_acquire(4).expect("aggregate acquire");
+        let partitioned_first = partitioned.try_acquire(1).expect("partitioned acquire 1");
+        let partitioned_second = partitioned.try_acquire(3).expect("partitioned acquire 3");
+
+        let aggregate_remaining = aggregate.available_permits();
+        let partitioned_remaining = partitioned.available_permits();
+        crate::assert_with_log!(
+            aggregate_remaining == 2,
+            "aggregate remaining capacity",
+            2usize,
+            aggregate_remaining
+        );
+        crate::assert_with_log!(
+            partitioned_remaining == 2,
+            "partitioned remaining capacity",
+            2usize,
+            partitioned_remaining
+        );
+
+        let aggregate_cx = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 22)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 22)),
+            crate::types::Budget::INFINITE,
+        );
+        let partitioned_cx = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 23)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 23)),
+            crate::types::Budget::INFINITE,
+        );
+
+        let mut aggregate_waiter = aggregate.acquire(&aggregate_cx, 3);
+        let mut partitioned_waiter = partitioned.acquire(&partitioned_cx, 3);
+
+        crate::assert_with_log!(
+            poll_once(&mut aggregate_waiter).is_none(),
+            "aggregate waiter pending before transform",
+            true,
+            true
+        );
+        crate::assert_with_log!(
+            poll_once(&mut partitioned_waiter).is_none(),
+            "partitioned waiter pending before transform",
+            true,
+            true
+        );
+
+        aggregate.add_permits(1);
+        partitioned.add_permits(1);
+
+        let aggregate_waiter_permit = poll_once(&mut aggregate_waiter)
+            .expect("aggregate waiter ready")
+            .expect("aggregate waiter acquired");
+        let partitioned_waiter_permit = poll_once(&mut partitioned_waiter)
+            .expect("partitioned waiter ready")
+            .expect("partitioned waiter acquired");
+
+        let aggregate_after_waiter = aggregate.available_permits();
+        let partitioned_after_waiter = partitioned.available_permits();
+        crate::assert_with_log!(
+            aggregate_after_waiter == 0,
+            "aggregate waiter consumes transformed capacity",
+            0usize,
+            aggregate_after_waiter
+        );
+        crate::assert_with_log!(
+            partitioned_after_waiter == 0,
+            "partitioned waiter consumes transformed capacity",
+            0usize,
+            partitioned_after_waiter
+        );
+
+        drop(aggregate_waiter_permit);
+        drop(partitioned_waiter_permit);
+
+        let aggregate_after_waiter_drop = aggregate.available_permits();
+        let partitioned_after_waiter_drop = partitioned.available_permits();
+        crate::assert_with_log!(
+            aggregate_after_waiter_drop == 3,
+            "aggregate waiter release restores transformed capacity",
+            3usize,
+            aggregate_after_waiter_drop
+        );
+        crate::assert_with_log!(
+            partitioned_after_waiter_drop == 3,
+            "partitioned waiter release restores transformed capacity",
+            3usize,
+            partitioned_after_waiter_drop
+        );
+
+        drop(aggregate_permit);
+        drop(partitioned_first);
+        drop(partitioned_second);
+
+        let aggregate_final = aggregate.available_permits();
+        let partitioned_final = partitioned.available_permits();
+        crate::assert_with_log!(
+            aggregate_final == 7,
+            "aggregate final capacity includes transformed permit injection",
+            7usize,
+            aggregate_final
+        );
+        crate::assert_with_log!(
+            partitioned_final == 7,
+            "partitioned final capacity includes transformed permit injection",
+            7usize,
+            partitioned_final
+        );
+
+        crate::test_complete!(
+            "metamorphic_partitioned_acquire_preserves_capacity_and_waiter_readiness"
+        );
+    }
+
     #[test]
     fn test_semaphore_permit_obligation_structure() {
         init_test("test_semaphore_permit_obligation_structure");
