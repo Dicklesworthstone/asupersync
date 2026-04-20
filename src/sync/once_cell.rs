@@ -605,6 +605,7 @@ mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
     use futures_lite::future::{block_on, pending};
+    use proptest::prelude::*;
     use std::future::Future;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
@@ -811,6 +812,54 @@ mod tests {
             counter.load(Ordering::SeqCst)
         );
         crate::test_complete!("get_or_init_blocking_initializes_once");
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_initialization_path_preserves_visibility_surface(
+            value in any::<u32>(),
+            fallback in any::<u32>(),
+        ) {
+            let eager_cell = OnceCell::with_value(value);
+
+            let set_cell = OnceCell::new();
+            prop_assert_eq!(set_cell.set(value), Ok(()));
+
+            let async_cell = OnceCell::new();
+            let async_value = block_on(async_cell.get_or_init(|| async move { value }));
+            prop_assert_eq!(*async_value, value);
+
+            let blocking_cell = OnceCell::new();
+            let blocking_value = blocking_cell.get_or_init_blocking(|| value);
+            prop_assert_eq!(*blocking_value, value);
+
+            for cell in [&eager_cell, &set_cell, &async_cell, &blocking_cell] {
+                prop_assert!(cell.is_initialized());
+                prop_assert_eq!(cell.get(), Some(&value));
+
+                let async_probe_runs = Arc::new(AtomicUsize::new(0));
+                let async_probe_counter = Arc::clone(&async_probe_runs);
+                let observed_async = block_on(cell.get_or_init(|| async move {
+                    async_probe_counter.fetch_add(1, Ordering::SeqCst);
+                    fallback
+                }));
+                prop_assert_eq!(*observed_async, value);
+                prop_assert_eq!(async_probe_runs.load(Ordering::SeqCst), 0);
+
+                let blocking_probe_runs = Arc::new(AtomicUsize::new(0));
+                let blocking_probe_counter = Arc::clone(&blocking_probe_runs);
+                let observed_blocking = cell.get_or_init_blocking(|| {
+                    blocking_probe_counter.fetch_add(1, Ordering::SeqCst);
+                    fallback
+                });
+                prop_assert_eq!(*observed_blocking, value);
+                prop_assert_eq!(blocking_probe_runs.load(Ordering::SeqCst), 0);
+
+                let cloned = cell.clone();
+                prop_assert!(cloned.is_initialized());
+                prop_assert_eq!(cloned.get(), Some(&value));
+            }
+        }
     }
 
     #[test]
