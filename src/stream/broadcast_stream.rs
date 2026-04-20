@@ -58,14 +58,13 @@ impl<T: Clone> BroadcastStream<T> {
         // Manually clear waiter registration before moving out inner receiver
         self.inner.clear_waiter_registration(&mut self.waiter);
 
-        // Use ptr::read to extract inner without running Drop
-        // SAFETY: We've manually performed the cleanup that Drop would do,
-        // and we use mem::forget to prevent Drop from running again.
-        let inner = unsafe { ptr::read(&raw const self.inner) };
-        unsafe { ptr::drop_in_place(&raw mut self.cx) };
-
-        // Prevent Drop from running
-        std::mem::forget(self); // ubs:ignore - intentional mem::forget
+        let mut md = std::mem::ManuallyDrop::new(self);
+        
+        // Use ptr::read to extract inner without running Drop.
+        // SAFETY: We've wrapped in ManuallyDrop, so the outer Drop will never run,
+        // preventing double-frees even if cx drop panics.
+        let inner = unsafe { ptr::read(&raw const md.inner) };
+        unsafe { ptr::drop_in_place(&raw mut md.cx) };
 
         inner
     }
