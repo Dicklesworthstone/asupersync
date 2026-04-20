@@ -349,6 +349,39 @@ mod tests {
         }
     }
 
+    /// Metamorphic relation: permuting node insertion order must not change
+    /// key assignment when the final node set is identical.
+    #[test]
+    fn mr_key_assignment_invariant_to_node_insertion_order() {
+        let keys: Vec<u64> = (0..2048u64).collect();
+        let insertion_orders = [
+            ["alpha", "beta", "gamma", "delta"],
+            ["delta", "beta", "alpha", "gamma"],
+            ["gamma", "alpha", "delta", "beta"],
+            ["beta", "delta", "gamma", "alpha"],
+        ];
+
+        let assignments_for = |order: &[&str; 4]| {
+            let mut ring = HashRing::new(32);
+            for node in order {
+                assert!(ring.add_node(*node), "duplicate node in MR fixture");
+            }
+            keys.iter()
+                .map(|key| ring.node_for_key(key).expect("ring should assign key"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+
+        let baseline = assignments_for(&insertion_orders[0]);
+        for order in insertion_orders.iter().skip(1) {
+            assert_eq!(
+                assignments_for(order),
+                baseline,
+                "assignment drifted after insertion order permutation: {order:?}"
+            );
+        }
+    }
+
     #[test]
     fn nodes_iterator_is_sorted() {
         let mut ring = HashRing::new(8);
