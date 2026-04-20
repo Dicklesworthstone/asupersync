@@ -821,6 +821,13 @@ mod tests {
     }
 
     #[test]
+    fn compact_json_snapshot() {
+        let entry = valid_builder().build().unwrap();
+        let line = serde_json::to_string(&entry).unwrap();
+        insta::assert_snapshot!("evidence_ledger_compact_json", line);
+    }
+
+    #[test]
     fn deserialize_from_known_json() {
         let json = r#"{"ts":1700000000000,"c":"test","a":"act","p":[0.6,0.4],"el":{"act":0.1},"cel":0.1,"cal":0.8,"fb":false,"tf":[["feat",0.9]]}"#;
         let entry: EvidenceLedger = serde_json::from_str(json).unwrap();

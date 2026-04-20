@@ -1,0 +1,5 @@
+---
+source: franken_evidence/src/lib.rs
+expression: line
+---
+{"ts":1700000000000,"c":"scheduler","a":"preempt","p":[0.7,0.2,0.1],"el":{"continue":0.3,"defer":0.15,"preempt":0.05},"cel":0.05,"cal":0.92,"fb":false,"tf":[["queue_depth",0.45],["priority_gap",0.3]]}
