@@ -790,6 +790,29 @@ mod tests {
     }
 
     #[test]
+    fn test_base64_rfc3548_two_octet_vector() {
+        init_test("test_base64_rfc3548_two_octet_vector");
+
+        let encoded = base64_encode(b"fo");
+        crate::assert_with_log!(
+            encoded == "Zm8=",
+            "rfc3548 encode vector",
+            "Zm8=",
+            encoded.as_str()
+        );
+
+        let decoded = base64_decode("Zm8=").unwrap();
+        crate::assert_with_log!(
+            decoded == b"fo",
+            "rfc3548 decode vector",
+            b"fo".as_slice(),
+            decoded.as_slice()
+        );
+
+        crate::test_complete!("test_base64_rfc3548_two_octet_vector");
+    }
+
+    #[test]
     fn test_base64_invalid_input() {
         init_test("test_base64_invalid_input");
         let result = base64_decode("not valid base64!!!");
