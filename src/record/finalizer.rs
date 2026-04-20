@@ -167,6 +167,26 @@ mod tests {
     use super::*;
     use parking_lot::Mutex;
 
+    fn finalizer_policy_table() -> String {
+        [
+            FinalizerEscalation::Soft,
+            FinalizerEscalation::BoundedLog,
+            FinalizerEscalation::BoundedPanic,
+        ]
+        .into_iter()
+        .map(|policy| {
+            format!(
+                "{policy:?}|soft={}|continue={}|polls={}|time_ns={}",
+                policy.is_soft(),
+                policy.allows_continuation(),
+                FINALIZER_POLL_BUDGET,
+                FINALIZER_TIME_BUDGET_NANOS
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
@@ -285,5 +305,10 @@ mod tests {
         let dbg = format!("{stack:?}");
         assert!(dbg.contains("FinalizerStack"), "{dbg}");
         assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn finalizer_policy_table_snapshot() {
+        insta::assert_snapshot!("finalizer_policy_table", finalizer_policy_table());
     }
 }
