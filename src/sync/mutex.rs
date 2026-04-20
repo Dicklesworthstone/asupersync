@@ -489,10 +489,14 @@ impl<T> Drop for OwnedMutexGuard<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+    use crate::runtime::yield_now;
     use crate::test_utils::init_test_logging;
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
+    use serde_json::Value;
+    use std::sync::Mutex as StdMutex;
 
     fn test_cx() -> Cx {
         Cx::new(
@@ -725,6 +729,147 @@ mod tests {
             final_value
         );
         crate::test_complete!("stress_test_mutex_high_contention");
+    }
+
+    #[test]
+    fn mutex_contention_under_lab_runtime() {
+        init_test("mutex_contention_under_lab_runtime");
+
+        let config = TestConfig::new()
+            .with_seed(0x6D57_E110)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let mutex = Arc::new(Mutex::new(0u32));
+        let checkpoints = Arc::new(StdMutex::new(Vec::<Value>::new()));
+
+        let (holder_value, waiter_value, final_value, checkpoints) =
+            LabRuntimeTarget::block_on(&mut runtime, async move {
+                let cx = Cx::current().expect("lab runtime should install a current Cx");
+                let holder_spawn_cx = cx.clone();
+                let waiter_spawn_cx = cx.clone();
+
+                let holder_mutex = Arc::clone(&mutex);
+                let holder_checkpoints = Arc::clone(&checkpoints);
+                let holder_task_cx = holder_spawn_cx.clone();
+                let holder =
+                    LabRuntimeTarget::spawn(&holder_spawn_cx, Budget::INFINITE, async move {
+                        let mut guard = holder_mutex
+                            .lock(&holder_task_cx)
+                            .await
+                            .expect("holder lock should succeed");
+                        *guard = 1;
+                        let acquired = serde_json::json!({
+                            "phase": "holder_acquired",
+                            "value": *guard,
+                        });
+                        tracing::info!(event = %acquired, "mutex_lab_checkpoint");
+                        holder_checkpoints.lock().unwrap().push(acquired);
+
+                        yield_now().await;
+                        yield_now().await;
+
+                        let released = serde_json::json!({
+                            "phase": "holder_releasing",
+                            "value": *guard,
+                        });
+                        tracing::info!(event = %released, "mutex_lab_checkpoint");
+                        holder_checkpoints.lock().unwrap().push(released);
+                        *guard
+                    });
+
+                yield_now().await;
+
+                let waiter_mutex = Arc::clone(&mutex);
+                let waiter_checkpoints = Arc::clone(&checkpoints);
+                let waiter_task_cx = waiter_spawn_cx.clone();
+                let waiter =
+                    LabRuntimeTarget::spawn(&waiter_spawn_cx, Budget::INFINITE, async move {
+                        let waiting = serde_json::json!({
+                            "phase": "waiter_waiting",
+                        });
+                        tracing::info!(event = %waiting, "mutex_lab_checkpoint");
+                        waiter_checkpoints.lock().unwrap().push(waiting);
+
+                        let mut guard = waiter_mutex
+                            .lock(&waiter_task_cx)
+                            .await
+                            .expect("waiter lock should succeed");
+                        let observed = *guard;
+                        let acquired = serde_json::json!({
+                            "phase": "waiter_acquired",
+                            "observed": observed,
+                        });
+                        tracing::info!(event = %acquired, "mutex_lab_checkpoint");
+                        waiter_checkpoints.lock().unwrap().push(acquired);
+                        *guard += 1;
+
+                        let updated = serde_json::json!({
+                            "phase": "waiter_updated",
+                            "value": *guard,
+                        });
+                        tracing::info!(event = %updated, "mutex_lab_checkpoint");
+                        waiter_checkpoints.lock().unwrap().push(updated);
+                        *guard
+                    });
+
+                let holder_outcome = holder.await;
+                crate::assert_with_log!(
+                    matches!(holder_outcome, crate::types::Outcome::Ok(_)),
+                    "holder task completes successfully",
+                    true,
+                    matches!(holder_outcome, crate::types::Outcome::Ok(_))
+                );
+                let crate::types::Outcome::Ok(holder_value) = holder_outcome else {
+                    panic!("holder task should finish successfully");
+                };
+
+                let waiter_outcome = waiter.await;
+                crate::assert_with_log!(
+                    matches!(waiter_outcome, crate::types::Outcome::Ok(_)),
+                    "waiter task completes successfully",
+                    true,
+                    matches!(waiter_outcome, crate::types::Outcome::Ok(_))
+                );
+                let crate::types::Outcome::Ok(waiter_value) = waiter_outcome else {
+                    panic!("waiter task should finish successfully");
+                };
+
+                let final_value = *mutex.try_lock().expect("final lock should succeed");
+                (
+                    holder_value,
+                    waiter_value,
+                    final_value,
+                    checkpoints.lock().unwrap().clone(),
+                )
+            });
+
+        assert_eq!(holder_value, 1);
+        assert_eq!(waiter_value, 2);
+        assert_eq!(final_value, 2);
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "holder_acquired"),
+            "holder acquisition checkpoint should be recorded"
+        );
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "waiter_acquired" && event["observed"] == 1),
+            "waiter should observe the holder's update"
+        );
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "waiter_updated" && event["value"] == 2),
+            "waiter update checkpoint should be recorded"
+        );
+        let violations = runtime.oracles.check_all(runtime.now());
+        assert!(
+            violations.is_empty(),
+            "mutex lab-runtime contention test should leave runtime invariants clean: {violations:?}"
+        );
     }
 
     #[test]
