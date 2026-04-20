@@ -49,7 +49,7 @@
 use crate::obligation::calm::Monotonicity;
 use crate::trace::distributed::lattice::LatticeState;
 use crate::trace::distributed::sheaf::{
-    ConsistencyReport, NodeSnapshot, SagaConsistencyChecker, SagaConstraint,
+    ConsistencyReport, ConstraintViolation, NodeSnapshot, SagaConsistencyChecker, SagaConstraint,
 };
 use std::fmt;
 
@@ -457,6 +457,25 @@ impl SagaExecutionResult {
         &self,
         obligation_ids: Option<&[Vec<crate::types::ObligationId>]>,
     ) -> ConsistencyReport {
+        if let Some(ids) = obligation_ids {
+            if ids.len() != self.batch_results.len() {
+                return ConsistencyReport {
+                    pairwise_conflicts: Vec::new(),
+                    phantom_states: Vec::new(),
+                    constraint_violations: vec![ConstraintViolation {
+                        constraint_name: format!("{} obligation mapping", self.saga_name),
+                        obligation_states: std::collections::BTreeMap::new(),
+                        explanation: format!(
+                            "invalid obligation_ids mapping: expected {} batch entries, got {}; \
+                             refusing synthetic fallback because it would mask batch-to-obligation mismatches",
+                            self.batch_results.len(),
+                            ids.len()
+                        ),
+                    }],
+                };
+            }
+        }
+
         let snapshots: Vec<NodeSnapshot> = self
             .batch_results
             .iter()
@@ -464,7 +483,7 @@ impl SagaExecutionResult {
             .map(|(i, batch)| {
                 let mut snapshot =
                     NodeSnapshot::new(crate::remote::NodeId::new(format!("batch-{i}")));
-                if let Some(ids) = obligation_ids.and_then(|o| o.get(i)) {
+                if let Some(ids) = obligation_ids.map(|o| &o[i]) {
                     for &id in ids {
                         snapshot.observe(id, batch.merged_state);
                     }
@@ -1221,6 +1240,50 @@ mod tests {
                 .unwrap()
                 .contains("Conflict"),
             "fallback_reason should mention Conflict"
+        );
+    }
+
+    #[test]
+    fn sheaf_consistency_rejects_partial_obligation_id_mapping() {
+        let result = SagaExecutionResult {
+            saga_name: "mapping_mismatch".to_string(),
+            batch_results: vec![
+                BatchResult {
+                    batch_index: 0,
+                    coordination_free: true,
+                    step_count: 1,
+                    merged_state: LatticeState::Committed,
+                    merge_count: 1,
+                },
+                BatchResult {
+                    batch_index: 1,
+                    coordination_free: true,
+                    step_count: 1,
+                    merged_state: LatticeState::Committed,
+                    merge_count: 1,
+                },
+            ],
+            final_state: LatticeState::Committed,
+            calm_optimized: true,
+            fallback_reason: None,
+            barrier_count: 0,
+            total_steps: 2,
+        };
+
+        let report = result.check_sheaf_consistency(Some(&[vec![crate::types::ObligationId::new_for_test(
+            0, 0,
+        )]]));
+
+        assert!(
+            report.pairwise_conflicts.is_empty(),
+            "mapping validation should fail before synthetic overlap introduces fake conflicts"
+        );
+        assert_eq!(report.constraint_violations.len(), 1);
+        assert!(
+            report.constraint_violations[0]
+                .explanation
+                .contains("invalid obligation_ids mapping"),
+            "expected explicit mapping validation error"
         );
     }
 
