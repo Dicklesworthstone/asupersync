@@ -167,6 +167,8 @@ pub enum SupervisionDetail {
     ExplicitStop,
     /// Strategy is explicitly `Escalate`.
     ExplicitEscalate,
+    /// Strategy is `Escalate`, but there is no parent supervisor to receive it.
+    EscalateWithoutParent,
     /// Restart was allowed: window + budget checks passed.
     RestartAllowed {
         /// Which attempt (1-indexed).
@@ -198,6 +200,9 @@ impl fmt::Display for SupervisionDetail {
             }
             Self::ExplicitStop => write!(f, "strategy is Stop"),
             Self::ExplicitEscalate => write!(f, "strategy is Escalate"),
+            Self::EscalateWithoutParent => {
+                write!(f, "strategy is Escalate but no parent region exists")
+            }
             Self::RestartAllowed { attempt, delay } => match delay {
                 Some(d) => write!(f, "restart allowed (attempt {attempt}, delay {d:?})"),
                 None => write!(f, "restart allowed (attempt {attempt})"),
@@ -528,6 +533,13 @@ fn supervision_card_triple(detail: &SupervisionDetail) -> (String, String, Strin
             "If supervision strategy is Escalate, the supervisor must ESCALATE.".to_string(),
             "strategy=Escalate => ESCALATE".to_string(),
             "Strategy is Escalate; failure is propagated to the parent region.".to_string(),
+        ),
+        SupervisionDetail::EscalateWithoutParent => (
+            "If supervision strategy is Escalate but no parent region exists, the supervisor must STOP."
+                .to_string(),
+            "strategy=Escalate,parent=None => STOP".to_string(),
+            "Root escalation has no parent target; stopping preserves a total supervision decision."
+                .to_string(),
         ),
         SupervisionDetail::RestartAllowed { attempt, delay } => (
             "If restart window and budget allow, the supervisor may RESTART.".to_string(),

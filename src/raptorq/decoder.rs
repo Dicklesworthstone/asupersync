@@ -1940,6 +1940,7 @@ impl InactivationDecoder {
         state.stats.dense_core_cols = n_cols;
 
         if n_rows < n_cols {
+            reactivate_unsolved_columns(state, &unsolved);
             return Err(singular_matrix_error(&unsolved, n_rows));
         }
 
@@ -1975,6 +1976,7 @@ impl InactivationDecoder {
             .iter()
             .filter(|&&support| support == 0)
             .count();
+        let dense_rhs_snapshot = snapshot_dense_rhs(&b, symbol_size);
 
         let decision = choose_runtime_decoder_policy(
             n_rows,
@@ -1991,9 +1993,6 @@ impl InactivationDecoder {
             }
             DecoderPolicyMode::BlockSchurLowRank => select_hard_regime_plan(n_rows, n_cols, &a),
         };
-        let retry_rhs_snapshot = (!hard_regime
-            || matches!(hard_plan, HardRegimePlan::BlockSchurLowRank { .. }))
-        .then(|| snapshot_dense_rhs(&b, symbol_size));
         if hard_regime {
             state.stats.hard_regime_activated = true;
             state.stats.hard_regime_branch = Some(hard_plan.label());
@@ -2089,16 +2088,14 @@ impl InactivationDecoder {
                     // Rebuild matrix BEFORE selecting hard-regime plan so that
                     // density metrics reflect the original matrix, not the
                     // partially-eliminated one.
-                    if let Some(base_b) = retry_rhs_snapshot.as_ref() {
-                        rebuild_dense_matrix_from_equations(
-                            &state.equations,
-                            &dense_rows,
-                            col_to_dense,
-                            n_cols,
-                            &mut a,
-                        );
-                        restore_dense_rhs(&mut b, base_b, symbol_size);
-                    }
+                    rebuild_dense_matrix_from_equations(
+                        &state.equations,
+                        &dense_rows,
+                        col_to_dense,
+                        n_cols,
+                        &mut a,
+                    );
+                    restore_dense_rhs(&mut b, &dense_rhs_snapshot, symbol_size);
                     hard_plan = select_hard_regime_plan(n_rows, n_cols, &a);
                     state.stats.hard_regime_branch = Some(hard_plan.label());
                     continue;
@@ -2108,18 +2105,18 @@ impl InactivationDecoder {
                     state.stats.hard_regime_fallbacks += 1;
                     state.stats.hard_regime_conservative_fallback_reason =
                         Some("block_schur_failed_to_converge");
-                    if let Some(base_b) = retry_rhs_snapshot.as_ref() {
-                        rebuild_dense_matrix_from_equations(
-                            &state.equations,
-                            &dense_rows,
-                            col_to_dense,
-                            n_cols,
-                            &mut a,
-                        );
-                        restore_dense_rhs(&mut b, base_b, symbol_size);
-                    }
+                    rebuild_dense_matrix_from_equations(
+                        &state.equations,
+                        &dense_rows,
+                        col_to_dense,
+                        n_cols,
+                        &mut a,
+                    );
+                    restore_dense_rhs(&mut b, &dense_rhs_snapshot, symbol_size);
                     continue;
                 }
+                restore_dense_rows_into_state(state, &dense_rows, &dense_rhs_snapshot, symbol_size);
+                reactivate_unsolved_columns(state, &unsolved);
                 return Err(err);
             }
             break;
@@ -2203,6 +2200,7 @@ impl InactivationDecoder {
         state.stats.dense_core_cols = n_cols;
 
         if n_rows < n_cols {
+            reactivate_unsolved_columns(state, &unsolved);
             return Err(singular_matrix_error(&unsolved, n_rows));
         }
 
@@ -2237,6 +2235,7 @@ impl InactivationDecoder {
             .iter()
             .filter(|&&support| support == 0)
             .count();
+        let dense_rhs_snapshot = snapshot_dense_rhs(&b, symbol_size);
 
         trace.set_strategy(InactivationStrategy::AllAtOnce);
         let decision = choose_runtime_decoder_policy(
@@ -2254,9 +2253,6 @@ impl InactivationDecoder {
             }
             DecoderPolicyMode::BlockSchurLowRank => select_hard_regime_plan(n_rows, n_cols, &a),
         };
-        let retry_rhs_snapshot = (!hard_regime
-            || matches!(hard_plan, HardRegimePlan::BlockSchurLowRank { .. }))
-        .then(|| snapshot_dense_rhs(&b, symbol_size));
         if hard_regime {
             state.stats.hard_regime_activated = true;
             state.stats.hard_regime_branch = Some(hard_plan.label());
@@ -2358,16 +2354,14 @@ impl InactivationDecoder {
                     // Rebuild matrix BEFORE selecting hard-regime plan so that
                     // density metrics reflect the original matrix, not the
                     // partially-eliminated one.
-                    if let Some(base_b) = retry_rhs_snapshot.as_ref() {
-                        rebuild_dense_matrix_from_equations(
-                            &state.equations,
-                            &dense_rows,
-                            col_to_dense,
-                            n_cols,
-                            &mut a,
-                        );
-                        restore_dense_rhs(&mut b, base_b, symbol_size);
-                    }
+                    rebuild_dense_matrix_from_equations(
+                        &state.equations,
+                        &dense_rows,
+                        col_to_dense,
+                        n_cols,
+                        &mut a,
+                    );
+                    restore_dense_rhs(&mut b, &dense_rhs_snapshot, symbol_size);
                     hard_plan = select_hard_regime_plan(n_rows, n_cols, &a);
                     state.stats.hard_regime_branch = Some(hard_plan.label());
                     trace.record_strategy_transition(
@@ -2395,18 +2389,18 @@ impl InactivationDecoder {
                     trace.pivot_events.clear();
                     trace.row_ops = 0;
                     trace.pivot_events_truncated = false;
-                    if let Some(base_b) = retry_rhs_snapshot.as_ref() {
-                        rebuild_dense_matrix_from_equations(
-                            &state.equations,
-                            &dense_rows,
-                            col_to_dense,
-                            n_cols,
-                            &mut a,
-                        );
-                        restore_dense_rhs(&mut b, base_b, symbol_size);
-                    }
+                    rebuild_dense_matrix_from_equations(
+                        &state.equations,
+                        &dense_rows,
+                        col_to_dense,
+                        n_cols,
+                        &mut a,
+                    );
+                    restore_dense_rhs(&mut b, &dense_rhs_snapshot, symbol_size);
                     continue;
                 }
+                restore_dense_rows_into_state(state, &dense_rows, &dense_rhs_snapshot, symbol_size);
+                reactivate_unsolved_columns(state, &unsolved);
                 return Err(err);
             }
             break;
@@ -2516,6 +2510,26 @@ fn restore_dense_rhs(rows: &mut [Vec<u8>], snapshot: &[u8], symbol_size: usize) 
         debug_assert_eq!(row.len(), symbol_size);
         let off = row_idx * symbol_size;
         row.copy_from_slice(&snapshot[off..off + symbol_size]);
+    }
+}
+
+fn restore_dense_rows_into_state(
+    state: &mut DecoderState,
+    dense_rows: &[usize],
+    snapshot: &[u8],
+    symbol_size: usize,
+) {
+    debug_assert_eq!(snapshot.len(), dense_rows.len().saturating_mul(symbol_size));
+    for (row_idx, &eq_idx) in dense_rows.iter().enumerate() {
+        let off = row_idx * symbol_size;
+        state.rhs[eq_idx] = snapshot[off..off + symbol_size].to_vec();
+    }
+}
+
+fn reactivate_unsolved_columns(state: &mut DecoderState, unsolved: &[usize]) {
+    for &col in unsolved {
+        state.inactive_cols.remove(&col);
+        state.active_cols.insert(col);
     }
 }
 
@@ -4249,6 +4263,57 @@ mod tests {
         assert_eq!(
             proof_state.stats.peeling_fallback_reason, plain_state.stats.peeling_fallback_reason,
             "proof capture must not change dense-core fallback telemetry"
+        );
+    }
+
+    #[test]
+    fn dense_failure_restores_decoder_state_after_early_termination() {
+        let decoder = InactivationDecoder::new(8, 16, 3201);
+        let params = decoder.params().clone();
+        let mut state = make_rank_deficient_state(&params, 16, 3, 7);
+        let initial_rhs = state.rhs.clone();
+        let initial_active = state.active_cols.clone();
+
+        let err = decoder.inactivate_and_solve(&mut state).unwrap_err();
+        assert_eq!(err, DecodeError::SingularMatrix { row: 7 });
+        assert_eq!(
+            state.rhs, initial_rhs,
+            "dense-failure cleanup must restore RHS rows taken into the dense core"
+        );
+        assert_eq!(
+            state.active_cols, initial_active,
+            "dense-failure cleanup must reactivate unsolved columns for postmortem inspection"
+        );
+        assert!(
+            state.inactive_cols.is_empty(),
+            "dense-failure cleanup must not leak inactive-column bookkeeping"
+        );
+    }
+
+    #[test]
+    fn dense_failure_with_proof_restores_decoder_state_after_early_termination() {
+        let decoder = InactivationDecoder::new(8, 16, 3202);
+        let params = decoder.params().clone();
+        let mut state = make_rank_deficient_state(&params, 16, 3, 7);
+        let initial_rhs = state.rhs.clone();
+        let initial_active = state.active_cols.clone();
+        let mut trace = EliminationTrace::default();
+
+        let err = decoder
+            .inactivate_and_solve_with_proof(&mut state, &mut trace)
+            .unwrap_err();
+        assert_eq!(err, DecodeError::SingularMatrix { row: 7 });
+        assert_eq!(
+            state.rhs, initial_rhs,
+            "proof dense-failure cleanup must restore RHS rows taken into the dense core"
+        );
+        assert_eq!(
+            state.active_cols, initial_active,
+            "proof dense-failure cleanup must reactivate unsolved columns for postmortem inspection"
+        );
+        assert!(
+            state.inactive_cols.is_empty(),
+            "proof dense-failure cleanup must not leak inactive-column bookkeeping"
         );
     }
 
