@@ -539,8 +539,7 @@ pub fn sigalrm() -> io::Result<Signal> {
 mod tests {
     use super::*;
     use std::future::Future;
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
 
 

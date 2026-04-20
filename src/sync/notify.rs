@@ -525,7 +525,6 @@ mod tests {
     use crate::test_utils::init_test_logging;
     use std::sync::Arc;
     use std::sync::mpsc;
-    use std::task::Wake;
     use std::thread;
     use std::time::Duration;
 

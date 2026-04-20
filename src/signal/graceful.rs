@@ -365,7 +365,7 @@ mod tests {
     use serde_json::Value;
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
 
 

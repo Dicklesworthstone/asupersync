@@ -413,7 +413,7 @@ mod tests {
     use crate::test_utils::init_test_logging;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
     static TEST_NOW: AtomicU64 = AtomicU64::new(0);

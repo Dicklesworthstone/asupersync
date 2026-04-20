@@ -104,8 +104,7 @@ mod tests {
     use super::*;
     use crate::fs::File;
     use crate::io::AsyncWriteExt;
-    use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::task::Waker;
     use tempfile::tempdir;
 
 

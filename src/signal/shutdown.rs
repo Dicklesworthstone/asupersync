@@ -239,7 +239,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
     use std::thread;
     use std::time::Duration;
 
