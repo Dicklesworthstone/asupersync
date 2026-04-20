@@ -914,6 +914,64 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_target_host_reuse_is_stable_under_unrelated_host_churn() {
+        let config = PoolConfig::builder()
+            .idle_timeout(Duration::from_millis(100))
+            .build();
+        let target_key = PoolKey::https("example.com", None);
+        let noise_key = PoolKey::https("other.example", None);
+
+        let mut baseline = Pool::with_config(config.clone());
+        let baseline_id1 = baseline.register_connecting(target_key.clone(), make_time(10), 2);
+        let baseline_id2 = baseline.register_connecting(target_key.clone(), make_time(20), 2);
+        assert!(baseline.mark_connected(&target_key, baseline_id1, make_time(10)));
+        assert!(baseline.mark_connected(&target_key, baseline_id2, make_time(20)));
+
+        let baseline_first = baseline.try_acquire(&target_key, make_time(50));
+        assert_eq!(baseline_first, Some(baseline_id1));
+        assert!(baseline.release(&target_key, baseline_id1, make_time(60)));
+        let baseline_second = baseline.try_acquire(&target_key, make_time(60));
+        assert_eq!(baseline_second, Some(baseline_id1));
+
+        let mut transformed = Pool::with_config(config);
+        let transformed_id1 = transformed.register_connecting(target_key.clone(), make_time(10), 2);
+        let transformed_id2 = transformed.register_connecting(target_key.clone(), make_time(20), 2);
+        assert!(transformed.mark_connected(&target_key, transformed_id1, make_time(10)));
+        assert!(transformed.mark_connected(&target_key, transformed_id2, make_time(20)));
+
+        let noise_idle_id = transformed.register_connecting(noise_key.clone(), make_time(5), 2);
+        assert!(transformed.mark_connected(&noise_key, noise_idle_id, make_time(5)));
+        let noise_connecting_id =
+            transformed.register_connecting(noise_key.clone(), make_time(30), 2);
+
+        let transformed_first = transformed.try_acquire(&target_key, make_time(50));
+        assert_eq!(
+            transformed_first, baseline_first,
+            "unrelated host activity must not perturb the first reuse choice for the target host"
+        );
+
+        assert!(transformed.release(&target_key, transformed_id1, make_time(60)));
+        let transformed_second = transformed.try_acquire(&target_key, make_time(60));
+        assert_eq!(
+            transformed_second, baseline_second,
+            "unrelated host churn must not perturb subsequent reuse ordering for the target host"
+        );
+
+        let noise_idle_meta = transformed
+            .get_connection_meta(&noise_key, noise_idle_id)
+            .expect("idle noise entry remains tracked");
+        assert_eq!(noise_idle_meta.state, PooledConnectionState::Idle);
+
+        let noise_connecting_meta = transformed
+            .get_connection_meta(&noise_key, noise_connecting_id)
+            .expect("connecting noise entry remains tracked");
+        assert_eq!(
+            noise_connecting_meta.state,
+            PooledConnectionState::Connecting
+        );
+    }
+
+    #[test]
     fn pool_key_debug_clone_eq_ord_hash() {
         use std::collections::HashSet;
         let a = PoolKey::new("example.com", 443, true);
