@@ -855,6 +855,112 @@ mod tests {
         assert_eq!(table.pending_obligation_ids_for_task(task), vec![canonical]);
     }
 
+    #[test]
+    fn metamorphic_resolution_reordering_preserves_table_invariants() {
+        #[derive(Clone, Copy)]
+        enum Resolution {
+            Commit(ObligationId, Time),
+            Abort(ObligationId, Time, ObligationAbortReason),
+            Leak(ObligationId, Time),
+        }
+
+        fn apply_resolutions(table: &mut ObligationTable, resolutions: &[Resolution]) {
+            for resolution in resolutions {
+                match *resolution {
+                    Resolution::Commit(id, now) => {
+                        table.commit(id, now).expect("commit should succeed");
+                    }
+                    Resolution::Abort(id, now, reason) => {
+                        table.abort(id, now, reason).expect("abort should succeed");
+                    }
+                    Resolution::Leak(id, now) => {
+                        table.mark_leaked(id, now).expect("leak should succeed");
+                    }
+                }
+            }
+        }
+
+        fn build_table() -> (
+            ObligationTable,
+            [ObligationId; 5],
+            TaskId,
+            TaskId,
+            RegionId,
+            RegionId,
+        ) {
+            let mut table = ObligationTable::new();
+            let task_a = test_task_id(21);
+            let task_b = test_task_id(22);
+            let region_x = test_region_id(7);
+            let region_y = test_region_id(8);
+
+            let ids = [
+                make_obligation(&mut table, ObligationKind::SendPermit, task_a, region_x),
+                make_obligation(&mut table, ObligationKind::Ack, task_a, region_y),
+                make_obligation(&mut table, ObligationKind::Lease, task_b, region_x),
+                make_obligation(&mut table, ObligationKind::IoOp, task_b, region_y),
+                make_obligation(&mut table, ObligationKind::SendPermit, task_b, region_y),
+            ];
+
+            (table, ids, task_a, task_b, region_x, region_y)
+        }
+
+        let (mut baseline, ids, task_a, task_b, region_x, region_y) = build_table();
+        let resolutions = [
+            Resolution::Commit(ids[0], Time::from_nanos(100)),
+            Resolution::Abort(ids[2], Time::from_nanos(200), ObligationAbortReason::Cancel),
+            Resolution::Leak(ids[4], Time::from_nanos(300)),
+        ];
+        apply_resolutions(&mut baseline, &resolutions);
+
+        let (mut reordered, reordered_ids, _, _, _, _) = build_table();
+        let reversed = [
+            Resolution::Leak(reordered_ids[4], Time::from_nanos(300)),
+            Resolution::Abort(
+                reordered_ids[2],
+                Time::from_nanos(200),
+                ObligationAbortReason::Cancel,
+            ),
+            Resolution::Commit(reordered_ids[0], Time::from_nanos(100)),
+        ];
+        apply_resolutions(&mut reordered, &reversed);
+
+        assert_eq!(baseline.pending_count(), reordered.pending_count());
+        assert_eq!(
+            baseline.pending_obligation_ids_for_task(task_a),
+            reordered.pending_obligation_ids_for_task(task_a)
+        );
+        assert_eq!(
+            baseline.pending_obligation_ids_for_task(task_b),
+            reordered.pending_obligation_ids_for_task(task_b)
+        );
+        assert_eq!(
+            baseline.pending_obligation_ids_for_region(region_x),
+            reordered.pending_obligation_ids_for_region(region_x)
+        );
+        assert_eq!(
+            baseline.pending_obligation_ids_for_region(region_y),
+            reordered.pending_obligation_ids_for_region(region_y)
+        );
+        assert_eq!(
+            baseline.ids_for_holder(task_a),
+            reordered.ids_for_holder(task_a)
+        );
+        assert_eq!(
+            baseline.ids_for_holder(task_b),
+            reordered.ids_for_holder(task_b)
+        );
+
+        for id in ids {
+            let baseline_record = baseline.get(id.arena_index()).expect("record exists");
+            let reordered_record = reordered.get(id.arena_index()).expect("record exists");
+            assert_eq!(baseline_record.state, reordered_record.state);
+            assert_eq!(baseline_record.holder, reordered_record.holder);
+            assert_eq!(baseline_record.region, reordered_record.region);
+            assert_eq!(baseline_record.kind, reordered_record.kind);
+        }
+    }
+
     // Pure data-type tests (wave 34 – CyanBarn)
 
     #[test]
