@@ -56,6 +56,7 @@ impl GlobalQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::collections::HashSet;
     use std::sync::{Arc, Barrier};
     use std::thread;
@@ -235,5 +236,43 @@ mod tests {
         // Queue should still be functional after contention
         queue.push(task(999_999));
         assert_eq!(queue.pop(), Some(task(999_999)));
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_drained_prefix_does_not_perturb_later_injection_order(
+            noise_len in 0usize..32,
+            payload_len in 1usize..32,
+        ) {
+            let queue = GlobalQueue::new();
+
+            for i in 0..noise_len {
+                queue.push(task(i as u32));
+            }
+            for i in 0..noise_len {
+                prop_assert_eq!(
+                    queue.pop(),
+                    Some(task(i as u32)),
+                    "unrelated prefix should drain in FIFO order before target injection",
+                );
+            }
+
+            let payload_base = 10_000u32;
+            for i in 0..payload_len {
+                queue.push(task(payload_base + i as u32));
+            }
+
+            let drained: Vec<_> = std::iter::from_fn(|| queue.pop()).collect();
+            let expected: Vec<_> = (0..payload_len)
+                .map(|i| task(payload_base + i as u32))
+                .collect();
+
+            prop_assert_eq!(
+                drained,
+                expected,
+                "draining an unrelated injected prefix must not perturb the FIFO order of later injections",
+            );
+            prop_assert!(queue.is_empty(), "queue should be empty after draining all later injections");
+        }
     }
 }
