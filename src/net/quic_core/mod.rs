@@ -748,6 +748,60 @@ fn ensure_pn_fits(packet_number: u32, packet_number_len: u8) -> Result<(), QuicC
 mod tests {
     use super::*;
 
+    fn reference_encode_varint_rfc9000(value: u64) -> Result<Vec<u8>, QuicCoreError> {
+        if value > QUIC_VARINT_MAX {
+            return Err(QuicCoreError::VarIntOutOfRange(value));
+        }
+
+        let encoded = if value <= 63 {
+            vec![value as u8]
+        } else if value <= 16_383 {
+            ((value as u16) | 0x4000).to_be_bytes().to_vec()
+        } else if value <= ((1 << 30) - 1) {
+            ((value as u32) | 0x8000_0000).to_be_bytes().to_vec()
+        } else {
+            (value | 0xc000_0000_0000_0000).to_be_bytes().to_vec()
+        };
+
+        Ok(encoded)
+    }
+
+    fn reference_decode_varint_rfc9000(input: &[u8]) -> Result<(u64, usize), QuicCoreError> {
+        let Some(&first) = input.first() else {
+            return Err(QuicCoreError::UnexpectedEof);
+        };
+
+        let prefix = first >> 6;
+        let len = 1usize << usize::from(prefix);
+        if input.len() < len {
+            return Err(QuicCoreError::UnexpectedEof);
+        }
+
+        let value = match len {
+            1 => u64::from(first & 0x3f),
+            2 => u64::from(u16::from_be_bytes([first & 0x3f, input[1]])),
+            4 => u64::from(u32::from_be_bytes([
+                first & 0x3f,
+                input[1],
+                input[2],
+                input[3],
+            ])),
+            8 => u64::from_be_bytes([
+                first & 0x3f,
+                input[1],
+                input[2],
+                input[3],
+                input[4],
+                input[5],
+                input[6],
+                input[7],
+            ]),
+            _ => unreachable!("QUIC varints are only 1, 2, 4, or 8 bytes"),
+        };
+
+        Ok((value, len))
+    }
+
     #[test]
     fn varint_roundtrip_boundaries() {
         let values = [
@@ -782,6 +836,44 @@ mod tests {
         let encoded = [0b01_000000u8];
         let err = decode_varint(&encoded).expect_err("should fail");
         assert_eq!(err, QuicCoreError::UnexpectedEof);
+    }
+
+    #[test]
+    fn rfc9000_varint_examples_match_reference_codec() {
+        // RFC 9000 §16 example encodings.
+        let cases = [
+            (37u64, vec![0x25]),
+            (15_293, vec![0x7b, 0xbd]),
+            (494_878_333, vec![0x9d, 0x7f, 0x3e, 0x7d]),
+            (
+                151_288_809_941_952_652,
+                vec![0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c],
+            ),
+        ];
+
+        for (value, expected_wire) in cases {
+            let reference_wire = reference_encode_varint_rfc9000(value).expect("reference encode");
+            assert_eq!(
+                reference_wire, expected_wire,
+                "reference encoder must match RFC 9000 example bytes for {value}"
+            );
+
+            let mut ours = Vec::new();
+            encode_varint(value, &mut ours).expect("encode");
+            assert_eq!(
+                ours, reference_wire,
+                "implementation diverged from RFC 9000 example encoding for {value}"
+            );
+
+            let ours_decoded = decode_varint(&expected_wire).expect("decode");
+            let reference_decoded =
+                reference_decode_varint_rfc9000(&expected_wire).expect("reference decode");
+            assert_eq!(
+                ours_decoded, reference_decoded,
+                "implementation diverged from reference decoder for RFC 9000 bytes {expected_wire:02x?}"
+            );
+            assert_eq!(ours_decoded, (value, expected_wire.len()));
+        }
     }
 
     #[test]
