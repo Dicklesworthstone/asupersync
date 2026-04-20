@@ -27,6 +27,7 @@ on:
           - length_delimited_decoder_state
           - bytes_slice_split_to
           - bytes_cursor_reader
+          - grpc_prost_codec_decode
           - fuzz_hpack_decode
           - fuzz_http2_frame
           - fuzz_interest_flags
@@ -59,6 +60,7 @@ jobs:
           - length_delimited_decoder_state
           - bytes_slice_split_to
           - bytes_cursor_reader
+          - grpc_prost_codec_decode
           - fuzz_hpack_decode
           - fuzz_http2_frame
           - fuzz_interest_flags
