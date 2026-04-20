@@ -1920,6 +1920,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn metamorphic_appending_tail_waiters_preserves_first_fifo_grant() {
+        let base = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_millis(100),
+            burst: 1,
+            wait_strategy: WaitStrategy::Block,
+            ..Default::default()
+        });
+        let extended = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_millis(100),
+            burst: 1,
+            wait_strategy: WaitStrategy::Block,
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+        assert!(base.try_acquire(1, now));
+        assert!(extended.try_acquire(1, now));
+
+        let base_head = base.enqueue(1, now).expect("head waiter should enqueue");
+        let extended_head = extended
+            .enqueue(1, now)
+            .expect("head waiter should enqueue");
+        let extended_tail = extended
+            .enqueue(1, now)
+            .expect("tail waiter should enqueue");
+
+        let refill = Time::from_millis(100);
+        assert_eq!(base.process_queue(refill), Some(base_head));
+        assert_eq!(extended.process_queue(refill), Some(extended_head));
+
+        assert!(
+            matches!(base.check_entry(base_head, refill), Ok(true)),
+            "single queued waiter should be granted on first refill"
+        );
+        assert!(
+            matches!(extended.check_entry(extended_head, refill), Ok(true)),
+            "head waiter must still win first refill after appending tail waiters"
+        );
+        assert!(
+            matches!(extended.check_entry(extended_tail, refill), Ok(false)),
+            "tail waiter must remain queued until a later refill"
+        );
+    }
+
     // =========================================================================
     // Sliding Window Tests
     // =========================================================================
