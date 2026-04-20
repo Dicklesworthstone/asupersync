@@ -453,6 +453,10 @@ impl HpackErrorTester {
 pub struct HpackEdgeCaseTester;
 
 impl HpackEdgeCaseTester {
+    fn encode_table_size_update(size: usize) -> Vec<u8> {
+        HpackErrorTester::encode_table_size_update(size)
+    }
+
     /// Run all edge case tests.
     pub fn run_all_edge_case_tests() -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();

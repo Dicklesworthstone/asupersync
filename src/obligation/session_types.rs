@@ -430,11 +430,6 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
     ///
     /// Returns `SessionError::Cancelled` if the `Cx` is cancelled, or
     /// `SessionError::Closed` if the peer endpoint was dropped.
-    ///
-    /// # Panics
-    ///
-    /// Panics if this channel has no transport backing, or if the received
-    /// value is not of the expected type (protocol violation).
     pub fn recv_async<'a>(
         mut self,
         cx: &'a Cx,
@@ -444,16 +439,15 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
         S: 'a,
         T: 'a,
     {
-        let mut transport = self
-            .transport
-            .take()
-            .expect("recv_async called on non-transport-backed session channel");
-
         // Disarm before the future is returned so dropping an unpolled future
         // is just as safe as dropping one after it has yielded once.
         self.closed = true;
 
         async move {
+            let Some(mut transport) = self.transport.take() else {
+                return Err(SessionError::NoTransport);
+            };
+
             let boxed = match transport.rx.recv(cx).await {
                 Ok(boxed) => boxed,
                 Err(error) => {
@@ -2408,6 +2402,18 @@ mod tests {
             let cx = Cx::for_testing();
             let sender = sender.send(send_permit::ReserveMsg);
             let result = sender.select_right_async(&cx).await;
+            assert_eq!(result.map(|_| ()), Err(SessionError::NoTransport));
+        });
+    }
+
+    #[test]
+    fn recv_async_fails_without_transport_backing() {
+        let (sender, receiver) = send_permit::new_session::<u64>(311);
+        sender.disarm_for_test();
+
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let result = receiver.recv_async(&cx).await;
             assert_eq!(result.map(|_| ()), Err(SessionError::NoTransport));
         });
     }

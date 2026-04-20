@@ -1,0 +1,26 @@
+---
+source: src/trace/event.rs
+expression: scrub_browser_trace_fields(&fields)
+---
+{
+  "capture_host_time_ns": "[capture_host_time_ns]",
+  "capture_host_turn_seq": "7",
+  "capture_replay_key": "[capture_replay_key]",
+  "capture_source": "host_input",
+  "capture_source_seq": "19",
+  "decision_seq": "17",
+  "event_kind": "worker_cancel_requested",
+  "job_id": "88",
+  "obligation": "[obligation]",
+  "region": "[region]",
+  "replay_hash": "12648430",
+  "schema_version": "browser-trace-schema-v1",
+  "seq": "[seq]",
+  "sequence_group": "[sequence_group]",
+  "task": "[task]",
+  "time_ns": "[time_ns]",
+  "trace_id": "[trace_id]",
+  "validation_failure_category": "none",
+  "validation_status": "valid",
+  "worker_id": "worker-browser-snapshot"
+}

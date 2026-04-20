@@ -2059,6 +2059,7 @@ mod tests {
     use crate::record::{ObligationAbortReason, ObligationKind, ObligationState};
     use crate::trace::distributed::LamportTime;
     use crate::types::CancelReason;
+    use serde_json::Value;
     use std::collections::BTreeSet;
 
     fn task(n: u32) -> TaskId {
@@ -2069,6 +2070,31 @@ mod tests {
     }
     fn obligation(n: u32) -> ObligationId {
         ObligationId::new_for_test(n, 1)
+    }
+
+    fn scrub_browser_trace_fields(fields: &std::collections::BTreeMap<String, String>) -> Value {
+        let mut value = serde_json::to_value(fields).expect("serialize browser trace fields");
+        let obj = value
+            .as_object_mut()
+            .expect("browser trace fields serialize to an object");
+
+        for key in [
+            "capture_host_time_ns",
+            "capture_replay_key",
+            "seq",
+            "time_ns",
+            "trace_id",
+            "task",
+            "region",
+            "obligation",
+            "sequence_group",
+        ] {
+            if obj.contains_key(key) {
+                obj.insert(key.to_string(), Value::String(format!("[{key}]")));
+            }
+        }
+
+        value
     }
 
     // ── TraceEventKind basics ──────────────────────────────────────
@@ -3688,6 +3714,39 @@ mod tests {
         assert_eq!(
             fields.get("sequence_group"),
             Some(&"worker_job:77:worker-a".to_string())
+        );
+    }
+
+    #[test]
+    fn browser_trace_log_fields_snapshot_scrubs_ids_and_timestamps() {
+        let event = TraceEvent::worker_cancel_requested(
+            41,
+            Time::from_nanos(123_456_789),
+            "worker-browser-snapshot",
+            88,
+            17,
+            0x00C0_FFEE,
+            task(9),
+            region(10),
+            obligation(11),
+        );
+        let capture = BrowserCaptureMetadata {
+            host_turn_seq: 7,
+            source: BrowserCaptureSource::HostInput,
+            source_seq: 19,
+            host_time_ns: 1_726_133_456_789_000_000,
+        };
+
+        let fields = browser_trace_log_fields_with_capture(
+            &event,
+            "trace-browser-snapshot-1",
+            None,
+            Some(&capture),
+        );
+
+        insta::assert_json_snapshot!(
+            "browser_trace_log_fields_worker_scrubbed",
+            scrub_browser_trace_fields(&fields)
         );
     }
 
