@@ -1093,6 +1093,7 @@ impl fmt::Display for CancelReason {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
+    use serde_json::{Value, json};
 
     fn init_test(test_name: &str) {
         init_test_logging();
@@ -1102,6 +1103,38 @@ mod tests {
     fn combine(mut a: CancelReason, b: &CancelReason) -> CancelReason {
         a.strengthen(b);
         a
+    }
+
+    fn scrub_cancel_snapshot(mut value: Value) -> Value {
+        fn scrub_in_place(value: &mut Value) {
+            match value {
+                Value::Object(map) => {
+                    for (key, entry) in map.iter_mut() {
+                        match key.as_str() {
+                            "task_id" | "origin_task" if !entry.is_null() => {
+                                *entry = Value::String("[TASK_ID]".into());
+                            }
+                            "region_id" | "origin_region" => {
+                                *entry = Value::String("[REGION_ID]".into());
+                            }
+                            "timestamp" => {
+                                *entry = Value::String("[TIME]".into());
+                            }
+                            _ => scrub_in_place(entry),
+                        }
+                    }
+                }
+                Value::Array(items) => {
+                    for item in items {
+                        scrub_in_place(item);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        scrub_in_place(&mut value);
+        value
     }
 
     #[test]
@@ -1666,6 +1699,37 @@ mod tests {
             reason.message
         );
         crate::test_complete!("cancel_reason_with_full_attribution");
+    }
+
+    #[test]
+    fn cancel_witness_json_snapshot_scrubbed() {
+        init_test("cancel_witness_json_snapshot_scrubbed");
+        let task = TaskId::new_for_test(8, 2);
+        let region = RegionId::new_for_test(7, 1);
+        let cause = CancelReason::with_origin(
+            CancelKind::Timeout,
+            RegionId::new_for_test(3, 0),
+            Time::from_millis(220),
+        )
+        .with_task(TaskId::new_for_test(4, 0))
+        .with_message("deadline budget expired");
+        let reason = CancelReason::with_origin(
+            CancelKind::ParentCancelled,
+            RegionId::new_for_test(9, 1),
+            Time::from_millis(550),
+        )
+        .with_task(TaskId::new_for_test(10, 0))
+        .with_message("closing subtree")
+        .with_cause(cause);
+        let witness = CancelWitness::new(task, region, 3, CancelPhase::Finalizing, reason);
+
+        insta::assert_json_snapshot!(
+            "cancel_witness_json_scrubbed",
+            scrub_cancel_snapshot(json!({
+                "phase_label": format!("{:?}", witness.phase),
+                "witness": witness,
+            }))
+        );
     }
 
     // ========================================================================
