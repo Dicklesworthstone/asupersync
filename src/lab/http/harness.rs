@@ -387,6 +387,20 @@ mod tests {
     use crate::web::response::StatusCode;
     use crate::web::router::get;
 
+    fn scrub_trace_display(output: &str) -> String {
+        output
+            .lines()
+            .map(|line| {
+                if let Some(prefix) = line.split_once("(t=").map(|(prefix, _)| prefix) {
+                    format!("{prefix}(t=[MS])")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn test_router() -> Router {
         Router::new()
             .route("/health", get(FnHandler::new(|| "ok")))
@@ -604,6 +618,27 @@ mod tests {
         );
         assert!(trace_str.contains("GET /health"));
         assert!(trace_str.contains("500"));
+    }
+
+    #[test]
+    fn harness_trace_display_snapshot_scrubbed() {
+        let mut harness = TestHarness::with_seed(42, test_router());
+
+        harness.get("/health");
+        harness.advance_time(250_000_000);
+        harness.get("/fail");
+
+        let trace_display = format!(
+            "{}",
+            RequestTrace {
+                entries: harness.trace().to_vec()
+            }
+        );
+
+        insta::assert_snapshot!(
+            "harness_trace_display_scrubbed",
+            scrub_trace_display(&trace_display)
+        );
     }
 
     #[test]

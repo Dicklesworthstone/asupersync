@@ -1,0 +1,6 @@
+---
+source: src/lab/http/harness.rs
+expression: scrub_trace_display(&trace_display)
+---
+  [0] GET /health → 200 (t=[MS])
+  [1] GET /fail → 500 (t=[MS])
