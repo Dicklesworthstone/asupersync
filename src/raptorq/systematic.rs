@@ -27,7 +27,7 @@
 
 #![allow(clippy::many_single_char_names)]
 
-use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
+use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
 use crate::raptorq::rfc6330::repair_indices_for_esi;
 #[cfg(test)]
 use crate::util::DetRng;
@@ -165,12 +165,9 @@ impl SystematicParams {
     /// can use one source of truth for RFC tuple expansion.
     #[must_use]
     pub fn rfc_repair_equation(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
-        let repair_isi = esi
-            .checked_add(
-                u32::try_from(self.k_prime - self.k)
-                    .expect("RFC systematic padding delta must fit in u32"),
-            )
-            .expect("RFC repair ISI must fit in u32");
+        let padding_delta = u32::try_from(self.k_prime - self.k)
+            .expect("RFC systematic padding delta must fit in u32");
+        let repair_isi = esi.wrapping_add(padding_delta);
         let columns = repair_indices_for_esi(self.j, self.w, self.p, repair_isi);
         let coefficients = vec![Gf256::ONE; columns.len()];
         (columns, coefficients)
@@ -1225,6 +1222,31 @@ mod tests {
     }
 
     #[test]
+    fn rfc_repair_equation_wraps_padding_delta_at_u32_boundary() {
+        let params = SystematicParams::for_source_block(11, 64);
+        let padding_delta = u32::try_from(params.k_prime - params.k).unwrap();
+        assert_eq!(padding_delta, 1, "test requires a non-zero K' - K delta");
+
+        let (columns, coefficients) = params.rfc_repair_equation(u32::MAX);
+        let expected_columns = repair_indices_for_esi(
+            params.j,
+            params.w,
+            params.p,
+            u32::MAX.wrapping_add(padding_delta),
+        );
+
+        assert_eq!(
+            columns, expected_columns,
+            "repair-equation tuple translation should wrap across the public u32 ESI boundary"
+        );
+        assert_eq!(
+            coefficients,
+            vec![Gf256::ONE; expected_columns.len()],
+            "repair-equation coefficients should stay aligned with the wrapped tuple columns"
+        );
+    }
+
+    #[test]
     fn params_lookup_reports_unsupported_k() {
         let err = SystematicParams::try_for_source_block(56404, 64).unwrap_err();
         assert_eq!(
@@ -1571,7 +1593,7 @@ mod tests {
         let symbol_size = 48;
         let source = make_source_symbols(k, symbol_size);
         let enc = SystematicEncoder::new(&source, symbol_size, 77).unwrap();
-        for esi in 0..20u32 {
+        for esi in (0..20u32).chain(std::iter::once(u32::MAX)) {
             assert_eq!(enc.repair_symbol(esi).len(), symbol_size);
         }
     }
