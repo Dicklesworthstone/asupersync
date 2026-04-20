@@ -2157,6 +2157,101 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_borrow_and_update_clone_matches_explicit_snapshot_clone() {
+        init_test("metamorphic_borrow_and_update_clone_matches_explicit_snapshot_clone");
+        let (tx, mut rx_explicit) = channel(1u32);
+        let mut rx_clone = tx.subscribe();
+
+        tx.send(10).expect("send failed");
+        tx.send(20).expect("send failed");
+
+        let current_version = tx.inner.current_version();
+        let explicit_value = {
+            let snapshot = rx_explicit.borrow_and_update();
+            snapshot.clone_inner()
+        };
+        let clone_value = rx_clone.borrow_and_update_clone();
+
+        crate::assert_with_log!(
+            explicit_value == clone_value,
+            "clone helper matches explicit snapshot clone",
+            explicit_value,
+            clone_value
+        );
+        crate::assert_with_log!(
+            explicit_value == 20,
+            "both paths observe latest unread value",
+            20u32,
+            explicit_value
+        );
+        crate::assert_with_log!(
+            rx_explicit.seen_version() == current_version,
+            "explicit path acknowledges current version",
+            current_version,
+            rx_explicit.seen_version()
+        );
+        crate::assert_with_log!(
+            rx_clone.seen_version() == current_version,
+            "clone helper acknowledges current version",
+            current_version,
+            rx_clone.seen_version()
+        );
+
+        let explicit_changed = rx_explicit.has_changed();
+        let clone_changed = rx_clone.has_changed();
+        crate::assert_with_log!(
+            !explicit_changed,
+            "explicit path has no duplicate change after acknowledgement",
+            false,
+            explicit_changed
+        );
+        crate::assert_with_log!(
+            !clone_changed,
+            "clone helper has no duplicate change after acknowledgement",
+            false,
+            clone_changed
+        );
+
+        tx.send(30).expect("send failed");
+
+        let explicit_next = {
+            let snapshot = rx_explicit.borrow_and_update();
+            snapshot.clone_inner()
+        };
+        let clone_next = rx_clone.borrow_and_update_clone();
+        let next_version = tx.inner.current_version();
+
+        crate::assert_with_log!(
+            explicit_next == clone_next,
+            "next send remains aligned across both acknowledgement paths",
+            explicit_next,
+            clone_next
+        );
+        crate::assert_with_log!(
+            explicit_next == 30,
+            "next send value observed by both paths",
+            30u32,
+            explicit_next
+        );
+        crate::assert_with_log!(
+            rx_explicit.seen_version() == next_version,
+            "explicit path advances on next send",
+            next_version,
+            rx_explicit.seen_version()
+        );
+        crate::assert_with_log!(
+            rx_clone.seen_version() == next_version,
+            "clone helper advances on next send",
+            next_version,
+            rx_clone.seen_version()
+        );
+
+        crate::test_complete!(
+            "metamorphic_borrow_and_update_clone_matches_explicit_snapshot_clone"
+        );
+    }
+
+    #[test]
     fn mark_seen_acknowledges_latest_version_not_prior_borrow_snapshot() {
         init_test("mark_seen_acknowledges_latest_version_not_prior_borrow_snapshot");
         let (tx, mut rx) = channel(1u32);
