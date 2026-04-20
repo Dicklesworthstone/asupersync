@@ -215,6 +215,13 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn scrub_task_leak_display(output: &str) -> String {
+        output
+            .replace("RegionId(0:0)", "[REGION_ID]")
+            .replace("TaskId(1:0)", "[TASK_ID_1]")
+            .replace("TaskId(2:0)", "[TASK_ID_2]")
+    }
+
     #[test]
     fn no_tasks_passes() {
         init_test("no_tasks_passes");
@@ -390,6 +397,20 @@ mod tests {
         let has_two = s.contains('2');
         crate::assert_with_log!(has_two, "contains 2", true, has_two);
         crate::test_complete!("violation_display");
+    }
+
+    #[test]
+    fn violation_display_snapshot_scrubbed() {
+        let violation = TaskLeakViolation {
+            region: region(0),
+            leaked_tasks: vec![task(1), task(2)],
+            region_close_time: t(100),
+        };
+
+        insta::assert_snapshot!(
+            "task_leak_violation_display_scrubbed",
+            scrub_task_leak_display(&violation.to_string())
+        );
     }
 
     #[test]
