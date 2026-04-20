@@ -490,6 +490,15 @@ impl std::error::Error for ScopeLeakError {}
 pub mod toy_api {
     use super::{GradedObligation, ObligationKind, Resolution, ResolvedProof};
 
+    fn assert_send_permit(permit: &GradedObligation, operation: &str) {
+        assert_eq!(
+            permit.kind(),
+            ObligationKind::SendPermit,
+            "{operation} requires a SendPermit obligation (got {})",
+            permit.kind()
+        );
+    }
+
     /// A toy channel that uses graded obligations for the two-phase send.
     pub struct ToyChannel {
         capacity: usize,
@@ -551,6 +560,7 @@ pub mod toy_api {
 
         /// Commit a send: consumes the permit and enqueues the message.
         pub fn commit_send(&mut self, permit: GradedObligation, message: String) -> ResolvedProof {
+            assert_send_permit(&permit, "commit_send");
             self.reserved_permits = self
                 .reserved_permits
                 .checked_sub(1)
@@ -562,6 +572,7 @@ pub mod toy_api {
         /// Abort a send: cancels the permit without sending.
         #[must_use]
         pub fn abort_send(&mut self, permit: GradedObligation) -> ResolvedProof {
+            assert_send_permit(&permit, "abort_send");
             self.reserved_permits = self
                 .reserved_permits
                 .checked_sub(1)
@@ -1106,6 +1117,49 @@ mod tests {
             retry.is_some()
         );
         crate::test_complete!("toy_channel_reservation_tracks_outstanding_capacity");
+    }
+
+    #[test]
+    fn toy_channel_commit_rejects_wrong_obligation_kind() {
+        init_test("toy_channel_commit_rejects_wrong_obligation_kind");
+        let mut ch = toy_api::ToyChannel::from_state(1, Vec::new(), 1);
+        let forged = GradedObligation::reserve(ObligationKind::Ack, "forged ack");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ch.commit_send(forged, "hello".to_string())
+        }));
+
+        crate::assert_with_log!(result.is_err(), "wrong kind rejected", true, result.is_err());
+        crate::assert_with_log!(ch.is_empty(), "no message enqueued", true, ch.is_empty());
+        let retry = ch.reserve_send();
+        crate::assert_with_log!(
+            retry.is_none(),
+            "reservation count preserved after rejected commit",
+            true,
+            retry.is_none()
+        );
+        crate::test_complete!("toy_channel_commit_rejects_wrong_obligation_kind");
+    }
+
+    #[test]
+    fn toy_channel_abort_rejects_wrong_obligation_kind() {
+        init_test("toy_channel_abort_rejects_wrong_obligation_kind");
+        let mut ch = toy_api::ToyChannel::from_state(1, Vec::new(), 1);
+        let forged = GradedObligation::reserve(ObligationKind::Lease, "forged lease");
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ch.abort_send(forged)));
+
+        crate::assert_with_log!(result.is_err(), "wrong kind rejected", true, result.is_err());
+        crate::assert_with_log!(ch.is_empty(), "abort does not enqueue", true, ch.is_empty());
+        let retry = ch.reserve_send();
+        crate::assert_with_log!(
+            retry.is_none(),
+            "reservation count preserved after rejected abort",
+            true,
+            retry.is_none()
+        );
+        crate::test_complete!("toy_channel_abort_rejects_wrong_obligation_kind");
     }
 
     // ---- Display impls -----------------------------------------------------
