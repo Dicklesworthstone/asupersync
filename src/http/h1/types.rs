@@ -1715,6 +1715,31 @@ mod tests {
     }
 
     #[test]
+    fn request_pkce_s256_vector_matches_rfc7636_appendix_b() {
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+        let authorize = Request::get("/authorize")
+            .query([
+                ("code_challenge", challenge),
+                ("code_challenge_method", "S256"),
+            ])
+            .build();
+        assert_eq!(
+            authorize.uri,
+            "/authorize?code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256"
+        );
+
+        let token = Request::post("/token")
+            .form([("code_verifier", verifier)])
+            .build();
+        assert_eq!(
+            std::str::from_utf8(&token.body).unwrap(),
+            "code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        );
+    }
+
+    #[test]
     fn request_content_type_and_accept() {
         let req = Request::post("/api")
             .content_type("application/xml")
