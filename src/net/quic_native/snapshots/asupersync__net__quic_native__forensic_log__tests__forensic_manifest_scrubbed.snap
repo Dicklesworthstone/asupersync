@@ -1,0 +1,60 @@
+---
+source: src/net/quic_native/forensic_log.rs
+expression: |-
+  scrub_forensic_manifest(json!({
+      "scenario_id": manifest.scenario_id,
+      "seed": manifest.seed,
+      "trace_fingerprint": manifest.trace_fingerprint,
+      "replay_command": manifest.replay_command,
+      "failure_class": manifest.failure_class,
+      "invariant_ids": manifest.invariant_ids,
+      "invariant_verdicts": manifest.invariant_verdicts,
+      "event_timeline": manifest.event_timeline,
+      "connection_lifecycle": manifest.connection_lifecycle,
+      "passed": manifest.passed,
+      "duration_us": manifest.duration_us,
+  }))
+---
+{
+  "connection_lifecycle": [
+    {
+      "from_state": "idle",
+      "to_state": "handshaking",
+      "trigger": "client_start",
+      "ts_us": 10
+    },
+    {
+      "from_state": "handshaking",
+      "to_state": "established",
+      "trigger": "handshake_confirmed",
+      "ts_us": 40
+    }
+  ],
+  "duration_us": 55,
+  "event_timeline": {
+    "by_category": {
+      "quic_connection": 2,
+      "test_harness": 1
+    },
+    "by_level": {
+      "INFO": 3
+    },
+    "total_events": 3
+  },
+  "failure_class": "passed",
+  "invariant_ids": [
+    "inv.quic.handshake_completes"
+  ],
+  "invariant_verdicts": [
+    {
+      "details": "handshake finished in test harness",
+      "invariant_id": "inv.quic.handshake_completes",
+      "verdict": "pass"
+    }
+  ],
+  "passed": true,
+  "replay_command": "ASUPERSYNC_SEED=0x1234 cargo test forensic_manifest_snapshot_scrubbed -- --nocapture",
+  "scenario_id": "QH3-SNAP-MANIFEST",
+  "seed": "0x0000000000001234",
+  "trace_fingerprint": "[TRACE_FINGERPRINT]"
+}

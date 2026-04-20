@@ -896,10 +896,20 @@ impl QuicH3ScenarioManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn scrub_forensic_manifest(mut value: Value) -> Value {
+        if let Some(map) = value.as_object_mut() {
+            if let Some(trace_fingerprint) = map.get_mut("trace_fingerprint") {
+                *trace_fingerprint = Value::String("[TRACE_FINGERPRINT]".into());
+            }
+        }
+        value
     }
 
     #[test]
@@ -1401,6 +1411,61 @@ mod tests {
         assert_eq!(first["data"]["verdict"], "pass");
 
         crate::test_complete!("test_invariant_logging");
+    }
+
+    #[test]
+    fn forensic_manifest_snapshot_scrubbed() {
+        init_test("forensic_manifest_snapshot_scrubbed");
+
+        let logger = QuicH3ForensicLogger::new(
+            "QH3-SNAP-MANIFEST",
+            0x1234,
+            "forensic_manifest_snapshot_scrubbed",
+        );
+
+        logger.log(
+            10,
+            "quic_connection",
+            QuicH3Event::StateChanged {
+                from_state: "idle".into(),
+                to_state: "handshaking".into(),
+                trigger: "client_start".into(),
+            },
+        );
+        logger.log_invariant(
+            25,
+            "inv.quic.handshake_completes",
+            "pass",
+            "handshake finished in test harness",
+        );
+        logger.log(
+            40,
+            "quic_connection",
+            QuicH3Event::StateChanged {
+                from_state: "handshaking".into(),
+                to_state: "established".into(),
+                trigger: "handshake_confirmed".into(),
+            },
+        );
+
+        let manifest = QuicH3ScenarioManifest::from_logger(&logger, true, 55);
+
+        insta::assert_json_snapshot!(
+            "forensic_manifest_scrubbed",
+            scrub_forensic_manifest(json!({
+                "scenario_id": manifest.scenario_id,
+                "seed": manifest.seed,
+                "trace_fingerprint": manifest.trace_fingerprint,
+                "replay_command": manifest.replay_command,
+                "failure_class": manifest.failure_class,
+                "invariant_ids": manifest.invariant_ids,
+                "invariant_verdicts": manifest.invariant_verdicts,
+                "event_timeline": manifest.event_timeline,
+                "connection_lifecycle": manifest.connection_lifecycle,
+                "passed": manifest.passed,
+                "duration_us": manifest.duration_us,
+            }))
+        );
     }
 
     #[test]
