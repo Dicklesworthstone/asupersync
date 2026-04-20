@@ -606,6 +606,11 @@ impl TlsConnectorBuilder {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "tls")]
+    const TEST_CERT_PEM: &[u8] = include_bytes!("../../tests/fixtures/tls/server.crt");
+    #[cfg(feature = "tls")]
+    const TEST_KEY_PEM: &[u8] = include_bytes!("../../tests/fixtures/tls/server.key");
+
     #[test]
     fn test_builder_default() {
         let builder = TlsConnectorBuilder::new();
@@ -729,6 +734,90 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, TlsError::InvalidDnsName(_)));
         });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_connect_completes_under_lab_runtime() {
+        use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+        use crate::cx::Cx;
+        use crate::net::tcp::VirtualTcpStream;
+        use crate::test_utils::init_test_logging;
+        use crate::tls::TlsAcceptorBuilder;
+        use futures_lite::future::zip;
+
+        init_test_logging();
+        let config = TestConfig::new()
+            .with_seed(0x715A_CCE9)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+
+        let (ready, protocol_present, alpn, checkpoints) = LabRuntimeTarget::block_on(
+            &mut runtime,
+            async move {
+                let _cx = Cx::current().expect("lab runtime should install a current Cx");
+
+                let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+                let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+                let acceptor = TlsAcceptorBuilder::new(chain, key)
+                    .alpn_http()
+                    .build()
+                    .unwrap();
+
+                let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+                let connector = TlsConnectorBuilder::new()
+                    .add_root_certificates(certs)
+                    .alpn_http()
+                    .handshake_timeout(std::time::Duration::from_secs(1))
+                    .build()
+                    .unwrap();
+
+                let (client_io, server_io) = VirtualTcpStream::pair(
+                    "127.0.0.1:5300".parse().unwrap(),
+                    "127.0.0.1:5301".parse().unwrap(),
+                );
+
+                let checkpoints = vec![serde_json::json!({
+                    "phase": "connector_pair_created",
+                    "client_addr": "127.0.0.1:5300",
+                    "server_addr": "127.0.0.1:5301",
+                    "handshake_timeout_ms": 1000,
+                })];
+                tracing::info!(event = %checkpoints[0], "tls_connector_lab_checkpoint");
+
+                let (client_res, server_res) = zip(
+                    connector.connect("localhost", client_io),
+                    acceptor.accept(server_io),
+                )
+                .await;
+                let client = client_res.expect("connector handshake should succeed");
+                let server = server_res.expect("server handshake should succeed");
+
+                let ready = client.is_ready() && server.is_ready();
+                let protocol_present =
+                    client.protocol_version().is_some() && server.protocol_version().is_some();
+                let alpn = client.alpn_protocol().map(|protocol| protocol.to_vec());
+
+                let mut checkpoints = checkpoints;
+                checkpoints.push(serde_json::json!({
+                    "phase": "connector_handshake_completed",
+                    "ready": ready,
+                    "protocol_present": protocol_present,
+                    "client_alpn": alpn.as_ref().map(|protocol| String::from_utf8_lossy(protocol).to_string()),
+                    "server_alpn": server.alpn_protocol().map(|protocol| String::from_utf8_lossy(protocol).to_string()),
+                }));
+                tracing::info!(event = %checkpoints[1], "tls_connector_lab_checkpoint");
+
+                (ready, protocol_present, alpn, checkpoints)
+            },
+        );
+
+        assert!(ready);
+        assert!(protocol_present);
+        assert_eq!(alpn.as_deref(), Some(b"h2".as_slice()));
+        assert_eq!(checkpoints.len(), 2);
+        assert!(runtime.is_quiescent());
     }
 
     #[cfg(feature = "tls")]
