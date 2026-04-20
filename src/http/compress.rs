@@ -510,11 +510,9 @@ impl Compressor for DeflateCompressor {
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
-        use io::Write;
         if self.finished {
             return Ok(());
         }
-        self.encoder.flush()?;
         let inner = std::mem::replace(
             &mut self.encoder,
             flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::none()),
@@ -1384,6 +1382,47 @@ mod tests {
         dec.decompress(&compressed, &mut decompressed).unwrap();
         dec.finish(&mut decompressed).unwrap();
         assert_eq!(&decompressed, input);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn deflate_streaming_output_matches_reference_encoder() {
+        use flate2::Compression;
+        use flate2::read::DeflateDecoder as ReferenceDeflateDecoder;
+        use flate2::write::DeflateEncoder as ReferenceDeflateEncoder;
+        use std::io::{Read, Write};
+
+        let input = b"RFC 1951 differential vector: repeated repeated repeated payload.";
+
+        let mut ours = DeflateCompressor::with_level(Compression::default());
+        let mut streamed = Vec::new();
+        for chunk in input.chunks(7) {
+            ours.compress(chunk, &mut streamed).unwrap();
+        }
+        ours.finish(&mut streamed).unwrap();
+
+        let mut reference = ReferenceDeflateEncoder::new(Vec::new(), Compression::default());
+        reference.write_all(input).unwrap();
+        let reference_bytes = reference.finish().unwrap();
+
+        assert_eq!(
+            streamed, reference_bytes,
+            "streaming wrapper must match canonical RFC 1951 deflate bytes for the same payload"
+        );
+
+        let mut ours_dec = DeflateDecompressor::new(None);
+        let mut ours_plain = Vec::new();
+        for chunk in reference_bytes.chunks(5) {
+            ours_dec.decompress(chunk, &mut ours_plain).unwrap();
+        }
+        ours_dec.finish(&mut ours_plain).unwrap();
+        assert_eq!(ours_plain, input);
+
+        let mut reference_plain = Vec::new();
+        ReferenceDeflateDecoder::new(&streamed[..])
+            .read_to_end(&mut reference_plain)
+            .unwrap();
+        assert_eq!(reference_plain, input);
     }
 
     #[cfg(feature = "compression")]
