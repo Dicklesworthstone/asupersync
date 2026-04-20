@@ -841,6 +841,7 @@ impl fmt::Debug for BulkheadRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     // =========================================================================
     // Basic Permit Acquisition
@@ -1745,6 +1746,104 @@ mod tests {
 
         // 7. Queue len now 1. Can enqueue.
         bh.enqueue(1, now).expect("enqueue should succeed");
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct QueueAdmissionRun {
+        granted_positions: Vec<usize>,
+        queue_depth: u32,
+        available: u32,
+        queued_executed: u64,
+        total_cancelled: u64,
+    }
+
+    fn run_queue_admission(cancelled: &[bool], filter_cancelled: bool) -> QueueAdmissionRun {
+        let bh = Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 1,
+            max_queue: cancelled.len() as u32 + 1,
+            queue_timeout: Duration::from_secs(60),
+            ..Default::default()
+        });
+        let now = Time::from_millis(0);
+        let held = bh.try_acquire(1).expect("seed permit must exist");
+        let mut entries = Vec::new();
+
+        for (position, &is_cancelled) in cancelled.iter().enumerate() {
+            if filter_cancelled && is_cancelled {
+                continue;
+            }
+            let entry_id = bh.enqueue(1, now).expect("queue should have capacity");
+            entries.push((position, entry_id, is_cancelled));
+        }
+
+        if !filter_cancelled {
+            for &(_, entry_id, is_cancelled) in &entries {
+                if is_cancelled {
+                    bh.cancel_entry(entry_id, now);
+                }
+            }
+        }
+
+        held.release();
+
+        let mut granted_positions = Vec::new();
+        for &(position, entry_id, is_cancelled) in &entries {
+            if !filter_cancelled && is_cancelled {
+                assert!(
+                    matches!(bh.check_entry(entry_id, now), Err(BulkheadError::Cancelled)),
+                    "cancelled entry should not remain claimable"
+                );
+                continue;
+            }
+
+            let permit = bh
+                .check_entry(entry_id, now)
+                .expect("survivor should not reject")
+                .expect("survivor should be granted in FIFO order");
+            granted_positions.push(position);
+            permit.release();
+        }
+
+        let metrics = bh.metrics();
+        QueueAdmissionRun {
+            granted_positions,
+            queue_depth: metrics.queue_depth,
+            available: bh.available(),
+            queued_executed: metrics.total_executed.saturating_sub(1),
+            total_cancelled: metrics.total_cancelled,
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_queue_cancellation_matches_filtered_admission(cancelled in prop::collection::vec(any::<bool>(), 1..12)) {
+            let cancelled_run = run_queue_admission(&cancelled, false);
+            let filtered_run = run_queue_admission(&cancelled, true);
+            let expected_positions = cancelled
+                .iter()
+                .enumerate()
+                .filter_map(|(position, &is_cancelled)| (!is_cancelled).then_some(position))
+                .collect::<Vec<_>>();
+            let survivor_count = expected_positions.len() as u64;
+            let cancelled_count = cancelled.iter().filter(|&&is_cancelled| is_cancelled).count() as u64;
+
+            prop_assert_eq!(&cancelled_run.granted_positions, &expected_positions);
+            prop_assert_eq!(&filtered_run.granted_positions, &expected_positions);
+            prop_assert_eq!(
+                &cancelled_run.granted_positions,
+                &filtered_run.granted_positions
+            );
+
+            prop_assert_eq!(cancelled_run.queue_depth, 0);
+            prop_assert_eq!(filtered_run.queue_depth, 0);
+            prop_assert_eq!(cancelled_run.available, 1);
+            prop_assert_eq!(filtered_run.available, 1);
+
+            prop_assert_eq!(cancelled_run.queued_executed, survivor_count);
+            prop_assert_eq!(filtered_run.queued_executed, survivor_count);
+            prop_assert_eq!(cancelled_run.total_cancelled, cancelled_count);
+            prop_assert_eq!(filtered_run.total_cancelled, 0);
+        }
     }
 
     // =========================================================================
