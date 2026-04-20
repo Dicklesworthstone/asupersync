@@ -711,15 +711,18 @@ impl SettingsFrame {
             flags |= settings_flags::ACK;
         }
 
+        // RFC 9113 §6.5.3: a SETTINGS ACK frame MUST have zero-length payload.
+        let encoded_settings: &[Setting] = if self.ack { &[] } else { &self.settings };
+
         let header = FrameHeader {
-            length: frame_length(self.settings.len().saturating_mul(6)),
+            length: frame_length(encoded_settings.len().saturating_mul(6)),
             frame_type: FrameType::Settings as u8,
             flags,
             stream_id: 0,
         };
         header.write(dst);
 
-        for setting in &self.settings {
+        for setting in encoded_settings {
             dst.put_u16(setting.id());
             dst.put_u32(setting.value());
         }
@@ -1222,6 +1225,24 @@ mod tests {
         let header = FrameHeader::parse(&mut buf).unwrap();
         assert_eq!(header.length, 0);
         assert!(header.has_flag(settings_flags::ACK));
+    }
+
+    #[test]
+    fn test_settings_ack_serialization_drops_payload_per_rfc9113() {
+        let mut buf = BytesMut::new();
+        SettingsFrame {
+            settings: vec![Setting::HeaderTableSize(4096)],
+            ack: true,
+        }
+        .encode(&mut buf);
+
+        let header = FrameHeader::parse(&mut buf).unwrap();
+        assert_eq!(header.length, 0, "SETTINGS ACK must be zero-length");
+        assert!(header.has_flag(settings_flags::ACK));
+        assert!(
+            buf.is_empty(),
+            "SETTINGS ACK must not carry serialized settings payload"
+        );
     }
 
     #[test]
