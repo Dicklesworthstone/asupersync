@@ -1096,6 +1096,20 @@ mod tests {
         init_test_logging();
     }
 
+    fn scrub_rewrite_summary(summary: &str) -> String {
+        summary
+            .lines()
+            .map(|line| {
+                if let Some((prefix, _)) = line.split_once(" (") {
+                    format!("{prefix} ([PLAN_ID] -> [PLAN_ID])")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn shared_leaf_race_plan() -> (PlanDag, PlanId, PlanId, PlanId) {
         let mut dag = PlanDag::new();
         let shared = dag.leaf("shared");
@@ -1703,5 +1717,25 @@ mod tests {
 
         let rr2 = rr;
         assert_eq!(rr2.steps().len(), 0);
+    }
+
+    #[test]
+    fn rewrite_report_summary_snapshot_scrubbed() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let inner = dag.join(vec![a, b]);
+        let c = dag.leaf("c");
+        let outer = dag.join(vec![inner, c]);
+        dag.set_root(outer);
+
+        let report = dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::JoinAssoc]);
+        assert_eq!(report.steps().len(), 1, "expected a single join-assoc rewrite");
+
+        insta::assert_snapshot!(
+            "rewrite_report_summary_scrubbed",
+            scrub_rewrite_summary(&report.summary())
+        );
     }
 }
