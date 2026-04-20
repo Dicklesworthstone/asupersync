@@ -33,8 +33,8 @@
 //! ```
 
 use super::gf256::{
-    Gf256, gf256_add_slice, gf256_add_slices2, gf256_addmul_slice, gf256_addmul_slices2,
-    gf256_mul_slice, gf256_mul_slices2,
+    gf256_add_slice, gf256_add_slices2, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice,
+    gf256_mul_slices2, Gf256,
 };
 
 // ============================================================================
@@ -1094,6 +1094,130 @@ fn count_nonzero_capped_from(row: &[u8], start_col: usize, cap: usize) -> usize 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RaptorQConfig;
+    use crate::cx::Cx;
+    use crate::raptorq::builder::RaptorQSenderBuilder;
+    use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+    use crate::security::AuthenticatedSymbol;
+    use crate::transport::sink::SymbolSink;
+    use crate::types::symbol::ObjectId;
+    use crate::util::DetRng;
+
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    struct CollectorSink {
+        symbols: Vec<AuthenticatedSymbol>,
+    }
+
+    impl CollectorSink {
+        fn new() -> Self {
+            Self {
+                symbols: Vec::new(),
+            }
+        }
+
+        fn symbols(&self) -> &[AuthenticatedSymbol] {
+            &self.symbols
+        }
+    }
+
+    impl SymbolSink for CollectorSink {
+        fn poll_send(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            symbol: AuthenticatedSymbol,
+        ) -> Poll<Result<(), crate::transport::error::SinkError>> {
+            self.symbols.push(symbol);
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), crate::transport::error::SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), crate::transport::error::SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), crate::transport::error::SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Unpin for CollectorSink {}
+
+    fn seed_for_block(object_id: ObjectId, sbn: u8) -> u64 {
+        let obj = object_id.as_u128();
+        let hi = (obj >> 64) as u64;
+        let lo = obj as u64;
+        let mut seed = hi ^ lo.rotate_left(13);
+        seed ^= u64::from(sbn) << 56;
+        if seed == 0 {
+            1
+        } else {
+            seed
+        }
+    }
+
+    fn create_test_decoder(symbols: &[AuthenticatedSymbol], k: usize) -> InactivationDecoder {
+        let first_symbol = symbols
+            .first()
+            .expect("decode permutation invariance requires at least one symbol")
+            .symbol();
+        let seed = seed_for_block(first_symbol.object_id(), first_symbol.sbn());
+        InactivationDecoder::new(k, first_symbol.len(), seed)
+    }
+
+    fn symbols_to_received(symbols: &[AuthenticatedSymbol], k: usize) -> Vec<ReceivedSymbol> {
+        let Some(first) = symbols.first() else {
+            return Vec::new();
+        };
+
+        let first_symbol = first.symbol();
+        let seed = seed_for_block(first_symbol.object_id(), first_symbol.sbn());
+        let decoder = InactivationDecoder::new(k, first_symbol.len(), seed);
+        let mut received = Vec::with_capacity(symbols.len());
+
+        for auth_symbol in symbols {
+            let symbol = auth_symbol.symbol();
+            let row = match symbol.kind() {
+                crate::types::SymbolKind::Source => {
+                    ReceivedSymbol::source(symbol.esi(), symbol.data().to_vec())
+                }
+                crate::types::SymbolKind::Repair => {
+                    let (columns, coefficients) = decoder.repair_equation(symbol.esi());
+                    ReceivedSymbol::repair(
+                        symbol.esi(),
+                        columns,
+                        coefficients,
+                        symbol.data().to_vec(),
+                    )
+                }
+            };
+            received.push(row);
+        }
+
+        received
+    }
+
+    fn flatten_source_symbols(source_symbols: &[Vec<u8>], original_len: usize) -> Vec<u8> {
+        source_symbols
+            .iter()
+            .flatten()
+            .copied()
+            .take(original_len)
+            .collect()
+    }
 
     // -- DenseRow tests --
 
@@ -2191,5 +2315,54 @@ mod tests {
         assert_eq!(s.swaps, 0);
         let cloned = s;
         assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn metamorphic_decode_permutation_invariance() {
+        let cx = Cx::for_testing();
+        let data: Vec<u8> = (0..383).map(|i| (i as u8).wrapping_mul(17)).collect();
+        let object_id = ObjectId::new_for_test(0xfeed_beef);
+
+        let config = RaptorQConfig::default();
+        let sink = CollectorSink::new();
+        let mut sender = RaptorQSenderBuilder::new()
+            .config(config)
+            .transport(sink)
+            .build()
+            .expect("sender build");
+
+        let send_outcome = sender
+            .send_object(&cx, object_id, &data)
+            .expect("encoding should succeed");
+        let symbols = sender.transport_mut().symbols().to_vec();
+        let k = send_outcome.source_symbols;
+
+        let original_symbols = &symbols[..std::cmp::min(symbols.len(), k + 3)];
+        let original_payload = symbols_to_received(original_symbols, k);
+
+        let mut permuted_payload = original_payload.clone();
+        let mut rng = DetRng::new(0xdecafbad_u64);
+        for i in (1..permuted_payload.len()).rev() {
+            let j = (rng.next_u32() as usize) % (i + 1);
+            permuted_payload.swap(i, j);
+        }
+
+        let decoder = create_test_decoder(&symbols, k);
+        let mut received_original = decoder.constraint_symbols();
+        received_original.extend(original_payload);
+        let mut received_permuted = decoder.constraint_symbols();
+        received_permuted.extend(permuted_payload);
+        let decoded_original = decoder
+            .decode(&received_original)
+            .expect("original ordering should decode");
+        let decoded_permuted = decoder
+            .decode(&received_permuted)
+            .expect("permuted ordering should decode");
+
+        assert_eq!(
+            flatten_source_symbols(&decoded_original.source, data.len()),
+            flatten_source_symbols(&decoded_permuted.source, data.len()),
+            "decode output must be byte-identical under symbol-set permutation"
+        );
     }
 }
