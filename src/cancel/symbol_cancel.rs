@@ -1088,7 +1088,12 @@ impl Default for CleanupCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+    use crate::runtime::yield_now;
+    use crate::test_utils::init_test_logging;
     use crate::types::symbol::{ObjectId, Symbol};
+    use serde_json::Value;
+    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::AtomicUsize;
 
     struct NullSink;
@@ -1107,6 +1112,46 @@ mod tests {
             _msg: &CancelMessage,
         ) -> impl std::future::Future<Output = crate::error::Result<usize>> + Send {
             std::future::ready(Ok(0))
+        }
+    }
+
+    struct RecordingSink {
+        label: &'static str,
+        checkpoints: Arc<StdMutex<Vec<Value>>>,
+        messages: Arc<StdMutex<Vec<CancelMessage>>>,
+    }
+
+    impl CancelSink for RecordingSink {
+        fn send_to(
+            &self,
+            _peer: &PeerId,
+            _msg: &CancelMessage,
+        ) -> impl std::future::Future<Output = crate::error::Result<()>> + Send {
+            std::future::ready(Ok(()))
+        }
+
+        fn broadcast(
+            &self,
+            msg: &CancelMessage,
+        ) -> impl std::future::Future<Output = crate::error::Result<usize>> + Send {
+            let label = self.label;
+            let checkpoints = Arc::clone(&self.checkpoints);
+            let messages = Arc::clone(&self.messages);
+            let message = msg.clone();
+
+            async move {
+                let event = serde_json::json!({
+                    "phase": format!("{label}_broadcast"),
+                    "kind": format!("{:?}", message.kind()),
+                    "sequence": message.sequence(),
+                    "hops": message.hops(),
+                });
+                tracing::info!(event = %event, "symbol_cancel_lab_checkpoint");
+                checkpoints.lock().unwrap().push(event);
+                messages.lock().unwrap().push(message);
+                yield_now().await;
+                Ok(1)
+            }
         }
     }
 
@@ -1367,6 +1412,248 @@ mod tests {
         let metrics = broadcaster.metrics();
         assert_eq!(metrics.received, 1);
         assert_eq!(metrics.forwarded, 1);
+    }
+
+    #[test]
+    fn cancel_broadcast_drains_remote_children_under_lab_runtime() {
+        init_test_logging();
+        crate::test_phase!("cancel_broadcast_drains_remote_children_under_lab_runtime");
+
+        let config = TestConfig::new()
+            .with_seed(0xCAA0_CE11)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let checkpoints = Arc::new(StdMutex::new(Vec::<Value>::new()));
+        let local_messages = Arc::new(StdMutex::new(Vec::<CancelMessage>::new()));
+        let remote_messages = Arc::new(StdMutex::new(Vec::<CancelMessage>::new()));
+
+        let (
+            local_cancelled,
+            remote_cancelled,
+            remote_child_cancelled,
+            late_child_cancelled,
+            remote_reason,
+            remote_metrics,
+            checkpoints,
+        ) = LabRuntimeTarget::block_on(&mut runtime, async move {
+            let cx = crate::cx::Cx::current().expect("lab runtime should install a current Cx");
+            let local_spawn_cx = cx.clone();
+            let remote_spawn_cx = cx.clone();
+            let object_id = ObjectId::new_for_test(44);
+
+            let local_sink = RecordingSink {
+                label: "local",
+                checkpoints: Arc::clone(&checkpoints),
+                messages: Arc::clone(&local_messages),
+            };
+            let remote_sink = RecordingSink {
+                label: "remote",
+                checkpoints: Arc::clone(&checkpoints),
+                messages: Arc::clone(&remote_messages),
+            };
+
+            let local_broadcaster = Arc::new(CancelBroadcaster::new(local_sink));
+            let remote_broadcaster = Arc::new(CancelBroadcaster::new(remote_sink));
+
+            let mut local_rng = DetRng::new(101);
+            let local_token = SymbolCancelToken::new(object_id, &mut local_rng);
+            local_broadcaster.register_token(local_token.clone());
+
+            let mut remote_rng = DetRng::new(202);
+            let remote_token = SymbolCancelToken::new(object_id, &mut remote_rng);
+            let remote_child = remote_token.child(&mut remote_rng);
+            let late_child = Arc::new(StdMutex::new(None::<SymbolCancelToken>));
+            let late_child_listener = Arc::clone(&late_child);
+            let listener_checkpoints = Arc::clone(&checkpoints);
+            let remote_token_for_listener = remote_token.clone();
+            remote_token.add_listener(move |reason: &CancelReason, at: Time| {
+                let listener_event = serde_json::json!({
+                    "phase": "remote_listener_invoked",
+                    "kind": format!("{:?}", reason.kind),
+                    "at_millis": at.as_millis(),
+                });
+                tracing::info!(event = %listener_event, "symbol_cancel_lab_checkpoint");
+                listener_checkpoints.lock().unwrap().push(listener_event);
+
+                let mut child_rng = DetRng::new(303);
+                let child = remote_token_for_listener.child(&mut child_rng);
+                *late_child_listener.lock().unwrap() = Some(child);
+            });
+            remote_broadcaster.register_token(remote_token.clone());
+
+            let local_task = LabRuntimeTarget::spawn(&local_spawn_cx, Budget::INFINITE, {
+                let local_broadcaster = Arc::clone(&local_broadcaster);
+                let local_token = local_token.clone();
+                let checkpoints = Arc::clone(&checkpoints);
+                async move {
+                    let request = serde_json::json!({
+                        "phase": "local_cancel_requested",
+                        "object_high": object_id.high(),
+                    });
+                    tracing::info!(event = %request, "symbol_cancel_lab_checkpoint");
+                    checkpoints.lock().unwrap().push(request);
+
+                    let sent = local_broadcaster
+                        .cancel(object_id, &CancelReason::shutdown(), Time::from_millis(100))
+                        .await
+                        .expect("local cancel should broadcast successfully");
+
+                    let completed = serde_json::json!({
+                        "phase": "local_cancel_completed",
+                        "sent": sent,
+                    });
+                    tracing::info!(event = %completed, "symbol_cancel_lab_checkpoint");
+                    checkpoints.lock().unwrap().push(completed);
+                    local_token.is_cancelled()
+                }
+            });
+
+            let local_outcome = local_task.await;
+            crate::assert_with_log!(
+                matches!(local_outcome, crate::types::Outcome::Ok(true)),
+                "local cancel task completes successfully",
+                true,
+                matches!(local_outcome, crate::types::Outcome::Ok(true))
+            );
+            let crate::types::Outcome::Ok(local_cancelled) = local_outcome else {
+                panic!("local cancel task should finish successfully");
+            };
+
+            let forwarded = local_messages
+                .lock()
+                .unwrap()
+                .first()
+                .cloned()
+                .expect("local cancel should emit a broadcast message");
+
+            let remote_task = LabRuntimeTarget::spawn(&remote_spawn_cx, Budget::INFINITE, {
+                let remote_broadcaster = Arc::clone(&remote_broadcaster);
+                let remote_token = remote_token.clone();
+                let remote_child = remote_child.clone();
+                let late_child = Arc::clone(&late_child);
+                let checkpoints = Arc::clone(&checkpoints);
+                async move {
+                    let received = serde_json::json!({
+                        "phase": "remote_handle_started",
+                        "sequence": forwarded.sequence(),
+                    });
+                    tracing::info!(event = %received, "symbol_cancel_lab_checkpoint");
+                    checkpoints.lock().unwrap().push(received);
+
+                    remote_broadcaster
+                        .handle_message(forwarded, Time::from_millis(125))
+                        .await
+                        .expect("remote handle_message should succeed");
+
+                    let completed = serde_json::json!({
+                        "phase": "remote_handle_completed",
+                        "forwarded_count": remote_broadcaster.metrics().forwarded,
+                    });
+                    tracing::info!(event = %completed, "symbol_cancel_lab_checkpoint");
+                    checkpoints.lock().unwrap().push(completed);
+
+                    (
+                        remote_token.is_cancelled(),
+                        remote_child.is_cancelled(),
+                        late_child
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .expect("late child should be created by remote listener")
+                            .is_cancelled(),
+                        remote_token
+                            .reason()
+                            .expect("remote token should have a reason")
+                            .kind,
+                        remote_broadcaster.metrics(),
+                    )
+                }
+            });
+
+            let remote_outcome = remote_task.await;
+            crate::assert_with_log!(
+                matches!(remote_outcome, crate::types::Outcome::Ok(_)),
+                "remote handle task completes successfully",
+                true,
+                matches!(remote_outcome, crate::types::Outcome::Ok(_))
+            );
+            let crate::types::Outcome::Ok((
+                remote_cancelled,
+                remote_child_cancelled,
+                late_child_cancelled,
+                remote_reason,
+                remote_metrics,
+            )) = remote_outcome
+            else {
+                panic!("remote handle task should finish successfully");
+            };
+
+            assert_eq!(
+                remote_token.state.children.read().len(),
+                0,
+                "remote cancellation should drain queued children before returning"
+            );
+            assert_eq!(
+                remote_token.state.listeners.read().len(),
+                0,
+                "remote cancellation should drain listeners before returning"
+            );
+
+            (
+                local_cancelled,
+                remote_cancelled,
+                remote_child_cancelled,
+                late_child_cancelled,
+                remote_reason,
+                remote_metrics,
+                checkpoints.lock().unwrap().clone(),
+            )
+        });
+
+        assert!(
+            local_cancelled,
+            "local token should be cancelled by broadcaster.cancel"
+        );
+        assert!(
+            remote_cancelled,
+            "remote token should be cancelled by forwarded message"
+        );
+        assert!(
+            remote_child_cancelled,
+            "remote pre-existing child should be drained during cancellation"
+        );
+        assert!(
+            late_child_cancelled,
+            "listener-spawned child should be cancelled before handle_message returns"
+        );
+        assert_eq!(remote_reason, CancelKind::Shutdown);
+        assert_eq!(remote_metrics.received, 1);
+        assert_eq!(remote_metrics.forwarded, 1);
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "local_broadcast"),
+            "local broadcast checkpoint should be recorded"
+        );
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "remote_listener_invoked"),
+            "remote listener checkpoint should be recorded"
+        );
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "remote_handle_completed"),
+            "remote completion checkpoint should be recorded"
+        );
+
+        let violations = runtime.oracles.check_all(runtime.now());
+        assert!(
+            violations.is_empty(),
+            "symbol cancel lab-runtime test should leave runtime invariants clean: {violations:?}"
+        );
     }
 
     #[test]
