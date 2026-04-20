@@ -24,6 +24,7 @@ cargo +nightly install cargo-fuzz
 | `bytes_slice_split_to` | Immutable Bytes slicing, split_to, and partition invariants | High |
 | `bytes_cursor_reader` | BytesCursor and reader() position, chunk, and copy invariants | High |
 | `grpc_prost_codec_decode` | Direct ProstCodec decode limits, malformed-wire, and unknown-field invariants | High |
+| `tls_stream_record_framing` | TlsStream handshake/read/write behavior under fragmented and malformed TLS records | High |
 | `fuzz_hpack_decode` | HPACK header compression decoder | Critical |
 | `fuzz_http2_frame` | HTTP/2 frame parser | Critical |
 | `fuzz_interest_flags` | Reactor Interest bitflags | Low |
@@ -70,6 +71,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `corpus/bytes_slice_split_to/` - Immutable Bytes slicing and split partition scenarios
 - `corpus/bytes_cursor_reader/` - BytesCursor reader and cursor-position scenarios
 - `corpus/grpc_prost_codec_decode/` - Direct ProstCodec decode boundary and malformed-wire scenarios
+- `corpus/tls_stream_record_framing/` - TlsStream record fragmentation, truncation, and close-notify scenarios
 
 To run with seeds:
 
