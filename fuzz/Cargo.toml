@@ -928,6 +928,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "length_delimited_frame_boundary"
+path = "fuzz_targets/length_delimited_frame_boundary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "postgres_scram"
 path = "fuzz_targets/postgres_scram.rs"
 test = false

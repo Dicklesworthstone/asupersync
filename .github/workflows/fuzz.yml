@@ -25,6 +25,7 @@ on:
           - h1_parsed_url
           - length_delimited_encode_width
           - length_delimited_decoder_state
+          - length_delimited_frame_boundary
           - bytes_slice_split_to
           - bytes_cursor_reader
           - grpc_prost_codec_decode
@@ -59,6 +60,7 @@ jobs:
           - h1_parsed_url
           - length_delimited_encode_width
           - length_delimited_decoder_state
+          - length_delimited_frame_boundary
           - bytes_slice_split_to
           - bytes_cursor_reader
           - grpc_prost_codec_decode
