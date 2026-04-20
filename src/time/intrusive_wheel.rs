@@ -1169,6 +1169,7 @@ fn duration_to_ns(duration: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1195,6 +1196,62 @@ mod tests {
 
     fn counter_waker(counter: Arc<AtomicU64>) -> Waker {
         Arc::new(CounterWaker { counter }).into()
+    }
+
+    fn intrusive_wheel_signature<const SLOTS: usize>(
+        entries: &[(u16, bool)],
+        insertion_order: &[usize],
+        cancel_after_insert: bool,
+    ) -> (Option<Duration>, usize, usize, bool) {
+        let base = Instant::now();
+        let mut wheel: TimerWheel<SLOTS> = TimerWheel::new_at(Duration::from_millis(1), base);
+        let counter = Arc::new(AtomicU64::new(0));
+        let mut nodes: Vec<Pin<Box<TimerNode>>> = (0..entries.len())
+            .map(|_| Box::pin(TimerNode::new()))
+            .collect();
+
+        for &index in insertion_order {
+            let (offset_ms, cancelled) = entries[index];
+            if !cancel_after_insert && cancelled {
+                continue;
+            }
+
+            let deadline = base + Duration::from_millis(u64::from(offset_ms));
+            let waker = counter_waker(counter.clone());
+            unsafe {
+                wheel.insert(nodes[index].as_mut(), deadline, waker);
+            }
+        }
+
+        if cancel_after_insert {
+            for (index, (_, cancelled)) in entries.iter().enumerate() {
+                if *cancelled {
+                    unsafe {
+                        wheel.cancel(nodes[index].as_mut());
+                    }
+                }
+            }
+        }
+
+        let next = wheel.next_expiration();
+        let max_offset_ms = entries
+            .iter()
+            .filter_map(|(offset_ms, cancelled)| (!cancelled).then_some(*offset_ms))
+            .max()
+            .unwrap_or(0);
+        let advance_target = base + Duration::from_millis(u64::from(max_offset_ms) + 2);
+        let wakers = unsafe { wheel.advance_to(advance_target) };
+        let wake_count = wakers.len();
+        for waker in wakers {
+            waker.wake();
+        }
+
+        (
+            next,
+            wake_count,
+            nodes.iter().filter(|node| node.is_linked()).count(),
+            wheel.is_empty(),
+        )
     }
 
     #[test]
@@ -1712,5 +1769,58 @@ mod tests {
         crate::test_complete!(
             "hierarchical_wheel_cascade_survivor_reinserts_without_extra_tick_delay"
         );
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_intrusive_wheel_cancelled_subset_matches_filtered_rotation(
+            entries in prop::collection::vec((1u16..96u16, any::<bool>()), 1..12),
+            raw_shift in 0usize..32,
+        ) {
+            let mut rotated_order: Vec<usize> = (0..entries.len()).collect();
+            rotated_order.rotate_left(raw_shift % entries.len());
+
+            let base_signature =
+                intrusive_wheel_signature::<16>(&entries, &rotated_order, true);
+            let filtered_signature =
+                intrusive_wheel_signature::<16>(&entries, &rotated_order, false);
+
+            let survivor_count = entries.iter().filter(|(_, cancelled)| !cancelled).count();
+
+            prop_assert_eq!(
+                base_signature.0,
+                filtered_signature.0,
+                "cancelling a subset after insertion must preserve the next expiration of surviving timers",
+            );
+            prop_assert_eq!(
+                base_signature.1,
+                survivor_count,
+                "exactly the uncancelled timers should fire",
+            );
+            prop_assert_eq!(
+                filtered_signature.1,
+                survivor_count,
+                "filtered insertion should fire the same surviving timers",
+            );
+            prop_assert_eq!(
+                base_signature.1,
+                filtered_signature.1,
+                "post-insert cancellation must match excluding the same timers up front",
+            );
+            prop_assert_eq!(
+                base_signature.2,
+                0,
+                "no timer nodes should remain linked after advancing past all survivors",
+            );
+            prop_assert_eq!(
+                filtered_signature.2,
+                0,
+                "filtered run must also drain all timer nodes",
+            );
+            prop_assert!(
+                base_signature.3 && filtered_signature.3,
+                "both wheels should be empty after draining surviving timers",
+            );
+        }
     }
 }
