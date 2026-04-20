@@ -841,7 +841,18 @@ impl fmt::Debug for BulkheadRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+    use crate::cx::Cx;
+    use crate::runtime::yield_now;
+    use crate::types::Budget;
     use proptest::prelude::*;
+    use serde_json::Value;
+    use std::sync::Mutex;
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
 
     // =========================================================================
     // Basic Permit Acquisition
@@ -2123,6 +2134,164 @@ mod tests {
         assert_eq!(
             slow_metrics.queue_depth, 1,
             "slow bulkhead queue unchanged by fast timeout"
+        );
+    }
+
+    #[test]
+    fn bulkhead_saturation_queues_and_recovers_under_lab_runtime() {
+        init_test("bulkhead_saturation_queues_and_recovers_under_lab_runtime");
+
+        let config = TestConfig::new()
+            .with_seed(0xB011_CE11)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let bulkhead = Arc::new(Bulkhead::new(BulkheadPolicy {
+            name: "lab-bulkhead".into(),
+            max_concurrent: 1,
+            max_queue: 1,
+            queue_timeout: Duration::from_secs(1),
+            ..Default::default()
+        }));
+        let checkpoints = Arc::new(Mutex::new(Vec::<Value>::new()));
+
+        let (queue_entry_id, checkpoints, final_metrics, final_available) =
+            LabRuntimeTarget::block_on(&mut runtime, async move {
+                let cx = Cx::current().expect("lab runtime should install a current Cx");
+                let holder_spawn_cx = cx.clone();
+                let waiter_spawn_cx = cx.clone();
+
+                let holder_bulkhead = Arc::clone(&bulkhead);
+                let holder_checkpoints = Arc::clone(&checkpoints);
+                let holder_task_cx = holder_spawn_cx.clone();
+                let holder =
+                    LabRuntimeTarget::spawn(&holder_spawn_cx, Budget::INFINITE, async move {
+                        let permit = holder_bulkhead
+                            .try_acquire(1)
+                            .expect("holder should acquire the only permit");
+                        let acquired = serde_json::json!({
+                            "phase": "holder_acquired",
+                            "available": holder_bulkhead.available(),
+                        });
+                        tracing::info!(event = %acquired, "bulkhead_lab_checkpoint");
+                        holder_checkpoints.lock().unwrap().push(acquired);
+
+                        yield_now().await;
+                        yield_now().await;
+                        permit.release();
+
+                        let released = serde_json::json!({
+                            "phase": "holder_released",
+                            "available": holder_bulkhead.available(),
+                            "time_ns": holder_task_cx.now().as_nanos(),
+                        });
+                        tracing::info!(event = %released, "bulkhead_lab_checkpoint");
+                        holder_checkpoints.lock().unwrap().push(released);
+                    });
+
+                yield_now().await;
+
+                let waiter_bulkhead = Arc::clone(&bulkhead);
+                let waiter_checkpoints = Arc::clone(&checkpoints);
+                let waiter_task_cx = waiter_spawn_cx.clone();
+                let waiter =
+                    LabRuntimeTarget::spawn(&waiter_spawn_cx, Budget::INFINITE, async move {
+                        let entry_id = waiter_bulkhead
+                            .enqueue(1, waiter_task_cx.now())
+                            .expect("waiter should enqueue while saturated");
+                        let enqueued = serde_json::json!({
+                            "phase": "waiter_enqueued",
+                            "entry_id": entry_id,
+                            "queue_depth": waiter_bulkhead.metrics().queue_depth,
+                        });
+                        tracing::info!(event = %enqueued, "bulkhead_lab_checkpoint");
+                        waiter_checkpoints.lock().unwrap().push(enqueued);
+
+                        let permit = loop {
+                            match waiter_bulkhead.check_entry(entry_id, waiter_task_cx.now()) {
+                                Ok(Some(permit)) => break permit,
+                                Ok(None) => yield_now().await,
+                                other => panic!("waiter queue check failed: {other:?}"),
+                            }
+                        };
+
+                        let granted = serde_json::json!({
+                            "phase": "waiter_granted",
+                            "entry_id": entry_id,
+                            "available": waiter_bulkhead.available(),
+                        });
+                        tracing::info!(event = %granted, "bulkhead_lab_checkpoint");
+                        waiter_checkpoints.lock().unwrap().push(granted);
+
+                        permit.release();
+                        let released = serde_json::json!({
+                            "phase": "waiter_released",
+                            "entry_id": entry_id,
+                            "available": waiter_bulkhead.available(),
+                        });
+                        tracing::info!(event = %released, "bulkhead_lab_checkpoint");
+                        waiter_checkpoints.lock().unwrap().push(released);
+                        entry_id
+                    });
+
+                let holder_outcome = holder.await;
+                crate::assert_with_log!(
+                    matches!(holder_outcome, crate::types::Outcome::Ok(())),
+                    "holder task completes successfully",
+                    true,
+                    matches!(holder_outcome, crate::types::Outcome::Ok(()))
+                );
+
+                let waiter_outcome = waiter.await;
+                crate::assert_with_log!(
+                    matches!(waiter_outcome, crate::types::Outcome::Ok(_)),
+                    "waiter task completes successfully",
+                    true,
+                    matches!(waiter_outcome, crate::types::Outcome::Ok(_))
+                );
+                let crate::types::Outcome::Ok(queue_entry_id) = waiter_outcome else {
+                    panic!("waiter task should finish successfully");
+                };
+
+                (
+                    queue_entry_id,
+                    checkpoints.lock().unwrap().clone(),
+                    bulkhead.metrics(),
+                    bulkhead.available(),
+                )
+            });
+
+        assert_eq!(queue_entry_id, 0);
+        assert_eq!(final_metrics.active_permits, 0);
+        assert_eq!(final_metrics.queue_depth, 0);
+        assert_eq!(final_metrics.total_executed, 2);
+        assert_eq!(final_metrics.total_queued, 1);
+        assert_eq!(final_metrics.total_rejected, 0);
+        assert_eq!(final_metrics.total_timeout, 0);
+        assert_eq!(final_metrics.total_cancelled, 0);
+        assert_eq!(final_available, 1);
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "holder_acquired"),
+            "holder acquisition checkpoint should be recorded"
+        );
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "waiter_enqueued"),
+            "waiter enqueue checkpoint should be recorded"
+        );
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "waiter_granted"),
+            "waiter grant checkpoint should be recorded"
+        );
+        let violations = runtime.oracles.check_all(runtime.now());
+        assert!(
+            violations.is_empty(),
+            "bulkhead lab-runtime saturation test should leave runtime invariants clean: {violations:?}"
         );
     }
 }
