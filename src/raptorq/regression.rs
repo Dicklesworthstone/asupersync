@@ -227,7 +227,15 @@ impl RegressionMonitor {
         self.total_observations += 1;
 
         for (metric, value) in &values {
-            let check_result = self.calibrator.check_and_track(metric, *value);
+            let check_result = if self.calibrator.threshold(metric).is_some() {
+                self.calibrator.check_and_track(metric, *value)
+            } else {
+                // Grow the split-conformal calibration set until the metric has
+                // enough baseline observations. The activating observation is
+                // treated as calibration-only, never scored against itself.
+                self.calibrator.calibrate(metric, *value);
+                None
+            };
 
             let (threshold, exceeds_threshold, calibration_n) =
                 check_result.as_ref().map_or((None, false, 0), |cr| {
@@ -282,6 +290,12 @@ impl RegressionMonitor {
                 exceeds_threshold,
                 verdict,
             });
+        }
+
+        if !self.calibration_complete {
+            self.calibration_complete = TRACKED_METRICS
+                .iter()
+                .all(|metric| self.calibrator.is_metric_calibrated(metric));
         }
 
         let regime_state = stats
@@ -453,6 +467,27 @@ mod tests {
     }
 
     #[test]
+    fn check_only_warmup_marks_monitor_calibrated() {
+        let mut monitor = RegressionMonitor::new();
+
+        for i in 0..(MIN_CALIBRATION_SAMPLES + 5) {
+            let stats = make_baseline_stats(10 + i % 3, 3 + i % 2);
+            let _ = monitor.check(&stats);
+        }
+
+        assert!(
+            monitor.is_calibrated(),
+            "check-only warmup should flip the public calibration state once all metrics are calibrated"
+        );
+        assert!(
+            TRACKED_METRICS
+                .iter()
+                .all(|metric| monitor.threshold(metric).is_some()),
+            "every tracked metric should expose a threshold after check-only warmup"
+        );
+    }
+
+    #[test]
     fn regression_log_lines_render_one_line_per_metric() {
         let report = RegressionReport {
             schema_version: G8_SCHEMA_VERSION,
@@ -594,16 +629,15 @@ mod tests {
         let mut clean = RegressionMonitor::new();
         let mut with_prechecks = RegressionMonitor::new();
 
-        for _ in 0..(MIN_CALIBRATION_SAMPLES / 2) {
-            let stats = make_baseline_stats(10, 3);
-            let report = with_prechecks.check(&stats);
-            assert_eq!(report.overall_verdict, RegressionVerdict::Calibrating);
-        }
-
-        for i in 0..(MIN_CALIBRATION_SAMPLES + 5) {
+        for i in 0..MIN_CALIBRATION_SAMPLES {
             let stats = make_baseline_stats(10 + i % 2, 3);
             clean.calibrate(&stats);
-            with_prechecks.calibrate(&stats);
+            let report = with_prechecks.check(&stats);
+            assert_eq!(
+                report.overall_verdict,
+                RegressionVerdict::Calibrating,
+                "warmup observations fed via check() must remain calibration-only until activation"
+            );
         }
 
         let anomaly = make_baseline_stats(1_000, 100);
