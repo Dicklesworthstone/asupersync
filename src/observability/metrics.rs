@@ -747,6 +747,22 @@ mod tests {
         assert!(output.contains("latency_count 2"));
     }
 
+    #[test]
+    fn metrics_export_prometheus_snapshot() {
+        let mut metrics = Metrics::new();
+        metrics.counter("requests_total").add(7);
+        metrics.gauge("active_connections").set(3);
+        let histogram = metrics.histogram("latency_seconds", vec![0.5, 1.0, 5.0]);
+        histogram.observe(0.25);
+        histogram.observe(0.75);
+        histogram.observe(3.5);
+
+        insta::assert_snapshot!(
+            "metrics_export_prometheus_mixed_registry",
+            metrics.export_prometheus()
+        );
+    }
+
     // =========================================================================
     // OpenTelemetry Exporter Implementation
     // =========================================================================
