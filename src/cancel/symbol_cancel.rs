@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{Budget, CancelKind, CancelReason, Time};
@@ -1089,6 +1089,7 @@ impl Default for CleanupCoordinator {
 mod tests {
     use super::*;
     use crate::types::symbol::{ObjectId, Symbol};
+    use std::sync::atomic::AtomicUsize;
 
     struct NullSink;
 
@@ -1772,6 +1773,192 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_listener_spawned_child_is_drained_inline() {
+        let mut rng = DetRng::new(91);
+        let parent = SymbolCancelToken::new(ObjectId::new_for_test(6), &mut rng);
+        let observed_child = Arc::new(std::sync::Mutex::new(None::<SymbolCancelToken>));
+        let observed_child_clone = Arc::clone(&observed_child);
+        let parent_for_listener = parent.clone();
+
+        parent.add_listener(move |_: &CancelReason, _: Time| {
+            let mut child_rng = DetRng::new(92);
+            let child = parent_for_listener.child(&mut child_rng);
+            *observed_child_clone.lock().unwrap() = Some(child);
+        });
+
+        let now = Time::from_millis(150);
+        assert!(
+            parent.cancel(&CancelReason::user("listener-child"), now),
+            "first caller should trigger cancellation"
+        );
+
+        let late_child = observed_child
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("listener should create a child during cancellation");
+        assert!(
+            late_child.is_cancelled(),
+            "child created during listener callback must be cancelled before cancel() returns"
+        );
+        assert_eq!(
+            late_child.reason().unwrap().kind,
+            CancelKind::ParentCancelled,
+            "late child should inherit parent-cancelled semantics"
+        );
+        assert_eq!(
+            late_child.cancelled_at(),
+            Some(now),
+            "late child should observe the parent cancellation timestamp"
+        );
+        assert_eq!(
+            parent.state.children.read().len(),
+            0,
+            "listener-spawned child must not be retained after drain completes"
+        );
+    }
+
+    #[test]
+    fn test_listener_registered_during_cancel_not_requeued() {
+        let mut rng = DetRng::new(93);
+        let token = SymbolCancelToken::new(ObjectId::new_for_test(7), &mut rng);
+        let notification_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen_kind = Arc::new(std::sync::Mutex::new(None::<CancelKind>));
+        let seen_time = Arc::new(std::sync::Mutex::new(None::<Time>));
+
+        let token_for_listener = token.clone();
+        let notification_count_clone = Arc::clone(&notification_count);
+        let seen_kind_clone = Arc::clone(&seen_kind);
+        let seen_time_clone = Arc::clone(&seen_time);
+        token.add_listener(move |_: &CancelReason, _: Time| {
+            token_for_listener.add_listener({
+                let notification_count_clone = Arc::clone(&notification_count_clone);
+                let seen_kind_clone = Arc::clone(&seen_kind_clone);
+                let seen_time_clone = Arc::clone(&seen_time_clone);
+                move |reason: &CancelReason, at: Time| {
+                    notification_count_clone.fetch_add(1, Ordering::SeqCst);
+                    *seen_kind_clone.lock().unwrap() = Some(reason.kind);
+                    *seen_time_clone.lock().unwrap() = Some(at);
+                }
+            });
+        });
+
+        let now = Time::from_millis(175);
+        assert!(
+            token.cancel(&CancelReason::timeout(), now),
+            "first caller should trigger listener drain"
+        );
+        assert_eq!(
+            notification_count.load(Ordering::SeqCst),
+            1,
+            "listener registered during cancellation should be invoked inline exactly once"
+        );
+        assert_eq!(
+            *seen_kind.lock().unwrap(),
+            Some(CancelKind::Timeout),
+            "late listener should observe the current cancellation kind"
+        );
+        assert_eq!(
+            *seen_time.lock().unwrap(),
+            Some(now),
+            "late listener should observe the current cancellation timestamp"
+        );
+        assert_eq!(
+            token.state.listeners.read().len(),
+            0,
+            "late listener should not remain queued after cancellation drain"
+        );
+
+        token.cancel(&CancelReason::shutdown(), Time::from_millis(200));
+        assert_eq!(
+            notification_count.load(Ordering::SeqCst),
+            1,
+            "drained late listener must not be re-notified by strengthened cancellations"
+        );
+        assert_eq!(
+            token.state.listeners.read().len(),
+            0,
+            "strengthened cancellations must not repopulate drained listeners"
+        );
+    }
+
+    #[test]
+    fn test_listener_registered_during_cancel_can_spawn_child_without_leak() {
+        let mut rng = DetRng::new(94);
+        let token = SymbolCancelToken::new(ObjectId::new_for_test(8), &mut rng);
+        let spawned_child = Arc::new(std::sync::Mutex::new(None::<SymbolCancelToken>));
+        let spawned_child_clone = Arc::clone(&spawned_child);
+        let child_notification_count = Arc::new(AtomicUsize::new(0));
+        let child_notification_count_clone = Arc::clone(&child_notification_count);
+        let token_for_listener = token.clone();
+
+        token.add_listener(move |_: &CancelReason, _: Time| {
+            token_for_listener.add_listener({
+                let spawned_child_clone = Arc::clone(&spawned_child_clone);
+                let child_notification_count_clone = Arc::clone(&child_notification_count_clone);
+                let token_for_listener = token_for_listener.clone();
+                move |reason: &CancelReason, at: Time| {
+                    child_notification_count_clone.fetch_add(1, Ordering::SeqCst);
+                    let mut child_rng = DetRng::new(95);
+                    let child = token_for_listener.child(&mut child_rng);
+                    assert!(
+                        child.is_cancelled(),
+                        "child created from a late listener must be cancelled inline"
+                    );
+                    assert_eq!(
+                        child.reason().unwrap().kind,
+                        CancelKind::ParentCancelled,
+                        "late child should inherit parent-cancelled semantics"
+                    );
+                    assert_eq!(
+                        child.cancelled_at(),
+                        Some(at),
+                        "late child should observe the current cancellation timestamp"
+                    );
+                    assert_eq!(
+                        reason.kind,
+                        CancelKind::Shutdown,
+                        "late listener should observe the active cancellation reason"
+                    );
+                    *spawned_child_clone.lock().unwrap() = Some(child);
+                }
+            });
+        });
+
+        let now = Time::from_millis(250);
+        assert!(
+            token.cancel(&CancelReason::shutdown(), now),
+            "first caller should trigger cancellation"
+        );
+
+        let child = spawned_child
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("late listener should have spawned a child");
+        assert_eq!(
+            child_notification_count.load(Ordering::SeqCst),
+            1,
+            "late listener should run exactly once during drain"
+        );
+        assert!(child.is_cancelled(), "spawned child must remain cancelled");
+        assert_eq!(
+            child.cancelled_at(),
+            Some(now),
+            "spawned child should be cancelled before cancel() returns"
+        );
+        assert_eq!(
+            token.state.listeners.read().len(),
+            0,
+            "drain must leave no late listeners queued"
+        );
+        assert_eq!(
+            token.state.children.read().len(),
+            0,
+            "drain must leave no late children queued"
+        );
+    }
     // ---- Cancel propagation: child cancel does not affect parent --------
 
     #[test]
