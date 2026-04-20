@@ -697,6 +697,18 @@ mod tests {
     }
 
     #[test]
+    fn serve_304_not_modified_for_if_none_match_wildcard() {
+        let dir = setup_dir();
+        let sf = StaticFiles::new(dir.path());
+        let path = sf.resolve_path("/hello.txt").unwrap();
+
+        let resp = sf.serve_file(&path, Some("*"));
+        assert_eq!(resp.status, StatusCode::NOT_MODIFIED);
+        assert!(resp.body.is_empty());
+        assert!(resp.headers.contains_key("etag"));
+    }
+
+    #[test]
     fn serve_custom_max_age() {
         let dir = setup_dir();
         let sf = StaticFiles::new(dir.path()).max_age(86400);
