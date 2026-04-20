@@ -437,6 +437,9 @@ impl FrameCodec {
                 return Err(WsError::ControlFrameTooLarge(payload_len));
             }
         }
+        if frame.opcode == Opcode::Close {
+            validate_close_payload(&frame.payload)?;
+        }
 
         // Determine if we need to mask (based on role)
         let should_mask = self.role == Role::Client;
@@ -1607,6 +1610,64 @@ mod tests {
             4000
         );
         assert_eq!(&frame.payload[2..], reason.as_bytes());
+    }
+
+    #[test]
+    fn encode_manual_close_frame_invalid_code_rejected() {
+        let mut codec = FrameCodec::server();
+        let frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Close,
+            masked: false,
+            mask_key: None,
+            payload: {
+                let mut payload = BytesMut::with_capacity(2);
+                payload.put_u16(1005);
+                payload.freeze()
+            },
+        };
+
+        let result = codec.encode(frame, &mut BytesMut::new());
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    fn encode_manual_close_frame_invalid_utf8_reason_rejected() {
+        let mut codec = FrameCodec::server();
+        let frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Close,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::from_static(&[0x03, 0xE8, 0xF0, 0x28]),
+        };
+
+        let result = codec.encode(frame, &mut BytesMut::new());
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    fn encode_manual_close_frame_one_byte_payload_rejected() {
+        let mut codec = FrameCodec::server();
+        let frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Close,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::from_static(&[0xFF]),
+        };
+
+        let result = codec.encode(frame, &mut BytesMut::new());
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
     }
 
     #[test]
