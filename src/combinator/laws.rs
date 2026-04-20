@@ -555,7 +555,9 @@ mod tests {
     use crate::combinator::pipeline::{PipelineResult, pipeline_n_outcomes};
     use crate::combinator::quorum::quorum_outcomes;
     use crate::combinator::race::{RaceWinner, race2_outcomes};
+    use crate::combinator::timeout::{effective_deadline, make_timed_result};
     use crate::types::Outcome;
+    use crate::types::Time;
     use crate::types::cancel::{CancelKind, CancelReason};
     use crate::types::outcome::{PanicPayload, join_outcomes};
 
@@ -830,6 +832,35 @@ mod tests {
                 matches!(loser, Outcome::Cancelled(ref r) if r.kind == CancelKind::RaceLost),
                 "race(f, never) loser should be RaceLost"
             );
+        }
+    }
+
+    /// TIMEOUT-IDENTITY: adding an identity timeout layer preserves deadline and outcome.
+    #[test]
+    fn timeout_identity_preserves_effective_deadline_and_outcome() {
+        let deadlines = [
+            Time::ZERO,
+            Time::from_nanos(1),
+            Time::from_nanos(1_000),
+            Time::from_nanos(1_000_000),
+        ];
+        let outcomes: Vec<Outcome<i32, i32>> = vec![ok(1), err(2), cancelled(), panicked()];
+
+        for requested in deadlines {
+            let effective = effective_deadline(requested, None);
+            assert_eq!(
+                effective, requested,
+                "timeout(None, f) should preserve requested deadline"
+            );
+
+            for outcome in &outcomes {
+                let wrapped = make_timed_result(outcome.clone(), effective, true).into_outcome();
+                assert_eq!(
+                    wrapped.severity(),
+                    outcome.severity(),
+                    "identity timeout wrapper should preserve outcome severity"
+                );
+            }
         }
     }
 
