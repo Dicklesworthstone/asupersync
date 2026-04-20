@@ -563,11 +563,15 @@ impl<T> Drop for Receiver<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+    use crate::runtime::yield_now;
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
+    use serde_json::Value;
     use std::future::Future;
     use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::task::{Context, Poll, Waker};
 
@@ -1176,6 +1180,164 @@ mod tests {
             true
         );
         crate::test_complete!("broadcast_drop_all_senders_closes");
+    }
+
+    #[test]
+    fn broadcast_fan_out_under_lab_runtime() {
+        init_test("broadcast_fan_out_under_lab_runtime");
+
+        let config = TestConfig::new()
+            .with_seed(0xBADC_A571)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let checkpoints = Arc::new(StdMutex::new(Vec::<Value>::new()));
+
+        let ((rx1_first, rx1_second), (rx2_first, rx2_second), checkpoints) =
+            LabRuntimeTarget::block_on(&mut runtime, async move {
+                let cx = Cx::current().expect("lab runtime should install a current Cx");
+                let sender_spawn_cx = cx.clone();
+                let rx1_spawn_cx = cx.clone();
+                let rx2_spawn_cx = cx.clone();
+
+                let (tx, mut rx1) = channel(8);
+                let mut rx2 = tx.subscribe();
+
+                let sender_checkpoints = Arc::clone(&checkpoints);
+                let sender = LabRuntimeTarget::spawn(&sender_spawn_cx, Budget::INFINITE, {
+                    let tx = tx.clone();
+                    let sender_task_cx = sender_spawn_cx.clone();
+                    async move {
+                        yield_now().await;
+
+                        let permit = tx.reserve(&sender_task_cx).expect("reserve should succeed");
+                        let first_receivers = permit.send(11);
+                        let first = serde_json::json!({
+                            "phase": "sent_first",
+                            "value": 11,
+                            "receivers": first_receivers,
+                        });
+                        tracing::info!(event = %first, "broadcast_lab_checkpoint");
+                        sender_checkpoints.lock().unwrap().push(first);
+
+                        let second_receivers =
+                            tx.send(&sender_task_cx, 22).expect("send should succeed");
+                        let second = serde_json::json!({
+                            "phase": "sent_second",
+                            "value": 22,
+                            "receivers": second_receivers,
+                        });
+                        tracing::info!(event = %second, "broadcast_lab_checkpoint");
+                        sender_checkpoints.lock().unwrap().push(second);
+                    }
+                });
+
+                let rx1_checkpoints = Arc::clone(&checkpoints);
+                let rx1_task = LabRuntimeTarget::spawn(&rx1_spawn_cx, Budget::INFINITE, {
+                    let rx1_task_cx = rx1_spawn_cx.clone();
+                    async move {
+                        let first = rx1.recv(&rx1_task_cx).await.expect("rx1 first receive");
+                        let first_event = serde_json::json!({
+                            "phase": "rx1_first",
+                            "value": first,
+                        });
+                        tracing::info!(event = %first_event, "broadcast_lab_checkpoint");
+                        rx1_checkpoints.lock().unwrap().push(first_event);
+
+                        let second = rx1.recv(&rx1_task_cx).await.expect("rx1 second receive");
+                        let second_event = serde_json::json!({
+                            "phase": "rx1_second",
+                            "value": second,
+                        });
+                        tracing::info!(event = %second_event, "broadcast_lab_checkpoint");
+                        rx1_checkpoints.lock().unwrap().push(second_event);
+
+                        (first, second)
+                    }
+                });
+
+                let rx2_checkpoints = Arc::clone(&checkpoints);
+                let rx2_task = LabRuntimeTarget::spawn(&rx2_spawn_cx, Budget::INFINITE, {
+                    let rx2_task_cx = rx2_spawn_cx.clone();
+                    async move {
+                        let first = rx2.recv(&rx2_task_cx).await.expect("rx2 first receive");
+                        let first_event = serde_json::json!({
+                            "phase": "rx2_first",
+                            "value": first,
+                        });
+                        tracing::info!(event = %first_event, "broadcast_lab_checkpoint");
+                        rx2_checkpoints.lock().unwrap().push(first_event);
+
+                        let second = rx2.recv(&rx2_task_cx).await.expect("rx2 second receive");
+                        let second_event = serde_json::json!({
+                            "phase": "rx2_second",
+                            "value": second,
+                        });
+                        tracing::info!(event = %second_event, "broadcast_lab_checkpoint");
+                        rx2_checkpoints.lock().unwrap().push(second_event);
+
+                        (first, second)
+                    }
+                });
+
+                let sender_outcome = sender.await;
+                crate::assert_with_log!(
+                    matches!(sender_outcome, crate::types::Outcome::Ok(())),
+                    "sender task completes successfully",
+                    true,
+                    matches!(sender_outcome, crate::types::Outcome::Ok(()))
+                );
+
+                let rx1_outcome = rx1_task.await;
+                crate::assert_with_log!(
+                    matches!(rx1_outcome, crate::types::Outcome::Ok(_)),
+                    "rx1 task completes successfully",
+                    true,
+                    matches!(rx1_outcome, crate::types::Outcome::Ok(_))
+                );
+                let crate::types::Outcome::Ok(rx1_values) = rx1_outcome else {
+                    panic!("rx1 task should finish successfully");
+                };
+
+                let rx2_outcome = rx2_task.await;
+                crate::assert_with_log!(
+                    matches!(rx2_outcome, crate::types::Outcome::Ok(_)),
+                    "rx2 task completes successfully",
+                    true,
+                    matches!(rx2_outcome, crate::types::Outcome::Ok(_))
+                );
+                let crate::types::Outcome::Ok(rx2_values) = rx2_outcome else {
+                    panic!("rx2 task should finish successfully");
+                };
+
+                (rx1_values, rx2_values, checkpoints.lock().unwrap().clone())
+            });
+
+        assert_eq!((rx1_first, rx1_second), (11, 22));
+        assert_eq!((rx2_first, rx2_second), (11, 22));
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "sent_first"),
+            "first send checkpoint should be recorded"
+        );
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "rx1_second"),
+            "rx1 second receive checkpoint should be recorded"
+        );
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "rx2_second"),
+            "rx2 second receive checkpoint should be recorded"
+        );
+        let violations = runtime.oracles.check_all(runtime.now());
+        assert!(
+            violations.is_empty(),
+            "broadcast lab-runtime fan-out test should leave runtime invariants clean: {violations:?}"
+        );
     }
 
     #[test]
