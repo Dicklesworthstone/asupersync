@@ -1160,6 +1160,7 @@ impl CircuitBreakerPolicyBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     // =========================================================================
     // State Bit Packing Tests
@@ -2091,5 +2092,109 @@ mod tests {
             post.is_ok(),
             "circuit should stay closed after half-open recovery when open already cleared the window, got {post:?}"
         );
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct OpenRecoverySnapshot {
+        post_probe_states: Vec<State>,
+        final_state: State,
+        total_success: u64,
+        total_failure: u64,
+        total_rejected: u64,
+        times_opened: u64,
+        times_closed: u64,
+        terminal_allows_normal: bool,
+    }
+
+    fn run_open_recovery_trace(
+        success_threshold: u32,
+        extra_open_polls: u32,
+    ) -> OpenRecoverySnapshot {
+        let cb = CircuitBreaker::new(CircuitBreakerPolicy {
+            failure_threshold: 1,
+            success_threshold,
+            open_duration: Duration::from_millis(10),
+            half_open_max_probes: 1,
+            ..Default::default()
+        });
+        let opened_at = Time::from_millis(1_000);
+
+        let permit = cb.should_allow(opened_at).expect("closed call should pass");
+        cb.record_failure(permit, "trip", opened_at);
+        assert!(matches!(cb.state(), State::Open { .. }));
+
+        let pre_expiry = Time::from_millis(1_005);
+        for _ in 0..extra_open_polls {
+            let result = cb.should_allow(pre_expiry);
+            assert!(
+                matches!(
+                    result,
+                    Err(CircuitBreakerError::Open { remaining })
+                        if remaining > Duration::ZERO && remaining <= Duration::from_millis(10)
+                ),
+                "pre-expiry polls must stay rejected while open: {result:?}"
+            );
+        }
+
+        let recovery_at = Time::from_millis(1_020);
+        let mut post_probe_states = Vec::new();
+        for step in 0..success_threshold {
+            let now = Time::from_millis(recovery_at.as_millis() + u64::from(step));
+            let permit = cb
+                .should_allow(now)
+                .expect("recovery probe should be allowed");
+            assert!(matches!(permit, Permit::Probe { .. }));
+            cb.record_success(permit, now);
+            post_probe_states.push(cb.state());
+        }
+
+        let terminal_allows_normal = matches!(
+            cb.should_allow(Time::from_millis(
+                recovery_at.as_millis() + u64::from(success_threshold) + 1
+            )),
+            Ok(Permit::Normal)
+        );
+        let metrics = cb.metrics();
+        OpenRecoverySnapshot {
+            post_probe_states,
+            final_state: cb.state(),
+            total_success: metrics.total_success,
+            total_failure: metrics.total_failure,
+            total_rejected: metrics.total_rejected,
+            times_opened: metrics.times_opened,
+            times_closed: metrics.times_closed,
+            terminal_allows_normal,
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_open_rejections_do_not_perturb_recovery(
+            success_threshold in 1u32..=6,
+            extra_open_polls in 0u32..20,
+        ) {
+            let baseline = run_open_recovery_trace(success_threshold, 0);
+            let transformed = run_open_recovery_trace(success_threshold, extra_open_polls);
+
+            prop_assert_eq!(transformed.post_probe_states, baseline.post_probe_states);
+            prop_assert_eq!(transformed.final_state, baseline.final_state);
+            prop_assert_eq!(transformed.final_state, State::Closed { failures: 0 });
+
+            prop_assert_eq!(baseline.total_success, u64::from(success_threshold));
+            prop_assert_eq!(transformed.total_success, u64::from(success_threshold));
+            prop_assert_eq!(transformed.total_failure, baseline.total_failure);
+            prop_assert_eq!(baseline.total_failure, 1);
+            prop_assert_eq!(transformed.times_opened, baseline.times_opened);
+            prop_assert_eq!(transformed.times_closed, baseline.times_closed);
+            prop_assert_eq!(baseline.times_opened, 1);
+            prop_assert_eq!(baseline.times_closed, 1);
+
+            prop_assert_eq!(
+                transformed.total_rejected,
+                baseline.total_rejected + u64::from(extra_open_polls)
+            );
+            prop_assert!(baseline.terminal_allows_normal);
+            prop_assert!(transformed.terminal_allows_normal);
+        }
     }
 }
