@@ -370,6 +370,7 @@ impl From<std::io::Error> for GrpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -794,6 +795,16 @@ mod tests {
         result
     }
 
+    fn status_wire_snapshot(status: &Status) -> serde_json::Value {
+        serde_json::json!({
+            "grpc-status": status.code().as_i32().to_string(),
+            "grpc-message": escape_grpc_message(status.message()),
+            "grpc-status-details-bin": status.details().map(|details| {
+                base64::engine::general_purpose::STANDARD.encode(details)
+            }),
+        })
+    }
+
     #[test]
     fn test_all_canonical_status_codes_encode_correctly() {
         init_test("test_all_canonical_status_codes_encode_correctly");
@@ -886,6 +897,20 @@ mod tests {
         }
 
         crate::test_complete!("test_grpc_message_utf8_escaping");
+    }
+
+    #[test]
+    fn grpc_status_wire_format_snapshot() {
+        let status = Status::with_details(
+            Code::InvalidArgument,
+            "field \"display_name\"\ncontains invalid UTF-8: 🚀",
+            Bytes::from_static(b"\x00grpc-details\xff"),
+        );
+
+        insta::assert_json_snapshot!(
+            "grpc_status_wire_format_invalid_argument",
+            status_wire_snapshot(&status)
+        );
     }
 
     #[test]
