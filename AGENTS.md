@@ -45,6 +45,61 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
+## RULE 2: NO GIT BRANCHES. NO GIT WORKTREES. EVER.
+
+**`main` is the one and only branch. Period.** There is no exception. There is no "just for this one little thing." There is no "temporary" branch. There is no "short-lived" worktree. There is **no justification** a branch or a worktree can have that overrides this rule.
+
+This project has exactly **one** source of truth: `main`. We want it to always carry the latest, most optimized, most correct, most mature code. Every commit goes directly to `main`. Every agent works on `main`. Every build and test runs against `main`.
+
+### FORBIDDEN — zero tolerance
+
+Any of the following, by any agent, for any reason, is a violation:
+
+- `git branch <anything-other-than-main>` — creating a new branch
+- `git checkout -b <foo>` / `git switch -c <foo>` — creating and switching to a new branch
+- `git worktree add ...` — creating a worktree (with or without `--detach`, with or without a branch name)
+- Pushing a non-main ref to `origin` (`git push origin <foo>`, `git push origin HEAD:<foo>`, `git push --set-upstream origin <foo>`)
+- Creating pull requests, draft PRs, or any "feature branch" pattern
+- Per-agent / per-pane / per-bead / per-task branches like `pane-7-fix-x`, `codex/<uuid>-*`, `claim-<bead>`, `close-<bead>`, etc.
+- Working in a scratch clone at `/tmp/asupersync-*` or `/data/projects/asupersync-*` to "isolate" changes
+- Any tool, harness, or automation that creates branches or worktrees as a side effect. If you find one, disable it or change it to operate on `main` directly. **The harness does not get a pass.**
+
+### WHY THIS RULE EXISTS
+
+When agents proliferate branches and worktrees:
+
+- Real accretive work gets stranded on branches that nobody remembers to merge.
+- Disk usage explodes — each full worktree is ~6 GB; dozens of them fill the disk and starve `rch`.
+- Context fragments — different agents end up editing stale snapshots of the same file.
+- The "single source of truth" invariant of the project is broken, and we stop being able to answer "what is the current state of the code" with one command.
+- Conflict resolution explodes — once N branches exist, merging them costs more than writing the code from scratch.
+
+The project has already been bitten by this, repeatedly, at scale. The user has had to manually reconstruct state from chaos. **Never again.**
+
+### WHAT YOU DO INSTEAD
+
+- **Commit to `main` directly.** If your work-in-progress isn't ready to commit, don't commit yet — keep it in your working tree.
+- **Coordinate via MCP Agent Mail + advisory file reservations.** Reserve the files or globs you are about to edit with `file_reservation_paths(...)` and release them when done. That is the isolation mechanism for this project. It is the only isolation mechanism for this project.
+- **Use bead IDs + reservations as your "branch."** The conceptual "feature branch" of a bead like `asupersync-jp6pq9` is: (1) the bead itself, (2) a file reservation on the files it touches, (3) a commit to `main` referencing `br-asupersync-jp6pq9` in the subject. That's it. No branch object in git needs to exist.
+- **Rebase / stash instead of branching.** If you need to pause work to pull in others' changes, `git fetch && git rebase origin/main` or `git stash` — never `git switch -c wip`.
+
+### ENFORCEMENT
+
+If you see a branch other than `main` (local or remote), a worktree other than the project root, or a scratch clone at `/tmp/asupersync-*` or `/data/projects/asupersync-*`:
+
+1. **Stop whatever else you were doing.**
+2. Audit every non-main branch and worktree for commits / uncommitted work that is *not yet on main*.
+3. Cherry-pick (or port by hand) any truly unique accretive work onto `main`.
+4. `git worktree remove --force <path>` every non-main worktree.
+5. `git branch -D <name>` every non-main local branch.
+6. `git push origin --delete <name>` every non-main remote branch.
+7. Commit, push, and sync `master` from `main`.
+8. Tell the user in your next reply what you cleaned up.
+
+Do all of this *before* starting any other task. There is no task in this project more important than not relapsing into the branch-proliferation failure mode.
+
+---
+
 ## Toolchain: Rust & Cargo
 
 We only use **Cargo** in this project, NEVER any other package manager.
