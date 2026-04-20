@@ -1,0 +1,9 @@
+---
+source: src/grpc/codec.rs
+expression: render_grpc_frame_for_snapshot_test(buf.as_ref())
+---
+compressed_flag: 01
+message_length_be: 00 00 00 16
+message_length: 22
+payload_utf8: "compressed-passthrough"
+payload_hex: 63 6f 6d 70 72 65 73 73 65 64 2d 70 61 73 73 74 68 72 6f 75 67 68

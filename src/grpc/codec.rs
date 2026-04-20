@@ -487,10 +487,33 @@ impl Codec for IdentityCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn format_hex(bytes: &[u8]) -> String {
+        bytes.iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn render_grpc_frame_for_snapshot_test(bytes: &[u8]) -> String {
+        let mut out = String::new();
+        let compressed_flag = bytes[0];
+        let payload_len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+        let payload = &bytes[MESSAGE_HEADER_SIZE..];
+
+        let _ = writeln!(out, "compressed_flag: {compressed_flag:02x}");
+        let _ = writeln!(out, "message_length_be: {}", format_hex(&bytes[1..5]));
+        let _ = writeln!(out, "message_length: {payload_len}");
+        let _ = writeln!(out, "payload_utf8: {:?}", String::from_utf8_lossy(payload));
+        let _ = writeln!(out, "payload_hex: {}", format_hex(payload));
+
+        out
     }
 
     #[derive(Debug, thiserror::Error)]
@@ -776,6 +799,10 @@ mod tests {
             "compressed flag set",
             Some(1u8),
             buf.first().copied()
+        );
+        insta::assert_snapshot!(
+            "grpc_identity_frame_wire_layout",
+            render_grpc_frame_for_snapshot_test(buf.as_ref())
         );
 
         let decoded = codec
