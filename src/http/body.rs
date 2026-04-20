@@ -803,8 +803,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+    use crate::runtime::yield_now::yield_now;
     use crate::stream;
+    use crate::types::Budget;
+    use serde_json::Value;
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::Wake;
+    use std::task::Waker;
 
     struct NoopWaker;
 
@@ -1311,6 +1319,216 @@ mod tests {
 
         assert!(matches!(poll_body(&mut body), Poll::Ready(None)));
         assert!(body.is_end_stream());
+    }
+
+    struct GatedFrameStream {
+        gate: Arc<AtomicBool>,
+        pending_logged: bool,
+        yielded_data: bool,
+        yielded_trailers: bool,
+        pending_waker: Arc<StdMutex<Option<Waker>>>,
+        checkpoints: Arc<StdMutex<Vec<Value>>>,
+    }
+
+    impl Stream for GatedFrameStream {
+        type Item = Result<Frame<BytesCursor>, Infallible>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if !self.gate.load(Ordering::SeqCst) {
+                if !self.pending_logged {
+                    self.pending_logged = true;
+                    let event = serde_json::json!({
+                        "phase": "body_pending",
+                    });
+                    tracing::info!(event = %event, "body_lab_checkpoint");
+                    self.checkpoints.lock().unwrap().push(event);
+                }
+                *self.pending_waker.lock().unwrap() = Some(cx.waker().clone());
+                return Poll::Pending;
+            }
+
+            if !self.yielded_data {
+                self.yielded_data = true;
+                let event = serde_json::json!({
+                    "phase": "body_data_ready",
+                    "bytes": 5,
+                });
+                tracing::info!(event = %event, "body_lab_checkpoint");
+                self.checkpoints.lock().unwrap().push(event);
+                return Poll::Ready(Some(Ok(Frame::data(BytesCursor::new(Bytes::from_static(
+                    b"hello",
+                ))))));
+            }
+
+            if !self.yielded_trailers {
+                self.yielded_trailers = true;
+                let mut trailers = HeaderMap::new();
+                trailers.insert(
+                    HeaderName::from_static("x-checksum"),
+                    HeaderValue::from_static("done"),
+                );
+                let event = serde_json::json!({
+                    "phase": "body_trailers_ready",
+                });
+                tracing::info!(event = %event, "body_lab_checkpoint");
+                self.checkpoints.lock().unwrap().push(event);
+                return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
+            }
+
+            let event = serde_json::json!({
+                "phase": "body_eof",
+            });
+            tracing::info!(event = %event, "body_lab_checkpoint");
+            self.checkpoints.lock().unwrap().push(event);
+            Poll::Ready(None)
+        }
+    }
+
+    #[test]
+    fn stream_body_roundtrip_under_lab_runtime() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("stream_body_roundtrip_under_lab_runtime");
+
+        let config = TestConfig::new()
+            .with_seed(0xB0D1_5001)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let checkpoints = Arc::new(StdMutex::new(Vec::<Value>::new()));
+        let gate = Arc::new(AtomicBool::new(false));
+        let pending_waker = Arc::new(StdMutex::new(None::<Waker>));
+
+        let (body_bytes, trailer_value, checkpoints) =
+            LabRuntimeTarget::block_on(&mut runtime, async move {
+                let cx = crate::cx::Cx::current().expect("lab runtime should install a current Cx");
+                let body_spawn_cx = cx.clone();
+                let gate_spawn_cx = cx.clone();
+
+                let body_task = LabRuntimeTarget::spawn(&body_spawn_cx, Budget::INFINITE, {
+                    let checkpoints = Arc::clone(&checkpoints);
+                    let gate = Arc::clone(&gate);
+                    let pending_waker = Arc::clone(&pending_waker);
+                    async move {
+                        let mut body = StreamBody::new(GatedFrameStream {
+                            gate,
+                            pending_logged: false,
+                            yielded_data: false,
+                            yielded_trailers: false,
+                            pending_waker,
+                            checkpoints: Arc::clone(&checkpoints),
+                        });
+
+                        let first = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+                            .await
+                            .expect("stream body first frame should succeed")
+                            .expect("stream body should yield first frame");
+                        let data = first.into_data().expect("expected data frame");
+                        let data_bytes = data.chunk().to_vec();
+                        let data_event = serde_json::json!({
+                            "phase": "body_data_consumed",
+                            "bytes": data_bytes.len(),
+                        });
+                        tracing::info!(event = %data_event, "body_lab_checkpoint");
+                        checkpoints.lock().unwrap().push(data_event);
+
+                        let second = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+                            .await
+                            .expect("stream body trailers should succeed")
+                            .expect("stream body should yield trailers");
+                        let trailers = second.into_trailers().expect("expected trailers frame");
+                        let trailer_value = trailers
+                            .get(&HeaderName::from_static("x-checksum"))
+                            .expect("checksum trailer should exist")
+                            .to_str()
+                            .expect("checksum trailer should be utf-8")
+                            .to_string();
+                        let trailer_event = serde_json::json!({
+                            "phase": "body_trailers_consumed",
+                            "value": trailer_value,
+                        });
+                        tracing::info!(event = %trailer_event, "body_lab_checkpoint");
+                        checkpoints.lock().unwrap().push(trailer_event);
+
+                        let eof =
+                            std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await;
+                        assert!(eof.is_none(), "body should terminate after trailers");
+                        let eof_event = serde_json::json!({
+                            "phase": "body_complete",
+                        });
+                        tracing::info!(event = %eof_event, "body_lab_checkpoint");
+                        checkpoints.lock().unwrap().push(eof_event);
+
+                        (data_bytes, trailer_value)
+                    }
+                });
+
+                let gate_task = LabRuntimeTarget::spawn(&gate_spawn_cx, Budget::INFINITE, {
+                    let checkpoints = Arc::clone(&checkpoints);
+                    let gate = Arc::clone(&gate);
+                    let pending_waker = Arc::clone(&pending_waker);
+                    async move {
+                        yield_now().await;
+                        yield_now().await;
+                        gate.store(true, Ordering::SeqCst);
+                        let event = serde_json::json!({
+                            "phase": "gate_opened",
+                        });
+                        tracing::info!(event = %event, "body_lab_checkpoint");
+                        checkpoints.lock().unwrap().push(event);
+                        if let Some(waker) = pending_waker.lock().unwrap().take() {
+                            waker.wake();
+                        }
+                    }
+                });
+
+                let gate_outcome = gate_task.await;
+                crate::assert_with_log!(
+                    matches!(gate_outcome, crate::types::Outcome::Ok(())),
+                    "gate task completes successfully",
+                    true,
+                    matches!(gate_outcome, crate::types::Outcome::Ok(()))
+                );
+
+                let body_outcome = body_task.await;
+                crate::assert_with_log!(
+                    matches!(body_outcome, crate::types::Outcome::Ok(_)),
+                    "body task completes successfully",
+                    true,
+                    matches!(body_outcome, crate::types::Outcome::Ok(_))
+                );
+                let crate::types::Outcome::Ok(result) = body_outcome else {
+                    panic!("body task should finish successfully");
+                };
+
+                (result.0, result.1, checkpoints.lock().unwrap().clone())
+            });
+
+        assert_eq!(body_bytes, b"hello");
+        assert_eq!(trailer_value, "done");
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "body_pending"),
+            "body should report an initial pending checkpoint"
+        );
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "gate_opened"),
+            "gate opening checkpoint should be recorded"
+        );
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "body_trailers_consumed"),
+            "trailer consumption checkpoint should be recorded"
+        );
+
+        let violations = runtime.oracles.check_all(runtime.now());
+        assert!(
+            violations.is_empty(),
+            "body lab-runtime stream test should leave runtime invariants clean: {violations:?}"
+        );
     }
 
     struct ErrorOnceStream {
