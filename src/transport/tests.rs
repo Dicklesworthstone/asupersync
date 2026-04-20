@@ -16,11 +16,7 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
     use std::time::Duration;
 
-    struct NoopWake;
 
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

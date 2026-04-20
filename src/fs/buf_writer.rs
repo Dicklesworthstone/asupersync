@@ -108,11 +108,7 @@ mod tests {
     use std::task::{Wake, Waker};
     use tempfile::tempdir;
 
-    struct NoopWaker;
 
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

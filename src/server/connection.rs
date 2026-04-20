@@ -418,11 +418,7 @@ mod tests {
 
     static TEST_NOW: AtomicU64 = AtomicU64::new(0);
 
-    struct NoopWake;
 
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
 
     fn init_test(name: &str) {
         init_test_logging();

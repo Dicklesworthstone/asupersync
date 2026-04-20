@@ -243,12 +243,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    struct NoopWaker;
 
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-        fn wake_by_ref(self: &Arc<Self>) {}
-    }
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
