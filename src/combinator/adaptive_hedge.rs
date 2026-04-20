@@ -342,4 +342,57 @@ mod tests {
             controller.max_delay
         );
     }
+
+    #[test]
+    fn metamorphic_replay_with_readonly_probes_is_stable() {
+        let trace = [
+            Duration::from_millis(80),
+            Duration::from_millis(15),
+            Duration::from_millis(220),
+            Duration::from_millis(5),
+            Duration::from_millis(120),
+            Duration::ZERO,
+        ];
+
+        let baseline = PeakEwmaHedgeController::new(
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+            Duration::from_millis(500),
+            0.95,
+        );
+        let mut baseline_delays = Vec::with_capacity(trace.len());
+        for sample in trace {
+            baseline.observe(sample);
+            baseline_delays.push(baseline.current_config().hedge_delay);
+        }
+
+        let replayed = PeakEwmaHedgeController::new(
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+            Duration::from_millis(500),
+            0.95,
+        );
+        let mut replayed_delays = Vec::with_capacity(trace.len());
+        for sample in trace {
+            let pre_probe = replayed.current_config();
+            assert!(
+                pre_probe.hedge_delay >= Duration::from_millis(10)
+                    && pre_probe.hedge_delay <= Duration::from_millis(500),
+                "readonly probe must stay within configured bounds"
+            );
+            replayed.observe(sample);
+            let post_probe = replayed.current_config();
+            replayed_delays.push(post_probe.hedge_delay);
+        }
+
+        assert_eq!(
+            replayed_delays, baseline_delays,
+            "interleaving readonly config probes must not perturb replayed hedge trajectory"
+        );
+        assert_eq!(
+            raw_estimate_nanos(&replayed),
+            raw_estimate_nanos(&baseline),
+            "readonly probes must not perturb the final atomic hedge estimate"
+        );
+    }
 }
