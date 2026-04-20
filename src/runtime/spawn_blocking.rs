@@ -318,10 +318,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+    use crate::runtime::yield_now::yield_now;
     use crate::types::{Budget, RegionId, TaskId};
     use futures_lite::future;
+    use serde_json::Value;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Condvar, Mutex as StdMutex};
     use std::time::Duration;
 
     fn init_test(name: &str) {
@@ -471,6 +475,171 @@ mod tests {
             crate::assert_with_log!(r2 == 2, "second result", 2, r2);
         });
         crate::test_complete!("spawn_blocking_runs_in_parallel");
+    }
+
+    #[test]
+    fn spawn_blocking_pool_overflow_queues_under_lab_runtime() {
+        init_test("spawn_blocking_pool_overflow_queues_under_lab_runtime");
+
+        let config = TestConfig::new()
+            .with_seed(0x5A0B_B10C)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let pool_handle = pool.handle();
+        let checkpoints = Arc::new(StdMutex::new(Vec::<Value>::new()));
+        let gate = Arc::new((StdMutex::new(false), Condvar::new()));
+        let first_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let (first_value, second_value, queued_before_release, second_started_after, checkpoints) =
+            LabRuntimeTarget::block_on(&mut runtime, async move {
+                let cx = Cx::current().expect("lab runtime should install a current Cx");
+                let first_spawn_cx = cx.clone();
+                let second_spawn_cx = cx.clone();
+
+                let first_task = LabRuntimeTarget::spawn(&first_spawn_cx, Budget::INFINITE, {
+                    let pool_handle = pool_handle.clone();
+                    let checkpoints = Arc::clone(&checkpoints);
+                    let gate = Arc::clone(&gate);
+                    let first_started = Arc::clone(&first_started);
+                    async move {
+                        spawn_blocking_on_pool(pool_handle, move || {
+                            first_started.store(true, Ordering::SeqCst);
+                            let started = serde_json::json!({
+                                "phase": "first_started",
+                            });
+                            tracing::info!(event = %started, "spawn_blocking_lab_checkpoint");
+                            checkpoints.lock().unwrap().push(started);
+
+                            let (lock, cvar) = &*gate;
+                            let mut released = lock.lock().unwrap();
+                            while !*released {
+                                released = cvar.wait(released).expect("gate wait should succeed");
+                            }
+
+                            let completed = serde_json::json!({
+                                "phase": "first_completed",
+                                "value": 11,
+                            });
+                            tracing::info!(event = %completed, "spawn_blocking_lab_checkpoint");
+                            checkpoints.lock().unwrap().push(completed);
+                            11
+                        })
+                        .await
+                    }
+                });
+
+                while !first_started.load(Ordering::SeqCst) {
+                    yield_now().await;
+                }
+
+                let second_task = LabRuntimeTarget::spawn(&second_spawn_cx, Budget::INFINITE, {
+                    let pool_handle = pool_handle.clone();
+                    let checkpoints = Arc::clone(&checkpoints);
+                    let second_started = Arc::clone(&second_started);
+                    async move {
+                        spawn_blocking_on_pool(pool_handle, move || {
+                            second_started.store(true, Ordering::SeqCst);
+                            let started = serde_json::json!({
+                                "phase": "second_started",
+                            });
+                            tracing::info!(event = %started, "spawn_blocking_lab_checkpoint");
+                            checkpoints.lock().unwrap().push(started);
+                            22
+                        })
+                        .await
+                    }
+                });
+
+                yield_now().await;
+                yield_now().await;
+
+                let queued_before_release = !second_started.load(Ordering::SeqCst);
+                let queued = serde_json::json!({
+                    "phase": "queue_observed",
+                    "second_started": second_started.load(Ordering::SeqCst),
+                });
+                tracing::info!(event = %queued, "spawn_blocking_lab_checkpoint");
+                checkpoints.lock().unwrap().push(queued);
+
+                {
+                    let (lock, cvar) = &*gate;
+                    let mut released = lock.lock().unwrap();
+                    *released = true;
+                    cvar.notify_all();
+                }
+
+                let first_outcome = first_task.await;
+                crate::assert_with_log!(
+                    matches!(first_outcome, crate::types::Outcome::Ok(11)),
+                    "first blocking task completes successfully",
+                    true,
+                    matches!(first_outcome, crate::types::Outcome::Ok(11))
+                );
+                let crate::types::Outcome::Ok(first_value) = first_outcome else {
+                    panic!("first blocking task should finish successfully");
+                };
+
+                let second_outcome = second_task.await;
+                crate::assert_with_log!(
+                    matches!(second_outcome, crate::types::Outcome::Ok(22)),
+                    "second blocking task completes successfully",
+                    true,
+                    matches!(second_outcome, crate::types::Outcome::Ok(22))
+                );
+                let crate::types::Outcome::Ok(second_value) = second_outcome else {
+                    panic!("second blocking task should finish successfully");
+                };
+
+                (
+                    first_value,
+                    second_value,
+                    queued_before_release,
+                    second_started.load(Ordering::SeqCst),
+                    checkpoints.lock().unwrap().clone(),
+                )
+            });
+
+        assert_eq!(first_value, 11);
+        assert_eq!(second_value, 22);
+        assert!(
+            queued_before_release,
+            "second blocking task should remain queued while the single worker is occupied"
+        );
+        assert!(
+            second_started_after,
+            "second blocking task should eventually start after the first releases the worker"
+        );
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "first_started"),
+            "first task start checkpoint should be recorded"
+        );
+        assert!(
+            checkpoints.iter().any(|event| {
+                event["phase"] == "queue_observed" && event["second_started"] == false
+            }),
+            "queue observation checkpoint should record that the second task was still queued"
+        );
+        assert!(
+            checkpoints
+                .iter()
+                .any(|event| event["phase"] == "second_started"),
+            "second task start checkpoint should be recorded"
+        );
+
+        let violations = runtime.oracles.check_all(runtime.now());
+        assert!(
+            violations.is_empty(),
+            "spawn_blocking lab-runtime overflow test should leave runtime invariants clean: {violations:?}"
+        );
+        assert!(
+            pool.shutdown_and_wait(Duration::from_secs(1)),
+            "blocking pool should shut down cleanly after the test"
+        );
     }
 
     #[test]
