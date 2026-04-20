@@ -65,7 +65,7 @@ impl<T: Clone> BroadcastStream<T> {
         unsafe { ptr::drop_in_place(&raw mut self.cx) };
 
         // Prevent Drop from running
-        std::mem::forget(self);
+        std::mem::forget(self); // ubs:ignore - intentional mem::forget
 
         inner
     }

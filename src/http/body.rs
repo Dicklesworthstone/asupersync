@@ -1312,7 +1312,7 @@ mod tests {
         assert!(matches!(poll_body(&mut body), Poll::Pending));
 
         let Poll::Ready(Some(Ok(frame))) = poll_body(&mut body) else {
-            panic!("expected data frame after pending")
+            panic!("expected data frame after pending") // ubs:ignore - test logic
         };
         let data = frame.into_data().expect("expected data frame");
         assert_eq!(data.chunk(), b"later");

@@ -1752,7 +1752,7 @@ mod tests {
         // the count to zero, but its buffer-clear path has not acquired `inner`
         // yet. We intentionally forget the old receiver so this state remains
         // stable for the deterministic regression test.
-        std::mem::forget(rx);
+        std::mem::forget(rx); // ubs:ignore - intentional memory leak for testing
         tx.channel.receiver_count.store(0, Ordering::Release);
 
         let tx_thread = tx.clone();

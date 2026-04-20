@@ -187,13 +187,19 @@ impl RegionStateMachine {
     /// Check if the region is quiesced (no active tasks, no finalizers).
     #[must_use]
     pub fn is_quiesced(&self) -> bool {
-        matches!(
-            self.state,
+        match self.state {
+            RegionState::Created | RegionState::Finalized => true,
             RegionState::Active {
                 active_tasks: 0,
-                pending_finalizers: 0
-            } | RegionState::Finalized
-        )
+                pending_finalizers: 0,
+            } => true,
+            RegionState::Cancelling {
+                draining_tasks: 0,
+                pending_finalizers: 0,
+                ..
+            } => true,
+            _ => false,
+        }
     }
 
     /// Check region-specific invariants.
@@ -1777,6 +1783,43 @@ impl CancelProtocolValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_region_is_quiesced() {
+        let region_id = RegionId::new_for_test(1, 0);
+        let mut machine = RegionStateMachine::new(region_id, ValidationLevel::Full);
+        let context = RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+
+        // Created region should be quiesced
+        assert!(machine.is_quiesced());
+
+        // Activate to empty Active state
+        assert_eq!(
+            machine.transition(RegionEvent::Activate, &context),
+            TransitionResult::Valid
+        );
+        // Empty Active region should be quiesced
+        assert!(machine.is_quiesced());
+
+        // Spawn a task, no longer quiesced
+        assert_eq!(
+            machine.transition(RegionEvent::TaskSpawned, &context),
+            TransitionResult::Valid
+        );
+        assert!(!machine.is_quiesced());
+
+        // Complete the task, quiesced again
+        assert_eq!(
+            machine.transition(RegionEvent::TaskCompleted, &context),
+            TransitionResult::Valid
+        );
+        assert!(machine.is_quiesced());
+    }
 
     #[test]
     fn test_region_lifecycle() {
