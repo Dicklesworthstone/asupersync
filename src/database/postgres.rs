@@ -4318,6 +4318,21 @@ mod tests {
         assert!(msg.len() > 4); // At least length prefix
     }
 
+    #[test]
+    fn test_scram_pbkdf2_matches_rfc8018_sha256_vector() {
+        let cx = Cx::for_testing();
+        let auth = ScramAuth::new(&cx, "user", "password");
+        let derived = auth.pbkdf2_sha256("password", b"salt", 1);
+        let expected =
+            hex::decode("120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
+                .expect("valid hex vector");
+
+        assert_eq!(
+            derived, expected,
+            "PBKDF2-HMAC-SHA256 output should match the RFC 8018 reference vector"
+        );
+    }
+
     /// Create a PgConnection backed by a dummy socket pair for unit-testing
     /// parse methods that only inspect a byte slice.
     fn make_test_connection() -> PgConnection {
