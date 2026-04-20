@@ -2231,6 +2231,22 @@ mod tests {
     }
 
     #[test]
+    fn auth_accepts_rfc7515_detached_compact_jws_bearer_token() {
+        // RFC 7515 Appendix F detaches the payload by emptying the compact
+        // serialization middle field; use the Appendix A.1 header/signature.
+        let detached_jws =
+            "eyJ0eXAiOiJKV1QiLA0KICJhbGciOiJIUzI1NiJ9..dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let mw = AuthMiddleware::new(
+            FnHandler::new(ok_handler),
+            AuthPolicy::exact_bearer(detached_jws),
+        );
+        let req = Request::new("GET", "/auth")
+            .with_header("authorization", &format!("Bearer {detached_jws}"));
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
     fn auth_rejects_non_matching_bearer_token() {
         let mw = AuthMiddleware::new(
             FnHandler::new(ok_handler),
