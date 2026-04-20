@@ -724,6 +724,30 @@ impl ConformanceTarget for LabRuntimeTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn scrub_conformance_report(events: &[ConformanceEvent]) -> serde_json::Value {
+        json!(
+            events
+                .iter()
+                .map(|event| match event {
+                    ConformanceEvent::TestStart { name } => json!({
+                        "event": "start",
+                        "name": name,
+                    }),
+                    ConformanceEvent::TestPassed { name } => json!({
+                        "event": "passed",
+                        "name": name,
+                    }),
+                    ConformanceEvent::TestFailed { name, .. } => json!({
+                        "event": "failed",
+                        "name": name,
+                        "message": "[MESSAGE]",
+                    }),
+                })
+                .collect::<Vec<_>>()
+        )
+    }
 
     #[test]
     fn test_config_default() {
@@ -893,5 +917,44 @@ mod tests {
         });
 
         assert_ne!(region_id, RegionId::new_for_test(0, 0));
+    }
+
+    #[test]
+    fn reporter_snapshot_scrubs_failure_messages() {
+        fn passing_test(_config: &TestConfig) {}
+
+        fn failing_test(_config: &TestConfig) {
+            std::panic::resume_unwind(Box::new(String::from(
+                "expected deterministic failure payload",
+            )));
+        }
+
+        let tests = [
+            ConformanceTestFn {
+                name: "pass_case",
+                test_fn: passing_test,
+            },
+            ConformanceTestFn {
+                name: "fail_case",
+                test_fn: failing_test,
+            },
+        ];
+        let mut events = Vec::new();
+        let (passed, failed) =
+            run_conformance_tests_with_reporter(&tests, &TestConfig::default(), |event| {
+                events.push(event);
+            });
+
+        assert_eq!((passed, failed), (1, 1));
+        insta::assert_json_snapshot!(
+            "conformance_report_scrubbed",
+            json!({
+                "summary": {
+                    "passed": passed,
+                    "failed": failed,
+                },
+                "events": scrub_conformance_report(&events),
+            })
+        );
     }
 }
