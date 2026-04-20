@@ -1740,6 +1740,52 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_dependent_row_extension_preserves_rank_solution() {
+        fn build_base_solver() -> GaussianSolver {
+            let mut solver = GaussianSolver::new(2, 2);
+            solver.set_row(0, &[1, 0], DenseRow::new(vec![0x10]));
+            solver.set_row(1, &[0, 1], DenseRow::new(vec![0x20]));
+            solver
+        }
+
+        fn build_augmented_solver() -> GaussianSolver {
+            let mut solver = GaussianSolver::new(3, 2);
+            solver.set_row(0, &[1, 0], DenseRow::new(vec![0x10]));
+            solver.set_row(1, &[0, 1], DenseRow::new(vec![0x20]));
+            // Row 2 is the GF(256) sum of rows 0 and 1, so it is rank-preserving noise.
+            solver.set_row(2, &[1, 1], DenseRow::new(vec![0x30]));
+            solver
+        }
+
+        for (name, base_result, augmented_result) in [
+            (
+                "basic",
+                build_base_solver().solve(),
+                build_augmented_solver().solve(),
+            ),
+            (
+                "markowitz",
+                build_base_solver().solve_markowitz(),
+                build_augmented_solver().solve_markowitz(),
+            ),
+        ] {
+            match (base_result, augmented_result) {
+                (GaussianResult::Solved(base), GaussianResult::Solved(augmented)) => {
+                    assert_eq!(
+                        base, augmented,
+                        "{name} elimination should preserve the solved variable rows when only a dependent row is appended"
+                    );
+                }
+                (base, augmented) => {
+                    panic!(
+                        "{name} elimination changed result kind under dependent-row extension: base={base:?} augmented={augmented:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn gaussian_underdetermined_matrix_fails_closed() {
         let mut basic = GaussianSolver::new(2, 3);
         basic.set_row(0, &[1, 0, 0], DenseRow::new(vec![0x10]));
