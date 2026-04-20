@@ -1807,6 +1807,71 @@ mod tests {
     }
 
     #[test]
+    fn test_rfc7541_c5_1_first_response_exact_wire_without_huffman() {
+        // RFC 7541 Appendix C.5.1 exact wire image.
+        let headers = vec![
+            Header::new(":status", "302"),
+            Header::new("cache-control", "private"),
+            Header::new("date", "Mon, 21 Oct 2013 20:13:21 GMT"),
+            Header::new("location", "https://www.example.com"),
+        ];
+        let expected_wire: &[u8] = &[
+            0x48, 0x03, 0x33, 0x30, 0x32, 0x58, 0x07, 0x70, 0x72, 0x69, 0x76, 0x61, 0x74, 0x65,
+            0x61, 0x1d, 0x4d, 0x6f, 0x6e, 0x2c, 0x20, 0x32, 0x31, 0x20, 0x4f, 0x63, 0x74, 0x20,
+            0x32, 0x30, 0x31, 0x33, 0x20, 0x32, 0x30, 0x3a, 0x31, 0x33, 0x3a, 0x32, 0x31, 0x20,
+            0x47, 0x4d, 0x54, 0x6e, 0x17, 0x68, 0x74, 0x74, 0x70, 0x73, 0x3a, 0x2f, 0x2f, 0x77,
+            0x77, 0x77, 0x2e, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d,
+        ];
+
+        let mut decoder = Decoder::new();
+        let mut src = Bytes::copy_from_slice(expected_wire);
+        let decoded = decoder.decode(&mut src).expect("RFC 7541 C.5.1 decode");
+        assert_eq!(decoded, headers);
+
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+        let mut encoded = BytesMut::new();
+        encoder.encode(&headers, &mut encoded);
+        assert_eq!(
+            encoded.as_ref(),
+            expected_wire,
+            "RFC 7541 C.5.1 wire image must match the specification exactly"
+        );
+    }
+
+    #[test]
+    fn test_rfc7541_c6_1_first_response_exact_wire_with_huffman() {
+        // RFC 7541 Appendix C.6.1 exact wire image.
+        let headers = vec![
+            Header::new(":status", "302"),
+            Header::new("cache-control", "private"),
+            Header::new("date", "Mon, 21 Oct 2013 20:13:21 GMT"),
+            Header::new("location", "https://www.example.com"),
+        ];
+        let expected_wire: &[u8] = &[
+            0x48, 0x82, 0x64, 0x02, 0x58, 0x85, 0xae, 0xc3, 0x77, 0x1a, 0x4b, 0x61, 0x96, 0xd0,
+            0x7a, 0xbe, 0x94, 0x10, 0x54, 0xd4, 0x44, 0xa8, 0x20, 0x05, 0x95, 0x04, 0x0b, 0x81,
+            0x66, 0xe0, 0x82, 0xa6, 0x2d, 0x1b, 0xff, 0x6e, 0x91, 0x9d, 0x29, 0xad, 0x17, 0x18,
+            0x63, 0xc7, 0x8f, 0x0b, 0x97, 0xc8, 0xe9, 0xae, 0x82, 0xae, 0x43, 0xd3,
+        ];
+
+        let mut decoder = Decoder::new();
+        let mut src = Bytes::copy_from_slice(expected_wire);
+        let decoded = decoder.decode(&mut src).expect("RFC 7541 C.6.1 decode");
+        assert_eq!(decoded, headers);
+
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(true);
+        let mut encoded = BytesMut::new();
+        encoder.encode(&headers, &mut encoded);
+        assert_eq!(
+            encoded.as_ref(),
+            expected_wire,
+            "RFC 7541 C.6.1 wire image must match the specification exactly"
+        );
+    }
+
+    #[test]
     fn test_rfc7541_huffman_decode_www_example_com() {
         // RFC 7541 C.4.1 encoded "www.example.com" with Huffman
         // This is a known encoding from the spec
