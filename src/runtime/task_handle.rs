@@ -822,6 +822,72 @@ mod tests {
         crate::test_complete!("defuse_drop_abort_skips_pending_join_abort");
     }
 
+    #[test]
+    fn drop_join_with_weaker_reason_preserves_stronger_existing_cancel_reason() {
+        init_test("drop_join_with_weaker_reason_preserves_stronger_existing_cancel_reason");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(14, 1));
+        let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+
+        handle.abort_with_reason(CancelReason::timeout());
+        drop(handle.join_with_drop_reason(&cx, CancelReason::user("race cleanup")));
+
+        let guard = cx.inner.read();
+        let reason = guard
+            .cancel_reason
+            .clone()
+            .expect("drop join should leave existing cancel reason intact");
+        crate::assert_with_log!(
+            guard.cancel_requested,
+            "drop join still marks cancellation requested",
+            true,
+            guard.cancel_requested
+        );
+        crate::assert_with_log!(
+            reason.kind == CancelKind::Timeout,
+            "weaker drop reason must not downgrade existing timeout cancel reason",
+            CancelKind::Timeout,
+            reason.kind
+        );
+
+        crate::test_complete!(
+            "drop_join_with_weaker_reason_preserves_stronger_existing_cancel_reason"
+        );
+    }
+
+    #[test]
+    fn drop_join_with_stronger_reason_strengthens_existing_cancel_reason() {
+        init_test("drop_join_with_stronger_reason_strengthens_existing_cancel_reason");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(14, 2));
+        let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+
+        handle.abort_with_reason(CancelReason::user("soft stop"));
+        drop(handle.join_with_drop_reason(&cx, CancelReason::timeout()));
+
+        let guard = cx.inner.read();
+        let reason = guard
+            .cancel_reason
+            .clone()
+            .expect("drop join should strengthen existing cancel reason");
+        crate::assert_with_log!(
+            guard.cancel_requested,
+            "drop join marks cancellation requested",
+            true,
+            guard.cancel_requested
+        );
+        crate::assert_with_log!(
+            reason.kind == CancelKind::Timeout,
+            "stronger drop reason must upgrade existing cancel reason",
+            CancelKind::Timeout,
+            reason.kind
+        );
+
+        crate::test_complete!("drop_join_with_stronger_reason_strengthens_existing_cancel_reason");
+    }
+
     // =========================================================================
     // Wave 27: Data-type trait coverage
     // =========================================================================
