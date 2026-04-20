@@ -356,7 +356,13 @@ impl GracePeriodGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+    use crate::cx::Cx;
+    use crate::runtime::yield_now;
     use crate::signal::ShutdownController;
+    use crate::types::Budget;
+    use parking_lot::Mutex;
+    use serde_json::Value;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
@@ -792,6 +798,118 @@ mod tests {
             result
         );
         crate::test_complete!("graceful_builder_run_times_out_with_time_getter");
+    }
+
+    #[test]
+    fn graceful_builder_run_completes_during_shutdown_under_lab_runtime() {
+        init_test("graceful_builder_run_completes_during_shutdown_under_lab_runtime");
+
+        let config = TestConfig::new()
+            .with_seed(0x6A00_5101)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+
+        let (result, checkpoints) = LabRuntimeTarget::block_on(&mut runtime, async move {
+            let cx = Cx::current().expect("lab runtime should install a current Cx");
+            let shutdown_task_cx = cx.clone();
+            let controller = ShutdownController::new();
+            let receiver = controller.subscribe();
+            let checkpoints = Arc::new(Mutex::new(Vec::<Value>::new()));
+
+            let shutdown_checkpoints = Arc::clone(&checkpoints);
+            let shutdown_task = LabRuntimeTarget::spawn(&shutdown_task_cx, Budget::INFINITE, {
+                let controller = controller.clone();
+                async move {
+                    yield_now().await;
+                    let event = serde_json::json!({
+                        "phase": "shutdown_requested",
+                        "after_yields": 1,
+                    });
+                    tracing::info!(event = %event, "graceful_lab_checkpoint");
+                    shutdown_checkpoints.lock().push(event);
+                    controller.shutdown();
+                }
+            });
+
+            yield_now().await;
+
+            let task_checkpoints = Arc::clone(&checkpoints);
+            let result = GracefulBuilder::new(receiver)
+                .grace_period(Duration::from_secs(1))
+                .logging(false)
+                .run(async move {
+                    let started = serde_json::json!({
+                        "phase": "task_started",
+                        "yield_count": 2,
+                    });
+                    tracing::info!(event = %started, "graceful_lab_checkpoint");
+                    task_checkpoints.lock().push(started);
+
+                    yield_now().await;
+                    yield_now().await;
+
+                    let completed = serde_json::json!({
+                        "phase": "task_completed",
+                        "value": 42,
+                    });
+                    tracing::info!(event = %completed, "graceful_lab_checkpoint");
+                    task_checkpoints.lock().push(completed);
+                    42
+                })
+                .await;
+
+            let shutdown_outcome = shutdown_task.await;
+            crate::assert_with_log!(
+                matches!(shutdown_outcome, crate::types::Outcome::Ok(())),
+                "shutdown task completes successfully",
+                true,
+                matches!(shutdown_outcome, crate::types::Outcome::Ok(()))
+            );
+
+            (result, checkpoints.lock().clone())
+        });
+
+        crate::assert_with_log!(
+            matches!(result, GracefulOutcome::Completed(42)),
+            "graceful builder completes task during shutdown grace period",
+            "GracefulOutcome::Completed(42)",
+            result
+        );
+        crate::assert_with_log!(
+            checkpoints.len() == 3,
+            "graceful lab runtime emits three checkpoints",
+            3,
+            checkpoints.len()
+        );
+        crate::assert_with_log!(
+            checkpoints[0]["phase"] == "task_started",
+            "task starts before shutdown request",
+            "task_started",
+            checkpoints[0]["phase"].clone()
+        );
+        crate::assert_with_log!(
+            checkpoints[1]["phase"] == "shutdown_requested",
+            "shutdown request recorded second",
+            "shutdown_requested",
+            checkpoints[1]["phase"].clone()
+        );
+        crate::assert_with_log!(
+            checkpoints[2]["phase"] == "task_completed",
+            "task completion recorded after shutdown request",
+            "task_completed",
+            checkpoints[2]["phase"].clone()
+        );
+
+        let violations = runtime.oracles.check_all(runtime.now());
+        crate::assert_with_log!(
+            violations.is_empty(),
+            "graceful lab runtime leaves no oracle violations",
+            true,
+            violations.is_empty()
+        );
+
+        crate::test_complete!("graceful_builder_run_completes_during_shutdown_under_lab_runtime");
     }
 
     // =========================================================================
