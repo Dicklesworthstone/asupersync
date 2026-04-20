@@ -767,6 +767,29 @@ mod tests {
     }
 
     #[test]
+    fn test_base64_rfc4648_single_octet_vector() {
+        init_test("test_base64_rfc4648_single_octet_vector");
+
+        let encoded = base64_encode(b"f");
+        crate::assert_with_log!(
+            encoded == "Zg==",
+            "rfc4648 encode vector",
+            "Zg==",
+            encoded.as_str()
+        );
+
+        let decoded = base64_decode("Zg==").unwrap();
+        crate::assert_with_log!(
+            decoded == b"f",
+            "rfc4648 decode vector",
+            b"f".as_slice(),
+            decoded.as_slice()
+        );
+
+        crate::test_complete!("test_base64_rfc4648_single_octet_vector");
+    }
+
+    #[test]
     fn test_base64_invalid_input() {
         init_test("test_base64_invalid_input");
         let result = base64_decode("not valid base64!!!");
