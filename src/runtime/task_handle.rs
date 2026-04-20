@@ -359,6 +359,7 @@ mod tests {
     use crate::test_utils::init_test_logging;
     use crate::types::{Budget, CancelKind};
     use crate::util::ArenaIndex;
+    use serde_json::{Value, json};
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
 
@@ -389,6 +390,28 @@ mod tests {
                 Poll::Pending => std::thread::yield_now(),
             }
         }
+    }
+
+    fn task_handle_snapshot<T>(handle: &TaskHandle<T>) -> Value {
+        json!({
+            "task_id": handle.task_id(),
+            "is_finished": handle.is_finished(),
+            "terminal_consumed": handle.terminal_consumed_for_test(),
+        })
+    }
+
+    fn scrub_task_handle_ids(value: Value) -> Value {
+        let mut scrubbed = value;
+
+        if let Some(task_id) = scrubbed.pointer_mut("/pending/task_id") {
+            *task_id = json!("[TASK_ID]");
+        }
+
+        if let Some(task_id) = scrubbed.pointer_mut("/consumed/task_id") {
+            *task_id = json!("[TASK_ID]");
+        }
+
+        scrubbed
     }
 
     #[test]
@@ -999,5 +1022,29 @@ mod tests {
 
         let second = handle.try_join();
         assert!(matches!(second, Err(JoinError::PolledAfterCompletion)));
+    }
+
+    #[test]
+    fn task_handle_snapshot_scrubs_ids() {
+        init_test("task_handle_snapshot_scrubs_ids");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(24, 4));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+
+        let pending = task_handle_snapshot(&handle);
+        tx.send(&cx, Ok(7)).expect("send");
+        let joined = handle.try_join();
+        assert_eq!(joined, Ok(Some(7)));
+        let consumed = task_handle_snapshot(&handle);
+
+        insta::assert_json_snapshot!(
+            "task_handle_scrubbed_ids",
+            scrub_task_handle_ids(json!({
+                "pending": pending,
+                "consumed": consumed,
+            }))
+        );
+        crate::test_complete!("task_handle_snapshot_scrubs_ids");
     }
 }

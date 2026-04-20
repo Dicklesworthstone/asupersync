@@ -1,0 +1,19 @@
+---
+source: src/runtime/task_handle.rs
+expression: |-
+  scrub_task_handle_ids(json!({
+      "pending": pending, "consumed": consumed,
+  }))
+---
+{
+  "consumed": {
+    "is_finished": true,
+    "task_id": "[TASK_ID]",
+    "terminal_consumed": true
+  },
+  "pending": {
+    "is_finished": false,
+    "task_id": "[TASK_ID]",
+    "terminal_consumed": false
+  }
+}
