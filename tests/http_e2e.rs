@@ -11,9 +11,10 @@
 mod common;
 
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::codec::Decoder;
+use asupersync::codec::{Decoder, Encoder};
 use asupersync::http::body::{Body, Empty, Full, HeaderMap, HeaderName, HeaderValue};
 use asupersync::http::compress::{ContentEncoding, negotiate_encoding};
+use asupersync::http::h1::client::Http1ClientCodec;
 use asupersync::http::h1::codec::Http1Codec;
 use asupersync::http::h1::server::Http1Config;
 use asupersync::http::h1::types::{Method, Request as H1Request, Version};
@@ -807,6 +808,40 @@ fn e2e_http_chunked_transfer_encoding() {
         Err(e) => tracing::info!(error = ?e, "chunked decode error"),
     }
     test_complete!("e2e_http_chunked_transfer_encoding");
+}
+
+#[test]
+fn e2e_http_chunked_request_exact_wire_rfc9112() {
+    init_test("e2e_http_chunked_request_exact_wire_rfc9112");
+
+    test_section!("setup");
+    let mut codec = Http1ClientCodec::new();
+    let req = H1Request {
+        method: Method::Post,
+        uri: "/upload".into(),
+        version: Version::Http11,
+        headers: vec![
+            ("Host".into(), "example.com".into()),
+            ("Transfer-Encoding".into(), "chunked".into()),
+        ],
+        body: b"hello".to_vec(),
+        trailers: Vec::new(),
+        peer_addr: None,
+    };
+
+    test_section!("encode");
+    let mut buf = BytesMut::with_capacity(256);
+    codec
+        .encode(req, &mut buf)
+        .expect("chunked request should encode");
+
+    test_section!("verify");
+    assert_eq!(
+        String::from_utf8(buf.to_vec()).expect("wire vector should be UTF-8"),
+        "POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+    );
+
+    test_complete!("e2e_http_chunked_request_exact_wire_rfc9112");
 }
 
 // ============================================================================
