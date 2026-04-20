@@ -722,6 +722,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "bytes_cursor_reader"
+path = "fuzz_targets/bytes_cursor_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "bytes_mut_boundaries"
 path = "fuzz_targets/bytes_mut_boundaries.rs"
 test = false

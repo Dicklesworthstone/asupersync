@@ -25,6 +25,7 @@ on:
           - length_delimited_encode_width
           - length_delimited_decoder_state
           - bytes_slice_split_to
+          - bytes_cursor_reader
           - fuzz_hpack_decode
           - fuzz_http2_frame
           - fuzz_interest_flags
@@ -55,6 +56,7 @@ jobs:
           - length_delimited_encode_width
           - length_delimited_decoder_state
           - bytes_slice_split_to
+          - bytes_cursor_reader
           - fuzz_hpack_decode
           - fuzz_http2_frame
           - fuzz_interest_flags
