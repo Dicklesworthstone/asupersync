@@ -46,6 +46,8 @@ impl ConnectTestTimeGetter {
 struct ConnectRequestInput {
     /// Target authority (hostname:port)
     authority: Option<String>,
+    /// Optional extended CONNECT protocol (RFC 8441).
+    protocol: Option<String>,
     /// Optional scheme (should be forbidden for CONNECT)
     scheme: Option<String>,
     /// Optional path (should be forbidden for CONNECT)
@@ -68,6 +70,11 @@ impl ConnectRequestInput {
         // Add authority if present
         if let Some(ref authority) = self.authority {
             headers.push(Header::new(":authority", authority));
+        }
+
+        // Add protocol if present (extended CONNECT / RFC 8441)
+        if let Some(ref protocol) = self.protocol {
+            headers.push(Header::new(":protocol", protocol));
         }
 
         // Add scheme if present (should trigger error for CONNECT)
@@ -178,6 +185,15 @@ fn validate_connect_pseudo_headers(input: &ConnectRequestInput) -> Result<(), H2
         ));
     }
 
+    // RFC 8441 extended CONNECT is not enabled on this validator path.
+    // Reject :protocol explicitly so RFC 8441-style requests are not
+    // silently accepted without SETTINGS negotiation support.
+    if input.protocol.is_some() {
+        return Err(H2Error::protocol(
+            "CONNECT request must not include unsupported :protocol pseudo-header",
+        ));
+    }
+
     // RFC 9113 §8.5: CONNECT method MUST NOT include :scheme or :path
     if input.scheme.is_some() {
         return Err(H2Error::protocol(
@@ -210,6 +226,7 @@ fn arb_valid_connect_request() -> impl Strategy<Value = ConnectRequestInput> {
         .prop_map(|(authority, headers, stream_id)| {
             ConnectRequestInput {
                 authority: Some(authority),
+                protocol: None,
                 scheme: None,     // Valid CONNECT: no scheme
                 path: None,       // Valid CONNECT: no path
                 end_stream: true, // RFC 9113 §8.5: CONNECT request ends with END_STREAM
@@ -234,6 +251,7 @@ fn arb_invalid_connect_request() -> impl Strategy<Value = ConnectRequestInput> {
             .prop_map(|(authority, scheme, path, end_stream, stream_id)| {
                 ConnectRequestInput {
                     authority,
+                    protocol: None,
                     scheme,
                     path,
                     end_stream,
@@ -251,6 +269,7 @@ fn arb_invalid_connect_request() -> impl Strategy<Value = ConnectRequestInput> {
             .prop_map(|(authority, scheme, end_stream, stream_id)| {
                 ConnectRequestInput {
                     authority: Some(authority),
+                    protocol: None,
                     scheme: Some(scheme), // Forbidden for CONNECT
                     path: None,
                     end_stream,
@@ -268,6 +287,7 @@ fn arb_invalid_connect_request() -> impl Strategy<Value = ConnectRequestInput> {
             .prop_map(|(authority, path, end_stream, stream_id)| {
                 ConnectRequestInput {
                     authority: Some(authority),
+                    protocol: None,
                     scheme: None,
                     path: Some(path), // Forbidden for CONNECT
                     end_stream,
@@ -408,6 +428,7 @@ proptest! {
 
         let connect_input = ConnectRequestInput {
             authority: Some(authority.clone()),
+            protocol: None,
             scheme: None,
             path: None,
             end_stream: true,
@@ -527,6 +548,7 @@ proptest! {
 
         let request = ConnectRequestInput {
             authority: Some(authority.clone()),
+            protocol: None,
             scheme: None,
             path: None,
             end_stream: true,
@@ -572,6 +594,7 @@ proptest! {
 
         let request = ConnectRequestInput {
             authority: authority.clone(),
+            protocol: None,
             scheme,
             path,
             end_stream: true,
@@ -613,6 +636,7 @@ mod unit_tests {
     fn test_validate_connect_pseudo_headers_valid() {
         let valid_request = ConnectRequestInput {
             authority: Some("example.com:443".to_string()),
+            protocol: None,
             scheme: None,
             path: None,
             end_stream: true,
@@ -631,6 +655,7 @@ mod unit_tests {
     fn test_validate_connect_pseudo_headers_missing_authority() {
         let invalid_request = ConnectRequestInput {
             authority: None, // Missing required authority
+            protocol: None,
             scheme: None,
             path: None,
             end_stream: true,
@@ -654,6 +679,7 @@ mod unit_tests {
     fn test_validate_connect_pseudo_headers_forbidden_scheme() {
         let invalid_request = ConnectRequestInput {
             authority: Some("example.com:443".to_string()),
+            protocol: None,
             scheme: Some("https".to_string()), // Forbidden for CONNECT
             path: None,
             end_stream: true,
@@ -674,6 +700,7 @@ mod unit_tests {
     fn test_validate_connect_pseudo_headers_forbidden_path() {
         let invalid_request = ConnectRequestInput {
             authority: Some("example.com:443".to_string()),
+            protocol: None,
             scheme: None,
             path: Some("/tunnel".to_string()), // Forbidden for CONNECT
             end_stream: true,
@@ -711,5 +738,34 @@ mod unit_tests {
 
         // Time should advance
         assert!(ctx.time_getter.now_nanos() > 0);
+    }
+
+    #[test]
+    fn test_validate_connect_pseudo_headers_rejects_rfc8441_websocket_vector() {
+        let extended_connect_request = ConnectRequestInput {
+            authority: Some("server.example.com:443".to_string()),
+            protocol: Some("websocket".to_string()),
+            scheme: Some("https".to_string()),
+            path: Some("/chat".to_string()),
+            end_stream: false,
+            headers: vec![
+                ("sec-websocket-version".to_string(), "13".to_string()),
+                (
+                    "sec-websocket-protocol".to_string(),
+                    "chat, superchat".to_string(),
+                ),
+            ],
+            stream_id: 1,
+        };
+
+        let result = validate_connect_pseudo_headers(&extended_connect_request);
+        assert!(
+            result.is_err(),
+            "RFC 8441-style extended CONNECT must be rejected on the non-enabled CONNECT path"
+        );
+
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(err.to_string().contains("unsupported :protocol"));
     }
 }
