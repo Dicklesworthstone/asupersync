@@ -304,8 +304,13 @@ impl BarrierWaitResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+    use crate::runtime::yield_now;
     use crate::test_utils::init_test_logging;
+    use crate::types::Budget;
+    use serde_json::Value;
     use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -459,6 +464,124 @@ mod tests {
         }
 
         crate::test_complete!("barrier_multiple_generations");
+    }
+
+    #[test]
+    fn barrier_n_party_sync_under_lab_runtime() {
+        init_test("barrier_n_party_sync_under_lab_runtime");
+
+        let config = TestConfig::new()
+            .with_seed(0xBA22_1E42)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let barrier = Arc::new(Barrier::new(3));
+        let checkpoints = Arc::new(StdMutex::new(Vec::<Value>::new()));
+
+        let (leaders, checkpoints, generation, arrived, waiter_count) =
+            LabRuntimeTarget::block_on(&mut runtime, async move {
+                let cx = Cx::current().expect("lab runtime should install a current Cx");
+                let mut tasks = Vec::new();
+
+                for party in 0..3usize {
+                    let spawn_cx = cx.clone();
+                    let task_cx = spawn_cx.clone();
+                    let barrier = Arc::clone(&barrier);
+                    let checkpoints = Arc::clone(&checkpoints);
+                    tasks.push(LabRuntimeTarget::spawn(
+                        &spawn_cx,
+                        Budget::INFINITE,
+                        async move {
+                            for _ in 0..party {
+                                yield_now().await;
+                            }
+
+                            let arrived_event = serde_json::json!({
+                                "phase": "arrived",
+                                "party": party,
+                            });
+                            tracing::info!(event = %arrived_event, "barrier_lab_checkpoint");
+                            checkpoints.lock().unwrap().push(arrived_event);
+
+                            let wait_result = barrier
+                                .wait(&task_cx)
+                                .await
+                                .expect("barrier wait should succeed");
+                            let released_event = serde_json::json!({
+                                "phase": "released",
+                                "party": party,
+                                "leader": wait_result.is_leader(),
+                                "time_ns": task_cx.now().as_nanos(),
+                            });
+                            tracing::info!(event = %released_event, "barrier_lab_checkpoint");
+                            checkpoints.lock().unwrap().push(released_event);
+                            wait_result.is_leader()
+                        },
+                    ));
+                }
+
+                let mut leaders = 0usize;
+                for task in tasks {
+                    let outcome = task.await;
+                    crate::assert_with_log!(
+                        matches!(outcome, crate::types::Outcome::Ok(_)),
+                        "barrier task completes successfully",
+                        true,
+                        matches!(outcome, crate::types::Outcome::Ok(_))
+                    );
+                    let crate::types::Outcome::Ok(is_leader) = outcome else {
+                        panic!("barrier task should finish successfully");
+                    };
+                    leaders += usize::from(is_leader);
+                }
+
+                let state = barrier.state.lock();
+                (
+                    leaders,
+                    checkpoints.lock().unwrap().clone(),
+                    state.generation,
+                    state.arrived,
+                    state.waiters.len(),
+                )
+            });
+
+        assert_eq!(leaders, 1, "exactly one barrier party should be the leader");
+        assert_eq!(
+            generation, 1,
+            "barrier should advance exactly one generation"
+        );
+        assert_eq!(
+            arrived, 0,
+            "barrier should clear arrived count after release"
+        );
+        assert_eq!(waiter_count, 0, "barrier should drain waiter registrations");
+
+        let first_release_index = checkpoints
+            .iter()
+            .position(|event| event["phase"] == "released")
+            .expect("released checkpoint should be recorded");
+        let arrived_before_release = checkpoints[..first_release_index]
+            .iter()
+            .filter(|event| event["phase"] == "arrived")
+            .count();
+        assert_eq!(
+            arrived_before_release, 3,
+            "all parties should arrive before the barrier releases any waiter"
+        );
+        assert_eq!(
+            checkpoints
+                .iter()
+                .filter(|event| event["phase"] == "released")
+                .count(),
+            3,
+            "all parties should record a release checkpoint"
+        );
+
+        let violations = runtime.oracles.check_all(runtime.now());
+        assert!(
+            violations.is_empty(),
+            "barrier lab-runtime rendezvous should leave runtime invariants clean: {violations:?}"
+        );
     }
 
     #[test]
