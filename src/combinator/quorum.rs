@@ -832,6 +832,45 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_appending_error_losers_preserves_met_quorum_result() {
+        let base_outcomes: Vec<Outcome<i32, &str>> =
+            vec![Outcome::Ok(10), Outcome::Err("e1"), Outcome::Ok(20)];
+        let extended_outcomes: Vec<Outcome<i32, &str>> = vec![
+            Outcome::Ok(10),
+            Outcome::Err("e1"),
+            Outcome::Ok(20),
+            Outcome::Err("e2"),
+            Outcome::Err("e3"),
+        ];
+
+        let base_result = quorum_outcomes(2, base_outcomes);
+        let extended_result = quorum_outcomes(2, extended_outcomes);
+
+        assert!(base_result.quorum_met);
+        assert!(extended_result.quorum_met);
+
+        let mut base_success_values = base_result
+            .successes
+            .iter()
+            .map(|(_, value)| *value)
+            .collect::<Vec<_>>();
+        let mut extended_success_values = extended_result
+            .successes
+            .iter()
+            .map(|(_, value)| *value)
+            .collect::<Vec<_>>();
+        base_success_values.sort_unstable();
+        extended_success_values.sort_unstable();
+
+        assert_eq!(base_success_values, vec![10, 20]);
+        assert_eq!(extended_success_values, base_success_values);
+        assert_eq!(
+            quorum_to_result_signature(base_result),
+            quorum_to_result_signature(extended_result)
+        );
+    }
+
+    #[test]
     fn quorum_empty_outcomes() {
         let outcomes: Vec<Outcome<i32, &str>> = vec![];
 
