@@ -269,7 +269,7 @@ fn mr1_isolation_invariant(
     bulkhead_count: u32,
     workers_per_bulkhead: u32,
     total_work_units: u32,
-    seed: u64,
+    _seed: u64,
 ) -> bool {
     let global_state = GlobalBulkheadState::new();
     let mut bulkheads: Vec<(String, Arc<Bulkhead>)> = Vec::new();
@@ -290,7 +290,7 @@ fn mr1_isolation_invariant(
     }
 
     // Generate work units distributed across bulkheads
-    let _rng = DetRng::new(seed);
+    let _rng = DetRng::new(_seed);
     let mut work_assignments: HashMap<String, Vec<TestWorkUnit>> = HashMap::new();
 
     for work_id in 0..total_work_units {
@@ -371,7 +371,7 @@ fn mr2_rejection_accuracy(
     max_workers: u32,
     queue_size: u32,
     work_burst_size: u32,
-    seed: u64,
+    _seed: u64,
 ) -> bool {
     let global_state = GlobalBulkheadState::new();
 
@@ -468,7 +468,7 @@ fn mr3_cancel_propagation(worker_count: u32, in_flight_count: u32, _seed: u64) -
 
     // Queue additional work
     let now = Time::from_millis(0);
-    for work_id in worker_count..worker_count + in_flight_count {
+    for _work_id in worker_count..worker_count + in_flight_count {
         match bulkhead.enqueue(1, now) {
             Ok(entry_id) => {
                 queue_entries.push(entry_id);
@@ -525,7 +525,7 @@ fn mr4_metrics_accuracy(
     worker_count: u32,
     operation_count: u32,
     concurrency_level: u32,
-    seed: u64,
+    _seed: u64,
 ) -> bool {
     let global_state = GlobalBulkheadState::new();
 
@@ -603,11 +603,11 @@ fn mr4_metrics_accuracy(
 fn mr5_deterministic_behavior(
     worker_count: u32,
     work_sequence: Vec<u32>, // Sequence of work weights
-    seed: u64,
+    _seed: u64,
 ) -> bool {
     // Run the same sequence twice and verify identical results
-    let result1 = run_deterministic_sequence(worker_count, &work_sequence, seed);
-    let result2 = run_deterministic_sequence(worker_count, &work_sequence, seed);
+    let result1 = run_deterministic_sequence(worker_count, &work_sequence, _seed);
+    let result2 = run_deterministic_sequence(worker_count, &work_sequence, _seed);
 
     // **MR5 Verification**: Results should be identical
     let determinism_maintained = result1 == result2;
@@ -626,10 +626,10 @@ fn mr5_deterministic_behavior(
 fn run_deterministic_sequence(
     worker_count: u32,
     work_sequence: &[u32],
-    seed: u64,
+    _seed: u64,
 ) -> DeterministicResult {
     let global_state = GlobalBulkheadState::new();
-    let _rng = DetRng::new(seed);
+    let _rng = DetRng::new(_seed);
 
     let policy = BulkheadPolicy {
         name: "deterministic_test".to_string(),
