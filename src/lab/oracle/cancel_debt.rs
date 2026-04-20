@@ -357,17 +357,20 @@ impl QueueState {
 
     #[allow(clippy::cast_precision_loss)]
     fn debt_accumulation_rate(&self, window_ns: u64, now: Time) -> f64 {
+        if self.pending_items.len() < 2 {
+            return 0.0;
+        }
+
         let cutoff_time = Time::from_nanos(now.as_nanos().saturating_sub(window_ns));
-        let arrivals_in_window: usize = self
-            .arrival_times
+        let items_added_in_window = self
+            .pending_items
             .iter()
-            .filter(|(time, _)| *time >= cutoff_time)
-            .map(|(_, count)| *count)
-            .sum();
+            .filter(|item| item.created_at >= cutoff_time)
+            .count();
 
         let completion_rate = self.completion_rate_over_window(window_ns, now);
         let window_seconds = window_ns as f64 / 1_000_000_000.0;
-        let addition_rate = arrivals_in_window as f64 / window_seconds;
+        let addition_rate = items_added_in_window as f64 / window_seconds;
 
         addition_rate - completion_rate
     }

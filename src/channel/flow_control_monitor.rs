@@ -127,6 +127,7 @@ pub enum FlowControlEvent {
 
 /// Flow control violations that compromise channel safety.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(missing_docs)]
 pub enum FlowControlViolation {
     /// Potential deadlock detected in flow control.
     PotentialDeadlock {
@@ -674,7 +675,7 @@ impl FlowControlMonitor {
                 self.deadlock_detector.remove_dependency(*task_id, *channel_id);
             }
 
-            _ => {} // Handle other events as needed
+            FlowControlEvent::CommitFlowControlled { .. } | FlowControlEvent::AbortDueToFlowControl { .. } => {} // Handle other events as needed
         }
     }
 

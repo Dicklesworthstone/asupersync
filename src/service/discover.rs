@@ -410,7 +410,7 @@ impl Discover for DnsServiceDiscovery {
 
     fn poll_discover(&self) -> Result<Vec<Change<SocketAddr>>, DnsDiscoveryError> {
         let now = (self.config.time_getter)();
-        let resolve_generation = loop {
+        let resolve_generation = {
             let mut state = self.state.lock();
             if let Some(in_flight_generation) = state.in_flight_generation {
                 self.resolve_done.wait(&mut state);
@@ -436,7 +436,7 @@ impl Discover for DnsServiceDiscovery {
                 .checked_add(1)
                 .expect("dns discovery resolve generation overflow");
             state.in_flight_generation = Some(state.resolve_generation);
-            break state.resolve_generation;
+            state.resolve_generation
         };
 
         let resolution = self.resolve();

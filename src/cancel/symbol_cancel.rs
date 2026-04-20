@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{Budget, CancelKind, CancelReason, Time};
