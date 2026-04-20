@@ -122,6 +122,7 @@ impl CrdtObligationEntry {
             }
             (Some(lhs), Some(rhs)) if lhs != rhs => {
                 self.state = self.state.join(LatticeState::Conflict);
+                self.kind = Some(lhs.min(rhs));
             }
             _ => {}
         }
@@ -543,6 +544,7 @@ mod tests {
     use super::*;
     use crate::remote::NodeId;
     use crate::types::ObligationId;
+    use proptest::prelude::*;
 
     fn oid(index: u32) -> ObligationId {
         ObligationId::new_for_test(index, 0)
@@ -550,6 +552,76 @@ mod tests {
 
     fn node(name: &str) -> NodeId {
         NodeId::new(name)
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct TraceOp {
+        id_index: u8,
+        action: u8,
+    }
+
+    fn apply_trace(ledger: &mut CrdtObligationLedger, ops: &[TraceOp]) {
+        for op in ops {
+            let id = oid(u32::from(op.id_index % 6) + 1);
+            match op.action % 7 {
+                0 => {
+                    let kind = match op.id_index % 4 {
+                        0 => ObligationKind::SendPermit,
+                        1 => ObligationKind::Ack,
+                        2 => ObligationKind::Lease,
+                        _ => ObligationKind::IoOp,
+                    };
+                    let _ = ledger.record_acquire(id, kind);
+                }
+                1 => {
+                    let _ = ledger.record_commit(id);
+                }
+                2 => {
+                    let _ = ledger.record_abort(id);
+                }
+                3 => {
+                    let _ = ledger.record_acquire(id, ObligationKind::SendPermit);
+                }
+                4 => {
+                    let _ = ledger.record_acquire(id, ObligationKind::Lease);
+                }
+                5 => {
+                    ledger.force_abort_repair(id);
+                }
+                _ => {
+                    let _ = ledger.record_acquire(id, ObligationKind::Ack);
+                    let _ = ledger.record_commit(id);
+                }
+            }
+        }
+    }
+
+    fn ledger_signature(
+        ledger: &CrdtObligationLedger,
+    ) -> Vec<(
+        ObligationId,
+        LatticeState,
+        Option<ObligationKind>,
+        BTreeMap<NodeId, LatticeState>,
+        BTreeSet<NodeId>,
+        BTreeMap<NodeId, u64>,
+        BTreeMap<NodeId, u64>,
+    )> {
+        ledger
+            .entries
+            .iter()
+            .map(|(id, entry)| {
+                (
+                    *id,
+                    entry.state,
+                    entry.kind,
+                    entry.witnesses.clone(),
+                    entry.repair_nodes.clone(),
+                    entry.acquire_counts.clone(),
+                    entry.resolve_counts.clone(),
+                )
+            })
+            .collect()
     }
 
     // ── Basic operations ────────────────────────────────────────────────
@@ -662,6 +734,41 @@ mod tests {
 
         assert_eq!(ab.get(&oid(1)), ba.get(&oid(1)));
         assert_eq!(ab.get(&oid(1)), LatticeState::Committed);
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_merge_trace_commutativity(
+            a_ops in prop::collection::vec((0u8..12, 0u8..7), 0..24),
+            b_ops in prop::collection::vec((0u8..12, 0u8..7), 0..24),
+        ) {
+            let a_ops: Vec<TraceOp> = a_ops
+                .into_iter()
+                .map(|(id_index, action)| TraceOp { id_index, action })
+                .collect();
+            let b_ops: Vec<TraceOp> = b_ops
+                .into_iter()
+                .map(|(id_index, action)| TraceOp { id_index, action })
+                .collect();
+
+            let mut a = CrdtObligationLedger::new(node("A"));
+            let mut b = CrdtObligationLedger::new(node("B"));
+            apply_trace(&mut a, &a_ops);
+            apply_trace(&mut b, &b_ops);
+
+            let mut ab = a.clone();
+            ab.merge(&b);
+            let mut ba = b.clone();
+            ba.merge(&a);
+
+            prop_assert_eq!(ledger_signature(&ab), ledger_signature(&ba));
+            prop_assert_eq!(ab.pending(), ba.pending());
+            prop_assert_eq!(ab.conflicts().len(), ba.conflicts().len());
+            prop_assert_eq!(
+                ab.linearity_violations().len(),
+                ba.linearity_violations().len()
+            );
+        }
     }
 
     #[test]
