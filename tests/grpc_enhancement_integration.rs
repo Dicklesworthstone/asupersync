@@ -7,6 +7,8 @@
 #![allow(clippy::pedantic)]
 #![allow(clippy::nursery)]
 
+mod common;
+
 use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::grpc::codec::{FramedCodec, GrpcCodec, GrpcMessage, IdentityCodec};
 use asupersync::grpc::status::{Code, GrpcError, Status};
@@ -19,10 +21,16 @@ use asupersync::grpc::web::{
 // ── F.1: Reflection Integration Tests ────────────────────────────────
 
 mod reflection {
+    use super::common;
+    use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+    use asupersync::cx::Cx;
+    use asupersync::grpc::health::HealthService;
     use asupersync::grpc::reflection::ReflectionService;
     use asupersync::grpc::service::{
         MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandler,
     };
+    use asupersync::grpc::streaming::Request;
+    use asupersync::types::Budget;
 
     /// Mock service for testing reflection.
     struct MockEchoService;
@@ -46,16 +54,101 @@ mod reflection {
 
     #[test]
     fn test_reflection_registers_and_lists_multiple_services() {
-        let reflection = ReflectionService::default();
+        common::init_test_logging();
 
-        let svc1 = MockEchoService;
-        reflection.register_handler(&svc1);
+        let config = TestConfig::new().with_seed(0x5157).with_tracing(true);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
 
-        let services = reflection.list_services();
+        let (services, health_method_names, checkpoints) =
+            LabRuntimeTarget::block_on(&mut runtime, async {
+                let cx = Cx::current().expect("lab root task should have a current Cx");
+                let reflection = ReflectionService::default();
+                let health = HealthService::new();
+                let reflection_service = ReflectionService::new();
+
+                reflection.register_handler(&health);
+                reflection.register_handler(&reflection_service);
+
+                let list_reflection = reflection.clone();
+                let list_handle = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async move {
+                    list_reflection
+                        .list_services_async(&Request::new(Default::default()))
+                        .await
+                        .expect("list services should succeed")
+                        .into_inner()
+                        .services
+                });
+
+                let describe_reflection = reflection.clone();
+                let describe_handle =
+                    LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async move {
+                        describe_reflection
+                            .describe_service_async(&Request::new(
+                                asupersync::grpc::reflection::ReflectionDescribeServiceRequest::new(
+                                    <HealthService as NamedService>::NAME,
+                                ),
+                            ))
+                            .await
+                            .expect("describe service should succeed")
+                            .into_inner()
+                            .service
+                            .methods
+                            .into_iter()
+                            .map(|method| method.name)
+                            .collect::<Vec<_>>()
+                    });
+
+                asupersync::runtime::yield_now().await;
+
+                let services = match list_handle.await {
+                    asupersync::types::Outcome::Ok(services) => services,
+                    other => panic!("unexpected list outcome: {other:?}"),
+                };
+                let health_method_names = match describe_handle.await {
+                    asupersync::types::Outcome::Ok(methods) => methods,
+                    other => panic!("unexpected describe outcome: {other:?}"),
+                };
+
+                let checkpoints = vec![
+                    serde_json::json!({
+                        "phase": "registered",
+                        "services": [
+                            <HealthService as NamedService>::NAME,
+                            <ReflectionService as NamedService>::NAME,
+                        ],
+                    }),
+                    serde_json::json!({
+                        "phase": "listed",
+                        "services": services,
+                    }),
+                    serde_json::json!({
+                        "phase": "described",
+                        "service": <HealthService as NamedService>::NAME,
+                        "methods": health_method_names,
+                    }),
+                ];
+
+                for checkpoint in &checkpoints {
+                    tracing::info!(event = %checkpoint, "grpc_reflection_lab_checkpoint");
+                }
+
+                (services, health_method_names, checkpoints)
+            });
+
         assert!(
-            services.iter().any(|s| s == "test.Echo"),
-            "Echo service registered"
+            services
+                .iter()
+                .any(|service| service == <HealthService as NamedService>::NAME),
+            "real HealthService must be registered in reflection"
         );
+        assert!(
+            services
+                .iter()
+                .any(|service| service == <ReflectionService as NamedService>::NAME),
+            "real ReflectionService must be registered in reflection"
+        );
+        assert_eq!(health_method_names, vec!["Check".to_string(), "Watch".to_string()]);
+        assert_eq!(checkpoints.len(), 3, "expected deterministic JSON checkpoints");
     }
 
     #[test]
