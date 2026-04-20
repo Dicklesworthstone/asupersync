@@ -658,6 +658,16 @@ mod tests {
 
     #[cfg(feature = "tls")]
     #[test]
+    fn test_validate_domain_rfc3492_punycode_vector() {
+        // RFC 3492 / IDNA-style A-label for "bücher.example".
+        let punycode = "xn--bcher-kva.example";
+
+        assert!(TlsConnector::validate_domain(punycode).is_ok());
+        assert!(TlsConnector::validate_domain("bücher.example").is_err());
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
     fn test_build_empty_roots() {
         // Should build but with a warning
         let connector = TlsConnectorBuilder::new().build().unwrap();
