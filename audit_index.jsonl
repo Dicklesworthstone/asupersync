@@ -3449,3 +3449,4 @@
 {"file":"src/trace/distributed/vclock.rs","lines":1346,"batch":"golden-vclock-output-2026-04-20","date":"2026-04-20","agent":"Codex","verdict":"SOUND","bugs":0,"notes":"Added micro-snapshot for VectorClock display/debug output with scrubbed node names"}
 {"file":"src/transport/router.rs","lines":3382,"batch":"golden-transport-routing-table-2026-04-20","date":"2026-04-20","agent":"Codex","verdict":"SOUND","bugs":0,"notes":"Added tiny scrubbed snapshot for routing-table endpoint and route state"}
 {"file":"src/database/pool.rs","lines":2236,"batch":"golden-db-pool-telemetry-2026-04-20","date":"2026-04-20","agent":"Codex","verdict":"SOUND","bugs":0,"notes":"Added tiny telemetry snapshot for sync DbPool lifecycle counters"}
+{"file":"src/messaging/nats.rs","lines":2448,"batch":"golden-nats-pubsub-event-2026-04-20","date":"2026-04-20","agent":"Codex","verdict":"SOUND","bugs":0,"notes":"Added tiny scrubbed snapshot for NATS pub/sub message event shape"}

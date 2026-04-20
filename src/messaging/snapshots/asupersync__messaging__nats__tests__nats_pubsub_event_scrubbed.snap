@@ -1,0 +1,11 @@
+---
+source: src/messaging/nats.rs
+expression: message_event_snapshot(&msg)
+---
+{
+  "payload_len": 30,
+  "payload_utf8": "{\"event\":\"published\",\"seq\":12}",
+  "reply_to": "_INBOX.[SCRUBBED]",
+  "sid": 7,
+  "subject": "svc.echo"
+}

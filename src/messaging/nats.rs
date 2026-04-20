@@ -1454,11 +1454,32 @@ impl Drop for Subscription {
 mod tests {
     use super::*;
     use crate::test_utils::{assert_completes_within, run_test_with_cx};
+    use serde_json::json;
     use socket2::SockRef;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc as std_mpsc;
     use std::thread;
+
+    fn scrub_reply_subject(reply_to: Option<&str>) -> Option<&str> {
+        reply_to.map(|value| {
+            if value.starts_with("_INBOX.") {
+                "_INBOX.[SCRUBBED]"
+            } else {
+                value
+            }
+        })
+    }
+
+    fn message_event_snapshot(message: &Message) -> serde_json::Value {
+        json!({
+            "subject": message.subject,
+            "sid": message.sid,
+            "reply_to": scrub_reply_subject(message.reply_to.as_deref()),
+            "payload_utf8": String::from_utf8_lossy(&message.payload),
+            "payload_len": message.payload.len(),
+        })
+    }
 
     fn read_protocol_line(reader: &mut BufReader<std::net::TcpStream>) -> String {
         let mut line = String::new();
@@ -2168,6 +2189,21 @@ mod tests {
         };
         assert!(msg.reply_to.is_none());
         assert!(msg.payload.is_empty());
+    }
+
+    #[test]
+    fn nats_pubsub_event_snapshot_scrubbed() {
+        let msg = Message {
+            subject: "svc.echo".into(),
+            sid: 7,
+            reply_to: Some("_INBOX.42.reply".into()),
+            payload: b"{\"event\":\"published\",\"seq\":12}".to_vec(),
+        };
+
+        insta::assert_json_snapshot!(
+            "nats_pubsub_event_scrubbed",
+            message_event_snapshot(&msg)
+        );
     }
 
     #[test]
