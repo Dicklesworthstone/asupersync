@@ -253,6 +253,7 @@ mod tests {
     use crate::types::Time;
     use franken_decision::{EvalContext, Posterior, evaluate};
     use franken_kernel::{DecisionId, TraceId};
+    use serde_json::{Value, json};
 
     #[inline]
     fn test_ctx(cal: f64) -> EvalContext {
@@ -284,6 +285,24 @@ mod tests {
             finalizing_tasks: 0,
             ready_queue_depth: 0,
         }
+    }
+
+    fn scrub_decision_output(value: Value) -> Value {
+        let mut scrubbed = value;
+
+        if let Some(audit) = scrubbed.get_mut("audit_entry").and_then(Value::as_object_mut) {
+            if let Some(decision_id) = audit.get_mut("decision_id") {
+                *decision_id = Value::String("[DECISION_ID]".into());
+            }
+            if let Some(trace_id) = audit.get_mut("trace_id") {
+                *trace_id = Value::String("[TRACE_ID]".into());
+            }
+            if let Some(ts_unix_ms) = audit.get_mut("ts_unix_ms") {
+                *ts_unix_ms = Value::String("[TS_MS]".into());
+            }
+        }
+
+        scrubbed
     }
 
     #[test]
@@ -359,6 +378,24 @@ mod tests {
         let evidence = outcome.audit_entry.to_evidence_ledger();
         assert_eq!(evidence.component, "scheduler");
         assert!(evidence.is_valid());
+    }
+
+    #[test]
+    fn decision_output_snapshot_scrubbed() {
+        let c = SchedulerDecisionContract::new();
+        let posterior = Posterior::new(vec![0.12, 0.18, 0.2, 0.5]).unwrap();
+        let outcome = evaluate(&c, &posterior, &test_ctx(0.91));
+
+        insta::assert_json_snapshot!(
+            "decision_output_scrubbed",
+            scrub_decision_output(json!({
+                "action_index": outcome.action_index,
+                "action_name": outcome.action_name,
+                "expected_loss": outcome.expected_loss,
+                "fallback_active": outcome.fallback_active,
+                "audit_entry": outcome.audit_entry,
+            }))
+        );
     }
 
     #[test]
