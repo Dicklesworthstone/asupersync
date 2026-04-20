@@ -353,4 +353,40 @@ mod tests {
         assert!(dbg.contains("CalmClassification"));
         assert!(dbg.contains("TestOp"));
     }
+
+    #[test]
+    fn metamorphic_partitioned_views_preserve_classification_order() {
+        let original = classifications();
+        let monotone = coordination_free();
+        let non_monotone = coordination_points();
+
+        let reconstructed: Vec<(&'static str, Monotonicity)> = original
+            .iter()
+            .map(|classification| {
+                let projection = match classification.monotonicity {
+                    Monotonicity::Monotone => monotone
+                        .iter()
+                        .find(|candidate| candidate.operation == classification.operation)
+                        .expect("monotone projection should contain every monotone operation"),
+                    Monotonicity::NonMonotone => non_monotone
+                        .iter()
+                        .find(|candidate| candidate.operation == classification.operation)
+                        .expect(
+                            "non-monotone projection should contain every non-monotone operation",
+                        ),
+                };
+                (projection.operation, projection.monotonicity)
+            })
+            .collect();
+
+        let original_projection: Vec<(&'static str, Monotonicity)> = original
+            .iter()
+            .map(|classification| (classification.operation, classification.monotonicity))
+            .collect();
+
+        assert_eq!(
+            reconstructed, original_projection,
+            "projecting through monotone/non-monotone filtered views must preserve original order"
+        );
+    }
 }
