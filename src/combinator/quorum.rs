@@ -442,6 +442,100 @@ impl CancelReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Debug, Clone)]
+    enum QuorumCase {
+        Ok(i32),
+        ErrAlpha,
+        ErrBeta,
+        CancelUser,
+        CancelTimeout,
+        CancelShutdown,
+        Panic,
+    }
+
+    impl QuorumCase {
+        fn into_outcome(self) -> Outcome<i32, &'static str> {
+            match self {
+                Self::Ok(value) => Outcome::Ok(value),
+                Self::ErrAlpha => Outcome::Err("err-alpha"),
+                Self::ErrBeta => Outcome::Err("err-beta"),
+                Self::CancelUser => Outcome::Cancelled(CancelReason::user("user")),
+                Self::CancelTimeout => Outcome::Cancelled(CancelReason::timeout()),
+                Self::CancelShutdown => Outcome::Cancelled(CancelReason::shutdown()),
+                Self::Panic => Outcome::Panicked(PanicPayload::new("boom")),
+            }
+        }
+    }
+
+    fn quorum_case_strategy() -> impl Strategy<Value = QuorumCase> {
+        prop_oneof![
+            any::<i16>().prop_map(|value| QuorumCase::Ok(i32::from(value))),
+            Just(QuorumCase::ErrAlpha),
+            Just(QuorumCase::ErrBeta),
+            Just(QuorumCase::CancelUser),
+            Just(QuorumCase::CancelTimeout),
+            Just(QuorumCase::CancelShutdown),
+            Just(QuorumCase::Panic),
+        ]
+    }
+
+    fn failure_signature(
+        failure: &QuorumFailure<&'static str>,
+    ) -> (&'static str, Option<u8>, Option<&'static str>) {
+        match failure {
+            QuorumFailure::Error(error) => ("err", None, Some(*error)),
+            QuorumFailure::Cancelled(reason) => ("cancelled", Some(reason.severity()), None),
+            QuorumFailure::Panicked(_) => ("panic", None, None),
+        }
+    }
+
+    fn ordered_projection(
+        result: &QuorumResult<i32, &'static str>,
+    ) -> Vec<(&'static str, Option<i32>, Option<u8>, Option<&'static str>)> {
+        let mut projection = vec![("unassigned", None, None, None); result.total()];
+
+        for (index, value) in &result.successes {
+            projection[*index] = ("ok", Some(*value), None, None);
+        }
+
+        for (index, failure) in &result.failures {
+            projection[*index] = match failure {
+                QuorumFailure::Error(error) => ("err", None, None, Some(*error)),
+                QuorumFailure::Cancelled(reason) => {
+                    ("cancelled", None, Some(reason.severity()), None)
+                }
+                QuorumFailure::Panicked(_) => ("panic", None, None, None),
+            };
+        }
+
+        projection
+    }
+
+    fn quorum_to_result_signature(
+        result: QuorumResult<i32, &'static str>,
+    ) -> (&'static str, usize, Vec<i32>, Vec<&'static str>) {
+        match quorum_to_result(result) {
+            Ok(mut values) => {
+                values.sort_unstable();
+                ("ok", values.len(), values, Vec::new())
+            }
+            Err(QuorumError::InvalidQuorum { required, total }) => {
+                ("invalid", required + total, Vec::new(), Vec::new())
+            }
+            Err(QuorumError::Panicked(_)) => ("panic", 0, Vec::new(), Vec::new()),
+            Err(QuorumError::Cancelled(_)) => ("cancelled", 0, Vec::new(), Vec::new()),
+            Err(QuorumError::InsufficientSuccesses {
+                achieved,
+                mut errors,
+                ..
+            }) => {
+                errors.sort_unstable();
+                ("insufficient", achieved, Vec::new(), errors)
+            }
+        }
+    }
 
     #[test]
     fn quorum_all_succeed() {
@@ -775,5 +869,93 @@ mod tests {
         assert!(dbg.contains("Error"));
         let dbg2 = format!("{f2:?}");
         assert!(dbg2.contains("Error"));
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_quorum_rotation_preserves_projection_and_verdict(
+            cases in prop::collection::vec(quorum_case_strategy(), 1..12),
+            raw_required in 0usize..16,
+            raw_shift in 0usize..32,
+        ) {
+            let shift = raw_shift % cases.len();
+            let required = raw_required % (cases.len() + 3);
+
+            let base_result = quorum_outcomes(
+                required,
+                cases
+                    .iter()
+                    .cloned()
+                    .map(QuorumCase::into_outcome)
+                    .collect::<Vec<_>>(),
+            );
+
+            let mut rotated_cases = cases.clone();
+            rotated_cases.rotate_left(shift);
+            let rotated_result = quorum_outcomes(
+                required,
+                rotated_cases
+                    .iter()
+                    .cloned()
+                    .map(QuorumCase::into_outcome)
+                    .collect::<Vec<_>>(),
+            );
+
+            prop_assert_eq!(base_result.quorum_met, rotated_result.quorum_met);
+            prop_assert_eq!(base_result.required, rotated_result.required);
+            prop_assert_eq!(base_result.total(), rotated_result.total());
+            prop_assert_eq!(base_result.has_cancellation, rotated_result.has_cancellation);
+            prop_assert_eq!(base_result.has_panic, rotated_result.has_panic);
+
+            let mut base_success_values = base_result
+                .successes
+                .iter()
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>();
+            let mut rotated_success_values = rotated_result
+                .successes
+                .iter()
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>();
+            base_success_values.sort_unstable();
+            rotated_success_values.sort_unstable();
+            prop_assert_eq!(
+                base_success_values,
+                rotated_success_values,
+                "rotating branch order must preserve the quorum success multiset"
+            );
+
+            let mut base_failure_signatures = base_result
+                .failures
+                .iter()
+                .map(|(_, failure)| failure_signature(failure))
+                .collect::<Vec<_>>();
+            let mut rotated_failure_signatures = rotated_result
+                .failures
+                .iter()
+                .map(|(_, failure)| failure_signature(failure))
+                .collect::<Vec<_>>();
+            base_failure_signatures.sort_unstable();
+            rotated_failure_signatures.sort_unstable();
+            prop_assert_eq!(
+                base_failure_signatures,
+                rotated_failure_signatures,
+                "rotating branch order must preserve the quorum failure multiset"
+            );
+
+            let mut expected_rotated_projection = ordered_projection(&base_result);
+            expected_rotated_projection.rotate_left(shift);
+            prop_assert_eq!(
+                ordered_projection(&rotated_result),
+                expected_rotated_projection,
+                "a quiescent quorum must preserve the branch projection under the same rotation"
+            );
+
+            prop_assert_eq!(
+                quorum_to_result_signature(base_result),
+                quorum_to_result_signature(rotated_result),
+                "rotating branch order must preserve the fail-fast quorum verdict class"
+            );
+        }
     }
 }
