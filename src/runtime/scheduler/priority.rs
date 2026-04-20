@@ -2597,6 +2597,82 @@ mod tests {
         crate::test_complete!("edf_same_deadline_fifo_stable");
     }
 
+    #[test]
+    fn metamorphic_edf_deadline_tightening_is_monotone() {
+        init_test("metamorphic_edf_deadline_tightening_is_monotone");
+
+        fn timed_order(entries: &[(TaskId, Time)]) -> Vec<TaskId> {
+            let mut sched = Scheduler::new();
+            for &(task, deadline) in entries {
+                sched.schedule_timed(task, deadline);
+            }
+
+            let mut order = Vec::with_capacity(entries.len());
+            while let Some(task) = sched.pop() {
+                order.push(task);
+            }
+            order
+        }
+
+        fn position_of(order: &[TaskId], task: TaskId) -> usize {
+            order.iter().position(|&entry| entry == task).unwrap()
+        }
+
+        let baseline = [
+            (task(1), Time::from_secs(40)),
+            (task(2), Time::from_secs(15)),
+            (task(3), Time::from_secs(90)),
+            (task(4), Time::from_secs(25)),
+            (task(5), Time::from_secs(60)),
+        ];
+
+        let baseline_order = timed_order(&baseline);
+        crate::assert_with_log!(
+            baseline_order == vec![task(2), task(4), task(1), task(5), task(3)],
+            "baseline EDF order",
+            vec![task(2), task(4), task(1), task(5), task(3)],
+            baseline_order.clone()
+        );
+
+        for &(tightened_task, tighter_deadline) in &[
+            (task(3), Time::from_secs(10)),
+            (task(5), Time::from_secs(20)),
+            (task(1), Time::from_secs(5)),
+        ] {
+            let mut transformed = baseline;
+            let baseline_pos = position_of(&baseline_order, tightened_task);
+            let baseline_deadline = baseline
+                .iter()
+                .find(|&&(task, _)| task == tightened_task)
+                .map(|&(_, deadline)| deadline)
+                .unwrap();
+
+            for (task, deadline) in &mut transformed {
+                if *task == tightened_task {
+                    *deadline = tighter_deadline;
+                }
+            }
+
+            let transformed_order = timed_order(&transformed);
+            let transformed_pos = position_of(&transformed_order, tightened_task);
+
+            crate::assert_with_log!(
+                tighter_deadline < baseline_deadline,
+                "transformation strictly tightens deadline",
+                true,
+                tighter_deadline < baseline_deadline
+            );
+            crate::assert_with_log!(
+                transformed_pos <= baseline_pos,
+                "tightened deadline cannot move task later",
+                true,
+                transformed_pos <= baseline_pos
+            );
+        }
+
+        crate::test_complete!("metamorphic_edf_deadline_tightening_is_monotone");
+    }
+
     // ---- Remove from specific lane doesn't corrupt other lanes ----------
 
     #[test]
