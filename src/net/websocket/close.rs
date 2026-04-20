@@ -727,6 +727,26 @@ mod tests {
     }
 
     #[test]
+    fn handshake_receive_close_rejects_rfc6455_tls_handshake_code_1015() {
+        let mut handshake = CloseHandshake::new();
+        let close_frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Close,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::copy_from_slice(&1015u16.to_be_bytes()),
+        };
+
+        let err = handshake.receive_close(&close_frame).unwrap_err();
+        assert!(matches!(err, WsError::InvalidClosePayload));
+        assert_eq!(handshake.state(), CloseState::Open);
+        assert!(handshake.peer_reason().is_none());
+    }
+
+    #[test]
     fn handshake_receive_empty_close_keeps_response_payload_empty() {
         let mut handshake = CloseHandshake::new();
         let close_frame = Frame::close(None, None);
