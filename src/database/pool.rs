@@ -1206,6 +1206,7 @@ mod tests {
     use super::*;
     use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
     use crate::runtime::yield_now;
+    use crate::types::Budget;
     use futures_lite::future::block_on;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

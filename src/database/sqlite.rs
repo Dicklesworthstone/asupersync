@@ -1591,6 +1591,117 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_transaction_commit_persists_under_lab_runtime() {
+        init_test_logging();
+        let config = TestConfig::new()
+            .with_seed(0x51A7_2002)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+
+        let (count_inside_tx, count_after_commit, committed_name) =
+            LabRuntimeTarget::block_on(&mut runtime, async move {
+                let cx = Cx::current().expect("lab runtime should install a current Cx");
+
+                let conn = match SqliteConnection::open_in_memory(&cx).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("open_in_memory failed: {other:?}"),
+                };
+                match conn
+                    .execute_batch(
+                        &cx,
+                        "CREATE TABLE tx_items (id INTEGER PRIMARY KEY, name TEXT);",
+                    )
+                    .await
+                {
+                    Outcome::Ok(()) => {}
+                    other => panic!("schema setup failed: {other:?}"),
+                }
+
+                let Outcome::Ok(tx) = conn.begin(&cx).await else {
+                    panic!("begin failed");
+                };
+                match tx
+                    .execute(
+                        &cx,
+                        "INSERT INTO tx_items(name) VALUES (?1)",
+                        &[SqliteValue::Text("committed".to_string())],
+                    )
+                    .await
+                {
+                    Outcome::Ok(1) => {}
+                    other => panic!("insert in transaction failed: {other:?}"),
+                }
+
+                let rows_inside = match tx
+                    .query(&cx, "SELECT COUNT(*) AS count FROM tx_items", &[])
+                    .await
+                {
+                    Outcome::Ok(rows) => rows,
+                    other => panic!("count query inside transaction failed: {other:?}"),
+                };
+                let count_inside_tx = rows_inside[0]
+                    .get_i64("count")
+                    .expect("count column should be present");
+                tracing::info!(
+                    event = %serde_json::json!({
+                        "phase": "transaction_inserted",
+                        "count_inside_tx": count_inside_tx,
+                    }),
+                    "sqlite_lab_checkpoint"
+                );
+
+                match tx.commit(&cx).await {
+                    Outcome::Ok(()) => {}
+                    other => panic!("commit failed: {other:?}"),
+                }
+
+                let rows_after = match conn
+                    .query(
+                        &cx,
+                        "SELECT COUNT(*) AS count, MIN(name) AS name FROM tx_items",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(rows) => rows,
+                    other => panic!("query after commit failed: {other:?}"),
+                };
+                let count_after_commit = rows_after[0]
+                    .get_i64("count")
+                    .expect("count column should be present");
+                let committed_name = rows_after[0]
+                    .get_str("name")
+                    .expect("name column should be present")
+                    .to_string();
+                tracing::info!(
+                    event = %serde_json::json!({
+                        "phase": "transaction_committed",
+                        "count_after_commit": count_after_commit,
+                        "name": committed_name,
+                    }),
+                    "sqlite_lab_checkpoint"
+                );
+                conn.close().unwrap();
+
+                (count_inside_tx, count_after_commit, committed_name)
+            });
+
+        assert_eq!(count_inside_tx, 1);
+        assert_eq!(count_after_commit, 1);
+        assert_eq!(committed_name, "committed");
+        let violations = runtime.oracles.check_all(runtime.now());
+        assert!(
+            violations.is_empty(),
+            "sqlite lab transaction test should leave runtime invariants clean: {violations:?}"
+        );
+        assert!(
+            runtime.is_quiescent(),
+            "lab runtime should reach quiescence"
+        );
+    }
+
+    #[test]
     fn transaction_commit_cancelled_does_not_mark_finished_before_commit_runs() {
         let cx = create_test_cx();
         let cancelled_cx = create_test_cx();
