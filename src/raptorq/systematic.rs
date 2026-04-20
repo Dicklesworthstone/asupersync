@@ -167,7 +167,9 @@ impl SystematicParams {
     pub fn rfc_repair_equation(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
         let padding_delta = u32::try_from(self.k_prime - self.k)
             .expect("RFC systematic padding delta must fit in u32");
-        let repair_isi = esi.wrapping_add(padding_delta);
+        let repair_isi = esi
+            .checked_add(padding_delta)
+            .expect("RFC repair ISI must fit in u32");
         let columns = repair_indices_for_esi(self.j, self.w, self.p, repair_isi);
         let coefficients = vec![Gf256::ONE; columns.len()];
         (columns, coefficients)
@@ -1593,7 +1595,7 @@ mod tests {
         let symbol_size = 48;
         let source = make_source_symbols(k, symbol_size);
         let enc = SystematicEncoder::new(&source, symbol_size, 77).unwrap();
-        for esi in (0..20u32).chain(std::iter::once(u32::MAX)) {
+        for esi in 0..20u32 {
             assert_eq!(enc.repair_symbol(esi).len(), symbol_size);
         }
     }
