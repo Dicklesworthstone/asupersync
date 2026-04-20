@@ -35,9 +35,9 @@ use core::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
 
-use crate::types::Outcome;
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
+use crate::types::Outcome;
 
 // ============================================================================
 // Cancel Trait
@@ -759,6 +759,62 @@ macro_rules! race {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Debug, Clone)]
+    enum RaceWinnerCase {
+        Ok(i32),
+        Err,
+        CancelTimeout,
+        CancelShutdown,
+        Panic,
+    }
+
+    impl RaceWinnerCase {
+        fn into_outcome(self) -> Outcome<i32, &'static str> {
+            match self {
+                Self::Ok(value) => Outcome::Ok(value),
+                Self::Err => Outcome::Err("winner-error"),
+                Self::CancelTimeout => Outcome::Cancelled(CancelReason::timeout()),
+                Self::CancelShutdown => Outcome::Cancelled(CancelReason::shutdown()),
+                Self::Panic => Outcome::Panicked(PanicPayload::new("winner-panic")),
+            }
+        }
+    }
+
+    fn race_winner_case_strategy() -> impl Strategy<Value = RaceWinnerCase> {
+        prop_oneof![
+            any::<i16>().prop_map(|value| RaceWinnerCase::Ok(i32::from(value))),
+            Just(RaceWinnerCase::Err),
+            Just(RaceWinnerCase::CancelTimeout),
+            Just(RaceWinnerCase::CancelShutdown),
+            Just(RaceWinnerCase::Panic),
+        ]
+    }
+
+    fn race_outcome_signature(
+        outcome: &Outcome<i32, &'static str>,
+    ) -> (&'static str, Option<i32>, Option<u8>) {
+        match outcome {
+            Outcome::Ok(value) => ("ok", Some(*value), None),
+            Outcome::Err(_) => ("err", None, None),
+            Outcome::Cancelled(reason) => ("cancelled", None, Some(reason.severity())),
+            Outcome::Panicked(_) => ("panic", None, None),
+        }
+    }
+
+    fn race_all_error_signature(
+        error: &RaceAllError<&'static str>,
+    ) -> (&'static str, usize, Option<u8>) {
+        match error {
+            RaceAllError::Error { winner_index, .. } => ("err", *winner_index, None),
+            RaceAllError::Cancelled {
+                winner_index,
+                reason,
+            } => ("cancelled", *winner_index, Some(reason.severity())),
+            RaceAllError::Panicked { index, .. } => ("panic", *index, None),
+        }
+    }
 
     #[test]
     fn race_result_is_first() {
@@ -1254,6 +1310,75 @@ mod tests {
     #[ignore = "macro emits compile_error!"]
     fn race_macro_compiles_and_runs() {
         // Test ignored
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_race_all_rotation_preserves_winner_and_loser_projection(
+            branch_count in 1usize..12,
+            raw_winner_index in 0usize..24,
+            raw_shift in 0usize..24,
+            winner_case in race_winner_case_strategy(),
+        ) {
+            let winner_index = raw_winner_index % branch_count;
+            let shift = raw_shift % branch_count;
+
+            let mut base_outcomes = vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
+            base_outcomes[winner_index] = winner_case.clone().into_outcome();
+
+            let base_result = race_all_outcomes(winner_index, base_outcomes.clone());
+            prop_assert_eq!(base_result.winner_index, winner_index);
+            prop_assert_eq!(
+                race_outcome_signature(&base_result.winner_outcome),
+                race_outcome_signature(&winner_case.clone().into_outcome()),
+            );
+
+            let mut rotated_outcomes = base_outcomes.clone();
+            rotated_outcomes.rotate_left(shift);
+            let expected_rotated_winner = (winner_index + branch_count - shift) % branch_count;
+
+            let rotated_result = race_all_outcomes(expected_rotated_winner, rotated_outcomes.clone());
+            prop_assert_eq!(rotated_result.winner_index, expected_rotated_winner);
+            prop_assert_eq!(
+                race_outcome_signature(&base_result.winner_outcome),
+                race_outcome_signature(&rotated_result.winner_outcome),
+                "rotating branches must preserve the winner outcome class"
+            );
+
+            let mut base_loser_indices = base_result
+                .loser_outcomes
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>();
+            let mut rotated_loser_indices = rotated_result
+                .loser_outcomes
+                .iter()
+                .map(|(index, _)| (*index + shift) % branch_count)
+                .collect::<Vec<_>>();
+            base_loser_indices.sort_unstable();
+            rotated_loser_indices.sort_unstable();
+            prop_assert_eq!(
+                base_loser_indices,
+                rotated_loser_indices,
+                "inverse-rotating loser indices must recover the original loser set"
+            );
+
+            let base_final = make_race_all_result(winner_index, base_outcomes);
+            let rotated_final = make_race_all_result(expected_rotated_winner, rotated_outcomes);
+            match (&base_final, &rotated_final) {
+                (Ok(base_value), Ok(rotated_value)) => {
+                    prop_assert_eq!(base_value, rotated_value);
+                }
+                (Err(base_error), Err(rotated_error)) => {
+                    let base_sig = race_all_error_signature(base_error);
+                    let rotated_sig = race_all_error_signature(rotated_error);
+                    prop_assert_eq!(base_sig.0, rotated_sig.0);
+                    prop_assert_eq!(base_sig.2, rotated_sig.2);
+                    prop_assert_eq!(rotated_sig.1, expected_rotated_winner);
+                }
+                _ => prop_assert!(false, "rotation changed race_all terminal class"),
+            }
+        }
     }
 
     // =========================================================================
