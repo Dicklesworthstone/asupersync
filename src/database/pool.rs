@@ -1208,12 +1208,27 @@ mod tests {
     use crate::runtime::yield_now;
     use crate::types::Budget;
     use futures_lite::future::block_on;
+    use serde_json::json;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn db_pool_stats_snapshot(stats: &DbPoolStats) -> serde_json::Value {
+        json!({
+            "idle": stats.idle,
+            "active": stats.active,
+            "total": stats.total,
+            "max_size": stats.max_size,
+            "total_acquisitions": stats.total_acquisitions,
+            "total_creates": stats.total_creates,
+            "total_discards": stats.total_discards,
+            "total_timeouts": stats.total_timeouts,
+            "total_validation_failures": stats.total_validation_failures,
+        })
     }
 
     // ================================================================
@@ -2190,5 +2205,32 @@ mod tests {
         assert!(dbg.contains("total_creates: 1"));
         assert!(dbg.contains("total_discards: 0"));
         crate::test_complete!("pool_debug_reports_live_counter_values");
+    }
+
+    #[test]
+    fn pool_telemetry_snapshot() {
+        let pool = DbPool::new(TestManager::new(), DbPoolConfig::with_max_size(2));
+
+        let initial = pool.stats();
+
+        let conn = pool.get().expect("first checkout should succeed");
+        let checked_out = pool.stats();
+
+        conn.return_to_pool();
+        let returned = pool.stats();
+
+        let recycled = pool.get().expect("recycled checkout should succeed");
+        recycled.discard();
+        let discarded = pool.stats();
+
+        insta::assert_json_snapshot!(
+            "pool_telemetry_snapshot",
+            json!({
+                "initial": db_pool_stats_snapshot(&initial),
+                "checked_out": db_pool_stats_snapshot(&checked_out),
+                "returned": db_pool_stats_snapshot(&returned),
+                "discarded": db_pool_stats_snapshot(&discarded),
+            })
+        );
     }
 }

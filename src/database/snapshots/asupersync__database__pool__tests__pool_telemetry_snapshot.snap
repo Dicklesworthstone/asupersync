@@ -1,0 +1,56 @@
+---
+source: src/database/pool.rs
+expression: |-
+  json!({
+      "initial": db_pool_stats_snapshot(&initial),
+      "checked_out": db_pool_stats_snapshot(&checked_out),
+      "returned": db_pool_stats_snapshot(&returned),
+      "discarded": db_pool_stats_snapshot(&discarded),
+  })
+---
+{
+  "initial": {
+    "active": 0,
+    "idle": 0,
+    "max_size": 2,
+    "total": 0,
+    "total_acquisitions": 0,
+    "total_creates": 0,
+    "total_discards": 0,
+    "total_timeouts": 0,
+    "total_validation_failures": 0
+  },
+  "checked_out": {
+    "active": 1,
+    "idle": 0,
+    "max_size": 2,
+    "total": 1,
+    "total_acquisitions": 1,
+    "total_creates": 1,
+    "total_discards": 0,
+    "total_timeouts": 0,
+    "total_validation_failures": 0
+  },
+  "returned": {
+    "active": 0,
+    "idle": 1,
+    "max_size": 2,
+    "total": 1,
+    "total_acquisitions": 1,
+    "total_creates": 1,
+    "total_discards": 0,
+    "total_timeouts": 0,
+    "total_validation_failures": 0
+  },
+  "discarded": {
+    "active": 0,
+    "idle": 0,
+    "max_size": 2,
+    "total": 0,
+    "total_acquisitions": 2,
+    "total_creates": 1,
+    "total_discards": 1,
+    "total_timeouts": 0,
+    "total_validation_failures": 0
+  }
+}
