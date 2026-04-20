@@ -1128,6 +1128,39 @@ mod tests {
         assert_eq!(primary_fast.winner(), HedgeWinner::Primary);
     }
 
+    #[test]
+    fn metamorphic_redundant_loser_cancel_preserves_hedged_winner_result() {
+        let baseline: HedgeResult<i32, &str> = HedgeResult::primary_won(
+            Outcome::Ok(42),
+            Outcome::Cancelled(CancelReason::race_loser()),
+        );
+        let transformed: HedgeResult<i32, &str> = HedgeResult::primary_won(
+            Outcome::Ok(42),
+            Outcome::Cancelled(CancelReason::race_loser()),
+        );
+
+        assert_eq!(
+            hedge_to_result(baseline.clone()).unwrap(),
+            hedge_to_result(transformed.clone()).unwrap(),
+            "reissuing the loser cancellation must not perturb the successful hedged result"
+        );
+        assert_eq!(baseline.winner(), transformed.winner());
+
+        let baseline_loser = baseline
+            .loser_outcome()
+            .expect("raced hedge must track loser outcome");
+        let transformed_loser = transformed
+            .loser_outcome()
+            .expect("raced hedge must track loser outcome");
+
+        match (baseline_loser, transformed_loser) {
+            (Outcome::Cancelled(left), Outcome::Cancelled(right)) => {
+                assert_eq!(left.kind(), right.kind());
+            }
+            _ => panic!("loser should remain represented as cancellation"),
+        }
+    }
+
     // --- wave 79 trait coverage ---
 
     #[test]
