@@ -995,6 +995,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h1_parsed_url"
+path = "fuzz_targets/h1_parsed_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h1_header_values"
 path = "fuzz_targets/h1_header_values.rs"
 test = false
