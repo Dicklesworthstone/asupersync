@@ -326,10 +326,21 @@ impl VirtualTimerWheel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Wake;
+
+    fn scrub_timer_id(timer_id: u64) -> &'static str {
+        match timer_id {
+            0 => "[TIMER_A]",
+            1 => "[TIMER_B]",
+            2 => "[TIMER_C]",
+            3 => "[TIMER_D]",
+            _ => "[TIMER_OTHER]",
+        }
+    }
 
     /// A waker that counts how many times it has been woken.
     struct CountingWaker(AtomicUsize);
@@ -722,5 +733,43 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(handle);
         assert!(set.contains(&b));
+    }
+
+    #[test]
+    fn wheel_tick_snapshot_scrubbed() {
+        let mut wheel = VirtualTimerWheel::new();
+        let (_, waker_a) = counting_waker();
+        let (_, waker_b) = counting_waker();
+        let (_, waker_c) = counting_waker();
+
+        let timer_a = wheel.insert(20, waker_a);
+        let timer_b = wheel.insert(10, waker_b);
+        let timer_c = wheel.insert(10, waker_c);
+        wheel.cancel(timer_b);
+
+        let expired = wheel.advance_to(15);
+
+        insta::assert_json_snapshot!(
+            "wheel_tick_scrubbed",
+            json!({
+                "before": {
+                    "inserted": [
+                        {"timer": scrub_timer_id(timer_a.timer_id()), "deadline": timer_a.deadline()},
+                        {"timer": scrub_timer_id(timer_b.timer_id()), "deadline": timer_b.deadline()},
+                        {"timer": scrub_timer_id(timer_c.timer_id()), "deadline": timer_c.deadline()},
+                    ],
+                    "cancelled": scrub_timer_id(timer_b.timer_id()),
+                },
+                "after": {
+                    "current_tick": wheel.current_tick(),
+                    "next_deadline": wheel.next_deadline(),
+                    "pending_len": wheel.len(),
+                    "expired": expired.into_iter().map(|timer| json!({
+                        "timer": scrub_timer_id(timer.timer_id),
+                        "deadline": timer.deadline,
+                    })).collect::<Vec<_>>(),
+                }
+            })
+        );
     }
 }

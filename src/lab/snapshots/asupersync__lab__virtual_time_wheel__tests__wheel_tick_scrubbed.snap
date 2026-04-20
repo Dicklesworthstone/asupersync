@@ -1,0 +1,53 @@
+---
+source: src/lab/virtual_time_wheel.rs
+expression: |-
+  json!({
+      "before": {
+          "inserted": [
+              {"timer": scrub_timer_id(timer_a.timer_id()), "deadline": timer_a.deadline()},
+              {"timer": scrub_timer_id(timer_b.timer_id()), "deadline": timer_b.deadline()},
+              {"timer": scrub_timer_id(timer_c.timer_id()), "deadline": timer_c.deadline()},
+          ],
+          "cancelled": scrub_timer_id(timer_b.timer_id()),
+      },
+      "after": {
+          "current_tick": wheel.current_tick(),
+          "next_deadline": wheel.next_deadline(),
+          "pending_len": wheel.len(),
+          "expired": expired.into_iter().map(|timer| json!({
+              "timer": scrub_timer_id(timer.timer_id),
+              "deadline": timer.deadline,
+          })).collect::<Vec<_>>(),
+      }
+  })
+---
+{
+  "after": {
+    "current_tick": 15,
+    "expired": [
+      {
+        "deadline": 10,
+        "timer": "[TIMER_C]"
+      }
+    ],
+    "next_deadline": 20,
+    "pending_len": 1
+  },
+  "before": {
+    "cancelled": "[TIMER_B]",
+    "inserted": [
+      {
+        "deadline": 20,
+        "timer": "[TIMER_A]"
+      },
+      {
+        "deadline": 10,
+        "timer": "[TIMER_B]"
+      },
+      {
+        "deadline": 10,
+        "timer": "[TIMER_C]"
+      }
+    ]
+  }
+}
