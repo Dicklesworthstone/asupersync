@@ -1373,6 +1373,57 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_retry_first_poll_work_is_monotone_under_longer_failure_chains() {
+        init_test("metamorphic_retry_first_poll_work_is_monotone_under_longer_failure_chains");
+
+        fn first_poll_snapshot(failures_before_success: usize) -> (bool, usize, bool) {
+            let policy = LimitedRetry::<i32>::new(failures_before_success);
+            let (svc, calls) = FailingService::new(failures_before_success);
+            let mut retry_svc = Retry::new(svc, policy);
+            let woke = Arc::new(AtomicBool::new(false));
+            let waker = Waker::from(Arc::new(TrackWaker(Arc::clone(&woke))));
+            let mut cx = Context::from_waker(&waker);
+
+            let _ = retry_svc.poll_ready(&mut cx);
+            let mut future = retry_svc.call(21);
+            let first = Pin::new(&mut future).poll(&mut cx);
+
+            (
+                matches!(first, Poll::Pending),
+                calls.load(Ordering::SeqCst),
+                woke.load(Ordering::SeqCst),
+            )
+        }
+
+        let budget_plus_one = first_poll_snapshot(RETRY_COOPERATIVE_BUDGET + 1);
+        let much_longer = first_poll_snapshot(RETRY_COOPERATIVE_BUDGET * 2 + 17);
+
+        crate::assert_with_log!(
+            budget_plus_one.0 && much_longer.0,
+            "both over-budget chains must yield on first poll",
+            true,
+            budget_plus_one.0 && much_longer.0
+        );
+        crate::assert_with_log!(
+            budget_plus_one.1 == RETRY_COOPERATIVE_BUDGET
+                && much_longer.1 == RETRY_COOPERATIVE_BUDGET,
+            "first poll work stays capped at cooperative budget for longer chains",
+            RETRY_COOPERATIVE_BUDGET,
+            (budget_plus_one.1, much_longer.1)
+        );
+        crate::assert_with_log!(
+            budget_plus_one.2 && much_longer.2,
+            "both over-budget chains request a self-wake after budget exhaustion",
+            true,
+            budget_plus_one.2 && much_longer.2
+        );
+
+        crate::test_complete!(
+            "metamorphic_retry_first_poll_work_is_monotone_under_longer_failure_chains"
+        );
+    }
+
+    #[test]
     fn poll_ready_does_not_strand_concurrency_limit_reservations() {
         init_test("poll_ready_does_not_strand_concurrency_limit_reservations");
         let inner = ConcurrencyLimitLayer::new(1).layer(FailingService::new(0).0);
