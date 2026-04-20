@@ -190,6 +190,9 @@ impl H3Settings {
             encode_setting(out, H3_SETTING_H3_DATAGRAM, u64::from(v))?;
         }
         for s in &self.unknown {
+            if is_http2_reserved_settings_id(s.id) {
+                return Err(H3NativeError::InvalidSettingValue(s.id));
+            }
             encode_setting(out, s.id, s.value)?;
         }
         Ok(())
@@ -217,7 +220,7 @@ impl H3Settings {
             match id {
                 // RFC 9114 §7.2.4.1: HTTP/2 reserved setting identifiers
                 // MUST NOT be sent; receipt is a connection error.
-                0x00 | 0x02 | 0x03 | 0x04 | 0x05 => {
+                id if is_http2_reserved_settings_id(id) => {
                     return Err(H3NativeError::InvalidSettingValue(id));
                 }
                 H3_SETTING_QPACK_MAX_TABLE_CAPACITY => {
@@ -240,6 +243,10 @@ impl H3Settings {
         }
         Ok(settings)
     }
+}
+
+const fn is_http2_reserved_settings_id(id: u64) -> bool {
+    matches!(id, 0x00 | 0x02 | 0x03 | 0x04 | 0x05)
 }
 
 fn parse_bool_setting(id: u64, value: u64) -> Result<bool, H3NativeError> {
@@ -3989,6 +3996,25 @@ mod tests {
             let err = H3Settings::decode_payload(&payload).expect_err(&format!(
                 "must reject H2 reserved setting 0x{reserved_id:02x}"
             ));
+            assert_eq!(err, H3NativeError::InvalidSettingValue(reserved_id));
+        }
+    }
+
+    #[test]
+    fn settings_encode_rejects_h2_reserved_unknown_ids() {
+        // RFC 9114 §7.2.4.1: HTTP/2 reserved setting identifiers MUST NOT be sent.
+        for reserved_id in [0x00u64, 0x02, 0x03, 0x04, 0x05] {
+            let settings = H3Settings {
+                unknown: vec![UnknownSetting {
+                    id: reserved_id,
+                    value: 42,
+                }],
+                ..H3Settings::default()
+            };
+
+            let err = settings
+                .encode_payload(&mut Vec::new())
+                .expect_err("must reject reserved HTTP/2 setting IDs on encode");
             assert_eq!(err, H3NativeError::InvalidSettingValue(reserved_id));
         }
     }
