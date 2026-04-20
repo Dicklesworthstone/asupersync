@@ -357,6 +357,13 @@ where
             // In production, this would log a warning. For Phase 0, we accept
             // potential resource leak for pathologically long-running release.
         }
+
+        // Ensure we don't swallow a use-phase panic if release times out or is absent.
+        if !std::thread::panicking() {
+            if let Some(Err(payload)) = self.state.use_result.take() {
+                std::panic::resume_unwind(payload);
+            }
+        }
     }
 }
 
