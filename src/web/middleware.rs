@@ -1962,6 +1962,32 @@ mod tests {
         assert_eq!(recovered.status, StatusCode::OK);
     }
 
+    #[test]
+    fn rate_limit_retry_after_matches_rfc9110_delay_seconds_example() {
+        let policy = RateLimitPolicy {
+            rate: 1,
+            burst: 1,
+            period: Duration::from_secs(120),
+            ..Default::default()
+        };
+        let mw = RateLimitMiddleware::with_time_getter(
+            FnHandler::new(ok_handler),
+            policy,
+            rate_limit_test_time,
+        );
+
+        set_rate_limit_test_time(5_000);
+        let first = mw.call(make_request());
+        assert_eq!(first.status, StatusCode::OK);
+
+        let rejected = mw.call(make_request());
+        assert_eq!(rejected.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            rejected.headers.get("retry-after").map(String::as_str),
+            Some("120")
+        );
+    }
+
     // --- BulkheadMiddleware ---
 
     #[test]
