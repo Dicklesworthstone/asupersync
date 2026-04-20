@@ -8998,6 +8998,14 @@ lab:
     }
 
     #[test]
+    fn format_timestamp_matches_rfc3339_utc_vector() {
+        assert_eq!(
+            format_timestamp(1_577_836_800_000_000_000),
+            Some("2020-01-01T00:00:00Z".to_string())
+        );
+    }
+
+    #[test]
     fn parse_doctor_package_config_rejects_invalid_profile() {
         let mut config =
             doctor_package_config_template(DoctorPackageProfile::Local, "doctor_asupersync");
