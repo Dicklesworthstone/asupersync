@@ -3046,4 +3046,125 @@ mod metamorphic_tests {
             }
         }
     }
+
+    #[test]
+    fn waiting_writer_blocks_late_readers_until_writer_turn_completes() {
+        let harness = RwLockTestHarness::new(0u64);
+        let lock = harness.lock();
+        let cx = test_cx();
+
+        let blocking_reader = block_on(lock.read(&cx)).expect("initial reader should acquire");
+
+        let mut writer_fut = OwnedRwLockWriteGuard::write(lock.clone(), &cx);
+        let (writer_waker, writer_wake_count) = CountWaker::new();
+        let writer_waker_obj = Waker::from(Arc::new(writer_waker));
+        let mut writer_task_cx = Context::from_waker(&writer_waker_obj);
+        assert!(
+            Pin::new(&mut writer_fut)
+                .poll(&mut writer_task_cx)
+                .is_pending(),
+            "writer should wait behind active reader"
+        );
+
+        let mut late_reader_fut = OwnedRwLockReadGuard::read(lock.clone(), &cx);
+        let (late_reader_waker, late_reader_wake_count) = CountWaker::new();
+        let late_reader_waker_obj = Waker::from(Arc::new(late_reader_waker));
+        let mut late_reader_task_cx = Context::from_waker(&late_reader_waker_obj);
+        assert!(
+            Pin::new(&mut late_reader_fut)
+                .poll(&mut late_reader_task_cx)
+                .is_pending(),
+            "late reader should queue behind waiting writer"
+        );
+
+        drop(blocking_reader);
+
+        assert!(
+            writer_wake_count.load(Ordering::SeqCst) > 0,
+            "writer should be woken when the blocking reader releases"
+        );
+        assert_eq!(
+            late_reader_wake_count.load(Ordering::SeqCst),
+            0,
+            "late reader must stay blocked until the queued writer runs"
+        );
+
+        let writer_guard = match Pin::new(&mut writer_fut).poll(&mut writer_task_cx) {
+            Poll::Ready(Ok(guard)) => guard,
+            other => panic!("writer did not acquire after wake: {other:?}"),
+        };
+
+        assert!(
+            Pin::new(&mut late_reader_fut)
+                .poll(&mut late_reader_task_cx)
+                .is_pending(),
+            "late reader must still be blocked while writer guard is held"
+        );
+
+        drop(writer_guard);
+
+        assert!(
+            late_reader_wake_count.load(Ordering::SeqCst) > 0,
+            "late reader should be woken after writer completes its turn"
+        );
+        assert!(
+            matches!(
+                Pin::new(&mut late_reader_fut).poll(&mut late_reader_task_cx),
+                Poll::Ready(Ok(_))
+            ),
+            "late reader should acquire once writer turn completes"
+        );
+    }
+
+    #[test]
+    fn cancelled_waiting_writer_reopens_reader_admission() {
+        let harness = RwLockTestHarness::new(0u64);
+        let lock = harness.lock();
+        let cx = test_cx();
+
+        let blocking_reader = block_on(lock.read(&cx)).expect("initial reader should acquire");
+
+        let mut cancelled_writer_fut = OwnedRwLockWriteGuard::write(lock.clone(), &cx);
+        let (writer_waker, _writer_wake_count) = CountWaker::new();
+        let writer_waker_obj = Waker::from(Arc::new(writer_waker));
+        let mut writer_task_cx = Context::from_waker(&writer_waker_obj);
+        assert!(
+            Pin::new(&mut cancelled_writer_fut)
+                .poll(&mut writer_task_cx)
+                .is_pending(),
+            "writer should queue while reader is active"
+        );
+
+        let mut reader_after_cancel_fut = OwnedRwLockReadGuard::read(lock.clone(), &cx);
+        let (reader_waker, reader_wake_count) = CountWaker::new();
+        let reader_waker_obj = Waker::from(Arc::new(reader_waker));
+        let mut reader_task_cx = Context::from_waker(&reader_waker_obj);
+        assert!(
+            Pin::new(&mut reader_after_cancel_fut)
+                .poll(&mut reader_task_cx)
+                .is_pending(),
+            "reader should be blocked while writer preference is active"
+        );
+
+        drop(cancelled_writer_fut);
+        let state_after_cancel = lock.debug_state();
+        assert_eq!(
+            state_after_cancel.writer_waiters, 0,
+            "cancelling the queued writer must release writer preference"
+        );
+
+        drop(blocking_reader);
+
+        assert!(
+            reader_wake_count.load(Ordering::SeqCst) > 0,
+            "reader should be woken once the cancelled writer no longer blocks admission"
+        );
+        assert!(
+            matches!(
+                Pin::new(&mut reader_after_cancel_fut).poll(&mut reader_task_cx),
+                Poll::Ready(Ok(_))
+            ),
+            "reader should acquire after the cancelled writer is removed"
+        );
+    }
 }
