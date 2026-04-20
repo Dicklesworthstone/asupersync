@@ -589,6 +589,9 @@ impl CancellationAnalyzer {
         let mut rankings = Vec::new();
 
         for (entity_id, times) in entity_data {
+            if times.is_empty() {
+                continue;
+            }
             let timing_ms: Vec<f64> = times.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
 
             let processing_stats = self.calculate_distribution_stats(&timing_ms);

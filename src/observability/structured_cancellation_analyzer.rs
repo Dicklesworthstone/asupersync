@@ -303,8 +303,11 @@ impl StructuredCancellationAnalyzer {
 
         // Calculate memory usage estimate
         let memory_mb = (stats.traces_collected * 10 + stats.traces_collected * 2) / 1024; // Rough estimate
-        real_time_stats.memory_usage_percentage =
-            (memory_mb as f64 / self.config.max_memory_usage_mb as f64 * 100.0).min(100.0);
+        real_time_stats.memory_usage_percentage = if self.config.max_memory_usage_mb > 0 {
+            (memory_mb as f64 / self.config.max_memory_usage_mb as f64 * 100.0).min(100.0)
+        } else {
+            100.0
+        };
     }
 
     /// Update completed traces count for real-time stats.
@@ -362,7 +365,7 @@ impl StructuredCancellationAnalyzer {
                     "Entity {entity_id} showing consistently slow cancellation propagation"
                 ),
                 entity_id: Some(entity_id.to_string()),
-                metric_value: slow_count as f64 / entity_traces.len() as f64 * 100.0,
+                metric_value: if entity_traces.is_empty() { 0.0 } else { slow_count as f64 / entity_traces.len() as f64 * 100.0 },
                 threshold: 50.0,
                 triggered_at: std::time::SystemTime::now(),
                 remediation_suggestions: vec![
@@ -381,7 +384,7 @@ impl StructuredCancellationAnalyzer {
                 severity: AlertSeverity::Error,
                 message: format!("High anomaly rate detected for entity {entity_id}"),
                 entity_id: Some(entity_id.to_string()),
-                metric_value: total_anomalies as f64 / entity_traces.len() as f64,
+                metric_value: if entity_traces.is_empty() { 0.0 } else { total_anomalies as f64 / entity_traces.len() as f64 },
                 threshold: 1.0,
                 triggered_at: std::time::SystemTime::now(),
                 remediation_suggestions: vec![

@@ -640,7 +640,8 @@ fn test_performance_regression() {
     }
     let duration = start.elapsed();
 
-    let throughput_gbps = (size * iterations) as f64 / duration.as_secs_f64() / 1e9;
+    let secs = duration.as_secs_f64().max(f64::MIN_POSITIVE);
+    let throughput_gbps = (size * iterations) as f64 / secs / 1e9;
 
     let details = format!(
         "kernel={:?} size={} iterations={} duration_ms={} throughput_gbps={}",
