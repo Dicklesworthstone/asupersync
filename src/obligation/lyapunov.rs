@@ -756,6 +756,7 @@ mod tests {
     use crate::record::ObligationKind;
     use crate::runtime::RuntimeState;
     use crate::types::Budget;
+    use proptest::prelude::*;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -790,6 +791,31 @@ mod tests {
             draining_regions: draining,
             deadline_pressure: 0.0,
             pending_send_permits: obligations, // default: all send permits
+            pending_acks: 0,
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 0,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
+        }
+    }
+
+    fn snapshot_with_components(
+        tasks: u32,
+        send_permits: u32,
+        age_ns: u64,
+        draining: u32,
+        deadline_pressure: f64,
+    ) -> StateSnapshot {
+        StateSnapshot {
+            time: Time::from_nanos(age_ns),
+            live_tasks: tasks,
+            pending_obligations: send_permits,
+            obligation_age_sum_ns: age_ns,
+            draining_regions: draining,
+            deadline_pressure,
+            pending_send_permits: send_permits,
             pending_acks: 0,
             pending_leases: 0,
             pending_io_ops: 0,
@@ -1131,6 +1157,79 @@ mod tests {
         let inc = v2.total > v1.total;
         crate::assert_with_log!(inc, "deadline pressure increases V", true, inc);
         crate::test_complete!("potential_deadline_pressure");
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_componentwise_reduction_never_increases_potential(
+            tasks in 0u32..40,
+            obligations in 0u32..40,
+            age_ns in 0u64..2_000_000_000,
+            draining in 0u32..20,
+            deadline_millis in 0u32..20_000,
+            task_reduction in 0u32..40,
+            obligation_reduction in 0u32..40,
+            age_reduction in 0u64..2_000_000_000,
+            draining_reduction in 0u32..20,
+            deadline_reduction_millis in 0u32..20_000,
+        ) {
+            let reduced_tasks = tasks.saturating_sub(task_reduction);
+            let reduced_obligations = obligations.saturating_sub(obligation_reduction);
+            let reduced_age_ns = age_ns.saturating_sub(age_reduction);
+            let reduced_draining = draining.saturating_sub(draining_reduction);
+            let deadline_pressure = f64::from(deadline_millis) / 1000.0;
+            let reduced_deadline_pressure =
+                f64::from(deadline_millis.saturating_sub(deadline_reduction_millis)) / 1000.0;
+
+            let fuller = snapshot_with_components(
+                tasks,
+                obligations,
+                age_ns,
+                draining,
+                deadline_pressure,
+            );
+            let reduced = snapshot_with_components(
+                reduced_tasks,
+                reduced_obligations,
+                reduced_age_ns,
+                reduced_draining,
+                reduced_deadline_pressure,
+            );
+
+            let weights = [
+                PotentialWeights::default(),
+                PotentialWeights::uniform(1.0),
+                PotentialWeights::obligation_focused(),
+                PotentialWeights::deadline_focused(),
+            ];
+
+            for weight_set in weights {
+                let governor = LyapunovGovernor::new(weight_set);
+                let fuller_record = governor.compute_record(&fuller);
+                let reduced_record = governor.compute_record(&reduced);
+
+                prop_assert!(
+                    reduced_record.total <= fuller_record.total + f64::EPSILON,
+                    "component-wise reduction increased total potential: full={fuller_record:?}, reduced={reduced_record:?}, weights={weight_set:?}"
+                );
+                prop_assert!(
+                    reduced_record.task_component <= fuller_record.task_component + f64::EPSILON,
+                    "task component increased under task reduction"
+                );
+                prop_assert!(
+                    reduced_record.obligation_component <= fuller_record.obligation_component + f64::EPSILON,
+                    "obligation component increased under age reduction"
+                );
+                prop_assert!(
+                    reduced_record.region_component <= fuller_record.region_component + f64::EPSILON,
+                    "region component increased under draining reduction"
+                );
+                prop_assert!(
+                    reduced_record.deadline_component <= fuller_record.deadline_component + f64::EPSILON,
+                    "deadline component increased under deadline-pressure reduction"
+                );
+            }
+        }
     }
 
     // ---- Convergence properties --------------------------------------------
