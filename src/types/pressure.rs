@@ -131,6 +131,21 @@ impl Default for SystemPressure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
+
+    fn scrub_pressure_json(value: Value) -> Value {
+        let mut scrubbed = value;
+
+        if let Some(headroom) = scrubbed.pointer_mut("/headroom") {
+            let formatted = headroom
+                .as_f64()
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| headroom.to_string());
+            *headroom = Value::String(formatted);
+        }
+
+        scrubbed
+    }
 
     #[test]
     fn new_starts_at_full_headroom() {
@@ -197,5 +212,20 @@ mod tests {
         assert_eq!(p.level_label(), "heavy");
         p.set_headroom(0.0);
         assert_eq!(p.level_label(), "emergency");
+    }
+
+    #[test]
+    fn pressure_json_snapshot_scrubbed() {
+        let p = SystemPressure::with_headroom(0.42);
+
+        insta::assert_json_snapshot!(
+            "pressure_json_scrubbed",
+            scrub_pressure_json(json!({
+                "headroom": p.headroom(),
+                "degradation_level": p.degradation_level(),
+                "label": p.level_label(),
+                "should_degrade_0_5": p.should_degrade(0.5),
+            }))
+        );
     }
 }

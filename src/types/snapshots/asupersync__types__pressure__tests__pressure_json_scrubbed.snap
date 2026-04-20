@@ -1,0 +1,14 @@
+---
+source: src/types/pressure.rs
+expression: |-
+  scrub_pressure_json(json!({
+      "headroom": p.headroom(), "degradation_level": p.degradation_level(),
+      "label": p.level_label(), "should_degrade_0_5": p.should_degrade(0.5),
+  }))
+---
+{
+  "degradation_level": 2,
+  "headroom": "0.42",
+  "label": "moderate",
+  "should_degrade_0_5": true
+}
