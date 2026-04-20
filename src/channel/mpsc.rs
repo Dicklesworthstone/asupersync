@@ -2124,6 +2124,115 @@ pub mod backpressure_metamorphic {
         (queued, reserved, available, waiting_senders)
     }
 
+    fn encode_sender_message(sender_id: usize, ordinal: usize) -> u32 {
+        ((sender_id as u32) << 16) | ordinal as u32
+    }
+
+    fn decode_sender_message(value: u32) -> (usize, u32) {
+        (((value >> 16) & 0xffff) as usize, value & 0xffff)
+    }
+
+    fn projected_sender_sequences(
+        received: &[u32],
+        sender_count: usize,
+        rotation: usize,
+    ) -> HashMap<usize, Vec<u32>> {
+        let normalized_rotation = if sender_count == 0 {
+            0
+        } else {
+            rotation % sender_count
+        };
+        let mut projections = HashMap::new();
+        for &value in received {
+            let (rotated_sender, ordinal) = decode_sender_message(value);
+            let sender_id = if sender_count == 0 {
+                rotated_sender
+            } else {
+                (rotated_sender + sender_count - normalized_rotation) % sender_count
+            };
+            projections
+                .entry(sender_id)
+                .or_insert_with(Vec::new)
+                .push(ordinal);
+        }
+        projections
+    }
+
+    fn run_multi_producer_projection_case(
+        cx: &crate::cx::Cx,
+        capacity: usize,
+        sender_count: usize,
+        messages_per_sender: usize,
+        rotation: usize,
+    ) -> (
+        HashMap<usize, Vec<u32>>,
+        (usize, usize, usize, usize),
+        usize,
+    ) {
+        let (sender, mut receiver) = channel::<u32>(capacity);
+        let shared = Arc::clone(&sender.shared);
+        let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let start_barrier = Arc::new(std::sync::Barrier::new(sender_count + 1));
+
+        let recv_ref = Arc::clone(&received_messages);
+        let recv_cx = cx.clone();
+        let recv_handle = std::thread::spawn(move || {
+            futures_lite::future::block_on(async move {
+                while let Ok(value) = receiver.recv(&recv_cx).await {
+                    recv_ref.lock().push(value);
+                }
+            })
+        });
+
+        let mut send_handles = Vec::new();
+        for sender_id in 0..sender_count {
+            let sender_clone = sender.clone();
+            let send_cx = cx.clone();
+            let start = Arc::clone(&start_barrier);
+            let handle = std::thread::spawn(move || {
+                start.wait();
+                futures_lite::future::block_on(async move {
+                    let rotated_sender = if sender_count == 0 {
+                        sender_id
+                    } else {
+                        (sender_id + rotation) % sender_count
+                    };
+                    for ordinal in 0..messages_per_sender {
+                        sender_clone
+                            .send(&send_cx, encode_sender_message(rotated_sender, ordinal))
+                            .await
+                            .expect("multi-producer send should succeed");
+                        if ordinal % 2 == 0 {
+                            std::thread::yield_now();
+                        }
+                    }
+                })
+            });
+            send_handles.push(handle);
+        }
+
+        start_barrier.wait();
+        for handle in send_handles {
+            handle.join().unwrap();
+        }
+        drop(sender);
+        recv_handle.join().unwrap();
+
+        let received = received_messages.lock().clone();
+        let projections = projected_sender_sequences(&received, sender_count, rotation);
+        let final_state = {
+            let inner = shared.inner.lock();
+            (
+                inner.queue.len(),
+                inner.reserved,
+                0usize,
+                inner.send_wakers.len(),
+            )
+        };
+        let remaining_senders = shared.sender_count.load(Ordering::Acquire);
+        (projections, final_state, remaining_senders)
+    }
+
     /// MR1: Capacity Conservation
     ///
     /// Invariant: total_capacity = queued + reserved + available
@@ -2272,6 +2381,103 @@ pub mod backpressure_metamorphic {
 
             Ok(())
                         }.await;
+                    }).unwrap();
+                    lab.scheduler.lock().schedule(test_task, 0);
+                    let _ = lab.run_until_quiescent_with_report();
+                });
+                Ok(())
+            })
+            .expect("Property test failed");
+    }
+
+    /// MR2b: Rotating producer identity labels preserves each producer's receive projection.
+    ///
+    /// Property: If each producer's local sequence is unchanged and only the producer labels are
+    /// rotated, inverse-rotating the receive trace must recover the same per-producer ordering.
+    #[test]
+    fn metamorphic_multi_producer_rotation_preserves_per_sender_projection() {
+        use proptest::test_runner::TestRunner;
+
+        let mut runner = TestRunner::default();
+        runner
+            .run(&backpressure_config_strategy(), |config| {
+                crate::lab::runtime::test(config.seed, |lab| {
+                    let root = lab.state.create_root_region(Budget::INFINITE);
+                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
+                        let cx = crate::cx::Cx::for_testing();
+                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+                            let sender_count = config.sender_count;
+                            let rotation = if sender_count <= 1 {
+                                0
+                            } else {
+                                (config.seed as usize % (sender_count - 1)) + 1
+                            };
+
+                            let (base_projection, base_state, base_remaining_senders) =
+                                run_multi_producer_projection_case(
+                                    &cx,
+                                    config.capacity,
+                                    sender_count,
+                                    config.messages_per_sender,
+                                    0,
+                                );
+                            let (
+                                rotated_projection,
+                                rotated_state,
+                                rotated_remaining_senders,
+                            ) = run_multi_producer_projection_case(
+                                &cx,
+                                config.capacity,
+                                sender_count,
+                                config.messages_per_sender,
+                                rotation,
+                            );
+
+                            let expected_projection: HashMap<usize, Vec<u32>> = (0..sender_count)
+                                .map(|sender_id| {
+                                    (
+                                        sender_id,
+                                        (0..config.messages_per_sender)
+                                            .map(|ordinal| ordinal as u32)
+                                            .collect(),
+                                    )
+                                })
+                                .collect();
+
+                            assert_eq!(
+                                base_projection, expected_projection,
+                                "base run violated per-sender FIFO projection"
+                            );
+                            assert_eq!(
+                                rotated_projection, expected_projection,
+                                "rotated producer labels changed per-sender FIFO projection"
+                            );
+                            assert_eq!(
+                                base_projection, rotated_projection,
+                                "inverse-rotated producer projection drifted under relabeling"
+                            );
+                            assert_eq!(
+                                base_state,
+                                (0, 0, 0, 0),
+                                "base run leaked queue/reservations/waiters: {base_state:?}"
+                            );
+                            assert_eq!(
+                                rotated_state,
+                                (0, 0, 0, 0),
+                                "rotated run leaked queue/reservations/waiters: {rotated_state:?}"
+                            );
+                            assert_eq!(
+                                base_remaining_senders, 0,
+                                "base run left live senders: {base_remaining_senders}"
+                            );
+                            assert_eq!(
+                                rotated_remaining_senders, 0,
+                                "rotated run left live senders: {rotated_remaining_senders}"
+                            );
+
+                            Ok(())
+                        }
+                        .await;
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let _ = lab.run_until_quiescent_with_report();
