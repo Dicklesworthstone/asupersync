@@ -1236,6 +1236,34 @@ mod tests {
     }
 
     #[test]
+    fn test_accept_response_snapshot_negotiated_protocol_and_extension() {
+        let server = ServerHandshake::new()
+            .protocol("superchat")
+            .extension("permessage-deflate");
+
+        let request = HttpRequest::parse(
+            b"GET /chat HTTP/1.1\r\n\
+              Host: example.com\r\n\
+              Upgrade: websocket\r\n\
+              Connection: keep-alive, Upgrade\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+              Sec-WebSocket-Version: 13\r\n\
+              Sec-WebSocket-Protocol: chat, superchat\r\n\
+              Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits, x-ignored\r\n\
+              \r\n",
+        )
+        .unwrap();
+
+        let accept = server.accept(&request).unwrap();
+        let response = String::from_utf8(accept.response_bytes()).unwrap();
+
+        insta::assert_snapshot!(
+            "accept_response_negotiated_protocol_and_extension",
+            response
+        );
+    }
+
+    #[test]
     fn test_client_validate_response_rejects_unsolicited_extensions() {
         let handshake = ClientHandshake {
             url: WsUrl::parse("ws://example.com/chat").expect("valid url"),
