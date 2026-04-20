@@ -70,6 +70,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `corpus/length_delimited_decoder_state/` - Decoder chunking and invalid-header scenarios
 - `corpus/bytes_slice_split_to/` - Immutable Bytes slicing and split partition scenarios
 - `corpus/bytes_cursor_reader/` - BytesCursor reader and cursor-position scenarios
+  including empty views, clone-heavy cursor churn, and position-reset cases
 - `corpus/grpc_prost_codec_decode/` - Direct ProstCodec decode boundary and malformed-wire scenarios
 - `corpus/tls_stream_record_framing/` - TlsStream record fragmentation, truncation, and close-notify scenarios
 
