@@ -29,6 +29,7 @@ rustls-pemfile = "2.2"
 # For SCRAM-SHA-256 parsing
 base64 = "0.22"
 sha2 = "0.10"
+hmac = "0.12"
 
 # For MessagePack serialization in trace streaming tests
 rmp-serde = "1.3"
@@ -1293,6 +1294,13 @@ bench = false
 [[bin]]
 name = "auth_aead"
 path = "fuzz_targets/auth_aead.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "security_tag_verifier"
+path = "fuzz_targets/security_tag_verifier.rs"
 test = false
 doc = false
 bench = false
