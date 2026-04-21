@@ -1020,6 +1020,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "nats_subscription_matcher"
+path = "fuzz_targets/nats_subscription_matcher.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "unix_stream"
 path = "fuzz_targets/unix_stream.rs"
 test = false

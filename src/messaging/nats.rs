@@ -396,6 +396,101 @@ fn validate_nats_token(value: &str, field: &str) -> Result<(), NatsError> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubscriptionPatternToken<'a> {
+    Literal(&'a str),
+    SingleWildcard,
+    TailWildcard,
+}
+
+fn is_valid_nats_segment(token: &str) -> bool {
+    !token.is_empty()
+        && !token
+            .chars()
+            .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
+}
+
+fn parse_subscription_pattern(pattern: &str) -> Option<Vec<SubscriptionPatternToken<'_>>> {
+    if pattern.is_empty() {
+        return None;
+    }
+
+    let raw_tokens: Vec<_> = pattern.split('.').collect();
+    let raw_len = raw_tokens.len();
+    if raw_tokens.iter().any(|token| !is_valid_nats_segment(token)) {
+        return None;
+    }
+
+    let mut parsed = Vec::with_capacity(raw_tokens.len());
+    for (index, token) in raw_tokens.into_iter().enumerate() {
+        match token {
+            "*" => parsed.push(SubscriptionPatternToken::SingleWildcard),
+            ">" if index + 1 == raw_len => {
+                parsed.push(SubscriptionPatternToken::TailWildcard);
+            }
+            ">" => return None,
+            _ if token.contains('*') || token.contains('>') => return None,
+            _ => parsed.push(SubscriptionPatternToken::Literal(token)),
+        }
+    }
+
+    Some(parsed)
+}
+
+fn parse_publish_subject(subject: &str) -> Option<Vec<&str>> {
+    if subject.is_empty() {
+        return None;
+    }
+
+    let tokens: Vec<_> = subject.split('.').collect();
+    if tokens
+        .iter()
+        .any(|token| !is_valid_nats_segment(token) || token.contains('*') || token.contains('>'))
+    {
+        return None;
+    }
+
+    Some(tokens)
+}
+
+fn subscription_matches_subject_impl(pattern: &str, subject: &str) -> bool {
+    let Some(pattern_tokens) = parse_subscription_pattern(pattern) else {
+        return false;
+    };
+    let Some(subject_tokens) = parse_publish_subject(subject) else {
+        return false;
+    };
+
+    let mut subject_index = 0usize;
+    for token in pattern_tokens {
+        match token {
+            SubscriptionPatternToken::Literal(literal) => {
+                if subject_tokens.get(subject_index) != Some(&literal) {
+                    return false;
+                }
+                subject_index += 1;
+            }
+            SubscriptionPatternToken::SingleWildcard => {
+                if subject_tokens.get(subject_index).is_none() {
+                    return false;
+                }
+                subject_index += 1;
+            }
+            SubscriptionPatternToken::TailWildcard => {
+                return subject_index < subject_tokens.len();
+            }
+        }
+    }
+
+    subject_index == subject_tokens.len()
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[doc(hidden)]
+pub fn subscription_matches_subject(pattern: &str, subject: &str) -> bool {
+    subscription_matches_subject_impl(pattern, subject)
+}
+
 /// Generate a random suffix for unique inbox subjects using capability-based entropy.
 fn random_suffix(cx: &Cx) -> String {
     let hi = cx.random_u64();
@@ -1646,6 +1741,44 @@ mod tests {
         assert!(validate_nats_token("foo bar", "subject").is_err());
         assert!(validate_nats_token("foo\r\nPUB x 1\r\nx", "subject").is_err());
         assert!(validate_nats_token("queue\tgroup", "queue group").is_err());
+    }
+
+    #[test]
+    fn test_subscription_matches_subject_exact_and_single_wildcard() {
+        assert!(subscription_matches_subject("time.us.east", "time.us.east"));
+        assert!(subscription_matches_subject("time.*.east", "time.us.east"));
+        assert!(!subscription_matches_subject(
+            "time.*.east",
+            "time.us.east.atlanta"
+        ));
+        assert!(!subscription_matches_subject("time.*.east", "time.east"));
+    }
+
+    #[test]
+    fn test_subscription_matches_subject_tail_wildcard_requires_trailing_tokens() {
+        assert!(subscription_matches_subject("time.>", "time.us"));
+        assert!(subscription_matches_subject(
+            "time.>",
+            "time.us.east.atlanta"
+        ));
+        assert!(!subscription_matches_subject("time.>", "time"));
+        assert!(subscription_matches_subject(">", "time.us"));
+    }
+
+    #[test]
+    fn test_subscription_matches_subject_rejects_invalid_wildcard_placements() {
+        assert!(!subscription_matches_subject("time>.east", "time.us.east"));
+        assert!(!subscription_matches_subject("time.>.east", "time.us.east"));
+        assert!(!subscription_matches_subject("time.*east", "time.us.east"));
+        assert!(!subscription_matches_subject("time.east", "time.*"));
+    }
+
+    #[test]
+    fn test_subscription_matches_subject_rejects_empty_tokens() {
+        assert!(!subscription_matches_subject("time..east", "time.us.east"));
+        assert!(!subscription_matches_subject(".time.east", "time.us.east"));
+        assert!(!subscription_matches_subject("time.east", "time..east"));
+        assert!(!subscription_matches_subject("time.east", "time.east."));
     }
 
     #[test]
