@@ -2400,7 +2400,7 @@ mod tests {
         // 1. Hold a read lock.
         let mut fut_read1 = lock.read(&cx);
         let Poll::Ready(Ok(_guard1)) = std::pin::Pin::new(&mut fut_read1).poll(&mut task_cx) else {
-            panic!("Expected Ready")
+            panic!("Expected Ready") // ubs:ignore - test logic
         };
 
         // 2. Queue a writer.

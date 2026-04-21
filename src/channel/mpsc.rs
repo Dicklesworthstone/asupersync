@@ -2340,7 +2340,7 @@ pub mod backpressure_metamorphic {
                                 Err(SendError::Full(_)) => {
                                     // Channel full - capacity should still be conserved
                                 }
-                                _ => panic!("Unexpected send error"),
+                                _ => panic!("Unexpected send error"), // ubs:ignore - test logic
                             }
 
                             let (queued, reserved, available, _) = observe_channel_state(&sender);
