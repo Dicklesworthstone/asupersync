@@ -110,7 +110,7 @@ fn test_frame_header_golden_max_values() {
         stream_id: 0x7FFFFFFF, // Maximum 31-bit value
     };
 
-    tester.assert_header_golden(&header, "max_header", "fffffffffff7fffffff");
+    tester.assert_header_golden(&header, "max_header", "ffffffffff7fffffff");
 }
 
 #[test]
@@ -138,13 +138,18 @@ fn test_data_frame_golden_simple() {
 
     let frame = Frame::Data(DataFrame::new(
         0x12345678,                          // stream_id
-        Bytes::from_static(b"Hello HTTP/2"), // 11 bytes
+        Bytes::from_static(b"Hello HTTP/2"), // 12 bytes
         false,                               // end_stream
     ));
 
-    // Golden: header(9) + payload(11) = 20 bytes total
-    // Header: length=11(00000b), type=0, flags=0, stream_id=0x12345678
-    tester.assert_frame_golden(&frame, "data_simple", "00000b000012345678Hello HTTP/2");
+    // Golden: header(9) + payload(12) = 21 bytes total, encoded as 42 hex chars.
+    // Header: length=12 (0x0c), type=0, flags=0, stream_id=0x12345678.
+    // Payload "Hello HTTP/2" as hex: 48656c6c6f20485454502f32.
+    tester.assert_frame_golden(
+        &frame,
+        "data_simple",
+        "00000c00001234567848656c6c6f20485454502f32",
+    );
 }
 
 #[test]
@@ -157,8 +162,9 @@ fn test_data_frame_golden_with_end_stream() {
         true,                       // end_stream (flag 0x1)
     ));
 
-    // Golden: header with END_STREAM flag set
-    tester.assert_frame_golden(&frame, "data_end_stream", "000003000100000001EOF");
+    // Golden: header with END_STREAM flag set, payload "EOF" encoded as hex
+    // 454f46. Header: length=3, type=0, flags=0x1 (END_STREAM), stream_id=0x1.
+    tester.assert_frame_golden(&frame, "data_end_stream", "000003000100000001454f46");
 }
 
 #[test]
@@ -171,8 +177,9 @@ fn test_data_frame_golden_empty() {
         true,         // end_stream
     ));
 
-    // Golden: empty DATA frame with END_STREAM
-    tester.assert_frame_golden(&frame, "data_empty", "000000000100007fffffff");
+    // Golden: empty DATA frame with END_STREAM.
+    // Header: length=0, type=0, flags=0x1, stream_id=0x7fffffff. No payload.
+    tester.assert_frame_golden(&frame, "data_empty", "00000000017fffffff");
 }
 
 // ============================================================================
@@ -211,8 +218,13 @@ fn test_ping_frame_golden_request() {
         0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
     ]));
 
-    // Golden: PING frame (type 6, flags 0, stream_id 0, 8-byte payload)
-    tester.assert_frame_golden(&frame, "ping_request", "000008060000000000123456789abcdef");
+    // Golden: PING frame (type 6, flags 0, stream_id 0, 8-byte payload).
+    // 9 header bytes + 8 payload bytes = 34 hex chars.
+    tester.assert_frame_golden(
+        &frame,
+        "ping_request",
+        "0000080600000000000123456789abcdef",
+    );
 }
 
 #[test]

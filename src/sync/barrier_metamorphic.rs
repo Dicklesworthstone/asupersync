@@ -570,7 +570,19 @@ fn execute_barrier_scenario(
     config: BarrierTestConfig,
     work_units: Vec<BarrierWorkUnit>,
 ) -> Result<BarrierTestSummary, String> {
-    let lab_config = LabConfig::new(config.seed).worker_count(4);
+    // Enable auto-advance + cap max_steps. Proptest-generated scenarios
+    // routinely use `start_delay_ms > 0` (which calls `crate::time::sleep`)
+    // and parties/drop/cancel ratios that can leave fewer live waiters
+    // than `parties`, so the barrier never trips. Without auto-advance the
+    // LabRuntime's virtual clock never moves past a timer deadline, sleeps
+    // never resolve, and `run_until_quiescent` iterates for the default
+    // max_steps=100_000 per scenario — a multi-minute effective hang that
+    // trips CI timeouts (this test was one of the ~17 hangs cleaned up in
+    // the post-release deep-dive).
+    let lab_config = LabConfig::new(config.seed)
+        .worker_count(4)
+        .max_steps(5_000)
+        .with_auto_advance();
     let mut runtime = LabRuntime::new(lab_config);
     let root = runtime.state.create_root_region(Budget::INFINITE);
 
@@ -604,7 +616,7 @@ fn execute_barrier_scenario(
         runtime.scheduler.lock().schedule(task_id, 0);
     }
 
-    runtime.run_until_quiescent();
+    let _ = runtime.run_with_auto_advance();
     Ok(global_state.summary())
 }
 

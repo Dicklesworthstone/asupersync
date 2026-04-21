@@ -225,6 +225,14 @@ fn mr2_cancel_non_poisoning() {
         let cx = create_test_context(2, 1);
         let try_result = mutex.try_lock();
         prop_assert!(try_result.is_ok(), "try_lock should succeed after cancel, got {:?}", try_result);
+        // Release the guard held inside `try_result` BEFORE re-locking
+        // asynchronously below. Without this drop, the guard is still
+        // alive when `block_on(mutex.lock(&cx))` is called on the same
+        // single-threaded executor, and the async acquire future pends
+        // forever waiting for a lock that will never be released —
+        // deadlocking the whole test (seen as "running for over 60
+        // seconds" then binary stall).
+        drop(try_result);
 
         let _lab2 = LabRuntime::new(LabConfig::default());
         let lock_result = futures_lite::future::block_on(async {
