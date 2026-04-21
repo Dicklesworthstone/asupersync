@@ -1348,6 +1348,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "distributed_envelope_serialization"
+path = "fuzz_targets/distributed_envelope_serialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "security_tag_verifier"
 path = "fuzz_targets/security_tag_verifier.rs"
 test = false
