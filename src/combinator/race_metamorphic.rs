@@ -13,6 +13,8 @@
 //!   branch-k leaves all other N-1 in Cancelled outcome
 //! - **MR4 (Cancel Propagation Consistency)**: Cancelling the whole race mid-flight
 //!   returns Cancelled for all branches
+//! - **MR5 (Seed Replay Consistency)**: Re-running the same seeded race preserves
+//!   loser drain order and stays within the same bounded poll budget
 //!
 //! # Property Coverage
 //!
@@ -37,8 +39,8 @@ use crate::util::{ArenaIndex, DetRng};
 use proptest::prelude::*;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 // ============================================================================
@@ -212,6 +214,10 @@ impl GlobalTestState {
         self.race_operations.fetch_add(1, Ordering::SeqCst);
     }
 
+    fn drain_order(&self) -> Vec<u32> {
+        self.drained_futures.lock().clone()
+    }
+
     /// Get all futures that were cancelled but not drained (invariant violation)
     fn get_undrained_losers(&self) -> Vec<u32> {
         let cancelled = self.cancelled_futures.lock();
@@ -253,6 +259,14 @@ struct TestStats {
     race_operations_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeededDrainSimulation {
+    winner_completed: bool,
+    all_cancelled_futures_drained: bool,
+    drain_order: Vec<u32>,
+    total_polls: usize,
+}
+
 /// Create a test context with deterministic IDs
 fn create_test_context(region_id: u32, task_id: u32) -> Cx {
     Cx::new(
@@ -288,6 +302,88 @@ impl std::task::Wake for TestWaker {
     }
 }
 
+fn poll_test_future(future: &mut TestFuture) -> Poll<i32> {
+    let waker = Waker::from(Arc::new(TestWaker));
+    let mut cx = Context::from_waker(&waker);
+    Pin::new(future).poll(&mut cx)
+}
+
+fn next_seeded_order(branch_count: usize, rng: &mut DetRng) -> Vec<usize> {
+    let mut order = (0..branch_count).collect::<Vec<_>>();
+    rng.shuffle(&mut order);
+    order
+}
+
+fn run_seeded_loser_drain_simulation(
+    branch_count: usize,
+    winner_index: usize,
+    loser_poll_counts: &[u32],
+    seed: u64,
+) -> SeededDrainSimulation {
+    let global_state = GlobalTestState::new();
+    let mut rng = DetRng::new(seed);
+
+    let mut futures = Vec::with_capacity(branch_count);
+    for i in 0..branch_count {
+        let polls = if i == winner_index {
+            1
+        } else {
+            loser_poll_counts[i % loser_poll_counts.len()]
+        };
+        futures.push(TestFuture::new(
+            i as u32,
+            (i * 10) as i32,
+            polls,
+            global_state.clone(),
+        ));
+    }
+
+    global_state.on_race_operation();
+
+    let mut winner_completed = false;
+    while !winner_completed {
+        for index in next_seeded_order(branch_count, &mut rng) {
+            let future = &mut futures[index];
+            if future.completed.load(Ordering::SeqCst) || future.is_cancelled() {
+                continue;
+            }
+
+            if let Poll::Ready(_) = poll_test_future(future) {
+                if index == winner_index {
+                    winner_completed = true;
+                    for (loser_index, other) in futures.iter().enumerate() {
+                        if loser_index != index {
+                            other.cancel(CancelReason::race_loser());
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut drain_indices = (0..branch_count)
+        .filter(|index| *index != winner_index)
+        .collect::<Vec<_>>();
+    rng.shuffle(&mut drain_indices);
+
+    for index in drain_indices {
+        let future = &mut futures[index];
+        if future.is_cancelled() && !future.drained.load(Ordering::SeqCst) {
+            let poll = poll_test_future(future);
+            debug_assert!(poll.is_ready(), "cancelled futures must drain immediately");
+        }
+    }
+
+    let stats = global_state.get_stats();
+    SeededDrainSimulation {
+        winner_completed,
+        all_cancelled_futures_drained: global_state.all_cancelled_futures_drained(),
+        drain_order: global_state.drain_order(),
+        total_polls: stats.total_polls,
+    }
+}
+
 // ============================================================================
 // Metamorphic Relation Tests
 // ============================================================================
@@ -302,82 +398,16 @@ fn mr1_loser_drain_completeness(
     loser_poll_counts: Vec<u32>,
     seed: u64,
 ) -> bool {
-    let global_state = GlobalTestState::new();
-    let _rng = DetRng::new(seed);
-
-    // Create test futures - winner completes quickly, losers take longer
-    let mut futures = Vec::new();
-    for i in 0..branch_count {
-        let polls = if i == winner_index {
-            1
-        } else {
-            loser_poll_counts[i % loser_poll_counts.len()]
-        };
-        let future = TestFuture::new(i as u32, (i * 10) as i32, polls, global_state.clone());
-        futures.push(future);
-    }
-
-    global_state.on_race_operation();
-
-    // Simulate race execution (simplified - in reality this would use Scope::race)
-    // The winner should complete first, then all losers should be cancelled and drained
-    let mut completed_futures = 0;
-    let mut winner_value = None;
-
-    // Poll until winner completes
-    loop {
-        let mut any_ready = false;
-        for (i, future) in futures.iter_mut().enumerate() {
-            if !future.completed.load(Ordering::SeqCst) && !future.is_cancelled() {
-                let waker = Waker::from(Arc::new(TestWaker));
-                let mut cx = Context::from_waker(&waker);
-                let mut pinned = Pin::new(future);
-                match pinned.as_mut().poll(&mut cx) {
-                    Poll::Ready(val) => {
-                        any_ready = true;
-                        completed_futures += 1;
-                        if i == winner_index {
-                            winner_value = Some(val);
-                            // Cancel all other futures (losers)
-                            for (j, other) in futures.iter().enumerate() {
-                                if j != i {
-                                    other.cancel(CancelReason::race_loser());
-                                }
-                            }
-                            break;
-                        }
-                    }
-                    Poll::Pending => {}
-                }
-            }
-        }
-        if winner_value.is_some() || !any_ready {
-            break;
-        }
-    }
-
-    // Now drain all cancelled futures
-    for future in &mut futures {
-        if future.is_cancelled() && !future.drained.load(Ordering::SeqCst) {
-            let waker = Waker::from(Arc::new(TestWaker));
-            let mut cx = Context::from_waker(&waker);
-            let mut pinned = Pin::new(future);
-            // Poll until drained (Ready)
-            loop {
-                match pinned.as_mut().poll(&mut cx) {
-                    Poll::Ready(_) => break,
-                    Poll::Pending => {}
-                }
-            }
-        }
-    }
-
-    // **MR1 Verification**: All cancelled futures must be drained
-    let result = global_state.all_cancelled_futures_drained();
+    let simulation =
+        run_seeded_loser_drain_simulation(branch_count, winner_index, &loser_poll_counts, seed);
+    let poll_budget = branch_count * 3 - 1;
+    let result = simulation.winner_completed
+        && simulation.all_cancelled_futures_drained
+        && simulation.total_polls <= poll_budget;
 
     crate::assert_with_log!(
         result,
-        "MR1: All cancelled futures were drained",
+        "MR1: winner completes and every cancelled loser drains within the bounded poll budget",
         true,
         result
     );
@@ -393,7 +423,7 @@ fn mr2_panic_isolation(
     branch_count: usize,
     winner_index: usize,
     panic_loser_indices: Vec<usize>,
-    seed: u64,
+    _seed: u64,
 ) -> bool {
     let global_state = GlobalTestState::new();
 
@@ -415,33 +445,18 @@ fn mr2_panic_isolation(
     global_state.on_race_operation();
 
     // Simulate race with panic handling
-    let panic_count_before = global_state.drain_panics.lock().len();
-
     // Use std::panic::catch_unwind to catch drain panics
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Simplified race simulation
-        let mut winner_value = None;
-
-        // Winner completes first
-        let waker = Waker::from(Arc::new(TestWaker));
-        let mut cx = Context::from_waker(&waker);
-        let mut pinned = Pin::new(&mut futures[winner_index]);
-        match pinned.as_mut().poll(&mut cx) {
-            Poll::Ready(val) => winner_value = Some(val),
-            Poll::Pending => {
-                // Poll until ready
-                loop {
-                    let mut pinned = Pin::new(&mut futures[winner_index]);
-                    match pinned.as_mut().poll(&mut cx) {
-                        Poll::Ready(val) => {
-                            winner_value = Some(val);
-                            break;
-                        }
-                        Poll::Pending => {}
-                    }
-                }
+        let winner_value = loop {
+            let waker = Waker::from(Arc::new(TestWaker));
+            let mut cx = Context::from_waker(&waker);
+            let mut pinned = Pin::new(&mut futures[winner_index]);
+            match pinned.as_mut().poll(&mut cx) {
+                Poll::Ready(val) => break val,
+                Poll::Pending => {}
             }
-        }
+        };
 
         // Cancel and drain losers (some may panic)
         for (i, future) in futures.iter_mut().enumerate() {
@@ -462,11 +477,8 @@ fn mr2_panic_isolation(
             }
         }
 
-        winner_value.unwrap()
+        winner_value
     }));
-
-    let panic_count_after = global_state.drain_panics.lock().len();
-    let panics_occurred = panic_count_after > panic_count_before;
 
     // **MR2 Verification**: Race should complete successfully despite drain panics
     let race_completed = result.is_ok();
@@ -485,7 +497,7 @@ fn mr2_panic_isolation(
 /// **MR3: Branch Outcome Consistency**
 ///
 /// Race with N branches where winner is branch-k leaves all other N-1 in Cancelled outcome.
-fn mr3_branch_outcome_consistency(branch_count: usize, winner_index: usize, seed: u64) -> bool {
+fn mr3_branch_outcome_consistency(branch_count: usize, winner_index: usize, _seed: u64) -> bool {
     let global_state = GlobalTestState::new();
 
     // Create N test futures
@@ -559,7 +571,7 @@ fn mr3_branch_outcome_consistency(branch_count: usize, winner_index: usize, seed
 fn mr4_cancel_propagation_consistency(
     branch_count: usize,
     cancel_after_polls: u32,
-    seed: u64,
+    _seed: u64,
 ) -> bool {
     let global_state = GlobalTestState::new();
 
@@ -652,6 +664,34 @@ fn mr4_cancel_propagation_consistency(
     propagation_correct
 }
 
+/// **MR5: Seed Replay Consistency**
+///
+/// Re-running the same seeded race preserves loser drain order and overall poll budget.
+fn mr5_seed_replay_preserves_loser_drain_order(
+    branch_count: usize,
+    winner_index: usize,
+    loser_poll_counts: Vec<u32>,
+    seed: u64,
+) -> bool {
+    let baseline =
+        run_seeded_loser_drain_simulation(branch_count, winner_index, &loser_poll_counts, seed);
+    let replay =
+        run_seeded_loser_drain_simulation(branch_count, winner_index, &loser_poll_counts, seed);
+
+    let deterministic = baseline == replay
+        && baseline.drain_order.len() == branch_count - 1
+        && !baseline.drain_order.contains(&(winner_index as u32));
+
+    crate::assert_with_log!(
+        deterministic,
+        "MR5: replaying a fixed seed preserves loser drain order",
+        true,
+        deterministic
+    );
+
+    deterministic
+}
+
 // ============================================================================
 // Property-Based Tests
 // ============================================================================
@@ -730,6 +770,24 @@ mod tests {
                 seed
             ));
         }
+
+        /// Test MR5: re-running the same seeded race preserves loser drain order
+        #[test]
+        fn test_mr5_seed_replay_preserves_loser_drain_order(
+            branch_count in 2usize..=8,
+            winner_index in 0usize..8,
+            loser_polls in prop::collection::vec(1u32..10, 1..8),
+            seed in any::<u64>(),
+        ) {
+            let winner_index = winner_index % branch_count;
+
+            prop_assert!(mr5_seed_replay_preserves_loser_drain_order(
+                branch_count,
+                winner_index,
+                loser_polls,
+                seed
+            ));
+        }
     }
 
     /// Comprehensive integration test combining all MRs
@@ -776,6 +834,12 @@ mod tests {
             seed
         ));
         assert!(mr4_cancel_propagation_consistency(branch_count, 5, seed));
+        assert!(mr5_seed_replay_preserves_loser_drain_order(
+            branch_count,
+            winner_index,
+            vec![8, 9, 10],
+            seed
+        ));
     }
 
     /// Test edge cases and boundary conditions
@@ -794,5 +858,13 @@ mod tests {
 
         // Test late cancellation
         assert!(mr4_cancel_propagation_consistency(3, 15, 6666));
+
+        // Same seed should preserve loser drain order
+        assert!(mr5_seed_replay_preserves_loser_drain_order(
+            5,
+            2,
+            vec![3, 4, 5],
+            7777
+        ));
     }
 }
