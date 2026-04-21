@@ -1355,6 +1355,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "authenticated_mac_verification"
+path = "fuzz_targets/authenticated_mac_verification.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "qpack_decoder"
 path = "fuzz_targets/qpack_decoder.rs"
 test = false
