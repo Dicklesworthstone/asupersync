@@ -1370,6 +1370,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_web_sse"
+path = "fuzz_targets/fuzz_web_sse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_data"
 path = "fuzz_targets/h2_data.rs"
 test = false
