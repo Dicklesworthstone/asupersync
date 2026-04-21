@@ -21,6 +21,7 @@ cargo +nightly install cargo-fuzz
 | `h1_parsed_url` | HTTP/1 client URL parser | High |
 | `length_delimited_encode_width` | Length-delimited encode width and round-trip invariants | High |
 | `length_delimited_decoder_state` | Length-delimited decoder chunking and invalid-header invariants | High |
+| `fuzz_lines_codec` | Newline-delimited frame parsing, mixed delimiters, UTF-8 rejection, and max-line enforcement | High |
 | `bytes_slice_split_to` | Immutable Bytes slicing, split_to, and partition invariants | High |
 | `bytes_cursor_reader` | BytesCursor and reader() position, chunk, and copy invariants | High |
 | `gf256_simd_edge_cases` | GF(256) SIMD/scalar parity, fast-path, alignment, and threshold-boundary invariants | High |
@@ -86,6 +87,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `corpus/h1_parsed_url/` - Valid and invalid HTTP/1 client URLs
 - `corpus/length_delimited_encode_width/` - Width-sensitive length-delimited encode scenarios
 - `corpus/length_delimited_decoder_state/` - Decoder chunking and invalid-header scenarios
+- `corpus/fuzz_lines_codec/` - Newline-delimited frame seeds covering empty lines, trailing EOF without newline, and oversized-line recovery
 - `corpus/bytes_slice_split_to/` - Immutable Bytes slicing and split partition scenarios
 - `corpus/bytes_cursor_reader/` - BytesCursor reader and cursor-position scenarios
   including empty views, clone-heavy cursor churn, and position-reset cases

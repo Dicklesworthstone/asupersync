@@ -255,10 +255,10 @@ fuzz_target!(|input: FuzzInput| {
         }
 
         // Handle any remaining data with decode_eof
-        if !decode_buf.is_empty() {
-            if let Ok(Some(final_line)) = rt_codec.decode_eof(&mut decode_buf) {
-                decoded_lines.push(final_line);
-            }
+        if !decode_buf.is_empty()
+            && let Ok(Some(final_line)) = rt_codec.decode_eof(&mut decode_buf)
+        {
+            decoded_lines.push(final_line);
         }
 
         // Test round-trip: encode each decoded line and decode it back
@@ -288,14 +288,14 @@ fuzz_target!(|input: FuzzInput| {
 
     // Test 8: Mixed newline handling validation (\n, \r\n, \r, bare CR, NUL)
     {
-        let mixed_data = [
-            b"line1\n",
-            b"line2\r\n",
-            b"line3\r",
-            b"line4\x00with\x00nul\n",
-            b"line5", // No newline
-        ]
-        .concat();
+        let mixed_cases: [&[u8]; 5] = [
+            b"line1\n".as_slice(),
+            b"line2\r\n".as_slice(),
+            b"line3\r".as_slice(),
+            b"line4\x00with\x00nul\n".as_slice(),
+            b"line5".as_slice(), // No newline
+        ];
+        let mixed_data = mixed_cases.concat();
 
         let mut mixed_codec = LinesCodec::new();
         let mut mixed_buf = BytesMut::from(&mixed_data[..]);

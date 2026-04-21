@@ -26,6 +26,7 @@ on:
           - length_delimited
           - length_delimited_encode_width
           - length_delimited_decoder_state
+          - fuzz_lines_codec
           - length_delimited_frame_boundary
           - bytes_slice_split_to
           - bytes_cursor_reader
@@ -80,6 +81,7 @@ jobs:
           - length_delimited
           - length_delimited_encode_width
           - length_delimited_decoder_state
+          - fuzz_lines_codec
           - length_delimited_frame_boundary
           - bytes_slice_split_to
           - bytes_cursor_reader
