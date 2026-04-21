@@ -1,11 +1,8 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::cx::macaroon::{
-    CaveatPredicate, MacaroonToken, VerificationContext, VerificationError,
-};
+use asupersync::cx::macaroon::{CaveatPredicate, MacaroonToken, VerificationContext};
 use asupersync::security::key::AuthKey;
-use asupersync::types::Time;
 use libfuzzer_sys::fuzz_target;
 
 /// Comprehensive fuzz target for Macaroon capability token attenuation chains
@@ -14,6 +11,7 @@ use libfuzzer_sys::fuzz_target;
 /// - Binary serialization/deserialization robustness
 /// - HMAC signature chain verification integrity
 /// - Caveat predicate encoding/decoding edge cases
+/// - Declared-length overflow and trailing-byte parser resilience
 /// - Attenuation chain manipulation attempts
 /// - Third-party caveat discharge token handling
 /// - Malformed token parsing resilience
@@ -99,6 +97,7 @@ const MAX_STRING_LEN: usize = 1024;
 const MAX_OPERATIONS: usize = 20;
 const MAX_MALFORMED_DATA_LEN: usize = 4096;
 const MAX_CAVEAT_COUNT: usize = 50;
+const MAX_TRAILING_SUFFIX_LEN: usize = 16;
 
 fuzz_target!(|input: MacaroonFuzz| {
     // Limit operations for performance
@@ -113,6 +112,7 @@ fuzz_target!(|input: MacaroonFuzz| {
 
     // Test predicate encoding/decoding
     test_predicate_round_trip(operations);
+    test_caveat_parser_edge_cases(operations, &input.malformed_data);
 
     // Execute macaroon operations
     let mut current_token: Option<MacaroonToken> = None;
@@ -238,7 +238,7 @@ fn test_add_third_party_caveat(
     let caveat_key = AuthKey::from_seed(caveat_key_seed);
     let original_count = token.caveat_count();
 
-    let new_token = token.add_third_party_caveat(location, &caveat_key, identifier);
+    let new_token = token.add_third_party_caveat(location, identifier, &caveat_key);
 
     // Invariants after adding third-party caveat
     assert_eq!(new_token.caveat_count(), original_count + 1);
@@ -248,7 +248,7 @@ fn test_add_third_party_caveat(
 
 fn test_serialization_round_trip(token: &MacaroonToken) {
     // Serialize should never panic
-    let serialized = token.serialize();
+    let serialized = token.to_binary();
 
     // Basic sanity checks
     assert!(
@@ -261,7 +261,7 @@ fn test_serialization_round_trip(token: &MacaroonToken) {
     );
 
     // Deserialization should succeed for valid tokens
-    if let Some(deserialized) = MacaroonToken::deserialize(&serialized) {
+    if let Some(deserialized) = MacaroonToken::from_binary(&serialized) {
         // Round-trip should preserve all fields
         assert_eq!(deserialized.identifier(), token.identifier());
         assert_eq!(deserialized.location(), token.location());
@@ -275,7 +275,7 @@ fn test_serialization_round_trip(token: &MacaroonToken) {
 
 fn test_safe_deserialization(data: &[u8]) {
     // Deserialization should never panic, even with malformed data
-    let result = MacaroonToken::deserialize(data);
+    let result = MacaroonToken::from_binary(data);
 
     // If deserialization succeeds, verify basic properties
     if let Some(token) = result {
@@ -299,7 +299,7 @@ fn test_malformed_deserialization(data: &[u8]) {
     };
 
     // Should handle malformed data gracefully
-    let _ = MacaroonToken::deserialize(limited_data);
+    let _ = MacaroonToken::from_binary(limited_data);
 }
 
 fn test_predicate_round_trip(operations: &[MacaroonOperation]) {
@@ -327,6 +327,76 @@ fn test_predicate_round_trip(operations: &[MacaroonOperation]) {
     }
 }
 
+fn test_caveat_parser_edge_cases(operations: &[MacaroonOperation], malformed_data: &[u8]) {
+    for operation in operations {
+        if let MacaroonOperation::AddCaveat { predicate } = operation {
+            let encoded = convert_predicate_fuzz(predicate).to_bytes();
+
+            test_truncated_predicate_rejection(&encoded);
+            test_trailing_predicate_bytes(&encoded, malformed_data);
+            test_variable_length_field_overflow(&encoded);
+        }
+    }
+}
+
+fn test_truncated_predicate_rejection(encoded: &[u8]) {
+    for truncated_len in 0..encoded.len() {
+        assert!(
+            CaveatPredicate::from_bytes(&encoded[..truncated_len]).is_none(),
+            "truncated predicate prefix should be rejected"
+        );
+    }
+}
+
+fn test_trailing_predicate_bytes(encoded: &[u8], malformed_data: &[u8]) {
+    let suffix_len = malformed_data.len().min(MAX_TRAILING_SUFFIX_LEN);
+    let mut with_trailing = encoded.to_vec();
+    with_trailing.extend_from_slice(&malformed_data[..suffix_len]);
+
+    let (decoded, consumed) = CaveatPredicate::from_bytes(&with_trailing)
+        .expect("valid predicate prefix should still parse with trailing bytes");
+    assert_eq!(consumed, encoded.len(), "parser must stop at predicate boundary");
+    assert_eq!(
+        decoded.to_bytes(),
+        encoded,
+        "parsed predicate should round-trip to the original prefix"
+    );
+}
+
+fn test_variable_length_field_overflow(encoded: &[u8]) {
+    match encoded.first().copied() {
+        Some(0x06) if encoded.len() >= 3 => {
+            let mut inflated_key_len = encoded.to_vec();
+            inflated_key_len[1..3].copy_from_slice(&u16::MAX.to_le_bytes());
+            assert!(
+                CaveatPredicate::from_bytes(&inflated_key_len).is_none(),
+                "custom predicate with oversized key length should be rejected"
+            );
+
+            let key_len = u16::from_le_bytes([encoded[1], encoded[2]]) as usize;
+            let value_len_offset = 3 + key_len;
+            if encoded.len() >= value_len_offset + 2 {
+                let mut inflated_value_len = encoded.to_vec();
+                inflated_value_len[value_len_offset..value_len_offset + 2]
+                    .copy_from_slice(&u16::MAX.to_le_bytes());
+                assert!(
+                    CaveatPredicate::from_bytes(&inflated_value_len).is_none(),
+                    "custom predicate with oversized value length should be rejected"
+                );
+            }
+        }
+        Some(0x07) if encoded.len() >= 3 => {
+            let mut inflated_pattern_len = encoded.to_vec();
+            inflated_pattern_len[1..3].copy_from_slice(&u16::MAX.to_le_bytes());
+            assert!(
+                CaveatPredicate::from_bytes(&inflated_pattern_len).is_none(),
+                "resource-scope predicate with oversized pattern length should be rejected"
+            );
+        }
+        _ => {}
+    }
+}
+
 fn test_malformed_predicate_parsing(data: &[u8]) {
     let limited_data = if data.len() > MAX_MALFORMED_DATA_LEN {
         &data[..MAX_MALFORMED_DATA_LEN]
@@ -335,7 +405,14 @@ fn test_malformed_predicate_parsing(data: &[u8]) {
     };
 
     // Should handle malformed predicate data gracefully
-    let _ = CaveatPredicate::from_bytes(limited_data);
+    if let Some((decoded, consumed)) = CaveatPredicate::from_bytes(limited_data) {
+        assert!(consumed <= limited_data.len(), "parser cannot overrun input");
+        assert_eq!(
+            decoded.to_bytes(),
+            limited_data[..consumed],
+            "successful parse should round-trip its consumed prefix"
+        );
+    }
 }
 
 fn test_signature_verification(token: &MacaroonToken, key_seed: u64) {
@@ -370,7 +447,7 @@ fn test_full_verification(token: &MacaroonToken, key_seed: u64, context: &Verifi
     }
 }
 
-fn test_discharge_binding(token: &MacaroonToken, discharge_ops: &[MacaroonOperation]) {
+fn test_discharge_binding(token: &MacaroonToken, _discharge_ops: &[MacaroonOperation]) {
     // Create a simple discharge token for testing
     let discharge_key = AuthKey::from_seed(12345);
     let discharge = MacaroonToken::mint(&discharge_key, "discharge", "test");
@@ -398,7 +475,7 @@ fn test_comprehensive_properties(token: &MacaroonToken, context: &VerificationCo
     }
 
     // Test serialization
-    let serialized = token.serialize();
+    let serialized = token.to_binary();
     assert!(!serialized.is_empty());
     assert!(serialized.len() < 1_000_000); // Reasonable upper bound
 }
@@ -430,17 +507,15 @@ fn convert_predicate_fuzz(predicate_fuzz: &CaveatPredicateFuzz) -> CaveatPredica
 }
 
 fn create_verification_context(context_fuzz: &ContextFuzz) -> VerificationContext {
-    let current_time = Time::from_millis_since_epoch(context_fuzz.current_time_ms);
     let safe_resource_path = limit_string(&context_fuzz.resource_path, MAX_STRING_LEN);
 
-    VerificationContext {
-        current_time,
-        region_id: Some(context_fuzz.region_id),
-        task_id: Some(context_fuzz.task_id),
-        resource_path: Some(safe_resource_path),
-        use_count: Some(context_fuzz.use_count),
-        window_use_count: Some(context_fuzz.window_use_count),
-    }
+    VerificationContext::new()
+        .with_time(context_fuzz.current_time_ms)
+        .with_region(context_fuzz.region_id)
+        .with_task(context_fuzz.task_id)
+        .with_resource(safe_resource_path)
+        .with_use_count(context_fuzz.use_count)
+        .with_window_use_count(context_fuzz.window_use_count)
 }
 
 fn limit_string(input: &str, max_len: usize) -> String {
