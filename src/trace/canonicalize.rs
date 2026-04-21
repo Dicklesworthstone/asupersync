@@ -701,7 +701,7 @@ mod tests {
                 abort_reason,
             } => format!(
                 "obligation={} task={} region={} kind={} state={state:?} duration_ns={} abort_reason={}",
-                obligation.as_u64(),
+                pack_arena(obligation.arena_index()),
                 task.as_u64(),
                 region.as_u64(),
                 kind.as_str(),
