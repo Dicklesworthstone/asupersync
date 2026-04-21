@@ -300,7 +300,7 @@ impl RegionTable {
 mod tests {
     use super::*;
     use crate::record::region::RegionState;
-    use crate::types::TaskId;
+    use crate::types::{CancelReason, TaskId};
 
     #[test]
     fn create_root_region() {
@@ -526,6 +526,127 @@ mod tests {
             assert!(matches!(result, Err(RegionCreateError::ParentClosed(id)) if id == root));
             assert_eq!(table.len(), 1);
             assert!(table.child_ids(root).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn close_completion_tracks_zero_live_work_across_child_task_obligation_combinations() {
+        for mask in 0_u8..8 {
+            let has_child = mask & 0b001 != 0;
+            let has_task = mask & 0b010 != 0;
+            let has_obligation = mask & 0b100 != 0;
+
+            let mut table = RegionTable::new();
+            let root = table.create_root(Budget::default(), Time::ZERO);
+            let child = if has_child {
+                Some(
+                    table
+                        .create_child(root, Budget::default(), Time::ZERO)
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let root_record = table.get(root.arena_index()).unwrap();
+            let task = if has_task {
+                Some(TaskId::from_arena(ArenaIndex::new(
+                    100 + u32::from(mask),
+                    0,
+                )))
+            } else {
+                None
+            };
+
+            if let Some(task) = task {
+                assert!(root_record.add_task(task).is_ok());
+            }
+            if has_obligation {
+                assert!(root_record.try_reserve_obligation().is_ok());
+                assert_eq!(table.pending_obligations(root), Some(1));
+            }
+
+            assert!(root_record.begin_close(None));
+            assert!(root_record.begin_finalize());
+
+            let should_close_immediately = !(has_child || has_task || has_obligation);
+            assert_eq!(
+                root_record.complete_close(),
+                should_close_immediately,
+                "close outcome should depend only on whether live work remains: mask={mask:03b}",
+            );
+
+            if let Some(task) = task {
+                root_record.remove_task(task);
+            }
+            if let Some(child) = child {
+                root_record.remove_child(child);
+            }
+            if has_obligation {
+                root_record.resolve_obligation();
+            }
+
+            if !should_close_immediately {
+                assert!(root_record.complete_close());
+            }
+
+            assert_eq!(table.state(root), Some(RegionState::Closed));
+            assert!(!root_record.has_live_work());
+            assert_eq!(table.pending_obligations(root), Some(0));
+        }
+    }
+
+    #[test]
+    fn cancel_during_close_preserves_budget_and_completes_after_drain() {
+        let budget = Budget::new()
+            .with_deadline(Time::from_secs(30))
+            .with_poll_quota(64)
+            .with_cost_quota(512)
+            .with_priority(77);
+        let mut table = RegionTable::new();
+        let root = table.create_root(budget, Time::ZERO);
+        let root_record = table.get(root.arena_index()).unwrap();
+        let task = TaskId::from_arena(ArenaIndex::new(200, 0));
+        let reason = CancelReason::timeout().with_message("close budget preserved");
+
+        assert!(root_record.add_task(task).is_ok());
+        assert!(root_record.try_reserve_obligation().is_ok());
+        assert!(root_record.begin_close(Some(reason.clone())));
+        assert_eq!(root_record.cancel_reason(), Some(reason));
+        assert_eq!(root_record.budget(), budget);
+        assert_eq!(table.budget(root), Some(budget));
+
+        assert!(root_record.begin_finalize());
+        assert!(!root_record.complete_close());
+
+        root_record.remove_task(task);
+        assert!(!root_record.complete_close());
+
+        root_record.resolve_obligation();
+        assert!(root_record.complete_close());
+        assert_eq!(table.state(root), Some(RegionState::Closed));
+        assert_eq!(root_record.budget(), budget);
+        assert_eq!(table.budget(root), Some(budget));
+        assert_eq!(table.pending_obligations(root), Some(0));
+    }
+
+    #[test]
+    fn repeated_complete_close_after_closed_stays_idempotent() {
+        let mut table = RegionTable::new();
+        let root = table.create_root(Budget::default(), Time::ZERO);
+        let root_record = table.get(root.arena_index()).unwrap();
+
+        assert!(root_record.begin_close(None));
+        assert!(root_record.begin_finalize());
+        assert!(root_record.complete_close());
+        assert_eq!(table.state(root), Some(RegionState::Closed));
+
+        for _ in 0..3 {
+            assert!(!root_record.complete_close());
+            assert_eq!(table.state(root), Some(RegionState::Closed));
+            assert_eq!(table.len(), 1);
+            assert!(table.child_ids(root).unwrap().is_empty());
+            assert!(table.task_ids(root).unwrap().is_empty());
+            assert_eq!(table.pending_obligations(root), Some(0));
         }
     }
 
