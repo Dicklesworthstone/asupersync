@@ -78,7 +78,7 @@ expression: certificate_snapshot(&cert)
       {
         "step": 7,
         "potential": "70.000000",
-        "bound": "5.000000",
+        "bound": "1.000000",
         "description": "stall: 5 consecutive non-decreasing steps (threshold: 4)"
       },
       {
@@ -101,5 +101,5 @@ expression: certificate_snapshot(&cert)
       }
     ]
   },
-  "verdict_display": "Progress Certificate Verdict\n============================\nConverging:         false\nStall detected:     true\nSteps:              8\nV(Σ₀):              80.0000\nV(Σₜ):              70.0000\nMean credit/step:   1.5714\nMax |Δ|:            8.0000\nDrain phase:        stalled\nConfidence bound:   0.864902\nAzuma bound:        1.000000\nFreedman bound:     1.000000\nDelta variance:     8.530612\nEst. remaining:     44.5 steps\nEvidence (4 entries):\n  step=7: V=70.0000, bound=5.000000 — stall: 5 consecutive non-decreasing steps (threshold: 4)\n  step=7: V=70.0000, bound=0.142857 — 1 monotonicity violations out of 7 steps (rate: 0.1429)\n  step=7: V=70.0000, bound=0.666667 — Ville bound: P(potential ever exceeds 1.5·V₀) ≤ 0.6667\n  step=7: V=70.0000, bound=1.000000 — total progress 10.0000 over 7 steps, mean credit 1.5714/step, Azuma tail P ≤ 1.000000\n"
+  "verdict_display": "Progress Certificate Verdict\n============================\nConverging:         false\nStall detected:     true\nSteps:              8\nV(Σ₀):              80.0000\nV(Σₜ):              70.0000\nMean credit/step:   1.5714\nMax |Δ|:            8.0000\nDrain phase:        stalled\nConfidence bound:   0.864902\nAzuma bound:        1.000000\nFreedman bound:     1.000000\nDelta variance:     8.530612\nEst. remaining:     44.5 steps\nEvidence (4 entries):\n  step=7: V=70.0000, bound=1.000000 — stall: 5 consecutive non-decreasing steps (threshold: 4)\n  step=7: V=70.0000, bound=0.142857 — 1 monotonicity violations out of 7 steps (rate: 0.1429)\n  step=7: V=70.0000, bound=0.666667 — Ville bound: P(potential ever exceeds 1.5·V₀) ≤ 0.6667\n  step=7: V=70.0000, bound=1.000000 — total progress 10.0000 over 7 steps, mean credit 1.5714/step, Azuma tail P ≤ 1.000000\n"
 }

@@ -1917,13 +1917,15 @@ Connection: Upgrade\n\
             "Should not select protocol when client doesn't request any"
         );
 
-        // Test case 5: Protocol list parsing edge cases
+        // Test case 5: Protocol list parsing edge cases.
+        // In each case the server (below) only supports "chat", so the
+        // negotiated protocol must be "chat" whenever the client offers it.
         let protocol_test_cases = vec![
             ("chat", "chat"),
-            ("chat, superchat", "chat"),          // First in list
-            ("  chat  ,  superchat  ", "chat"),   // Whitespace handling
-            ("superchat,chat,echo", "superchat"), // No spaces
-            ("unknown, chat, unknown2", "chat"),  // Mixed known/unknown
+            ("chat, superchat", "chat"),         // First in list
+            ("  chat  ,  superchat  ", "chat"),  // Whitespace handling
+            ("superchat,chat,echo", "chat"),     // No spaces (server only supports "chat")
+            ("unknown, chat, unknown2", "chat"), // Mixed known/unknown
         ];
 
         let server_chat = ServerHandshake::new().protocol("chat");
