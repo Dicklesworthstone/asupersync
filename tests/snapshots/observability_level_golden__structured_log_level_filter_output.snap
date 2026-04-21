@@ -1,0 +1,176 @@
+---
+source: tests/observability_level_golden.rs
+expression: snapshot
+---
+{
+  "debug": {
+    "accepted_levels": [
+      "debug",
+      "info",
+      "warn",
+      "error"
+    ],
+    "entries": [
+      {
+        "level": "debug",
+        "message": "debug collector state",
+        "pid": "[pid]",
+        "request_id": "REQ-DEBUG",
+        "target": "collector::state",
+        "timestamp_ns": "[timestamp_ns]"
+      },
+      {
+        "level": "info",
+        "message": "info runtime ready",
+        "pid": "[pid]",
+        "request_id": "REQ-INFO",
+        "target": "runtime::startup",
+        "timestamp_ns": "[timestamp_ns]"
+      },
+      {
+        "level": "warn",
+        "message": "warn backlog elevated",
+        "pid": "[pid]",
+        "request_id": "REQ-WARN",
+        "target": "scheduler::queue",
+        "timestamp_ns": "[timestamp_ns]"
+      },
+      {
+        "level": "error",
+        "message": "error downstream unavailable",
+        "pid": "[pid]",
+        "request_id": "REQ-ERROR",
+        "target": "grpc::client",
+        "timestamp_ns": "[timestamp_ns]"
+      }
+    ],
+    "threshold": "debug"
+  },
+  "error": {
+    "accepted_levels": [
+      "error"
+    ],
+    "entries": [
+      {
+        "level": "error",
+        "message": "error downstream unavailable",
+        "pid": "[pid]",
+        "request_id": "REQ-ERROR",
+        "target": "grpc::client",
+        "timestamp_ns": "[timestamp_ns]"
+      }
+    ],
+    "threshold": "error"
+  },
+  "info": {
+    "accepted_levels": [
+      "info",
+      "warn",
+      "error"
+    ],
+    "entries": [
+      {
+        "level": "info",
+        "message": "info runtime ready",
+        "pid": "[pid]",
+        "request_id": "REQ-INFO",
+        "target": "runtime::startup",
+        "timestamp_ns": "[timestamp_ns]"
+      },
+      {
+        "level": "warn",
+        "message": "warn backlog elevated",
+        "pid": "[pid]",
+        "request_id": "REQ-WARN",
+        "target": "scheduler::queue",
+        "timestamp_ns": "[timestamp_ns]"
+      },
+      {
+        "level": "error",
+        "message": "error downstream unavailable",
+        "pid": "[pid]",
+        "request_id": "REQ-ERROR",
+        "target": "grpc::client",
+        "timestamp_ns": "[timestamp_ns]"
+      }
+    ],
+    "threshold": "info"
+  },
+  "trace": {
+    "accepted_levels": [
+      "trace",
+      "debug",
+      "info",
+      "warn",
+      "error"
+    ],
+    "entries": [
+      {
+        "level": "trace",
+        "message": "trace handshake probe",
+        "pid": "[pid]",
+        "request_id": "REQ-TRACE",
+        "target": "net::handshake",
+        "timestamp_ns": "[timestamp_ns]"
+      },
+      {
+        "level": "debug",
+        "message": "debug collector state",
+        "pid": "[pid]",
+        "request_id": "REQ-DEBUG",
+        "target": "collector::state",
+        "timestamp_ns": "[timestamp_ns]"
+      },
+      {
+        "level": "info",
+        "message": "info runtime ready",
+        "pid": "[pid]",
+        "request_id": "REQ-INFO",
+        "target": "runtime::startup",
+        "timestamp_ns": "[timestamp_ns]"
+      },
+      {
+        "level": "warn",
+        "message": "warn backlog elevated",
+        "pid": "[pid]",
+        "request_id": "REQ-WARN",
+        "target": "scheduler::queue",
+        "timestamp_ns": "[timestamp_ns]"
+      },
+      {
+        "level": "error",
+        "message": "error downstream unavailable",
+        "pid": "[pid]",
+        "request_id": "REQ-ERROR",
+        "target": "grpc::client",
+        "timestamp_ns": "[timestamp_ns]"
+      }
+    ],
+    "threshold": "trace"
+  },
+  "warn": {
+    "accepted_levels": [
+      "warn",
+      "error"
+    ],
+    "entries": [
+      {
+        "level": "warn",
+        "message": "warn backlog elevated",
+        "pid": "[pid]",
+        "request_id": "REQ-WARN",
+        "target": "scheduler::queue",
+        "timestamp_ns": "[timestamp_ns]"
+      },
+      {
+        "level": "error",
+        "message": "error downstream unavailable",
+        "pid": "[pid]",
+        "request_id": "REQ-ERROR",
+        "target": "grpc::client",
+        "timestamp_ns": "[timestamp_ns]"
+      }
+    ],
+    "threshold": "warn"
+  }
+}
