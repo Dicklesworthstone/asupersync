@@ -210,6 +210,13 @@ enum HeaderStrategy {
     None,
     /// A small, valid header block.
     Valid { headers: Vec<HeaderField> },
+    /// Obsolete line folding continuation that modern parsers must reject.
+    FoldedContinuation {
+        name: String,
+        value: String,
+        continuation: String,
+        tab_prefix: bool,
+    },
     /// A header block that exceeds the codec's size limit.
     Oversized { size: usize },
     /// A header block that exceeds the codec's header-count limit.
@@ -308,6 +315,26 @@ impl FuzzInput {
                 }
                 block
             }
+            HeaderStrategy::FoldedContinuation {
+                name,
+                value,
+                continuation,
+                tab_prefix,
+            } => {
+                let mut block = Vec::new();
+                let name = sanitize_header_name(name);
+                let value = sanitize_header_value(value);
+                let continuation = sanitize_header_value(continuation);
+                let prefix = if *tab_prefix { b'\t' } else { b' ' };
+                block.extend_from_slice(name.as_bytes());
+                block.extend_from_slice(b": ");
+                block.extend_from_slice(value.as_bytes());
+                block.extend_from_slice(b"\r\n");
+                block.push(prefix);
+                block.extend_from_slice(continuation.as_bytes());
+                block.extend_from_slice(b"\r\n");
+                block
+            }
             HeaderStrategy::Oversized { size } => {
                 let value_len = (*size).clamp(MAX_HEADERS_SIZE + 1, MAX_FUZZ_INPUT_SIZE / 2);
                 let mut block = b"X-Fuzz: ".to_vec();
@@ -330,7 +357,9 @@ impl FuzzInput {
         match &self.headers {
             HeaderStrategy::None => Some(0),
             HeaderStrategy::Valid { headers } => Some(headers.len().min(16)),
-            HeaderStrategy::Oversized { .. } | HeaderStrategy::TooMany { .. } => None,
+            HeaderStrategy::FoldedContinuation { .. }
+            | HeaderStrategy::Oversized { .. }
+            | HeaderStrategy::TooMany { .. } => None,
         }
     }
 
@@ -382,11 +411,11 @@ impl FuzzInput {
                 } else {
                     path.clone()
                 };
-                if let Some(q) = query {
-                    if !q.is_empty() {
-                        uri.push('?');
-                        uri.push_str(q);
-                    }
+                if let Some(q) = query
+                    && !q.is_empty()
+                {
+                    uri.push('?');
+                    uri.push_str(q);
                 }
                 uri
             }
@@ -755,6 +784,13 @@ fuzz_target!(|input: FuzzInput| {
                     // **ASSERTION 6: Origin-form vs asterisk-form dispatched correctly**
                     validate_uri_form_consistency(&method, &uri);
 
+                    if matches!(input.headers, HeaderStrategy::FoldedContinuation { .. }) {
+                        panic!(
+                            "Codec accepted obsolete folded continuation header: {:?}",
+                            String::from_utf8_lossy(&full_request)
+                        );
+                    }
+
                     if let Some(expected_header_count) = input.expected_header_count() {
                         assert_eq!(request.headers.len(), expected_header_count);
                     }
@@ -839,12 +875,12 @@ fuzz_target!(|input: FuzzInput| {
 
     // **ASSERTION 5: Absolute-URI form for proxy**
     // Test proxy request handling (if we implement proxy logic)
-    if let Ok((_method, uri, _version)) = &mock_result {
-        if uri.starts_with("http://") || uri.starts_with("https://") {
-            // This is an absolute-form URI for proxy requests
-            // Verify proper handling according to RFC 9112
-            assert!(uri.contains("://"), "Absolute-form URI must contain scheme");
-        }
+    if let Ok((_method, uri, _version)) = &mock_result
+        && (uri.starts_with("http://") || uri.starts_with("https://"))
+    {
+        // This is an absolute-form URI for proxy requests
+        // Verify proper handling according to RFC 9112
+        assert!(uri.contains("://"), "Absolute-form URI must contain scheme");
     }
 });
 
