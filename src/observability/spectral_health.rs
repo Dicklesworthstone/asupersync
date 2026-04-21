@@ -1930,6 +1930,45 @@ impl SpectralHealthMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
+
+    fn render_spectral_health_report(report: &SpectralHealthReport) -> String {
+        let mut rendered = format!("{report}");
+        if report.bottlenecks.is_empty() {
+            rendered.push_str("  bottleneck_nodes: []\n");
+        } else {
+            rendered.push_str("  bottleneck_nodes:\n");
+            for node in &report.bottlenecks {
+                let _ = writeln!(
+                    rendered,
+                    "    - node={} degree={} component={:.4} resistance={:.4}",
+                    node.node_index, node.degree, node.fiedler_component, node.effective_resistance,
+                );
+            }
+        }
+
+        match &report.bifurcation {
+            Some(bifurcation) => {
+                let _ = writeln!(
+                    rendered,
+                    "  bifurcation_detail: trend={} severity={} confidence={:.2}",
+                    bifurcation.trend, bifurcation.severity, bifurcation.confidence
+                );
+            }
+            None => rendered.push_str("  bifurcation_detail: none\n"),
+        }
+
+        rendered
+    }
+
+    fn assert_spectral_health_snapshot(snapshot_name: &str, rendered: &str) {
+        insta::with_settings!({
+            snapshot_path => "../../tests/snapshots",
+            prepend_module_to_snapshot => false,
+        }, {
+            insta::assert_snapshot!(snapshot_name, rendered);
+        });
+    }
 
     // -- Laplacian construction ------------------------------------------------
 
@@ -2834,6 +2873,37 @@ mod tests {
         // Verify Clone produces equivalent value.
         let monitor2 = monitor.clone();
         assert_eq!(monitor.history_len(), monitor2.history_len());
+    }
+
+    #[test]
+    fn spectral_health_report_snapshot_scrubbed() {
+        let mut healthy_monitor = SpectralHealthMonitor::new(SpectralThresholds::default());
+        let healthy = healthy_monitor.analyze(4, &[(0, 1), (1, 2), (2, 3), (3, 0)]);
+
+        let degraded_thresholds = SpectralThresholds {
+            critical_fiedler: 0.3,
+            degraded_fiedler: 0.8,
+            ..SpectralThresholds::default()
+        };
+        let mut degraded_monitor = SpectralHealthMonitor::new(degraded_thresholds);
+        let degraded = degraded_monitor.analyze(4, &[(0, 1), (1, 2), (2, 3)]);
+
+        let critical_thresholds = SpectralThresholds {
+            critical_fiedler: 0.6,
+            degraded_fiedler: 0.8,
+            ..SpectralThresholds::default()
+        };
+        let mut critical_monitor = SpectralHealthMonitor::new(critical_thresholds);
+        let critical = critical_monitor.analyze(4, &[(0, 1), (1, 2), (2, 3)]);
+
+        let snapshot = format!(
+            "[healthy]\n{}\n[degraded]\n{}\n[critical]\n{}",
+            render_spectral_health_report(&healthy),
+            render_spectral_health_report(&degraded),
+            render_spectral_health_report(&critical),
+        );
+
+        assert_spectral_health_snapshot("observability_spectral_health_report_scrubbed", &snapshot);
     }
 
     // -- Stress / scale test ---------------------------------------------------
