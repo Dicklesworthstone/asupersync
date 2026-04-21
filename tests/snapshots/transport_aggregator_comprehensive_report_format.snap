@@ -59,6 +59,29 @@ path_2:
     is_primary: false
     priority: 3
 
+[path_percentiles]
+symbols_received_p50: 8765
+symbols_received_p90: 15420
+symbols_received_p100: 15420
+symbols_lost_p50: 134
+symbols_lost_p90: 892
+symbols_lost_p100: 892
+duplicates_received_p50: 23
+duplicates_received_p90: 67
+duplicates_received_p100: 67
+latency_ms_p50: 45
+latency_ms_p90: 600
+latency_ms_p100: 600
+bandwidth_bps_p50: 100000000
+bandwidth_bps_p90: 1000000000
+bandwidth_bps_p100: 1000000000
+loss_rate_p50: 0.0150
+loss_rate_p90: 0.0500
+loss_rate_p100: 0.0500
+jitter_ms_p50: 12
+jitter_ms_p90: 50
+jitter_ms_p100: 50
+
 [aggregator_stats]
 total_processed: 0
 deduplicator:

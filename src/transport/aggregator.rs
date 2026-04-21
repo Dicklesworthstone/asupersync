@@ -8,13 +8,13 @@
 //! - `MultipathAggregator`: Main aggregation orchestrator
 
 use crate::error::{Error, ErrorKind};
-use crate::types::Time;
 use crate::types::symbol::{ObjectId, Symbol, SymbolId};
+use crate::types::Time;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 // ============================================================================
 // Path Types
@@ -4017,7 +4017,8 @@ mod tests {
             path.symbols_received.store(2341, Ordering::Relaxed);
             path.symbols_lost.store(892, Ordering::Relaxed);
             path.duplicates_received.store(12, Ordering::Relaxed);
-            path.state.store(PathState::Degraded as u8, Ordering::Relaxed);
+            path.state
+                .store(PathState::Degraded as u8, Ordering::Relaxed);
         }
 
         // Generate comprehensive aggregation report
@@ -4034,9 +4035,61 @@ mod tests {
         crate::test_complete!("transport_aggregator_comprehensive_report_format_golden_snapshot");
     }
 
+    fn percentile_index(len: usize, percentile: usize) -> usize {
+        debug_assert!(len > 0);
+        let rank = percentile.saturating_mul(len).saturating_add(99) / 100;
+        rank.saturating_sub(1).min(len - 1)
+    }
+
+    fn append_u32_percentiles(report: &mut String, label: &str, values: &[u32]) {
+        if values.is_empty() {
+            return;
+        }
+
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        for percentile in [50, 90, 100] {
+            let value = sorted[percentile_index(sorted.len(), percentile)];
+            report.push_str(&format!("{}p{}: {}\n", label, percentile, value));
+        }
+    }
+
+    fn append_u64_percentiles(report: &mut String, label: &str, values: &[u64]) {
+        if values.is_empty() {
+            return;
+        }
+
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        for percentile in [50, 90, 100] {
+            let value = sorted[percentile_index(sorted.len(), percentile)];
+            report.push_str(&format!("{}p{}: {}\n", label, percentile, value));
+        }
+    }
+
+    fn append_f64_percentiles(report: &mut String, label: &str, values: &[f64]) {
+        if values.is_empty() {
+            return;
+        }
+
+        let mut sorted = values.to_vec();
+        sorted.sort_by(|left, right| left.total_cmp(right));
+        for percentile in [50, 90, 100] {
+            let value = sorted[percentile_index(sorted.len(), percentile)];
+            report.push_str(&format!("{}p{}: {:.4}\n", label, percentile, value));
+        }
+    }
+
     /// Generate a structured aggregation report for golden snapshot testing
     fn generate_aggregation_report(aggregator: &MultipathAggregator) -> String {
         let mut report = String::new();
+        let mut received_values = Vec::new();
+        let mut lost_values = Vec::new();
+        let mut duplicate_values = Vec::new();
+        let mut latency_values = Vec::new();
+        let mut bandwidth_values = Vec::new();
+        let mut loss_rate_values = Vec::new();
+        let mut jitter_values = Vec::new();
 
         report.push_str("=== Transport Aggregator Report ===\n\n");
 
@@ -4047,12 +4100,22 @@ mod tests {
         report.push_str(&format!("usable_count: {}\n", path_stats.usable_count));
         report.push_str(&format!("total_received: {}\n", path_stats.total_received));
         report.push_str(&format!("total_lost: {}\n", path_stats.total_lost));
-        report.push_str(&format!("total_duplicates: {}\n", path_stats.total_duplicates));
-        report.push_str(&format!("aggregate_bandwidth_bps: {}\n", path_stats.aggregate_bandwidth_bps));
-        report.push_str(&format!("loss_rate: {:.4}\n",
+        report.push_str(&format!(
+            "total_duplicates: {}\n",
+            path_stats.total_duplicates
+        ));
+        report.push_str(&format!(
+            "aggregate_bandwidth_bps: {}\n",
+            path_stats.aggregate_bandwidth_bps
+        ));
+        report.push_str(&format!(
+            "loss_rate: {:.4}\n",
             if path_stats.total_received + path_stats.total_lost > 0 {
-                path_stats.total_lost as f64 / (path_stats.total_received + path_stats.total_lost) as f64
-            } else { 0.0 }
+                path_stats.total_lost as f64
+                    / (path_stats.total_received + path_stats.total_lost) as f64
+            } else {
+                0.0
+            }
         ));
         report.push_str("\n");
 
@@ -4066,6 +4129,14 @@ mod tests {
                 let lost = path.symbols_lost.load(Ordering::Relaxed);
                 let duplicates = path.duplicates_received.load(Ordering::Relaxed);
 
+                received_values.push(received);
+                lost_values.push(lost);
+                duplicate_values.push(duplicates);
+                latency_values.push(path.characteristics.latency_ms);
+                bandwidth_values.push(path.characteristics.bandwidth_bps);
+                loss_rate_values.push(path.characteristics.loss_rate);
+                jitter_values.push(path.characteristics.jitter_ms);
+
                 report.push_str(&format!("path_{}:\n", path_id));
                 report.push_str(&format!("  id: Path({})\n", path_id));
                 report.push_str(&format!("  state: {:?}\n", state));
@@ -4074,31 +4145,86 @@ mod tests {
                 report.push_str(&format!("  symbols_lost: {}\n", lost));
                 report.push_str(&format!("  duplicates_received: {}\n", duplicates));
                 report.push_str(&format!("  characteristics:\n"));
-                report.push_str(&format!("    latency_ms: {}\n", path.characteristics.latency_ms));
-                report.push_str(&format!("    bandwidth_bps: {}\n", path.characteristics.bandwidth_bps));
-                report.push_str(&format!("    loss_rate: {:.3}\n", path.characteristics.loss_rate));
-                report.push_str(&format!("    jitter_ms: {}\n", path.characteristics.jitter_ms));
-                report.push_str(&format!("    is_primary: {}\n", path.characteristics.is_primary));
-                report.push_str(&format!("    priority: {}\n", path.characteristics.priority));
+                report.push_str(&format!(
+                    "    latency_ms: {}\n",
+                    path.characteristics.latency_ms
+                ));
+                report.push_str(&format!(
+                    "    bandwidth_bps: {}\n",
+                    path.characteristics.bandwidth_bps
+                ));
+                report.push_str(&format!(
+                    "    loss_rate: {:.3}\n",
+                    path.characteristics.loss_rate
+                ));
+                report.push_str(&format!(
+                    "    jitter_ms: {}\n",
+                    path.characteristics.jitter_ms
+                ));
+                report.push_str(&format!(
+                    "    is_primary: {}\n",
+                    path.characteristics.is_primary
+                ));
+                report.push_str(&format!(
+                    "    priority: {}\n",
+                    path.characteristics.priority
+                ));
                 report.push_str("\n");
             }
         }
+
+        report.push_str("[path_percentiles]\n");
+        append_u64_percentiles(&mut report, "symbols_received_", &received_values);
+        append_u64_percentiles(&mut report, "symbols_lost_", &lost_values);
+        append_u64_percentiles(&mut report, "duplicates_received_", &duplicate_values);
+        append_u32_percentiles(&mut report, "latency_ms_", &latency_values);
+        append_u64_percentiles(&mut report, "bandwidth_bps_", &bandwidth_values);
+        append_f64_percentiles(&mut report, "loss_rate_", &loss_rate_values);
+        append_u32_percentiles(&mut report, "jitter_ms_", &jitter_values);
+        report.push_str("\n");
 
         // Aggregator Statistics
         let agg_stats = aggregator.stats();
         report.push_str("[aggregator_stats]\n");
         report.push_str(&format!("total_processed: {}\n", agg_stats.total_processed));
         report.push_str("deduplicator:\n");
-        report.push_str(&format!("  objects_tracked: {}\n", agg_stats.dedup.objects_tracked));
-        report.push_str(&format!("  symbols_tracked: {}\n", agg_stats.dedup.symbols_tracked));
-        report.push_str(&format!("  duplicates_detected: {}\n", agg_stats.dedup.duplicates_detected));
-        report.push_str(&format!("  unique_symbols: {}\n", agg_stats.dedup.unique_symbols));
+        report.push_str(&format!(
+            "  objects_tracked: {}\n",
+            agg_stats.dedup.objects_tracked
+        ));
+        report.push_str(&format!(
+            "  symbols_tracked: {}\n",
+            agg_stats.dedup.symbols_tracked
+        ));
+        report.push_str(&format!(
+            "  duplicates_detected: {}\n",
+            agg_stats.dedup.duplicates_detected
+        ));
+        report.push_str(&format!(
+            "  unique_symbols: {}\n",
+            agg_stats.dedup.unique_symbols
+        ));
         report.push_str("reorderer:\n");
-        report.push_str(&format!("  objects_tracked: {}\n", agg_stats.reorder.objects_tracked));
-        report.push_str(&format!("  symbols_buffered: {}\n", agg_stats.reorder.symbols_buffered));
-        report.push_str(&format!("  in_order_deliveries: {}\n", agg_stats.reorder.in_order_deliveries));
-        report.push_str(&format!("  reordered_deliveries: {}\n", agg_stats.reorder.reordered_deliveries));
-        report.push_str(&format!("  timeout_deliveries: {}\n", agg_stats.reorder.timeout_deliveries));
+        report.push_str(&format!(
+            "  objects_tracked: {}\n",
+            agg_stats.reorder.objects_tracked
+        ));
+        report.push_str(&format!(
+            "  symbols_buffered: {}\n",
+            agg_stats.reorder.symbols_buffered
+        ));
+        report.push_str(&format!(
+            "  in_order_deliveries: {}\n",
+            agg_stats.reorder.in_order_deliveries
+        ));
+        report.push_str(&format!(
+            "  reordered_deliveries: {}\n",
+            agg_stats.reorder.reordered_deliveries
+        ));
+        report.push_str(&format!(
+            "  timeout_deliveries: {}\n",
+            agg_stats.reorder.timeout_deliveries
+        ));
 
         report.trim_end().to_string()
     }
