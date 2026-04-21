@@ -999,13 +999,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_length_delimited_frame_splitter"
-path = "fuzz_targets/fuzz_length_delimited_frame_splitter.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "postgres_scram"
 path = "fuzz_targets/postgres_scram.rs"
 test = false
