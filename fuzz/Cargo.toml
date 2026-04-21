@@ -1314,6 +1314,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_grpc_web_framing"
+path = "fuzz_targets/fuzz_grpc_web_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "raptorq_decoder_sm"
 path = "fuzz_targets/raptorq_decoder_sm.rs"
 test = false
