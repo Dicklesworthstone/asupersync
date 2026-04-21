@@ -1,0 +1,90 @@
+---
+source: src/trace/canonicalize.rs
+expression: canonical_trace_snapshot(&events)
+---
+{
+  "depth": 4,
+  "len": 6,
+  "layers": [
+    [
+      {
+        "seq": 1,
+        "time_ns": 0,
+        "kind": "region_created",
+        "key": {
+          "kind": 10,
+          "primary": 4294967296,
+          "secondary": 0,
+          "tertiary": 0
+        },
+        "data": "region=1 parent=none"
+      }
+    ],
+    [
+      {
+        "seq": 2,
+        "time_ns": 0,
+        "kind": "spawn",
+        "key": {
+          "kind": 0,
+          "primary": 4294967296,
+          "secondary": 4294967296,
+          "tertiary": 0
+        },
+        "data": "task=1 region=1"
+      },
+      {
+        "seq": 3,
+        "time_ns": 0,
+        "kind": "spawn",
+        "key": {
+          "kind": 0,
+          "primary": 8589934592,
+          "secondary": 4294967296,
+          "tertiary": 0
+        },
+        "data": "task=2 region=1"
+      }
+    ],
+    [
+      {
+        "seq": 4,
+        "time_ns": 5,
+        "kind": "poll",
+        "key": {
+          "kind": 4,
+          "primary": 4294967296,
+          "secondary": 4294967296,
+          "tertiary": 0
+        },
+        "data": "task=1 region=1"
+      },
+      {
+        "seq": 6,
+        "time_ns": 11,
+        "kind": "complete",
+        "key": {
+          "kind": 5,
+          "primary": 8589934592,
+          "secondary": 4294967296,
+          "tertiary": 0
+        },
+        "data": "task=2 region=1"
+      }
+    ],
+    [
+      {
+        "seq": 5,
+        "time_ns": 9,
+        "kind": "complete",
+        "key": {
+          "kind": 5,
+          "primary": 4294967296,
+          "secondary": 4294967296,
+          "tertiary": 0
+        },
+        "data": "task=1 region=1"
+      }
+    ]
+  ]
+}

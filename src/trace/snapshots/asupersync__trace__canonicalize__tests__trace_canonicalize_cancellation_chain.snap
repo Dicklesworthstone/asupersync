@@ -1,0 +1,108 @@
+---
+source: src/trace/canonicalize.rs
+expression: canonical_trace_snapshot(&events)
+---
+{
+  "depth": 7,
+  "len": 7,
+  "layers": [
+    [
+      {
+        "seq": 1,
+        "time_ns": 0,
+        "kind": "region_created",
+        "key": {
+          "kind": 10,
+          "primary": 12884901888,
+          "secondary": 0,
+          "tertiary": 0
+        },
+        "data": "region=3 parent=none"
+      }
+    ],
+    [
+      {
+        "seq": 2,
+        "time_ns": 1,
+        "kind": "spawn",
+        "key": {
+          "kind": 0,
+          "primary": 17179869184,
+          "secondary": 12884901888,
+          "tertiary": 0
+        },
+        "data": "task=4 region=3"
+      }
+    ],
+    [
+      {
+        "seq": 3,
+        "time_ns": 2,
+        "kind": "obligation_reserve",
+        "key": {
+          "kind": 12,
+          "primary": 17179869184,
+          "secondary": 17179869184,
+          "tertiary": 12884901888
+        },
+        "data": "obligation=4 task=4 region=3 kind=send_permit state=Reserved duration_ns=none abort_reason=none"
+      }
+    ],
+    [
+      {
+        "seq": 4,
+        "time_ns": 3,
+        "kind": "cancel_request",
+        "key": {
+          "kind": 6,
+          "primary": 17179869184,
+          "secondary": 12884901888,
+          "tertiary": 0
+        },
+        "data": "task=4 region=3 reason=timeout"
+      }
+    ],
+    [
+      {
+        "seq": 5,
+        "time_ns": 4,
+        "kind": "cancel_ack",
+        "key": {
+          "kind": 7,
+          "primary": 17179869184,
+          "secondary": 12884901888,
+          "tertiary": 0
+        },
+        "data": "task=4 region=3 reason=timeout"
+      }
+    ],
+    [
+      {
+        "seq": 6,
+        "time_ns": 5,
+        "kind": "obligation_abort",
+        "key": {
+          "kind": 14,
+          "primary": 17179869184,
+          "secondary": 17179869184,
+          "tertiary": 12884901888
+        },
+        "data": "obligation=4 task=4 region=3 kind=send_permit state=Aborted duration_ns=17 abort_reason=cancel"
+      }
+    ],
+    [
+      {
+        "seq": 7,
+        "time_ns": 6,
+        "kind": "region_cancelled",
+        "key": {
+          "kind": 11,
+          "primary": 12884901888,
+          "secondary": 0,
+          "tertiary": 0
+        },
+        "data": "region=3 reason=timeout"
+      }
+    ]
+  ]
+}

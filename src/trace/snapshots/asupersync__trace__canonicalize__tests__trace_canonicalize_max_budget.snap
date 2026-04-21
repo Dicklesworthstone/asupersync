@@ -1,0 +1,102 @@
+---
+source: src/trace/canonicalize.rs
+expression: canonical_trace_snapshot(&events)
+---
+{
+  "depth": 4,
+  "len": 7,
+  "layers": [
+    [
+      {
+        "seq": 1,
+        "time_ns": 0,
+        "kind": "region_created",
+        "key": {
+          "kind": 10,
+          "primary": 38654705664,
+          "secondary": 0,
+          "tertiary": 0
+        },
+        "data": "region=9 parent=none"
+      },
+      {
+        "seq": 4,
+        "time_ns": 3,
+        "kind": "time_advance",
+        "key": {
+          "kind": 16,
+          "primary": 0,
+          "secondary": 18446744073709551615,
+          "tertiary": 0
+        },
+        "data": "old=0 new=18446744073709551615"
+      },
+      {
+        "seq": 7,
+        "time_ns": 18446744073709551615,
+        "kind": "checkpoint",
+        "key": {
+          "kind": 26,
+          "primary": 18446744073709551615,
+          "secondary": 4294967295,
+          "tertiary": 4294967295
+        },
+        "data": "sequence=18446744073709551615 active_tasks=4294967295 active_regions=4294967295"
+      }
+    ],
+    [
+      {
+        "seq": 2,
+        "time_ns": 1,
+        "kind": "spawn",
+        "key": {
+          "kind": 0,
+          "primary": 38654705664,
+          "secondary": 38654705664,
+          "tertiary": 0
+        },
+        "data": "task=9 region=9"
+      },
+      {
+        "seq": 5,
+        "time_ns": 18446744073709551615,
+        "kind": "timer_scheduled",
+        "key": {
+          "kind": 17,
+          "primary": 18446744073709551615,
+          "secondary": 0,
+          "tertiary": 0
+        },
+        "data": "timer_id=18446744073709551615 deadline=18446744073709551615"
+      }
+    ],
+    [
+      {
+        "seq": 3,
+        "time_ns": 2,
+        "kind": "obligation_reserve",
+        "key": {
+          "kind": 12,
+          "primary": 30064771072,
+          "secondary": 38654705664,
+          "tertiary": 38654705664
+        },
+        "data": "obligation=7 task=9 region=9 kind=lease state=Reserved duration_ns=none abort_reason=none"
+      }
+    ],
+    [
+      {
+        "seq": 6,
+        "time_ns": 18446744073709551615,
+        "kind": "obligation_commit",
+        "key": {
+          "kind": 13,
+          "primary": 30064771072,
+          "secondary": 38654705664,
+          "tertiary": 38654705664
+        },
+        "data": "obligation=7 task=9 region=9 kind=lease state=Committed duration_ns=18446744073709551615 abort_reason=none"
+      }
+    ]
+  ]
+}

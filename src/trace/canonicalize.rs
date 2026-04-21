@@ -622,8 +622,26 @@ fn event_hash_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
 mod tests {
     use super::*;
     use crate::monitor::DownReason;
-    use crate::record::ObligationKind;
+    use crate::record::{ObligationAbortReason, ObligationKind};
     use crate::types::{CancelReason, ObligationId, RegionId, TaskId, Time};
+    use insta::assert_json_snapshot;
+    use serde::Serialize;
+
+    #[derive(Debug, Serialize)]
+    struct CanonicalTraceSnapshot {
+        depth: usize,
+        len: usize,
+        layers: Vec<Vec<CanonicalTraceEventSnapshot>>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct CanonicalTraceEventSnapshot {
+        seq: u64,
+        time_ns: u64,
+        kind: &'static str,
+        key: TraceEventKey,
+        data: String,
+    }
 
     fn tid(n: u32) -> TaskId {
         TaskId::new_for_test(n, 0)
@@ -635,6 +653,194 @@ mod tests {
 
     fn oid(n: u32) -> ObligationId {
         ObligationId::new_for_test(n, 0)
+    }
+
+    fn canonical_trace_snapshot(events: &[TraceEvent]) -> CanonicalTraceSnapshot {
+        let foata = canonicalize(events);
+        CanonicalTraceSnapshot {
+            depth: foata.depth(),
+            len: foata.len(),
+            layers: foata
+                .layers()
+                .iter()
+                .map(|layer| layer.iter().map(snapshot_event).collect())
+                .collect(),
+        }
+    }
+
+    fn snapshot_event(event: &TraceEvent) -> CanonicalTraceEventSnapshot {
+        CanonicalTraceEventSnapshot {
+            seq: event.seq,
+            time_ns: event.time.as_nanos(),
+            kind: event.kind.stable_name(),
+            key: trace_event_key(event),
+            data: snapshot_event_data(&event.data),
+        }
+    }
+
+    fn snapshot_event_data(data: &TraceData) -> String {
+        match data {
+            TraceData::None => "none".to_string(),
+            TraceData::Task { task, region } => {
+                format!("task={} region={}", task.as_u64(), region.as_u64())
+            }
+            TraceData::Region { region, parent } => format!(
+                "region={} parent={}",
+                region.as_u64(),
+                parent
+                    .map(|region| region.as_u64().to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            ),
+            TraceData::Obligation {
+                obligation,
+                task,
+                region,
+                kind,
+                state,
+                duration_ns,
+                abort_reason,
+            } => format!(
+                "obligation={} task={} region={} kind={} state={state:?} duration_ns={} abort_reason={}",
+                obligation.as_u64(),
+                task.as_u64(),
+                region.as_u64(),
+                kind.as_str(),
+                duration_ns
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                abort_reason
+                    .map(|reason| reason.as_str().to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            ),
+            TraceData::Cancel {
+                task,
+                region,
+                reason,
+            } => format!(
+                "task={} region={} reason={reason}",
+                task.as_u64(),
+                region.as_u64()
+            ),
+            TraceData::RegionCancel { region, reason } => {
+                format!("region={} reason={reason}", region.as_u64())
+            }
+            TraceData::Time { old, new } => {
+                format!("old={} new={}", old.as_nanos(), new.as_nanos())
+            }
+            TraceData::Timer { timer_id, deadline } => format!(
+                "timer_id={timer_id} deadline={}",
+                deadline
+                    .map(|time| time.as_nanos().to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            ),
+            TraceData::Checkpoint {
+                sequence,
+                active_tasks,
+                active_regions,
+            } => format!(
+                "sequence={sequence} active_tasks={active_tasks} active_regions={active_regions}"
+            ),
+            other => format!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn trace_canonicalize_happy_path_snapshot() {
+        let events = [
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(3, Time::ZERO, tid(2), rid(1)),
+            TraceEvent::poll(4, Time::from_nanos(5), tid(1), rid(1)),
+            TraceEvent::complete(5, Time::from_nanos(9), tid(1), rid(1)),
+            TraceEvent::complete(6, Time::from_nanos(11), tid(2), rid(1)),
+        ];
+
+        assert_json_snapshot!(
+            "trace_canonicalize_happy_path",
+            canonical_trace_snapshot(&events)
+        );
+    }
+
+    #[test]
+    fn trace_canonicalize_empty_snapshot() {
+        assert_json_snapshot!("trace_canonicalize_empty", canonical_trace_snapshot(&[]));
+    }
+
+    #[test]
+    fn trace_canonicalize_max_budget_snapshot() {
+        let events = [
+            TraceEvent::region_created(1, Time::ZERO, rid(9), None),
+            TraceEvent::spawn(2, Time::from_nanos(1), tid(9), rid(9)),
+            TraceEvent::obligation_reserve(
+                3,
+                Time::from_nanos(2),
+                oid(7),
+                tid(9),
+                rid(9),
+                ObligationKind::Lease,
+            ),
+            TraceEvent::time_advance(4, Time::from_nanos(3), Time::ZERO, Time::MAX),
+            TraceEvent::timer_scheduled(5, Time::MAX, u64::MAX, Time::MAX),
+            TraceEvent::obligation_commit(
+                6,
+                Time::MAX,
+                oid(7),
+                tid(9),
+                rid(9),
+                ObligationKind::Lease,
+                u64::MAX,
+            ),
+            TraceEvent::checkpoint(7, Time::MAX, u64::MAX, u32::MAX, u32::MAX),
+        ];
+
+        assert_json_snapshot!(
+            "trace_canonicalize_max_budget",
+            canonical_trace_snapshot(&events)
+        );
+    }
+
+    #[test]
+    fn trace_canonicalize_cancellation_chain_snapshot() {
+        let cancel = CancelReason::timeout();
+        let events = [
+            TraceEvent::region_created(1, Time::ZERO, rid(3), None),
+            TraceEvent::spawn(2, Time::from_nanos(1), tid(4), rid(3)),
+            TraceEvent::obligation_reserve(
+                3,
+                Time::from_nanos(2),
+                oid(4),
+                tid(4),
+                rid(3),
+                ObligationKind::SendPermit,
+            ),
+            TraceEvent::cancel_request(4, Time::from_nanos(3), tid(4), rid(3), cancel.clone()),
+            TraceEvent::new(
+                5,
+                Time::from_nanos(4),
+                TraceEventKind::CancelAck,
+                TraceData::Cancel {
+                    task: tid(4),
+                    region: rid(3),
+                    reason: cancel.clone(),
+                },
+            ),
+            TraceEvent::obligation_abort(
+                6,
+                Time::from_nanos(5),
+                oid(4),
+                tid(4),
+                rid(3),
+                ObligationKind::SendPermit,
+                17,
+                ObligationAbortReason::Cancel,
+            ),
+            TraceEvent::region_cancelled(7, Time::from_nanos(6), rid(3), cancel),
+        ];
+
+        assert_json_snapshot!(
+            "trace_canonicalize_cancellation_chain",
+            canonical_trace_snapshot(&events)
+        );
     }
 
     // === Basic structure ===
