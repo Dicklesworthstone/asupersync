@@ -375,6 +375,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "dns_lookup_decoder"
+path = "fuzz_targets/dns_lookup_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "dns_resolv_conf_parser"
 path = "fuzz_targets/dns_resolv_conf_parser.rs"
 test = false
@@ -1546,6 +1553,13 @@ bench = false
 [[bin]]
 name = "lab_network_message_routing"
 path = "fuzz_targets/lab_network_message_routing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns_message_decoder"
+path = "fuzz_targets/dns_message_decoder.rs"
 test = false
 doc = false
 bench = false
