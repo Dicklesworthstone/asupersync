@@ -1445,3 +1445,10 @@ path = "fuzz_targets/otel_span_attributes.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "postgres_bind_execute_sync"
+path = "fuzz_targets/postgres_bind_execute_sync.rs"
+test = false
+doc = false
+bench = false

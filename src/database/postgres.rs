@@ -3970,7 +3970,8 @@ fn build_parse_msg(stmt_name: &str, sql: &str, param_oids: &[u32]) -> Result<Vec
 }
 
 /// Build a Bind message (Extended Query Protocol).
-fn build_bind_msg(
+#[doc(hidden)]
+pub fn build_bind_msg(
     portal: &str,
     stmt_name: &str,
     params: &[&dyn ToSql],
@@ -4031,7 +4032,8 @@ fn build_describe_msg(target: u8, name: &str) -> Result<Vec<u8>, PgError> {
 }
 
 /// Build an Execute message.
-fn build_execute_msg(portal: &str, max_rows: i32) -> Result<Vec<u8>, PgError> {
+#[doc(hidden)]
+pub fn build_execute_msg(portal: &str, max_rows: i32) -> Result<Vec<u8>, PgError> {
     let mut buf = MessageBuffer::new();
     buf.write_cstring(portal);
     buf.write_i32(max_rows); // 0 = all rows
@@ -4039,7 +4041,8 @@ fn build_execute_msg(portal: &str, max_rows: i32) -> Result<Vec<u8>, PgError> {
 }
 
 /// Build a Sync message.
-fn build_sync_msg() -> Result<Vec<u8>, PgError> {
+#[doc(hidden)]
+pub fn build_sync_msg() -> Result<Vec<u8>, PgError> {
     let mut buf = MessageBuffer::new();
     buf.build_message(FrontendMessage::Sync as u8)
 }

@@ -106,6 +106,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `corpus/quic_stream_flow/` - QUIC flow-control, reset, stop-sending, window-regression, and credit-exhaustion scenarios
 - `corpus/symbol_auth/` - AuthenticatedSymbol forged-tag, wrong-key, replay-window, and payload/context-tampering scenarios
 - `corpus/symbol_cancel_broadcast/` - Symbol cancel fanout scenarios covering duplicate delivery, max-hop exhaustion, and late-child/late-listener observation
+- `corpus/postgres_bind_execute_sync/` - Extended-query Bind/Execute/Sync seeds covering binary/text parameters, embedded-NUL portal names, injected bind errors, and excessive parameter-count rejection
 - `corpus/postgres_scram/` - SCRAM server-first/server-final seeds covering valid nonces, low-iteration rejects, and malformed signatures
 - `corpus/raptorq_decoder_gauss_matrix/` - Rank-deficient duplicate-source/repair systems plus malformed-equation and corrupt-RHS decoder scenarios
 - `corpus/fuzz_raptorq_rfc6330/` - RFC 6330 OTI seeds covering aligned transfer lengths, invalid sub-block divisibility, duplicate ESIs, and checksum mismatch cases
