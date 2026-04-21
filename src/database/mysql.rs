@@ -2369,6 +2369,11 @@ impl Drop for MySqlTransaction<'_> {
     }
 }
 
+#[doc(hidden)]
+pub fn fuzz_parse_ok_packet_fields(data: &[u8]) -> Result<(u64, u16), MySqlError> {
+    MySqlConnection::parse_ok_packet(data).map(|packet| (packet.affected_rows, packet.status_flags))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

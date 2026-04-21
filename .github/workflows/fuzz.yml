@@ -47,6 +47,7 @@ on:
           - symbol_cancel_broadcast
           - postgres_bind_execute_sync
           - postgres_scram
+          - mysql_ok_packet
           - raptorq_decoder_gauss_matrix
           - source_payload_hash_verification
           - fuzz_raptorq_rfc6330
@@ -107,6 +108,7 @@ jobs:
           - symbol_cancel_broadcast
           - postgres_bind_execute_sync
           - postgres_scram
+          - mysql_ok_packet
           - raptorq_decoder_gauss_matrix
           - source_payload_hash_verification
           - fuzz_raptorq_rfc6330
