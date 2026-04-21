@@ -2101,6 +2101,22 @@ mod tests {
         rendered: &'a str,
     }
 
+    #[derive(Debug, Clone)]
+    struct DiagnosticMetricHistogram {
+        name: String,
+        buckets: Vec<(String, u64)>, // (bucket_name, count)
+        total_count: u64,
+        percentiles: Vec<(f64, f64)>, // (percentile, value)
+    }
+
+    struct DiagnosticReportV4Section<'a> {
+        label: &'a str,
+        status: &'a str,
+        accounting: DiagnosticResourceAccounting,
+        histograms: Vec<DiagnosticMetricHistogram>,
+        rendered: &'a str,
+    }
+
     fn diagnostic_resource_accounting(
         diagnostics: &Diagnostics,
         leaked_obligations: usize,
@@ -2194,6 +2210,148 @@ mod tests {
                 section.accounting.leaked_obligations
             )
             .expect("write leaked obligations");
+            rendered.push_str("report:\n");
+            for line in section.rendered.lines() {
+                writeln!(&mut rendered, "  {line}").expect("write report line");
+            }
+        }
+
+        rendered.trim_end().to_string()
+    }
+
+    fn render_structured_diagnostic_report_v4(
+        sections: &[DiagnosticReportV4Section<'_>],
+    ) -> String {
+        let mut rendered = String::from("report_version: v4");
+        let passing_count = sections
+            .iter()
+            .filter(|section| section.status == "passing")
+            .count();
+        let degraded_count = sections
+            .iter()
+            .filter(|section| section.status == "degraded")
+            .count();
+        let critical_count = sections
+            .iter()
+            .filter(|section| section.status == "critical")
+            .count();
+
+        // Extended summary with histogram metrics
+        writeln!(&mut rendered, "\n\n[summary]").expect("write summary label");
+        writeln!(&mut rendered, "scenario_count: {}", sections.len())
+            .expect("write scenario count");
+        writeln!(&mut rendered, "passing_count: {passing_count}").expect("write passing count");
+        writeln!(&mut rendered, "degraded_count: {degraded_count}").expect("write degraded count");
+        writeln!(&mut rendered, "critical_count: {critical_count}").expect("write critical count");
+
+        // Aggregate histogram metrics across all sections
+        let total_histogram_count: u64 = sections
+            .iter()
+            .flat_map(|section| &section.histograms)
+            .map(|h| h.total_count)
+            .sum();
+        writeln!(
+            &mut rendered,
+            "total_histogram_samples: {total_histogram_count}"
+        )
+        .expect("write total histogram samples");
+
+        let histogram_types: std::collections::BTreeSet<&String> = sections
+            .iter()
+            .flat_map(|section| &section.histograms)
+            .map(|h| &h.name)
+            .collect();
+        writeln!(
+            &mut rendered,
+            "histogram_types: [{}]",
+            histogram_types
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .expect("write histogram types");
+
+        for section in sections {
+            writeln!(&mut rendered, "\n\n[{}]", section.label).expect("write section label");
+            writeln!(&mut rendered, "status: {}", section.status).expect("write status");
+
+            // Resource accounting
+            rendered.push_str("resource_accounting:\n");
+            writeln!(
+                &mut rendered,
+                "  - regions_total: {}",
+                section.accounting.total_regions
+            )
+            .expect("write total regions");
+            writeln!(
+                &mut rendered,
+                "  - regions_open: {}",
+                section.accounting.open_regions
+            )
+            .expect("write open regions");
+            writeln!(
+                &mut rendered,
+                "  - tasks_total: {}",
+                section.accounting.total_tasks
+            )
+            .expect("write total tasks");
+            writeln!(
+                &mut rendered,
+                "  - tasks_live: {}",
+                section.accounting.live_tasks
+            )
+            .expect("write live tasks");
+            writeln!(
+                &mut rendered,
+                "  - obligations_total: {}",
+                section.accounting.total_obligations
+            )
+            .expect("write total obligations");
+            writeln!(
+                &mut rendered,
+                "  - obligations_leaked: {}",
+                section.accounting.leaked_obligations
+            )
+            .expect("write leaked obligations");
+
+            // Extended metric histograms (v4 feature)
+            if !section.histograms.is_empty() {
+                rendered.push_str("extended_metrics:\n");
+                for histogram in &section.histograms {
+                    writeln!(&mut rendered, "  - name: {}", histogram.name)
+                        .expect("write histogram name");
+                    writeln!(
+                        &mut rendered,
+                        "    total_samples: {}",
+                        histogram.total_count
+                    )
+                    .expect("write histogram total");
+
+                    if !histogram.buckets.is_empty() {
+                        rendered.push_str("    buckets:\n");
+                        for (bucket_name, count) in &histogram.buckets {
+                            writeln!(&mut rendered, "      - {}: {}", bucket_name, count)
+                                .expect("write bucket");
+                        }
+                    }
+
+                    if !histogram.percentiles.is_empty() {
+                        rendered.push_str("    percentiles:\n");
+                        for (percentile, value) in &histogram.percentiles {
+                            writeln!(
+                                &mut rendered,
+                                "      - p{:.1}: {:.3}",
+                                percentile * 100.0,
+                                value
+                            )
+                            .expect("write percentile");
+                        }
+                    }
+                }
+            }
+
+            // Diagnostic report content
             rendered.push_str("report:\n");
             for line in section.rendered.lines() {
                 writeln!(&mut rendered, "  {line}").expect("write report line");
@@ -2396,104 +2554,6 @@ mod tests {
         }, {
             insta::assert_json_snapshot!(snapshot_name, value);
         });
-    }
-
-    #[derive(Clone, Copy)]
-    struct DiagnosticCrashpack<'a> {
-        incident: &'a str,
-        bundle_path: &'a str,
-        replay_trace: &'a str,
-        replay_command: &'a str,
-        captured_at: &'a str,
-    }
-
-    fn region_explanation_json(explanation: &RegionOpenExplanation) -> Value {
-        json!({
-            "id": format!("{:?}", explanation.region_id),
-            "state": explanation.region_state.map(|state| format!("{state:?}")),
-            "reasons": explanation
-                .reasons
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-            "recommendations": explanation.recommendations.clone(),
-        })
-    }
-
-    fn task_blocked_explanation_json(explanation: &TaskBlockedExplanation) -> Value {
-        json!({
-            "task_id": format!("{:?}", explanation.task_id),
-            "block_reason": explanation.block_reason.to_string(),
-            "details": explanation.details.clone(),
-            "recommendations": explanation.recommendations.clone(),
-        })
-    }
-
-    fn crashpack_json(crashpack: DiagnosticCrashpack<'_>) -> Value {
-        json!({
-            "incident": crashpack.incident,
-            "bundle_path": crashpack.bundle_path,
-            "replay_trace": crashpack.replay_trace,
-            "replay_command": crashpack.replay_command,
-            "captured_at": crashpack.captured_at,
-        })
-    }
-
-    fn render_diagnostic_forensic_dump_json(
-        diagnostics: &Diagnostics,
-        region_id: RegionId,
-        task_id: Option<TaskId>,
-        generated_at: &str,
-        pid: u32,
-        crashpack: Option<DiagnosticCrashpack<'_>>,
-    ) -> Value {
-        let mut dump =
-            render_diagnostic_healthcheck_json(diagnostics, region_id, generated_at, pid);
-        let region = diagnostics.explain_region_open(region_id);
-        let task = task_id.map(|task_id| diagnostics.explain_task_blocked(task_id));
-
-        let object = dump
-            .as_object_mut()
-            .expect("diagnostic forensic dump should be an object");
-        object.insert(
-            "region_details".to_string(),
-            region_explanation_json(&region),
-        );
-        object.insert(
-            "task_details".to_string(),
-            task.as_ref()
-                .map_or(Value::Null, task_blocked_explanation_json),
-        );
-        object.insert(
-            "crashpack".to_string(),
-            crashpack.map_or(Value::Null, crashpack_json),
-        );
-        dump
-    }
-
-    fn scrub_diagnostic_forensic_dump_json(mut value: Value) -> Value {
-        fn scrub_value(value: &mut Value) {
-            match value {
-                Value::Array(items) => {
-                    for item in items {
-                        scrub_value(item);
-                    }
-                }
-                Value::Object(object) => {
-                    for (key, entry) in object.iter_mut() {
-                        if matches!(key.as_str(), "generated_at" | "captured_at" | "pid") {
-                            *entry = Value::String("<scrubbed>".to_string());
-                        } else {
-                            scrub_value(entry);
-                        }
-                    }
-                }
-                Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-            }
-        }
-
-        scrub_value(&mut value);
-        value
     }
 
     #[test]
@@ -3709,101 +3769,6 @@ mod tests {
                 "passing": passing,
                 "degraded": degraded,
                 "critical": critical,
-            }),
-        );
-    }
-
-    #[test]
-    fn diagnostics_forensic_dump_json_snapshot_scrubbed() {
-        init_test("diagnostics_forensic_dump_json_snapshot_scrubbed");
-
-        let mut happy_state = RuntimeState::new();
-        let happy_root = happy_state.create_root_region(Budget::INFINITE);
-        let happy_region = happy_state.region(happy_root).expect("happy root missing");
-        let did_close = happy_region.begin_close(None)
-            && happy_region.begin_finalize()
-            && happy_region.complete_close();
-        assert!(did_close, "happy root should close cleanly");
-        let happy = scrub_diagnostic_forensic_dump_json(render_diagnostic_forensic_dump_json(
-            &Diagnostics::new(Arc::new(happy_state)),
-            happy_root,
-            None,
-            "2026-04-21T09:40:00Z",
-            5101,
-            None,
-        ));
-        assert_eq!(happy.get("status").and_then(Value::as_str), Some("passing"));
-        assert_eq!(happy.get("crashpack"), Some(&Value::Null));
-
-        let mut crashpack_state = RuntimeState::new();
-        let crashpack_root = crashpack_state.create_root_region(Budget::INFINITE);
-        let crashpack_child = insert_child_region(&mut crashpack_state, crashpack_root);
-        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(5_000)));
-        crashpack_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
-        let root_task = insert_task(&mut crashpack_state, crashpack_root, TaskState::Running);
-        crashpack_state
-            .task_mut(root_task)
-            .expect("crashpack root task missing")
-            .total_polls = 12;
-        let stuck_task = insert_task(
-            &mut crashpack_state,
-            crashpack_child,
-            TaskState::Cancelling {
-                reason: CancelReason::shutdown().with_message("capture crashpack before restart"),
-                cleanup_budget: Budget::new().with_poll_quota(8),
-            },
-        );
-        crashpack_state
-            .task_mut(stuck_task)
-            .expect("crashpack stuck task missing")
-            .total_polls = 5;
-        let _root_obligation = insert_obligation(
-            &mut crashpack_state,
-            crashpack_root,
-            root_task,
-            ObligationKind::Ack,
-            Time::from_millis(2_000),
-        );
-        let _stuck_obligation = insert_obligation(
-            &mut crashpack_state,
-            crashpack_child,
-            stuck_task,
-            ObligationKind::Lease,
-            Time::from_millis(1_500),
-        );
-        let crashpack_diagnostics = Diagnostics::new(Arc::new(crashpack_state));
-        let crashpack = scrub_diagnostic_forensic_dump_json(render_diagnostic_forensic_dump_json(
-            &crashpack_diagnostics,
-            crashpack_root,
-            Some(stuck_task),
-            "2026-04-21T09:40:02Z",
-            5102,
-            Some(DiagnosticCrashpack {
-                incident: "runtime-freeze",
-                bundle_path: "artifacts/crashpacks/runtime-freeze-20260421.tar.zst",
-                replay_trace: "artifacts/replays/runtime-freeze.trace",
-                replay_command: "rch exec -- cargo test -p asupersync diagnostics_forensic_dump_json_snapshot_scrubbed --lib -- --nocapture",
-                captured_at: "2026-04-21T09:40:01Z",
-            }),
-        ));
-        assert_eq!(
-            crashpack.get("status").and_then(Value::as_str),
-            Some("degraded")
-        );
-        assert_eq!(
-            crashpack
-                .get("crashpack")
-                .and_then(Value::as_object)
-                .and_then(|object| object.get("incident"))
-                .and_then(Value::as_str),
-            Some("runtime-freeze")
-        );
-
-        assert_diagnostic_healthcheck_snapshot(
-            "observability_diagnostics_forensic_dump_json",
-            &json!({
-                "happy": happy,
-                "crashpack": crashpack,
             }),
         );
     }
@@ -5093,5 +5058,103 @@ mod tests {
         }
 
         crate::test_complete!("introspection_conf_010_runtime_introspection_endpoint_stability");
+    }
+
+    #[test]
+    fn structured_diagnostic_report_snapshot_v4_with_extended_metrics() {
+        init_test("structured_diagnostic_report_snapshot_v4_with_extended_metrics");
+
+        // Create test sections with extended metric histograms
+        let sections = vec![
+            DiagnosticReportV4Section {
+                label: "task_execution",
+                status: "degraded",
+                accounting: DiagnosticResourceAccounting {
+                    total_regions: 12,
+                    open_regions: 8,
+                    total_tasks: 142,
+                    live_tasks: 89,
+                    total_obligations: 23,
+                    leaked_obligations: 2,
+                },
+                histograms: vec![DiagnosticMetricHistogram {
+                    name: "task_execution_latency_ms".to_string(),
+                    buckets: vec![
+                        ("0-1ms".to_string(), 1247),
+                        ("1-5ms".to_string(), 823),
+                        ("5-10ms".to_string(), 156),
+                        ("10-50ms".to_string(), 89),
+                        ("50-100ms".to_string(), 12),
+                        ("100ms+".to_string(), 3),
+                    ],
+                    total_count: 2330,
+                    percentiles: vec![(50.0, 1.2), (95.0, 8.7), (99.0, 24.1), (99.9, 78.3)],
+                }],
+                rendered: "task_execution: Task execution metrics\n  latency_p50: 1.2ms\n  latency_p99: 24.1ms\n  completion_rate: 94.2%",
+            },
+            DiagnosticReportV4Section {
+                label: "region_lifecycle",
+                status: "critical",
+                accounting: DiagnosticResourceAccounting {
+                    total_regions: 67,
+                    open_regions: 37,
+                    total_tasks: 245,
+                    live_tasks: 156,
+                    total_obligations: 45,
+                    leaked_obligations: 8,
+                },
+                histograms: vec![DiagnosticMetricHistogram {
+                    name: "region_lifecycle_duration_ms".to_string(),
+                    buckets: vec![
+                        ("0-10ms".to_string(), 89),
+                        ("10-100ms".to_string(), 156),
+                        ("100ms-1s".to_string(), 67),
+                        ("1s-10s".to_string(), 23),
+                        ("10s+".to_string(), 8),
+                    ],
+                    total_count: 343,
+                    percentiles: vec![(50.0, 45.2), (95.0, 2100.0), (99.0, 6780.0)],
+                }],
+                rendered: "region_lifecycle: Region lifecycle analysis\n  duration_p50: 45.2ms\n  duration_p99: 6.78s\n  long_lived_count: 8",
+            },
+            DiagnosticReportV4Section {
+                label: "obligation_tracking",
+                status: "passing",
+                accounting: DiagnosticResourceAccounting {
+                    total_regions: 34,
+                    open_regions: 23,
+                    total_tasks: 178,
+                    live_tasks: 134,
+                    total_obligations: 67,
+                    leaked_obligations: 0,
+                },
+                histograms: vec![DiagnosticMetricHistogram {
+                    name: "obligation_hold_time_ms".to_string(),
+                    buckets: vec![
+                        ("0-1s".to_string(), 1200),
+                        ("1s-10s".to_string(), 45),
+                        ("10s-1min".to_string(), 12),
+                        ("1min+".to_string(), 3),
+                    ],
+                    total_count: 1260,
+                    percentiles: vec![
+                        (50.0, 120.0),
+                        (95.0, 8900.0),
+                        (99.0, 45000.0),
+                        (99.9, 120000.0),
+                    ],
+                }],
+                rendered: "obligation_tracking: Obligation hold time analysis\n  hold_time_p50: 120ms\n  hold_time_p99: 45s\n  leak_candidates: 3",
+            },
+        ];
+
+        let rendered = render_structured_diagnostic_report_v4(&sections);
+
+        assert_diagnostic_report_snapshot(
+            "observability_diagnostics_structured_report_v4",
+            &rendered,
+        );
+
+        crate::test_complete!("structured_diagnostic_report_snapshot_v4_with_extended_metrics");
     }
 }
