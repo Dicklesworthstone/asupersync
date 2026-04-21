@@ -2085,6 +2085,124 @@ mod tests {
         rendered.trim_end().to_string()
     }
 
+    struct DiagnosticResourceAccounting {
+        total_regions: usize,
+        open_regions: usize,
+        total_tasks: usize,
+        live_tasks: usize,
+        total_obligations: usize,
+        leaked_obligations: usize,
+    }
+
+    struct DiagnosticReportV3Section<'a> {
+        label: &'a str,
+        status: &'a str,
+        accounting: DiagnosticResourceAccounting,
+        rendered: &'a str,
+    }
+
+    fn diagnostic_resource_accounting(
+        diagnostics: &Diagnostics,
+        leaked_obligations: usize,
+    ) -> DiagnosticResourceAccounting {
+        let total_regions = diagnostics.state.regions.iter().count();
+        let open_regions = diagnostics
+            .state
+            .regions
+            .iter()
+            .filter(|(_, region)| region.state() != RegionState::Closed)
+            .count();
+        let total_tasks = diagnostics.state.tasks_iter().count();
+        let live_tasks = diagnostics
+            .state
+            .tasks_iter()
+            .filter(|(_, task)| !task.state.is_terminal())
+            .count();
+        let total_obligations = diagnostics.state.obligations.iter().count();
+
+        DiagnosticResourceAccounting {
+            total_regions,
+            open_regions,
+            total_tasks,
+            live_tasks,
+            total_obligations,
+            leaked_obligations,
+        }
+    }
+
+    fn render_structured_diagnostic_report_v3(
+        sections: &[DiagnosticReportV3Section<'_>],
+    ) -> String {
+        let mut rendered = String::from("report_version: v3");
+        let passing_count = sections
+            .iter()
+            .filter(|section| section.status == "passing")
+            .count();
+        let degraded_count = sections
+            .iter()
+            .filter(|section| section.status == "degraded")
+            .count();
+        let critical_count = sections
+            .iter()
+            .filter(|section| section.status == "critical")
+            .count();
+
+        writeln!(&mut rendered, "\n\n[summary]").expect("write summary label");
+        writeln!(&mut rendered, "scenario_count: {}", sections.len())
+            .expect("write scenario count");
+        writeln!(&mut rendered, "passing_count: {passing_count}").expect("write passing count");
+        writeln!(&mut rendered, "degraded_count: {degraded_count}").expect("write degraded count");
+        writeln!(&mut rendered, "critical_count: {critical_count}").expect("write critical count");
+
+        for section in sections {
+            writeln!(&mut rendered, "\n\n[{}]", section.label).expect("write section label");
+            writeln!(&mut rendered, "status: {}", section.status).expect("write status");
+            rendered.push_str("resource_accounting:\n");
+            writeln!(
+                &mut rendered,
+                "  - regions_total: {}",
+                section.accounting.total_regions
+            )
+            .expect("write total regions");
+            writeln!(
+                &mut rendered,
+                "  - regions_open: {}",
+                section.accounting.open_regions
+            )
+            .expect("write open regions");
+            writeln!(
+                &mut rendered,
+                "  - tasks_total: {}",
+                section.accounting.total_tasks
+            )
+            .expect("write total tasks");
+            writeln!(
+                &mut rendered,
+                "  - tasks_live: {}",
+                section.accounting.live_tasks
+            )
+            .expect("write live tasks");
+            writeln!(
+                &mut rendered,
+                "  - obligations_total: {}",
+                section.accounting.total_obligations
+            )
+            .expect("write total obligations");
+            writeln!(
+                &mut rendered,
+                "  - obligations_leaked: {}",
+                section.accounting.leaked_obligations
+            )
+            .expect("write leaked obligations");
+            rendered.push_str("report:\n");
+            for line in section.rendered.lines() {
+                writeln!(&mut rendered, "  {line}").expect("write report line");
+            }
+        }
+
+        rendered.trim_end().to_string()
+    }
+
     fn scrub_diagnostic_report_timestamps(rendered: &str) -> String {
         rendered
             .lines()
@@ -3028,7 +3146,8 @@ mod tests {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(5_000)));
         degraded_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)));
 
-        let degraded_root_task = insert_task(&mut degraded_state, degraded_root, TaskState::Running);
+        let degraded_root_task =
+            insert_task(&mut degraded_state, degraded_root, TaskState::Running);
         degraded_state
             .task_mut(degraded_root_task)
             .expect("root task missing")
@@ -3079,7 +3198,160 @@ mod tests {
             ("happy", &happy_scrubbed),
             ("degraded", &degraded_scrubbed),
         ]);
-        assert_diagnostic_report_snapshot("observability_diagnostics_structured_report_v2", &rendered);
+        assert_diagnostic_report_snapshot(
+            "observability_diagnostics_structured_report_v2",
+            &rendered,
+        );
+    }
+
+    #[test]
+    fn structured_diagnostic_report_snapshot_v3_happy_degraded_and_critical() {
+        let mut happy_state = RuntimeState::new();
+        let happy_root = happy_state.create_root_region(Budget::INFINITE);
+        let happy_task = insert_task(
+            &mut happy_state,
+            happy_root,
+            TaskState::Completed(Outcome::Ok(())),
+        );
+        let happy_diagnostics = Diagnostics::new(Arc::new(happy_state));
+        let happy_rendered = render_structured_diagnostic_report(
+            "happy_path",
+            "2026-04-21T09:10:00Z",
+            None,
+            Some(&happy_diagnostics.explain_task_blocked(happy_task)),
+            &[],
+        );
+        let happy_scrubbed = scrub_diagnostic_report_timestamps(&happy_rendered);
+
+        let mut degraded_state = RuntimeState::new();
+        let degraded_root = degraded_state.create_root_region(Budget::INFINITE);
+        let degraded_child = insert_child_region(&mut degraded_state, degraded_root);
+        let degraded_clock = Arc::new(VirtualClock::starting_at(Time::from_millis(5_000)));
+        degraded_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(
+            &degraded_clock,
+        )));
+
+        let degraded_root_task =
+            insert_task(&mut degraded_state, degraded_root, TaskState::Running);
+        degraded_state
+            .task_mut(degraded_root_task)
+            .expect("degraded root task missing")
+            .total_polls = 9;
+        let degraded_child_task = insert_task(
+            &mut degraded_state,
+            degraded_child,
+            TaskState::CancelRequested {
+                reason: CancelReason::shutdown().with_message("node draining"),
+                cleanup_budget: Budget::new().with_poll_quota(16),
+            },
+        );
+        let _degraded_root_obligation = insert_obligation(
+            &mut degraded_state,
+            degraded_root,
+            degraded_root_task,
+            ObligationKind::Ack,
+            Time::from_millis(500),
+        );
+        let _degraded_child_obligation = insert_obligation(
+            &mut degraded_state,
+            degraded_child,
+            degraded_child_task,
+            ObligationKind::Lease,
+            Time::from_millis(750),
+        );
+
+        let degraded_diagnostics = Diagnostics::new(Arc::new(degraded_state));
+        let mut degraded_task = degraded_diagnostics.explain_task_blocked(degraded_child_task);
+        degraded_task
+            .details
+            .insert(0, "observed_at: 2026-04-21T09:10:05Z".to_string());
+        degraded_task
+            .recommendations
+            .push("Continue draining child region tasks before sealing shutdown.".to_string());
+        let degraded_leaks = degraded_diagnostics.find_leaked_obligations();
+        let degraded_rendered = render_structured_diagnostic_report(
+            "shutdown_drain",
+            "2026-04-21T09:10:05Z",
+            Some(&degraded_diagnostics.explain_region_open(degraded_root)),
+            Some(&degraded_task),
+            &degraded_leaks,
+        );
+        let degraded_scrubbed = scrub_diagnostic_report_timestamps(&degraded_rendered);
+
+        let mut critical_state = RuntimeState::new();
+        let critical_root = critical_state.create_root_region(Budget::INFINITE);
+        let critical_clock = Arc::new(VirtualClock::starting_at(Time::from_millis(1_500)));
+        critical_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(
+            &critical_clock,
+        )));
+        let critical_t1 = insert_task(&mut critical_state, critical_root, TaskState::Running);
+        let critical_t2 = insert_task(&mut critical_state, critical_root, TaskState::Running);
+        critical_state
+            .task_mut(critical_t1)
+            .expect("critical task 1 missing")
+            .waiters
+            .push(critical_t2);
+        critical_state
+            .task_mut(critical_t2)
+            .expect("critical task 2 missing")
+            .waiters
+            .push(critical_t1);
+        let _critical_obligation = insert_obligation(
+            &mut critical_state,
+            critical_root,
+            critical_t1,
+            ObligationKind::Ack,
+            Time::from_millis(250),
+        );
+
+        let critical_diagnostics = Diagnostics::new(Arc::new(critical_state));
+        let mut critical_task = critical_diagnostics.explain_task_blocked(critical_t1);
+        critical_task
+            .details
+            .insert(0, "observed_at: 2026-04-21T09:10:09Z".to_string());
+        critical_task
+            .recommendations
+            .push("Break the trapped wait cycle before allowing retries.".to_string());
+        let critical_leaks = critical_diagnostics.find_leaked_obligations();
+        let critical_rendered = render_structured_diagnostic_report(
+            "critical_deadlock",
+            "2026-04-21T09:10:09Z",
+            Some(&critical_diagnostics.explain_region_open(critical_root)),
+            Some(&critical_task),
+            &critical_leaks,
+        );
+        let critical_scrubbed = scrub_diagnostic_report_timestamps(&critical_rendered);
+
+        let rendered = render_structured_diagnostic_report_v3(&[
+            DiagnosticReportV3Section {
+                label: "happy",
+                status: "passing",
+                accounting: diagnostic_resource_accounting(&happy_diagnostics, 0),
+                rendered: &happy_scrubbed,
+            },
+            DiagnosticReportV3Section {
+                label: "degraded",
+                status: "degraded",
+                accounting: diagnostic_resource_accounting(
+                    &degraded_diagnostics,
+                    degraded_leaks.len(),
+                ),
+                rendered: &degraded_scrubbed,
+            },
+            DiagnosticReportV3Section {
+                label: "critical",
+                status: "critical",
+                accounting: diagnostic_resource_accounting(
+                    &critical_diagnostics,
+                    critical_leaks.len(),
+                ),
+                rendered: &critical_scrubbed,
+            },
+        ]);
+        assert_diagnostic_report_snapshot(
+            "observability_diagnostics_structured_report_v3",
+            &rendered,
+        );
     }
 
     #[test]
