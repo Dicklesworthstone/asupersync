@@ -7653,7 +7653,7 @@ mod tests {
         use std::os::unix::net::UnixStream;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
-        use std::task::{Waker};
+        use std::task::Waker;
         use std::time::Duration;
 
         struct FlagWaker(AtomicBool);
@@ -9394,6 +9394,107 @@ mod tests {
 
                     if child.close_successful {
                         prop_assert_eq!(child.task_count, 0, "Closed child should have no tasks");
+                    }
+                }
+            });
+        }
+    }
+
+    mod metamorphic_cancel_cause_chain_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn reason_from_variant(variant: u8) -> CancelReason {
+            match variant {
+                0 => CancelReason::deadline().with_message("root deadline"),
+                1 => CancelReason::timeout().with_message("rpc timeout"),
+                2 => CancelReason::resource_unavailable().with_message("peer unavailable"),
+                _ => CancelReason::user("operator stop"),
+            }
+        }
+
+        #[test]
+        fn mr_cancel_cause_chain_tracks_full_lineage_without_truncation() {
+            proptest!(|(
+                nesting_depth in 1..7usize,
+                extra_depth_budget in 0..3usize,
+                reason_variant in 0..4u8
+            )| {
+                let mut state = RuntimeState::new();
+                let full_lineage_depth = nesting_depth + 1;
+                state.set_cancel_attribution_config(CancelAttributionConfig::new(
+                    full_lineage_depth + extra_depth_budget,
+                    usize::MAX,
+                ));
+
+                let root = state.create_root_region(Budget::INFINITE);
+                let mut lineage = vec![root];
+                for _ in 0..nesting_depth {
+                    let parent = *lineage.last().expect("lineage has root");
+                    let child = create_child_region(&mut state, parent);
+                    lineage.push(child);
+                }
+
+                let leaf = *lineage.last().expect("leaf region missing");
+                let leaf_task = insert_task(&mut state, leaf);
+                let original_reason = reason_from_variant(reason_variant);
+                let expected_root_kind = original_reason.kind;
+                let expected_root_message = original_reason.message.clone();
+
+                let _ = state.cancel_request(root, &original_reason, None);
+
+                for (depth_idx, &region_id) in lineage.iter().enumerate() {
+                    let region_record = state
+                        .regions
+                        .get(region_id.arena_index())
+                        .expect("region missing");
+                    let region_reason = region_record.cancel_reason();
+                    let reason = region_reason
+                        .as_ref()
+                        .expect("region cancel reason missing");
+
+                    prop_assert_eq!(
+                        reason.chain_depth(),
+                        depth_idx + 1,
+                        "depth {} should expose the full ancestry",
+                        depth_idx
+                    );
+                    prop_assert!(
+                        !reason.any_truncated(),
+                        "full-depth attribution should not truncate at depth {}",
+                        depth_idx
+                    );
+
+                    if depth_idx == 0 {
+                        prop_assert_eq!(reason.kind, expected_root_kind);
+                    } else {
+                        prop_assert_eq!(reason.kind, CancelKind::ParentCancelled);
+                        prop_assert_eq!(reason.origin_region, lineage[depth_idx - 1]);
+                    }
+
+                    let root_cause = reason.root_cause();
+                    prop_assert_eq!(root_cause.kind, expected_root_kind);
+                    prop_assert_eq!(
+                        root_cause.message.as_deref(),
+                        expected_root_message.as_deref()
+                    );
+                }
+
+                let leaf_task_record = state.tasks.get(leaf_task.arena_index()).expect("task missing");
+                match &leaf_task_record.state {
+                    TaskState::CancelRequested { reason, .. } => {
+                        prop_assert_eq!(reason.kind, CancelKind::ParentCancelled);
+                        prop_assert_eq!(reason.origin_region, lineage[lineage.len() - 2]);
+                        prop_assert_eq!(reason.chain_depth(), full_lineage_depth);
+                        prop_assert!(!reason.any_truncated());
+                        prop_assert_eq!(reason.root_cause().kind, expected_root_kind);
+                        prop_assert_eq!(
+                            reason.root_cause().message.as_deref(),
+                            expected_root_message.as_deref()
+                        );
+                    }
+                    other => {
+                        prop_assert!(false, "expected CancelRequested task state, got {other:?}");
                     }
                 }
             });
