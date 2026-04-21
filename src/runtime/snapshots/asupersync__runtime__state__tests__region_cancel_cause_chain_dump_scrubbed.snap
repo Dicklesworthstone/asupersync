@@ -1,0 +1,310 @@
+---
+source: src/runtime/state.rs
+expression: |-
+  json!({
+      "full_chain":
+      nested_region_cancel_cause_chain_dump(CancelAttributionConfig::DEFAULT_MAX_DEPTH,),
+      "depth_limited_chain": nested_region_cancel_cause_chain_dump(3),
+  })
+---
+{
+  "depth_limited_chain": {
+    "config": {
+      "max_chain_depth": 3,
+      "max_chain_memory": 4096
+    },
+    "regions": {
+      "child": {
+        "any_truncated": false,
+        "chain": [
+          {
+            "kind": "ParentCancelled",
+            "level": 0,
+            "message": null,
+            "origin_region": "root",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          },
+          {
+            "kind": "Deadline",
+            "level": 1,
+            "message": "budget exhausted",
+            "origin_region": "root",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          }
+        ],
+        "chain_depth": 2,
+        "kind": "ParentCancelled",
+        "message": null,
+        "origin_region": "root",
+        "root_cause_kind": "Deadline",
+        "root_cause_message": "budget exhausted",
+        "timestamp": "[timestamp]",
+        "truncated": false,
+        "truncated_at_depth": null
+      },
+      "grandchild": {
+        "any_truncated": false,
+        "chain": [
+          {
+            "kind": "ParentCancelled",
+            "level": 0,
+            "message": null,
+            "origin_region": "child",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          },
+          {
+            "kind": "ParentCancelled",
+            "level": 1,
+            "message": null,
+            "origin_region": "root",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          },
+          {
+            "kind": "Deadline",
+            "level": 2,
+            "message": "budget exhausted",
+            "origin_region": "root",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          }
+        ],
+        "chain_depth": 3,
+        "kind": "ParentCancelled",
+        "message": null,
+        "origin_region": "child",
+        "root_cause_kind": "Deadline",
+        "root_cause_message": "budget exhausted",
+        "timestamp": "[timestamp]",
+        "truncated": false,
+        "truncated_at_depth": null
+      },
+      "leaf": {
+        "any_truncated": true,
+        "chain": [
+          {
+            "kind": "ParentCancelled",
+            "level": 0,
+            "message": null,
+            "origin_region": "grandchild",
+            "timestamp": "[timestamp]",
+            "truncated": true,
+            "truncated_at_depth": 3
+          },
+          {
+            "kind": "ParentCancelled",
+            "level": 1,
+            "message": null,
+            "origin_region": "child",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          },
+          {
+            "kind": "ParentCancelled",
+            "level": 2,
+            "message": null,
+            "origin_region": "root",
+            "timestamp": "[timestamp]",
+            "truncated": true,
+            "truncated_at_depth": 1
+          }
+        ],
+        "chain_depth": 3,
+        "kind": "ParentCancelled",
+        "message": null,
+        "origin_region": "grandchild",
+        "root_cause_kind": "ParentCancelled",
+        "root_cause_message": null,
+        "timestamp": "[timestamp]",
+        "truncated": true,
+        "truncated_at_depth": 3
+      },
+      "root": {
+        "any_truncated": false,
+        "chain": [
+          {
+            "kind": "Deadline",
+            "level": 0,
+            "message": "budget exhausted",
+            "origin_region": "root",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          }
+        ],
+        "chain_depth": 1,
+        "kind": "Deadline",
+        "message": "budget exhausted",
+        "origin_region": "root",
+        "root_cause_kind": "Deadline",
+        "root_cause_message": "budget exhausted",
+        "timestamp": "[timestamp]",
+        "truncated": false,
+        "truncated_at_depth": null
+      }
+    }
+  },
+  "full_chain": {
+    "config": {
+      "max_chain_depth": 16,
+      "max_chain_memory": 4096
+    },
+    "regions": {
+      "child": {
+        "any_truncated": false,
+        "chain": [
+          {
+            "kind": "ParentCancelled",
+            "level": 0,
+            "message": null,
+            "origin_region": "root",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          },
+          {
+            "kind": "Deadline",
+            "level": 1,
+            "message": "budget exhausted",
+            "origin_region": "root",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          }
+        ],
+        "chain_depth": 2,
+        "kind": "ParentCancelled",
+        "message": null,
+        "origin_region": "root",
+        "root_cause_kind": "Deadline",
+        "root_cause_message": "budget exhausted",
+        "timestamp": "[timestamp]",
+        "truncated": false,
+        "truncated_at_depth": null
+      },
+      "grandchild": {
+        "any_truncated": false,
+        "chain": [
+          {
+            "kind": "ParentCancelled",
+            "level": 0,
+            "message": null,
+            "origin_region": "child",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          },
+          {
+            "kind": "ParentCancelled",
+            "level": 1,
+            "message": null,
+            "origin_region": "root",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          },
+          {
+            "kind": "Deadline",
+            "level": 2,
+            "message": "budget exhausted",
+            "origin_region": "root",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          }
+        ],
+        "chain_depth": 3,
+        "kind": "ParentCancelled",
+        "message": null,
+        "origin_region": "child",
+        "root_cause_kind": "Deadline",
+        "root_cause_message": "budget exhausted",
+        "timestamp": "[timestamp]",
+        "truncated": false,
+        "truncated_at_depth": null
+      },
+      "leaf": {
+        "any_truncated": false,
+        "chain": [
+          {
+            "kind": "ParentCancelled",
+            "level": 0,
+            "message": null,
+            "origin_region": "grandchild",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          },
+          {
+            "kind": "ParentCancelled",
+            "level": 1,
+            "message": null,
+            "origin_region": "child",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          },
+          {
+            "kind": "ParentCancelled",
+            "level": 2,
+            "message": null,
+            "origin_region": "root",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          },
+          {
+            "kind": "Deadline",
+            "level": 3,
+            "message": "budget exhausted",
+            "origin_region": "root",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          }
+        ],
+        "chain_depth": 4,
+        "kind": "ParentCancelled",
+        "message": null,
+        "origin_region": "grandchild",
+        "root_cause_kind": "Deadline",
+        "root_cause_message": "budget exhausted",
+        "timestamp": "[timestamp]",
+        "truncated": false,
+        "truncated_at_depth": null
+      },
+      "root": {
+        "any_truncated": false,
+        "chain": [
+          {
+            "kind": "Deadline",
+            "level": 0,
+            "message": "budget exhausted",
+            "origin_region": "root",
+            "timestamp": "[timestamp]",
+            "truncated": false,
+            "truncated_at_depth": null
+          }
+        ],
+        "chain_depth": 1,
+        "kind": "Deadline",
+        "message": "budget exhausted",
+        "origin_region": "root",
+        "root_cause_kind": "Deadline",
+        "root_cause_message": "budget exhausted",
+        "timestamp": "[timestamp]",
+        "truncated": false,
+        "truncated_at_depth": null
+      }
+    }
+  }
+}

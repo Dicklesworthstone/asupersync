@@ -4266,7 +4266,7 @@ mod tests {
     use crate::types::{CancelAttributionConfig, CancelKind};
     use crate::util::ArenaIndex;
     use parking_lot::Mutex;
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
@@ -4370,6 +4370,126 @@ mod tests {
             ),
             other => other,
         }
+    }
+
+    fn label_region_for_snapshot(
+        region: RegionId,
+        labels: &[(RegionId, &'static str)],
+    ) -> &'static str {
+        labels
+            .iter()
+            .find_map(|(id, label)| (*id == region).then_some(*label))
+            .unwrap_or("[region]")
+    }
+
+    fn scrub_cancel_reason_chain_for_snapshot(
+        reason: &CancelReason,
+        labels: &[(RegionId, &'static str)],
+    ) -> Value {
+        json!({
+            "kind": reason.kind.as_str(),
+            "message": reason.message.clone(),
+            "origin_region": label_region_for_snapshot(reason.origin_region, labels),
+            "timestamp": "[timestamp]",
+            "chain_depth": reason.chain_depth(),
+            "root_cause_kind": reason.root_cause().kind.as_str(),
+            "root_cause_message": reason.root_cause().message.clone(),
+            "truncated": reason.is_truncated(),
+            "truncated_at_depth": reason.truncated_at_depth(),
+            "any_truncated": reason.any_truncated(),
+            "chain": reason
+                .chain()
+                .enumerate()
+                .map(|(level, entry)| {
+                    json!({
+                        "level": level,
+                        "kind": entry.kind.as_str(),
+                        "message": entry.message.clone(),
+                        "origin_region": label_region_for_snapshot(entry.origin_region, labels),
+                        "timestamp": "[timestamp]",
+                        "truncated": entry.is_truncated(),
+                        "truncated_at_depth": entry.truncated_at_depth(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn nested_region_cancel_cause_chain_dump(max_chain_depth: usize) -> Value {
+        let mut state = RuntimeState::new();
+        state.set_cancel_attribution_config(CancelAttributionConfig::new(
+            max_chain_depth,
+            CancelAttributionConfig::DEFAULT_MAX_MEMORY,
+        ));
+
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+        let grandchild = create_child_region(&mut state, child);
+        let leaf = create_child_region(&mut state, grandchild);
+        let _ = insert_task(&mut state, root);
+        let _ = insert_task(&mut state, child);
+        let _ = insert_task(&mut state, grandchild);
+        let _ = insert_task(&mut state, leaf);
+        let labels = [
+            (root, "root"),
+            (child, "child"),
+            (grandchild, "grandchild"),
+            (leaf, "leaf"),
+        ];
+
+        let reason = CancelReason::deadline()
+            .with_message("budget exhausted")
+            .with_timestamp(Time::from_millis(42));
+        let _ = state.cancel_request(root, &reason, None);
+
+        json!({
+            "config": {
+                "max_chain_depth": max_chain_depth,
+                "max_chain_memory": CancelAttributionConfig::DEFAULT_MAX_MEMORY,
+            },
+            "regions": {
+                "root": scrub_cancel_reason_chain_for_snapshot(
+                    state
+                        .regions
+                        .get(root.arena_index())
+                        .expect("root missing")
+                        .cancel_reason()
+                        .as_ref()
+                        .expect("root cancel reason missing"),
+                    &labels,
+                ),
+                "child": scrub_cancel_reason_chain_for_snapshot(
+                    state
+                        .regions
+                        .get(child.arena_index())
+                        .expect("child missing")
+                        .cancel_reason()
+                        .as_ref()
+                        .expect("child cancel reason missing"),
+                    &labels,
+                ),
+                "grandchild": scrub_cancel_reason_chain_for_snapshot(
+                    state
+                        .regions
+                        .get(grandchild.arena_index())
+                        .expect("grandchild missing")
+                        .cancel_reason()
+                        .as_ref()
+                        .expect("grandchild cancel reason missing"),
+                    &labels,
+                ),
+                "leaf": scrub_cancel_reason_chain_for_snapshot(
+                    state
+                        .regions
+                        .get(leaf.arena_index())
+                        .expect("leaf missing")
+                        .cancel_reason()
+                        .as_ref()
+                        .expect("leaf cancel reason missing"),
+                    &labels,
+                ),
+            },
+        })
     }
 
     fn init_test(name: &str) {
@@ -5130,6 +5250,23 @@ mod tests {
             scrub_runtime_snapshot_for_snapshot_test(serde_json::to_value(&snapshot).unwrap())
         );
         crate::test_complete!("snapshot_json_scrubs_ids_and_timestamps");
+    }
+
+    #[test]
+    fn region_cancel_cause_chain_dump_scrubbed() {
+        init_test("region_cancel_cause_chain_dump_scrubbed");
+
+        insta::assert_json_snapshot!(
+            "region_cancel_cause_chain_dump_scrubbed",
+            json!({
+                "full_chain": nested_region_cancel_cause_chain_dump(
+                    CancelAttributionConfig::DEFAULT_MAX_DEPTH,
+                ),
+                "depth_limited_chain": nested_region_cancel_cause_chain_dump(3),
+            })
+        );
+
+        crate::test_complete!("region_cancel_cause_chain_dump_scrubbed");
     }
 
     #[test]
