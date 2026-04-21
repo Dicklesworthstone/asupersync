@@ -8,6 +8,7 @@ pub mod aggregator_flush;
 pub mod h1_rfc9112;
 pub mod h2_alpn_negotiation_rfc7540;
 pub mod h2_connect;
+pub mod h2_priority;
 pub mod h2_rst_stream_ping_rfc9113;
 pub mod hpack_table_size;
 // pub mod h2_stream_state_machine_rfc7540;
@@ -49,6 +50,10 @@ pub use h1_rfc9112::{H1ConformanceHarness, H1ConformanceResult, RequirementLevel
 pub use h2_alpn_negotiation_rfc7540::{
     H2AlpnConformanceHarness, H2ConformanceResult as H2AlpnConformanceResult,
     TestCategory as H2AlpnTestCategory,
+};
+pub use h2_priority::{
+    H2PriorityConformanceHarness, H2PriorityConformanceResult,
+    TestCategory as H2PriorityTestCategory,
 };
 pub use h2_rst_stream_ping_rfc9113::{
     H2ConformanceHarness, H2ConformanceResult, TestCategory as H2TestCategory,

@@ -38,7 +38,7 @@
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::{
     error::{ErrorCode, H2Error},
-    frame::{Frame, FrameHeader, FrameType, PriorityFrame, PrioritySpec, parse_frame},
+    frame::{FrameHeader, FrameType, PriorityFrame, PrioritySpec},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -58,7 +58,7 @@ pub struct H2PriorityConformanceResult {
 }
 
 /// Conformance test categories for HTTP/2 PRIORITY frames.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum TestCategory {
     /// PRIORITY frame format validation
@@ -126,7 +126,11 @@ impl StreamDependencyTracker {
     /// Update stream priority and detect circular dependencies.
     /// Returns Ok(()) if update is valid, Err if circular dependency would occur.
     #[allow(dead_code)]
-    pub fn update_priority(&mut self, stream_id: u32, priority: PrioritySpec) -> Result<(), String> {
+    pub fn update_priority(
+        &mut self,
+        stream_id: u32,
+        priority: PrioritySpec,
+    ) -> Result<(), String> {
         // Check for immediate self-dependency (should be caught by frame parsing)
         if priority.dependency == stream_id {
             return Err("Stream cannot depend on itself".to_string());
@@ -178,8 +182,8 @@ impl StreamDependencyTracker {
         let children: Vec<u32> = self
             .dependencies
             .iter()
-            .filter(|(&child, &dep_parent)| dep_parent == parent && child != stream_id)
-            .map(|(&child, _)| child)
+            .filter(|entry| *entry.1 == parent && *entry.0 != stream_id)
+            .map(|entry| *entry.0)
             .collect();
 
         for child in children {
@@ -267,7 +271,7 @@ impl H2PriorityConformanceHarness {
                 };
                 let payload = Bytes::from_static(&[
                     0x00, 0x00, 0x00, 0x00, // No exclusive flag, dependency 0
-                    0x10,                   // Weight 16 (represents priority 17)
+                    0x10, // Weight 16 (represents priority 17)
                 ]);
 
                 let result = PriorityFrame::parse(&header, &payload);
@@ -365,23 +369,38 @@ impl H2PriorityConformanceHarness {
                 let mut tracker = StreamDependencyTracker::new();
 
                 // Create basic dependency chain: 1 -> 3 -> 5
-                tracker.update_priority(1, PrioritySpec {
-                    exclusive: false,
-                    dependency: 0,
-                    weight: 16,
-                }).map_err(|e| format!("Failed to update stream 1: {}", e))?;
+                tracker
+                    .update_priority(
+                        1,
+                        PrioritySpec {
+                            exclusive: false,
+                            dependency: 0,
+                            weight: 16,
+                        },
+                    )
+                    .map_err(|e| format!("Failed to update stream 1: {}", e))?;
 
-                tracker.update_priority(3, PrioritySpec {
-                    exclusive: false,
-                    dependency: 1,
-                    weight: 32,
-                }).map_err(|e| format!("Failed to update stream 3: {}", e))?;
+                tracker
+                    .update_priority(
+                        3,
+                        PrioritySpec {
+                            exclusive: false,
+                            dependency: 1,
+                            weight: 32,
+                        },
+                    )
+                    .map_err(|e| format!("Failed to update stream 3: {}", e))?;
 
-                tracker.update_priority(5, PrioritySpec {
-                    exclusive: false,
-                    dependency: 3,
-                    weight: 64,
-                }).map_err(|e| format!("Failed to update stream 5: {}", e))?;
+                tracker
+                    .update_priority(
+                        5,
+                        PrioritySpec {
+                            exclusive: false,
+                            dependency: 3,
+                            weight: 64,
+                        },
+                    )
+                    .map_err(|e| format!("Failed to update stream 5: {}", e))?;
 
                 assert_eq!(tracker.dependencies.get(&1), Some(&0));
                 assert_eq!(tracker.dependencies.get(&3), Some(&1));
@@ -400,30 +419,42 @@ impl H2PriorityConformanceHarness {
                 let mut tracker = StreamDependencyTracker::new();
 
                 // Build initial tree: 1 -> 3, 1 -> 5
-                tracker.update_priority(1, PrioritySpec {
-                    exclusive: false,
-                    dependency: 0,
-                    weight: 16,
-                })?;
+                tracker.update_priority(
+                    1,
+                    PrioritySpec {
+                        exclusive: false,
+                        dependency: 0,
+                        weight: 16,
+                    },
+                )?;
 
-                tracker.update_priority(3, PrioritySpec {
-                    exclusive: false,
-                    dependency: 1,
-                    weight: 32,
-                })?;
+                tracker.update_priority(
+                    3,
+                    PrioritySpec {
+                        exclusive: false,
+                        dependency: 1,
+                        weight: 32,
+                    },
+                )?;
 
-                tracker.update_priority(5, PrioritySpec {
-                    exclusive: false,
-                    dependency: 1,
-                    weight: 64,
-                })?;
+                tracker.update_priority(
+                    5,
+                    PrioritySpec {
+                        exclusive: false,
+                        dependency: 1,
+                        weight: 64,
+                    },
+                )?;
 
                 // Now restructure: make 3 depend on 5 instead
-                tracker.update_priority(3, PrioritySpec {
-                    exclusive: false,
-                    dependency: 5,
-                    weight: 32,
-                })?;
+                tracker.update_priority(
+                    3,
+                    PrioritySpec {
+                        exclusive: false,
+                        dependency: 5,
+                        weight: 32,
+                    },
+                )?;
 
                 assert_eq!(tracker.dependencies.get(&3), Some(&5));
                 Ok(())
@@ -453,10 +484,10 @@ impl H2PriorityConformanceHarness {
                 };
                 let payload = Bytes::from_static(&[
                     0x00, 0x00, 0x00, 0x00, // Dependency 0
-                    0x00,                   // Weight 0 (represents priority 1)
+                    0x00, // Weight 0 (represents priority 1)
                 ]);
 
-                let result = PriorityFrame::parse(&header, &payload)?;
+                let result = PriorityFrame::parse(&header, &payload).map_err(h2error_to_string)?;
                 assert_eq!(result.priority.weight, 0);
                 Ok(())
             },
@@ -477,10 +508,10 @@ impl H2PriorityConformanceHarness {
                 };
                 let payload = Bytes::from_static(&[
                     0x00, 0x00, 0x00, 0x00, // Dependency 0
-                    0xFF,                   // Weight 255 (represents priority 256)
+                    0xFF, // Weight 255 (represents priority 256)
                 ]);
 
-                let result = PriorityFrame::parse(&header, &payload)?;
+                let result = PriorityFrame::parse(&header, &payload).map_err(h2error_to_string)?;
                 assert_eq!(result.priority.weight, 255);
                 Ok(())
             },
@@ -506,12 +537,16 @@ impl H2PriorityConformanceHarness {
                     let mut buf = BytesMut::new();
                     frame.encode(&mut buf);
 
-                    let header = FrameHeader::parse(&mut buf)?;
+                    let header = FrameHeader::parse(&mut buf).map_err(h2error_to_string)?;
                     let payload = buf.split_to(header.length as usize).freeze();
-                    let parsed = PriorityFrame::parse(&header, &payload)?;
+                    let parsed =
+                        PriorityFrame::parse(&header, &payload).map_err(h2error_to_string)?;
 
-                    assert_eq!(parsed.priority.weight, weight,
-                        "Weight {} was not preserved through encoding", weight);
+                    assert_eq!(
+                        parsed.priority.weight, weight,
+                        "Weight {} was not preserved through encoding",
+                        weight
+                    );
                 }
                 Ok(())
             },
@@ -542,20 +577,22 @@ impl H2PriorityConformanceHarness {
                 // Test exclusive=true (E bit set)
                 let payload_exclusive = Bytes::from_static(&[
                     0x80, 0x00, 0x00, 0x05, // E=1, dependency=5
-                    0x10,                   // Weight 16
+                    0x10, // Weight 16
                 ]);
 
-                let result = PriorityFrame::parse(&header, &payload_exclusive)?;
+                let result =
+                    PriorityFrame::parse(&header, &payload_exclusive).map_err(h2error_to_string)?;
                 assert!(result.priority.exclusive);
                 assert_eq!(result.priority.dependency, 5);
 
                 // Test exclusive=false (E bit clear)
                 let payload_non_exclusive = Bytes::from_static(&[
                     0x00, 0x00, 0x00, 0x05, // E=0, dependency=5
-                    0x10,                   // Weight 16
+                    0x10, // Weight 16
                 ]);
 
-                let result = PriorityFrame::parse(&header, &payload_non_exclusive)?;
+                let result = PriorityFrame::parse(&header, &payload_non_exclusive)
+                    .map_err(h2error_to_string)?;
                 assert!(!result.priority.exclusive);
                 assert_eq!(result.priority.dependency, 5);
                 Ok(())
@@ -572,37 +609,52 @@ impl H2PriorityConformanceHarness {
                 let mut tracker = StreamDependencyTracker::new();
 
                 // Build tree: 1 -> 3, 1 -> 5, 1 -> 7
-                tracker.update_priority(1, PrioritySpec {
-                    exclusive: false,
-                    dependency: 0,
-                    weight: 16,
-                })?;
+                tracker.update_priority(
+                    1,
+                    PrioritySpec {
+                        exclusive: false,
+                        dependency: 0,
+                        weight: 16,
+                    },
+                )?;
 
-                tracker.update_priority(3, PrioritySpec {
-                    exclusive: false,
-                    dependency: 1,
-                    weight: 32,
-                })?;
+                tracker.update_priority(
+                    3,
+                    PrioritySpec {
+                        exclusive: false,
+                        dependency: 1,
+                        weight: 32,
+                    },
+                )?;
 
-                tracker.update_priority(5, PrioritySpec {
-                    exclusive: false,
-                    dependency: 1,
-                    weight: 64,
-                })?;
+                tracker.update_priority(
+                    5,
+                    PrioritySpec {
+                        exclusive: false,
+                        dependency: 1,
+                        weight: 64,
+                    },
+                )?;
 
-                tracker.update_priority(7, PrioritySpec {
-                    exclusive: false,
-                    dependency: 1,
-                    weight: 96,
-                })?;
+                tracker.update_priority(
+                    7,
+                    PrioritySpec {
+                        exclusive: false,
+                        dependency: 1,
+                        weight: 96,
+                    },
+                )?;
 
                 // Now make stream 9 exclusively depend on stream 1
                 // This should move streams 3, 5, 7 to depend on stream 9
-                tracker.update_priority(9, PrioritySpec {
-                    exclusive: true,
-                    dependency: 1,
-                    weight: 128,
-                })?;
+                tracker.update_priority(
+                    9,
+                    PrioritySpec {
+                        exclusive: true,
+                        dependency: 1,
+                        weight: 128,
+                    },
+                )?;
 
                 // Verify restructuring
                 assert_eq!(tracker.dependencies.get(&9), Some(&1));
@@ -684,11 +736,14 @@ impl H2PriorityConformanceHarness {
                 tracker.mark_stream_closed(5);
 
                 // PRIORITY frame on closed stream should still be processable
-                let result = tracker.update_priority(5, PrioritySpec {
-                    exclusive: false,
-                    dependency: 1,
-                    weight: 64,
-                });
+                let result = tracker.update_priority(
+                    5,
+                    PrioritySpec {
+                        exclusive: false,
+                        dependency: 1,
+                        weight: 64,
+                    },
+                );
 
                 // Should succeed even though stream is closed
                 match result {
@@ -713,7 +768,7 @@ impl H2PriorityConformanceHarness {
                 };
                 let payload = Bytes::from_static(&[
                     0x00, 0x00, 0x00, 0x01, // Dependency 1
-                    0x40,                   // Weight 64
+                    0x40, // Weight 64
                 ]);
 
                 let result = PriorityFrame::parse(&header, &payload);
@@ -752,7 +807,7 @@ impl H2PriorityConformanceHarness {
                 };
                 let payload = Bytes::from_static(&[
                     0x00, 0x00, 0x00, 0x05, // Dependency on self (stream 5)
-                    0x10,                   // Weight 16
+                    0x10, // Weight 16
                 ]);
 
                 let result = PriorityFrame::parse(&header, &payload);
@@ -779,30 +834,42 @@ impl H2PriorityConformanceHarness {
                 let mut tracker = StreamDependencyTracker::new();
 
                 // Create chain: 1 -> 3 -> 5
-                tracker.update_priority(1, PrioritySpec {
-                    exclusive: false,
-                    dependency: 0,
-                    weight: 16,
-                })?;
+                tracker.update_priority(
+                    1,
+                    PrioritySpec {
+                        exclusive: false,
+                        dependency: 0,
+                        weight: 16,
+                    },
+                )?;
 
-                tracker.update_priority(3, PrioritySpec {
-                    exclusive: false,
-                    dependency: 1,
-                    weight: 32,
-                })?;
+                tracker.update_priority(
+                    3,
+                    PrioritySpec {
+                        exclusive: false,
+                        dependency: 1,
+                        weight: 32,
+                    },
+                )?;
 
-                tracker.update_priority(5, PrioritySpec {
-                    exclusive: false,
-                    dependency: 3,
-                    weight: 64,
-                })?;
+                tracker.update_priority(
+                    5,
+                    PrioritySpec {
+                        exclusive: false,
+                        dependency: 3,
+                        weight: 64,
+                    },
+                )?;
 
                 // Now try to make 1 depend on 5, creating cycle: 1 -> 5 -> 3 -> 1
-                let result = tracker.update_priority(1, PrioritySpec {
-                    exclusive: false,
-                    dependency: 5,
-                    weight: 16,
-                });
+                let result = tracker.update_priority(
+                    1,
+                    PrioritySpec {
+                        exclusive: false,
+                        dependency: 5,
+                        weight: 16,
+                    },
+                );
 
                 // Should succeed and break the cycle by making stream 1 depend on root
                 assert!(result.is_ok());
@@ -822,19 +889,25 @@ impl H2PriorityConformanceHarness {
 
                 // Create complex chain: 1 -> 3 -> 5 -> 7 -> 9
                 for (stream, dep) in [(1, 0), (3, 1), (5, 3), (7, 5), (9, 7)] {
-                    tracker.update_priority(stream, PrioritySpec {
-                        exclusive: false,
-                        dependency: dep,
-                        weight: 16,
-                    })?;
+                    tracker.update_priority(
+                        stream,
+                        PrioritySpec {
+                            exclusive: false,
+                            dependency: dep,
+                            weight: 16,
+                        },
+                    )?;
                 }
 
                 // Try to close the loop: 1 -> 9, creating 1 -> 9 -> 7 -> 5 -> 3 -> 1
-                let result = tracker.update_priority(1, PrioritySpec {
-                    exclusive: false,
-                    dependency: 9,
-                    weight: 16,
-                });
+                let result = tracker.update_priority(
+                    1,
+                    PrioritySpec {
+                        exclusive: false,
+                        dependency: 9,
+                        weight: 16,
+                    },
+                );
 
                 assert!(result.is_ok());
                 assert_eq!(tracker.dependencies.get(&1), Some(&0)); // Should depend on root
@@ -865,7 +938,7 @@ impl H2PriorityConformanceHarness {
                 };
                 let payload = Bytes::from_static(&[
                     0x00, 0x00, 0x00, 0x01, // Dependency 1
-                    0x10,                   // Weight 16
+                    0x10, // Weight 16
                 ]);
 
                 let result = PriorityFrame::parse(&header, &payload);
@@ -896,9 +969,9 @@ impl H2PriorityConformanceHarness {
                 };
 
                 for weight in [0u8, 50, 100, 150, 255] {
-                    let payload = Bytes::from_static(&[
-                        0x00, 0x00, 0x00, 0x00, // Dependency 0
-                        weight,                 // Different weights
+                    let payload = Bytes::copy_from_slice(&[
+                        0x00, 0x00, 0x00, 0x00,   // Dependency 0
+                        weight, // Different weights
                     ]);
 
                     let result = PriorityFrame::parse(&header, &payload);
@@ -907,7 +980,12 @@ impl H2PriorityConformanceHarness {
                             assert_eq!(err.code, ErrorCode::ProtocolError);
                             assert!(err.stream_id.is_none());
                         }
-                        Ok(_) => return Err(format!("PRIORITY frame with Stream ID 0 and weight {} was accepted", weight)),
+                        Ok(_) => {
+                            return Err(format!(
+                                "PRIORITY frame with Stream ID 0 and weight {} was accepted",
+                                weight
+                            ));
+                        }
                     }
                 }
                 Ok(())
@@ -1081,18 +1159,24 @@ mod tests {
         let mut tracker = StreamDependencyTracker::new();
 
         // Test basic dependency tracking
-        let result = tracker.update_priority(1, PrioritySpec {
-            exclusive: false,
-            dependency: 0,
-            weight: 16,
-        });
+        let result = tracker.update_priority(
+            1,
+            PrioritySpec {
+                exclusive: false,
+                dependency: 0,
+                weight: 16,
+            },
+        );
         assert!(result.is_ok());
 
-        let result = tracker.update_priority(3, PrioritySpec {
-            exclusive: false,
-            dependency: 1,
-            weight: 32,
-        });
+        let result = tracker.update_priority(
+            3,
+            PrioritySpec {
+                exclusive: false,
+                dependency: 1,
+                weight: 32,
+            },
+        );
         assert!(result.is_ok());
 
         assert_eq!(tracker.dependencies.get(&1), Some(&0));
@@ -1105,30 +1189,48 @@ mod tests {
         let mut tracker = StreamDependencyTracker::new();
 
         // Build chain: 1 -> 3 -> 5
-        tracker.update_priority(1, PrioritySpec {
-            exclusive: false,
-            dependency: 0,
-            weight: 16,
-        }).unwrap();
+        tracker
+            .update_priority(
+                1,
+                PrioritySpec {
+                    exclusive: false,
+                    dependency: 0,
+                    weight: 16,
+                },
+            )
+            .unwrap();
 
-        tracker.update_priority(3, PrioritySpec {
-            exclusive: false,
-            dependency: 1,
-            weight: 32,
-        }).unwrap();
+        tracker
+            .update_priority(
+                3,
+                PrioritySpec {
+                    exclusive: false,
+                    dependency: 1,
+                    weight: 32,
+                },
+            )
+            .unwrap();
 
-        tracker.update_priority(5, PrioritySpec {
-            exclusive: false,
-            dependency: 3,
-            weight: 64,
-        }).unwrap();
+        tracker
+            .update_priority(
+                5,
+                PrioritySpec {
+                    exclusive: false,
+                    dependency: 3,
+                    weight: 64,
+                },
+            )
+            .unwrap();
 
         // Try to create cycle: 1 -> 5 (which would create 1 -> 5 -> 3 -> 1)
-        let result = tracker.update_priority(1, PrioritySpec {
-            exclusive: false,
-            dependency: 5,
-            weight: 16,
-        });
+        let result = tracker.update_priority(
+            1,
+            PrioritySpec {
+                exclusive: false,
+                dependency: 5,
+                weight: 16,
+            },
+        );
 
         assert!(result.is_ok());
         // Should break cycle by making 1 depend on root
