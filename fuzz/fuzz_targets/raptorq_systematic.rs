@@ -6,9 +6,9 @@ use libfuzzer_sys::fuzz_target;
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::Gf256;
 use asupersync::raptorq::proof::DecodeConfig;
-use asupersync::raptorq::systematic::{SystematicEncoder, SystematicParams};
+use asupersync::raptorq::systematic::{SystematicEncoder, SystematicParamError, SystematicParams};
 use asupersync::types::ObjectId;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 /// Fuzzing parameters for RaptorQ systematic encoding/decoding.
 #[derive(Debug, Clone, Arbitrary)]
@@ -29,6 +29,8 @@ struct FuzzConfig {
     pub test_rank_deficiency: bool,
     /// Whether to test boundary conditions (K/K' edge cases)
     pub test_boundary_conditions: bool,
+    /// Size of the lookup window around the raw K value
+    pub lookup_window: u8,
     /// Subset of source symbols to use (for partial reception)
     pub source_subset_mask: Vec<bool>,
     /// Repair symbols to drop (for loss simulation)
@@ -37,7 +39,8 @@ struct FuzzConfig {
 
 /// Validate and normalize fuzz configuration
 fn normalize_config(config: &mut FuzzConfig) {
-    // Clamp K to supported range (1..=256 for fuzzing performance)
+    // Keep the expensive encode/decode path small; full-range K lookup is
+    // exercised separately via cheap table-only checks below.
     config.k = config.k.clamp(1, 256);
 
     // Clamp symbol size to reasonable range
@@ -45,6 +48,7 @@ fn normalize_config(config: &mut FuzzConfig) {
 
     // Limit repair count for performance
     config.repair_count = config.repair_count.clamp(0, config.k.saturating_mul(2));
+    config.lookup_window = config.lookup_window.clamp(0, 32);
 
     // Normalize permutation indices
     if !config.permutation_indices.is_empty() {
@@ -59,6 +63,171 @@ fn normalize_config(config: &mut FuzzConfig) {
     config
         .repair_drop_mask
         .truncate(config.repair_count as usize);
+}
+
+fn max_supported_source_block_size() -> usize {
+    match SystematicParams::try_for_source_block(0, 1).unwrap_err() {
+        SystematicParamError::UnsupportedSourceBlockSize { max_supported, .. } => max_supported,
+    }
+}
+
+fn assert_param_invariants(params: &SystematicParams) -> Result<(), String> {
+    if params.k == 0 {
+        return Err("table lookup produced zero-sized source block".to_string());
+    }
+    if params.k_prime < params.k {
+        return Err(format!(
+            "K' must be >= K, got K={} K'={}",
+            params.k, params.k_prime
+        ));
+    }
+    if params.symbol_size == 0 {
+        return Err("symbol size must stay positive".to_string());
+    }
+    if params.w < params.s {
+        return Err(format!("W must be >= S, got W={} S={}", params.w, params.s));
+    }
+    if params.l != params.k_prime + params.s + params.h {
+        return Err(format!(
+            "L partition mismatch: expected {} got {}",
+            params.k_prime + params.s + params.h,
+            params.l
+        ));
+    }
+    if params.b != params.w - params.s {
+        return Err(format!(
+            "B partition mismatch: expected {} got {}",
+            params.w - params.s,
+            params.b
+        ));
+    }
+    if params.p != params.l - params.w {
+        return Err(format!(
+            "P partition mismatch: expected {} got {}",
+            params.l - params.w,
+            params.p
+        ));
+    }
+
+    Ok(())
+}
+
+fn build_lookup_candidates(raw_k: usize, window: usize, max_supported: usize) -> Vec<usize> {
+    let max_with_overflow_case = max_supported.saturating_add(1);
+    let mut candidates = BTreeSet::new();
+    for candidate in [
+        0usize,
+        1,
+        2,
+        10,
+        11,
+        12,
+        raw_k.saturating_sub(window),
+        raw_k.saturating_sub(1),
+        raw_k,
+        raw_k.saturating_add(1).min(max_with_overflow_case),
+        raw_k.saturating_add(window).min(max_with_overflow_case),
+        max_supported.saturating_sub(1),
+        max_supported,
+        max_with_overflow_case,
+    ] {
+        candidates.insert(candidate);
+    }
+    candidates.into_iter().collect()
+}
+
+fn assert_same_partition_row(
+    baseline: &SystematicParams,
+    candidate: &SystematicParams,
+) -> Result<(), String> {
+    if baseline.k_prime != candidate.k_prime
+        || baseline.j != candidate.j
+        || baseline.s != candidate.s
+        || baseline.h != candidate.h
+        || baseline.w != candidate.w
+        || baseline.p != candidate.p
+        || baseline.b != candidate.b
+        || baseline.l != candidate.l
+    {
+        return Err(format!(
+            "same-row lookup drifted: baseline={baseline:?} candidate={candidate:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn test_systematic_index_lookup_boundaries(
+    raw_k: usize,
+    symbol_size: usize,
+    lookup_window: usize,
+) -> Result<(), String> {
+    let max_supported = max_supported_source_block_size();
+    let candidates = build_lookup_candidates(raw_k, lookup_window, max_supported);
+
+    for k in candidates {
+        match SystematicParams::try_for_source_block(k, symbol_size) {
+            Ok(params) => {
+                assert_param_invariants(&params)?;
+
+                if k == max_supported && params.k_prime != max_supported {
+                    return Err(format!(
+                        "K_max should map to its own final table row, got K'={}",
+                        params.k_prime
+                    ));
+                }
+
+                if params.k < params.k_prime {
+                    let next = SystematicParams::try_for_source_block(params.k + 1, symbol_size)
+                        .map_err(|err| {
+                            format!("next lookup failed for K={}: {err:?}", params.k + 1)
+                        })?;
+                    assert_same_partition_row(&params, &next)?;
+                }
+
+                let boundary = SystematicParams::try_for_source_block(params.k_prime, symbol_size)
+                    .map_err(|err| {
+                        format!("boundary lookup failed for K={}: {err:?}", params.k_prime)
+                    })?;
+                assert_same_partition_row(&params, &boundary)?;
+
+                if params.k_prime < max_supported {
+                    let after_boundary =
+                        SystematicParams::try_for_source_block(params.k_prime + 1, symbol_size)
+                            .map_err(|err| {
+                                format!(
+                                    "post-boundary lookup failed for K={}: {err:?}",
+                                    params.k_prime + 1
+                                )
+                            })?;
+                    if after_boundary.k_prime <= params.k_prime {
+                        return Err(format!(
+                            "table partition did not advance after K' boundary: boundary={} next={}",
+                            params.k_prime, after_boundary.k_prime
+                        ));
+                    }
+                }
+            }
+            Err(err) => {
+                if k <= max_supported {
+                    return Err(format!(
+                        "supported K={k} unexpectedly failed lookup: {err:?}"
+                    ));
+                }
+                if err
+                    != (SystematicParamError::UnsupportedSourceBlockSize {
+                        requested: k,
+                        max_supported,
+                    })
+                {
+                    return Err(format!(
+                        "unsupported K lookup returned wrong error for K={k}: {err:?}"
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Generate source data for encoding
@@ -384,12 +553,15 @@ fn test_permutation_invariance(
 
 /// Main fuzzing function
 fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
+    let raw_k = config.k as usize;
     normalize_config(&mut config);
 
     let k = config.k as usize;
     let symbol_size = config.symbol_size as usize;
     let seed = config.seed;
     let repair_count = config.repair_count as usize;
+
+    test_systematic_index_lookup_boundaries(raw_k, symbol_size, config.lookup_window as usize)?;
 
     // Skip degenerate cases
     if k == 0 || symbol_size == 0 {
