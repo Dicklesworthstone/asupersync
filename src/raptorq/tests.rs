@@ -977,6 +977,59 @@ mod property_tests {
             .collect()
     }
 
+    fn build_symbol_pool(
+        k: usize,
+        symbol_size: usize,
+        seed: u64,
+        repair_overhead: usize,
+        context: &str,
+    ) -> (
+        Vec<Vec<u8>>,
+        InactivationDecoder,
+        Vec<ReceivedSymbol>,
+        Vec<ReceivedSymbol>,
+    ) {
+        let source = make_source_data(k, symbol_size, seed);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+            .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let constraints = decoder.constraint_symbols();
+        let repair_limit = k + decoder.params().l + repair_overhead;
+        let mut symbols = Vec::with_capacity(repair_limit);
+
+        for (i, data) in source.iter().enumerate() {
+            symbols.push(ReceivedSymbol::source(i as u32, data.clone()));
+        }
+
+        for esi in (k as u32)..(repair_limit as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            symbols.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        (source, decoder, constraints, symbols)
+    }
+
+    fn alternating_extremes(symbols: &[ReceivedSymbol]) -> Vec<ReceivedSymbol> {
+        let mut ordered = Vec::with_capacity(symbols.len());
+        if symbols.is_empty() {
+            return ordered;
+        }
+
+        let mut lo = 0usize;
+        let mut hi = symbols.len() - 1;
+        while lo < hi {
+            ordered.push(symbols[hi].clone());
+            ordered.push(symbols[lo].clone());
+            lo += 1;
+            hi -= 1;
+        }
+        if lo == hi {
+            ordered.push(symbols[lo].clone());
+        }
+        ordered
+    }
+
     fn failure_context(
         scenario_id: &str,
         seed: u64,
@@ -1212,6 +1265,165 @@ mod property_tests {
                 "{context} decoded source must match for drop_seed={drop_seed}"
             );
         }
+    }
+
+    #[test]
+    fn symmetry_metamorphic_decodable_subset_matches_full_roundtrip_identity() {
+        let k = 16;
+        let symbol_size = 48;
+        let seed = 2027u64;
+        let replay_ref = "replay:rq-u-systematic-metamorphic-subset-identity-v1";
+        let context = failure_context(
+            "RQ-U-METAMORPHIC-SUBSET",
+            seed,
+            &format!("k={k},symbol_size={symbol_size},repair_overhead=12"),
+            replay_ref,
+        );
+
+        let (source, decoder, constraints, symbols) =
+            build_symbol_pool(k, symbol_size, seed, 12, &context);
+        let preferred = alternating_extremes(&symbols);
+        let selected = super::select_first_decodable_prefix(
+            &decoder,
+            &constraints,
+            &preferred,
+            decoder.params().l,
+            &context,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let mut subset_received = constraints.clone();
+        subset_received.extend(selected);
+        let subset_decoded = decoder
+            .decode(&subset_received)
+            .unwrap_or_else(|err| panic!("{context} subset decode should succeed; got {err:?}"));
+
+        let mut full_received = constraints;
+        full_received.extend(preferred);
+        let full_decoded = decoder
+            .decode(&full_received)
+            .unwrap_or_else(|err| panic!("{context} full decode should succeed; got {err:?}"));
+
+        assert_eq!(
+            subset_decoded.source, source,
+            "{context} decodable subset must preserve the original payload"
+        );
+        assert_eq!(
+            full_decoded.source, source,
+            "{context} full symbol pool must preserve the original payload"
+        );
+        assert_eq!(
+            subset_decoded.source, full_decoded.source,
+            "{context} subset and full decodes must agree on payload identity"
+        );
+    }
+
+    #[test]
+    fn symmetry_metamorphic_received_symbol_permutations_preserve_payload() {
+        let k = 12;
+        let symbol_size = 40;
+        let seed = 2028u64;
+        let replay_ref = "replay:rq-u-systematic-metamorphic-permutation-v1";
+        let context = failure_context(
+            "RQ-U-METAMORPHIC-PERMUTATION",
+            seed,
+            &format!("k={k},symbol_size={symbol_size},repair_overhead=10"),
+            replay_ref,
+        );
+
+        let (source, decoder, constraints, symbols) =
+            build_symbol_pool(k, symbol_size, seed, 10, &context);
+        let baseline = super::select_first_decodable_prefix(
+            &decoder,
+            &constraints,
+            &symbols,
+            decoder.params().l,
+            &context,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let mut reversed = baseline.clone();
+        reversed.reverse();
+        let permutations = [
+            ("in_order", baseline.clone()),
+            ("reversed", reversed),
+            ("alternating_extremes", alternating_extremes(&baseline)),
+        ];
+
+        for (ordering_name, ordering) in permutations {
+            let mut received = constraints.clone();
+            received.extend(ordering);
+            let decoded = decoder.decode(&received).unwrap_or_else(|err| {
+                panic!("{context} decode should succeed for ordering={ordering_name}; got {err:?}")
+            });
+            assert_eq!(
+                decoded.source, source,
+                "{context} decoded payload must be invariant for ordering={ordering_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn symmetry_metamorphic_extra_repair_symbols_do_not_reduce_decode_success() {
+        let k = 12;
+        let symbol_size = 40;
+        let seed = 2029u64;
+        let replay_ref = "replay:rq-u-systematic-metamorphic-extra-repair-v1";
+        let context = failure_context(
+            "RQ-U-METAMORPHIC-EXTRA-REPAIR",
+            seed,
+            &format!("k={k},symbol_size={symbol_size},repair_overhead=14"),
+            replay_ref,
+        );
+
+        let (source, decoder, constraints, symbols) =
+            build_symbol_pool(k, symbol_size, seed, 14, &context);
+        let baseline = super::select_first_decodable_prefix(
+            &decoder,
+            &constraints,
+            &symbols,
+            decoder.params().l,
+            &context,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+        let baseline_esis: std::collections::BTreeSet<u32> =
+            baseline.iter().map(|symbol| symbol.esi).collect();
+        let extra_repairs: Vec<ReceivedSymbol> = symbols
+            .iter()
+            .filter(|symbol| !symbol.is_source && !baseline_esis.contains(&symbol.esi))
+            .take(8)
+            .cloned()
+            .collect();
+        assert!(
+            !extra_repairs.is_empty(),
+            "{context} expected additional repair symbols beyond baseline frontier"
+        );
+
+        let mut baseline_received = constraints.clone();
+        baseline_received.extend(baseline.clone());
+        let baseline_decoded = decoder
+            .decode(&baseline_received)
+            .unwrap_or_else(|err| panic!("{context} baseline decode should succeed; got {err:?}"));
+
+        let mut augmented_received = constraints;
+        augmented_received.extend(baseline);
+        augmented_received.extend(extra_repairs);
+        let augmented_decoded = decoder.decode(&augmented_received).unwrap_or_else(|err| {
+            panic!("{context} augmented decode should succeed with extra repairs; got {err:?}")
+        });
+
+        assert_eq!(
+            baseline_decoded.source, source,
+            "{context} baseline decode must preserve the original payload"
+        );
+        assert_eq!(
+            augmented_decoded.source, source,
+            "{context} extra repair symbols must not reduce decode success"
+        );
+        assert_eq!(
+            baseline_decoded.source, augmented_decoded.source,
+            "{context} baseline and augmented decodes must agree on the payload"
+        );
     }
 
     /// Property: encoding is deterministic regardless of seed (seed is reserved for future use).
