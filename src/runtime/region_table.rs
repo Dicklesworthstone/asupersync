@@ -300,6 +300,7 @@ impl RegionTable {
 mod tests {
     use super::*;
     use crate::record::region::RegionState;
+    use crate::types::TaskId;
 
     #[test]
     fn create_root_region() {
@@ -437,6 +438,95 @@ mod tests {
         assert_eq!(table.state(root), Some(RegionState::Open));
         assert_eq!(table.parent(root), Some(None));
         assert_eq!(table.parent(child), Some(Some(root)));
+    }
+
+    #[test]
+    fn close_requires_quiescence_for_all_live_work() {
+        let mut table = RegionTable::new();
+        let root = table.create_root(Budget::default(), Time::ZERO);
+        let child = table
+            .create_child(root, Budget::default(), Time::ZERO)
+            .unwrap();
+        let root_record = table.get(root.arena_index()).unwrap();
+        let task = TaskId::from_arena(ArenaIndex::new(7, 0));
+
+        assert!(root_record.add_task(task).is_ok());
+        assert!(root_record.begin_close(None));
+        assert!(root_record.begin_finalize());
+        assert_eq!(table.state(root), Some(RegionState::Finalizing));
+        assert!(!root_record.complete_close());
+
+        root_record.remove_task(task);
+        assert!(!root_record.complete_close());
+
+        root_record.remove_child(child);
+        assert!(root_record.complete_close());
+        assert_eq!(table.state(root), Some(RegionState::Closed));
+    }
+
+    #[test]
+    fn close_outcome_is_invariant_to_live_work_removal_order() {
+        let mut remove_task_then_child = RegionTable::new();
+        let root_a = remove_task_then_child.create_root(Budget::default(), Time::ZERO);
+        let child_a = remove_task_then_child
+            .create_child(root_a, Budget::default(), Time::ZERO)
+            .unwrap();
+        let root_a_record = remove_task_then_child.get(root_a.arena_index()).unwrap();
+        let task_a = TaskId::from_arena(ArenaIndex::new(11, 0));
+        assert!(root_a_record.add_task(task_a).is_ok());
+        assert!(root_a_record.begin_close(None));
+        assert!(root_a_record.begin_finalize());
+        root_a_record.remove_task(task_a);
+        assert!(!root_a_record.complete_close());
+        root_a_record.remove_child(child_a);
+        assert!(root_a_record.complete_close());
+
+        let mut remove_child_then_task = RegionTable::new();
+        let root_b = remove_child_then_task.create_root(Budget::default(), Time::ZERO);
+        let child_b = remove_child_then_task
+            .create_child(root_b, Budget::default(), Time::ZERO)
+            .unwrap();
+        let root_b_record = remove_child_then_task.get(root_b.arena_index()).unwrap();
+        let task_b = TaskId::from_arena(ArenaIndex::new(12, 0));
+        assert!(root_b_record.add_task(task_b).is_ok());
+        assert!(root_b_record.begin_close(None));
+        assert!(root_b_record.begin_finalize());
+        root_b_record.remove_child(child_b);
+        assert!(!root_b_record.complete_close());
+        root_b_record.remove_task(task_b);
+        assert!(root_b_record.complete_close());
+
+        assert_eq!(
+            remove_task_then_child.state(root_a),
+            Some(RegionState::Closed)
+        );
+        assert_eq!(
+            remove_child_then_task.state(root_b),
+            Some(RegionState::Closed)
+        );
+    }
+
+    #[test]
+    fn repeated_child_creation_attempts_after_close_stay_rejected() {
+        let mut table = RegionTable::new();
+        let root = table.create_root(Budget::default(), Time::ZERO);
+        let root_record = table.get(root.arena_index()).unwrap();
+
+        assert!(root_record.begin_close(None));
+        assert!(root_record.begin_finalize());
+        assert!(root_record.complete_close());
+        assert_eq!(table.state(root), Some(RegionState::Closed));
+
+        for attempt in 0..3 {
+            let result = table.create_child(
+                root,
+                Budget::default(),
+                Time::from_nanos((attempt + 1) as u64),
+            );
+            assert!(matches!(result, Err(RegionCreateError::ParentClosed(id)) if id == root));
+            assert_eq!(table.len(), 1);
+            assert!(table.child_ids(root).unwrap().is_empty());
+        }
     }
 
     // =========================================================================
