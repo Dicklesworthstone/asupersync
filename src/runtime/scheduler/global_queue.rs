@@ -70,6 +70,47 @@ mod tests {
         std::iter::from_fn(|| queue.pop()).collect()
     }
 
+    fn run_cancelled_steal_schedule(
+        total: usize,
+        cancel_after: usize,
+        chunk_plan: &[usize],
+    ) -> (Vec<TaskId>, Vec<TaskId>) {
+        let queue = GlobalQueue::new();
+        for i in 0..total {
+            queue.push(task(i as u32));
+        }
+
+        let mut stolen = Vec::new();
+        let cancel_after = cancel_after.min(total);
+        if cancel_after > 0 {
+            let normalized_plan = if chunk_plan.is_empty() {
+                vec![cancel_after]
+            } else {
+                chunk_plan
+                    .iter()
+                    .map(|chunk| (*chunk).max(1))
+                    .collect::<Vec<_>>()
+            };
+
+            let mut chunk_index = 0usize;
+            while stolen.len() < cancel_after {
+                let remaining = cancel_after - stolen.len();
+                let chunk = normalized_plan[chunk_index % normalized_plan.len()].min(remaining);
+                for _ in 0..chunk {
+                    stolen.push(
+                        queue
+                            .pop()
+                            .expect("scheduled cancel cut should not exceed queued task count"),
+                    );
+                }
+                chunk_index += 1;
+            }
+        }
+
+        let resumed = drain_all(&queue);
+        (stolen, resumed)
+    }
+
     #[test]
     fn test_global_queue_push_pop_basic() {
         let queue = GlobalQueue::new();
@@ -402,6 +443,43 @@ mod tests {
                 "cancelled steal must not drop or duplicate tasks across the handoff",
             );
             prop_assert!(queue.is_empty(), "queue should be empty after the resumed drain");
+        }
+
+        #[test]
+        fn metamorphic_cancel_cut_preserves_fifo_suffix_across_steal_chunking(
+            total in 1usize..64,
+            cancel_after in 0usize..64,
+        ) {
+            let cancel_after = cancel_after.min(total);
+
+            let (bulk_prefix, bulk_suffix) =
+                run_cancelled_steal_schedule(total, cancel_after, &[cancel_after.max(1)]);
+            let (step_prefix, step_suffix) =
+                run_cancelled_steal_schedule(total, cancel_after, &[1]);
+
+            let expected_prefix: Vec<_> = (0..cancel_after).map(|i| task(i as u32)).collect();
+            let expected_suffix: Vec<_> = (cancel_after..total).map(|i| task(i as u32)).collect();
+
+            prop_assert_eq!(
+                bulk_prefix,
+                expected_prefix.clone(),
+                "bulk stealing up to the cancellation cut must preserve the FIFO prefix",
+            );
+            prop_assert_eq!(
+                step_prefix,
+                expected_prefix,
+                "per-pop cancellation checkpoints must preserve the same FIFO prefix",
+            );
+            prop_assert_eq!(
+                bulk_suffix,
+                expected_suffix.clone(),
+                "bulk stealing to the cut must leave the remaining suffix in FIFO order",
+            );
+            prop_assert_eq!(
+                step_suffix,
+                expected_suffix,
+                "chunking the steal loop with extra cancellation checks must not perturb the FIFO suffix",
+            );
         }
 
         #[test]
