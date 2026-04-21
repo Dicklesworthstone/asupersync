@@ -32,7 +32,9 @@
 
 use core::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::observability::SpanId;
 use crate::types::symbol::{ObjectId, SymbolId};
 use crate::types::{CancelReason, RegionId, TaskId};
 
@@ -439,6 +441,107 @@ pub struct ErrorContext {
     pub object_id: Option<ObjectId>,
     /// The symbol involved in the error (for RaptorQ).
     pub symbol_id: Option<SymbolId>,
+    /// Correlation ID for tracing error propagation across async boundaries.
+    pub correlation_id: Option<u64>,
+    /// Parent correlation IDs forming a causal chain.
+    pub causal_chain: Vec<u64>,
+    /// Span ID from the current tracing context.
+    pub span_id: Option<crate::observability::SpanId>,
+    /// Parent span ID for building async stack traces.
+    pub parent_span_id: Option<crate::observability::SpanId>,
+    /// Async stack trace showing error propagation path.
+    pub async_stack: Vec<String>,
+}
+
+impl ErrorContext {
+    /// Creates a new error context with automatic correlation ID generation.
+    #[must_use]
+    pub fn new() -> Self {
+        static NEXT_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
+        Self {
+            correlation_id: Some(NEXT_CORRELATION_ID.fetch_add(1, Ordering::Relaxed)),
+            ..Self::default()
+        }
+    }
+
+    /// Creates an error context from the current Cx diagnostic context.
+    #[must_use]
+    pub fn from_diagnostic_context(ctx: &crate::observability::DiagnosticContext) -> Self {
+        let mut error_ctx = Self::new();
+        error_ctx.task_id = ctx.task_id();
+        error_ctx.region_id = ctx.region_id();
+        error_ctx.span_id = ctx.span_id();
+        error_ctx.parent_span_id = ctx.parent_span_id();
+        error_ctx
+    }
+
+    /// Derives a child error context preserving causal chain.
+    #[must_use]
+    pub fn derive_child(&self, operation: &str) -> Self {
+        static NEXT_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
+        let child_correlation_id = NEXT_CORRELATION_ID.fetch_add(1, Ordering::Relaxed);
+
+        let mut causal_chain = self.causal_chain.clone();
+        if let Some(parent_id) = self.correlation_id {
+            causal_chain.push(parent_id);
+        }
+
+        let mut async_stack = self.async_stack.clone();
+        async_stack.push(operation.to_string());
+
+        Self {
+            task_id: self.task_id,
+            region_id: self.region_id,
+            object_id: self.object_id,
+            symbol_id: self.symbol_id,
+            correlation_id: Some(child_correlation_id),
+            causal_chain,
+            span_id: Some(SpanId::new()), // New span for child operation
+            parent_span_id: self.span_id,
+            async_stack,
+        }
+    }
+
+    /// Adds an operation to the async stack trace.
+    #[must_use]
+    pub fn with_operation(mut self, operation: &str) -> Self {
+        self.async_stack.push(operation.to_string());
+        self
+    }
+
+    /// Sets the span context from current tracing.
+    #[must_use]
+    pub fn with_span_context(mut self, span_id: SpanId, parent_span_id: Option<SpanId>) -> Self {
+        self.span_id = Some(span_id);
+        self.parent_span_id = parent_span_id;
+        self
+    }
+
+    /// Returns the root correlation ID from the causal chain.
+    #[must_use]
+    pub fn root_correlation_id(&self) -> Option<u64> {
+        self.causal_chain.first().copied().or(self.correlation_id)
+    }
+
+    /// Returns the full causal chain including current correlation ID.
+    #[must_use]
+    pub fn full_causal_chain(&self) -> Vec<u64> {
+        let mut chain = self.causal_chain.clone();
+        if let Some(id) = self.correlation_id {
+            chain.push(id);
+        }
+        chain
+    }
+
+    /// Returns a human-readable async stack trace.
+    #[must_use]
+    pub fn format_async_stack(&self) -> String {
+        if self.async_stack.is_empty() {
+            "<no stack trace>".to_string()
+        } else {
+            self.async_stack.join(" -> ")
+        }
+    }
 }
 
 /// The main error type for Asupersync operations.
@@ -454,17 +557,12 @@ impl Error {
     /// Creates a new error with the given kind.
     #[must_use]
     #[inline]
-    pub const fn new(kind: ErrorKind) -> Self {
+    pub fn new(kind: ErrorKind) -> Self {
         Self {
             kind,
             message: None,
             source: None,
-            context: ErrorContext {
-                task_id: None,
-                region_id: None,
-                object_id: None,
-                symbol_id: None,
-            },
+            context: ErrorContext::new(),
         }
     }
 
@@ -514,6 +612,58 @@ impl Error {
     pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
         self.source = Some(Arc::new(source));
         self
+    }
+
+    /// Creates an error with context derived from current Cx.
+    #[must_use]
+    pub fn from_cx(kind: ErrorKind, cx: &crate::cx::Cx) -> Self {
+        let diag_ctx = cx.diagnostic_context();
+        let error_ctx = ErrorContext::from_diagnostic_context(&diag_ctx)
+            .with_operation(&format!("Error::{:?}", kind));
+
+        Self::new(kind).with_context(error_ctx)
+    }
+
+    /// Propagates an error across an async boundary, preserving causal chain.
+    #[must_use]
+    pub fn propagate_across_async(mut self, operation: &str) -> Self {
+        self.context = self.context.derive_child(operation);
+        self
+    }
+
+    /// Adds an operation to the error's async stack trace.
+    #[must_use]
+    pub fn with_operation(mut self, operation: &str) -> Self {
+        self.context = self.context.with_operation(operation);
+        self
+    }
+
+    /// Returns the correlation ID for tracing this error.
+    #[must_use]
+    #[inline]
+    pub fn correlation_id(&self) -> Option<u64> {
+        self.context.correlation_id
+    }
+
+    /// Returns the root cause correlation ID.
+    #[must_use]
+    #[inline]
+    pub fn root_correlation_id(&self) -> Option<u64> {
+        self.context.root_correlation_id()
+    }
+
+    /// Returns the full causal chain for root cause analysis.
+    #[must_use]
+    #[inline]
+    pub fn causal_chain(&self) -> Vec<u64> {
+        self.context.full_causal_chain()
+    }
+
+    /// Returns a formatted async stack trace.
+    #[must_use]
+    #[inline]
+    pub fn async_stack(&self) -> String {
+        self.context.format_async_stack()
     }
 
     /// Creates a cancellation error from a structured reason.
@@ -866,6 +1016,11 @@ mod tests {
             region_id: Some(region_id),
             object_id: Some(object_id),
             symbol_id: Some(symbol_id),
+            correlation_id: None,
+            causal_chain: Vec::new(),
+            span_id: None,
+            parent_span_id: None,
+            async_stack: Vec::new(),
         };
 
         let err = Error::new(ErrorKind::Internal).with_context(ctx);
@@ -1298,5 +1453,99 @@ mod tests {
 
         let cloned = c.clone();
         assert_eq!(cloned, c);
+    }
+
+    #[test]
+    fn error_context_auto_correlation() {
+        let ctx = ErrorContext::new();
+        assert!(ctx.correlation_id.is_some());
+        assert!(ctx.causal_chain.is_empty());
+        assert!(ctx.async_stack.is_empty());
+    }
+
+    #[test]
+    fn error_context_derive_child() {
+        let parent = ErrorContext::new();
+        let parent_id = parent.correlation_id.unwrap();
+
+        let child = parent.derive_child("async_operation");
+
+        // Child has new correlation ID
+        assert!(child.correlation_id.is_some());
+        assert_ne!(child.correlation_id, parent.correlation_id);
+
+        // Causal chain includes parent
+        assert_eq!(child.causal_chain, vec![parent_id]);
+
+        // Operation added to stack
+        assert_eq!(child.async_stack, vec!["async_operation"]);
+
+        // Spans are updated
+        assert!(child.span_id.is_some());
+        assert_eq!(child.parent_span_id, parent.span_id);
+    }
+
+    #[test]
+    fn error_context_causal_chain() {
+        let root = ErrorContext::new();
+        let child = root.derive_child("level1");
+        let grandchild = child.derive_child("level2");
+
+        let root_id = root.correlation_id.unwrap();
+        let child_id = child.correlation_id.unwrap();
+
+        let chain = grandchild.full_causal_chain();
+        assert_eq!(
+            chain,
+            vec![root_id, child_id, grandchild.correlation_id.unwrap()]
+        );
+
+        assert_eq!(grandchild.root_correlation_id(), Some(root_id));
+    }
+
+    #[test]
+    fn error_context_async_stack_trace() {
+        let ctx = ErrorContext::new()
+            .with_operation("spawn_task")
+            .with_operation("process_request");
+
+        let trace = ctx.format_async_stack();
+        assert_eq!(trace, "spawn_task -> process_request");
+    }
+
+    #[test]
+    fn error_propagate_across_async() {
+        let error = Error::new(ErrorKind::Internal).with_operation("initial_operation");
+
+        let propagated = error.propagate_across_async("async_boundary");
+
+        // Original error correlation should be in causal chain
+        let chain = propagated.causal_chain();
+        assert!(!chain.is_empty());
+
+        // Async stack should include new operation
+        let stack = propagated.async_stack();
+        assert!(stack.contains("async_boundary"));
+    }
+
+    #[test]
+    fn error_correlation_tracking() {
+        let err1 = Error::new(ErrorKind::ChannelClosed);
+        let err2 = Error::new(ErrorKind::Internal);
+
+        // Different errors get different correlation IDs
+        assert_ne!(err1.correlation_id(), err2.correlation_id());
+        assert!(err1.correlation_id().is_some());
+        assert!(err2.correlation_id().is_some());
+    }
+
+    #[test]
+    fn error_with_operations() {
+        let error = Error::new(ErrorKind::DecodingFailed)
+            .with_operation("read_symbol")
+            .with_operation("decode_block");
+
+        let stack = error.async_stack();
+        assert_eq!(stack, "read_symbol -> decode_block");
     }
 }
