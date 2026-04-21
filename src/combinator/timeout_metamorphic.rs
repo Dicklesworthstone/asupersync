@@ -771,7 +771,7 @@ mod metamorphic_deterministic_replay {
 
         // Verify that we got some variation across different seeds
         // (This confirms our test setup can detect timing differences)
-        let all_same = results.windows(2).all(|window| window[0] == window[1]);
+        let _all_same = results.windows(2).all(|window| window[0] == window[1]);
 
         // Note: In some cases results might be the same due to deterministic timing,
         // but we should see some variation across 5 different seeds

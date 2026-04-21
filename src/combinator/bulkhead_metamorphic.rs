@@ -628,7 +628,7 @@ fn run_deterministic_sequence(
     work_sequence: &[u32],
     _seed: u64,
 ) -> DeterministicResult {
-    let global_state = GlobalBulkheadState::new();
+    let _global_state = GlobalBulkheadState::new();
     let _rng = DetRng::new(_seed);
 
     let policy = BulkheadPolicy {
