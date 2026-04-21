@@ -737,6 +737,15 @@ mod tests {
         AuthenticatedSymbol::new_verified(symbol, tag)
     }
 
+    fn queued_symbol_ids(shared: &SharedChannel) -> Vec<u32> {
+        shared
+            .queue
+            .lock()
+            .iter()
+            .map(|symbol| symbol.symbol().id().esi())
+            .collect()
+    }
+
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }
@@ -1395,6 +1404,321 @@ mod tests {
             flush_count
         );
         crate::test_complete!("metamorphic_cancelled_batch_preserves_committed_prefix");
+    }
+
+    #[test]
+    fn metamorphic_buffered_sink_backpressure_preserves_capacity_and_delivery_order() {
+        init_test("metamorphic_buffered_sink_backpressure_preserves_capacity_and_delivery_order");
+
+        let symbols = [1_u32, 2, 3, 4].map(create_symbol);
+
+        let mut baseline_sink = TrackingSink::new(TrackingSinkState::new());
+        let baseline_count = future::block_on(async {
+            baseline_sink
+                .send_all(symbols.iter().cloned())
+                .await
+                .unwrap()
+        });
+        let baseline_ids = {
+            let state = baseline_sink.state.lock();
+            state
+                .sent
+                .iter()
+                .map(|symbol| symbol.symbol().id().esi())
+                .collect::<Vec<_>>()
+        };
+
+        let inner = TrackingSink::new({
+            let mut state = TrackingSinkState::new();
+            state.ready_after = 10;
+            state
+        });
+        let state = inner.state();
+        let mut buffered = BufferedSink::new(inner, 2);
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        for symbol in symbols.iter().cloned() {
+            let poll = Pin::new(&mut buffered).poll_send(&mut context, symbol);
+            crate::assert_with_log!(
+                matches!(poll, Poll::Ready(Ok(()))),
+                "buffered send accepted despite downstream backpressure",
+                true,
+                matches!(poll, Poll::Ready(Ok(())))
+            );
+            crate::assert_with_log!(
+                buffered.buffer.len() <= buffered.capacity,
+                "primary buffer never exceeds configured capacity",
+                true,
+                buffered.buffer.len() <= buffered.capacity
+            );
+        }
+
+        let mut flush_completed = false;
+        for _ in 0..=10 {
+            let poll = Pin::new(&mut buffered).poll_flush(&mut context);
+            crate::assert_with_log!(
+                buffered.buffer.len() <= buffered.capacity,
+                "flush retries keep the primary buffer bounded",
+                true,
+                buffered.buffer.len() <= buffered.capacity
+            );
+            if matches!(poll, Poll::Ready(Ok(()))) {
+                flush_completed = true;
+                break;
+            }
+            crate::assert_with_log!(
+                matches!(poll, Poll::Pending),
+                "intermediate flushes stay pending until the inner sink is ready",
+                true,
+                matches!(poll, Poll::Pending)
+            );
+        }
+
+        let transformed_ids = {
+            let state = state.lock();
+            state
+                .sent
+                .iter()
+                .map(|symbol| symbol.symbol().id().esi())
+                .collect::<Vec<_>>()
+        };
+
+        crate::assert_with_log!(
+            flush_completed,
+            "eventual flush completes once backpressure clears",
+            true,
+            flush_completed
+        );
+        crate::assert_with_log!(
+            transformed_ids == baseline_ids,
+            "backpressure retries preserve final delivery order",
+            baseline_ids.clone(),
+            transformed_ids
+        );
+        crate::assert_with_log!(
+            baseline_count == baseline_ids.len(),
+            "baseline count matches delivered symbols",
+            baseline_ids.len(),
+            baseline_count
+        );
+        crate::assert_with_log!(
+            buffered.buffer.is_empty() && buffered.staged_symbols.is_empty(),
+            "all local buffering drains after the final flush",
+            true,
+            buffered.buffer.is_empty() && buffered.staged_symbols.is_empty()
+        );
+        crate::test_complete!(
+            "metamorphic_buffered_sink_backpressure_preserves_capacity_and_delivery_order"
+        );
+    }
+
+    #[test]
+    fn metamorphic_cancelled_send_future_does_not_consume_released_channel_capacity() {
+        init_test("metamorphic_cancelled_send_future_does_not_consume_released_channel_capacity");
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        let (mut baseline_fill, mut baseline_stream) = channel(1);
+        let baseline_shared = Arc::clone(&baseline_fill.shared);
+        future::block_on(async {
+            baseline_fill.send(create_symbol(1)).await.unwrap();
+            let received = baseline_stream.next().await.unwrap().unwrap();
+            crate::assert_with_log!(
+                received.symbol().id().esi() == 1,
+                "baseline drain receives the queued symbol",
+                1_u32,
+                received.symbol().id().esi()
+            );
+        });
+
+        let mut baseline_replacement = ChannelSink::new(Arc::clone(&baseline_shared));
+        let baseline_ready = Pin::new(&mut baseline_replacement).poll_ready(&mut context);
+        let baseline_send =
+            Pin::new(&mut baseline_replacement).poll_send(&mut context, create_symbol(2));
+        crate::assert_with_log!(
+            matches!(baseline_ready, Poll::Ready(Ok(()))),
+            "baseline replacement sender sees freed capacity",
+            true,
+            matches!(baseline_ready, Poll::Ready(Ok(())))
+        );
+        crate::assert_with_log!(
+            matches!(baseline_send, Poll::Ready(Ok(()))),
+            "baseline replacement send succeeds",
+            true,
+            matches!(baseline_send, Poll::Ready(Ok(())))
+        );
+        let baseline_ids = queued_symbol_ids(&baseline_shared);
+
+        let (mut transformed_fill, mut transformed_stream) = channel(1);
+        let transformed_shared = Arc::clone(&transformed_fill.shared);
+        future::block_on(async {
+            transformed_fill.send(create_symbol(1)).await.unwrap();
+        });
+
+        let mut cancelled_sender = ChannelSink::new(Arc::clone(&transformed_shared));
+        let mut replacement_sender = ChannelSink::new(Arc::clone(&transformed_shared));
+        {
+            let cx = crate::cx::Cx::for_testing();
+            let _current_guard = crate::cx::Cx::set_current(Some(cx.clone()));
+            let mut pending_send = cancelled_sender.send(create_symbol(99));
+            let mut pending_send = Pin::new(&mut pending_send);
+
+            let first = pending_send.as_mut().poll(&mut context);
+            crate::assert_with_log!(
+                matches!(first, Poll::Pending),
+                "full channel blocks the in-flight send before cancellation",
+                true,
+                matches!(first, Poll::Pending)
+            );
+            let waiter_registered = transformed_shared.send_wakers.lock().len();
+            crate::assert_with_log!(
+                waiter_registered == 1,
+                "pending send registers exactly one waiter",
+                1usize,
+                waiter_registered
+            );
+
+            cx.set_cancel_requested(true);
+            let cancelled = pending_send.as_mut().poll(&mut context);
+            let cancel_kind = match cancelled {
+                Poll::Ready(Err(SinkError::Io { source })) => Some(source.kind()),
+                _ => None,
+            };
+            crate::assert_with_log!(
+                cancel_kind == Some(std::io::ErrorKind::Interrupted),
+                "cancellation converts the blocked send into an interrupted error",
+                Some(std::io::ErrorKind::Interrupted),
+                cancel_kind
+            );
+        }
+
+        future::block_on(async {
+            let received = transformed_stream.next().await.unwrap().unwrap();
+            crate::assert_with_log!(
+                received.symbol().id().esi() == 1,
+                "transformed drain receives the original queued symbol",
+                1_u32,
+                received.symbol().id().esi()
+            );
+        });
+
+        let transformed_ready = Pin::new(&mut replacement_sender).poll_ready(&mut context);
+        let transformed_send =
+            Pin::new(&mut replacement_sender).poll_send(&mut context, create_symbol(2));
+        crate::assert_with_log!(
+            matches!(transformed_ready, Poll::Ready(Ok(()))),
+            "replacement sender sees the released capacity after cancellation",
+            true,
+            matches!(transformed_ready, Poll::Ready(Ok(())))
+        );
+        crate::assert_with_log!(
+            matches!(transformed_send, Poll::Ready(Ok(()))),
+            "replacement sender can commit after the cancelled send drops out",
+            true,
+            matches!(transformed_send, Poll::Ready(Ok(())))
+        );
+
+        let transformed_ids = queued_symbol_ids(&transformed_shared);
+        let waiter_cleared = cancelled_sender
+            .waiter
+            .as_ref()
+            .is_some_and(|waiter| !waiter.load(Ordering::Acquire));
+        let remaining_waiters = transformed_shared.send_wakers.lock().len();
+        crate::assert_with_log!(
+            transformed_ids == baseline_ids,
+            "cancelled sends do not consume the next released buffer slot",
+            baseline_ids,
+            transformed_ids
+        );
+        crate::assert_with_log!(
+            waiter_cleared,
+            "draining the queued symbol clears the cancelled sender waiter",
+            true,
+            waiter_cleared
+        );
+        crate::assert_with_log!(
+            remaining_waiters == 0,
+            "no stale send waiters remain after the cancelled path drains",
+            0usize,
+            remaining_waiters
+        );
+        crate::test_complete!(
+            "metamorphic_cancelled_send_future_does_not_consume_released_channel_capacity"
+        );
+    }
+
+    #[test]
+    fn metamorphic_channel_sink_concurrent_poll_ready_preserves_total_send_order() {
+        init_test("metamorphic_channel_sink_concurrent_poll_ready_preserves_total_send_order");
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        let baseline_shared = Arc::new(SharedChannel::new(2));
+        let mut baseline_first = ChannelSink::new(Arc::clone(&baseline_shared));
+        let mut baseline_second = ChannelSink::new(Arc::clone(&baseline_shared));
+
+        let baseline_first_ready = Pin::new(&mut baseline_first).poll_ready(&mut context);
+        let baseline_first_send =
+            Pin::new(&mut baseline_first).poll_send(&mut context, create_symbol(11));
+        let baseline_second_ready = Pin::new(&mut baseline_second).poll_ready(&mut context);
+        let baseline_second_send =
+            Pin::new(&mut baseline_second).poll_send(&mut context, create_symbol(12));
+        crate::assert_with_log!(
+            matches!(baseline_first_ready, Poll::Ready(Ok(())))
+                && matches!(baseline_first_send, Poll::Ready(Ok(())))
+                && matches!(baseline_second_ready, Poll::Ready(Ok(())))
+                && matches!(baseline_second_send, Poll::Ready(Ok(()))),
+            "baseline send order commits cleanly",
+            true,
+            matches!(baseline_first_ready, Poll::Ready(Ok(())))
+                && matches!(baseline_first_send, Poll::Ready(Ok(())))
+                && matches!(baseline_second_ready, Poll::Ready(Ok(())))
+                && matches!(baseline_second_send, Poll::Ready(Ok(())))
+        );
+        let baseline_ids = queued_symbol_ids(&baseline_shared);
+
+        let transformed_shared = Arc::new(SharedChannel::new(2));
+        let mut transformed_first = ChannelSink::new(Arc::clone(&transformed_shared));
+        let mut transformed_second = ChannelSink::new(Arc::clone(&transformed_shared));
+
+        let transformed_first_ready = Pin::new(&mut transformed_first).poll_ready(&mut context);
+        let transformed_second_ready = Pin::new(&mut transformed_second).poll_ready(&mut context);
+        let transformed_first_send =
+            Pin::new(&mut transformed_first).poll_send(&mut context, create_symbol(11));
+        let transformed_second_send =
+            Pin::new(&mut transformed_second).poll_send(&mut context, create_symbol(12));
+        crate::assert_with_log!(
+            matches!(transformed_first_ready, Poll::Ready(Ok(())))
+                && matches!(transformed_second_ready, Poll::Ready(Ok(())))
+                && matches!(transformed_first_send, Poll::Ready(Ok(())))
+                && matches!(transformed_second_send, Poll::Ready(Ok(()))),
+            "concurrent ready polling still allows both sends to commit",
+            true,
+            matches!(transformed_first_ready, Poll::Ready(Ok(())))
+                && matches!(transformed_second_ready, Poll::Ready(Ok(())))
+                && matches!(transformed_first_send, Poll::Ready(Ok(())))
+                && matches!(transformed_second_send, Poll::Ready(Ok(())))
+        );
+
+        let transformed_ids = queued_symbol_ids(&transformed_shared);
+        crate::assert_with_log!(
+            transformed_ids == baseline_ids,
+            "extra poll_ready interleaving preserves the committed channel order",
+            baseline_ids.clone(),
+            transformed_ids
+        );
+        crate::assert_with_log!(
+            baseline_ids == vec![11, 12],
+            "queue order matches the committed send order",
+            vec![11_u32, 12_u32],
+            baseline_ids
+        );
+        crate::test_complete!(
+            "metamorphic_channel_sink_concurrent_poll_ready_preserves_total_send_order"
+        );
     }
 
     #[test]
