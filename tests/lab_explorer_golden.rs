@@ -19,6 +19,52 @@ struct ScenarioGolden {
 }
 
 #[derive(Debug, Serialize)]
+struct ScenarioGoldenV2 {
+    name: &'static str,
+    mode: &'static str,
+    metadata: ScenarioMetadata,
+    report: ScrubbedReport,
+    dpor_coverage: Option<ScrubbedDporCoverage>,
+}
+
+#[derive(Debug, Serialize)]
+struct ScenarioMetadata {
+    config: ScrubbedExplorerConfig,
+    workload: ScenarioWorkload,
+    summary: ScenarioSummary,
+}
+
+#[derive(Debug, Serialize)]
+struct ScrubbedExplorerConfig {
+    base_seed: String,
+    max_runs: usize,
+    max_steps_per_run: u64,
+    worker_count: usize,
+    record_traces: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ScenarioWorkload {
+    root_tasks_scheduled: usize,
+    scheduled_priorities: Vec<u8>,
+    shape: &'static str,
+    notes: &'static [&'static str],
+}
+
+#[derive(Debug, Serialize)]
+struct ScenarioSummary {
+    has_violations: bool,
+    certificates_consistent: bool,
+    certificate_divergence_count: usize,
+    unexplored_seed_count: usize,
+    repeated_class_runs: usize,
+    dominant_class_runs: usize,
+    total_steps: u64,
+    min_steps: u64,
+    max_steps: u64,
+}
+
+#[derive(Debug, Serialize)]
 struct ScrubbedReport {
     total_runs: usize,
     unique_classes: usize,
@@ -109,6 +155,10 @@ impl ScrubContext {
 
 fn scrub_report(report: &ExplorationReport) -> ScrubbedReport {
     let mut scrub = ScrubContext::default();
+    scrub_report_with_context(report, &mut scrub)
+}
+
+fn scrub_report_with_context(report: &ExplorationReport, scrub: &mut ScrubContext) -> ScrubbedReport {
     let class_run_counts = report
         .coverage
         .class_run_counts
@@ -168,6 +218,67 @@ fn scrub_report(report: &ExplorationReport) -> ScrubbedReport {
         top_unexplored,
         runs,
         certificate_divergences,
+    }
+}
+
+fn scrub_config(config: &ExplorerConfig, scrub: &mut ScrubContext) -> ScrubbedExplorerConfig {
+    ScrubbedExplorerConfig {
+        base_seed: scrub.seed_label(config.base_seed),
+        max_runs: config.max_runs,
+        max_steps_per_run: config.max_steps_per_run,
+        worker_count: config.worker_count,
+        record_traces: config.record_traces,
+    }
+}
+
+fn scenario_summary(report: &ExplorationReport) -> ScenarioSummary {
+    let certificate_divergence_count = report.certificate_divergences().len();
+    let repeated_class_runs = report.total_runs.saturating_sub(report.unique_classes);
+    let dominant_class_runs = report
+        .coverage
+        .class_run_counts
+        .values()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    let total_steps = report.runs.iter().map(|run| run.steps).sum();
+    let min_steps = report.runs.iter().map(|run| run.steps).min().unwrap_or(0);
+    let max_steps = report.runs.iter().map(|run| run.steps).max().unwrap_or(0);
+
+    ScenarioSummary {
+        has_violations: report.has_violations(),
+        certificates_consistent: report.certificates_consistent(),
+        certificate_divergence_count,
+        unexplored_seed_count: report.top_unexplored.len(),
+        repeated_class_runs,
+        dominant_class_runs,
+        total_steps,
+        min_steps,
+        max_steps,
+    }
+}
+
+fn build_scenario_golden_v2(
+    name: &'static str,
+    mode: &'static str,
+    config: &ExplorerConfig,
+    workload: ScenarioWorkload,
+    report: ExplorationReport,
+    dpor_coverage: Option<ScrubbedDporCoverage>,
+) -> ScenarioGoldenV2 {
+    let mut scrub = ScrubContext::default();
+    let metadata = ScenarioMetadata {
+        config: scrub_config(config, &mut scrub),
+        workload,
+        summary: scenario_summary(&report),
+    };
+
+    ScenarioGoldenV2 {
+        name,
+        mode,
+        metadata,
+        report: scrub_report_with_context(&report, &mut scrub),
+        dpor_coverage,
     }
 }
 
@@ -264,6 +375,111 @@ fn run_topology_scenario() -> ScenarioGolden {
     }
 }
 
+fn run_single_task_scenario_v2() -> ScenarioGoldenV2 {
+    let config = ExplorerConfig::new(7, 3).worker_count(2);
+    let mut explorer = ScheduleExplorer::new(config.clone());
+    let report = explorer.explore(|runtime| {
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async { 42usize })
+            .expect("create task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_quiescent();
+    });
+
+    build_scenario_golden_v2(
+        "single_task_seed_sweep",
+        "schedule",
+        &config,
+        ScenarioWorkload {
+            root_tasks_scheduled: 1,
+            scheduled_priorities: vec![0],
+            shape: "single immediate root task",
+            notes: &["returns usize", "baseline seed sweep"],
+        },
+        report,
+        None,
+    )
+}
+
+fn run_two_task_dpor_scenario_v2() -> ScenarioGoldenV2 {
+    let config = ExplorerConfig::new(11, 4).worker_count(2);
+    let mut explorer = DporExplorer::new(config.clone());
+    let report = explorer.explore(|runtime| {
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let (t1, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("t1");
+        let (t2, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("t2");
+        {
+            let mut scheduler = runtime.scheduler.lock();
+            scheduler.schedule(t1, 0);
+            scheduler.schedule(t2, 0);
+        }
+        runtime.run_until_quiescent();
+    });
+
+    build_scenario_golden_v2(
+        "two_task_dpor",
+        "dpor",
+        &config,
+        ScenarioWorkload {
+            root_tasks_scheduled: 2,
+            scheduled_priorities: vec![0, 0],
+            shape: "two independent root tasks",
+            notes: &["backtrack derivation active", "sleep-set pruning exposed"],
+        },
+        report,
+        Some(scrub_dpor_coverage(&explorer.dpor_coverage())),
+    )
+}
+
+fn run_topology_scenario_v2() -> ScenarioGoldenV2 {
+    let config = ExplorerConfig::new(21, 3).worker_count(2);
+    let mut explorer = TopologyExplorer::new(config.clone());
+    let report = explorer.explore(|runtime| {
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let (t1, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("t1");
+        let (t2, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("t2");
+        let (t3, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("t3");
+        {
+            let mut scheduler = runtime.scheduler.lock();
+            scheduler.schedule(t1, 0);
+            scheduler.schedule(t2, 0);
+            scheduler.schedule(t3, 0);
+        }
+        runtime.run_until_quiescent();
+    });
+
+    build_scenario_golden_v2(
+        "three_task_topology_frontier",
+        "topology",
+        &config,
+        ScenarioWorkload {
+            root_tasks_scheduled: 3,
+            scheduled_priorities: vec![0, 0, 0],
+            shape: "three-task topology frontier",
+            notes: &["topology-prioritized seed frontier", "homology score on unexplored seeds"],
+        },
+        report,
+        None,
+    )
+}
+
 #[test]
 fn scenario_discovery_output_scrubbed() {
     let golden = vec![
@@ -273,4 +489,15 @@ fn scenario_discovery_output_scrubbed() {
     ];
 
     assert_json_snapshot!("scenario_discovery_output_scrubbed", golden);
+}
+
+#[test]
+fn scenario_discovery_output_v2_scrubbed() {
+    let golden = vec![
+        run_single_task_scenario_v2(),
+        run_two_task_dpor_scenario_v2(),
+        run_topology_scenario_v2(),
+    ];
+
+    assert_json_snapshot!("scenario_discovery_output_v2_scrubbed", golden);
 }
