@@ -462,7 +462,7 @@ mod tests {
     use proptest::prelude::*;
     use std::future::Future;
     use std::sync::Arc;
-    use std::task::{Context, Poll, Waker};
+    use std::task::{Context, Poll};
 
     fn test_cx() -> crate::cx::Cx {
         crate::cx::Cx::new(

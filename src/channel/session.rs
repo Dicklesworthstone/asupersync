@@ -346,7 +346,7 @@ mod tests {
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
     use std::future::Future;
-    use std::task::{Context, Poll, Waker};
+    use std::task::{Context, Poll};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

@@ -575,7 +575,7 @@ mod tests {
     use crate::{RegionId, TaskId};
     use std::future::Future;
     use std::sync::Arc;
-    use std::task::{Context, Poll, Waker};
+    use std::task::{Context, Poll};
 
     fn test_cx() -> Cx {
         Cx::new(

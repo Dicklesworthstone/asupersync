@@ -11,7 +11,7 @@ use crate::types::{Budget, RegionId, TaskId};
 use crate::util::{ArenaIndex, DetRng};
 use std::future::Future;
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 use proptest::prelude::*;
 

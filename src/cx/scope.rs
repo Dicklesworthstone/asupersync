@@ -1576,7 +1576,7 @@ mod tests {
     fn spawn_inherits_registry_and_remote_capabilities() {
         use crate::cx::registry::RegistryHandle;
         use crate::remote::{NodeId, RemoteCap};
-        use std::task::{Context, Waker};
+        use std::task::Context;
 
         let mut state = RuntimeState::new();
 
@@ -1627,7 +1627,7 @@ mod tests {
 
     #[test]
     fn spawn_inherits_runtime_timer_driver() {
-        use std::task::{Context, Waker};
+        use std::task::Context;
 
         let mut state = RuntimeState::new();
         let clock = Arc::new(crate::time::VirtualClock::new());
@@ -1676,7 +1676,7 @@ mod tests {
 
     #[test]
     fn spawn_blocking_inherits_runtime_timer_driver() {
-        use std::task::{Context, Waker};
+        use std::task::Context;
 
         let mut state = RuntimeState::new();
         let clock = Arc::new(crate::time::VirtualClock::new());
@@ -1726,7 +1726,7 @@ mod tests {
     #[test]
     fn spawn_registered_task_can_be_polled() {
         use std::sync::Arc;
-        use std::task::{Context, Waker};
+        use std::task::Context;
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -1814,7 +1814,7 @@ mod tests {
     #[test]
     fn spawn_local_makes_progress_via_local_ready() {
         use std::sync::Arc;
-        use std::task::{Context, Waker};
+        use std::task::Context;
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -1915,7 +1915,7 @@ mod tests {
     #[test]
     fn test_join_manual_poll() {
         use std::sync::Arc;
-        use std::task::{Context, Waker};
+        use std::task::Context;
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2341,7 +2341,7 @@ mod tests {
     #[test]
     fn race_surfaces_loser_panic_even_if_winner_succeeds() {
         use std::sync::Arc;
-        use std::task::{Context, Waker};
+        use std::task::Context;
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2414,7 +2414,7 @@ mod tests {
     #[test]
     fn race_all_surfaces_simultaneous_loser_panic() {
         use std::sync::Arc;
-        use std::task::{Context, Waker};
+        use std::task::Context;
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2567,7 +2567,7 @@ mod tests {
     fn conformance_join_awaits_task_completion() {
         // INVARIANT: TaskHandle.join() waits for task completion and returns the result
         use std::sync::Arc;
-        use std::task::{Context, Waker};
+        use std::task::Context;
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2605,7 +2605,7 @@ mod tests {
     fn conformance_child_region_task_isolation() {
         // INVARIANT: Tasks spawned in child regions belong to the child, not the parent
         use std::sync::Arc;
-        use std::task::{Context, Waker};
+        use std::task::Context;
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2689,7 +2689,7 @@ mod tests {
         use crate::security::key::AuthKey;
         use crate::types::SystemPressure;
         use std::sync::Arc;
-        use std::task::{Context, Waker};
+        use std::task::Context;
 
         let mut state = RuntimeState::new();
         let region = state.create_root_region(Budget::INFINITE);
@@ -2818,7 +2818,7 @@ mod tests {
     fn conformance_task_cancellation_propagation() {
         // INVARIANT: Cancelling a task via abort() propagates cancellation signal
         use std::sync::Arc;
-        use std::task::{Context, Waker};
+        use std::task::Context;
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
