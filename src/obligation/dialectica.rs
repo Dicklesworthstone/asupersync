@@ -1821,6 +1821,12 @@ mod tests {
     fn metamorphic_event_reordering_invariance() {
         init_test("metamorphic_event_reordering_invariance");
 
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut rng = crate::util::det_rng::DetRng::new(seed);
+
         // Create a trace with independent obligations that can be reordered
         let base_trace = vec![
             // Independent obligations in different regions
