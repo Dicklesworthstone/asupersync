@@ -2602,6 +2602,9 @@ impl ReceivedSymbol {
 mod tests {
     use super::*;
 
+    use insta::assert_json_snapshot;
+    use serde_json::json;
+
     /// Test-only: checks whether sparse row update is beneficial.
     fn should_use_sparse_row_update(pivot_nnz: usize, n_cols: usize) -> bool {
         if n_cols == 0 {
@@ -2705,6 +2708,28 @@ mod tests {
             "{context}: unit log schema violations: {violations:?}"
         );
         json
+    }
+
+    fn decode_stats_snapshot(
+        scenario: &str,
+        k: usize,
+        symbol_size: usize,
+        seed: u64,
+        dropped: usize,
+        received_symbols: usize,
+        result: &DecodeResult,
+    ) -> serde_json::Value {
+        json!({
+            "scenario": scenario,
+            "k": k,
+            "symbol_size": symbol_size,
+            "seed": seed,
+            "received_symbols": received_symbols,
+            "decoded_source_symbols": result.source.len(),
+            "intermediate_symbols": result.intermediate.len(),
+            "stats": serde_json::to_value(to_unit_decode_stats(k, dropped, &result.stats))
+                .expect("serialize decode stats snapshot"),
+        })
     }
 
     #[test]
@@ -3176,6 +3201,74 @@ mod tests {
         );
         assert_eq!(first.stats.peeled, second.stats.peeled);
         assert_eq!(first.stats.inactivated, second.stats.inactivated);
+    }
+
+    #[test]
+    fn decode_statistics_output_scrubbed() {
+        let k = 8;
+        let symbol_size = 32;
+
+        let happy_seed = 42u64;
+        let happy_source = make_source_data(k, symbol_size);
+        let happy_encoder = SystematicEncoder::new(&happy_source, symbol_size, happy_seed).unwrap();
+        let happy_decoder = InactivationDecoder::new(k, symbol_size, happy_seed);
+        let happy_l = happy_decoder.params().l;
+
+        let mut happy_received = happy_decoder.constraint_symbols();
+        happy_received.extend(make_received_source(&happy_decoder, &happy_source));
+        for esi in (k as u32)..(happy_l as u32) {
+            let (cols, coefs) = happy_decoder.repair_equation(esi);
+            let repair_data = happy_encoder.repair_symbol(esi);
+            happy_received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+        let happy_result = happy_decoder
+            .decode(&happy_received)
+            .expect("happy-path decode should succeed");
+
+        let degraded_seed = 2026u64;
+        let degraded_source = make_source_data(k, symbol_size);
+        let degraded_encoder =
+            SystematicEncoder::new(&degraded_source, symbol_size, degraded_seed).unwrap();
+        let degraded_decoder = InactivationDecoder::new(k, symbol_size, degraded_seed);
+        let degraded_l = degraded_decoder.params().l;
+
+        let mut degraded_payload = make_received_source(&degraded_decoder, &degraded_source);
+        for esi in (k as u32)..((k + degraded_l + 8) as u32) {
+            let (cols, coefs) = degraded_decoder.repair_equation(esi);
+            let repair_data = degraded_encoder.repair_symbol(esi);
+            degraded_payload.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+        degraded_payload.drain(3..7);
+
+        let mut degraded_received = degraded_decoder.constraint_symbols();
+        degraded_received.extend(degraded_payload);
+        let degraded_result = degraded_decoder
+            .decode(&degraded_received)
+            .expect("degraded decode should recover source symbols");
+
+        assert_json_snapshot!(
+            "decode_statistics_output_scrubbed",
+            json!({
+                "happy_path": decode_stats_snapshot(
+                    "happy_path",
+                    k,
+                    symbol_size,
+                    happy_seed,
+                    0,
+                    happy_received.len(),
+                    &happy_result,
+                ),
+                "degraded_burst_loss": decode_stats_snapshot(
+                    "degraded_burst_loss",
+                    k,
+                    symbol_size,
+                    degraded_seed,
+                    4,
+                    degraded_received.len(),
+                    &degraded_result,
+                ),
+            })
+        );
     }
 
     #[test]
