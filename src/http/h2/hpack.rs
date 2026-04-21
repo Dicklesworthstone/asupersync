@@ -2651,6 +2651,33 @@ mod tests {
         assert_eq!(headers[0].name, ":method");
     }
 
+    #[test]
+    fn test_size_updates_apply_intermediate_eviction_before_dynamic_lookup() {
+        // RFC 7541 §4.2 requires consecutive block-start size updates to be
+        // applied in-order. If an intermediate shrink evicts dynamic entries,
+        // a later grow does not resurrect them before indexed lookups.
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+        let mut decoder = Decoder::new();
+
+        let seed_headers = vec![Header::new("x-evict-me", "value")];
+        let mut seeded = BytesMut::new();
+        encoder.encode(&seed_headers, &mut seeded);
+        let decoded = decoder.decode(&mut seeded.freeze()).unwrap();
+        assert_eq!(decoded, seed_headers);
+        assert!(decoder.dynamic_table_size() > 0);
+
+        let mut buf = BytesMut::new();
+        encode_integer(&mut buf, 0, 5, 0x20);
+        encode_integer(&mut buf, 256, 5, 0x20);
+        encode_integer(&mut buf, STATIC_TABLE.len() + 1, 7, 0x80);
+
+        let mut src = buf.freeze();
+        assert_compression_error(decoder.decode(&mut src));
+        assert_eq!(decoder.dynamic_table_size(), 0);
+        assert_eq!(decoder.dynamic_table_max_size(), 256);
+    }
+
     // =========================================================================
     // Audit Fix Tests: String length DoS prevention
     // =========================================================================
