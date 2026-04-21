@@ -216,4 +216,112 @@ mod tests {
         );
         crate::test_complete!("cross_generation_slot_reuse_panics_and_preserves_existing_task");
     }
+
+    #[test]
+    fn metamorphic_local_task_store_is_thread_affine() {
+        init_test("metamorphic_local_task_store_is_thread_affine");
+
+        let task_id = TaskId::new_for_test(42_427, 0);
+        let _ = remove_local_task(task_id);
+        let main_baseline = local_task_count();
+        let (stored_tx, stored_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            let thread_baseline = local_task_count();
+            let thread_missing_before_store = remove_local_task(task_id).is_none();
+
+            store_local_task(task_id, LocalStoredTask::new(async { Outcome::Ok(()) }));
+
+            stored_tx
+                .send((
+                    thread_baseline,
+                    thread_missing_before_store,
+                    local_task_count(),
+                ))
+                .expect("send thread-local store state");
+
+            release_rx.recv().expect("wait for main thread checks");
+
+            let thread_removed = remove_local_task(task_id).is_some();
+            (thread_removed, local_task_count(), thread_baseline)
+        });
+
+        let (thread_baseline, thread_missing_before_store, thread_after_store_count) =
+            stored_rx.recv().expect("receive thread-local store state");
+
+        crate::assert_with_log!(
+            thread_missing_before_store,
+            "new worker starts without task",
+            true,
+            thread_missing_before_store
+        );
+        crate::assert_with_log!(
+            thread_after_store_count == thread_baseline + 1,
+            "worker-local count increments independently",
+            thread_baseline + 1,
+            thread_after_store_count
+        );
+
+        let main_missing_while_worker_holds_task = remove_local_task(task_id).is_none();
+        crate::assert_with_log!(
+            main_missing_while_worker_holds_task,
+            "worker-owned task invisible on main thread",
+            true,
+            main_missing_while_worker_holds_task
+        );
+        crate::assert_with_log!(
+            local_task_count() == main_baseline,
+            "main thread count unaffected by worker-local store",
+            main_baseline,
+            local_task_count()
+        );
+
+        store_local_task(task_id, LocalStoredTask::new(async { Outcome::Ok(()) }));
+        crate::assert_with_log!(
+            local_task_count() == main_baseline + 1,
+            "same task id can be stored independently on main thread",
+            main_baseline + 1,
+            local_task_count()
+        );
+        let main_removed = remove_local_task(task_id).is_some();
+        crate::assert_with_log!(
+            main_removed,
+            "main thread removes only its own local task",
+            true,
+            main_removed
+        );
+        crate::assert_with_log!(
+            local_task_count() == main_baseline,
+            "main thread count restored after local cleanup",
+            main_baseline,
+            local_task_count()
+        );
+
+        release_tx
+            .send(())
+            .expect("allow worker thread to clean up local task");
+        let (thread_removed, thread_final_count, thread_join_baseline) =
+            handle.join().expect("join worker thread");
+
+        crate::assert_with_log!(
+            thread_removed,
+            "worker removes its own local task",
+            true,
+            thread_removed
+        );
+        crate::assert_with_log!(
+            thread_final_count == thread_join_baseline,
+            "worker-local count restored after cleanup",
+            thread_join_baseline,
+            thread_final_count
+        );
+        crate::assert_with_log!(
+            local_task_count() == main_baseline,
+            "main thread remains restored after worker cleanup",
+            main_baseline,
+            local_task_count()
+        );
+        crate::test_complete!("metamorphic_local_task_store_is_thread_affine");
+    }
 }
