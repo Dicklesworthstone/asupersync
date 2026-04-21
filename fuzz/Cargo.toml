@@ -1605,3 +1605,10 @@ path = "fuzz_targets/raptorq_codec_frame_splitter.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "grpc_codec"
+path = "fuzz_targets/grpc_codec.rs"
+test = false
+doc = false
+bench = false

@@ -19,6 +19,8 @@ on:
         type: choice
         options:
           - all
+          - grpc_codec
+          - grpc_codec
           - fuzz_http1_request
           - fuzz_http1_response
           - dns_resolver_name_compression
@@ -81,6 +83,8 @@ jobs:
       fail-fast: false
       matrix:
         target:
+          - grpc_codec
+          - grpc_codec
           - fuzz_http1_request
           - fuzz_http1_response
           - dns_resolver_name_compression
