@@ -1121,6 +1121,35 @@ mod tests {
         messages: Arc<StdMutex<Vec<CancelMessage>>>,
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct TokenSnapshot {
+        token_id: u64,
+        cancelled: bool,
+        reason_kind: Option<CancelKind>,
+        cancelled_at_nanos: Option<u64>,
+        queued_children: usize,
+        queued_listeners: usize,
+    }
+
+    fn snapshot_token(token: &SymbolCancelToken) -> TokenSnapshot {
+        TokenSnapshot {
+            token_id: token.token_id(),
+            cancelled: token.is_cancelled(),
+            reason_kind: token.reason().map(|reason| reason.kind),
+            cancelled_at_nanos: token.cancelled_at().map(Time::as_nanos),
+            queued_children: token.state.children.read().len(),
+            queued_listeners: token.state.listeners.read().len(),
+        }
+    }
+
+    fn attach_order_listener(token: &SymbolCancelToken, order: &Arc<StdMutex<Vec<u64>>>) {
+        let token_id = token.token_id();
+        let order = Arc::clone(order);
+        token.add_listener(move |_: &CancelReason, _: Time| {
+            order.lock().unwrap().push(token_id);
+        });
+    }
+
     impl CancelSink for RecordingSink {
         fn send_to(
             &self,
@@ -2569,6 +2598,76 @@ mod tests {
         ));
     }
 
+    /// META-CANCEL-003B: Idempotent Repeat-Cancel Property
+    /// Re-applying the same cancellation should not change the observable state.
+    /// Metamorphic relation: cancel_once(tree) = cancel_n_times(tree, same_reason)
+    #[test]
+    fn meta_repeat_cancel_matches_single_cancel_observable_state() {
+        let mut once_rng = DetRng::new(16_777_216);
+        let once_root = SymbolCancelToken::new(ObjectId::new_for_test(21), &mut once_rng);
+        let once_child_a = once_root.child(&mut once_rng);
+        let once_child_b = once_root.child(&mut once_rng);
+        let once_grandchild = once_child_a.child(&mut once_rng);
+
+        let once_order = Arc::new(StdMutex::new(Vec::new()));
+        for token in [&once_root, &once_child_a, &once_child_b, &once_grandchild] {
+            attach_order_listener(token, &once_order);
+        }
+
+        let mut repeated_rng = DetRng::new(16_777_216);
+        let repeated_root = SymbolCancelToken::new(ObjectId::new_for_test(21), &mut repeated_rng);
+        let repeated_child_a = repeated_root.child(&mut repeated_rng);
+        let repeated_child_b = repeated_root.child(&mut repeated_rng);
+        let repeated_grandchild = repeated_child_a.child(&mut repeated_rng);
+
+        let repeated_order = Arc::new(StdMutex::new(Vec::new()));
+        for token in [
+            &repeated_root,
+            &repeated_child_a,
+            &repeated_child_b,
+            &repeated_grandchild,
+        ] {
+            attach_order_listener(token, &repeated_order);
+        }
+
+        let reason = CancelReason::timeout();
+        let now = Time::from_millis(2_500);
+
+        assert!(
+            once_root.cancel(&reason, now),
+            "first cancellation should win for single-cancel fixture"
+        );
+        assert!(
+            repeated_root.cancel(&reason, now),
+            "first cancellation should win for repeated-cancel fixture"
+        );
+        for _ in 0..3 {
+            assert!(
+                !repeated_root.cancel(&reason, now),
+                "subsequent identical cancellations must be idempotent"
+            );
+        }
+
+        assert_eq!(snapshot_token(&once_root), snapshot_token(&repeated_root));
+        assert_eq!(
+            snapshot_token(&once_child_a),
+            snapshot_token(&repeated_child_a)
+        );
+        assert_eq!(
+            snapshot_token(&once_child_b),
+            snapshot_token(&repeated_child_b)
+        );
+        assert_eq!(
+            snapshot_token(&once_grandchild),
+            snapshot_token(&repeated_grandchild)
+        );
+        assert_eq!(
+            *once_order.lock().unwrap(),
+            *repeated_order.lock().unwrap(),
+            "identical repeated cancellations must not perturb drain order"
+        );
+    }
+
     /// META-CANCEL-004: Upward Isolation Property
     /// Child cancellation should never affect parent or siblings
     /// Metamorphic relation: cancel(child) ∩ affect(parent ∪ siblings) = ∅
@@ -2598,6 +2697,47 @@ mod tests {
         assert!(!parent.is_cancelled());
         assert!(!child_b.is_cancelled());
         assert!(!child_c.is_cancelled());
+    }
+
+    /// META-CANCEL-004B: Sibling Subtree Isolation Property
+    /// Cancelling one subtree parent should affect only that subtree.
+    /// Metamorphic relation: cancel(parent_a) ∩ affect(subtree_b) = ∅
+    #[test]
+    fn meta_sibling_subtrees_are_isolated_from_local_parent_cancel() {
+        let mut rng = DetRng::new(22_223);
+        let root = SymbolCancelToken::new(ObjectId::new_for_test(31), &mut rng);
+        let branch_a = root.child(&mut rng);
+        let branch_b = root.child(&mut rng);
+        let leaf_a = branch_a.child(&mut rng);
+        let leaf_b = branch_b.child(&mut rng);
+
+        let now = Time::from_millis(3_100);
+        branch_a.cancel(&CancelReason::user("branch_a_only"), now);
+
+        assert!(
+            branch_a.is_cancelled(),
+            "the locally cancelled subtree root must be cancelled"
+        );
+        assert!(
+            leaf_a.is_cancelled(),
+            "descendants of the locally cancelled subtree must cascade"
+        );
+        assert!(
+            !root.is_cancelled(),
+            "local subtree cancellation must not bubble up to the shared root"
+        );
+        assert!(
+            !branch_b.is_cancelled(),
+            "sibling subtree root must remain untouched"
+        );
+        assert!(
+            !leaf_b.is_cancelled(),
+            "sibling subtree descendants must remain untouched"
+        );
+        assert_eq!(branch_a.reason().unwrap().kind, CancelKind::User);
+        assert_eq!(leaf_a.reason().unwrap().kind, CancelKind::ParentCancelled);
+        assert!(branch_b.reason().is_none());
+        assert!(leaf_b.reason().is_none());
     }
 
     /// META-CANCEL-005: Listener Multiplicativity Property
@@ -2726,6 +2866,60 @@ mod tests {
         assert_eq!(
             nested_l3.reason().unwrap().kind,
             CancelKind::ParentCancelled
+        );
+    }
+
+    /// META-CANCEL-007B: Seeded Drain Determinism Property
+    /// Equivalent seeded setups must drain listeners in the same order.
+    /// Metamorphic relation: drain_order(seed, setup_a) = drain_order(seed, setup_b)
+    #[test]
+    fn meta_seeded_cascade_order_is_deterministic() {
+        let mut rng_a = DetRng::new(44_445);
+        let root_a = SymbolCancelToken::new(ObjectId::new_for_test(61), &mut rng_a);
+        let left_a = root_a.child(&mut rng_a);
+        let right_a = root_a.child(&mut rng_a);
+        let left_leaf_a = left_a.child(&mut rng_a);
+        let right_leaf_a = right_a.child(&mut rng_a);
+
+        let mut rng_b = DetRng::new(44_445);
+        let root_b = SymbolCancelToken::new(ObjectId::new_for_test(61), &mut rng_b);
+        let left_b = root_b.child(&mut rng_b);
+        let right_b = root_b.child(&mut rng_b);
+        let left_leaf_b = left_b.child(&mut rng_b);
+        let right_leaf_b = right_b.child(&mut rng_b);
+
+        let order_a = Arc::new(StdMutex::new(Vec::new()));
+        for token in [&root_a, &left_a, &right_a, &left_leaf_a, &right_leaf_a] {
+            attach_order_listener(token, &order_a);
+        }
+
+        let order_b = Arc::new(StdMutex::new(Vec::new()));
+        for token in [&root_b, &left_b, &right_b, &left_leaf_b, &right_leaf_b] {
+            attach_order_listener(token, &order_b);
+        }
+
+        let now = Time::from_millis(7_100);
+        let reason = CancelReason::new(CancelKind::Deadline);
+        root_a.cancel(&reason, now);
+        root_b.cancel(&reason, now);
+
+        let order_a = order_a.lock().unwrap().clone();
+        let order_b = order_b.lock().unwrap().clone();
+
+        assert_eq!(
+            order_a, order_b,
+            "identical seeded cancellation trees must drain in the same observable order"
+        );
+        assert_eq!(
+            order_a,
+            vec![
+                root_a.token_id(),
+                left_a.token_id(),
+                left_leaf_a.token_id(),
+                right_a.token_id(),
+                right_leaf_a.token_id(),
+            ],
+            "seeded drain order should follow deterministic parent-before-child traversal"
         );
     }
 

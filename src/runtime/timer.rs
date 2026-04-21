@@ -357,5 +357,52 @@ mod tests {
                 "both heaps should be drained after popping at the latest inserted deadline",
             );
         }
+
+        #[test]
+        fn metamorphic_uniform_deadline_shift_preserves_wake_order(
+            deadlines in prop::collection::vec(0u16..512u16, 1..24),
+            shift_ms in 0u16..2048u16,
+        ) {
+            let mut base_heap = TimerHeap::new();
+            let mut shifted_heap = TimerHeap::new();
+            let mut expected = Vec::with_capacity(deadlines.len());
+
+            for (index, deadline_ms) in deadlines.iter().copied().enumerate() {
+                let task = task(index as u32 + 1);
+                let deadline = Time::from_millis(u64::from(deadline_ms));
+                let shifted_deadline =
+                    Time::from_millis(u64::from(deadline_ms) + u64::from(shift_ms));
+                base_heap.insert(task, deadline);
+                shifted_heap.insert(task, shifted_deadline);
+                expected.push((deadline_ms, index, task));
+            }
+
+            expected.sort_by_key(|(deadline_ms, index, _)| (*deadline_ms, *index));
+            let expected_order = expected
+                .into_iter()
+                .map(|(_, _, task)| task)
+                .collect::<Vec<_>>();
+
+            let latest_ms = deadlines.iter().copied().max().unwrap_or(0);
+            let base_result = base_heap.pop_expired(Time::from_millis(u64::from(latest_ms)));
+            let shifted_result = shifted_heap.pop_expired(Time::from_millis(
+                u64::from(latest_ms) + u64::from(shift_ms),
+            ));
+
+            prop_assert_eq!(
+                base_result.as_slice(),
+                expected_order.as_slice(),
+                "wake ordering must follow increasing deadlines and insertion order for ties",
+            );
+            prop_assert_eq!(
+                shifted_result.as_slice(),
+                base_result.as_slice(),
+                "uniformly shifting every deadline must preserve final wake ordering",
+            );
+            prop_assert!(
+                base_heap.is_empty() && shifted_heap.is_empty(),
+                "both heaps should be drained after popping at their latest respective frontier",
+            );
+        }
     }
 }
