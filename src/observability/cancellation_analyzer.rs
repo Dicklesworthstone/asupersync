@@ -380,9 +380,13 @@ impl CancellationAnalyzer {
     /// Identify performance bottlenecks using statistical analysis.
     fn identify_bottlenecks(&self, traces: &[CancellationTrace]) -> Vec<BottleneckAnalysis> {
         let mut entity_timings: HashMap<String, Vec<Duration>> = HashMap::new();
+        let mut total_trace_time_ms = 0.0;
 
         // Collect timing data per entity
         for trace in traces {
+            if let Some(t) = trace.total_propagation_time {
+                total_trace_time_ms += t.as_secs_f64() * 1000.0;
+            }
             for step in &trace.steps {
                 entity_timings
                     .entry(step.entity_id.clone())
@@ -390,9 +394,13 @@ impl CancellationAnalyzer {
                     .push(step.elapsed_since_prev);
             }
         }
+        
+        // Prevent division by zero
+        if total_trace_time_ms == 0.0 {
+            total_trace_time_ms = 1.0;
+        }
 
         let mut bottlenecks = Vec::new();
-        let total_traces = traces.len() as f64;
 
         for (entity_id, timings) in entity_timings {
             if timings.len() < self.config.min_sample_size {
@@ -406,7 +414,7 @@ impl CancellationAnalyzer {
 
             // Calculate impact as percentage of total cancellation time
             let total_time_contribution = stats.mean * timings.len() as f64;
-            let impact_percentage = total_time_contribution / (stats.mean * total_traces * 10.0); // Rough estimate
+            let impact_percentage = (total_time_contribution / total_trace_time_ms) * 100.0;
 
             if impact_percentage > self.config.bottleneck_threshold {
                 let confidence = if stats.count >= 50 && stats.std_dev < stats.mean {
