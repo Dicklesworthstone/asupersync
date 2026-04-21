@@ -5,6 +5,7 @@
 use crate::types::{CancelKind, Outcome, RegionId, TaskId};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -233,12 +234,94 @@ impl Histogram {
     }
 }
 
+/// A summary for quantile-oriented distribution tracking.
+#[derive(Debug)]
+pub struct Summary {
+    name: String,
+    values: Mutex<Vec<f64>>,
+    sum: AtomicU64, // Stored as bits of f64
+    count: AtomicU64,
+}
+
+impl Summary {
+    pub(crate) fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            values: Mutex::new(Vec::new()),
+            sum: AtomicU64::new(0.0f64.to_bits()),
+            count: AtomicU64::new(0),
+        }
+    }
+
+    /// Observes a value.
+    pub fn observe(&self, value: f64) {
+        self.values
+            .lock()
+            .expect("summary values mutex poisoned")
+            .push(value);
+        self.count.fetch_add(1, Ordering::Relaxed);
+
+        let mut current = self.sum.load(Ordering::Relaxed);
+        loop {
+            let current_f64 = f64::from_bits(current);
+            let new_f64 = current_f64 + value;
+            let new_bits = new_f64.to_bits();
+            match self.sum.compare_exchange_weak(
+                current,
+                new_bits,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(v) => current = v,
+            }
+        }
+    }
+
+    /// Returns the total count of observations.
+    pub fn count(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    /// Returns the sum of observations.
+    pub fn sum(&self) -> f64 {
+        f64::from_bits(self.sum.load(Ordering::Relaxed))
+    }
+
+    /// Returns the summary name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns an exact quantile from the observed values.
+    pub fn quantile(&self, q: f64) -> Option<f64> {
+        if !(0.0..=1.0).contains(&q) {
+            return None;
+        }
+
+        let mut values = self
+            .values
+            .lock()
+            .expect("summary values mutex poisoned")
+            .clone();
+        if values.is_empty() {
+            return None;
+        }
+
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let last_index = values.len() - 1;
+        let rank = ((last_index as f64) * q).round() as usize;
+        values.get(rank).copied()
+    }
+}
+
 /// A collection of metrics.
 #[derive(Debug, Default)]
 pub struct Metrics {
     counters: BTreeMap<String, Arc<Counter>>,
     gauges: BTreeMap<String, Arc<Gauge>>,
     histograms: BTreeMap<String, Arc<Histogram>>,
+    summaries: BTreeMap<String, Arc<Summary>>,
 }
 
 impl Metrics {
@@ -273,6 +356,14 @@ impl Metrics {
             .clone()
     }
 
+    /// Gets or creates a summary.
+    pub fn summary(&mut self, name: &str) -> Arc<Summary> {
+        self.summaries
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(Summary::new(name)))
+            .clone()
+    }
+
     /// Exports metrics in a simple text format (Prometheus-like).
     #[must_use]
     pub fn export_prometheus(&self) -> String {
@@ -304,6 +395,17 @@ impl Metrics {
             }
             let _ = writeln!(output, "{name}_sum {}", hist.sum());
             let _ = writeln!(output, "{name}_count {}", hist.count());
+        }
+
+        for (name, summary) in &self.summaries {
+            let _ = writeln!(output, "# TYPE {name} summary");
+            for quantile in [0.5, 0.9, 0.99] {
+                if let Some(value) = summary.quantile(quantile) {
+                    let _ = writeln!(output, "{name}{{quantile=\"{quantile}\"}} {value}");
+                }
+            }
+            let _ = writeln!(output, "{name}_sum {}", summary.sum());
+            let _ = writeln!(output, "{name}_count {}", summary.count());
         }
 
         output
@@ -584,6 +686,24 @@ mod tests {
 
     #[test]
     #[allow(clippy::float_cmp)]
+    fn summary_observe_and_quantiles() {
+        let summary = Summary::new("request_size_bytes");
+        summary.observe(10.0);
+        summary.observe(20.0);
+        summary.observe(40.0);
+        summary.observe(80.0);
+        summary.observe(160.0);
+
+        assert_eq!(summary.name(), "request_size_bytes");
+        assert_eq!(summary.count(), 5);
+        assert_eq!(summary.sum(), 310.0);
+        assert_eq!(summary.quantile(0.5), Some(40.0));
+        assert_eq!(summary.quantile(0.9), Some(160.0));
+        assert_eq!(summary.quantile(0.99), Some(160.0));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
     fn histogram_empty() {
         let h = Histogram::new("h", vec![1.0, 5.0]);
         assert_eq!(h.count(), 0);
@@ -759,6 +879,28 @@ mod tests {
 
         insta::assert_snapshot!(
             "metrics_export_prometheus_mixed_registry",
+            metrics.export_prometheus()
+        );
+    }
+
+    #[test]
+    fn metrics_export_prometheus_full_registry_snapshot() {
+        let mut metrics = Metrics::new();
+        metrics.counter("requests_total").add(11);
+        metrics.gauge("memory_usage_bytes").set(4096);
+
+        let histogram = metrics.histogram("latency_seconds", vec![0.5, 1.0, 5.0]);
+        histogram.observe(0.25);
+        histogram.observe(0.75);
+        histogram.observe(3.5);
+
+        let summary = metrics.summary("request_size_bytes");
+        for value in [128.0, 256.0, 512.0, 1024.0, 2048.0] {
+            summary.observe(value);
+        }
+
+        insta::assert_snapshot!(
+            "metrics_export_prometheus_full_registry",
             metrics.export_prometheus()
         );
     }
