@@ -405,6 +405,9 @@ cargo insta accept
 "#;
 
     fs::create_dir_all("tests/snapshots/diagnostics")?;
-    fs::write("tests/snapshots/diagnostics/PROVENANCE.md", provenance_content)?;
+    fs::write(
+        "tests/snapshots/diagnostics/PROVENANCE.md",
+        provenance_content,
+    )?;
     Ok(())
 }
