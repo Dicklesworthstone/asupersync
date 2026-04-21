@@ -13,8 +13,7 @@ use arbitrary::Arbitrary;
 use asupersync::{
     cx::Cx,
     database::sqlite::{SqliteConnection, SqliteError, SqliteRow, SqliteValue},
-    types::{Outcome, RegionId, TaskId},
-    util::ArenaIndex,
+    types::Outcome,
 };
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
@@ -120,10 +119,7 @@ struct SqliteHarness {
 
 impl SqliteHarness {
     async fn new() -> Result<Self, SqliteError> {
-        let cx = Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
-            TaskId::from_arena(ArenaIndex::new(0, 0)),
-        );
+        let cx = Cx::for_testing();
 
         let conn = match SqliteConnection::open_in_memory(&cx).await {
             Outcome::Ok(conn) => conn,
