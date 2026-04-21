@@ -1255,7 +1255,7 @@ mod tests {
         assert!(!body.is_end_stream());
 
         let Poll::Ready(Some(Ok(frame))) = poll_body(&mut body) else {
-            panic!("expected trailers frame")
+            panic!("expected trailers frame") // ubs:ignore - test logic
         };
         let trailers = frame.into_trailers().expect("expected trailers frame");
         assert_eq!(
@@ -1490,7 +1490,7 @@ mod tests {
                     matches!(body_outcome, crate::types::Outcome::Ok(_))
                 );
                 let crate::types::Outcome::Ok(result) = body_outcome else {
-                    panic!("body task should finish successfully");
+                    panic!("body task should finish successfully"); // ubs:ignore - test logic
                 };
 
                 (result.0, result.1, checkpoints.lock().unwrap().clone())

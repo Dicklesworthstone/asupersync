@@ -1957,12 +1957,14 @@ fn kind_semantics(
 #[allow(clippy::arc_with_non_send_sync)]
 mod tests {
     use super::*;
+    use crate::observability::spectral_health::HealthClassification;
     use crate::record::obligation::{ObligationKind, ObligationRecord};
     use crate::record::region::RegionRecord;
     use crate::record::task::{TaskRecord, TaskState};
     use crate::time::{TimerDriverHandle, VirtualClock};
     use crate::types::{Budget, CancelReason, Outcome};
     use crate::util::ArenaIndex;
+    use serde_json::{Value, json};
     use std::fmt::Write as _;
     use std::sync::Arc;
 
@@ -2102,6 +2104,170 @@ mod tests {
             prepend_module_to_snapshot => false,
         }, {
             insta::assert_snapshot!(snapshot_name, rendered);
+        });
+    }
+
+    fn insert_wait_path(state: &mut RuntimeState, region: RegionId, len: usize) -> Vec<TaskId> {
+        let tasks: Vec<TaskId> = (0..len)
+            .map(|_| insert_task(state, region, TaskState::Running))
+            .collect();
+        for pair in tasks.windows(2) {
+            state
+                .task_mut(pair[0])
+                .expect("path task missing")
+                .waiters
+                .push(pair[1]);
+        }
+        tasks
+    }
+
+    fn round_metric(value: f64) -> f64 {
+        (value * 1_000.0).round() / 1_000.0
+    }
+
+    fn deadlock_severity_label(severity: DeadlockSeverity) -> &'static str {
+        match severity {
+            DeadlockSeverity::None => "none",
+            DeadlockSeverity::Elevated => "elevated",
+            DeadlockSeverity::Critical => "critical",
+        }
+    }
+
+    fn health_classification_json(classification: &HealthClassification) -> Value {
+        match classification {
+            HealthClassification::Deadlocked => json!({
+                "kind": "deadlocked",
+            }),
+            HealthClassification::Healthy { margin } => json!({
+                "kind": "healthy",
+                "margin": round_metric(*margin),
+            }),
+            HealthClassification::Degraded {
+                fiedler,
+                bottleneck_nodes,
+            } => json!({
+                "kind": "degraded",
+                "fiedler": round_metric(*fiedler),
+                "bottleneck_nodes": bottleneck_nodes,
+            }),
+            HealthClassification::Critical {
+                fiedler,
+                approaching_disconnect,
+            } => json!({
+                "kind": "critical",
+                "fiedler": round_metric(*fiedler),
+                "approaching_disconnect": approaching_disconnect,
+            }),
+            HealthClassification::Fragmented { components } => json!({
+                "kind": "fragmented",
+                "components": components,
+            }),
+        }
+    }
+
+    fn overall_health_status(
+        health: &SpectralHealthReport,
+        deadlock: &DirectionalDeadlockReport,
+        leak_count: usize,
+    ) -> &'static str {
+        if deadlock.severity == DeadlockSeverity::Critical
+            || matches!(
+                health.classification,
+                HealthClassification::Deadlocked
+                    | HealthClassification::Critical { .. }
+                    | HealthClassification::Fragmented { .. }
+            )
+        {
+            "critical"
+        } else if leak_count > 0
+            || deadlock.severity == DeadlockSeverity::Elevated
+            || matches!(health.classification, HealthClassification::Degraded { .. })
+        {
+            "degraded"
+        } else {
+            "passing"
+        }
+    }
+
+    fn render_diagnostic_healthcheck_json(
+        diagnostics: &Diagnostics,
+        region_id: RegionId,
+        generated_at: &str,
+        pid: u32,
+    ) -> Value {
+        let health = diagnostics.analyze_structural_health();
+        let deadlock = diagnostics.analyze_directional_deadlock();
+        let region = diagnostics.explain_region_open(region_id);
+        let leaks = diagnostics.find_leaked_obligations();
+        let leak_count = leaks.len();
+        let max_age_ms = leaks
+            .iter()
+            .map(|leak| u64::try_from(leak.age.as_millis()).unwrap_or(u64::MAX))
+            .max()
+            .unwrap_or(0);
+
+        json!({
+            "generated_at": generated_at,
+            "pid": pid,
+            "status": overall_health_status(&health, &deadlock, leak_count),
+            "structural_health": {
+                "classification": health_classification_json(&health.classification),
+                "fiedler_value": round_metric(health.decomposition.fiedler_value),
+                "spectral_gap": round_metric(health.decomposition.spectral_gap),
+                "spectral_radius": round_metric(health.decomposition.spectral_radius),
+                "iterations_used": health.decomposition.iterations_used,
+                "bottleneck_count": health.bottlenecks.len(),
+            },
+            "directional_deadlock": {
+                "severity": deadlock_severity_label(deadlock.severity),
+                "risk_score": round_metric(deadlock.risk_score),
+                "cycle_count": deadlock.cycles.len(),
+                "trapped_cycle_count": deadlock.cycles.iter().filter(|cycle| cycle.trapped).count(),
+                "cycles": deadlock.cycles.iter().map(|cycle| json!({
+                    "tasks": cycle.tasks.iter().map(|task| format!("{task:?}")).collect::<Vec<_>>(),
+                    "trapped": cycle.trapped,
+                    "ingress_edges": cycle.ingress_edges,
+                    "egress_edges": cycle.egress_edges,
+                })).collect::<Vec<_>>(),
+            },
+            "region": {
+                "id": format!("{:?}", region.region_id),
+                "state": region.region_state.map(|state| format!("{state:?}")),
+                "reason_count": region.reasons.len(),
+                "recommendation_count": region.recommendations.len(),
+            },
+            "obligations": {
+                "leak_count": leak_count,
+                "max_age_ms": max_age_ms,
+                "leaks": leaks.iter().map(|leak| json!({
+                    "obligation_id": format!("{:?}", leak.obligation_id),
+                    "region_id": format!("{:?}", leak.region_id),
+                    "holder_task": leak.holder_task.map(|task| format!("{task:?}")),
+                    "obligation_type": &leak.obligation_type,
+                    "age_ms": u64::try_from(leak.age.as_millis()).unwrap_or(u64::MAX),
+                })).collect::<Vec<_>>(),
+            },
+        })
+    }
+
+    fn scrub_diagnostic_healthcheck_json(mut value: Value) -> Value {
+        let Some(object) = value.as_object_mut() else {
+            return value;
+        };
+        object.insert(
+            "generated_at".to_string(),
+            Value::String("<scrubbed>".to_string()),
+        );
+        object.insert("pid".to_string(), Value::String("<scrubbed>".to_string()));
+        value
+    }
+
+    fn assert_diagnostic_healthcheck_snapshot(snapshot_name: &str, value: &Value) {
+        insta::with_settings!({
+            snapshot_path => "../../tests/snapshots",
+            prepend_module_to_snapshot => false,
+        }, {
+            insta::assert_json_snapshot!(snapshot_name, value);
         });
     }
 
@@ -2987,6 +3153,94 @@ mod tests {
 
         let scrubbed = scrub_diagnostic_report_timestamps(&rendered);
         assert_diagnostic_report_snapshot("observability_diagnostics_shutdown_drain", &scrubbed);
+    }
+
+    #[test]
+    fn diagnostics_healthcheck_json_snapshot_scrubbed() {
+        init_test("diagnostics_healthcheck_json_snapshot_scrubbed");
+        let mut passing_state = RuntimeState::new();
+        let passing_root = passing_state.create_root_region(Budget::INFINITE);
+        let passing_region = passing_state
+            .region(passing_root)
+            .expect("passing root missing");
+        let did_close = passing_region.begin_close(None)
+            && passing_region.begin_finalize()
+            && passing_region.complete_close();
+        assert!(did_close, "passing root should close cleanly");
+        let passing = scrub_diagnostic_healthcheck_json(render_diagnostic_healthcheck_json(
+            &Diagnostics::new(Arc::new(passing_state)),
+            passing_root,
+            "2026-04-21T08:30:00Z",
+            4101,
+        ));
+
+        let mut degraded_state = RuntimeState::new();
+        let degraded_root = degraded_state.create_root_region(Budget::INFINITE);
+        let degraded_tasks = insert_wait_path(&mut degraded_state, degraded_root, 11);
+        degraded_state
+            .task_mut(*degraded_tasks.first().expect("degraded path head"))
+            .expect("degraded head task missing")
+            .total_polls = 3;
+        let degraded_diagnostics = Diagnostics::new(Arc::new(degraded_state));
+        assert!(
+            matches!(
+                degraded_diagnostics
+                    .analyze_structural_health()
+                    .classification,
+                HealthClassification::Degraded { .. }
+            ),
+            "expected degraded classification for chained wait path"
+        );
+        let degraded = scrub_diagnostic_healthcheck_json(render_diagnostic_healthcheck_json(
+            &degraded_diagnostics,
+            degraded_root,
+            "2026-04-21T08:30:01Z",
+            4102,
+        ));
+
+        let mut critical_state = RuntimeState::new();
+        let critical_root = critical_state.create_root_region(Budget::INFINITE);
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(1_500)));
+        critical_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+        let t1 = insert_task(&mut critical_state, critical_root, TaskState::Running);
+        let t2 = insert_task(&mut critical_state, critical_root, TaskState::Running);
+        critical_state
+            .task_mut(t1)
+            .expect("critical t1")
+            .waiters
+            .push(t2);
+        critical_state
+            .task_mut(t2)
+            .expect("critical t2")
+            .waiters
+            .push(t1);
+        let _critical_obligation = insert_obligation(
+            &mut critical_state,
+            critical_root,
+            t1,
+            ObligationKind::Ack,
+            Time::from_millis(250),
+        );
+        let critical_diagnostics = Diagnostics::new(Arc::new(critical_state));
+        assert_eq!(
+            critical_diagnostics.analyze_directional_deadlock().severity,
+            DeadlockSeverity::Critical
+        );
+        let critical = scrub_diagnostic_healthcheck_json(render_diagnostic_healthcheck_json(
+            &critical_diagnostics,
+            critical_root,
+            "2026-04-21T08:30:02Z",
+            4103,
+        ));
+
+        assert_diagnostic_healthcheck_snapshot(
+            "observability_diagnostics_healthcheck_json",
+            &json!({
+                "passing": passing,
+                "degraded": degraded,
+                "critical": critical,
+            }),
+        );
     }
 
     #[test]

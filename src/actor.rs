@@ -1427,7 +1427,7 @@ mod tests {
         let registry_arc = registry_handle.as_arc();
         let io_cap: Arc<dyn crate::io::IoCap> = Arc::new(crate::io::LabIoCap::new());
         let pressure = Arc::new(SystemPressure::with_headroom(0.25));
-        let token = MacaroonToken::mint(&AuthKey::from_seed(7), "scope:actor", "actor/tests");
+        let macaroon_token = MacaroonToken::mint(&AuthKey::from_seed(7), "scope:actor", "actor/tests");
 
         let parent_cx = Cx::new_with_drivers(
             region,
@@ -1442,7 +1442,7 @@ mod tests {
         .with_registry_handle(Some(registry_handle))
         .with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("actor-origin")))
         .with_pressure(Arc::clone(&pressure))
-        .with_macaroon(token);
+        .with_macaroon(macaroon_token);
 
         let macaroon = parent_cx
             .macaroon_handle()

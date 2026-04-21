@@ -1,0 +1,136 @@
+---
+source: src/observability/diagnostics.rs
+expression: value
+---
+{
+  "critical": {
+    "directional_deadlock": {
+      "cycle_count": 1,
+      "cycles": [
+        {
+          "egress_edges": 0,
+          "ingress_edges": 0,
+          "tasks": [
+            "TaskId(0:0)",
+            "TaskId(1:0)"
+          ],
+          "trapped": true
+        }
+      ],
+      "risk_score": 1.0,
+      "severity": "critical",
+      "trapped_cycle_count": 1
+    },
+    "generated_at": "<scrubbed>",
+    "obligations": {
+      "leak_count": 1,
+      "leaks": [
+        {
+          "age_ms": 1250,
+          "holder_task": "TaskId(0:0)",
+          "obligation_id": "ObligationId(0:0)",
+          "obligation_type": "Ack",
+          "region_id": "RegionId(0:0)"
+        }
+      ],
+      "max_age_ms": 1250
+    },
+    "pid": "<scrubbed>",
+    "region": {
+      "id": "RegionId(0:0)",
+      "reason_count": 3,
+      "recommendation_count": 3,
+      "state": "Open"
+    },
+    "status": "critical",
+    "structural_health": {
+      "bottleneck_count": 0,
+      "classification": {
+        "kind": "deadlocked"
+      },
+      "fiedler_value": 2.0,
+      "iterations_used": 1,
+      "spectral_gap": 1.0,
+      "spectral_radius": 2.0
+    }
+  },
+  "degraded": {
+    "directional_deadlock": {
+      "cycle_count": 0,
+      "cycles": [],
+      "risk_score": 0.0,
+      "severity": "none",
+      "trapped_cycle_count": 0
+    },
+    "generated_at": "<scrubbed>",
+    "obligations": {
+      "leak_count": 0,
+      "leaks": [],
+      "max_age_ms": 0
+    },
+    "pid": "<scrubbed>",
+    "region": {
+      "id": "RegionId(0:0)",
+      "reason_count": 11,
+      "recommendation_count": 1,
+      "state": "Open"
+    },
+    "status": "degraded",
+    "structural_health": {
+      "bottleneck_count": 9,
+      "classification": {
+        "bottleneck_nodes": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9
+        ],
+        "fiedler": 0.081,
+        "kind": "degraded"
+      },
+      "fiedler_value": 0.081,
+      "iterations_used": 200,
+      "spectral_gap": 0.022,
+      "spectral_radius": 3.683
+    }
+  },
+  "passing": {
+    "directional_deadlock": {
+      "cycle_count": 0,
+      "cycles": [],
+      "risk_score": 0.0,
+      "severity": "none",
+      "trapped_cycle_count": 0
+    },
+    "generated_at": "<scrubbed>",
+    "obligations": {
+      "leak_count": 0,
+      "leaks": [],
+      "max_age_ms": 0
+    },
+    "pid": "<scrubbed>",
+    "region": {
+      "id": "RegionId(0:0)",
+      "reason_count": 0,
+      "recommendation_count": 0,
+      "state": "Closed"
+    },
+    "status": "passing",
+    "structural_health": {
+      "bottleneck_count": 0,
+      "classification": {
+        "kind": "healthy",
+        "margin": 0.0
+      },
+      "fiedler_value": 0.0,
+      "iterations_used": 0,
+      "spectral_gap": 0.0,
+      "spectral_radius": 0.0
+    }
+  }
+}

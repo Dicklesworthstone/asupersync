@@ -168,11 +168,11 @@ pub fn negotiate_encoding(
     let mut best: Option<(ContentEncoding, f32)> = None;
 
     for &encoding in supported {
-        let token = encoding.as_token();
+        let enc_token = encoding.as_token();
 
         let explicit_quality = preferences
             .iter()
-            .find(|q| q.encoding == token)
+            .find(|q| q.encoding == enc_token)
             .map(|q| q.quality);
 
         let quality = match encoding {
