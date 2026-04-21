@@ -763,6 +763,113 @@ mod tests {
         );
     }
 
+    #[test]
+    fn counter_metamorphic_fixed_schedule_never_decreases() {
+        let counter = Counter::new("metamorphic_counter");
+        let mut rng = crate::util::DetRng::new(0xC0FF_EE11);
+        let mut expected_total = 0_u64;
+        let mut previous = counter.get();
+
+        for _ in 0..64 {
+            let delta = (rng.next_u64() % 7) + 1;
+            counter.add(delta);
+            expected_total += delta;
+
+            let current = counter.get();
+            assert!(
+                current >= previous,
+                "counter must remain monotonic: previous={previous}, current={current}"
+            );
+            assert_eq!(
+                current, expected_total,
+                "counter should equal the cumulative sum of applied increments"
+            );
+            previous = current;
+        }
+    }
+
+    #[test]
+    fn counter_metamorphic_label_sum_matches_total() {
+        let mut metrics = Metrics::new();
+        let total = metrics.counter("requests_total");
+        let ok = metrics.counter("requests_total{outcome=\"ok\"}");
+        let err = metrics.counter("requests_total{outcome=\"err\"}");
+        let cancelled = metrics.counter("requests_total{outcome=\"cancelled\"}");
+        let mut rng = crate::util::DetRng::new(0x51A8_EE01);
+
+        for _ in 0..48 {
+            let delta = (rng.next_u64() % 5) + 1;
+            match rng.next_u64() % 3 {
+                0 => ok.add(delta),
+                1 => err.add(delta),
+                _ => cancelled.add(delta),
+            }
+            total.add(delta);
+
+            let labeled_sum = ok.get() + err.get() + cancelled.get();
+            assert_eq!(
+                total.get(),
+                labeled_sum,
+                "sum across labeled counters should match the total counter"
+            );
+        }
+    }
+
+    #[test]
+    fn counter_metamorphic_concurrent_schedule_matches_sequential() {
+        let mut rng = crate::util::DetRng::new(0xF17E_D5E5);
+        let mut workloads = Vec::new();
+        let mut expected_total = 0_u64;
+
+        for _ in 0..4 {
+            let mut shard = Vec::new();
+            for _ in 0..16 {
+                let delta = (rng.next_u64() % 11) + 1;
+                expected_total += delta;
+                shard.push(delta);
+            }
+            workloads.push(shard);
+        }
+
+        let sequential = Counter::new("sequential_counter");
+        for shard in &workloads {
+            for &delta in shard {
+                sequential.add(delta);
+            }
+        }
+
+        let concurrent = std::sync::Arc::new(Counter::new("concurrent_counter"));
+        let mut handles = Vec::new();
+        for shard in workloads.clone() {
+            let counter = std::sync::Arc::clone(&concurrent);
+            handles.push(std::thread::spawn(move || {
+                for delta in shard {
+                    counter.add(delta);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("counter worker should not panic");
+        }
+
+        assert_eq!(
+            sequential.get(),
+            expected_total,
+            "sequential replay should match the fixed workload sum"
+        );
+        assert_eq!(
+            concurrent.get(),
+            expected_total,
+            "concurrent replay should preserve the same cumulative count semantics"
+        );
+        assert_eq!(
+            concurrent.get(),
+            sequential.get(),
+            "concurrent and sequential application of the same schedule should agree"
+        );
+    }
+
     // =========================================================================
     // OpenTelemetry Exporter Implementation
     // =========================================================================
