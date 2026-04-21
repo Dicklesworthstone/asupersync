@@ -1,0 +1,25 @@
+---
+source: src/observability/spectral_health.rs
+expression: rendered
+---
+[stable]
+  classification: Healthy (margin=1.9000)
+  fiedler_value: 2.000000
+  spectral_gap: 0.500000
+  spectral_radius: 4.000000
+  iterations_used: 3
+  eigenvalues: [0.000000, 2.000000, 4.000000]
+[degraded]
+  classification: Degraded (fiedler=0.5858, bottleneck_nodes=2)
+  fiedler_value: 0.585786
+  spectral_gap: 0.171573
+  spectral_radius: 3.414214
+  iterations_used: 3
+  eigenvalues: [0.000000, 0.585786, 3.414214]
+[critical]
+  classification: Critical (fiedler=0.5858, approaching_disconnect=false)
+  fiedler_value: 0.585786
+  spectral_gap: 0.171573
+  spectral_radius: 3.414214
+  iterations_used: 3
+  eigenvalues: [0.000000, 0.585786, 3.414214]

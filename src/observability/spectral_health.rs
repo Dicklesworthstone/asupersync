@@ -1970,6 +1970,25 @@ mod tests {
         });
     }
 
+    fn render_eigenvalue_trace(label: &str, report: &SpectralHealthReport) -> String {
+        let eigenvalues = report
+            .decomposition
+            .eigenvalues
+            .iter()
+            .map(|value| format!("{value:.6}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        format!(
+            "[{label}]\n  classification: {}\n  fiedler_value: {:.6}\n  spectral_gap: {:.6}\n  spectral_radius: {:.6}\n  iterations_used: {}\n  eigenvalues: [{eigenvalues}]\n",
+            report.classification,
+            report.decomposition.fiedler_value,
+            report.decomposition.spectral_gap,
+            report.decomposition.spectral_radius,
+            report.decomposition.iterations_used,
+        )
+    }
+
     // -- Laplacian construction ------------------------------------------------
 
     #[test]
@@ -2904,6 +2923,37 @@ mod tests {
         );
 
         assert_spectral_health_snapshot("observability_spectral_health_report_scrubbed", &snapshot);
+    }
+
+    #[test]
+    fn eigenvalue_trace_scrubbed() {
+        let mut stable_monitor = SpectralHealthMonitor::new(SpectralThresholds::default());
+        let stable = stable_monitor.analyze(4, &[(0, 1), (1, 2), (2, 3), (3, 0)]);
+
+        let degraded_thresholds = SpectralThresholds {
+            critical_fiedler: 0.3,
+            degraded_fiedler: 0.8,
+            ..SpectralThresholds::default()
+        };
+        let mut degraded_monitor = SpectralHealthMonitor::new(degraded_thresholds);
+        let degraded = degraded_monitor.analyze(4, &[(0, 1), (1, 2), (2, 3)]);
+
+        let critical_thresholds = SpectralThresholds {
+            critical_fiedler: 0.6,
+            degraded_fiedler: 0.8,
+            ..SpectralThresholds::default()
+        };
+        let mut critical_monitor = SpectralHealthMonitor::new(critical_thresholds);
+        let critical = critical_monitor.analyze(4, &[(0, 1), (1, 2), (2, 3)]);
+
+        let snapshot = format!(
+            "{}{}{}",
+            render_eigenvalue_trace("stable", &stable),
+            render_eigenvalue_trace("degraded", &degraded),
+            render_eigenvalue_trace("critical", &critical),
+        );
+
+        assert_spectral_health_snapshot("eigenvalue_trace_scrubbed", &snapshot);
     }
 
     // -- Stress / scale test ---------------------------------------------------
