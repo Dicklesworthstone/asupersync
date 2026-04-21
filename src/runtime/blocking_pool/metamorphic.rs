@@ -9,9 +9,82 @@
 mod tests {
     use super::super::BlockingPool;
     use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    fn run_queued_cancellation_scenario(cancel_repeats: usize) -> (Vec<u8>, bool, bool) {
+        let pool = BlockingPool::new(1, 1);
+        let start_barrier = Arc::new(Barrier::new(2));
+        let finish_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let execution_order = Arc::new(Mutex::new(Vec::new()));
+        let cancelled_executed = Arc::new(AtomicBool::new(false));
+        let follower_executed = Arc::new(AtomicBool::new(false));
+
+        let start_barrier_clone = Arc::clone(&start_barrier);
+        let finish_gate_clone = Arc::clone(&finish_gate);
+        let execution_order_clone = Arc::clone(&execution_order);
+        let handle1 = pool.spawn(move || {
+            start_barrier_clone.wait();
+            let (lock, cvar) = &*finish_gate_clone;
+            let mut finish = lock.lock().unwrap();
+            while !*finish {
+                finish = cvar.wait(finish).unwrap();
+            }
+            execution_order_clone.lock().unwrap().push(1);
+        });
+
+        start_barrier.wait();
+
+        let cancelled_executed_clone = Arc::clone(&cancelled_executed);
+        let execution_order_clone = Arc::clone(&execution_order);
+        let handle2 = pool.spawn(move || {
+            cancelled_executed_clone.store(true, Ordering::SeqCst);
+            execution_order_clone.lock().unwrap().push(2);
+        });
+
+        let follower_executed_clone = Arc::clone(&follower_executed);
+        let execution_order_clone = Arc::clone(&execution_order);
+        let handle3 = pool.spawn(move || {
+            follower_executed_clone.store(true, Ordering::SeqCst);
+            execution_order_clone.lock().unwrap().push(3);
+        });
+
+        let queue_deadline = Instant::now() + Duration::from_secs(1);
+        while pool.pending_count() < 2 && Instant::now() < queue_deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            pool.pending_count() >= 2,
+            "blocked worker should leave the cancelled task and follower queued"
+        );
+
+        for _ in 0..cancel_repeats {
+            handle2.cancel();
+        }
+        assert!(
+            handle2.is_cancelled(),
+            "queued task should report cancelled"
+        );
+
+        {
+            let (lock, cvar) = &*finish_gate;
+            let mut finish = lock.lock().unwrap();
+            *finish = true;
+            cvar.notify_all();
+        }
+
+        assert!(handle1.wait_timeout(Duration::from_secs(5)));
+        assert!(handle2.wait_timeout(Duration::from_secs(5)));
+        assert!(handle3.wait_timeout(Duration::from_secs(5)));
+        assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+
+        (
+            execution_order.lock().unwrap().clone(),
+            cancelled_executed.load(Ordering::SeqCst),
+            follower_executed.load(Ordering::SeqCst),
+        )
+    }
 
     /// Metamorphic Relation 1: FIFO Ordering Preservation
     ///
@@ -396,6 +469,43 @@ mod tests {
             mixed_priority_results,
             vec![0, 1, 2, 3, 4],
             "All tasks should complete regardless of priority"
+        );
+    }
+
+    /// Metamorphic Relation 7: Repeated cancellation preserves follower progress.
+    ///
+    /// Property: Repeating `cancel()` on the same queued task must not change
+    /// whether a later queued follower runs once the blocked worker is released.
+    ///
+    /// MR: execute(blocker, cancel(x), follower) = execute(blocker, cancel(x)^n, follower)
+    #[test]
+    fn mr_repeated_cancellation_preserves_follower_progress() {
+        let (single_cancel_order, single_cancelled_executed, single_follower_executed) =
+            run_queued_cancellation_scenario(1);
+        let (repeated_cancel_order, repeated_cancelled_executed, repeated_follower_executed) =
+            run_queued_cancellation_scenario(4);
+
+        assert!(
+            !single_cancelled_executed && !repeated_cancelled_executed,
+            "queued cancelled task must stay skipped regardless of repeated cancel calls"
+        );
+        assert!(
+            single_follower_executed && repeated_follower_executed,
+            "follower task must still execute after the blocked worker is released"
+        );
+        assert_eq!(
+            single_cancel_order,
+            vec![1, 3],
+            "single cancellation should preserve blocker-then-follower execution order"
+        );
+        assert_eq!(
+            repeated_cancel_order,
+            vec![1, 3],
+            "repeated cancellation should preserve blocker-then-follower execution order"
+        );
+        assert_eq!(
+            repeated_cancel_order, single_cancel_order,
+            "repeating cancellation must not perturb survivor execution order"
         );
     }
 }
