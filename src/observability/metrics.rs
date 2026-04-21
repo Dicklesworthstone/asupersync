@@ -1656,7 +1656,9 @@ mod tests {
         metrics.counter("http_requests_total").add(0); // Zero value
         metrics.counter("bytes_processed_total").add(u64::MAX); // Max value
         metrics.counter("errors_total{status=\"404\"}").add(42); // With labels
-        metrics.counter("requests_with_underscore_name_total").add(123); // Underscore in name
+        metrics
+            .counter("requests_with_underscore_name_total")
+            .add(123); // Underscore in name
 
         // Gauges with various values including negatives
         metrics.gauge("temperature_celsius").set(-273); // Negative value
@@ -1666,8 +1668,10 @@ mod tests {
         metrics.gauge("offset_microseconds").set(i64::MIN); // Min negative value
 
         // Histograms with comprehensive bucket testing
-        let response_time_hist = metrics.histogram("http_request_duration_seconds",
-            vec![0.001, 0.01, 0.1, 1.0, 10.0]);
+        let response_time_hist = metrics.histogram(
+            "http_request_duration_seconds",
+            vec![0.001, 0.01, 0.1, 1.0, 10.0],
+        );
         response_time_hist.observe(0.0005); // Below first bucket
         response_time_hist.observe(0.005); // Between buckets
         response_time_hist.observe(0.05); // Between buckets
@@ -1675,8 +1679,10 @@ mod tests {
         response_time_hist.observe(5.0); // Between buckets
         response_time_hist.observe(50.0); // Above all buckets (+Inf)
 
-        let size_hist = metrics.histogram("request_size_bytes{endpoint=\"/api/v1/data\"}",
-            vec![100.0, 1000.0, 10000.0]);
+        let size_hist = metrics.histogram(
+            "request_size_bytes{endpoint=\"/api/v1/data\"}",
+            vec![100.0, 1000.0, 10000.0],
+        );
         size_hist.observe(0.0); // Zero value
         size_hist.observe(50.0); // First bucket
         size_hist.observe(500.0); // Middle bucket

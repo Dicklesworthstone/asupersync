@@ -1,0 +1,27 @@
+---
+source: src/observability/metrics.rs
+expression: "sorted_metric_blocks_snapshot(&metrics.export_prometheus())"
+---
+# TYPE region_live_tasks{region="root",phase="draining"} gauge
+region_live_tasks{region="root",phase="draining"} 2
+# TYPE region_live_tasks{region="worker",phase="steady"} gauge
+region_live_tasks{region="worker",phase="steady"} 5
+# TYPE runtime_poll_latency_seconds histogram
+runtime_poll_latency_seconds_bucket{le="0.001"} 1
+runtime_poll_latency_seconds_bucket{le="0.01"} 2
+runtime_poll_latency_seconds_bucket{le="0.1"} 3
+runtime_poll_latency_seconds_bucket{le="+Inf"} 3
+runtime_poll_latency_seconds_sum 0.0845
+runtime_poll_latency_seconds_count 3
+# TYPE runtime_regions_total{state="closed"} counter
+runtime_regions_total{state="closed"} 1
+# TYPE runtime_regions_total{state="open"} counter
+runtime_regions_total{state="open"} 3
+# TYPE scheduler_dispatch_total{lane="cancel",worker="primary"} counter
+scheduler_dispatch_total{lane="cancel",worker="primary"} 2
+# TYPE scheduler_dispatch_total{lane="ready",worker="primary"} counter
+scheduler_dispatch_total{lane="ready",worker="primary"} 11
+# TYPE scheduler_queue_depth{lane="ready"} gauge
+scheduler_queue_depth{lane="ready"} 4
+# TYPE scheduler_queue_depth{lane="timed"} gauge
+scheduler_queue_depth{lane="timed"} 1
