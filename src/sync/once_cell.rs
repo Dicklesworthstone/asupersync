@@ -921,6 +921,67 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_blocking_contenders_converge_on_single_observable_winner() {
+        init_test("metamorphic_blocking_contenders_converge_on_single_observable_winner");
+        let _lock = acquire_blocking_test_lock();
+
+        for candidates in [
+            &[11u32, 17][..],
+            &[5u32, 8, 13][..],
+            &[2u32, 3, 5, 8, 13][..],
+        ] {
+            let cell = Arc::new(OnceCell::<u32>::new());
+            let start_gate = Arc::new(std::sync::Barrier::new(candidates.len()));
+            let init_runs = Arc::new(AtomicUsize::new(0));
+            let mut handles = Vec::with_capacity(candidates.len());
+
+            for &candidate in candidates {
+                let cell = Arc::clone(&cell);
+                let start_gate = Arc::clone(&start_gate);
+                let init_runs = Arc::clone(&init_runs);
+                handles.push(thread::spawn(move || {
+                    start_gate.wait();
+                    *cell.get_or_init_blocking(|| {
+                        init_runs.fetch_add(1, Ordering::SeqCst);
+                        thread::sleep(std::time::Duration::from_millis(5));
+                        candidate
+                    })
+                }));
+            }
+
+            let observed: Vec<u32> = handles
+                .into_iter()
+                .map(|handle| handle.join().expect("thread panicked"))
+                .collect();
+            let winner = observed[0];
+
+            assert!(
+                observed.iter().all(|&value| value == winner),
+                "all contenders should observe the same winner: {observed:?}"
+            );
+            assert_eq!(
+                init_runs.load(Ordering::SeqCst),
+                1,
+                "exactly one initializer should run"
+            );
+            assert_eq!(cell.get(), Some(&winner));
+
+            let probe_runs = Arc::new(AtomicUsize::new(0));
+            let probe_counter = Arc::clone(&probe_runs);
+            let cached = cell.get_or_init_blocking(|| {
+                probe_counter.fetch_add(1, Ordering::SeqCst);
+                999
+            });
+            assert_eq!(*cached, winner);
+            assert_eq!(probe_runs.load(Ordering::SeqCst), 0);
+        }
+
+        crate::test_complete!(
+            "metamorphic_blocking_contenders_converge_on_single_observable_winner"
+        );
+    }
+
+    #[test]
     fn metamorphic_blocking_panic_recovery_matches_fresh_success_surface() {
         init_test("metamorphic_blocking_panic_recovery_matches_fresh_success_surface");
         let _lock = acquire_blocking_test_lock();
