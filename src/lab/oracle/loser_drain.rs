@@ -333,6 +333,7 @@ impl LoserDrainOracle {
 mod tests {
     use super::*;
     use crate::util::ArenaIndex;
+    use serde_json::{Value, json};
 
     fn task(n: u32) -> TaskId {
         TaskId::from_arena(ArenaIndex::new(n, 0))
@@ -349,6 +350,168 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn scrub_loser_drain_trace(scenario_id: &str, oracle: &LoserDrainOracle) -> serde_json::Value {
+        let active_races = oracle
+            .active_races
+            .iter()
+            .map(|(race_id, record)| {
+                json!({
+                    "race_id": race_id,
+                    "region": record.region.to_string(),
+                    "participants": record
+                        .participants
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                    "start_time_nanos": record.start_time.as_nanos(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let completed_races = oracle
+            .completed_races
+            .iter()
+            .map(|(race_id, record)| {
+                json!({
+                    "race_id": race_id,
+                    "winner": record.winner.to_string(),
+                    "participants": record
+                        .participants
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                    "complete_time_nanos": record.complete_time.as_nanos(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let unknown_completions = oracle
+            .unknown_completions
+            .iter()
+            .map(|(race_id, record)| {
+                json!({
+                    "race_id": race_id,
+                    "winner": record.winner.to_string(),
+                    "complete_time_nanos": record.complete_time.as_nanos(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let task_completions = oracle
+            .task_completions
+            .iter()
+            .map(|(task, time)| {
+                json!({
+                    "task": task.to_string(),
+                    "completed_at_nanos": time.as_nanos(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let check = match oracle.check() {
+            Ok(()) => json!({"status": "ok"}),
+            Err(LoserDrainViolation::UndrainedLosers {
+                race_id,
+                winner,
+                undrained_losers,
+                race_complete_time,
+            }) => json!({
+                "status": "undrained_losers",
+                "race_id": race_id,
+                "winner": winner.to_string(),
+                "undrained_losers": undrained_losers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+                "race_complete_time_nanos": race_complete_time.as_nanos(),
+            }),
+            Err(LoserDrainViolation::ActiveRaceNotCompleted {
+                race_id,
+                participants,
+                race_start_time,
+            }) => json!({
+                "status": "active_race_not_completed",
+                "race_id": race_id,
+                "participants": participants
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+                "race_start_time_nanos": race_start_time.as_nanos(),
+            }),
+            Err(LoserDrainViolation::UnknownRaceCompletion {
+                race_id,
+                winner,
+                race_complete_time,
+            }) => json!({
+                "status": "unknown_race_completion",
+                "race_id": race_id,
+                "winner": winner.to_string(),
+                "race_complete_time_nanos": race_complete_time.as_nanos(),
+            }),
+        };
+
+        json!({
+            "scenario_id": scenario_id,
+            "counts": {
+                "race_count": oracle.race_count(),
+                "active_race_count": oracle.active_race_count(),
+                "completed_race_count": oracle.completed_race_count(),
+            },
+            "active_races": active_races,
+            "completed_races": completed_races,
+            "unknown_completions": unknown_completions,
+            "task_completions": task_completions,
+            "check": check,
+        })
+    }
+
+    fn drained_three_way_loser_trace() -> Value {
+        let mut oracle = LoserDrainOracle::new();
+        let race_id = oracle.on_race_start(region(0), vec![task(1), task(2), task(3)], t(10));
+
+        oracle.on_task_complete(task(1), t(40));
+        oracle.on_task_complete(task(2), t(60));
+        oracle.on_task_complete(task(3), t(70));
+        oracle.on_race_complete(race_id, task(1), t(80));
+
+        scrub_loser_drain_trace("drained_three_way", &oracle)
+    }
+
+    fn undrained_multi_loser_trace() -> Value {
+        let mut oracle = LoserDrainOracle::new();
+        let race_id = oracle.on_race_start(
+            region(1),
+            vec![task(10), task(11), task(12), task(13)],
+            t(100),
+        );
+
+        oracle.on_task_complete(task(10), t(140));
+        oracle.on_task_complete(task(11), t(145));
+        oracle.on_race_complete(race_id, task(10), t(150));
+        oracle.on_task_complete(task(12), t(220));
+
+        scrub_loser_drain_trace("undrained_multi_loser", &oracle)
+    }
+
+    fn unknown_completion_trace() -> Value {
+        let mut oracle = LoserDrainOracle::new();
+        oracle.on_race_complete(77, task(21), t(900));
+        oracle.on_task_complete(task(21), t(880));
+
+        scrub_loser_drain_trace("unknown_completion", &oracle)
+    }
+
+    #[test]
+    fn loser_drain_trace_bundle_snapshot() {
+        let bundle = vec![
+            drained_three_way_loser_trace(),
+            undrained_multi_loser_trace(),
+            unknown_completion_trace(),
+        ];
+
+        insta::assert_json_snapshot!("loser_drain_trace_bundle", bundle);
     }
 
     #[test]

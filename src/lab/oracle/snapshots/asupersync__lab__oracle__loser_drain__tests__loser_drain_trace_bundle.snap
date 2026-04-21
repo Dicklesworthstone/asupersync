@@ -1,0 +1,121 @@
+---
+source: src/lab/oracle/loser_drain.rs
+expression: bundle
+---
+[
+  {
+    "active_races": [],
+    "check": {
+      "status": "ok"
+    },
+    "completed_races": [
+      {
+        "complete_time_nanos": 80,
+        "participants": [
+          "T1",
+          "T2",
+          "T3"
+        ],
+        "race_id": 0,
+        "winner": "T1"
+      }
+    ],
+    "counts": {
+      "active_race_count": 0,
+      "completed_race_count": 1,
+      "race_count": 1
+    },
+    "scenario_id": "drained_three_way",
+    "task_completions": [
+      {
+        "completed_at_nanos": 40,
+        "task": "T1"
+      },
+      {
+        "completed_at_nanos": 60,
+        "task": "T2"
+      },
+      {
+        "completed_at_nanos": 70,
+        "task": "T3"
+      }
+    ],
+    "unknown_completions": []
+  },
+  {
+    "active_races": [],
+    "check": {
+      "race_complete_time_nanos": 150,
+      "race_id": 0,
+      "status": "undrained_losers",
+      "undrained_losers": [
+        "T12",
+        "T13"
+      ],
+      "winner": "T10"
+    },
+    "completed_races": [
+      {
+        "complete_time_nanos": 150,
+        "participants": [
+          "T10",
+          "T11",
+          "T12",
+          "T13"
+        ],
+        "race_id": 0,
+        "winner": "T10"
+      }
+    ],
+    "counts": {
+      "active_race_count": 0,
+      "completed_race_count": 1,
+      "race_count": 1
+    },
+    "scenario_id": "undrained_multi_loser",
+    "task_completions": [
+      {
+        "completed_at_nanos": 140,
+        "task": "T10"
+      },
+      {
+        "completed_at_nanos": 145,
+        "task": "T11"
+      },
+      {
+        "completed_at_nanos": 220,
+        "task": "T12"
+      }
+    ],
+    "unknown_completions": []
+  },
+  {
+    "active_races": [],
+    "check": {
+      "race_complete_time_nanos": 900,
+      "race_id": 77,
+      "status": "unknown_race_completion",
+      "winner": "T21"
+    },
+    "completed_races": [],
+    "counts": {
+      "active_race_count": 0,
+      "completed_race_count": 0,
+      "race_count": 1
+    },
+    "scenario_id": "unknown_completion",
+    "task_completions": [
+      {
+        "completed_at_nanos": 880,
+        "task": "T21"
+      }
+    ],
+    "unknown_completions": [
+      {
+        "complete_time_nanos": 900,
+        "race_id": 77,
+        "winner": "T21"
+      }
+    ]
+  }
+]
