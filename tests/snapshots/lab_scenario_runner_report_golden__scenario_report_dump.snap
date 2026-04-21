@@ -1,0 +1,380 @@
+---
+source: tests/lab_scenario_runner_report_golden.rs
+expression: golden
+---
+{
+  "faulted_path": {
+    "adapter": "lab.scenario_runner",
+    "certificate": {
+      "event_hash": 2088590998354365396,
+      "schedule_hash": 0,
+      "trace_fingerprint": 16690330141123474010
+    },
+    "execution_instance_id": "scenario-runner-report-faulted:lab:0x2A:0",
+    "faults_injected": 2,
+    "invariant_violations": [],
+    "oracle_report": {
+      "all_passed": true,
+      "checked": [
+        "task_leak",
+        "obligation_leak",
+        "quiescence",
+        "loser_drain",
+        "finalizer",
+        "region_tree",
+        "region_leak",
+        "ambient_authority",
+        "deadline_monotone",
+        "cancellation_protocol",
+        "cancel_correctness",
+        "cancel_debt",
+        "cancel_signal_ordering",
+        "runtime_epoch",
+        "channel_atomicity",
+        "waker_dedup",
+        "actor_leak",
+        "supervision",
+        "mailbox",
+        "rref_access",
+        "reply_linearity",
+        "registry_lease",
+        "down_order",
+        "supervisor_quiescence"
+      ],
+      "entries": [
+        {
+          "invariant": "task_leak",
+          "passed": true
+        },
+        {
+          "invariant": "obligation_leak",
+          "passed": true
+        },
+        {
+          "invariant": "quiescence",
+          "passed": true
+        },
+        {
+          "invariant": "loser_drain",
+          "passed": true
+        },
+        {
+          "invariant": "finalizer",
+          "passed": true
+        },
+        {
+          "invariant": "region_tree",
+          "passed": true
+        },
+        {
+          "invariant": "region_leak",
+          "passed": true
+        },
+        {
+          "invariant": "ambient_authority",
+          "passed": true
+        },
+        {
+          "invariant": "deadline_monotone",
+          "passed": true
+        },
+        {
+          "invariant": "cancellation_protocol",
+          "passed": true
+        },
+        {
+          "invariant": "cancel_correctness",
+          "passed": true
+        },
+        {
+          "invariant": "cancel_debt",
+          "passed": true
+        },
+        {
+          "invariant": "cancel_signal_ordering",
+          "passed": true
+        },
+        {
+          "invariant": "runtime_epoch",
+          "passed": true
+        },
+        {
+          "invariant": "channel_atomicity",
+          "passed": true
+        },
+        {
+          "invariant": "waker_dedup",
+          "passed": true
+        },
+        {
+          "invariant": "actor_leak",
+          "passed": true
+        },
+        {
+          "invariant": "supervision",
+          "passed": true
+        },
+        {
+          "invariant": "mailbox",
+          "passed": true
+        },
+        {
+          "invariant": "rref_access",
+          "passed": true
+        },
+        {
+          "invariant": "reply_linearity",
+          "passed": true
+        },
+        {
+          "invariant": "registry_lease",
+          "passed": true
+        },
+        {
+          "invariant": "down_order",
+          "passed": true
+        },
+        {
+          "invariant": "supervisor_quiescence",
+          "passed": true
+        }
+      ],
+      "failed": 0,
+      "passed": 24
+    },
+    "passed": true,
+    "replay_metadata": {
+      "effective_entropy_seed": 17448893944149198620,
+      "effective_seed": 42,
+      "event_count": 2,
+      "event_hash": 2088590998354365396,
+      "family": {
+        "id": "scenario-runner-report-faulted",
+        "surface_contract_version": "scenario-runner-report-faulted.v1",
+        "surface_id": "scenario-runner-report-faulted"
+      },
+      "instance": {
+        "effective_seed": 42,
+        "family_id": "scenario-runner-report-faulted",
+        "run_index": 0,
+        "runtime_kind": "lab"
+      },
+      "repro_command": "ASUPERSYNC_SEED=0x2A rch exec -- cargo test scenario-runner-report-faulted -- --nocapture",
+      "schedule_hash": 0,
+      "seed_plan": {
+        "canonical_seed": 42,
+        "lab_seed_mode": "inherit",
+        "live_seed_mode": "inherit",
+        "replay_policy": "single_seed",
+        "seed_lineage_id": "seed.scenario-runner-report-faulted.v1"
+      },
+      "steps_total": 0,
+      "trace_fingerprint": 16690330141123474010
+    },
+    "scenario_id": "scenario-runner-report-faulted",
+    "seed": 42,
+    "seed_lineage": {
+      "canonical_seed": 42,
+      "lab_effective_seed": 42,
+      "lab_entropy_seed": 17448893944149198620,
+      "lab_seed_mode": "inherit",
+      "live_effective_seed": 42,
+      "live_entropy_seed": 17448893944149198620,
+      "live_seed_mode": "inherit",
+      "replay_policy": "single_seed",
+      "seed_lineage_id": "seed.scenario-runner-report-faulted.v1",
+      "seeds_match": true
+    },
+    "seed_lineage_id": "seed.scenario-runner-report-faulted.v1",
+    "steps": 0,
+    "surface_contract_version": "scenario-runner-report-faulted.v1",
+    "surface_id": "scenario-runner-report-faulted"
+  },
+  "happy_path": {
+    "adapter": "lab.scenario_runner",
+    "certificate": {
+      "event_hash": 0,
+      "schedule_hash": 0,
+      "trace_fingerprint": 16732658632908851881
+    },
+    "execution_instance_id": "scenario-runner-report-happy:lab:0x2A:0",
+    "faults_injected": 0,
+    "invariant_violations": [],
+    "oracle_report": {
+      "all_passed": true,
+      "checked": [
+        "task_leak",
+        "obligation_leak",
+        "quiescence",
+        "loser_drain",
+        "finalizer",
+        "region_tree",
+        "region_leak",
+        "ambient_authority",
+        "deadline_monotone",
+        "cancellation_protocol",
+        "cancel_correctness",
+        "cancel_debt",
+        "cancel_signal_ordering",
+        "runtime_epoch",
+        "channel_atomicity",
+        "waker_dedup",
+        "actor_leak",
+        "supervision",
+        "mailbox",
+        "rref_access",
+        "reply_linearity",
+        "registry_lease",
+        "down_order",
+        "supervisor_quiescence"
+      ],
+      "entries": [
+        {
+          "invariant": "task_leak",
+          "passed": true
+        },
+        {
+          "invariant": "obligation_leak",
+          "passed": true
+        },
+        {
+          "invariant": "quiescence",
+          "passed": true
+        },
+        {
+          "invariant": "loser_drain",
+          "passed": true
+        },
+        {
+          "invariant": "finalizer",
+          "passed": true
+        },
+        {
+          "invariant": "region_tree",
+          "passed": true
+        },
+        {
+          "invariant": "region_leak",
+          "passed": true
+        },
+        {
+          "invariant": "ambient_authority",
+          "passed": true
+        },
+        {
+          "invariant": "deadline_monotone",
+          "passed": true
+        },
+        {
+          "invariant": "cancellation_protocol",
+          "passed": true
+        },
+        {
+          "invariant": "cancel_correctness",
+          "passed": true
+        },
+        {
+          "invariant": "cancel_debt",
+          "passed": true
+        },
+        {
+          "invariant": "cancel_signal_ordering",
+          "passed": true
+        },
+        {
+          "invariant": "runtime_epoch",
+          "passed": true
+        },
+        {
+          "invariant": "channel_atomicity",
+          "passed": true
+        },
+        {
+          "invariant": "waker_dedup",
+          "passed": true
+        },
+        {
+          "invariant": "actor_leak",
+          "passed": true
+        },
+        {
+          "invariant": "supervision",
+          "passed": true
+        },
+        {
+          "invariant": "mailbox",
+          "passed": true
+        },
+        {
+          "invariant": "rref_access",
+          "passed": true
+        },
+        {
+          "invariant": "reply_linearity",
+          "passed": true
+        },
+        {
+          "invariant": "registry_lease",
+          "passed": true
+        },
+        {
+          "invariant": "down_order",
+          "passed": true
+        },
+        {
+          "invariant": "supervisor_quiescence",
+          "passed": true
+        }
+      ],
+      "failed": 0,
+      "passed": 24
+    },
+    "passed": true,
+    "replay_metadata": {
+      "effective_entropy_seed": 17448893944149198620,
+      "effective_seed": 42,
+      "event_count": 0,
+      "event_hash": 0,
+      "family": {
+        "id": "scenario-runner-report-happy",
+        "surface_contract_version": "scenario-runner-report-happy.v1",
+        "surface_id": "scenario-runner-report-happy"
+      },
+      "instance": {
+        "effective_seed": 42,
+        "family_id": "scenario-runner-report-happy",
+        "run_index": 0,
+        "runtime_kind": "lab"
+      },
+      "repro_command": "ASUPERSYNC_SEED=0x2A rch exec -- cargo test scenario-runner-report-happy -- --nocapture",
+      "schedule_hash": 0,
+      "seed_plan": {
+        "canonical_seed": 42,
+        "lab_seed_mode": "inherit",
+        "live_seed_mode": "inherit",
+        "replay_policy": "single_seed",
+        "seed_lineage_id": "seed.scenario-runner-report-happy.v1"
+      },
+      "steps_total": 0,
+      "trace_fingerprint": 16732658632908851881
+    },
+    "scenario_id": "scenario-runner-report-happy",
+    "seed": 42,
+    "seed_lineage": {
+      "canonical_seed": 42,
+      "lab_effective_seed": 42,
+      "lab_entropy_seed": 17448893944149198620,
+      "lab_seed_mode": "inherit",
+      "live_effective_seed": 42,
+      "live_entropy_seed": 17448893944149198620,
+      "live_seed_mode": "inherit",
+      "replay_policy": "single_seed",
+      "seed_lineage_id": "seed.scenario-runner-report-happy.v1",
+      "seeds_match": true
+    },
+    "seed_lineage_id": "seed.scenario-runner-report-happy.v1",
+    "steps": 0,
+    "surface_contract_version": "scenario-runner-report-happy.v1",
+    "surface_id": "scenario-runner-report-happy"
+  }
+}
