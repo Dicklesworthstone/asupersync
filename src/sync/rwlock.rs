@@ -2590,7 +2590,7 @@ mod metamorphic_tests {
         loop {
             match pinned.as_mut().poll(&mut cx) {
                 Poll::Ready(v) => return v,
-                Poll::Pending => continue,
+                Poll::Pending => {}
             }
         }
     }
@@ -2650,7 +2650,7 @@ mod metamorphic_tests {
             num_readers in 2usize..8,
             _seed in any::<u64>(),
         ) {
-            let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+            let _runtime = std::rc::Rc::new(LabRuntime::new(LabConfig::default()));
             let harness = RwLockTestHarness::new(0u64);
             let lock = harness.lock();
             let cx = test_cx();
@@ -2727,7 +2727,7 @@ mod metamorphic_tests {
             num_readers in 2usize..12,
             _seed in any::<u64>(),
         ) {
-            let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+            let _runtime = std::rc::Rc::new(LabRuntime::new(LabConfig::default()));
             let harness = RwLockTestHarness::new(0u64);
             let lock = harness.lock();
             let cx = test_cx();
@@ -2800,7 +2800,7 @@ mod metamorphic_tests {
             num_readers_after_cancel in 2usize..6,
             _seed in any::<u64>(),
         ) {
-            let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+            let _runtime = std::rc::Rc::new(LabRuntime::new(LabConfig::default()));
             let harness = RwLockTestHarness::new(0u64);
             let lock = harness.lock();
             let cx = test_cx();
@@ -2892,7 +2892,7 @@ mod metamorphic_tests {
             num_readers_to_cancel in 1usize..6,
             _seed in any::<u64>(),
         ) {
-            let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+            let _runtime = std::rc::Rc::new(LabRuntime::new(LabConfig::default()));
             let harness = RwLockTestHarness::new(0u64);
             let lock = harness.lock();
             let cx = test_cx();
@@ -2961,7 +2961,7 @@ mod metamorphic_tests {
             num_persistent_readers in 2usize..5,
             _seed in any::<u64>(),
         ) {
-            let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+            let _runtime = std::rc::Rc::new(LabRuntime::new(LabConfig::default()));
             let harness = RwLockTestHarness::new(0u64);
             let lock = harness.lock();
             let cx = test_cx();

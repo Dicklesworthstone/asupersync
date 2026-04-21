@@ -460,6 +460,11 @@ impl DeferredCleanupQueue {
         let start_time = Instant::now();
         let mut processed_count = 0;
         let mut batch = Vec::new();
+        // Items popped that are not yet safe to reclaim. We cannot rely on
+        // queue ordering (MPMC lockless queues may interleave producers), so
+        // we scan the whole queue and re-enqueue anything not safe rather
+        // than breaking on the first unsafe item.
+        let mut held_back: Vec<EpochWork> = Vec::new();
 
         // Collect a batch of work items that are safe to process
         while processed_count < self.config.max_batch_size {
@@ -476,14 +481,20 @@ impl DeferredCleanupQueue {
                         break;
                     }
                 } else {
-                    // This work is from a current epoch - put it back
-                    self.queue.push(epoch_work);
-                    self.size.fetch_add(1, Ordering::Relaxed);
-                    break;
+                    // Not yet safe; hold back and keep scanning for safe items
+                    // that may be queued behind it.
+                    held_back.push(epoch_work);
                 }
             } else {
                 break; // Queue is empty
             }
+        }
+
+        // Re-enqueue any items we held back so they remain observable for
+        // later advances.
+        for epoch_work in held_back {
+            self.queue.push(epoch_work);
+            self.size.fetch_add(1, Ordering::Relaxed);
         }
 
         // Process the collected batch
@@ -871,16 +882,24 @@ impl EpochGC {
         }
 
         if let Some(new_epoch) = self.epoch_counter.try_advance() {
-            // Process work from epochs older than the current one
-            // We use (new_epoch - 1) as the safe epoch boundary
-            let safe_epoch = new_epoch.saturating_sub(1);
-            self.cleanup_queue.process_safe_epochs(safe_epoch)
+            // Work enqueued while the global epoch was `new_epoch - 1` (or older)
+            // is now safe to reclaim: every thread that might have observed it
+            // has progressed to `new_epoch`. We pass `new_epoch` as the safe
+            // boundary so `process_safe_epochs` reclaims items with
+            // `epoch < new_epoch`.
+            self.cleanup_queue.process_safe_epochs(new_epoch)
         } else {
             0
         }
     }
 
-    /// Force advance the epoch and process cleanup (for testing).
+    /// Force advance the epoch and drain all safe cleanup work (for testing).
+    ///
+    /// Unlike `try_advance_and_cleanup`, this is expected to reclaim
+    /// everything that is eligible at the time of the call, so it loops
+    /// over `process_safe_epochs` until the queue stops yielding safe
+    /// items. This matches the intent of "force" (no rate limiting, no
+    /// backpressure-driven batch caps) that tests rely on.
     #[cfg(test)]
     pub fn force_advance_and_cleanup(&self) -> usize {
         if !self.is_enabled() {
@@ -888,8 +907,15 @@ impl EpochGC {
         }
 
         let new_epoch = self.epoch_counter.force_advance();
-        let safe_epoch = new_epoch.saturating_sub(1);
-        self.cleanup_queue.process_safe_epochs(safe_epoch)
+        let mut total = 0;
+        loop {
+            let processed = self.cleanup_queue.process_safe_epochs(new_epoch);
+            if processed == 0 {
+                break;
+            }
+            total += processed;
+        }
+        total
     }
 
     /// Get cleanup queue statistics.

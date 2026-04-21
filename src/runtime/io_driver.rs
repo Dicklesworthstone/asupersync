@@ -1961,7 +1961,17 @@ mod tests {
         let recycled_live_token = recycled_driver
             .register(&source, Interest::READABLE, recycled_waker)
             .expect("recycled live register should succeed");
+        // Simulate the kernel delivering readiness notifications for tokens that
+        // the driver already forgot: re-install each stale token at the reactor
+        // layer so its injected event passes the lab reactor's registration
+        // filter, then deliver all events in a single `turn`. The stale
+        // reactor registrations are unwound after the turn so the final
+        // reactor bookkeeping matches a fresh live registration (the
+        // metamorphic invariant under test).
         for stale_token in &stale_tokens {
+            recycled_reactor
+                .register(&source, *stale_token, Interest::READABLE)
+                .expect("manual stale-token registration should succeed");
             recycled_reactor.inject_event(
                 *stale_token,
                 Event::readable(*stale_token),
@@ -1976,6 +1986,11 @@ mod tests {
         let recycled_count = recycled_driver
             .turn(Some(Duration::ZERO))
             .expect("recycled turn should succeed");
+        for stale_token in &stale_tokens {
+            recycled_reactor
+                .deregister(*stale_token)
+                .expect("stale-token cleanup should succeed");
+        }
 
         let control_wakes = control_state.count.load(Ordering::SeqCst);
         let recycled_wakes = recycled_state.count.load(Ordering::SeqCst);

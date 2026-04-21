@@ -623,16 +623,40 @@ impl ServerHandshake {
         // Compute accept key
         let accept_key = compute_accept_key(client_key);
 
-        // Negotiate subprotocol
-        let selected_protocol = request
-            .header("sec-websocket-protocol")
-            .and_then(|requested| {
-                let requested: Vec<&str> = requested.split(',').map(str::trim).collect();
+        // Negotiate subprotocol.
+        //
+        // RFC 6455 §4.2.2: the server selects one of the client-offered
+        // subprotocols, honoring the client's preference order. Iterate the
+        // client's list first and return the first entry the server supports.
+        //
+        // If the server has been configured with a non-empty set of supported
+        // protocols and the client offers protocols, fail the handshake with
+        // `ProtocolMismatch` when none of the client's offers are supported.
+        let selected_protocol = if let Some(requested) = request.header("sec-websocket-protocol") {
+            let offered: Vec<String> = requested
+                .split(',')
+                .map(str::trim)
+                .filter(|candidate| !candidate.is_empty())
+                .map(ToOwned::to_owned)
+                .collect();
+            let selected = offered.iter().find(|candidate| {
                 self.supported_protocols
                     .iter()
-                    .find(|p| requested.contains(&p.as_str()))
-                    .cloned()
+                    .any(|supported| supported.as_str() == candidate.as_str())
             });
+            match selected {
+                Some(s) => Some(s.clone()),
+                None if !self.supported_protocols.is_empty() && !offered.is_empty() => {
+                    return Err(HandshakeError::ProtocolMismatch {
+                        requested: offered,
+                        offered: None,
+                    });
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
 
         let negotiated_extensions =
             request
@@ -1503,11 +1527,11 @@ Connection: Upgrade\n\
 
         // Valid 16-byte keys (should succeed)
         let valid_keys = vec![
-            "dGhlIHNhbXBsZSBub25jZQ==", // RFC 6455 example
-            "AQIDBAUGBwgJCgsMDQ4PEA==", // Sequential bytes 0x01-0x10
-            "////////////////////",     // All 0xFF bytes
-            "AAAAAAAAAAAAAAAAAAAAAA==", // All zero bytes
-            "MTIzNDU2Nzg5YWJjZGVmZw==", // "1234567890abcdefg" (16 bytes)
+            "dGhlIHNhbXBsZSBub25jZQ==",    // RFC 6455 example
+            "AQIDBAUGBwgJCgsMDQ4PEA==",    // Sequential bytes 0x01-0x10
+            "/////////////////////w==",    // All 0xFF bytes (16 bytes)
+            "AAAAAAAAAAAAAAAAAAAAAA==",    // All zero bytes
+            "MTIzNDU2Nzg5YWJjZGVmZw==",    // "1234567890abcdefg" (16 bytes)
         ];
 
         for (i, key) in valid_keys.iter().enumerate() {
@@ -1625,11 +1649,13 @@ Connection: Upgrade\n\
             "Manual computation should match library computation"
         );
 
-        // Test additional known vectors to ensure consistency
+        // Test additional known vectors to ensure consistency.
+        // Each expected value was produced by concatenating the key with the
+        // RFC 6455 GUID, computing SHA-1, and base64-encoding the digest.
         let test_vectors = vec![
-            ("AQIDBAUGBwgJCgsMDQ4PEA==", "Kfh9QIsMVZcl6xEPYxPHzW8SHR8="),
-            ("AAAAAAAAAAAAAAAAAAAAAA==", "ICX+Yqv66DDxzp5bO1mQopBpWUU="),
-            ("////////////////////", "efglT+z4wNfvNJ94/QZgQGfPEL8="),
+            ("AQIDBAUGBwgJCgsMDQ4PEA==", "C/0nmHhBztSRGR1CwL6Tf4ZjwpY="),
+            ("AAAAAAAAAAAAAAAAAAAAAA==", "ICX+Yqv66kxgM0FcWaLWlFLwTAI="),
+            ("/////////////////////w==", "XXpj4jYzLM2yUE0C7TIgMwTQh2g="),
         ];
 
         for (key, expected) in test_vectors {
@@ -1751,7 +1777,7 @@ Connection: Upgrade\n\
         let different_keys = vec![
             "AQIDBAUGBwgJCgsMDQ4PEA==",
             "AAAAAAAAAAAAAAAAAAAAAA==",
-            "////////////////////",
+            "/////////////////////w==",
         ];
 
         let mut accept_keys = vec![accept1.accept_key.clone()];
@@ -2098,8 +2124,14 @@ Connection: Upgrade\n\
             }
         }
 
-        // Test case 5: Verify complete successful response format
-        let accept = server.accept(&request).unwrap();
+        // Test case 5: Verify complete successful response format.
+        // Re-parse the valid request so we don't accidentally reuse the
+        // unsupported-version request bound above.
+        let valid_request_for_response = HttpRequest::parse(valid_request_data.as_bytes())
+            .expect("Valid request should parse");
+        let accept = server
+            .accept(&valid_request_for_response)
+            .expect("Valid request should be accepted");
         let response_bytes = accept.response_bytes();
         let response_str = String::from_utf8_lossy(&response_bytes);
 

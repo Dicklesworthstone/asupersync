@@ -1,3 +1,4 @@
+#![allow(warnings)]
 //! Metamorphic Testing for Obligation Ledger Commit/Abort Idempotence
 //!
 //! Tests the invariants and safety properties of the obligation ledger's

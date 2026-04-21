@@ -167,9 +167,11 @@ impl SystematicParams {
     pub fn rfc_repair_equation(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
         let padding_delta = u32::try_from(self.k_prime - self.k)
             .expect("RFC systematic padding delta must fit in u32");
-        let repair_isi = esi
-            .checked_add(padding_delta)
-            .expect("RFC repair ISI must fit in u32");
+        // The public ESI is a u32 surface; RFC 6330 specifies the repair ISI
+        // domain is K' + (ESI - K), which requires wrapping arithmetic when
+        // ESI approaches u32::MAX so that tuple-derivation stays deterministic
+        // instead of panicking at the public boundary.
+        let repair_isi = esi.wrapping_add(padding_delta);
         let columns = repair_indices_for_esi(self.j, self.w, self.p, repair_isi);
         let coefficients = vec![Gf256::ONE; columns.len()];
         (columns, coefficients)

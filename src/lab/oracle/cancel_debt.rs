@@ -789,7 +789,10 @@ mod tests {
             );
         }
 
-        let now = Time::from_nanos(2_000_000_000); // 2 seconds later
+        // Check within the measurement window so that rapidly-added items
+        // are counted by `debt_accumulation_rate` (which only considers
+        // items with `created_at >= now - window`).
+        let now = Time::from_nanos(1_000_000_000); // 1 second later (end of window)
         oracle.check_debt_accumulation(now);
 
         let stats = oracle.get_statistics();

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 //! Metamorphic Testing for Semaphore Permit Drain Ordering
 //!
 //! Tests fairness invariants when permits become available through

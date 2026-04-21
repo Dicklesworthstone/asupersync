@@ -72,6 +72,7 @@ use libc::{F_GETFD, fcntl};
 use parking_lot::Mutex;
 use polling::{Event as PollEvent, Events as PollEvents, PollMode, Poller};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::io;
 use std::num::NonZeroUsize;
@@ -91,6 +92,14 @@ struct RegistrationInfo {
 struct ReactorState {
     tokens: HashMap<Token, RegistrationInfo>,
     fds: HashMap<i32, Token>,
+    /// Tokens whose bookkeeping was forcibly cleaned up because the kernel
+    /// reported the watched descriptor as invalid (e.g. the fd was closed
+    /// before re-arm). A subsequent `deregister` on such a token must
+    /// succeed idempotently rather than being indistinguishable from a
+    /// token that was never registered. The set is cleared lazily by
+    /// `deregister` and bounded by the number of concurrently orphaned
+    /// tokens, so it does not grow without bound.
+    orphaned: HashSet<Token>,
 }
 
 impl ReactorState {
@@ -98,6 +107,7 @@ impl ReactorState {
         Self {
             tokens: HashMap::with_capacity(64),
             fds: HashMap::with_capacity(64),
+            orphaned: HashSet::new(),
         }
     }
 }
@@ -273,6 +283,15 @@ impl Reactor for EpollReactor {
 
         let raw_fd = source.as_raw_fd();
 
+        // `BorrowedFd::borrow_raw(-1)` is a checked precondition violation on
+        // recent Rust toolchains and panics in debug builds. Reject the
+        // sentinel value here with a well-typed error rather than letting the
+        // panic escape. Callers routinely pass the result of `as_raw_fd()`
+        // from a source that may not currently hold a descriptor.
+        if raw_fd < 0 {
+            return Err(io::Error::from_raw_os_error(libc::EBADF));
+        }
+
         // Check for duplicate registration first
         let mut state = self.state.lock();
         if state.tokens.contains_key(&token) {
@@ -314,6 +333,10 @@ impl Reactor for EpollReactor {
             .tokens
             .insert(token, RegistrationInfo { raw_fd, interest });
         state.fds.insert(raw_fd, token);
+        // A successful (re-)registration supersedes any orphan record for
+        // this token so the next `deregister` reflects the real kernel
+        // state instead of being short-circuited by a stale tombstone.
+        state.orphaned.remove(&token);
         drop(state);
 
         Ok(())
@@ -324,8 +347,12 @@ impl Reactor for EpollReactor {
 
         let mut state = self.state.lock();
         // Destructure for split borrows so the entry on `tokens` doesn't
-        // block access to `fds` in error-cleanup paths.
-        let ReactorState { tokens, fds } = &mut *state;
+        // block access to `fds`/`orphaned` in error-cleanup paths.
+        let ReactorState {
+            tokens,
+            fds,
+            orphaned,
+        } = &mut *state;
 
         let entry = match tokens.entry(token) {
             Entry::Occupied(entry) => entry,
@@ -360,6 +387,7 @@ impl Reactor for EpollReactor {
                 Some(libc::ENOENT) => {
                     let info = entry.remove();
                     fds.remove(&info.raw_fd);
+                    orphaned.insert(token);
                     Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         "token not registered",
@@ -372,6 +400,12 @@ impl Reactor for EpollReactor {
                     // We must remove it to prevent leaking the token if the fd was concurrently reused.
                     let info = entry.remove();
                     fds.remove(&info.raw_fd);
+                    // Record the orphaned token so the caller's follow-up
+                    // `deregister` succeeds idempotently. Without this a
+                    // conscientious cleanup loop would observe `NotFound`
+                    // and surface the failure, even though there is nothing
+                    // left to tear down.
+                    orphaned.insert(token);
                     Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         "token not registered",
@@ -386,10 +420,27 @@ impl Reactor for EpollReactor {
 
     fn deregister(&self, token: Token) -> io::Result<()> {
         let mut state = self.state.lock();
-        let info = state
-            .tokens
-            .get(&token)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
+        let info = match state.tokens.get(&token) {
+            Some(info) => info,
+            None => {
+                // If a previous modify/deregister already cleaned this token
+                // up because the kernel reported its fd as closed, honor the
+                // idempotent-cleanup contract: the caller asked us to tear it
+                // down and there is nothing left. Consume the tombstone so
+                // the next deregister of a genuinely-unknown token still
+                // surfaces NotFound.
+                let was_orphaned = state.orphaned.remove(&token);
+                drop(state);
+                return if was_orphaned {
+                    Ok(())
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "token not registered",
+                    ))
+                };
+            }
+        };
 
         // SAFETY: We stored the raw_fd during registration and trust it's still valid.
         // The caller is responsible for ensuring the fd remains valid until deregistered.

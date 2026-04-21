@@ -497,11 +497,9 @@ mod tests {
 
             let frontier_ms = base_deadlines.iter().copied().max().unwrap_or(0);
             let frontier = Time::from_millis(u64::from(frontier_ms));
-            let mut next_task = base_deadlines.len() as u32 + 1;
 
-            for offset in late_offsets {
+            for (next_task, offset) in (base_deadlines.len() as u32 + 1..).zip(late_offsets.into_iter()) {
                 let task = task(next_task);
-                next_task += 1;
                 let deadline = Time::from_millis(u64::from(frontier_ms) + u64::from(offset));
                 noisy_heap.insert(task, deadline);
             }
@@ -521,7 +519,7 @@ mod tests {
             prop_assert!(
                 noisy_heap
                     .peek_deadline()
-                    .map_or(true, |deadline| deadline > frontier),
+                    .is_none_or(|deadline| deadline > frontier),
                 "late-only noise should remain strictly after the earlier frontier",
             );
         }

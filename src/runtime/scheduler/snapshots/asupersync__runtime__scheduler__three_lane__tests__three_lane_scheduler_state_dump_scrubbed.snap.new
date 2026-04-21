@@ -1,0 +1,294 @@
+---
+source: src/runtime/scheduler/three_lane.rs
+assertion_line: 9852
+expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n    loaded_scheduler_state_dump(), \"cancel_streak\":\n    cancel_streak_scheduler_state_dump(),\n})"
+---
+{
+  "cancel_streak": {
+    "adaptive_policy": null,
+    "cancel_streak": 1,
+    "cancel_streak_limit": 2,
+    "dispatch_sequence": [
+      "[TASK_0]",
+      "[TASK_1]",
+      "[TASK_2]",
+      "[TASK_3]",
+      "[TASK_4]",
+      "[TASK_5]"
+    ],
+    "fairness_certificate": {
+      "adaptive_current_limit": 2,
+      "adaptive_enabled": false,
+      "base_limit": 2,
+      "base_limit_exceedances": 0,
+      "cancel_dispatches": 5,
+      "effective_limit": 2,
+      "effective_limit_exceedances": 0,
+      "fairness_yields": 2,
+      "fallback_cancel_dispatches": 1,
+      "invariant_holds": true,
+      "max_ready_priority_inversion_gap": 0,
+      "observed_max_cancel_streak": 2,
+      "observed_max_ready_stall_steps": 2,
+      "observed_max_timed_stall_steps": 0,
+      "observed_non_cancel_stall_steps": 2,
+      "ready_dispatches": 1,
+      "ready_priority_inversions": 0,
+      "ready_stall_bound_steps": 3,
+      "timed_dispatches": 0,
+      "witness_hash": 6666412354065563291
+    },
+    "invariant_stats": {
+      "avg_monitoring_overhead_ns": 2943,
+      "monitored_workers": 0,
+      "operations_monitored": 14,
+      "violations_by_severity": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "lane_depths": {
+      "fast_queue": 0,
+      "global_has_cancel": false,
+      "global_has_ready": false,
+      "global_has_timed": false,
+      "global_pending": 0,
+      "global_ready": 0,
+      "local_priority_scheduler": 0,
+      "local_ready": 0
+    },
+    "local_ready_tasks": [],
+    "preemption_metrics": {
+      "adaptive_current_limit": 2,
+      "adaptive_e_value": 1.0,
+      "adaptive_epochs": 0,
+      "adaptive_reward_ema": 0.0,
+      "base_limit_exceedances": 0,
+      "cancel_dispatches": 5,
+      "effective_limit_exceedances": 0,
+      "fairness_yields": 2,
+      "fallback_cancel_dispatches": 1,
+      "max_cancel_streak": 2,
+      "max_ready_dispatch_stall": 2,
+      "max_timed_dispatch_stall": 0,
+      "ready_dispatches": 1,
+      "timed_dispatches": 0
+    },
+    "ready_count": 0,
+    "scenario": "cancel_streak",
+    "starvation_stats": {
+      "avg_task_wait_time_ns": 0,
+      "currently_starved_tasks": 0,
+      "max_priority_inversion_gap": 0,
+      "max_task_wait_time_ns": 0,
+      "pattern_detected": false,
+      "total_priority_inversions": 0,
+      "total_starvation_events": 0,
+      "total_tracked_wait_time_ns": 0,
+      "tracked_tasks_count": 0
+    },
+    "tracked_tasks": [],
+    "worker_id": 0
+  },
+  "empty": {
+    "adaptive_policy": null,
+    "cancel_streak": 0,
+    "cancel_streak_limit": 16,
+    "dispatch_sequence": [],
+    "fairness_certificate": {
+      "adaptive_current_limit": 16,
+      "adaptive_enabled": false,
+      "base_limit": 16,
+      "base_limit_exceedances": 0,
+      "cancel_dispatches": 0,
+      "effective_limit": 16,
+      "effective_limit_exceedances": 0,
+      "fairness_yields": 0,
+      "fallback_cancel_dispatches": 0,
+      "invariant_holds": true,
+      "max_ready_priority_inversion_gap": 0,
+      "observed_max_cancel_streak": 0,
+      "observed_max_ready_stall_steps": 0,
+      "observed_max_timed_stall_steps": 0,
+      "observed_non_cancel_stall_steps": 0,
+      "ready_dispatches": 0,
+      "ready_priority_inversions": 0,
+      "ready_stall_bound_steps": 17,
+      "timed_dispatches": 0,
+      "witness_hash": 11950537627865327450
+    },
+    "invariant_stats": {
+      "avg_monitoring_overhead_ns": 130,
+      "monitored_workers": 0,
+      "operations_monitored": 2,
+      "violations_by_severity": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "lane_depths": {
+      "fast_queue": 0,
+      "global_has_cancel": false,
+      "global_has_ready": false,
+      "global_has_timed": false,
+      "global_pending": 0,
+      "global_ready": 0,
+      "local_priority_scheduler": 0,
+      "local_ready": 0
+    },
+    "local_ready_tasks": [],
+    "preemption_metrics": {
+      "adaptive_current_limit": 16,
+      "adaptive_e_value": 1.0,
+      "adaptive_epochs": 0,
+      "adaptive_reward_ema": 0.0,
+      "base_limit_exceedances": 0,
+      "cancel_dispatches": 0,
+      "effective_limit_exceedances": 0,
+      "fairness_yields": 0,
+      "fallback_cancel_dispatches": 0,
+      "max_cancel_streak": 0,
+      "max_ready_dispatch_stall": 0,
+      "max_timed_dispatch_stall": 0,
+      "ready_dispatches": 0,
+      "timed_dispatches": 0
+    },
+    "ready_count": 0,
+    "scenario": "empty",
+    "starvation_stats": {
+      "avg_task_wait_time_ns": 0,
+      "currently_starved_tasks": 0,
+      "max_priority_inversion_gap": 0,
+      "max_task_wait_time_ns": 0,
+      "pattern_detected": false,
+      "total_priority_inversions": 0,
+      "total_starvation_events": 0,
+      "total_tracked_wait_time_ns": 0,
+      "tracked_tasks_count": 0
+    },
+    "tracked_tasks": [],
+    "worker_id": 0
+  },
+  "loaded": {
+    "adaptive_policy": null,
+    "cancel_streak": 0,
+    "cancel_streak_limit": 16,
+    "dispatch_sequence": [],
+    "fairness_certificate": {
+      "adaptive_current_limit": 16,
+      "adaptive_enabled": false,
+      "base_limit": 16,
+      "base_limit_exceedances": 0,
+      "cancel_dispatches": 0,
+      "effective_limit": 16,
+      "effective_limit_exceedances": 0,
+      "fairness_yields": 0,
+      "fallback_cancel_dispatches": 0,
+      "invariant_holds": true,
+      "max_ready_priority_inversion_gap": 0,
+      "observed_max_cancel_streak": 0,
+      "observed_max_ready_stall_steps": 0,
+      "observed_max_timed_stall_steps": 0,
+      "observed_non_cancel_stall_steps": 0,
+      "ready_dispatches": 0,
+      "ready_priority_inversions": 0,
+      "ready_stall_bound_steps": 17,
+      "timed_dispatches": 0,
+      "witness_hash": 11950537627865327450
+    },
+    "invariant_stats": {
+      "avg_monitoring_overhead_ns": 1739,
+      "monitored_workers": 0,
+      "operations_monitored": 5,
+      "violations_by_severity": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "lane_depths": {
+      "fast_queue": 0,
+      "global_has_cancel": false,
+      "global_has_ready": false,
+      "global_has_timed": false,
+      "global_pending": 0,
+      "global_ready": 0,
+      "local_priority_scheduler": 3,
+      "local_ready": 0
+    },
+    "local_ready_tasks": [],
+    "preemption_metrics": {
+      "adaptive_current_limit": 16,
+      "adaptive_e_value": 1.0,
+      "adaptive_epochs": 0,
+      "adaptive_reward_ema": 0.0,
+      "base_limit_exceedances": 0,
+      "cancel_dispatches": 0,
+      "effective_limit_exceedances": 0,
+      "fairness_yields": 0,
+      "fallback_cancel_dispatches": 0,
+      "max_cancel_streak": 0,
+      "max_ready_dispatch_stall": 0,
+      "max_timed_dispatch_stall": 0,
+      "ready_dispatches": 0,
+      "timed_dispatches": 0
+    },
+    "ready_count": 0,
+    "scenario": "loaded",
+    "starvation_stats": {
+      "avg_task_wait_time_ns": 0,
+      "currently_starved_tasks": 0,
+      "max_priority_inversion_gap": 0,
+      "max_task_wait_time_ns": 0,
+      "pattern_detected": false,
+      "total_priority_inversions": 0,
+      "total_starvation_events": 0,
+      "total_tracked_wait_time_ns": 0,
+      "tracked_tasks_count": 3
+    },
+    "tracked_tasks": [
+      {
+        "enqueue_time_ns": 0,
+        "is_cancelled": false,
+        "last_update_ns": 0,
+        "lifecycle_state": "enqueued",
+        "owner_worker": null,
+        "priority": 40,
+        "queues": [
+          "local_ready_heap"
+        ],
+        "task_id": "[TASK_0]"
+      },
+      {
+        "enqueue_time_ns": 0,
+        "is_cancelled": false,
+        "last_update_ns": 0,
+        "lifecycle_state": "enqueued",
+        "owner_worker": null,
+        "priority": 90,
+        "queues": [
+          "local_cancel_queue"
+        ],
+        "task_id": "[TASK_1]"
+      },
+      {
+        "enqueue_time_ns": 0,
+        "is_cancelled": false,
+        "last_update_ns": 0,
+        "lifecycle_state": "enqueued",
+        "owner_worker": null,
+        "priority": 0,
+        "queues": [
+          "local_timed_queue"
+        ],
+        "task_id": "[TASK_2]"
+      }
+    ],
+    "worker_id": 0
+  }
+}

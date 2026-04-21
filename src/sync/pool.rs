@@ -5214,13 +5214,6 @@ mod tests {
     }
 
     fn noop_pool_waker() -> Waker {
-        struct NoopPoolWaker;
-
-        impl Wake for NoopPoolWaker {
-            fn wake(self: Arc<Self>) {}
-            fn wake_by_ref(self: &Arc<Self>) {}
-        }
-
-        Waker::from(Arc::new(NoopPoolWaker))
+        std::task::Waker::noop().clone()
     }
 }

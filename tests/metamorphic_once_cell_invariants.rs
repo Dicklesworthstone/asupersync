@@ -168,7 +168,7 @@ fn mr_cancel_recovery_invariant() {
 
             // Poll once to start initialization
             let waker = std::task::Waker::noop();
-            let mut cx = Context::from_waker(&waker);
+            let mut cx = Context::from_waker(waker);
             assert!(Future::poll(cancel_fut.as_mut(), &mut cx).is_pending());
 
             // Cancel by dropping

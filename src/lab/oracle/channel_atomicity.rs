@@ -845,7 +845,9 @@ impl ChannelAtomicityOracle {
         for (reservation_id, state) in &self.reservations {
             if matches!(state.status, ReservationStatus::Active) {
                 if let Ok(age) = now.duration_since(state.created_at) {
-                    if age.as_secs() > self.config.max_reservation_age_seconds {
+                    // Use >= so that setting `max_reservation_age_seconds = 0`
+                    // enables immediate leak detection (any positive age counts).
+                    if age.as_secs() >= self.config.max_reservation_age_seconds {
                         leaked_reservations.push(*reservation_id);
                         let violation = ChannelAtomicityViolation::ReservationLeak {
                             reservation_id: *reservation_id,

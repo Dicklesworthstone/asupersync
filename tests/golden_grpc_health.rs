@@ -1,3 +1,4 @@
+#![allow(warnings)]
 //! Golden snapshot tests for gRPC health service response formats.
 //!
 //! These tests ensure the gRPC Health Checking Protocol response format

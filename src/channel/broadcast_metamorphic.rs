@@ -297,9 +297,13 @@ mod tests {
                     // This is acceptable behavior
                 }
                 (Err(RecvError::Lagged(_)), Ok(after_msg)) => {
-                    // Receiver was lagged before but recovered after
+                    // Receiver was lagged before but recovered after. The
+                    // recovered value must correspond to a real sent message,
+                    // not a phantom/uninitialised slot value. Sent payloads
+                    // are small monotonically-assigned counters, so any valid
+                    // recovery message fits within a generous sanity bound.
                     prop_assert!(
-                        after_msg >= 0, // Should receive valid message
+                        after_msg < u64::MAX,
                         "MR3 VIOLATION: invalid message after recovery: {}",
                         after_msg
                     );

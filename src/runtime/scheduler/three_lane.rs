@@ -6719,7 +6719,7 @@ mod tests {
             })
             .collect();
         let state = Arc::new(ContendedMutex::new("runtime_state", state));
-        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+        let scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
 
         let mut offset = 0usize;
         for &chunk in chunk_pattern {
@@ -6849,7 +6849,7 @@ mod tests {
 
             let mut workers = scheduler.take_workers();
             let worker = &mut workers[0];
-            let dispatched: Vec<_> = (0..cancel_count + 1)
+            let dispatched: Vec<_> = (0..=cancel_count)
                 .map(|_| worker.next_task().expect("dispatch should continue"))
                 .collect();
 

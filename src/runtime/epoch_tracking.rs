@@ -18,7 +18,24 @@ use crate::util::CachePadded;
 use crossbeam_queue::SegQueue;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+/// Shared `Instant` origin used to serialize monotonic timestamps into a
+/// single `u64` nanosecond counter for lockless rate limiting.
+fn time_origin() -> Instant {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    *ORIGIN.get_or_init(Instant::now)
+}
+
+/// Convert an `Instant` to nanoseconds since [`time_origin`]. Values will
+/// never be zero in practice because callers sample `Instant::now()` strictly
+/// after the origin is captured; we reserve `0` as a "never advanced" sentinel.
+fn instant_to_nanos(t: Instant) -> u64 {
+    t.saturating_duration_since(time_origin())
+        .as_nanos()
+        .min(u64::MAX as u128) as u64
+}
 
 // ============================================================================
 // Configuration and Statistics
@@ -114,9 +131,13 @@ impl GlobalEpochCounter {
     /// Create a new global epoch counter.
     #[must_use]
     pub fn new(config: EpochConfig) -> Self {
+        // Seed `last_advance` with "now" so the first `try_advance()` call is
+        // correctly rate limited until `advance_interval` has elapsed. The
+        // counter itself still starts at 1 so epoch 0 can act as a sentinel.
+        let now_nanos = instant_to_nanos(Instant::now());
         Self {
-            epoch: AtomicU64::new(1), // Start at epoch 1
-            last_advance: AtomicU64::new(0),
+            epoch: AtomicU64::new(1),
+            last_advance: AtomicU64::new(now_nanos.max(1)),
             advance_interval: config.advance_interval,
             advance_count: AtomicU64::new(0),
             config,
@@ -130,16 +151,38 @@ impl GlobalEpochCounter {
     }
 
     /// Attempt to advance the epoch (rate limited).
+    ///
+    /// Returns `Some(new_epoch)` if the advance was accepted, or `None` if
+    /// it was throttled because less than `advance_interval` has elapsed
+    /// since the previous successful advance.
     pub fn try_advance(&self) -> Option<u64> {
         let now = Instant::now();
-        // Simplified: always try to advance (remove rate limiting for now)
-        // This is a temporary fix to get compilation working
-        self.advance_epoch(now)
+        let now_nanos = instant_to_nanos(now);
+        let interval_nanos = self.advance_interval.as_nanos() as u64;
+
+        loop {
+            let last = self.last_advance.load(Ordering::Acquire);
+            if now_nanos.saturating_sub(last) < interval_nanos {
+                return None;
+            }
+            // Claim the advance slot via CAS so concurrent callers don't
+            // both observe an eligible window and double-advance.
+            if self
+                .last_advance
+                .compare_exchange(last, now_nanos, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return self.advance_epoch(now);
+            }
+        }
     }
 
     /// Force epoch advancement (bypasses rate limiting).
     pub fn force_advance(&self) -> u64 {
-        self.advance_epoch(Instant::now())
+        let now = Instant::now();
+        self.last_advance
+            .store(instant_to_nanos(now), Ordering::Release);
+        self.advance_epoch(now)
             .unwrap_or_else(|| self.current_epoch())
     }
 
@@ -575,7 +618,14 @@ impl DeferredCleanupQueue {
         Ok(())
     }
 
-    /// Execute all safe cleanups up to the given epoch.
+    /// Execute all safe cleanups whose epoch is strictly older than
+    /// `safe_epoch`.
+    ///
+    /// Cleanups tagged with `safe_epoch` itself are *not* executed because a
+    /// pin on `safe_epoch` may still be observing state produced in that
+    /// epoch. A caller that has advanced the global epoch to `E` therefore
+    /// passes `E` to reclaim everything scheduled while the world was at
+    /// epochs `< E`.
     pub fn execute_safe_cleanups(&self, safe_epoch: u64) -> usize {
         let start = Instant::now();
         let mut executed = 0;
@@ -583,7 +633,7 @@ impl DeferredCleanupQueue {
 
         // Process all entries in the queue
         while let Some(entry) = self.queue.pop() {
-            if entry.epoch <= safe_epoch {
+            if entry.epoch < safe_epoch {
                 // Safe to execute
                 (entry.cleanup_fn)();
                 executed += 1;

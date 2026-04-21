@@ -1,3 +1,5 @@
+#![allow(warnings)]
+#![cfg(feature = "cli")]
 //! Golden snapshot tests for CLI output formats
 //!
 //! Comprehensive tests for all structured output formats in src/cli/output.rs:

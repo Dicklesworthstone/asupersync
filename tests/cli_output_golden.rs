@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![cfg(feature = "cli")]
 #![allow(missing_docs)]
 

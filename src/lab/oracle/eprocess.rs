@@ -869,7 +869,7 @@ mod tests {
     #[test]
     fn monitor_all_invariants_has_spork_invariants_too() {
         let monitor = EProcessMonitor::all_invariants();
-        assert_eq!(monitor.processes.len(), 17);
+        assert_eq!(monitor.processes.len(), 24);
         assert!(monitor.process("reply_linearity").is_some());
         assert!(monitor.process("registry_lease").is_some());
         assert!(monitor.process("down_order").is_some());

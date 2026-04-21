@@ -3206,7 +3206,7 @@ mod tests {
             state.tasks_is_empty()
                 || state
                     .region(region)
-                    .map_or(true, |r| r.task_ids().is_empty()),
+                    .is_none_or(|r| r.task_ids().is_empty()),
             "failed spawn must not create orphaned tasks"
         );
     }
@@ -3260,7 +3260,7 @@ mod tests {
                     "third task result must be preserved"
                 );
             }
-            other => panic!("join_all must complete with all results: {other:?}"),
+            other @ Poll::Pending => panic!("join_all must complete with all results: {other:?}"),
         }
     }
 

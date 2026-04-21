@@ -531,7 +531,12 @@ mod tests {
 
         // Test text payloads
         for (payload, opcode) in &test_payloads {
-            let frame = Frame::text(payload.clone());
+            // Build the frame matching the declared opcode so the round-trip
+            // assertion below correctly verifies the opcode is preserved.
+            let frame = match *opcode {
+                Opcode::Binary => Frame::binary(payload.clone().into_bytes()),
+                _ => Frame::text(payload.clone()),
+            };
 
             // Client encodes (with masking)
             let mut buf = BytesMut::new();

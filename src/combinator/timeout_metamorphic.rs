@@ -203,7 +203,7 @@ impl Future for TestOperation {
                 this.global_state
                     .operation_completed
                     .fetch_add(1, Ordering::SeqCst);
-                return Poll::Ready(Ok(this.id as i32));
+                return Poll::Ready(Ok(this.id.cast_signed()));
             }
         }
 
@@ -261,6 +261,7 @@ impl GlobalTimeoutState {
 /// Summary of timeout test execution results.
 #[derive(Debug, Clone)]
 pub struct TimeoutTestSummary {
+    #[allow(missing_docs)]
     pub total_polls: u32,
     pub operation_completed: u32,
     pub operation_cancelled: u32,

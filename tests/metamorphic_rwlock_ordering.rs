@@ -1,3 +1,4 @@
+#![allow(warnings)]
 //! Metamorphic Testing for RwLock Reader/Writer Ordering Invariants
 //!
 //! Tests the fairness and ordering properties of the cancel-aware RwLock

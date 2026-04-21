@@ -870,8 +870,9 @@ mod tests {
             CancelReason::user("test"),
         );
 
-        // Wait for the ordering window to expire so missing child cancellation is detected
-        oracle.check_ordering_violations(Time::from_nanos(20_000_000));
+        // Wait for the ordering window (default 1s) to expire so missing child
+        // cancellation is detected.
+        oracle.check_ordering_violations(Time::from_nanos(2_000_000_000));
 
         // Should detect a violation with the correct child region (not testing_default placeholder)
         let violations = oracle.get_recent_violations(10);

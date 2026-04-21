@@ -1699,7 +1699,7 @@ mod tests {
         // Edge case: single observation
         throughput_summary.observe(1000.0);
 
-        let empty_summary = metrics.summary("empty_metric_summary");
+        let _empty_summary = metrics.summary("empty_metric_summary");
         // Edge case: no observations (should still export with 0 values)
 
         // Special metric names testing edge cases

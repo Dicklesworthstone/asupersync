@@ -1727,7 +1727,7 @@ mod tests {
                 let mut write_succeeded = true;
                 for i in 0..10 {
                     let large_data = vec![b'x'; 65536]; // Large write to fill buffers
-                    match (&client).write(&large_data) {
+                    match (&client).write_all(&large_data) {
                         Err(e) => {
                             let is_broken_pipe = e.kind() == io::ErrorKind::BrokenPipe
                                 || (e.raw_os_error() == Some(libc::EPIPE));

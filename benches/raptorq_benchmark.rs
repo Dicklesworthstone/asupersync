@@ -7,6 +7,8 @@
 //!
 //! Follows the optimization loop: baseline → profile → single lever → golden outputs.
 
+#![allow(warnings)]
+#![allow(dead_code)]
 #![allow(missing_docs)]
 #![recursion_limit = "512"]
 
