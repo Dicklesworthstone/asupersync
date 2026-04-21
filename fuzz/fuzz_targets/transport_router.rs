@@ -11,17 +11,17 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::{
-    types::Budget,
-    Cx,
+    Cx, TaskId,
     security::authenticated::AuthenticatedSymbol,
     security::tag::AuthenticationTag,
     transport::router::{
-        DispatchConfig, DispatchError, DispatchStrategy, Endpoint, EndpointId, EndpointState,
-        LoadBalancer, RouteKey, RoutingEntry, RoutingTable, SymbolDispatcher, SymbolRouter,
+        DispatchConfig, DispatchError, DispatchResult, DispatchStrategy, Endpoint, EndpointId,
+        EndpointState, LoadBalancer, RouteKey, RoutingEntry, RoutingTable, SymbolDispatcher,
+        SymbolRouter,
     },
     transport::sink::SymbolSink,
+    types::Budget,
     types::{ObjectId, RegionId, Symbol, SymbolId, SymbolKind, Time},
-    TaskId,
 };
 use libfuzzer_sys::fuzz_target;
 use std::io;
@@ -721,6 +721,17 @@ fn fuzz_symbol_dispatcher(
 
     // Test the specific dispatch strategy
     let strategy: DispatchStrategy = strategy.into();
+    let dispatchable_ids: std::collections::HashSet<_> = endpoints
+        .iter()
+        .filter(|endpoint| endpoint.state().can_receive())
+        .map(|endpoint| endpoint.id)
+        .collect();
+    let dispatchable_count = dispatchable_ids.len();
+    let successful_capacity = endpoints
+        .iter()
+        .enumerate()
+        .filter(|(i, endpoint)| endpoint.state().can_receive() && !fail_set.contains(&(*i as u8)))
+        .count();
 
     // Block on the async dispatch (in a real fuzz test, we'd use a simple executor)
     let result = futures::executor::block_on(async {
@@ -808,9 +819,26 @@ fn fuzz_symbol_dispatcher(
             // ASSERTION: QuorumCast should continue until quorum reached or all endpoints exhausted
             match result {
                 Ok(dispatch_result) => {
+                    assert_dispatch_result_no_double_delivery(&dispatch_result, &dispatchable_ids);
                     assert!(
                         dispatch_result.successes >= required,
                         "QuorumCast success should have reached required quorum"
+                    );
+                    assert_eq!(
+                        dispatch_result.successes, required,
+                        "QuorumCast should stop once the requested quorum is reached"
+                    );
+                    assert!(
+                        dispatch_result.quorum_reached(required),
+                        "successful quorum dispatch must report quorum reached"
+                    );
+                    assert!(
+                        successful_capacity >= required,
+                        "quorum success requires enough successful endpoints"
+                    );
+                    assert!(
+                        dispatch_result.failures + dispatch_result.successes <= dispatchable_count,
+                        "quorum dispatch should not attempt more than dispatchable endpoints"
                     );
                 }
                 Err(DispatchError::QuorumNotReached {
@@ -825,14 +853,17 @@ fn fuzz_symbol_dispatcher(
                         achieved < required,
                         "QuorumNotReached should have achieved < required"
                     );
-
-                    // Should have tried all available endpoints
-                    let healthy_count =
-                        endpoints.iter().filter(|e| e.state().can_receive()).count();
-                    let total_possible = healthy_count.min(10); // Limit for safety
                     assert!(
-                        achieved <= total_possible,
-                        "QuorumCast should not achieve more than possible"
+                        dispatchable_count >= required,
+                        "quorum shortfall should only happen when enough endpoints existed to try"
+                    );
+                    assert_eq!(
+                        achieved, successful_capacity,
+                        "quorum shortfall should match the exact successful capacity"
+                    );
+                    assert!(
+                        successful_capacity < required,
+                        "quorum shortfall requires fewer successful endpoints than requested"
                     );
                 }
                 Err(DispatchError::InsufficientEndpoints {
@@ -847,12 +878,62 @@ fn fuzz_symbol_dispatcher(
                         available < required,
                         "InsufficientEndpoints should have available < required"
                     );
+                    assert_eq!(
+                        available, dispatchable_count,
+                        "insufficient-endpoints error should report dispatchable endpoint count"
+                    );
                 }
                 Err(_) => {
                     // Other errors are acceptable
                 }
             }
         }
+    }
+}
+
+fn assert_dispatch_result_no_double_delivery(
+    dispatch_result: &DispatchResult,
+    dispatchable_ids: &std::collections::HashSet<EndpointId>,
+) {
+    assert_eq!(
+        dispatch_result.sent_to.len(),
+        dispatch_result.successes,
+        "successful dispatch count must match sent_to length"
+    );
+    assert_eq!(
+        dispatch_result.failed_endpoints.len(),
+        dispatch_result.failures,
+        "failed dispatch count must match failed_endpoints length"
+    );
+
+    let successful_ids: std::collections::HashSet<_> =
+        dispatch_result.sent_to.iter().copied().collect();
+    assert_eq!(
+        successful_ids.len(),
+        dispatch_result.sent_to.len(),
+        "dispatcher must not report duplicate successful deliveries"
+    );
+
+    let failed_ids: std::collections::HashSet<_> = dispatch_result
+        .failed_endpoints
+        .iter()
+        .map(|(endpoint_id, _)| *endpoint_id)
+        .collect();
+    assert_eq!(
+        failed_ids.len(),
+        dispatch_result.failed_endpoints.len(),
+        "dispatcher must not report duplicate failed endpoints"
+    );
+
+    for endpoint_id in &dispatch_result.sent_to {
+        assert!(
+            dispatchable_ids.contains(endpoint_id),
+            "successful dispatches must target dispatchable endpoints"
+        );
+        assert!(
+            !failed_ids.contains(endpoint_id),
+            "an endpoint cannot be both successful and failed in one dispatch"
+        );
     }
 }
 
@@ -1132,7 +1213,11 @@ fn fuzz_edge_cases(edge_case: EdgeCaseScenario) {
         EdgeCaseScenario::MissingRouteKeys(object_id) => {
             let router = SymbolRouter::new(Arc::new(RoutingTable::new()));
             let object_id: ObjectId = object_id.into();
-            let symbol = Symbol::new(SymbolId::new(object_id, 0, 0), vec![0u8], SymbolKind::Source);
+            let symbol = Symbol::new(
+                SymbolId::new(object_id, 0, 0),
+                vec![0u8],
+                SymbolKind::Source,
+            );
 
             assert!(
                 matches!(
@@ -1170,7 +1255,11 @@ fn fuzz_edge_cases(edge_case: EdgeCaseScenario) {
                 RoutingEntry::new(initial_endpoints.clone(), created_at).with_ttl(ttl);
 
             table.add_route(key.clone(), initial_entry);
-            assert_eq!(table.route_count(), 1, "initial route insert should increase route count");
+            assert_eq!(
+                table.route_count(),
+                1,
+                "initial route insert should increase route count"
+            );
 
             let pre_prune = table
                 .lookup_without_default(&key)
@@ -1189,7 +1278,11 @@ fn fuzz_edge_cases(edge_case: EdgeCaseScenario) {
 
             let pruned = table.prune_expired(expire_at);
             assert_eq!(pruned, 1, "expired route should be pruned exactly once");
-            assert_eq!(table.route_count(), 0, "route count should drop after eviction");
+            assert_eq!(
+                table.route_count(),
+                0,
+                "route count should drop after eviction"
+            );
             assert!(
                 table.lookup_without_default(&key).is_none(),
                 "expired route should not survive lookup after pruning"
