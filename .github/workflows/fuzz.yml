@@ -30,6 +30,7 @@ on:
           - bytes_slice_split_to
           - bytes_cursor_reader
           - grpc_prost_codec_decode
+          - grpc_gzip_message_decode
           - tls_stream_record_framing
           - transport_router
           - fuzz_websocket_frame_parsing
@@ -69,6 +70,7 @@ jobs:
           - bytes_slice_split_to
           - bytes_cursor_reader
           - grpc_prost_codec_decode
+          - grpc_gzip_message_decode
           - tls_stream_record_framing
           - transport_router
           - fuzz_websocket_frame_parsing
