@@ -1767,7 +1767,7 @@ mod tests {
         )| {
             let panic_index = raw_panic_index % branch_count;
 
-            let mut outcomes = vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
+            let mut outcomes: Vec<Outcome<i32, &str>> = vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
             outcomes[panic_index] = Outcome::Panicked(PanicPayload::new("test panic"));
 
             let result = race_all_outcomes(panic_index, outcomes);
