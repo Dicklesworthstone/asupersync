@@ -37,6 +37,7 @@ on:
           - grpc_streaming
           - fuzz_distributed_snapshot_merge
           - h3_native_frames
+          - qpack_field_section
           - kafka_protocol
           - key_derivation_context
           - region_heap_allocator
@@ -95,6 +96,7 @@ jobs:
           - grpc_streaming
           - fuzz_distributed_snapshot_merge
           - h3_native_frames
+          - qpack_field_section
           - kafka_protocol
           - key_derivation_context
           - region_heap_allocator

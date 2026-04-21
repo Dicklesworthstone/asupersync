@@ -31,6 +31,7 @@ cargo +nightly install cargo-fuzz
 | `grpc_streaming` | Bidirectional gRPC stream interleaving, half-close/cancel propagation, deadline, and backpressure invariants | High |
 | `fuzz_distributed_snapshot_merge` | CRDT snapshot merge convergence under delta reordering, malformed-wire rejection, and region-mismatch handling | High |
 | `h3_native_frames` | HTTP/3 frame-header varint bounds, malformed-frame rejection, unknown-frame preservation, and GREASE tolerance | High |
+| `qpack_field_section` | QPACK encoded field section parsing for static-indexed fields, static-name literals, dynamic-reference rejection, and prefixed-integer overflow | High |
 | `kafka_protocol` | Kafka request-header ApiKey/ApiVersion, correlation echo, tagged-field varint, and size-bound invariants | High |
 | `key_derivation_context` | AuthKey seed/raw/RNG derivation, chained purpose isolation, and mutated-tag/symbol verification invariants | High |
 | `region_heap_allocator` | RegionHeap mixed-size/high-alignment allocation, stale-handle reuse, and reclaim-all invariants | High |
@@ -100,6 +101,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `corpus/h2_connection_window_update/` - HTTP/2 connection-state WINDOW_UPDATE seeds covering zero-increment rejection, idle-stream protocol errors, queued frame ordering, and window-overflow guards
 - `corpus/fuzz_distributed_snapshot_merge/` - CRDT merge seeds covering reordering convergence, malformed delta bytes, and region mismatch handling
 - `corpus/h3_native_frames/` - HTTP/3 DATA/HEADERS header varint, GREASE unknown-frame, reserved-type, and truncated-payload scenarios
+- `corpus/qpack_field_section/` - QPACK field section seeds covering static indexed fields, static-name literals, dynamic references without table state, and prefixed-integer overflow
 - `corpus/kafka_protocol/` - Kafka request-header scenarios covering ApiKey/version mismatches, tagged-field varints, correlation echo, and oversized frames
 - `corpus/key_derivation_context/` - AuthKey seed/raw/RNG derivation, chained purpose isolation, and mutated-tag/symbol scenarios
 - `corpus/region_heap_allocator/` - RegionHeap allocation, stale-handle, reclaim-all, and high-alignment slot-reuse scenarios

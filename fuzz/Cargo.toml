@@ -1076,6 +1076,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "qpack_field_section"
+path = "fuzz_targets/qpack_field_section.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "sqlite_sql"
 path = "fuzz_targets/sqlite_sql.rs"
 test = false
