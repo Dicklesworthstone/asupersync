@@ -1,0 +1,123 @@
+---
+source: src/observability/task_inspector.rs
+expression: scrubbed
+---
+== Summary ==
+Task Summary
+----------------------------------------------------------------------
+Total: 5  |  Running: 2  |  Cancelling: 1  |  Completed: 1  |  Stuck: 1
+----------------------------------------------------------------------
+By Region:
+  <region-root>: 2 tasks
+  <region-child>: 3 tasks
+----------------------------------------------------------------------
+POTENTIAL STUCK TASKS:
+  <task-created> in <region-root> - Created for 40.0s, 0 polls
+
+== Wire ==
+{
+  "schema_version": "asupersync.task_console_wire.v1",
+  "generated_at": 45000000000,
+  "summary": {
+    "total_tasks": 5,
+    "created": 1,
+    "running": 2,
+    "cancelling": 1,
+    "completed": 1,
+    "stuck_count": 1,
+    "by_region": [
+      {
+        "region_id": "<region-root>",
+        "task_count": 2
+      },
+      {
+        "region_id": "<region-child>",
+        "task_count": 3
+      }
+    ]
+  },
+  "tasks": [
+    {
+      "id": "<task-created>",
+      "region_id": "<region-root>",
+      "state": "Created",
+      "phase": "Created",
+      "poll_count": 0,
+      "polls_remaining": 12,
+      "created_at": 5000000000,
+      "age_nanos": 40000000000,
+      "time_since_last_poll_nanos": null,
+      "wake_pending": false,
+      "obligations": [],
+      "waiters": []
+    },
+    {
+      "id": "<task-running>",
+      "region_id": "<region-root>",
+      "state": "Running",
+      "phase": "Running",
+      "poll_count": 2,
+      "polls_remaining": 6,
+      "created_at": 5000000000,
+      "age_nanos": 40000000000,
+      "time_since_last_poll_nanos": 10000000000,
+      "wake_pending": true,
+      "obligations": [
+        "<obligation-pending>"
+      ],
+      "waiters": [
+        "<task-waiter>"
+      ]
+    },
+    {
+      "id": "<task-cancel-requested>",
+      "region_id": "<region-child>",
+      "state": {
+        "CancelRequested": {
+          "reason": "Timeout"
+        }
+      },
+      "phase": "CancelRequested",
+      "poll_count": 1,
+      "polls_remaining": 4,
+      "created_at": 5000000000,
+      "age_nanos": 40000000000,
+      "time_since_last_poll_nanos": null,
+      "wake_pending": false,
+      "obligations": [],
+      "waiters": []
+    },
+    {
+      "id": "<task-completed>",
+      "region_id": "<region-child>",
+      "state": {
+        "Completed": {
+          "outcome": "Ok"
+        }
+      },
+      "phase": "Completed",
+      "poll_count": 1,
+      "polls_remaining": 0,
+      "created_at": 5000000000,
+      "age_nanos": 40000000000,
+      "time_since_last_poll_nanos": null,
+      "wake_pending": false,
+      "obligations": [],
+      "waiters": []
+    },
+    {
+      "id": "<task-waiter>",
+      "region_id": "<region-child>",
+      "state": "Running",
+      "phase": "Running",
+      "poll_count": 1,
+      "polls_remaining": 9,
+      "created_at": 5000000000,
+      "age_nanos": 40000000000,
+      "time_since_last_poll_nanos": null,
+      "wake_pending": false,
+      "obligations": [],
+      "waiters": []
+    }
+  ]
+}

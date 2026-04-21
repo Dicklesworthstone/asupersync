@@ -1223,6 +1223,152 @@ mod tests {
         assert_eq!(wire.waiters[1], TaskId::new_for_test(8, 0));
     }
 
+    fn scrub_task_inspector_snapshot(
+        snapshot: &str,
+        regions: &[(RegionId, &str)],
+        tasks: &[(TaskId, &str)],
+        obligations: &[(ObligationId, &str)],
+    ) -> String {
+        let mut scrubbed = snapshot.to_string();
+        for (region_id, label) in regions {
+            scrubbed = scrubbed.replace(&format!("{region_id:?}"), label);
+            scrubbed = scrubbed.replace(
+                &serde_json::to_string_pretty(region_id).expect("region id should encode"),
+                &format!("\"{label}\""),
+            );
+        }
+        for (task_id, label) in tasks {
+            scrubbed = scrubbed.replace(&format!("{task_id:?}"), label);
+            scrubbed = scrubbed.replace(
+                &serde_json::to_string_pretty(task_id).expect("task id should encode"),
+                &format!("\"{label}\""),
+            );
+        }
+        for (obligation_id, label) in obligations {
+            scrubbed = scrubbed.replace(&format!("{obligation_id:?}"), label);
+            scrubbed = scrubbed.replace(
+                &serde_json::to_string_pretty(obligation_id)
+                    .expect("obligation id should encode"),
+                &format!("\"{label}\""),
+            );
+        }
+        scrubbed
+    }
+
+    #[test]
+    fn task_inspector_introspection_output_mixed_states_snapshot() {
+        let mut state = RuntimeState::new();
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(5)));
+        state.now = Time::from_secs(5);
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)));
+
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("create child region");
+
+        let (created_id, _created_handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create created task");
+        let (running_id, _running_handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create running task");
+        let (cancel_requested_id, _cancel_handle) = state
+            .create_task(child, Budget::INFINITE, async {})
+            .expect("create cancelling task");
+        let (completed_id, _completed_handle) = state
+            .create_task(child, Budget::INFINITE, async {})
+            .expect("create completed task");
+        let (waiter_id, _waiter_handle) = state
+            .create_task(child, Budget::INFINITE, async {})
+            .expect("create waiter task");
+
+        {
+            let created = state.task_mut(created_id).expect("created task record");
+            created.polls_remaining = 12;
+        }
+
+        let running_cx = {
+            let running = state.task_mut(running_id).expect("running task record");
+            running.state = TaskState::Running;
+            running.phase.store(TaskPhase::Running);
+            running.polls_remaining = 6;
+            running.increment_polls();
+            running.increment_polls();
+            running.waiters.push(waiter_id);
+            running.wake_state.notify();
+            running.cx.as_ref().expect("running task cx").clone()
+        };
+
+        {
+            let cancel_requested = state
+                .task_mut(cancel_requested_id)
+                .expect("cancel requested task record");
+            cancel_requested.polls_remaining = 4;
+            cancel_requested.increment_polls();
+            assert!(cancel_requested.request_cancel(crate::types::CancelReason::timeout()));
+        }
+
+        {
+            let completed = state.task_mut(completed_id).expect("completed task record");
+            completed.state = TaskState::Running;
+            completed.phase.store(TaskPhase::Running);
+            completed.polls_remaining = 0;
+            completed.increment_polls();
+            assert!(completed.complete(Outcome::Ok(())));
+        }
+
+        {
+            let waiter = state.task_mut(waiter_id).expect("waiter task record");
+            waiter.state = TaskState::Running;
+            waiter.phase.store(TaskPhase::Running);
+            waiter.polls_remaining = 9;
+            waiter.increment_polls();
+        }
+
+        let pending_obligation = state
+            .create_obligation(crate::record::ObligationKind::IoOp, running_id, root, None)
+            .expect("create pending obligation");
+
+        clock.advance_to(Time::from_secs(35));
+        running_cx.checkpoint().expect("checkpoint");
+        clock.advance_to(Time::from_secs(45));
+
+        let inspector = TaskInspector::with_config(
+            Arc::new(state),
+            None,
+            TaskInspectorConfig::default().with_stuck_threshold(Duration::from_secs(20)),
+        );
+        let summary = inspector.summary();
+        let stuck = inspector.find_stuck_tasks_default();
+        assert_eq!(
+            stuck.iter().map(|task| task.id).collect::<Vec<_>>(),
+            vec![created_id]
+        );
+
+        let rendered = TaskInspector::format_summary_output(&summary, &stuck, true);
+        let wire = inspector
+            .wire_snapshot_pretty_json()
+            .expect("wire snapshot should encode");
+        let scrubbed = scrub_task_inspector_snapshot(
+            &format!("== Summary ==\n{rendered}\n== Wire ==\n{wire}\n"),
+            &[(root, "<region-root>"), (child, "<region-child>")],
+            &[
+                (created_id, "<task-created>"),
+                (running_id, "<task-running>"),
+                (cancel_requested_id, "<task-cancel-requested>"),
+                (completed_id, "<task-completed>"),
+                (waiter_id, "<task-waiter>"),
+            ],
+            &[(pending_obligation, "<obligation-pending>")],
+        );
+
+        insta::assert_snapshot!(
+            "task_inspector_introspection_output_mixed_states",
+            scrubbed
+        );
+    }
+
     #[test]
     fn format_summary_output_hides_stuck_section_when_highlight_disabled() {
         let mut summary = TaskSummary {
