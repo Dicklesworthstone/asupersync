@@ -4437,11 +4437,210 @@ impl Wake for ThreeLaneLocalCancelWaker {
 mod tests {
     use super::*;
     use crate::record::task::TaskWakeState;
+    use crate::runtime::scheduler::invariant_monitor;
     use crate::runtime::scheduler::{InvariantCategory, SchedulerInvariant};
     use crate::time::{TimerDriverHandle, VirtualClock};
     use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId};
     use parking_lot::RwLock;
+    use serde_json::{Value, json};
     use std::time::Duration;
+
+    #[derive(Default)]
+    struct TaskIdScrubber {
+        labels: BTreeMap<TaskId, String>,
+        next: usize,
+    }
+
+    impl TaskIdScrubber {
+        fn label(&mut self, task_id: TaskId) -> String {
+            if let Some(label) = self.labels.get(&task_id) {
+                return label.clone();
+            }
+
+            let label = format!("[TASK_{}]", self.next);
+            self.next += 1;
+            self.labels.insert(task_id, label.clone());
+            label
+        }
+    }
+
+    fn scrubbed_tracked_tasks(
+        scrubber: &mut TaskIdScrubber,
+        tracked_tasks: Vec<invariant_monitor::TrackedTaskSnapshot>,
+    ) -> Vec<Value> {
+        let mut tracked_tasks = tracked_tasks;
+        tracked_tasks.sort_by_key(|snapshot| snapshot.task_id);
+        tracked_tasks
+            .into_iter()
+            .map(|snapshot| {
+                json!({
+                    "task_id": scrubber.label(snapshot.task_id),
+                    "queues": snapshot.queues,
+                    "priority": snapshot.priority,
+                    "enqueue_time_ns": snapshot.enqueue_time.as_nanos(),
+                    "last_update_ns": snapshot.last_update.as_nanos(),
+                    "lifecycle_state": snapshot.lifecycle_state,
+                    "owner_worker": snapshot.owner_worker,
+                    "is_cancelled": snapshot.is_cancelled,
+                })
+            })
+            .collect()
+    }
+
+    fn worker_state_dump_scrubbed(
+        scenario: &str,
+        worker: &ThreeLaneWorker,
+        dispatch_sequence: &[TaskId],
+    ) -> Value {
+        let mut scrubber = TaskIdScrubber::default();
+        let local_ready_tasks: Vec<_> = worker.local_ready.lock().iter().copied().collect();
+        let local_scheduler_depth = worker.local.lock().len();
+        let tracked_tasks = worker.invariant_monitor.lock().tracked_tasks();
+        let invariant_stats = worker.invariant_stats();
+        let starvation_stats = worker.starvation_stats();
+        let certificate = worker.preemption_fairness_certificate();
+        let metrics = worker.preemption_metrics();
+        let adaptive_policy = worker.adaptive_cancel_policy.as_ref().map(|policy| {
+            json!({
+                "selected_arm": policy.selected_arm,
+                "current_limit": policy.current_limit(),
+                "epoch_steps": policy.epoch_steps,
+                "steps_in_epoch": policy.steps_in_epoch,
+                "epoch_count": policy.epoch_count,
+                "reward_ema": policy.reward_ema,
+                "e_process_log": policy.e_process_log,
+                "weights": policy.weights,
+                "probs": policy.probs,
+                "pulls": policy.pulls,
+            })
+        });
+
+        json!({
+            "scenario": scenario,
+            "worker_id": worker.id,
+            "cancel_streak": worker.cancel_streak,
+            "cancel_streak_limit": worker.cancel_streak_limit,
+            "ready_count": worker.ready_count(),
+            "lane_depths": {
+                "local_priority_scheduler": local_scheduler_depth,
+                "local_ready": local_ready_tasks.len(),
+                "fast_queue": worker.fast_queue.len(),
+                "global_pending": worker.global.len(),
+                "global_ready": worker.global.ready_count(),
+                "global_has_cancel": worker.global.has_cancel_work(),
+                "global_has_timed": worker.global.has_timed_work(),
+                "global_has_ready": worker.global.has_ready_work(),
+            },
+            "local_ready_tasks": local_ready_tasks
+                .into_iter()
+                .map(|task_id| scrubber.label(task_id))
+                .collect::<Vec<_>>(),
+            "dispatch_sequence": dispatch_sequence
+                .iter()
+                .copied()
+                .map(|task_id| scrubber.label(task_id))
+                .collect::<Vec<_>>(),
+            "tracked_tasks": scrubbed_tracked_tasks(&mut scrubber, tracked_tasks),
+            "fairness_certificate": {
+                "base_limit": certificate.base_limit,
+                "effective_limit": certificate.effective_limit,
+                "observed_max_cancel_streak": certificate.observed_max_cancel_streak,
+                "cancel_dispatches": certificate.cancel_dispatches,
+                "timed_dispatches": certificate.timed_dispatches,
+                "ready_dispatches": certificate.ready_dispatches,
+                "fairness_yields": certificate.fairness_yields,
+                "observed_max_ready_stall_steps": certificate.observed_max_ready_stall_steps,
+                "observed_max_timed_stall_steps": certificate.observed_max_timed_stall_steps,
+                "ready_priority_inversions": certificate.ready_priority_inversions,
+                "max_ready_priority_inversion_gap": certificate.max_ready_priority_inversion_gap,
+                "fallback_cancel_dispatches": certificate.fallback_cancel_dispatches,
+                "base_limit_exceedances": certificate.base_limit_exceedances,
+                "effective_limit_exceedances": certificate.effective_limit_exceedances,
+                "adaptive_enabled": certificate.adaptive_enabled,
+                "adaptive_current_limit": certificate.adaptive_current_limit,
+                "ready_stall_bound_steps": certificate.ready_stall_bound_steps(),
+                "observed_non_cancel_stall_steps": certificate.observed_non_cancel_stall_steps(),
+                "invariant_holds": certificate.invariant_holds(),
+                "witness_hash": certificate.witness_hash(),
+            },
+            "preemption_metrics": {
+                "cancel_dispatches": metrics.cancel_dispatches,
+                "timed_dispatches": metrics.timed_dispatches,
+                "ready_dispatches": metrics.ready_dispatches,
+                "fairness_yields": metrics.fairness_yields,
+                "max_cancel_streak": metrics.max_cancel_streak,
+                "max_ready_dispatch_stall": metrics.max_ready_dispatch_stall,
+                "max_timed_dispatch_stall": metrics.max_timed_dispatch_stall,
+                "fallback_cancel_dispatches": metrics.fallback_cancel_dispatches,
+                "base_limit_exceedances": metrics.base_limit_exceedances,
+                "effective_limit_exceedances": metrics.effective_limit_exceedances,
+                "adaptive_epochs": metrics.adaptive_epochs,
+                "adaptive_current_limit": metrics.adaptive_current_limit,
+                "adaptive_reward_ema": metrics.adaptive_reward_ema,
+                "adaptive_e_value": metrics.adaptive_e_value,
+            },
+            "invariant_stats": {
+                "operations_monitored": invariant_stats.operations_monitored,
+                "avg_monitoring_overhead_ns": invariant_stats.avg_monitoring_overhead_ns,
+                "monitored_workers": invariant_stats.monitored_workers,
+                "violations_by_severity": invariant_stats.violations_by_severity,
+            },
+            "starvation_stats": {
+                "total_starvation_events": starvation_stats.total_starvation_events,
+                "currently_starved_tasks": starvation_stats.currently_starved_tasks,
+                "max_task_wait_time_ns": starvation_stats.max_task_wait_time_ns,
+                "avg_task_wait_time_ns": starvation_stats.avg_task_wait_time_ns,
+                "total_priority_inversions": starvation_stats.total_priority_inversions,
+                "tracked_tasks_count": starvation_stats.tracked_tasks_count,
+                "pattern_detected": starvation_stats.pattern_detected,
+                "total_tracked_wait_time_ns": starvation_stats.total_tracked_wait_time_ns,
+                "max_priority_inversion_gap": starvation_stats.max_priority_inversion_gap,
+            },
+            "adaptive_policy": adaptive_policy,
+        })
+    }
+
+    fn empty_scheduler_state_dump() -> Value {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let worker = &mut scheduler.workers[0];
+        worker.verify_scheduler_invariants();
+        worker_state_dump_scrubbed("empty", worker, &[])
+    }
+
+    fn loaded_scheduler_state_dump() -> Value {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let worker = &mut scheduler.workers[0];
+
+        worker.schedule_local(TaskId::new_for_test(100, 1), 40);
+        worker.schedule_local_cancel(TaskId::new_for_test(101, 1), 90);
+        worker.schedule_local_timed(TaskId::new_for_test(102, 1), Time::from_nanos(5_000));
+        worker.verify_scheduler_invariants();
+
+        worker_state_dump_scrubbed("loaded", worker, &[])
+    }
+
+    fn cancel_streak_scheduler_state_dump() -> Value {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 2);
+        let worker = &mut scheduler.workers[0];
+
+        worker.schedule_local(TaskId::new_for_test(200, 1), 25);
+        for task_index in 0..5 {
+            worker.schedule_local_cancel(TaskId::new_for_test(210 + task_index, 1), 100);
+        }
+
+        let mut dispatch_sequence = Vec::new();
+        for _ in 0..6 {
+            if let Some(task_id) = worker.next_task() {
+                dispatch_sequence.push(task_id);
+            }
+        }
+        worker.verify_scheduler_invariants();
+
+        worker_state_dump_scrubbed("cancel_streak", worker, &dispatch_sequence)
+    }
 
     #[test]
     fn test_three_lane_scheduler_creation() {
@@ -9468,5 +9667,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn three_lane_scheduler_state_dump_scrubbed() {
+        insta::assert_json_snapshot!(
+            "three_lane_scheduler_state_dump_scrubbed",
+            json!({
+                "empty": empty_scheduler_state_dump(),
+                "loaded": loaded_scheduler_state_dump(),
+                "cancel_streak": cancel_streak_scheduler_state_dump(),
+            })
+        );
     }
 }
