@@ -59,7 +59,7 @@ impl TestCodec {
         Self {
             inject_decode_error,
             inject_encode_error,
-            frame_size: frame_size.max(1).min(1024), // Bound frame size
+            frame_size: frame_size.clamp(1, 1024),
         }
     }
 }
@@ -68,7 +68,14 @@ impl Encoder<Bytes> for TestCodec {
     type Error = io::Error;
 
     fn encode(&mut self, item: Bytes, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        if self.inject_encode_error && item.len() % 13 == 0 {
+        if item.len() > self.frame_size {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "frame exceeds codec size limit",
+            ));
+        }
+
+        if self.inject_encode_error && item.len().is_multiple_of(13) {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
                 "injected encode error",
@@ -88,7 +95,7 @@ impl Decoder for TestCodec {
     type Error = io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if self.inject_decode_error && src.len() % 17 == 0 {
+        if self.inject_decode_error && src.len().is_multiple_of(17) {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
                 "injected decode error",
@@ -107,6 +114,13 @@ impl Decoder for TestCodec {
         // Bound check to prevent excessive allocations
         if length > MAX_FUZZ_INPUT_SIZE {
             return Err(io::Error::new(ErrorKind::InvalidData, "frame too large"));
+        }
+
+        if length > self.frame_size {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "decoded frame exceeds codec size limit",
+            ));
         }
 
         if src.len() < 4 + length {
@@ -151,6 +165,13 @@ impl MockTransport {
             is_closed: false,
         }
     }
+
+    fn feed_data(&mut self, data: &[u8]) {
+        if self.is_closed || data.is_empty() {
+            return;
+        }
+        self.read_data.extend_from_slice(data);
+    }
 }
 
 impl AsyncRead for MockTransport {
@@ -163,15 +184,15 @@ impl AsyncRead for MockTransport {
             return Poll::Ready(Ok(()));
         }
 
-        if self.inject_read_error && self.read_pos % 7 == 0 {
-            return Poll::Ready(Err(io::Error::new(ErrorKind::Other, "injected read error")));
+        if self.inject_read_error && self.read_pos.is_multiple_of(7) {
+            return Poll::Ready(Err(io::Error::other("injected read error")));
         }
 
         let remaining = self.read_data.len() - self.read_pos;
         if remaining == 0 {
-            // **ASSERTION 1: Partial frames buffered correctly**
-            // EOF condition - no more data available
-            return Poll::Ready(Ok(()));
+            // No bytes currently available. Model an async transport that can
+            // be fed later instead of forcing EOF immediately.
+            return Poll::Pending;
         }
 
         // Simulate partial reads for more realistic testing
@@ -196,11 +217,8 @@ impl AsyncWrite for MockTransport {
             )));
         }
 
-        if self.inject_write_error && buf.len() % 11 == 0 {
-            return Poll::Ready(Err(io::Error::new(
-                ErrorKind::Other,
-                "injected write error",
-            )));
+        if self.inject_write_error && buf.len().is_multiple_of(11) {
+            return Poll::Ready(Err(io::Error::other("injected write error")));
         }
 
         // **ASSERTION 5: BytesMut grows within configured bounds**
@@ -247,6 +265,12 @@ enum FramedOperation {
     Close,
     /// Feed additional read data to simulate more incoming bytes
     FeedData { data: Vec<u8> },
+    /// Mutate codec behavior mid-stream to exercise error propagation paths
+    MutateCodec {
+        inject_decode_error: bool,
+        inject_encode_error: bool,
+        frame_size: u8,
+    },
 }
 
 /// Comprehensive fuzz input for framed codec testing
@@ -430,10 +454,21 @@ fn test_framed_operations(input: &FuzzInput) -> Result<(), Box<dyn std::error::E
             }
 
             FramedOperation::FeedData { data } => {
-                // This operation would require mutable access to the transport
-                // which is not available through the Framed interface.
-                // Skip this operation to focus on the Framed API surface.
-                continue;
+                if data.len() > MAX_FUZZ_INPUT_SIZE {
+                    continue;
+                }
+                framed.get_mut().feed_data(data);
+            }
+
+            FramedOperation::MutateCodec {
+                inject_decode_error,
+                inject_encode_error,
+                frame_size,
+            } => {
+                let codec = framed.codec_mut();
+                codec.inject_decode_error = *inject_decode_error;
+                codec.inject_encode_error = *inject_encode_error;
+                codec.frame_size = usize::from((*frame_size).max(1)).min(1024);
             }
         }
     }

@@ -1,0 +1,317 @@
+---
+source: tests/distributed_consistent_hash_golden.rs
+expression: placeholder
+---
+{
+  "after_add": {
+    "changed_from_baseline": {
+      "1": "node-a->node-d",
+      "14": "node-a->node-d",
+      "17": "node-a->node-d",
+      "19": "node-c->node-d",
+      "20": "node-b->node-d",
+      "23": "node-a->node-d",
+      "4": "node-a->node-d",
+      "7": "node-c->node-d",
+      "9": "node-a->node-d"
+    },
+    "ring": {
+      "assignments": {
+        "0": "node-b",
+        "1": "node-d",
+        "10": "node-b",
+        "11": "node-b",
+        "12": "node-a",
+        "13": "node-c",
+        "14": "node-d",
+        "15": "node-a",
+        "16": "node-c",
+        "17": "node-d",
+        "18": "node-c",
+        "19": "node-d",
+        "2": "node-a",
+        "20": "node-d",
+        "21": "node-b",
+        "22": "node-a",
+        "23": "node-d",
+        "3": "node-b",
+        "4": "node-d",
+        "5": "node-a",
+        "6": "node-c",
+        "7": "node-d",
+        "8": "node-a",
+        "9": "node-d"
+      },
+      "label": "after_add",
+      "node_count": 4,
+      "nodes": [
+        "node-a",
+        "node-b",
+        "node-c",
+        "node-d"
+      ],
+      "partitions": {
+        "node-a": [
+          2,
+          5,
+          8,
+          12,
+          15,
+          22
+        ],
+        "node-b": [
+          0,
+          3,
+          10,
+          11,
+          21
+        ],
+        "node-c": [
+          6,
+          13,
+          16,
+          18
+        ],
+        "node-d": [
+          1,
+          4,
+          7,
+          9,
+          14,
+          17,
+          19,
+          20,
+          23
+        ]
+      },
+      "vnode_count": 128
+    }
+  },
+  "after_remove": {
+    "changed_from_after_add": {
+      "0": "node-b->node-c",
+      "10": "node-b->node-c",
+      "11": "node-b->node-c",
+      "21": "node-b->node-c",
+      "3": "node-b->node-c"
+    },
+    "ring": {
+      "assignments": {
+        "0": "node-c",
+        "1": "node-d",
+        "10": "node-c",
+        "11": "node-c",
+        "12": "node-a",
+        "13": "node-c",
+        "14": "node-d",
+        "15": "node-a",
+        "16": "node-c",
+        "17": "node-d",
+        "18": "node-c",
+        "19": "node-d",
+        "2": "node-a",
+        "20": "node-d",
+        "21": "node-c",
+        "22": "node-a",
+        "23": "node-d",
+        "3": "node-c",
+        "4": "node-d",
+        "5": "node-a",
+        "6": "node-c",
+        "7": "node-d",
+        "8": "node-a",
+        "9": "node-d"
+      },
+      "label": "after_remove",
+      "node_count": 3,
+      "nodes": [
+        "node-a",
+        "node-c",
+        "node-d"
+      ],
+      "partitions": {
+        "node-a": [
+          2,
+          5,
+          8,
+          12,
+          15,
+          22
+        ],
+        "node-c": [
+          0,
+          3,
+          6,
+          10,
+          11,
+          13,
+          16,
+          18,
+          21
+        ],
+        "node-d": [
+          1,
+          4,
+          7,
+          9,
+          14,
+          17,
+          19,
+          20,
+          23
+        ]
+      },
+      "vnode_count": 96
+    }
+  },
+  "after_replace": {
+    "changed_from_baseline": {
+      "1": "node-a->node-e",
+      "13": "node-c->node-e",
+      "16": "node-c->node-e",
+      "17": "node-a->node-e",
+      "18": "node-c->node-a",
+      "19": "node-c->node-e",
+      "23": "node-a->node-e",
+      "4": "node-a->node-e",
+      "6": "node-c->node-b",
+      "7": "node-c->node-e"
+    },
+    "ring": {
+      "assignments": {
+        "0": "node-b",
+        "1": "node-e",
+        "10": "node-b",
+        "11": "node-b",
+        "12": "node-a",
+        "13": "node-e",
+        "14": "node-a",
+        "15": "node-a",
+        "16": "node-e",
+        "17": "node-e",
+        "18": "node-a",
+        "19": "node-e",
+        "2": "node-a",
+        "20": "node-b",
+        "21": "node-b",
+        "22": "node-a",
+        "23": "node-e",
+        "3": "node-b",
+        "4": "node-e",
+        "5": "node-a",
+        "6": "node-b",
+        "7": "node-e",
+        "8": "node-a",
+        "9": "node-a"
+      },
+      "label": "after_replace",
+      "node_count": 3,
+      "nodes": [
+        "node-a",
+        "node-b",
+        "node-e"
+      ],
+      "partitions": {
+        "node-a": [
+          2,
+          5,
+          8,
+          9,
+          12,
+          14,
+          15,
+          18,
+          22
+        ],
+        "node-b": [
+          0,
+          3,
+          6,
+          10,
+          11,
+          20,
+          21
+        ],
+        "node-e": [
+          1,
+          4,
+          7,
+          13,
+          16,
+          17,
+          19,
+          23
+        ]
+      },
+      "vnode_count": 96
+    }
+  },
+  "baseline": {
+    "assignments": {
+      "0": "node-b",
+      "1": "node-a",
+      "10": "node-b",
+      "11": "node-b",
+      "12": "node-a",
+      "13": "node-c",
+      "14": "node-a",
+      "15": "node-a",
+      "16": "node-c",
+      "17": "node-a",
+      "18": "node-c",
+      "19": "node-c",
+      "2": "node-a",
+      "20": "node-b",
+      "21": "node-b",
+      "22": "node-a",
+      "23": "node-a",
+      "3": "node-b",
+      "4": "node-a",
+      "5": "node-a",
+      "6": "node-c",
+      "7": "node-c",
+      "8": "node-a",
+      "9": "node-a"
+    },
+    "label": "baseline",
+    "node_count": 3,
+    "nodes": [
+      "node-a",
+      "node-b",
+      "node-c"
+    ],
+    "partitions": {
+      "node-a": [
+        1,
+        2,
+        4,
+        5,
+        8,
+        9,
+        12,
+        14,
+        15,
+        17,
+        22,
+        23
+      ],
+      "node-b": [
+        0,
+        3,
+        10,
+        11,
+        20,
+        21
+      ],
+      "node-c": [
+        6,
+        7,
+        13,
+        16,
+        18,
+        19
+      ]
+    },
+    "vnode_count": 96
+  }
+}
