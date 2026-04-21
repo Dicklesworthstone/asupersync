@@ -509,6 +509,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "source_payload_hash_verification"
+path = "fuzz_targets/source_payload_hash_verification.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_local_queue"
 path = "fuzz_targets/local_queue.rs"
 test = false

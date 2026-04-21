@@ -41,6 +41,7 @@ cargo +nightly install cargo-fuzz
 | `symbol_cancel_broadcast` | Symbol cancel fanout, duplicate suppression, max-hop termination, and late-subscriber cancellation invariants | High |
 | `postgres_scram` | PostgreSQL SCRAM-SHA-256 server-first/server-final parsing, iteration-bound enforcement, and malformed-signature rejection | High |
 | `raptorq_decoder_gauss_matrix` | RaptorQ decoder Gaussian-elimination rank-deficient, malformed-equation, and corrupt-RHS invariants | High |
+| `source_payload_hash_verification` | DecodeProof replay verification for divergent recovered-source payloads with identical symbol structure and deterministic source-payload-hash mismatch detection | High |
 | `fuzz_raptorq_rfc6330` | RFC 6330 OTI transfer-length, sub-block partitioning, duplicate-ESI tolerance, and checksum-mismatch invariants | High |
 | `tls_stream_record_framing` | TlsStream handshake/read/write behavior under fragmented and malformed TLS records | High |
 | `transport_router` | RoutingTable add/remove/lookup, TTL pruning, fallback routing, and dispatcher strategy invariants | High |
@@ -112,6 +113,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `corpus/postgres_bind_execute_sync/` - Extended-query Bind/Execute/Sync seeds covering binary/text parameters, embedded-NUL portal names, injected bind errors, and excessive parameter-count rejection
 - `corpus/postgres_scram/` - SCRAM server-first/server-final seeds covering valid nonces, low-iteration rejects, and malformed signatures
 - `corpus/raptorq_decoder_gauss_matrix/` - Rank-deficient duplicate-source/repair systems plus malformed-equation and corrupt-RHS decoder scenarios
+- `corpus/source_payload_hash_verification/` - DecodeProof replay seeds covering matching replay, regenerated divergent payloads, and single-byte source mutation with recomputed repairs
 - `corpus/fuzz_raptorq_rfc6330/` - RFC 6330 OTI seeds covering aligned transfer lengths, invalid sub-block divisibility, duplicate ESIs, and checksum mismatch cases
 - `corpus/tls_stream_record_framing/` - TlsStream record fragmentation, truncation, and close-notify scenarios
 - `corpus/transport_router/` - RoutingTable insert/remove/reinsert, lookup-miss fallback, TTL expiry, and dispatch-strategy scenarios
