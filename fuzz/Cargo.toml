@@ -831,6 +831,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "region_heap_allocator"
+path = "fuzz_targets/region_heap_allocator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "tcp_accept_loop_fuzz"
 path = "fuzz_targets/tcp_accept_loop_fuzz.rs"
 test = false
