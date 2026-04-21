@@ -399,7 +399,3 @@ mod tests {
         );
     }
 }
-d complete regardless of priority"
-        );
-    }
-}

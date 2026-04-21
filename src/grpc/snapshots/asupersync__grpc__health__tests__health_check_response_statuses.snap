@@ -1,0 +1,28 @@
+---
+source: src/grpc/health.rs
+expression: snapshot
+---
+{
+  "server": {
+    "query": "",
+    "status_code": 0,
+    "status_text": "UNKNOWN"
+  },
+  "service_queries": [
+    {
+      "query": "svc.serving",
+      "status_code": 1,
+      "status_text": "SERVING"
+    },
+    {
+      "query": "svc.not_serving",
+      "status_code": 2,
+      "status_text": "NOT_SERVING"
+    },
+    {
+      "query": "svc.unknown",
+      "status_code": 0,
+      "status_text": "UNKNOWN"
+    }
+  ]
+}

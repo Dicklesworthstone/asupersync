@@ -746,6 +746,8 @@ impl HealthServiceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insta::assert_json_snapshot;
+    use serde_json::json;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -754,6 +756,23 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn health_response_snapshot(service: &HealthService, query: &str) -> serde_json::Value {
+        let request = if query.is_empty() {
+            HealthCheckRequest::server()
+        } else {
+            HealthCheckRequest::new(query)
+        };
+        let response = service
+            .check(&request)
+            .expect("health snapshot queries should succeed");
+
+        json!({
+            "query": request.service,
+            "status_code": response.status as i32,
+            "status_text": response.status.to_string(),
+        })
     }
 
     #[derive(Default)]
@@ -956,6 +975,28 @@ mod tests {
             resp.status
         );
         crate::test_complete!("health_service_server_status");
+    }
+
+    #[test]
+    fn health_check_response_statuses_snapshot() {
+        init_test("health_check_response_statuses_snapshot");
+        let service = HealthService::new();
+        service.set_server_status(ServingStatus::Unknown);
+        service.set_status("svc.serving", ServingStatus::Serving);
+        service.set_status("svc.not_serving", ServingStatus::NotServing);
+        service.set_status("svc.unknown", ServingStatus::Unknown);
+
+        let snapshot = json!({
+            "server": health_response_snapshot(&service, ""),
+            "service_queries": [
+                health_response_snapshot(&service, "svc.serving"),
+                health_response_snapshot(&service, "svc.not_serving"),
+                health_response_snapshot(&service, "svc.unknown"),
+            ],
+        });
+
+        assert_json_snapshot!("health_check_response_statuses", snapshot);
+        crate::test_complete!("health_check_response_statuses_snapshot");
     }
 
     #[test]
