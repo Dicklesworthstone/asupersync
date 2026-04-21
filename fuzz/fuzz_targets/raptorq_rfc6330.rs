@@ -81,7 +81,7 @@ fn validate_oti(oti: &ObjectTransmissionInfo) -> Result<(), String> {
 
     // RFC 6330 Section 4.3: Sub-blocks validation
     // Number of sub-blocks (Z) must be reasonable
-    if oti.sub_blocks == 0 || oti.sub_blocks > 255 {
+    if oti.sub_blocks == 0 {
         return Err("Sub-blocks count must be in range [1, 255]".to_string());
     }
 
@@ -142,7 +142,7 @@ fn test_symbol_size_sub_block_relationships(oti: &ObjectTransmissionInfo) -> Res
     let al = oti.alignment as usize;
 
     // RFC 6330 Section 4.4.1.2: Symbol size must be divisible by alignment
-    if al > 0 && symbol_size % (1 << al) != 0 {
+    if al > 0 && !symbol_size.is_multiple_of(1 << al) {
         return Err(format!(
             "Symbol size {} not aligned to {} bytes",
             symbol_size,
@@ -151,7 +151,7 @@ fn test_symbol_size_sub_block_relationships(oti: &ObjectTransmissionInfo) -> Res
     }
 
     // Sub-symbol size calculation (T/Z must be an integer)
-    if symbol_size % z != 0 {
+    if !symbol_size.is_multiple_of(z) {
         return Err(format!(
             "Symbol size {} not divisible by sub-blocks {}",
             symbol_size, z
@@ -212,6 +212,7 @@ fn test_duplicate_esi_tolerance(
     symbols: &[RepairSymbolInput],
     oti: &ObjectTransmissionInfo,
     seed: u64,
+    source_block_number: u8,
 ) -> Result<(), String> {
     let k = oti.source_symbols as usize;
     let symbol_size = oti.symbol_size as usize;
@@ -227,7 +228,7 @@ fn test_duplicate_esi_tolerance(
 
     let config = DecodeConfig {
         object_id,
-        sbn: 0,
+        sbn: source_block_number,
         k,
         s: params.s,
         h: params.h,
@@ -298,6 +299,12 @@ fn test_duplicate_esi_tolerance(
                 }
                 DecodeError::ColumnIndexOutOfRange { .. } => {
                     // Expected if column indices are invalid
+                }
+                DecodeError::SourceEsiOutOfRange { .. } => {
+                    // Expected if a source symbol uses an out-of-range ESI
+                }
+                DecodeError::InvalidSourceSymbolEquation { .. } => {
+                    // Expected if a source symbol violates the identity equation
                 }
                 DecodeError::SingularMatrix { .. } => {
                     // Expected with insufficient or inconsistent symbols
@@ -386,7 +393,7 @@ fn fuzz_rfc6330_oti(mut input: Rfc6330FuzzInput) -> Result<(), String> {
     input.oti.source_symbols = input.oti.source_symbols.clamp(1, 1000);
     input.oti.symbol_size = input.oti.symbol_size.clamp(1, 8192);
     input.oti.sub_blocks = input.oti.sub_blocks.clamp(1, 16);
-    input.oti.transfer_length = input.oti.transfer_length & 0xFF_FF_FF_FF_FF; // 40-bit max
+    input.oti.transfer_length &= 0xFF_FF_FF_FF_FF; // 40-bit max
 
     // Assertion 1: Transfer length encoded as 5 octets
     test_transfer_length_encoding(&input.oti)?;
@@ -399,7 +406,12 @@ fn fuzz_rfc6330_oti(mut input: Rfc6330FuzzInput) -> Result<(), String> {
 
     // Assertion 4: Duplicate ESIs tolerated
     if !input.repair_symbols.is_empty() {
-        test_duplicate_esi_tolerance(&input.repair_symbols, &input.oti, input.seed)?;
+        test_duplicate_esi_tolerance(
+            &input.repair_symbols,
+            &input.oti,
+            input.seed,
+            input.source_block_number,
+        )?;
     }
 
     // Assertion 5: OTI checksum mismatch returns error
