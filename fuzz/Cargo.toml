@@ -1447,6 +1447,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_hpack_static_indexed"
+path = "fuzz_targets/fuzz_hpack_static_indexed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "budget_arithmetic"
 path = "fuzz_targets/budget_arithmetic.rs"
 test = false
