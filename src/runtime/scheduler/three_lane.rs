@@ -6523,7 +6523,7 @@ mod tests {
         state.task_mut(task_id).expect("task").waiters.push(task_id);
         let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
-        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+        let scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
         let mut workers = scheduler.take_workers();
         let worker = &mut workers[0];
 
@@ -6702,6 +6702,185 @@ mod tests {
         }
         // With old obligations and no deadlines/draining, should suggest DrainObligations.
         assert_eq!(suggestions[0], SchedulingSuggestion::DrainObligations);
+    }
+
+    fn ready_only_governor_scheduler(
+        task_count: usize,
+        chunk_pattern: &[usize],
+    ) -> ThreeLaneScheduler {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::unlimited());
+        let tasks: Vec<_> = (0..task_count)
+            .map(|_| {
+                state
+                    .create_task(root, Budget::unlimited(), async {})
+                    .expect("create task")
+                    .0
+            })
+            .collect();
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+
+        let mut offset = 0usize;
+        for &chunk in chunk_pattern {
+            let end = offset.saturating_add(chunk).min(tasks.len());
+            for &task_id in &tasks[offset..end] {
+                scheduler.inject_ready(task_id, 100);
+            }
+            offset = end;
+            if offset == tasks.len() {
+                break;
+            }
+        }
+        for &task_id in &tasks[offset..] {
+            scheduler.inject_ready(task_id, 100);
+        }
+
+        scheduler
+    }
+
+    fn governor_total_potential(worker: &ThreeLaneWorker) -> f64 {
+        let governor = worker.governor.as_ref().expect("governor enabled");
+        let state = worker
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ready_depth = worker.local.lock().len();
+        #[allow(clippy::cast_possible_truncation)]
+        let snapshot =
+            StateSnapshot::from_runtime_state(&state).with_ready_queue_depth(ready_depth as u32);
+        governor.compute_record(&snapshot).total
+    }
+
+    fn collect_ready_drain_potentials(worker: &mut ThreeLaneWorker, dispatches: usize) -> Vec<f64> {
+        let mut potentials = vec![governor_total_potential(worker)];
+        for _ in 0..dispatches {
+            let task_id = worker.next_task().expect("ready task should dispatch");
+            worker.execute(task_id);
+            potentials.push(governor_total_potential(worker));
+        }
+        potentials
+    }
+
+    #[test]
+    fn metamorphic_lyapunov_chunked_ready_load_matches_batched_potential_sequence() {
+        let task_count = 12;
+        let mut batched = ready_only_governor_scheduler(task_count, &[task_count]);
+        let mut chunked = ready_only_governor_scheduler(task_count, &[3, 4, 5]);
+
+        let mut batched_workers = batched.take_workers();
+        let mut chunked_workers = chunked.take_workers();
+        let batched_worker = &mut batched_workers[0];
+        let chunked_worker = &mut chunked_workers[0];
+
+        let batched_potentials = collect_ready_drain_potentials(batched_worker, task_count);
+        let chunked_potentials = collect_ready_drain_potentials(chunked_worker, task_count);
+
+        assert_eq!(
+            batched_potentials.len(),
+            chunked_potentials.len(),
+            "equivalent ready loads should expose the same number of potential samples"
+        );
+
+        for (step, (&batched_total, &chunked_total)) in batched_potentials
+            .iter()
+            .zip(&chunked_potentials)
+            .enumerate()
+        {
+            assert!(
+                (batched_total - chunked_total).abs() <= f64::EPSILON,
+                "chunking equivalent ready work changed Lyapunov potential at step {step}: batched={batched_total}, chunked={chunked_total}"
+            );
+        }
+    }
+
+    #[test]
+    fn metamorphic_lyapunov_ready_drain_potential_is_monotonic() {
+        let task_count = 10;
+        let mut scheduler = ready_only_governor_scheduler(task_count, &[2, 3, 5]);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        let potentials = collect_ready_drain_potentials(worker, task_count);
+        for (step, window) in potentials.windows(2).enumerate() {
+            assert!(
+                window[1] <= window[0] + f64::EPSILON,
+                "draining ready work increased Lyapunov potential between steps {step} and {}: {:?}",
+                step + 1,
+                window
+            );
+        }
+        assert!(
+            potentials
+                .last()
+                .is_some_and(|last| last.abs() <= f64::EPSILON),
+            "fully drained ready workload should converge to zero potential: {potentials:?}"
+        );
+    }
+
+    #[test]
+    fn metamorphic_lyapunov_drain_boost_scales_with_base_limit() {
+        use crate::record::ObligationKind;
+
+        for &base_limit in &[2usize, 4, 8] {
+            let mut state = RuntimeState::new();
+            let root = state.create_root_region(Budget::unlimited());
+            let (task_id, _handle) = state
+                .create_task(root, Budget::unlimited(), async {})
+                .expect("create task");
+            let _obligation = state
+                .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+                .expect("create obligation");
+            state.now = Time::from_nanos(1_000_000_000);
+            let state = Arc::new(ContendedMutex::new("runtime_state", state));
+
+            let mut scheduler =
+                ThreeLaneScheduler::new_with_options(1, &state, base_limit, true, 1);
+            let cancel_count = base_limit * 2 + 1;
+            let cancel_tasks: Vec<_> = (0..cancel_count)
+                .map(|i| TaskId::new_for_test(42, i as u32))
+                .collect();
+            let ready_task = TaskId::new_for_test(42, 10_000 + base_limit as u32);
+
+            for &cancel_task in &cancel_tasks {
+                scheduler.inject_cancel(cancel_task, 100);
+            }
+            scheduler.inject_ready(ready_task, 50);
+
+            let mut workers = scheduler.take_workers();
+            let worker = &mut workers[0];
+            let dispatched: Vec<_> = (0..cancel_count + 1)
+                .map(|_| worker.next_task().expect("dispatch should continue"))
+                .collect();
+
+            let ready_position = dispatched
+                .iter()
+                .position(|&task| task == ready_task)
+                .expect("ready task should dispatch under boosted drain mode");
+            assert_eq!(
+                ready_position,
+                base_limit * 2,
+                "ready work should dispatch immediately after the boosted cancel streak for base limit {base_limit}: {dispatched:?}"
+            );
+
+            let cert = worker.preemption_fairness_certificate();
+            assert_eq!(cert.base_limit, base_limit);
+            assert_eq!(
+                cert.effective_limit,
+                base_limit * 2,
+                "drain mode should scale the effective cancel streak limit linearly"
+            );
+            assert_eq!(
+                cert.observed_max_cancel_streak,
+                base_limit * 2,
+                "cancel streak should stabilize exactly at the boosted limit"
+            );
+            assert_eq!(
+                cert.effective_limit_exceedances, 0,
+                "boosted drain mode must still preserve the effective limit invariant"
+            );
+            assert!(cert.invariant_holds());
+        }
     }
 
     #[test]
