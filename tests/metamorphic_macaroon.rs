@@ -12,11 +12,16 @@
 //! 4. Deserialize-serialize round-trip identity
 //! 5. LabRuntime deterministic replay consistency
 
-use asupersync::cx::macaroon::{CaveatPredicate, MacaroonToken, VerificationContext};
+use asupersync::cx::macaroon::{
+    Caveat, CaveatPredicate, MACAROON_SCHEMA_VERSION, MacaroonToken, VerificationContext,
+};
 use asupersync::security::key::AuthKey;
+use insta::assert_json_snapshot;
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
+use serde_json::json;
 use std::collections::HashSet;
+use std::fmt::Write;
 
 /// Generate arbitrary auth keys for testing
 fn arb_auth_key() -> impl Strategy<Value = AuthKey> {
@@ -174,6 +179,61 @@ fn caveats_are_commutative(a: &CaveatPredicate, b: &CaveatPredicate) -> bool {
 
         // Different types are generally commutative
         _ => true,
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+fn caveat_json(caveat: &Caveat) -> serde_json::Value {
+    match caveat {
+        Caveat::FirstParty { predicate } => match predicate {
+            CaveatPredicate::TimeBefore(deadline_ms) => {
+                json!({"kind": "first_party", "predicate": "time_before", "deadline_ms": deadline_ms})
+            }
+            CaveatPredicate::TimeAfter(start_ms) => {
+                json!({"kind": "first_party", "predicate": "time_after", "start_ms": start_ms})
+            }
+            CaveatPredicate::RegionScope(region_id) => {
+                json!({"kind": "first_party", "predicate": "region_scope", "region_id": region_id})
+            }
+            CaveatPredicate::TaskScope(task_id) => {
+                json!({"kind": "first_party", "predicate": "task_scope", "task_id": task_id})
+            }
+            CaveatPredicate::MaxUses(max_uses) => {
+                json!({"kind": "first_party", "predicate": "max_uses", "max_uses": max_uses})
+            }
+            CaveatPredicate::ResourceScope(pattern) => {
+                json!({"kind": "first_party", "predicate": "resource_scope", "pattern": pattern})
+            }
+            CaveatPredicate::RateLimit {
+                max_count,
+                window_secs,
+            } => json!({
+                "kind": "first_party",
+                "predicate": "rate_limit",
+                "max_count": max_count,
+                "window_secs": window_secs
+            }),
+            CaveatPredicate::Custom(key, value) => {
+                json!({"kind": "first_party", "predicate": "custom", "key": key, "value": value})
+            }
+        },
+        Caveat::ThirdParty {
+            location,
+            identifier,
+            vid,
+        } => json!({
+            "kind": "third_party",
+            "location": location,
+            "identifier": identifier,
+            "vid_hex": hex_bytes(vid),
+        }),
     }
 }
 
@@ -448,6 +508,54 @@ fn mr_serialize_deserialize_roundtrip() {
     )| {
         prop_assert!(property(key, identifier, location, caveats));
     });
+}
+
+#[test]
+fn token_serialization_scrubbed() {
+    let key = AuthKey::from_bytes([0x11; 32]);
+    let token = MacaroonToken::mint(&key, "api:read:tenant-7", "cx/macaroons")
+        .add_caveat(CaveatPredicate::TimeBefore(1_700_000_123_000))
+        .add_caveat(CaveatPredicate::RegionScope(42))
+        .add_caveat(CaveatPredicate::ResourceScope(
+            "tenants/7/objects/*".to_string(),
+        ))
+        .add_caveat(CaveatPredicate::RateLimit {
+            max_count: 3,
+            window_secs: 60,
+        })
+        .add_caveat(CaveatPredicate::Custom(
+            "env".to_string(),
+            "prod".to_string(),
+        ));
+
+    let binary = token.to_binary();
+    let recovered = MacaroonToken::from_binary(&binary).expect("snapshot token should deserialize");
+
+    assert_eq!(recovered.identifier(), token.identifier());
+    assert_eq!(recovered.location(), token.location());
+    assert_eq!(recovered.caveats(), token.caveats());
+    assert_eq!(
+        recovered.signature().as_bytes(),
+        token.signature().as_bytes()
+    );
+    assert_eq!(recovered.to_binary(), binary);
+
+    let golden = json!({
+        "schema_version": MACAROON_SCHEMA_VERSION,
+        "identifier": token.identifier(),
+        "location": token.location(),
+        "caveat_count": token.caveat_count(),
+        "caveats": token
+            .caveats()
+            .iter()
+            .map(caveat_json)
+            .collect::<Vec<_>>(),
+        "binary_len": binary.len(),
+        "binary_hex": hex_bytes(&binary),
+        "signature_hex": hex_bytes(token.signature().as_bytes()),
+    });
+
+    assert_json_snapshot!("token_serialization_scrubbed", golden);
 }
 
 /// Metamorphic Relation 5: LabRuntime Deterministic Replay

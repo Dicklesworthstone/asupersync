@@ -1,0 +1,42 @@
+---
+source: tests/metamorphic_macaroon.rs
+expression: golden
+---
+{
+  "schema_version": 2,
+  "identifier": "api:read:tenant-7",
+  "location": "cx/macaroons",
+  "caveat_count": 5,
+  "caveats": [
+    {
+      "kind": "first_party",
+      "predicate": "time_before",
+      "deadline_ms": 1700000123000
+    },
+    {
+      "kind": "first_party",
+      "predicate": "region_scope",
+      "region_id": 42
+    },
+    {
+      "kind": "first_party",
+      "predicate": "resource_scope",
+      "pattern": "tenants/7/objects/*"
+    },
+    {
+      "kind": "first_party",
+      "predicate": "rate_limit",
+      "max_count": 3,
+      "window_secs": 60
+    },
+    {
+      "kind": "first_party",
+      "predicate": "custom",
+      "key": "env",
+      "value": "prod"
+    }
+  ],
+  "binary_len": 144,
+  "binary_hex": "0211006170693a726561643a74656e616e742d370c0063782f6d616361726f6f6e730500000900017848e7cf8b010000000900032a0000000000000000160007130074656e616e74732f372f6f626a656374732f2a00090008030000003c000000000c00060300656e76040070726f64c7c6dd4530f6a3f0b0444f0dd7eeaca1bb127ac91b1e052219d4cf95fa62335a",
+  "signature_hex": "c7c6dd4530f6a3f0b0444f0dd7eeaca1bb127ac91b1e052219d4cf95fa62335a"
+}
