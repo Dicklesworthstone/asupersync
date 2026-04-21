@@ -450,6 +450,44 @@ mod tests {
         (steal_rounds, owner_remaining)
     }
 
+    fn run_repeated_steal_batch_from_push_chunks(
+        chunks: &[Vec<u32>],
+    ) -> (Vec<Vec<u32>>, Vec<u32>) {
+        let max_task_id = chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter().copied())
+            .max()
+            .unwrap_or(0);
+        let state = LocalQueue::test_state(max_task_id);
+        let src = LocalQueue::new(Arc::clone(&state));
+
+        for chunk in chunks {
+            let task_ids: Vec<_> = chunk.iter().copied().map(task).collect();
+            src.push_many(&task_ids);
+        }
+
+        let mut steal_rounds = Vec::new();
+        loop {
+            let dest = LocalQueue::new(Arc::clone(&state));
+            if !src.stealer().steal_batch(&dest) {
+                break;
+            }
+            steal_rounds.push(
+                dest.snapshot_tasks()
+                    .into_iter()
+                    .map(|task_id| task_id.0.index())
+                    .collect(),
+            );
+        }
+
+        let mut owner_remaining = Vec::new();
+        while let Some(task_id) = src.pop() {
+            owner_remaining.push(task_id.0.index());
+        }
+
+        (steal_rounds, owner_remaining)
+    }
+
     fn normalize_task_ids(task_ids: Vec<u32>, layout: &[(u32, bool)]) -> Vec<usize> {
         let order: HashMap<u32, usize> = layout
             .iter()
@@ -1050,6 +1088,48 @@ mod tests {
                 variant,
                 expected.clone(),
                 "chunking pushes must not perturb thief-visible FIFO order",
+            );
+        }
+
+        #[test]
+        fn mr_chunked_push_equivalent_for_repeated_steal_fifo_mode(
+            total in 1usize..64,
+            split in 0usize..64,
+        ) {
+            let split = split.min(total);
+            let baseline_chunks = vec![(0..total as u32).collect::<Vec<_>>()];
+            let variant_chunks = vec![
+                (0..split as u32).collect::<Vec<_>>(),
+                (split as u32..total as u32).collect::<Vec<_>>(),
+            ];
+
+            let (baseline_rounds, baseline_owner_remaining) =
+                run_repeated_steal_batch_from_push_chunks(&baseline_chunks);
+            let (variant_rounds, variant_owner_remaining) =
+                run_repeated_steal_batch_from_push_chunks(&variant_chunks);
+
+            let baseline_flattened: Vec<_> = baseline_rounds.iter().flatten().copied().collect();
+            let variant_flattened: Vec<_> = variant_rounds.iter().flatten().copied().collect();
+            let expected: Vec<_> = (0..total as u32).collect();
+
+            prop_assert_eq!(
+                baseline_flattened,
+                expected.clone(),
+                "repeated steal_batch should drain remote tasks in FIFO arrival order",
+            );
+            prop_assert_eq!(
+                variant_flattened,
+                expected,
+                "chunking pushes must not perturb repeated steal_batch FIFO order",
+            );
+            prop_assert!(
+                baseline_owner_remaining.is_empty(),
+                "all-remote repeated steal_batch schedule should drain the owner queue",
+            );
+            prop_assert_eq!(
+                variant_owner_remaining,
+                baseline_owner_remaining,
+                "chunking pushes must not change the owner-visible remainder under repeated steals",
             );
         }
 
