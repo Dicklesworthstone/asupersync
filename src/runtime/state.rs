@@ -9209,6 +9209,7 @@ mod tests {
             task_count: usize,
             child_count: usize,
             pending_obligations: usize,
+            cancel_reason: Option<CancelReason>,
         }
 
         impl RegionCloseOutcome {
@@ -9223,7 +9224,17 @@ mod tests {
                     task_count: region.task_count(),
                     child_count: region.child_count(),
                     pending_obligations: region.pending_obligations(),
+                    cancel_reason: region.cancel_reason(),
                 })
+            }
+        }
+
+        fn cancel_reason_for_variant(variant: u8) -> CancelReason {
+            match variant {
+                0 => CancelReason::default(),
+                1 => CancelReason::timeout(),
+                2 => CancelReason::resource_unavailable(),
+                _ => CancelReason::user("redundant close"),
             }
         }
 
@@ -9296,11 +9307,7 @@ mod tests {
                 let outcome_before_cancel = RegionCloseOutcome::from_region(&runtime, region_id);
 
                 // Attempt to cancel the already-closed region
-                let cancel_reason = match cancel_reason_variant {
-                    0 => CancelReason::default(),
-                    1 => CancelReason::timeout(),
-                    _ => CancelReason::resource_unavailable(),
-                };
+                let cancel_reason = cancel_reason_for_variant(cancel_reason_variant);
 
                 {
                     let state = &mut runtime.state;
@@ -9313,6 +9320,53 @@ mod tests {
                 // Metamorphic relation: Cancel should be no-op on closed region
                 prop_assert_eq!(outcome_before_cancel, outcome_after_cancel,
                     "Cancelling closed region should have no effect");
+            });
+        }
+
+        /// Metamorphic Relation 2b: Closed regions preserve their terminal cancel cause
+        /// Property: Once a region reaches Closed, redundant close attempts cannot rewrite the terminal reason
+        #[test]
+        fn mr_closed_region_preserves_terminal_cancel_reason() {
+            proptest!(|(seed in any::<u64>(), initial_variant in 0..4u8, followup_variant in 0..4u8)| {
+                let config = LabConfig::new(seed).max_steps(1000);
+                let mut runtime = LabRuntime::new(config);
+
+                let region_id = runtime.state.create_root_region(Budget::default());
+                let initial_reason = cancel_reason_for_variant(initial_variant);
+                let followup_reason = cancel_reason_for_variant(followup_variant);
+
+                {
+                    let state = &mut runtime.state;
+                    let region = state.regions.get_mut(region_id.arena_index()).unwrap();
+                    let _ = region.begin_close(Some(initial_reason.clone()));
+                    let _ = region.begin_finalize();
+                    let _ = region.complete_close();
+                }
+
+                let outcome_before_redundant_close = RegionCloseOutcome::from_region(&runtime, region_id);
+
+                {
+                    let state = &mut runtime.state;
+                    let region = state.regions.get_mut(region_id.arena_index()).unwrap();
+                    let redundant_close_result = region.begin_close(Some(followup_reason));
+                    prop_assert!(!redundant_close_result, "redundant close on terminal region should be a no-op");
+                }
+
+                let outcome_after_redundant_close = RegionCloseOutcome::from_region(&runtime, region_id);
+
+                prop_assert_eq!(
+                    &outcome_before_redundant_close,
+                    &outcome_after_redundant_close,
+                    "redundant close must preserve the terminal cancel reason and region snapshot"
+                );
+
+                if let Some(outcome) = &outcome_after_redundant_close {
+                    prop_assert_eq!(
+                        outcome.cancel_reason.clone(),
+                        Some(initial_reason),
+                        "terminal cancel reason should remain the original close cause"
+                    );
+                }
             });
         }
 

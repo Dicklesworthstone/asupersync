@@ -750,8 +750,19 @@ impl RegionRecord {
     ///
     /// Returns true if the transition succeeded.
     pub fn begin_close(&self, reason: Option<CancelReason>) -> bool {
-        if let Some(reason) = reason {
-            self.strengthen_cancel_reason(reason);
+        {
+            let mut inner = self.inner.write();
+            if self.state.load() == RegionState::Closed {
+                return false;
+            }
+
+            if let Some(reason) = reason {
+                if let Some(existing) = &mut inner.cancel_reason {
+                    existing.strengthen(&reason);
+                } else {
+                    inner.cancel_reason = Some(reason);
+                }
+            }
         }
 
         let transitioned = self
@@ -1373,6 +1384,20 @@ mod tests {
 
         assert!(region.begin_close(Some(reason.clone())));
         assert_eq!(region.cancel_reason(), Some(reason));
+    }
+
+    #[test]
+    fn begin_close_on_closed_region_preserves_terminal_cancel_reason() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        let initial_reason = CancelReason::timeout();
+
+        assert!(region.begin_close(Some(initial_reason.clone())));
+        assert!(region.begin_finalize());
+        assert!(region.complete_close());
+        assert_eq!(region.cancel_reason(), Some(initial_reason.clone()));
+
+        assert!(!region.begin_close(Some(CancelReason::resource_unavailable())));
+        assert_eq!(region.cancel_reason(), Some(initial_reason));
     }
 
     #[test]
