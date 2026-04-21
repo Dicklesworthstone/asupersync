@@ -4762,6 +4762,86 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_cancelled_waiter_preserves_reuse_identity() {
+        init_test("metamorphic_cancelled_waiter_preserves_reuse_identity");
+
+        let counter = std::sync::atomic::AtomicU32::new(0);
+        let factory = move || {
+            let id = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>(id) })
+                as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+        };
+
+        let pool = GenericPool::new(factory, PoolConfig::with_max_size(1));
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        let held = futures_lite::future::block_on(pool.acquire(&cx)).expect("initial acquire");
+        let original_id = *held;
+
+        let waker = noop_pool_waker();
+        let mut task_cx = std::task::Context::from_waker(&waker);
+        {
+            let mut blocked_acquire = pool.acquire(&cx);
+            let poll_result = std::pin::Pin::new(&mut blocked_acquire).poll(&mut task_cx);
+            crate::assert_with_log!(
+                poll_result.is_pending(),
+                "second acquire should block while the only resource is held",
+                true,
+                poll_result.is_pending()
+            );
+            crate::assert_with_log!(
+                pool.stats().waiters == 1,
+                "blocked acquire should register one waiter",
+                1usize,
+                pool.stats().waiters
+            );
+        }
+
+        crate::assert_with_log!(
+            pool.stats().waiters == 0,
+            "dropping the blocked acquire should clean the waiter queue",
+            0usize,
+            pool.stats().waiters
+        );
+
+        held.return_to_pool();
+
+        let reacquired = futures_lite::future::block_on(pool.acquire(&cx)).expect("reacquire");
+        let reacquired_id = *reacquired;
+        crate::assert_with_log!(
+            reacquired_id == original_id,
+            "cancelled waiter must not perturb the identity of the next clean reacquire",
+            original_id,
+            reacquired_id
+        );
+
+        let stats = pool.stats();
+        crate::assert_with_log!(
+            stats.active == 1,
+            "reacquired resource should be active and not leaked to the cancelled waiter",
+            1usize,
+            stats.active
+        );
+        crate::assert_with_log!(
+            stats.waiters == 0,
+            "cancelled waiter cleanup must persist after the reacquire",
+            0usize,
+            stats.waiters
+        );
+
+        reacquired.return_to_pool();
+        let final_stats = pool.stats();
+        crate::assert_with_log!(
+            final_stats.idle == 1,
+            "returned resource should still be reusable after cancelled waiter cleanup",
+            1usize,
+            final_stats.idle
+        );
+
+        crate::test_complete!("metamorphic_cancelled_waiter_preserves_reuse_identity");
+    }
+
+    #[test]
     fn metamorphic_pool_bounds_invariant() {
         init_test("metamorphic_pool_bounds_invariant");
 
