@@ -18,7 +18,7 @@ use common::*;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 #[cfg(unix)]
 use std::{os::unix::io::AsRawFd, os::unix::net::UnixStream};

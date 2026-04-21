@@ -280,7 +280,7 @@ mod tests {
     use crate::io::BufReader;
     use crate::io::{AsyncBufRead, AsyncRead, ReadBuf};
     use std::sync::Arc;
-    use std::task::{Poll, Wake, Waker};
+    use std::task::{Poll, Waker};
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

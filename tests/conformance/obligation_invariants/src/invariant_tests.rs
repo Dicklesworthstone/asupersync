@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 pub struct NoObligationLeaksTest;
 
 impl ObligationInvariantTest for NoObligationLeaksTest {
-    fn invariant_name(&self) -> &str {
+    fn invariant_name(&self) -> &'static str {
         "No Obligation Leaks"
     }
 
@@ -25,7 +25,7 @@ impl ObligationInvariantTest for NoObligationLeaksTest {
         InvariantTestCategory::NoLeakValidation
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Every created obligation must be properly resolved or cancelled - no leaked obligations"
     }
 
@@ -135,7 +135,7 @@ impl ObligationInvariantTest for NoObligationLeaksTest {
 pub struct RegionQuiescenceTest;
 
 impl ObligationInvariantTest for RegionQuiescenceTest {
-    fn invariant_name(&self) -> &str {
+    fn invariant_name(&self) -> &'static str {
         "Region Close = Quiescence"
     }
 
@@ -143,7 +143,7 @@ impl ObligationInvariantTest for RegionQuiescenceTest {
         InvariantTestCategory::RegionQuiescence
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Region closure must wait for all obligations to complete before closing"
     }
 
@@ -256,7 +256,7 @@ impl ObligationInvariantTest for RegionQuiescenceTest {
 pub struct CancelPropagationTest;
 
 impl ObligationInvariantTest for CancelPropagationTest {
-    fn invariant_name(&self) -> &str {
+    fn invariant_name(&self) -> &'static str {
         "Cancel Propagation"
     }
 
@@ -264,7 +264,7 @@ impl ObligationInvariantTest for CancelPropagationTest {
         InvariantTestCategory::CancelPropagation
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Cancel signals must propagate correctly through obligation hierarchies"
     }
 
@@ -375,7 +375,7 @@ impl ObligationInvariantTest for CancelPropagationTest {
 pub struct ResourceCleanupTest;
 
 impl ObligationInvariantTest for ResourceCleanupTest {
-    fn invariant_name(&self) -> &str {
+    fn invariant_name(&self) -> &'static str {
         "Resource Cleanup"
     }
 
@@ -383,7 +383,7 @@ impl ObligationInvariantTest for ResourceCleanupTest {
         InvariantTestCategory::ResourceCleanup
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Obligation cleanup must not leak resources (memory, wakers, handles)"
     }
 
@@ -516,7 +516,7 @@ impl ObligationInvariantTest for ResourceCleanupTest {
 pub struct TemporalSafetyTest;
 
 impl ObligationInvariantTest for TemporalSafetyTest {
-    fn invariant_name(&self) -> &str {
+    fn invariant_name(&self) -> &'static str {
         "Temporal Safety"
     }
 
@@ -524,7 +524,7 @@ impl ObligationInvariantTest for TemporalSafetyTest {
         InvariantTestCategory::TemporalSafety
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Obligations cannot outlive their parent regions - temporal safety invariant"
     }
 

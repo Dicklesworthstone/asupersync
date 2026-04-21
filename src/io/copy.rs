@@ -832,7 +832,7 @@ where
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::task::{Context, Wake, Waker};
+    use std::task::{Context, Waker};
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

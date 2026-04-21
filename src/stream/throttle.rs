@@ -132,7 +132,7 @@ mod tests {
     use crate::stream::iter;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     static TEST_NOW_NANOS: AtomicU64 = AtomicU64::new(0);
 

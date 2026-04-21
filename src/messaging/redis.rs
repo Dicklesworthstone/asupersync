@@ -2066,7 +2066,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::mpsc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
     use std::thread;
 
     fn noop_waker() -> Waker {

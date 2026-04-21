@@ -860,7 +860,7 @@ fn datagram_peer_cred_impl(socket: &net::UnixDatagram) -> io::Result<UCred> {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::task::{Context, Wake, Waker};
+    use std::task::{Context, Waker};
     use tempfile::tempdir;
 
     fn init_test(name: &str) {

@@ -13,7 +13,7 @@ use std::net::Shutdown;
 use std::os::unix::net;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 /// Borrowed read half of a [`UnixStream`](super::UnixStream).
 ///
@@ -180,6 +180,7 @@ struct CombinedWaker {
     write: Option<Waker>,
 }
 
+use std::task::Wake;
 impl Wake for CombinedWaker {
     fn wake(self: Arc<Self>) {
         self.wake_by_ref();
@@ -698,7 +699,7 @@ mod tests {
     use super::*;
     use crate::cx::Cx;
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

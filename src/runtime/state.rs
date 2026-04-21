@@ -4269,7 +4269,7 @@ mod tests {
     use serde_json::Value;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     #[derive(Default)]
     struct TestMetrics {
@@ -7652,7 +7652,7 @@ mod tests {
         use std::os::unix::net::UnixStream;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
-        use std::task::{Wake, Waker};
+        use std::task::{Waker};
         use std::time::Duration;
 
         struct FlagWaker(AtomicBool);

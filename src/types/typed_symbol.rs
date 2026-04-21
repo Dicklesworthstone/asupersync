@@ -1001,8 +1001,7 @@ mod tests {
     use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     struct Demo {

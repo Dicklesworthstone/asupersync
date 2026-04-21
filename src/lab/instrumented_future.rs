@@ -1046,7 +1046,7 @@ impl<F: Future> Future for InstrumentedFuture<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::task::{Poll, Wake, Waker};
+    use std::task::{Poll, Waker};
 
     /// A simple noop waker for testing.
     /// Creates a noop waker for testing.

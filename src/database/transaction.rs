@@ -715,7 +715,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     use crate::database::sqlite::{SqliteConnection, SqliteValue};
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

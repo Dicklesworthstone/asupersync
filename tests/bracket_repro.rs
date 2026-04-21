@@ -78,5 +78,4 @@ mod tests {
         );
         test_complete!("bracket_leak_on_cancel");
     }
-
-    }
+}

@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
-use std::task::{Wake, Waker};
+use std::task::{Waker};
 
 fn tracked_probe_waker(delegate: &Waker) -> (Waker, Arc<AtomicBool>) {
     struct TrackWaker {
@@ -19,6 +19,7 @@ fn tracked_probe_waker(delegate: &Waker) -> (Waker, Arc<AtomicBool>) {
         delegate: Waker,
     }
 
+use std::task::Wake;
     impl Wake for TrackWaker {
         fn wake(self: Arc<Self>) {
             self.woke.store(true, Ordering::SeqCst);

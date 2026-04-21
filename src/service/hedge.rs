@@ -674,7 +674,7 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-    use std::task::{Context, Wake, Waker};
+    use std::task::{Context, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

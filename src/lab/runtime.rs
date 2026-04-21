@@ -36,7 +36,7 @@ use crate::util::{DetEntropy, DetRng};
 use parking_lot::Mutex;
 use std::fmt;
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 /// Summary of a trace certificate built from the current trace buffer.
@@ -2649,6 +2649,7 @@ struct TaskWaker {
     scheduler: Arc<Mutex<LabScheduler>>,
 }
 
+use std::task::Wake;
 impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
         self.scheduler.lock().schedule(self.task_id, self.priority);
@@ -2790,7 +2791,7 @@ mod tests {
     use parking_lot::Mutex;
     use parking_lot::RwLock;
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::task::{Waker};
     use std::time::Duration;
 
     #[cfg(unix)]

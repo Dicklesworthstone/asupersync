@@ -212,7 +212,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
-    use std::task::{Poll, Wake, Waker};
+    use std::task::{Poll, Waker};
 
     thread_local! {
         static TEST_NOW_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };

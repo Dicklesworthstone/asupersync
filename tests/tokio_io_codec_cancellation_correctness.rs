@@ -317,7 +317,7 @@ use asupersync::stream::Stream;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 fn noop_waker() -> Waker {
     std::task::Waker::noop().clone()

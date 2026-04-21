@@ -2354,7 +2354,7 @@ mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     use crate::Time;
     use crate::time::{TimerDriverHandle, VirtualClock};

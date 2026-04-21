@@ -79,7 +79,7 @@ use futures_lite::future::block_on;
 use std::io::{self, Write};
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::Duration;
 
@@ -300,9 +300,21 @@ fn net_verify_006a_tcp_socket_ipv6_unspecified_wildcard_bind_rfc8200() {
         Ipv6Addr::UNSPECIFIED,
         "wildcard bind should preserve the unspecified IPv6 address"
     );
-    assert_ne!(local_v6.port(), 0, "OS should allocate a non-zero ephemeral port");
-    assert_eq!(local_v6.flowinfo(), 0, "wildcard bind should keep zero flowinfo");
-    assert_eq!(local_v6.scope_id(), 0, "wildcard bind should keep zero scope ID");
+    assert_ne!(
+        local_v6.port(),
+        0,
+        "OS should allocate a non-zero ephemeral port"
+    );
+    assert_eq!(
+        local_v6.flowinfo(),
+        0,
+        "wildcard bind should keep zero flowinfo"
+    );
+    assert_eq!(
+        local_v6.scope_id(),
+        0,
+        "wildcard bind should keep zero scope ID"
+    );
 
     test_complete!("net_verify_006a_tcp_socket_ipv6_unspecified_wildcard_bind_rfc8200");
 }

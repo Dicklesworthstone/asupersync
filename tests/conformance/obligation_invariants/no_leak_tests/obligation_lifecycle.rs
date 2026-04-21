@@ -25,7 +25,7 @@ use asupersync::types::{ObligationId, RegionId, Time};
 pub struct BasicObligationLifecycleTest;
 
 impl ObligationInvariantTest for BasicObligationLifecycleTest {
-    fn invariant_name(&self) -> &str {
+    fn invariant_name(&self) -> &'static str {
         "basic_obligation_lifecycle"
     }
 
@@ -33,7 +33,7 @@ impl ObligationInvariantTest for BasicObligationLifecycleTest {
         InvariantTestCategory::NoLeakValidation
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Tests basic obligation creation, execution, and resolution without leaks"
     }
 
@@ -102,7 +102,7 @@ impl ObligationInvariantTest for BasicObligationLifecycleTest {
 pub struct NestedObligationTest;
 
 impl ObligationInvariantTest for NestedObligationTest {
-    fn invariant_name(&self) -> &str {
+    fn invariant_name(&self) -> &'static str {
         "nested_obligation_lifecycle"
     }
 
@@ -110,7 +110,7 @@ impl ObligationInvariantTest for NestedObligationTest {
         InvariantTestCategory::NoLeakValidation
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Tests creation and resolution of nested obligation hierarchies without leaks"
     }
 
@@ -213,7 +213,7 @@ impl ObligationInvariantTest for NestedObligationTest {
 pub struct ConcurrentObligationTest;
 
 impl ObligationInvariantTest for ConcurrentObligationTest {
-    fn invariant_name(&self) -> &str {
+    fn invariant_name(&self) -> &'static str {
         "concurrent_obligation_lifecycle"
     }
 
@@ -221,7 +221,7 @@ impl ObligationInvariantTest for ConcurrentObligationTest {
         InvariantTestCategory::NoLeakValidation
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Tests concurrent creation and resolution of obligations without race conditions or leaks"
     }
 
@@ -301,7 +301,7 @@ impl ObligationInvariantTest for ConcurrentObligationTest {
 pub struct ErrorPathCleanupTest;
 
 impl ObligationInvariantTest for ErrorPathCleanupTest {
-    fn invariant_name(&self) -> &str {
+    fn invariant_name(&self) -> &'static str {
         "error_path_obligation_cleanup"
     }
 
@@ -309,7 +309,7 @@ impl ObligationInvariantTest for ErrorPathCleanupTest {
         InvariantTestCategory::NoLeakValidation
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Tests that obligations are properly cleaned up when errors occur during execution"
     }
 

@@ -443,13 +443,13 @@ macro_rules! invariant_test {
         struct InvariantTestImpl;
 
         impl ObligationInvariantTest for InvariantTestImpl {
-            fn invariant_name(&self) -> &str {
+            fn invariant_name(&self) -> &'static str {
                 $name
             }
             fn test_category(&self) -> InvariantTestCategory {
                 $category
             }
-            fn description(&self) -> &str {
+            fn description(&self) -> &'static str {
                 $desc
             }
 
@@ -490,13 +490,13 @@ mod tests {
         // Simple test that should pass
         struct PassingTest;
         impl ObligationInvariantTest for PassingTest {
-            fn invariant_name(&self) -> &str {
+            fn invariant_name(&self) -> &'static str {
                 "passing_test"
             }
             fn test_category(&self) -> InvariantTestCategory {
                 InvariantTestCategory::NoLeakValidation
             }
-            fn description(&self) -> &str {
+            fn description(&self) -> &'static str {
                 "A test that should pass"
             }
 

@@ -723,7 +723,7 @@ mod tests {
     use parking_lot::Mutex;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

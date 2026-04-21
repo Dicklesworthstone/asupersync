@@ -182,7 +182,7 @@ mod tests {
     use crate::stream::{StreamExt, iter};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

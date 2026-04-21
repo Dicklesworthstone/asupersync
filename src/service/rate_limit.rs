@@ -666,7 +666,7 @@ mod tests {
     use std::future::ready;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::task::{Wake, Waker};
+    use std::task::{Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

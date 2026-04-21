@@ -265,7 +265,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BufWriter<W> {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::task::{Waker};
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

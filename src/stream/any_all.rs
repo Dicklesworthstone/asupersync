@@ -143,7 +143,7 @@ mod tests {
     use crate::stream::iter;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::task::{Poll, Wake, Waker};
+    use std::task::{Poll, Waker};
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

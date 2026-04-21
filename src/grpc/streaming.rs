@@ -632,8 +632,7 @@ impl<T> Default for RequestSink<T> {
 mod tests {
     use super::*;
     use crate::grpc::Code;
-    use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::task::Waker;
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

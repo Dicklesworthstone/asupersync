@@ -18,7 +18,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 static START_TIME: OnceLock<Instant> = OnceLock::new();
@@ -125,6 +125,7 @@ struct ReadyWaker {
     inner: Waker,
 }
 
+use std::task::Wake;
 impl Wake for ReadyWaker {
     #[inline]
     fn wake(self: Arc<Self>) {
@@ -800,7 +801,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::task::{Context, Wake, Waker};
+    use std::task::{Context, Waker};
 
     // =========================================================================
     // Construction Tests

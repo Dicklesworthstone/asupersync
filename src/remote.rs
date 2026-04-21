@@ -2642,7 +2642,7 @@ mod tests {
     use parking_lot::Mutex;
     use std::collections::BTreeMap;
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

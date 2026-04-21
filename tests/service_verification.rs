@@ -70,7 +70,7 @@ use std::future::{self, Future};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 fn init_test(name: &str) {

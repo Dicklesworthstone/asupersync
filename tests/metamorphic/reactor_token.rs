@@ -24,7 +24,7 @@ use proptest::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::task::{Wake, Waker};
+use std::task::{Waker};
 use std::time::Duration;
 
 use asupersync::lab::{LabConfig, LabRuntime};

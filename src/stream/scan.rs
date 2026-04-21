@@ -93,7 +93,7 @@ mod tests {
     use crate::stream::{StreamExt, iter};
     use std::marker::PhantomPinned;
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::task::{Waker};
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

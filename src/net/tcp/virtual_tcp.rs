@@ -32,7 +32,7 @@ use std::net::{Shutdown, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 const VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES: usize = 1024;
 const VIRTUAL_TCP_ACCEPT_QUEUE_CAPACITY: usize = 16;
@@ -78,6 +78,7 @@ impl AcceptWaiters {
     }
 }
 
+use std::task::Wake;
 impl Wake for AcceptWaiters {
     fn wake(self: Arc<Self>) {
         self.wake_all();
@@ -632,7 +633,7 @@ mod tests {
     use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::task::{Context, Wake, Waker};
+    use std::task::{Context, Waker};
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

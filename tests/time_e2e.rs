@@ -31,7 +31,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 // ============================================================================

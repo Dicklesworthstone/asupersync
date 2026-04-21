@@ -106,7 +106,7 @@ mod tests {
     use crate::io::{AsyncBufRead, AsyncRead, BufReader, ReadBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::{Wake, Waker};
+    use std::task::{Waker};
 
     struct CountWaker {
         wakes: AtomicUsize,

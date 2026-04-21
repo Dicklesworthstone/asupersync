@@ -1174,7 +1174,7 @@ mod tests {
     use crate::bytes::{Buf, BytesMut};
     use crate::codec::Decoder;
     use std::pin::Pin;
-    use std::task::{Context, Wake, Waker};
+    use std::task::{Context, Waker};
 
     #[test]
     fn decode_simple_response() {

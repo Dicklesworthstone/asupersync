@@ -420,7 +420,7 @@ mod tests {
     use std::future::{pending, ready};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     /// A no-op waker for testing.
     fn noop_waker() -> Waker {

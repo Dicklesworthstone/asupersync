@@ -21,7 +21,7 @@ use std::marker::PhantomData;
 use std::net::{self, Shutdown};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 #[cfg(target_arch = "wasm32")]
 #[inline]
@@ -269,6 +269,7 @@ struct CombinedWaker {
     write: Option<Waker>,
 }
 
+use std::task::Wake;
 impl Wake for CombinedWaker {
     fn wake(self: Arc<Self>) {
         self.wake_by_ref();
@@ -947,7 +948,7 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
-    use std::task::{Context, Wake, Waker};
+    use std::task::{Context, Waker};
     use std::thread;
     use std::time::Duration;
 

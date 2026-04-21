@@ -774,7 +774,7 @@ mod tests {
     use std::future::Future;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     // In-memory I/O for testing
     struct TestIo {

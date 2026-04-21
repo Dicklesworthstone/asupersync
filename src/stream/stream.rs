@@ -111,7 +111,7 @@ impl<S: Stream + Unpin + ?Sized> Stream for &mut S {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::task::{Waker};
 
     #[inline]
     fn noop_waker() -> Waker {

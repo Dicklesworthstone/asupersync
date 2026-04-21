@@ -18,7 +18,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use super::Service;
 use super::discover::{Change, Discover};
@@ -26,6 +26,7 @@ use super::discover::{Change, Discover};
 fn tracked_probe_waker() -> (Waker, Arc<AtomicBool>) {
     struct TrackWaker(Arc<AtomicBool>);
 
+use std::task::Wake;
     impl Wake for TrackWaker {
         fn wake(self: Arc<Self>) {
             self.0.store(true, Ordering::SeqCst);
@@ -1073,7 +1074,7 @@ mod tests {
     use parking_lot::Mutex;
     use std::collections::VecDeque;
     use std::panic::{AssertUnwindSafe, catch_unwind};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

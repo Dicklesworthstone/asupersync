@@ -896,7 +896,7 @@ mod tests {
     use crate::types::{Symbol, SymbolId, SymbolKind, Time};
     use futures_lite::future;
     use std::sync::atomic::AtomicU64;
-    use std::task::{Poll, Wake, Waker};
+    use std::task::{Poll, Waker};
 
     static STREAM_TEST_NOW: AtomicU64 = AtomicU64::new(0);
     static SINK_TEST_NOW: AtomicU64 = AtomicU64::new(0);

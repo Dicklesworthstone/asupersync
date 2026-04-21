@@ -1017,7 +1017,7 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
@@ -1484,7 +1484,7 @@ mod tests {
         use std::future::{Future, pending};
         use std::pin::pin;
         use std::sync::Arc;
-        use std::task::{Context, Poll, Wake, Waker};
+        use std::task::{Context, Poll, Waker};
         use std::time::Duration;
 
         fn noop_waker() -> Waker {

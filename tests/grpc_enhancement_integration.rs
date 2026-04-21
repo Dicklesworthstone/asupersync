@@ -80,23 +80,22 @@ mod reflection {
                 });
 
                 let describe_reflection = reflection.clone();
-                let describe_handle =
-                    LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async move {
-                        describe_reflection
-                            .describe_service_async(&Request::new(
-                                asupersync::grpc::reflection::ReflectionDescribeServiceRequest::new(
-                                    <HealthService as NamedService>::NAME,
-                                ),
-                            ))
-                            .await
-                            .expect("describe service should succeed")
-                            .into_inner()
-                            .service
-                            .methods
-                            .into_iter()
-                            .map(|method| method.name)
-                            .collect::<Vec<_>>()
-                    });
+                let describe_handle = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async move {
+                    describe_reflection
+                        .describe_service_async(&Request::new(
+                            asupersync::grpc::reflection::ReflectionDescribeServiceRequest::new(
+                                <HealthService as NamedService>::NAME,
+                            ),
+                        ))
+                        .await
+                        .expect("describe service should succeed")
+                        .into_inner()
+                        .service
+                        .methods
+                        .into_iter()
+                        .map(|method| method.name)
+                        .collect::<Vec<_>>()
+                });
 
                 asupersync::runtime::yield_now().await;
 
@@ -147,8 +146,15 @@ mod reflection {
                 .any(|service| service == <ReflectionService as NamedService>::NAME),
             "real ReflectionService must be registered in reflection"
         );
-        assert_eq!(health_method_names, vec!["Check".to_string(), "Watch".to_string()]);
-        assert_eq!(checkpoints.len(), 3, "expected deterministic JSON checkpoints");
+        assert_eq!(
+            health_method_names,
+            vec!["Check".to_string(), "Watch".to_string()]
+        );
+        assert_eq!(
+            checkpoints.len(),
+            3,
+            "expected deterministic JSON checkpoints"
+        );
     }
 
     #[test]

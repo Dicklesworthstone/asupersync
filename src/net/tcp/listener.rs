@@ -18,7 +18,7 @@ use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 const FALLBACK_ACCEPT_BACKOFF: Duration = Duration::from_millis(4);
@@ -75,6 +75,7 @@ impl AcceptWaiters {
     }
 }
 
+use std::task::Wake;
 impl Wake for AcceptWaiters {
     fn wake(self: Arc<Self>) {
         self.wake_all();
@@ -415,7 +416,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::{Context, Wake, Waker};
+    use std::task::{Context, Waker};
     use std::time::Instant;
 
     thread_local! {

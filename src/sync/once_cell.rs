@@ -609,7 +609,7 @@ mod tests {
     use std::future::Future;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
     use std::thread;
 
     struct BlockingWaitHookGuard;

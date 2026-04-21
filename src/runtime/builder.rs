@@ -175,7 +175,7 @@ use std::io;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Weak};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 use thiserror::Error as ThisError;
 #[cfg(target_arch = "wasm32")]
@@ -3701,6 +3701,7 @@ struct ThreadWaker {
     woken: std::sync::atomic::AtomicBool,
 }
 
+use std::task::Wake;
 impl Wake for ThreadWaker {
     fn wake(self: Arc<Self>) {
         self.woken.store(true, std::sync::atomic::Ordering::Release);

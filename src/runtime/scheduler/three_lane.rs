@@ -71,7 +71,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 /// Identifier for a scheduler worker.
@@ -4247,6 +4247,7 @@ impl ThreeLaneWaker {
     }
 }
 
+use std::task::Wake;
 impl Wake for ThreeLaneWaker {
     #[inline]
     fn wake(self: Arc<Self>) {
@@ -4956,7 +4957,7 @@ mod tests {
     fn test_run_once_processes_timers() {
         use crate::time::{TimerDriverHandle, VirtualClock};
         use std::sync::atomic::AtomicBool;
-        use std::task::{Wake, Waker};
+        use std::task::{Waker};
 
         // Waker that sets a flag when woken
         struct TestWaker(AtomicBool);

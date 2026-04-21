@@ -25,7 +25,7 @@ use asupersync::types::{ObligationId, RegionId, Time};
 pub struct BasicRegionQuiescenceTest;
 
 impl ObligationInvariantTest for BasicRegionQuiescenceTest {
-    fn invariant_name(&self) -> &str {
+    fn invariant_name(&self) -> &'static str {
         "basic_region_quiescence"
     }
 
@@ -33,7 +33,7 @@ impl ObligationInvariantTest for BasicRegionQuiescenceTest {
         InvariantTestCategory::RegionQuiescence
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Tests that region closure waits for all obligations to complete"
     }
 
@@ -110,7 +110,7 @@ impl ObligationInvariantTest for BasicRegionQuiescenceTest {
 pub struct NestedRegionQuiescenceTest;
 
 impl ObligationInvariantTest for NestedRegionQuiescenceTest {
-    fn invariant_name(&self) -> &str {
+    fn invariant_name(&self) -> &'static str {
         "nested_region_quiescence"
     }
 
@@ -118,7 +118,7 @@ impl ObligationInvariantTest for NestedRegionQuiescenceTest {
         InvariantTestCategory::RegionQuiescence
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Tests that parent region closure waits for child region obligations"
     }
 
@@ -229,7 +229,7 @@ impl ObligationInvariantTest for NestedRegionQuiescenceTest {
 pub struct RegionCloseWithActiveObligationsTest;
 
 impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
-    fn invariant_name(&self) -> &str {
+    fn invariant_name(&self) -> &'static str {
         "region_close_with_active_obligations"
     }
 
@@ -237,7 +237,7 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
         InvariantTestCategory::RegionQuiescence
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Tests that attempting to close region with active obligations is detected as violation"
     }
 
@@ -324,7 +324,7 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
 pub struct ConcurrentRegionClosureTest;
 
 impl ObligationInvariantTest for ConcurrentRegionClosureTest {
-    fn invariant_name(&self) -> &str {
+    fn invariant_name(&self) -> &'static str {
         "concurrent_region_closure"
     }
 
@@ -332,7 +332,7 @@ impl ObligationInvariantTest for ConcurrentRegionClosureTest {
         InvariantTestCategory::RegionQuiescence
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Tests concurrent region closure with obligations resolving concurrently"
     }
 

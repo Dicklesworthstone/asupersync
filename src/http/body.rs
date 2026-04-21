@@ -811,8 +811,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::task::Wake;
-    use std::task::Waker;
+        use std::task::Waker;
 
     struct NoopWaker;
 

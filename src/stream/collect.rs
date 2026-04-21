@@ -80,7 +80,7 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

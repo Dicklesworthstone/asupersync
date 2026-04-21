@@ -65,7 +65,7 @@ fn ff_02_poll_shutdown_is_noop() {
     use asupersync::io::AsyncWrite;
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("shutdown_noop.txt");

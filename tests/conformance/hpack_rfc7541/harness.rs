@@ -629,7 +629,7 @@ impl ConformanceTest for ContextSynchronizationTest {
                 let _ = (decoded_first, decoded_second);
                 TestVerdict::Fail
             }
-            _ => TestVerdict::Fail
+            _ => TestVerdict::Fail,
         };
 
         ConformanceTestResult {

@@ -44,7 +44,7 @@ use asupersync::types::Time;
 use common::*;
 use std::future::Future;
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------

@@ -40,7 +40,7 @@ use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 #[cfg(test)]
@@ -89,6 +89,7 @@ impl AcceptWaiters {
     }
 }
 
+use std::task::Wake;
 impl Wake for AcceptWaiters {
     fn wake(self: Arc<Self>) {
         self.wake_all();
@@ -638,7 +639,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
     use tempfile::tempdir;
 
     fn init_test(name: &str) {

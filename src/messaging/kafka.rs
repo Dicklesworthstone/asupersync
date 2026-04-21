@@ -1604,7 +1604,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     #[cfg(feature = "kafka")]
-    use std::task::{Context, Wake, Waker};
+    use std::task::{Context, Waker};
 
     #[cfg(not(feature = "kafka"))]
     fn stub_broker_guard() -> StubBrokerTestGuard {

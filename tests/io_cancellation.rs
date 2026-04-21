@@ -56,7 +56,7 @@ use std::os::unix::io::AsRawFd;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::Duration;
 

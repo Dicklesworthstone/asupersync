@@ -1,0 +1,111 @@
+  [2m2026-04-20T22:40:13.913807Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ts2 at ubuntu@100.96.111.98 (24 slots, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:289 [2;3mon[0m ThreadId(1)
+
+[*] Job j-29806699757961968 submitted to ts2 (slots 24, speed 50.0)
+  [2m2026-04-20T22:40:14.277503Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for asupersync (hash: df548de923f627f7)[0m
+    [2;3mat[0m rch/src/hook.rs:4645 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:14.277544Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 10 roots[0m
+    [2;3mat[0m rch/src/hook.rs:4667 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:15.097168Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker ts2...[0m
+    [2;3mat[0m rch/src/hook.rs:4691 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:15.097245Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 2 pattern(s) from .rchignore (total: 33)[0m
+    [2;3mat[0m rch/src/transfer.rs:575 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:15.097256Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync -> /data/projects/asupersync on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:16.181423Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1084ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:16.181505Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/asupersync-browser-core -> /data/projects/asupersync/asupersync-browser-core on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:16.904113Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 722ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:16.904186Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/asupersync-macros -> /data/projects/asupersync/asupersync-macros on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:17.638690Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 734ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:17.638784Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/asupersync-tokio-compat -> /data/projects/asupersync/asupersync-tokio-compat on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:18.373141Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 734ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:18.373254Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/conformance -> /data/projects/asupersync/conformance on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:19.163721Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 790ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:19.163817Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/drop_unwrap_finder -> /data/projects/asupersync/drop_unwrap_finder on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:19.911287Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 747ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:19.911385Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/franken_decision -> /data/projects/asupersync/franken_decision on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:20.641517Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 730ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:20.641671Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/franken_evidence -> /data/projects/asupersync/franken_evidence on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:21.370941Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 729ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:21.371043Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/franken_kernel -> /data/projects/asupersync/franken_kernel on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:22.164037Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 792ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:22.164173Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/frankenlab -> /data/projects/asupersync/frankenlab on ts2[0m
+    [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:22.898601Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 734ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:22.898661Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 7883 files, 368109 bytes in 7796ms[0m
+    [2;3mat[0m rch/src/hook.rs:4848 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:23.465413Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo test --all-targets[0m
+    [2;3mat[0m rch/src/hook.rs:4875 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-20T22:40:23.465454Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mWrapping command with external timeout protection, [1;32mkind[0m[32m: cargo test, [1;32mtimeout_secs[0m[32m: 1800[0m
+    [2;3mat[0m rch/src/transfer.rs:782 [2;3mon[0m ThreadId(1)
+
+   Compiling asupersync v0.2.9 (/data/projects/asupersync)
+error: unexpected closing delimiter: `)`
+   --> src/lab/oracle/cancel_debt.rs:973:9
+    |
+702 | mod tests {
+    |           - this opening brace...
+...
+971 | }
+    | - ...matches this closing brace
+972 | tes()
+973 |         );
+    |         ^ unexpected closing delimiter
+
+error: could not compile `asupersync` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `asupersync` (lib test) due to 1 previous error
+  [2m2026-04-20T22:40:25.165585Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=101 in 1700ms[0m
+    [2;3mat[0m rch/src/hook.rs:4996 [2;3mon[0m ThreadId(1)
+
+[W] Worker: ts2 | Job: j-29806699757961968
+[T] Total: 9.5s (sync 7.8s, build 1.7s, artifacts --)
+^ Sync: 359.5 KB in 7.8s (46.1 KB/s)
+[C] Compile: 1.7s
+Artifacts: skipped
+[T] Cache: MISS
+[RCH] remote ts2 failed (exit 101)

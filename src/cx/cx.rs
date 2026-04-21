@@ -3393,7 +3393,7 @@ mod tests {
     #[test]
     fn set_cancel_requested_wakes_registered_cancel_waker() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::task::{Wake, Waker};
+        use std::task::{Waker};
 
         struct CountWaker(Arc<AtomicUsize>);
 

@@ -629,7 +629,7 @@ write_int_future!(WriteF64Le, f64, 8);
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::task::{Context, Wake, Waker};
+    use std::task::{Context, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

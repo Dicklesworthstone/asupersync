@@ -83,7 +83,7 @@ use asupersync::grpc::{
 
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 fn init_test(name: &str) {
