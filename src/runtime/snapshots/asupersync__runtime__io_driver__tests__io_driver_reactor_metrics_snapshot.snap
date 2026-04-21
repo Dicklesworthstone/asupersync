@@ -1,0 +1,17 @@
+---
+source: src/runtime/io_driver.rs
+expression: render_io_driver_metrics_snapshot(driver.stats(), driver.waker_count(), &captured_events)
+---
+polls: 2
+events_received: 5
+wakers_dispatched: 3
+unknown_tokens: 1
+registrations: 2
+deregistrations: 1
+live_wakers: 1
+events:
+- turn=1 token=0 ready=readable interest=readable
+- turn=1 token=1 ready=writable interest=writable
+- turn=1 token=77 ready=readable interest=untracked
+- turn=2 token=0 ready=readable interest=readable
+- turn=2 token=0 ready=readable interest=readable

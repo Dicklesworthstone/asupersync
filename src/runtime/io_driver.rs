@@ -1344,6 +1344,61 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn render_interest_snapshot(interest: Option<Interest>) -> &'static str {
+        match interest {
+            Some(interest) if interest.is_readable() && interest.is_writable() => {
+                "readable|writable"
+            }
+            Some(interest) if interest.is_readable() => "readable",
+            Some(interest) if interest.is_writable() => "writable",
+            Some(_) => "empty",
+            None => "untracked",
+        }
+    }
+
+    fn render_ready_snapshot(event: &Event) -> &'static str {
+        match (event.is_readable(), event.is_writable()) {
+            (true, true) => "readable|writable",
+            (true, false) => "readable",
+            (false, true) => "writable",
+            (false, false) => "empty",
+        }
+    }
+
+    fn render_io_driver_metrics_snapshot(
+        stats: &IoStats,
+        waker_count: usize,
+        captured_events: &[String],
+    ) -> String {
+        let mut snapshot = format!(
+            "polls: {}\n\
+             events_received: {}\n\
+             wakers_dispatched: {}\n\
+             unknown_tokens: {}\n\
+             registrations: {}\n\
+             deregistrations: {}\n\
+             live_wakers: {}\n",
+            stats.polls,
+            stats.events_received,
+            stats.wakers_dispatched,
+            stats.unknown_tokens,
+            stats.registrations,
+            stats.deregistrations,
+            waker_count
+        );
+
+        if !captured_events.is_empty() {
+            snapshot.push_str("events:\n");
+            for event in captured_events {
+                snapshot.push_str("- ");
+                snapshot.push_str(event);
+                snapshot.push('\n');
+            }
+        }
+
+        snapshot
+    }
+
     #[test]
     fn io_driver_new() {
         init_test("io_driver_new");
@@ -1947,6 +2002,109 @@ mod tests {
             driver.stats().wakers_dispatched
         );
         crate::test_complete!("metamorphic_duplicate_events_wake_once_per_registration");
+    }
+
+    #[test]
+    fn io_driver_reactor_metrics_snapshot() {
+        init_test("io_driver_reactor_metrics_snapshot");
+        let reactor = Arc::new(LabReactor::new());
+        let source = TestFdSource;
+        let mut driver = IoDriver::new(reactor.clone());
+
+        let (readable_waker, readable_state) = create_test_waker();
+        let readable_token = driver
+            .register(&source, Interest::READABLE, readable_waker)
+            .expect("readable register should succeed");
+
+        let (writable_waker, writable_state) = create_test_waker();
+        let writable_token = driver
+            .register(&source, Interest::WRITABLE, writable_waker)
+            .expect("writable register should succeed");
+
+        let unknown_token = Token::new(77);
+        reactor
+            .register(&source, unknown_token, Interest::READABLE)
+            .expect("manual unknown-token register should succeed");
+
+        reactor.inject_event(
+            readable_token,
+            Event::readable(readable_token),
+            Duration::ZERO,
+        );
+        reactor.inject_event(
+            writable_token,
+            Event::writable(writable_token),
+            Duration::ZERO,
+        );
+        reactor.inject_event(
+            unknown_token,
+            Event::readable(unknown_token),
+            Duration::ZERO,
+        );
+
+        let mut captured_events = Vec::new();
+        let first_turn = driver
+            .turn_with(Some(Duration::ZERO), |event, interest| {
+                captured_events.push(format!(
+                    "turn=1 token={} ready={} interest={}",
+                    event.token.0,
+                    render_ready_snapshot(event),
+                    render_interest_snapshot(interest)
+                ));
+            })
+            .expect("first turn should succeed");
+        crate::assert_with_log!(first_turn == 3, "first turn count", 3usize, first_turn);
+
+        driver
+            .deregister(writable_token)
+            .expect("writable deregister should succeed");
+
+        reactor.inject_event(
+            readable_token,
+            Event::readable(readable_token),
+            Duration::ZERO,
+        );
+        reactor.inject_event(
+            readable_token,
+            Event::readable(readable_token),
+            Duration::ZERO,
+        );
+
+        let second_turn = driver
+            .turn_with(Some(Duration::ZERO), |event, interest| {
+                captured_events.push(format!(
+                    "turn=2 token={} ready={} interest={}",
+                    event.token.0,
+                    render_ready_snapshot(event),
+                    render_interest_snapshot(interest)
+                ));
+            })
+            .expect("second turn should succeed");
+        crate::assert_with_log!(second_turn == 2, "second turn count", 2usize, second_turn);
+
+        let readable_wakes = readable_state.count.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            readable_wakes == 2,
+            "readable waker fires once per turn",
+            2usize,
+            readable_wakes
+        );
+        let writable_wakes = writable_state.count.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            writable_wakes == 1,
+            "writable waker fires once before deregister",
+            1usize,
+            writable_wakes
+        );
+
+        insta::assert_snapshot!(
+            "io_driver_reactor_metrics_snapshot",
+            render_io_driver_metrics_snapshot(
+                driver.stats(),
+                driver.waker_count(),
+                &captured_events
+            )
+        );
     }
 
     #[test]
