@@ -2739,6 +2739,141 @@ pub mod span_semantics {
             })
         }
 
+        fn otlp_attributes_snapshot(map: &HashMap<String, String>) -> Vec<Value> {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries
+                .into_iter()
+                .map(|(key, value)| {
+                    json!({
+                        "key": key,
+                        "value": {
+                            "string_value": scrub_span_field(key, value),
+                        }
+                    })
+                })
+                .collect()
+        }
+
+        fn otlp_metric_labels_snapshot(labels: &[(String, String)]) -> Vec<Value> {
+            let mut entries: Vec<_> = labels.iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries
+                .into_iter()
+                .map(|(key, value)| {
+                    json!({
+                        "key": key,
+                        "value": {
+                            "string_value": value,
+                        }
+                    })
+                })
+                .collect()
+        }
+
+        fn otlp_status_snapshot(status: &Status) -> Value {
+            match status {
+                Status::Unset => json!({"code": 0, "message": ""}),
+                Status::Ok => json!({"code": 1, "message": ""}),
+                Status::Error { description } => json!({
+                    "code": 2,
+                    "message": description,
+                }),
+            }
+        }
+
+        fn otlp_event_wire_snapshot(event: &SpanEvent) -> Value {
+            json!({
+                "name": event.name,
+                "time_unix_nano": "[TIMESTAMP]",
+                "attributes": otlp_attributes_snapshot(&event.attributes),
+            })
+        }
+
+        fn otlp_span_wire_snapshot(span: &TestSpan) -> Value {
+            json!({
+                "trace_id": "[ID]",
+                "span_id": "[ID]",
+                "parent_span_id": span.parent_context.as_ref().map(|_| "[ID]").unwrap_or(""),
+                "name": span.name,
+                "kind": format!("{:?}", span.kind),
+                "start_time_unix_nano": "[TIMESTAMP]",
+                "end_time_unix_nano": span.end_time.map(|_| "[TIMESTAMP]"),
+                "attributes": otlp_attributes_snapshot(&span.attributes),
+                "events": span.events.iter().map(otlp_event_wire_snapshot).collect::<Vec<_>>(),
+                "status": otlp_status_snapshot(&span.status),
+                "trace_state_vendor": span.context.trace_state().get("vendor"),
+                "sampled": span.context.trace_flags().is_sampled(),
+            })
+        }
+
+        fn otlp_metrics_wire_snapshot(snapshot: &MetricsSnapshot) -> Value {
+            let mut counters: Vec<_> = snapshot.counters.iter().collect();
+            counters.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+
+            let mut gauges: Vec<_> = snapshot.gauges.iter().collect();
+            gauges.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+
+            let mut histograms: Vec<_> = snapshot.histograms.iter().collect();
+            histograms.sort_by(|(left, _, _, _), (right, _, _, _)| left.cmp(right));
+
+            json!({
+                "scope_metrics": [{
+                    "scope": {
+                        "name": "asupersync.observability.otel",
+                        "version": "0.2.9",
+                    },
+                    "metrics": {
+                        "counters": counters.into_iter().map(|(name, labels, value)| {
+                            json!({
+                                "name": name,
+                                "sum": {
+                                    "data_points": [{
+                                        "attributes": otlp_metric_labels_snapshot(labels),
+                                        "as_int": value,
+                                    }]
+                                }
+                            })
+                        }).collect::<Vec<_>>(),
+                        "gauges": gauges.into_iter().map(|(name, labels, value)| {
+                            json!({
+                                "name": name,
+                                "gauge": {
+                                    "data_points": [{
+                                        "attributes": otlp_metric_labels_snapshot(labels),
+                                        "as_int": value,
+                                    }]
+                                }
+                            })
+                        }).collect::<Vec<_>>(),
+                        "histograms": histograms.into_iter().map(|(name, labels, count, sum)| {
+                            json!({
+                                "name": name,
+                                "histogram": {
+                                    "data_points": [{
+                                        "attributes": otlp_metric_labels_snapshot(labels),
+                                        "count": count,
+                                        "sum": sum,
+                                    }]
+                                }
+                            })
+                        }).collect::<Vec<_>>(),
+                    }
+                }]
+            })
+        }
+
+        fn otlp_log_record_snapshot(body: &str, attributes: HashMap<String, String>) -> Value {
+            json!({
+                "time_unix_nano": "[TIMESTAMP]",
+                "trace_id": "[ID]",
+                "span_id": "[ID]",
+                "severity_text": "INFO",
+                "body": body,
+                "attributes": otlp_attributes_snapshot(&attributes),
+            })
+        }
+
         #[test]
         fn test_span_conformance_config_default() {
             let config = SpanConformanceConfig::default();
@@ -3031,6 +3166,106 @@ pub mod span_semantics {
                         test_span_snapshot(&decode_child),
                         test_span_snapshot(&publish_child),
                     ],
+                })
+            );
+        }
+
+        #[test]
+        fn otlp_wire_format_scrubbed() {
+            let config = SpanConformanceConfig {
+                max_attributes: 6,
+                max_events: 3,
+                max_attribute_length: Some(24),
+                test_sampling: true,
+                test_context_propagation: true,
+            };
+
+            let mut root = TestSpan::new_with_config("otlp.export", SpanKind::Server, &config);
+            root.set_attribute("service.name", "checkout");
+            root.set_attribute("deployment.environment", "staging");
+            root.add_event(
+                "request.accepted",
+                HashMap::from([("route".to_string(), "/v1/orders".to_string())]),
+            );
+            root.set_status(Status::Ok);
+            root.end();
+
+            let mut child = root.new_child("postgres.query", SpanKind::Client);
+            child.set_attribute("db.system", "postgresql");
+            child.set_attribute("db.operation", "select");
+            child.add_event(
+                "row.batch",
+                HashMap::from([("rows".to_string(), "3".to_string())]),
+            );
+            child.set_status(Status::Error {
+                description: "deadline exceeded".into(),
+            });
+            child.end();
+
+            let mut metrics = MetricsSnapshot::new();
+            metrics.add_counter(
+                "otel.export.spans",
+                vec![("signal".to_string(), "traces".to_string())],
+                2,
+            );
+            metrics.add_gauge(
+                "otel.export.queue_depth",
+                vec![("pipeline".to_string(), "primary".to_string())],
+                1,
+            );
+            metrics.add_histogram(
+                "otel.export.latency_ms",
+                vec![("signal".to_string(), "mixed".to_string())],
+                2,
+                17.5,
+            );
+
+            insta::assert_json_snapshot!(
+                "otlp_wire_format_scrubbed",
+                json!({
+                    "resource_spans": [{
+                        "resource": {
+                            "attributes": [
+                                {"key": "service.name", "value": {"string_value": "checkout"}},
+                                {"key": "telemetry.sdk.name", "value": {"string_value": "asupersync"}},
+                            ]
+                        },
+                        "scope_spans": [{
+                            "scope": {
+                                "name": "asupersync.observability.otel",
+                                "version": "0.2.9",
+                            },
+                            "spans": [
+                                otlp_span_wire_snapshot(&root),
+                                otlp_span_wire_snapshot(&child),
+                            ],
+                        }]
+                    }],
+                    "resource_metrics": [otlp_metrics_wire_snapshot(&metrics)],
+                    "resource_logs": [{
+                        "scope_logs": [{
+                            "scope": {
+                                "name": "asupersync.observability.otel",
+                                "version": "0.2.9",
+                            },
+                            "log_records": [
+                                otlp_log_record_snapshot(
+                                    "export started",
+                                    HashMap::from([
+                                        ("component".to_string(), "otlp".to_string()),
+                                        ("signal".to_string(), "traces".to_string()),
+                                    ]),
+                                ),
+                                otlp_log_record_snapshot(
+                                    "export retry scheduled",
+                                    HashMap::from([
+                                        ("component".to_string(), "otlp".to_string()),
+                                        ("retry_in_ms".to_string(), "250".to_string()),
+                                    ]),
+                                ),
+                            ],
+                        }]
+                    }],
                 })
             );
         }

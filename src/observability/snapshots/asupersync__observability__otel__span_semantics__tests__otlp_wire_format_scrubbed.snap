@@ -1,0 +1,298 @@
+---
+source: src/observability/otel.rs
+expression: |-
+  json!({
+      "resource_spans": [{
+          "resource": {
+              "attributes": [
+                  {"key": "service.name", "value": {"string_value": "checkout"}},
+                  {"key": "telemetry.sdk.name", "value": {"string_value": "asupersync"}},
+              ]
+          },
+          "scope_spans": [{
+              "scope": {
+                  "name": "asupersync.observability.otel",
+                  "version": "0.2.9",
+              },
+              "spans": [
+                  otlp_span_wire_snapshot(&root),
+                  otlp_span_wire_snapshot(&child),
+              ],
+          }]
+      }],
+      "resource_metrics": [otlp_metrics_wire_snapshot(&metrics)],
+      "resource_logs": [{
+          "scope_logs": [{
+              "scope": {
+                  "name": "asupersync.observability.otel",
+                  "version": "0.2.9",
+              },
+              "log_records": [
+                  otlp_log_record_snapshot(
+                      "export started",
+                      HashMap::from([
+                          ("component".to_string(), "otlp".to_string()),
+                          ("signal".to_string(), "traces".to_string()),
+                      ]),
+                  ),
+                  otlp_log_record_snapshot(
+                      "export retry scheduled",
+                      HashMap::from([
+                          ("component".to_string(), "otlp".to_string()),
+                          ("retry_in_ms".to_string(), "250".to_string()),
+                      ]),
+                  ),
+              ],
+          }]
+      }],
+  })
+---
+{
+  "resource_spans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "string_value": "checkout"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "string_value": "asupersync"
+            }
+          }
+        ]
+      },
+      "scope_spans": [
+        {
+          "scope": {
+            "name": "asupersync.observability.otel",
+            "version": "0.2.9"
+          },
+          "spans": [
+            {
+              "trace_id": "[ID]",
+              "span_id": "[ID]",
+              "parent_span_id": "",
+              "name": "otlp.export",
+              "kind": "Server",
+              "start_time_unix_nano": "[TIMESTAMP]",
+              "end_time_unix_nano": "[TIMESTAMP]",
+              "attributes": [
+                {
+                  "key": "deployment.environment",
+                  "value": {
+                    "string_value": "staging"
+                  }
+                },
+                {
+                  "key": "service.name",
+                  "value": {
+                    "string_value": "checkout"
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "name": "request.accepted",
+                  "time_unix_nano": "[TIMESTAMP]",
+                  "attributes": [
+                    {
+                      "key": "route",
+                      "value": {
+                        "string_value": "/v1/orders"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "trace_state_vendor": null,
+              "sampled": true
+            },
+            {
+              "trace_id": "[ID]",
+              "span_id": "[ID]",
+              "parent_span_id": "[ID]",
+              "name": "postgres.query",
+              "kind": "Client",
+              "start_time_unix_nano": "[TIMESTAMP]",
+              "end_time_unix_nano": "[TIMESTAMP]",
+              "attributes": [
+                {
+                  "key": "db.operation",
+                  "value": {
+                    "string_value": "select"
+                  }
+                },
+                {
+                  "key": "db.system",
+                  "value": {
+                    "string_value": "postgresql"
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "name": "row.batch",
+                  "time_unix_nano": "[TIMESTAMP]",
+                  "attributes": [
+                    {
+                      "key": "rows",
+                      "value": {
+                        "string_value": "3"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": {
+                "code": 2,
+                "message": "deadline exceeded"
+              },
+              "trace_state_vendor": null,
+              "sampled": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "resource_metrics": [
+    {
+      "scope_metrics": [
+        {
+          "scope": {
+            "name": "asupersync.observability.otel",
+            "version": "0.2.9"
+          },
+          "metrics": {
+            "counters": [
+              {
+                "name": "otel.export.spans",
+                "sum": {
+                  "data_points": [
+                    {
+                      "attributes": [
+                        {
+                          "key": "signal",
+                          "value": {
+                            "string_value": "traces"
+                          }
+                        }
+                      ],
+                      "as_int": 2
+                    }
+                  ]
+                }
+              }
+            ],
+            "gauges": [
+              {
+                "name": "otel.export.queue_depth",
+                "gauge": {
+                  "data_points": [
+                    {
+                      "attributes": [
+                        {
+                          "key": "pipeline",
+                          "value": {
+                            "string_value": "primary"
+                          }
+                        }
+                      ],
+                      "as_int": 1
+                    }
+                  ]
+                }
+              }
+            ],
+            "histograms": [
+              {
+                "name": "otel.export.latency_ms",
+                "histogram": {
+                  "data_points": [
+                    {
+                      "attributes": [
+                        {
+                          "key": "signal",
+                          "value": {
+                            "string_value": "mixed"
+                          }
+                        }
+                      ],
+                      "count": 2,
+                      "sum": 17.5
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "resource_logs": [
+    {
+      "scope_logs": [
+        {
+          "scope": {
+            "name": "asupersync.observability.otel",
+            "version": "0.2.9"
+          },
+          "log_records": [
+            {
+              "time_unix_nano": "[TIMESTAMP]",
+              "trace_id": "[ID]",
+              "span_id": "[ID]",
+              "severity_text": "INFO",
+              "body": "export started",
+              "attributes": [
+                {
+                  "key": "component",
+                  "value": {
+                    "string_value": "otlp"
+                  }
+                },
+                {
+                  "key": "signal",
+                  "value": {
+                    "string_value": "traces"
+                  }
+                }
+              ]
+            },
+            {
+              "time_unix_nano": "[TIMESTAMP]",
+              "trace_id": "[ID]",
+              "span_id": "[ID]",
+              "severity_text": "INFO",
+              "body": "export retry scheduled",
+              "attributes": [
+                {
+                  "key": "component",
+                  "value": {
+                    "string_value": "otlp"
+                  }
+                },
+                {
+                  "key": "retry_in_ms",
+                  "value": {
+                    "string_value": "250"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
