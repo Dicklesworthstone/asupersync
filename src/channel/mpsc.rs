@@ -1202,10 +1202,6 @@ mod tests {
     }
 
     fn noop_waker() -> Waker {
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: std::sync::Arc<Self>) {}
-        }
         std::task::Waker::noop().clone()
     }
 

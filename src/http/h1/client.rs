@@ -1188,13 +1188,6 @@ mod tests {
         assert!(resp.trailers.is_empty());
     }
 
-    struct NoopWaker;
-
-    use std::task::Wake;
-    impl Wake for NoopWaker {
-        fn wake(self: std::sync::Arc<Self>) {}
-    }
-
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }
