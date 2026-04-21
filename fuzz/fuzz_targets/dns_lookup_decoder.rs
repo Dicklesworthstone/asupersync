@@ -1,12 +1,10 @@
-//! EDNS0 + compression fuzz target for the DNS resolver-to-lookup decode path.
-//!
-//! This harness drives the real `Resolver` lookup methods through a fake UDP
-//! nameserver. It focuses on the lookup-result decode surface that materializes
-//! `LookupIp`, `LookupMx`, `LookupSrv`, and `LookupTxt`, while mixing in valid
-//! EDNS0 OPT records plus malformed owner compression and advertised-length
-//! overruns.
-
-#![no_main]
+// EDNS0 + compression fuzz target for the DNS resolver-to-lookup decode path.
+//
+// This harness drives the real `Resolver` lookup methods through a fake UDP
+// nameserver. It focuses on the lookup-result decode surface that materializes
+// `LookupIp`, `LookupMx`, `LookupSrv`, and `LookupTxt`, while mixing in valid
+// EDNS0 OPT records plus malformed owner compression and advertised-length
+// overruns.
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::net::dns::{Resolver, ResolverConfig};
