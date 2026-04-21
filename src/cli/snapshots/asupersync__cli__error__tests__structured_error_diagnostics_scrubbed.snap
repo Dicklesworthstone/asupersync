@@ -1,0 +1,74 @@
+---
+source: src/cli/error.rs
+expression: |-
+  json!({
+      "user_error": scrubbed_error_snapshot(&user_error),
+      "system_error": scrubbed_error_snapshot(&system_error),
+      "panic_recovery": scrubbed_error_snapshot(&panic_recovery),
+  })
+---
+{
+  "panic_recovery": {
+    "docs_url": "https://docs.asupersync.dev/cli#panic-recovery",
+    "exit_code": 3,
+    "human": "Error: Recovered from panic\nThe CLI captured a panic, preserved the evidence bundle, and returned a safe fallback response.\n\nSuggestion: Inspect the evidence bundle and rerun with --replay-seed 424242 to reproduce the failure deterministically.\nSee: https://docs.asupersync.dev/cli#panic-recovery\n\nContext:\n  evidence_bundle: \"artifacts/replay/panic-000042.json\"\n  recovery_mode: \"deterministic-replay\"\n  stack_trace: \"src/cli/main.rs:88\\nsrc/cli/run.rs:144\\nsrc/runtime/scheduler/three_lane.rs:3110\\nsrc/runtime/task.rs:287\"\n",
+    "human_line_count": 10,
+    "machine": {
+      "context": {
+        "evidence_bundle": "artifacts/replay/panic-000042.json",
+        "recovery_mode": "deterministic-replay",
+        "stack_trace": "[STACK_TRACE:4 frames]"
+      },
+      "detail": "The CLI captured a panic, preserved the evidence bundle, and returned a safe fallback response.",
+      "docs_url": "https://docs.asupersync.dev/cli#panic-recovery",
+      "exit_code": 3,
+      "suggestion": "Inspect the evidence bundle and rerun with --replay-seed 424242 to reproduce the failure deterministically.",
+      "title": "Recovered from panic",
+      "type": "panic_recovery"
+    },
+    "stack_trace_line_count": 4,
+    "suggestion": "Inspect the evidence bundle and rerun with --replay-seed 424242 to reproduce the failure deterministically.",
+    "title": "Recovered from panic",
+    "type": "panic_recovery"
+  },
+  "system_error": {
+    "docs_url": null,
+    "exit_code": 3,
+    "human": "Error: Internal error\nScheduler certificate writer panicked while flushing diagnostics\n\nSuggestion: Please report this bug at https://github.com/Dicklesworthstone/asupersync/issues\n\nContext:\n  component: \"runtime::scheduler\"\n  panic_id: \"panic-000042\"\n  stack_trace: \"src/runtime/scheduler/three_lane.rs:412\\nsrc/runtime/worker.rs:91\\nsrc/cli/main.rs:14\"\n",
+    "human_line_count": 9,
+    "machine": {
+      "context": {
+        "component": "runtime::scheduler",
+        "panic_id": "panic-000042",
+        "stack_trace": "[STACK_TRACE:3 frames]"
+      },
+      "detail": "Scheduler certificate writer panicked while flushing diagnostics",
+      "exit_code": 3,
+      "suggestion": "Please report this bug at https://github.com/Dicklesworthstone/asupersync/issues",
+      "title": "Internal error",
+      "type": "internal_error"
+    },
+    "stack_trace_line_count": 3,
+    "suggestion": "Please report this bug at https://github.com/Dicklesworthstone/asupersync/issues",
+    "title": "Internal error",
+    "type": "internal_error"
+  },
+  "user_error": {
+    "docs_url": "https://docs.asupersync.dev/cli#profile",
+    "exit_code": 1,
+    "human": "Error: Invalid argument: profile\nexpected one of: dev, staging, prod\n\nSuggestion: Pass --profile with a supported value\nSee: https://docs.asupersync.dev/cli#profile\n",
+    "human_line_count": 5,
+    "machine": {
+      "detail": "expected one of: dev, staging, prod",
+      "docs_url": "https://docs.asupersync.dev/cli#profile",
+      "exit_code": 1,
+      "suggestion": "Pass --profile with a supported value",
+      "title": "Invalid argument: profile",
+      "type": "invalid_argument"
+    },
+    "stack_trace_line_count": 0,
+    "suggestion": "Pass --profile with a supported value",
+    "title": "Invalid argument: profile",
+    "type": "invalid_argument"
+  }
+}
