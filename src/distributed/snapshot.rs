@@ -934,6 +934,24 @@ mod tests {
         })
     }
 
+    fn scrub_snapshot_for_vector_clock_merge_snapshot_test(
+        snapshot: &RegionSnapshot,
+        expected_sequence: u64,
+        expected_timestamp_secs: u64,
+        expected_state: RegionState,
+        expected_cancel_reason: Option<&str>,
+    ) -> serde_json::Value {
+        json!({
+            "merged": scrub_snapshot_for_crdt_merge_snapshot_test(snapshot),
+            "clock_invariants": {
+                "sequence_is_max": snapshot.sequence == expected_sequence,
+                "timestamp_is_max": snapshot.timestamp.as_nanos() == Time::from_secs(expected_timestamp_secs).as_nanos(),
+                "state_is_max": snapshot.state == expected_state,
+                "cancel_reason_matches_latest_clock": snapshot.cancel_reason.as_deref() == expected_cancel_reason,
+            }
+        })
+    }
+
     fn merge_test_snapshot(
         region_id: RegionId,
         state: RegionState,
@@ -1233,6 +1251,192 @@ mod tests {
                 "concurrent_inserts": scrub_snapshot_for_crdt_merge_snapshot_test(&concurrent_inserts),
                 "concurrent_deletes": scrub_snapshot_for_crdt_merge_snapshot_test(&concurrent_deletes),
                 "mixed_insert_delete": scrub_snapshot_for_crdt_merge_snapshot_test(&mixed_insert_delete),
+            })
+        );
+    }
+
+    #[test]
+    fn vector_clock_merge_output_scrubbed() {
+        let region_id = RegionId::new_for_test(91, 4);
+
+        let replica_a = merge_test_snapshot(
+            region_id,
+            RegionState::Closing,
+            40,
+            7,
+            &[(1, 0, TaskState::Pending, 1), (3, 0, TaskState::Running, 2)],
+            &[(10, 0)],
+            1,
+            BudgetSnapshot {
+                deadline_nanos: Some(400),
+                polls_remaining: Some(2),
+                cost_remaining: Some(24),
+            },
+            None,
+            &[1, 4],
+        );
+        let replica_b = merge_test_snapshot(
+            region_id,
+            RegionState::Draining,
+            44,
+            9,
+            &[(1, 0, TaskState::Running, 3), (2, 0, TaskState::Pending, 4)],
+            &[(11, 0)],
+            2,
+            BudgetSnapshot {
+                deadline_nanos: Some(440),
+                polls_remaining: Some(6),
+                cost_remaining: Some(48),
+            },
+            Some("retry-exhausted"),
+            &[2, 4],
+        );
+        let replica_c = merge_test_snapshot(
+            region_id,
+            RegionState::Closed,
+            46,
+            11,
+            &[
+                (1, 0, TaskState::Completed, 3),
+                (2, 0, TaskState::Cancelled, 5),
+                (4, 0, TaskState::Panicked, 1),
+            ],
+            &[(12, 0), (13, 0)],
+            4,
+            BudgetSnapshot {
+                deadline_nanos: Some(460),
+                polls_remaining: Some(8),
+                cost_remaining: Some(96),
+            },
+            Some("peer-closed"),
+            &[3, 4, 5],
+        );
+
+        let three_replica_chain = replica_a
+            .merge_crdt(&replica_b)
+            .unwrap()
+            .merge_crdt(&replica_c)
+            .unwrap();
+        let three_replica_alt = replica_a
+            .merge_crdt(&replica_c)
+            .unwrap()
+            .merge_crdt(&replica_b)
+            .unwrap();
+        let three_replica_rev = replica_c
+            .merge_crdt(&replica_b)
+            .unwrap()
+            .merge_crdt(&replica_a)
+            .unwrap();
+
+        crate::assert_with_log!(
+            three_replica_chain.to_bytes() == three_replica_alt.to_bytes(),
+            "three-replica merge should be order-independent",
+            scrub_snapshot_for_crdt_merge_snapshot_test(&three_replica_chain),
+            scrub_snapshot_for_crdt_merge_snapshot_test(&three_replica_alt)
+        );
+        crate::assert_with_log!(
+            three_replica_chain.to_bytes() == three_replica_rev.to_bytes(),
+            "three-replica merge should be associative",
+            scrub_snapshot_for_crdt_merge_snapshot_test(&three_replica_chain),
+            scrub_snapshot_for_crdt_merge_snapshot_test(&three_replica_rev)
+        );
+
+        let same_sequence_left = merge_test_snapshot(
+            region_id,
+            RegionState::Closing,
+            50,
+            12,
+            &[(8, 0, TaskState::Running, 1)],
+            &[(20, 0)],
+            1,
+            BudgetSnapshot {
+                deadline_nanos: Some(500),
+                polls_remaining: Some(5),
+                cost_remaining: Some(32),
+            },
+            Some("stale-owner"),
+            &[9],
+        );
+        let same_sequence_right = merge_test_snapshot(
+            region_id,
+            RegionState::Draining,
+            55,
+            12,
+            &[(8, 0, TaskState::Cancelled, 7)],
+            &[(21, 0)],
+            3,
+            BudgetSnapshot {
+                deadline_nanos: Some(550),
+                polls_remaining: Some(7),
+                cost_remaining: Some(64),
+            },
+            Some("fresh-owner"),
+            &[8, 9],
+        );
+        let same_sequence_later_timestamp =
+            same_sequence_left.merge_crdt(&same_sequence_right).unwrap();
+
+        let tied_clock_left = merge_test_snapshot(
+            region_id,
+            RegionState::Draining,
+            60,
+            15,
+            &[(9, 0, TaskState::Cancelled, 4)],
+            &[(30, 0)],
+            2,
+            BudgetSnapshot {
+                deadline_nanos: Some(600),
+                polls_remaining: Some(9),
+                cost_remaining: Some(80),
+            },
+            Some("drain-phase"),
+            &[10],
+        );
+        let tied_clock_right = merge_test_snapshot(
+            region_id,
+            RegionState::Closed,
+            60,
+            15,
+            &[
+                (9, 0, TaskState::Cancelled, 6),
+                (10, 0, TaskState::Completed, 2),
+            ],
+            &[(31, 0)],
+            5,
+            BudgetSnapshot {
+                deadline_nanos: Some(650),
+                polls_remaining: Some(11),
+                cost_remaining: Some(120),
+            },
+            Some("closed-phase"),
+            &[10, 11],
+        );
+        let state_tiebreak_merge = tied_clock_left.merge_crdt(&tied_clock_right).unwrap();
+
+        insta::assert_json_snapshot!(
+            "vector_clock_merge_output_scrubbed",
+            json!({
+                "three_replica_chain": scrub_snapshot_for_vector_clock_merge_snapshot_test(
+                    &three_replica_chain,
+                    11,
+                    46,
+                    RegionState::Closed,
+                    Some("peer-closed"),
+                ),
+                "same_sequence_later_timestamp": scrub_snapshot_for_vector_clock_merge_snapshot_test(
+                    &same_sequence_later_timestamp,
+                    12,
+                    55,
+                    RegionState::Draining,
+                    Some("fresh-owner"),
+                ),
+                "state_tiebreak": scrub_snapshot_for_vector_clock_merge_snapshot_test(
+                    &state_tiebreak_merge,
+                    15,
+                    60,
+                    RegionState::Closed,
+                    Some("closed-phase"),
+                ),
             })
         );
     }

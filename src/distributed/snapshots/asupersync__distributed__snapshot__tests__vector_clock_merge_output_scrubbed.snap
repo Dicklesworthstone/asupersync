@@ -1,0 +1,142 @@
+---
+source: src/distributed/snapshot.rs
+expression: json!({ ... })
+---
+{
+  "same_sequence_later_timestamp": {
+    "clock_invariants": {
+      "cancel_reason_matches_latest_clock": true,
+      "sequence_is_max": true,
+      "state_is_max": true,
+      "timestamp_is_max": true
+    },
+    "merged": {
+      "budget": {
+        "cost_remaining": 64,
+        "deadline_nanos": "[deadline_nanos]",
+        "polls_remaining": 7
+      },
+      "cancel_reason": "fresh-owner",
+      "children": [
+        "[child_0]",
+        "[child_1]"
+      ],
+      "finalizer_count": 3,
+      "metadata": [
+        8,
+        9
+      ],
+      "parent": "[parent_region_id]",
+      "region_id": "[region_id]",
+      "sequence": 12,
+      "state": "Draining",
+      "tasks": [
+        {
+          "priority": 7,
+          "state": "Cancelled",
+          "task_id": "[task_0]"
+        }
+      ],
+      "timestamp_nanos": "[timestamp_nanos]"
+    }
+  },
+  "state_tiebreak": {
+    "clock_invariants": {
+      "cancel_reason_matches_latest_clock": true,
+      "sequence_is_max": true,
+      "state_is_max": true,
+      "timestamp_is_max": true
+    },
+    "merged": {
+      "budget": {
+        "cost_remaining": 120,
+        "deadline_nanos": "[deadline_nanos]",
+        "polls_remaining": 11
+      },
+      "cancel_reason": "closed-phase",
+      "children": [
+        "[child_0]",
+        "[child_1]"
+      ],
+      "finalizer_count": 5,
+      "metadata": [
+        10,
+        11
+      ],
+      "parent": "[parent_region_id]",
+      "region_id": "[region_id]",
+      "sequence": 15,
+      "state": "Closed",
+      "tasks": [
+        {
+          "priority": 6,
+          "state": "Cancelled",
+          "task_id": "[task_0]"
+        },
+        {
+          "priority": 2,
+          "state": "Completed",
+          "task_id": "[task_1]"
+        }
+      ],
+      "timestamp_nanos": "[timestamp_nanos]"
+    }
+  },
+  "three_replica_chain": {
+    "clock_invariants": {
+      "cancel_reason_matches_latest_clock": true,
+      "sequence_is_max": true,
+      "state_is_max": true,
+      "timestamp_is_max": true
+    },
+    "merged": {
+      "budget": {
+        "cost_remaining": 96,
+        "deadline_nanos": "[deadline_nanos]",
+        "polls_remaining": 8
+      },
+      "cancel_reason": "peer-closed",
+      "children": [
+        "[child_0]",
+        "[child_1]",
+        "[child_2]",
+        "[child_3]"
+      ],
+      "finalizer_count": 4,
+      "metadata": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "parent": "[parent_region_id]",
+      "region_id": "[region_id]",
+      "sequence": 11,
+      "state": "Closed",
+      "tasks": [
+        {
+          "priority": 3,
+          "state": "Completed",
+          "task_id": "[task_0]"
+        },
+        {
+          "priority": 5,
+          "state": "Cancelled",
+          "task_id": "[task_1]"
+        },
+        {
+          "priority": 2,
+          "state": "Running",
+          "task_id": "[task_2]"
+        },
+        {
+          "priority": 1,
+          "state": "Panicked",
+          "task_id": "[task_3]"
+        }
+      ],
+      "timestamp_nanos": "[timestamp_nanos]"
+    }
+  }
+}
