@@ -8,9 +8,9 @@
 
 use asupersync::channel::broadcast::{self, RecvError, TryRecvError};
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::{Cx, RegionId, TaskId};
 use asupersync::types::Budget;
 use asupersync::util::ArenaIndex;
+use asupersync::{Cx, RegionId, TaskId};
 use proptest::prelude::*;
 
 /// Test scenario for broadcast slow receiver lag bound testing
@@ -65,14 +65,15 @@ impl SlowReceiverScenario {
 /// Generate test scenarios for property-based testing
 fn slow_receiver_scenarios() -> impl Strategy<Value = SlowReceiverScenario> {
     (
-        1usize..=8,   // capacity
-        0usize..=5,   // warmup_messages
-        1usize..=15,  // lag_messages
-        0usize..=3,   // fast_receiver_count
-        0usize..=5,   // recovery_messages
-    ).prop_map(|(capacity, warmup, lag, fast_count, recovery)| {
-        SlowReceiverScenario::new(capacity, warmup, lag, fast_count, recovery)
-    })
+        1usize..=8,  // capacity
+        0usize..=5,  // warmup_messages
+        1usize..=15, // lag_messages
+        0usize..=3,  // fast_receiver_count
+        0usize..=5,  // recovery_messages
+    )
+        .prop_map(|(capacity, warmup, lag, fast_count, recovery)| {
+            SlowReceiverScenario::new(capacity, warmup, lag, fast_count, recovery)
+        })
 }
 
 /// Create a test context for broadcast channel tests
@@ -103,6 +104,47 @@ async fn consume_all_messages<T: Clone>(
     }
 
     results
+}
+
+async fn lag_outcome_with_fast_consumer_multiplicity(
+    capacity: usize,
+    total_messages: usize,
+    fast_receiver_count: usize,
+) -> (u64, Vec<usize>) {
+    let cx = create_test_context();
+    let (tx, mut slow_rx) = broadcast::channel::<usize>(capacity);
+    let mut fast_receivers: Vec<_> = (0..fast_receiver_count).map(|_| tx.subscribe()).collect();
+
+    for value in 0..total_messages {
+        let delivered = tx.send(&cx, value).expect("send lag probe");
+        assert_eq!(
+            delivered,
+            fast_receiver_count + 1,
+            "every subscribed receiver should observe the send"
+        );
+
+        for rx in &mut fast_receivers {
+            let fast_value = rx.recv(&cx).await.expect("fast receiver keeps up");
+            assert_eq!(fast_value, value, "fast receivers should stay in lockstep");
+        }
+    }
+
+    let lag = match slow_rx.recv(&cx).await {
+        Err(RecvError::Lagged(skipped)) => skipped,
+        other => panic!("expected lagged slow receiver, got {other:?}"),
+    };
+
+    let mut recovered_tail = Vec::with_capacity(capacity);
+    for _ in 0..capacity {
+        recovered_tail.push(
+            slow_rx
+                .recv(&cx)
+                .await
+                .expect("slow receiver should recover buffered tail"),
+        );
+    }
+
+    (lag, recovered_tail)
 }
 
 /// **MR1: Capacity Bound Honored Per Receiver**
@@ -501,6 +543,31 @@ fn mr5_drop_slow_receiver_cleans_backpressure_state() {
     });
 }
 
+/// **MR6: Fast Consumer Multiplicity Does Not Change Slow Receiver Outcome**
+///
+/// Adding receivers that promptly consume each message is a semantics-preserving
+/// transformation for an already-idle slow receiver: the slow receiver should
+/// report the same lag count and recover the same buffered tail regardless of
+/// how many fast peers stay caught up.
+#[test]
+fn mr6_fast_consumer_multiplicity_preserves_slow_receiver_lag_outcome() {
+    let _lab = LabRuntime::new(LabConfig::default());
+
+    futures_lite::future::block_on(async {
+        let capacity = 4;
+        let total_messages = 11;
+
+        let baseline =
+            lag_outcome_with_fast_consumer_multiplicity(capacity, total_messages, 0).await;
+        let transformed =
+            lag_outcome_with_fast_consumer_multiplicity(capacity, total_messages, 3).await;
+
+        assert_eq!(baseline, transformed);
+        assert_eq!(baseline.0, (total_messages - capacity) as u64);
+        assert_eq!(baseline.1, vec![7, 8, 9, 10]);
+    });
+}
+
 /// **Integration Test: Complete Slow Receiver Workflow**
 ///
 /// Tests the complete slow receiver workflow from creation through lag to cleanup
@@ -527,7 +594,8 @@ fn integration_slow_receiver_complete_workflow() {
 
         // Send messages beyond capacity
         for i in 3..=8 {
-            tx.send(&cx, format!("msg{}", i)).expect(&format!("send {}", i));
+            tx.send(&cx, format!("msg{}", i))
+                .expect(&format!("send {}", i));
         }
 
         // Fast receiver keeps up
@@ -655,6 +723,7 @@ mod conformance_suite {
         mr3_recovery_after_lagged_resumes_from_latest();
         mr4_other_receivers_unaffected_by_slow_subscriber();
         mr5_drop_slow_receiver_cleans_backpressure_state();
+        mr6_fast_consumer_multiplicity_preserves_slow_receiver_lag_outcome();
 
         // Run integration and edge case tests
         integration_slow_receiver_complete_workflow();
