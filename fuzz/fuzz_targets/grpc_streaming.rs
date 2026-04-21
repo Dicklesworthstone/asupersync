@@ -1,18 +1,18 @@
-//! Comprehensive gRPC bidirectional streaming fuzz target.
+//! Comprehensive gRPC streaming fuzz target.
 //!
-//! Fuzzes bidirectional gRPC streaming with interleaved client and server operations
+//! Fuzzes bidirectional gRPC streaming plus explicit server-streaming demand patterns
 //! to verify critical streaming invariants:
 //! 1. Message order preserved per direction
 //! 2. Half-close correctly signaled
 //! 3. Cancel from either direction drains the other
 //! 4. Deadline propagates into both streams
-//! 5. Flow-control backpressure respected
+//! 5. Server-streaming response buffers apply and relieve backpressure
 //!
 //! # Streaming Patterns Tested
 //! - Interleaved client→server and server→client messages
 //! - Various close/cancel scenarios (client closes first, server closes first, both)
 //! - Deadline/timeout propagation and enforcement
-//! - Flow-control edge cases with buffer saturation
+//! - Server-streaming demand gaps that saturate and later drain response buffers
 //! - Metadata and status code handling
 //! - Concurrent send/receive operations
 //!
@@ -25,11 +25,14 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::collections::VecDeque;
 use std::time::Duration;
 
 use asupersync::grpc::{
     client::{Channel, GrpcClient},
+    streaming::{ResponseStream, ServerStreaming, Streaming},
     status::{Code, Status},
 };
 
@@ -38,6 +41,9 @@ const MAX_FUZZ_SIZE: usize = 32_000;
 
 /// Maximum messages per stream direction to bound fuzzing runtime.
 const MAX_STREAM_MESSAGES: usize = 100;
+
+/// Upper bound for explicit server-streaming demand/backpressure exercises.
+const MAX_SERVER_STREAM_BUFFER_ATTEMPTS: usize = 1400;
 
 /// Fuzz-local duration wrapper.
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -106,12 +112,27 @@ impl TestMessage {
 struct StreamingScenario {
     /// Operations to perform on the bidirectional stream
     operations: Vec<StreamOperation>,
+    /// Explicit server-streaming demand patterns that can saturate the response buffer.
+    server_streaming_patterns: Vec<ServerStreamingDemandPattern>,
     /// Global timeout for the streaming session
     timeout: Option<FuzzDuration>,
     /// Whether to enable flow-control backpressure testing
     test_backpressure: bool,
     /// Initial metadata to send
     initial_metadata: Vec<(String, String)>,
+}
+
+/// Server-streaming demand patterns focused on response-buffer backpressure.
+#[derive(Arbitrary, Debug, Clone)]
+struct ServerStreamingDemandPattern {
+    /// Messages pushed before the client drains the stream.
+    initial_burst: u16,
+    /// Messages the client drains after the initial burst.
+    client_drain: u16,
+    /// Additional messages pushed after draining to verify pressure relief.
+    refill_burst: u16,
+    /// Whether to close the stream after the refill burst.
+    close_after_refill: bool,
 }
 
 /// Individual streaming operation.
@@ -175,6 +196,9 @@ struct StreamState {
     server_cancelled: bool,
     deadline_exceeded: bool,
     backpressure_triggered: bool,
+    server_backpressure_events: usize,
+    server_stream_drains: usize,
+    backpressure_relieved: bool,
 }
 
 impl StreamState {
@@ -190,6 +214,9 @@ impl StreamState {
             server_cancelled: false,
             deadline_exceeded: false,
             backpressure_triggered: false,
+            server_backpressure_events: 0,
+            server_stream_drains: 0,
+            backpressure_relieved: false,
         }
     }
 
@@ -260,7 +287,87 @@ impl StreamState {
             // For this fuzz test, we assume correct if ResourceExhausted errors are handled
         }
 
+        if self.server_backpressure_events > 0
+            && self.server_stream_drains > 0
+            && !self.backpressure_relieved
+        {
+            return false;
+        }
+
         true
+    }
+}
+
+fn exercise_server_streaming_backpressure(
+    pattern: &ServerStreamingDemandPattern,
+    state: &mut StreamState,
+) {
+    let mut server_stream = ServerStreaming::new(ResponseStream::<TestMessage>::open());
+    let waker = std::task::Waker::noop().clone();
+    let mut cx = Context::from_waker(&waker);
+
+    let initial_burst = usize::from(pattern.initial_burst).min(MAX_SERVER_STREAM_BUFFER_ATTEMPTS);
+    for idx in 0..initial_burst {
+        let message = TestMessage::new_simple(10_000 + idx as u32);
+        match server_stream.get_mut().push(Ok(message.clone())) {
+            Ok(()) => state.server_sent.push_back(message),
+            Err(status) => {
+                if status.code() == Code::ResourceExhausted {
+                    state.backpressure_triggered = true;
+                    state.server_backpressure_events += 1;
+                }
+                break;
+            }
+        }
+    }
+
+    let drain_count = usize::from(pattern.client_drain).min(MAX_SERVER_STREAM_BUFFER_ATTEMPTS);
+    for _ in 0..drain_count {
+        match Pin::new(&mut server_stream).poll_next(&mut cx) {
+            Poll::Ready(Some(Ok(message))) => {
+                state.client_received.push_back(message);
+                state.server_stream_drains += 1;
+            }
+            Poll::Ready(Some(Err(status))) => {
+                if status.code() == Code::ResourceExhausted {
+                    state.backpressure_triggered = true;
+                    state.server_backpressure_events += 1;
+                }
+                break;
+            }
+            Poll::Ready(None) | Poll::Pending => break,
+        }
+    }
+
+    let refill_burst = usize::from(pattern.refill_burst).min(MAX_SERVER_STREAM_BUFFER_ATTEMPTS);
+    let mut refill_succeeded = false;
+    for idx in 0..refill_burst {
+        let message = TestMessage::new_simple(20_000 + idx as u32);
+        match server_stream.get_mut().push(Ok(message.clone())) {
+            Ok(()) => {
+                refill_succeeded = true;
+                state.server_sent.push_back(message);
+            }
+            Err(status) => {
+                if status.code() == Code::ResourceExhausted {
+                    state.backpressure_triggered = true;
+                    state.server_backpressure_events += 1;
+                }
+                break;
+            }
+        }
+    }
+
+    if state.server_backpressure_events > 0 && state.server_stream_drains > 0 && refill_succeeded {
+        state.backpressure_relieved = true;
+    }
+
+    if pattern.close_after_refill {
+        server_stream.get_mut().close();
+        while let Poll::Ready(Some(Ok(message))) = Pin::new(&mut server_stream).poll_next(&mut cx) {
+            state.client_received.push_back(message);
+            state.server_stream_drains += 1;
+        }
     }
 }
 
@@ -282,6 +389,10 @@ async fn simulate_streaming(
     scenario: &StreamingScenario,
     state: &mut StreamState,
 ) -> Result<(), Status> {
+    for pattern in &scenario.server_streaming_patterns {
+        exercise_server_streaming_backpressure(pattern, state);
+    }
+
     // Create test channel
     let channel = create_test_channel(scenario.timeout.map(FuzzDuration::into_duration)).await?;
     let mut client = GrpcClient::new(channel);
@@ -456,7 +567,9 @@ async fn simulate_streaming(
 }
 
 fuzz_target!(|scenario: StreamingScenario| {
-    if scenario.operations.len() > MAX_STREAM_MESSAGES {
+    if scenario.operations.len() > MAX_STREAM_MESSAGES
+        || scenario.server_streaming_patterns.len() > MAX_STREAM_MESSAGES
+    {
         return;
     }
 
