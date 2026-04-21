@@ -281,11 +281,13 @@ impl TriggerConfig {
         &self,
         new_level: DegradationLevel,
         current_level: DegradationLevel,
-        last_change: Instant,
+        last_change: Option<Instant>,
     ) -> DegradationLevel {
         // Respect cooldown period
-        if last_change.elapsed() < self.cooldown {
-            return current_level;
+        if let Some(last) = last_change {
+            if last.elapsed() < self.cooldown {
+                return current_level;
+            }
         }
 
         // Allow immediate escalation for emergencies
@@ -576,12 +578,7 @@ impl DegradationEngine {
                     .last_changes
                     .read()
                     .get(resource_type)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        Instant::now()
-                            .checked_sub(Duration::from_secs(3600))
-                            .unwrap()
-                    });
+                    .copied();
 
                 let final_level = config.apply_hysteresis(new_level, current_level, last_change);
 
