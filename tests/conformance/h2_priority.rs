@@ -1028,6 +1028,39 @@ impl H2PriorityConformanceHarness {
             },
         ));
 
+        // Test 3: generic frame dispatch must reject Stream ID 0 PRIORITY frames
+        results.push(self.run_test(
+            "priority_stream_id_zero_generic_dispatch_error",
+            "Generic HTTP/2 frame dispatch MUST reject PRIORITY frames on Stream ID 0",
+            TestCategory::ConnectionStreamError,
+            RequirementLevel::Must,
+            || {
+                let header = FrameHeader {
+                    length: 5,
+                    frame_type: FrameType::Priority as u8,
+                    flags: 0,
+                    stream_id: 0,
+                };
+                let payload = Bytes::from_static(&[
+                    0x00, 0x00, 0x00, 0x01, // Dependency 1
+                    0x20, // Weight 32
+                ]);
+
+                match parse_frame(&header, payload).map_err(h2error_to_string) {
+                    Err(message) => {
+                        assert!(
+                            message.contains("PROTOCOL_ERROR"),
+                            "expected protocol error, got {message}"
+                        );
+                        Ok(())
+                    }
+                    Ok(frame) => Err(format!(
+                        "Expected generic dispatch to reject Stream ID 0 PRIORITY frame, got {frame:?}"
+                    )),
+                }
+            },
+        ));
+
         results
     }
 
