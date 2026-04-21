@@ -481,10 +481,21 @@ fn mr6_listener_created_child_is_drained_before_cancel_returns() {
     let observed_child_clone = Arc::clone(&observed_child);
     let token_for_listener = token.clone();
 
-    token.add_listener(move |_, _| {
-        let mut child_rng = DetRng::new(777);
-        let child = token_for_listener.child(&mut child_rng);
-        *observed_child_clone.lock().unwrap() = Some(child);
+    struct Mr6Listener {
+        observed_child: Arc<StdMutex<Option<SymbolCancelToken>>>,
+        token: SymbolCancelToken,
+    }
+    impl CancelListener for Mr6Listener {
+        fn on_cancel(&self, _reason: &CancelReason, _time: Time) {
+            let mut child_rng = DetRng::new(777);
+            let child = self.token.child(&mut child_rng);
+            *self.observed_child.lock().unwrap() = Some(child);
+        }
+    }
+
+    token.add_listener(Mr6Listener {
+        observed_child: observed_child_clone,
+        token: token_for_listener,
     });
 
     let reason = CancelReason::new(CancelKind::Shutdown);
