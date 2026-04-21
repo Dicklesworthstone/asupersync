@@ -2301,6 +2301,69 @@ pub mod backpressure_metamorphic {
         }
     }
 
+    async fn run_reserve_abort_noop_case(
+        cx: &crate::cx::Cx,
+        capacity: usize,
+        steps: usize,
+        seed: u64,
+        inject_reserve_abort: bool,
+    ) -> (
+        Vec<u32>,
+        Vec<(usize, usize, usize, usize)>,
+        usize,
+        (usize, usize, usize, usize),
+    ) {
+        let (sender, mut receiver) = channel::<u32>(capacity);
+        let mut transcript = Vec::with_capacity(steps);
+        let mut post_step_states = Vec::with_capacity(steps);
+        let mut abort_count = 0usize;
+
+        for step in 0..steps {
+            let should_inject_abort = inject_reserve_abort
+                && (step == 0 || ((seed >> (step % u64::BITS as usize)) & 1) == 1);
+            if should_inject_abort {
+                let permit = sender
+                    .reserve(cx)
+                    .await
+                    .expect("reserve before abort should succeed");
+                let reserved_state = observe_channel_state(&sender);
+                assert_eq!(
+                    reserved_state.0 + reserved_state.1 + reserved_state.2,
+                    capacity,
+                    "reserved state leaked capacity before abort: {reserved_state:?}"
+                );
+                permit.abort();
+                abort_count += 1;
+                assert_eq!(
+                    observe_channel_state(&sender),
+                    (0, 0, capacity, 0),
+                    "abort should restore empty channel state"
+                );
+            }
+
+            sender
+                .send(cx, step as u32)
+                .await
+                .expect("send after reserve/abort should succeed");
+            transcript.push(
+                receiver
+                    .recv(cx)
+                    .await
+                    .expect("receiver should observe sent value"),
+            );
+            post_step_states.push(observe_channel_state(&sender));
+        }
+
+        let final_state = observe_channel_state(&sender);
+        drop(sender);
+        assert!(
+            matches!(receiver.try_recv(), Err(RecvError::Disconnected)),
+            "receiver should disconnect after sender drop once transcript is drained"
+        );
+
+        (transcript, post_step_states, abort_count, final_state)
+    }
+
     /// MR1: Capacity Conservation
     ///
     /// Invariant: total_capacity = queued + reserved + available
@@ -2691,6 +2754,109 @@ pub mod backpressure_metamorphic {
 
                         Ok(())
                         }.await;
+                    }).unwrap();
+                    lab.scheduler.lock().schedule(test_task, 0);
+                    let _ = lab.run_until_quiescent_with_report();
+                });
+                Ok(())
+            })
+            .expect("Property test failed");
+    }
+
+    /// MR3b: Reserve-abort is observationally equivalent to a no-op.
+    ///
+    /// Property: Inserting `reserve().await.abort()` before a successful send must not change
+    /// the receive transcript or post-step channel state.
+    #[test]
+    fn metamorphic_reserve_abort_is_observational_noop() {
+        use proptest::test_runner::TestRunner;
+
+        let mut runner = TestRunner::default();
+        runner
+            .run(&backpressure_config_strategy(), |config| {
+                crate::lab::runtime::test(config.seed, |lab| {
+                    let root = lab.state.create_root_region(Budget::INFINITE);
+                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
+                        let cx = crate::cx::Cx::for_testing();
+                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+                            let step_count = std::cmp::max(1, std::cmp::min(config.messages_per_sender, 12));
+
+                            let (base_transcript, base_states, base_abort_count, base_final_state) =
+                                run_reserve_abort_noop_case(
+                                    &cx,
+                                    config.capacity,
+                                    step_count,
+                                    config.seed,
+                                    false,
+                                )
+                                .await;
+                            let (
+                                transformed_transcript,
+                                transformed_states,
+                                transformed_abort_count,
+                                transformed_final_state,
+                            ) = run_reserve_abort_noop_case(
+                                &cx,
+                                config.capacity,
+                                step_count,
+                                config.seed,
+                                true,
+                            )
+                            .await;
+
+                            let expected_transcript: Vec<u32> =
+                                (0..step_count).map(|step| step as u32).collect();
+
+                            assert_eq!(
+                                base_abort_count, 0,
+                                "baseline should not inject reserve/abort no-ops"
+                            );
+                            assert!(
+                                transformed_abort_count > 0,
+                                "transformed run should inject at least one reserve/abort no-op"
+                            );
+                            assert_eq!(
+                                base_transcript, expected_transcript,
+                                "baseline run drifted from expected FIFO transcript"
+                            );
+                            assert_eq!(
+                                transformed_transcript, expected_transcript,
+                                "reserve/abort no-op changed FIFO transcript"
+                            );
+                            assert_eq!(
+                                base_transcript, transformed_transcript,
+                                "reserve/abort no-op changed receive transcript"
+                            );
+                            assert_eq!(
+                                base_states, transformed_states,
+                                "reserve/abort no-op changed post-step channel state"
+                            );
+                            assert!(
+                                base_states
+                                    .iter()
+                                    .all(|&state| state == (0, 0, config.capacity, 0)),
+                                "baseline run leaked queued/reserved state: {base_states:?}"
+                            );
+                            assert!(
+                                transformed_states
+                                    .iter()
+                                    .all(|&state| state == (0, 0, config.capacity, 0)),
+                                "transformed run leaked queued/reserved state: {transformed_states:?}"
+                            );
+                            assert_eq!(
+                                base_final_state,
+                                (0, 0, config.capacity, 0),
+                                "baseline final state leaked queue/reservations"
+                            );
+                            assert_eq!(
+                                transformed_final_state,
+                                (0, 0, config.capacity, 0),
+                                "transformed final state leaked queue/reservations"
+                            );
+
+                            Ok(())
+                        }
+                        .await;
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let _ = lab.run_until_quiescent_with_report();
