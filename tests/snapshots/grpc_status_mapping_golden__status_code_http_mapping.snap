@@ -1,0 +1,227 @@
+---
+source: tests/grpc_status_mapping_golden.rs
+expression: snapshot
+---
+[
+  {
+    "grpc_code": 0,
+    "grpc_name": "OK",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "",
+        "grpc-status": "0",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 1,
+    "grpc_name": "CANCELLED",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "caller cancelled request",
+        "grpc-status": "1",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 2,
+    "grpc_name": "UNKNOWN",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "opaque upstream failure",
+        "grpc-status": "2",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 3,
+    "grpc_name": "INVALID_ARGUMENT",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "field `name` is invalid",
+        "grpc-status": "3",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 4,
+    "grpc_name": "DEADLINE_EXCEEDED",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "deadline exceeded after 30s",
+        "grpc-status": "4",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 5,
+    "grpc_name": "NOT_FOUND",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "widget/123 missing",
+        "grpc-status": "5",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 6,
+    "grpc_name": "ALREADY_EXISTS",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "widget/123 already exists",
+        "grpc-status": "6",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 7,
+    "grpc_name": "PERMISSION_DENIED",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "missing write scope",
+        "grpc-status": "7",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 8,
+    "grpc_name": "RESOURCE_EXHAUSTED",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "quota exhausted",
+        "grpc-status": "8",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 9,
+    "grpc_name": "FAILED_PRECONDITION",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "system not ready",
+        "grpc-status": "9",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 10,
+    "grpc_name": "ABORTED",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "transaction aborted",
+        "grpc-status": "10",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 11,
+    "grpc_name": "OUT_OF_RANGE",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "page index out of range",
+        "grpc-status": "11",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 12,
+    "grpc_name": "UNIMPLEMENTED",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "method not implemented",
+        "grpc-status": "12",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 13,
+    "grpc_name": "INTERNAL",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "internal invariant broken",
+        "grpc-status": "13",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 14,
+    "grpc_name": "UNAVAILABLE",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "service draining",
+        "grpc-status": "14",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 15,
+    "grpc_name": "DATA_LOSS",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "checksum mismatch",
+        "grpc-status": "15",
+        "grpc-status-details-bin": null
+      }
+    }
+  },
+  {
+    "grpc_code": 16,
+    "grpc_name": "UNAUTHENTICATED",
+    "wire": {
+      "content_type": "application/grpc",
+      "http_status": 200,
+      "trailers": {
+        "grpc-message": "bearer token missing",
+        "grpc-status": "16",
+        "grpc-status-details-bin": null
+      }
+    }
+  }
+]
