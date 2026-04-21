@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! KIP-98 RecordBatch v2 test vectors for conformance testing.
 
 use super::format::*;

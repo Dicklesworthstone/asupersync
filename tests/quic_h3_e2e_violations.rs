@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! QH3-E6 -- Protocol violation corpus (reject, don't panic).
 //!
 //! Negative/adversarial tests that verify the QUIC/H3 stack properly rejects

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for the maintained React example fixture (asupersync-3qv04.9.3.2).
 //!
 //! This suite enforces that the React example lane remains present and wired to

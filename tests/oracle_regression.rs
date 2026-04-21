@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(clippy::too_many_lines)]
 //! Oracle E2E regression suite with evidence logs.
 //!

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration tests for distributed, trace, and remote module invariants.
 //!
 //! Covers gaps identified in bd-3q6f: causality verification edge cases,

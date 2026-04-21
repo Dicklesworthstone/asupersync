@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Tests for tuple generation algorithms (RFC 6330 Sections 5.3-5.5).
 
 use crate::spec_derived::{

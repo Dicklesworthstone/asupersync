@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for Tokio interop target ranking (2oh2u.7.1).
 //!
 //! Validates ranking coverage, machine-readable export presence,

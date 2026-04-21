@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for compatibility crate scaffolding/versioning policy (2oh2u.7.3).
 //!
 //! Validates explicit policy IDs, enforcement mappings, promotion/rollback

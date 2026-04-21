@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Stale-link detection for theorem-to-rule traceability ledger (bd-1drgu).
 
 use serde_json::Value;

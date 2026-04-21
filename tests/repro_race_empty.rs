@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Tests for race combinator with empty input.
 //!
 //! Verifies that `race([])` behaves as "never" (pending forever).

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for runtime::reactor registration/deregistration invariants.
 //!
 //! These tests validate the reactor token allocation, generation tracking, concurrent safety,

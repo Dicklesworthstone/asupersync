@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Semantic Maintainer Playbook Validation (SEM-11.2)
 //!
 //! Validates that the maintainer playbook exists, covers required topics,

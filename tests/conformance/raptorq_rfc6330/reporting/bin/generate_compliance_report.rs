@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Generate Compliance Report Binary
 //!
 //! CLI tool for generating comprehensive RaptorQ RFC 6330 conformance reports

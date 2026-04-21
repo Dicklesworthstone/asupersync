@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for Next Browser Edition adapter lifecycle/helper semantics
 //! (asupersync-3qv04.8.3 / 3qv04.8.3.3).
 //!

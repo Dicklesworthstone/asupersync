@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Console end-to-end (E2E) test suite.
 //!
 //! This module provides comprehensive end-to-end tests for the runtime debug

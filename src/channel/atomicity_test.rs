@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Two-phase channel atomicity verification framework.
 //!
 //! This module provides comprehensive testing for the atomicity guarantees of

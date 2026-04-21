@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/1.1 request-target conformance testing per RFC 9112 Section 3.2
 //!
 //! This test verifies that the HTTP/1.1 codec correctly validates and handles

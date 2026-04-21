@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! SQLite WAL Mode Conformance Tests
 //!
 //! Focused tests for SQLite WAL mode concurrent reader/writer correctness.

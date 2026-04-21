@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Test for commutativity bug.
 use asupersync::sync::Notify;
 use std::future::Future;

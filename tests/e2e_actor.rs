@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Actor E2E test suite entry point.
 //!
 //! This file provides the entry point for the actor E2E test suite,

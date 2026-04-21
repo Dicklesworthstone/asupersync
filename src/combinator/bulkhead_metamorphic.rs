@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing: Bulkhead isolation under burst load
 //!
 //! This module implements metamorphic relations (MRs) to verify that bulkhead

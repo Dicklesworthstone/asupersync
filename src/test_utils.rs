@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Test utilities for Asupersync.
 //!
 //! This module provides shared helpers for unit tests:

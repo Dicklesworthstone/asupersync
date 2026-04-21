@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration tests for the unified oracle report and expanded mutations.
 //!
 //! Validates:

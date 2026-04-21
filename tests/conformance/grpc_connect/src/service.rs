@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Conformance test service implementation
 //!
 //! This module implements the test service that serves as the target for

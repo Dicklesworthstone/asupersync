@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RFC 7541 Appendix C test vectors for HPACK decoder conformance.
 
 use asupersync::bytes::Bytes;

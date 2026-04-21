@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for cx::scope child-spawn ownership invariants.
 //!
 //! These tests validate the core invariants of scope-based task ownership,

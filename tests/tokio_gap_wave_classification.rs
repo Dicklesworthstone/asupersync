@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for Tokio gap wave classification (2oh2u.1.3.2).
 
 #![allow(missing_docs)]

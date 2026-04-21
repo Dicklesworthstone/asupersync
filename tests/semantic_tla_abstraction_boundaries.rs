@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! TLA+ Abstraction Boundaries and Runtime Correspondence Validation (SEM-07.5)
 //!
 //! Validates that the abstraction boundaries document exists, documents

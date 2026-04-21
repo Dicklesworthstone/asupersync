@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Test for timer wheel tick skipping bounds.
 
 use asupersync::time::TimerWheel;

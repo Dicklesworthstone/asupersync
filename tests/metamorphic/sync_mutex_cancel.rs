@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic property tests for sync::Mutex cancel-aware lock acquisition invariants.
 //!
 //! These tests verify Mutex behavior specifically around cancel-aware lock acquisition,

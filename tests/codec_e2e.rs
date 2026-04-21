@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Codec Framework E2E Verification Suite (bd-22vb)
 //!
 //! Comprehensive verification for the codec framework ensuring correct

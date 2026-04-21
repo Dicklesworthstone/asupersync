@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration and property-based tests for Separation Logic proof infrastructure.
 //!
 //! This test suite validates the three proof modules from the bd-1xwvk series

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Property-based testing types for region tree operations.
 //!
 //! This module provides Arbitrary implementations for generating random region

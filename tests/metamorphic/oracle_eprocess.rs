@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic testing for lab::oracle e-process evidence accumulation invariants.
 //!
 //! Property-based tests that validate fundamental behavioral invariants of e-processes

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for observability::resource_accounting tracking invariants.
 //!
 //! These tests validate the core invariants of resource accounting using

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! QUIC Initial Packet Conformance Tests (RFC 9000 Section 17)
 //!
 //! This module provides comprehensive conformance testing for QUIC Initial packet

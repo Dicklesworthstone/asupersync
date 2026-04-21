@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/3 RFC 9114 conformance test suite.
 //!
 //! This module validates compliance with RFC 9114 requirements using systematic

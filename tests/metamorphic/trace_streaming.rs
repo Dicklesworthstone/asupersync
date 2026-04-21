@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for trace::streaming partial-stream replay invariants.
 //!
 //! These tests validate the core invariants of the streaming trace replay system

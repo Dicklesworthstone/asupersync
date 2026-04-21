@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Kafka RecordBatch v2 format structures per KIP-98.
 //!
 //! This module defines the data structures and encoding/decoding logic

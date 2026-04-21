@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! T6.12 — Behavioral Verification Matrix for Database and Messaging Unit Tests
 //!
 //! Bead: `asupersync-2oh2u.6.12`

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Conformance tests for transport router symbol dispatch correctness.
 //!
 //! These tests verify that symbols are correctly routed and dispatched to endpoints

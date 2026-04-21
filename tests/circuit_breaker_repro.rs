@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs, unused_imports)]
 
 use asupersync::combinator::circuit_breaker::*;

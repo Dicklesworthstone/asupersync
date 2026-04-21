@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Scheduler Stress & Fairness E2E Tests (bd-13iit).
 //!

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 #![cfg(feature = "test-internals")]
 //! Cancel Lane Fairness & Starvation Bounds (bd-1jxe3).

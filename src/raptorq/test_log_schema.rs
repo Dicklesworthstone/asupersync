@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Canonical structured test logging schema for RaptorQ test runs.
 //!
 //! Defines versioned, serializable log entry types for both unit tests and E2E

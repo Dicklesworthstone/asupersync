@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Round-Trip Validation CLI
 //!
 //! Validates RaptorQ round-trip encode/decode cycles against golden files.

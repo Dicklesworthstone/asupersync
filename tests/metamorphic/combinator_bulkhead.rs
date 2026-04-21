@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for combinator::bulkhead concurrency-limit invariants
 //!
 //! This test suite validates the fundamental bulkhead combinator semantics using

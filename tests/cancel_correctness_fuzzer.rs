@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Cancel-Correctness Fuzzing Framework
 //!
 //! This module provides comprehensive property-based testing for cancellation scenarios

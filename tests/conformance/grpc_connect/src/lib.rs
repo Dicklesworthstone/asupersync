@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! gRPC Connect Conformance Test Suite
 //!
 //! This module implements Pattern 6 (Process-Based Conformance) for gRPC

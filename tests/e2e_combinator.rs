@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Combinator E2E test suite with cancel-correctness verification.
 //!
 //! This test suite validates the core combinator invariants:

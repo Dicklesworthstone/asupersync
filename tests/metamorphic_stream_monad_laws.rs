@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 #![cfg(any())]
 //! Metamorphic tests for stream combinator monad laws.

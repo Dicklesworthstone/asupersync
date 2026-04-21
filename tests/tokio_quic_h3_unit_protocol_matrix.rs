@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for [T4.10] Exhaustive Unit/Protocol Test Matrix: QUIC and HTTP/3 State Machines.
 //!
 //! Bead: asupersync-2oh2u.4.10

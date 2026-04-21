@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Remediation Unit-Test Suite for DSL, Risk, and Rollback Engines (Track 4.5)
 //!
 //! Validates remediation recipe DSL parsing, confidence scoring model,

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing: obligation::eprocess evidence threshold invariants
 //!
 //! This module implements metamorphic relations (MRs) to verify that the

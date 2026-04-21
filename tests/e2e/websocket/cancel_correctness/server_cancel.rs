@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use crate::websocket_e2e::util::{init_ws_test, ws_handshake_request_bytes};
 use asupersync::cx::Cx;
 use asupersync::net::tcp::VirtualTcpStream;

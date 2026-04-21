@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for [T4.11] End-to-End QUIC/H3 Scenario Manifest with Deep Telemetry Logs.
 //!
 //! Bead: asupersync-2oh2u.4.11

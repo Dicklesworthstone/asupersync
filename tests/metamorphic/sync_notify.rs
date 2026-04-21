@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for sync::notify event notification invariants.
 //!
 //! These tests validate the core invariants of the async Notify primitive

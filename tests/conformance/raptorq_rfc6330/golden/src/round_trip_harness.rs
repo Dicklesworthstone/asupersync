@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Round-trip validation harness for RaptorQ conformance testing.
 //!
 //! This module provides comprehensive round-trip testing that validates

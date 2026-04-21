@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 
 use sha2::{Digest, Sha256};

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Length delimited codec conformance tests.
 //!
 //! Tests validate length-prefixed framing protocol compliance including:

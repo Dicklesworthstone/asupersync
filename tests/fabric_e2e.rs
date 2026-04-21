@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Aggregated FABRIC E2E coverage with structured per-scenario summaries.
 #![cfg(feature = "messaging-fabric")]
 

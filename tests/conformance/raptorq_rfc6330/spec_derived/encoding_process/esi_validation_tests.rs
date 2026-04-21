@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Tests for Encoding Symbol ID (ESI) validation.
 
 use crate::spec_derived::{

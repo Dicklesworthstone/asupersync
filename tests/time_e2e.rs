@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Time/Timers Verification Suite - E2E Tests
 //!
 //! This test file provides comprehensive verification for the time/timer infrastructure,

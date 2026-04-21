@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Race Loser-Drain Metamorphic Tests
 //!
 //! Metamorphic relations for combinator::race loser-drain behavior with budget exhaustion.

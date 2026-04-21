@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for replay artifact schema and retention policy (2oh2u.10.6).
 //!
 //! Verifies canonical artifact set, versioning rules, determinism fields,

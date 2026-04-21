@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for cancel::progress_certificate proof invariants.
 //!
 //! These tests validate the statistical and mathematical properties of progress

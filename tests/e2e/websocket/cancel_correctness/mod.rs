@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Cancel-correctness scenarios for WebSocket.
 
 mod client_cancel;

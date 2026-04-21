@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for channel::watch snapshot and ordering invariants.
 
 use asupersync::channel::watch;

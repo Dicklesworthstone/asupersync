@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for runtime::waker wake-coalesce invariants.
 //!
 //! These tests validate the waker deduplication and cloning properties using

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Relation Suite for Channel Send/Recv Operations.
 //!
 //! This test suite implements metamorphic relations for asupersync's two-phase

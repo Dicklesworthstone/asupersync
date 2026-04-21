@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Property-based tests for critical FABRIC invariants.
 //!

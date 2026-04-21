@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Proof-guided performance opportunity map contract checks (bd-1lda7).
 
 use serde_json::Value;

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Repro test for budget remaining_time returning correct Duration.
 
 use asupersync::types::{Budget, Time};

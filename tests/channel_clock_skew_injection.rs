@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Channel clock skew fault injection integration tests (bd-2ktrc.4).
 //!
 //! Validates the `SkewClock` wrapper under various clock skew scenarios.

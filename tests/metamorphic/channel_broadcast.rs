@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for channel::broadcast lag-aware multi-consumer invariants
 //!
 //! This test suite validates the fundamental broadcast channel semantics using

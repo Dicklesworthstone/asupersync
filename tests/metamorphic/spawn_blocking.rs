@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for runtime::spawn_blocking cancel-propagation invariants.
 //!
 //! These tests validate the spawn_blocking cancellation semantics, panic propagation,

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for obligation::saga compensation order invariants
 //!
 //! Tests saga compensation mechanisms using metamorphic relations that must hold

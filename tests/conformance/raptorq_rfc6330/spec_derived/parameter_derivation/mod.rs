@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Parameter derivation tests for RFC 6330 sections 5.1-5.2.
 //!
 //! Tests systematic index calculation, K derivation, K' calculation,

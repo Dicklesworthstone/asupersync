@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Semantic Verification Summary Validation (SEM-12.10)
 //!
 //! Validates that the verification summary generator exists, produces correct

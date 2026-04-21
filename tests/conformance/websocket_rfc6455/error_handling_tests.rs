@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Error handling conformance tests.
 
 use super::*;

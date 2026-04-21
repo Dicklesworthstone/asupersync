@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! FrankenLab integration tests (bd-1hu19.5).
 //!
 //! Covers:

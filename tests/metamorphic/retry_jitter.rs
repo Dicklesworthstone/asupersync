@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for combinator::retry exponential backoff jitter invariants
 //!
 //! This test suite validates the mathematical properties of jitter algorithms

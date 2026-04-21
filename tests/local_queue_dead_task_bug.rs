@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Regression test for local queue dead task stealing bug.
 

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Property-Based Cancel Timing Generator
 //!
 //! This module provides comprehensive property generators for cancellation timing

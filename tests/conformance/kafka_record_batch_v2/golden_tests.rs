@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Golden tests for Kafka RecordBatch v2 format with known test vectors.
 //!
 //! These tests use specific binary data derived from librdkafka and official

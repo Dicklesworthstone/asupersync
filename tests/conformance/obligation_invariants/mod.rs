@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Obligation invariant conformance test module.
 //!
 //! This module contains all tests for validating structured concurrency obligation invariants.

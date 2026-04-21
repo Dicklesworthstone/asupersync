@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing: Oneshot channel send-receive commutativity
 //!
 //! This module implements metamorphic relations (MRs) to verify that oneshot

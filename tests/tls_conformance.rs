@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! TLS Conformance & Security Integration Tests (bd-31p8)
 //!
 //! Tests covering:

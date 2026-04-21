@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for cx::Cx cancellation propagation invariants.
 //!
 //! These tests validate the core invariants of capability context cancellation

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! UDP Socket Options and Message Framing Conformance Tests
 //!
 //! This module provides comprehensive conformance testing for UDP socket options

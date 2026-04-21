@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Exhaustive unit tests for adapter boundary correctness (T7.10).
 //!
 //! Validates correctness contracts declared in T7.8 performance budgets:

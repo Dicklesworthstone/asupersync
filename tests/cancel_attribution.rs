@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Comprehensive cancel attribution test suite.
 //!
 //! This module tests the cancel attribution system including:

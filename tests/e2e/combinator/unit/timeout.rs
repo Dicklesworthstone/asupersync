@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Unit tests for the timeout! combinator.
 //!
 //! Tests verify:

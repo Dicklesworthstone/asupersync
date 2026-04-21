@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Regression test for high-ESI symbol acceptance during recovery.
 
 use asupersync::distributed::{

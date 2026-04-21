@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(unsafe_code)]
 //! Contract tests for [T3.4] Process Lifecycle Parity
 //!

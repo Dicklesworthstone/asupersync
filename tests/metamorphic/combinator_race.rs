@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for combinator::race loser drain correctness.
 //!
 //! These tests validate the core invariants of the race combinator using

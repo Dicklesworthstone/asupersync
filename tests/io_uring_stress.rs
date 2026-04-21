@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Stress tests for io_uring reactor edge cases under high contention.
 //!
 //! This module provides conformance testing for io_uring reactor behavior under

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HPACK RFC 7541 conformance test harness implementation.
 
 use asupersync::bytes::{Bytes, BytesMut};

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Error handling and edge case conformance tests for HPACK.
 //!
 //! This module tests how our HPACK implementation handles various error

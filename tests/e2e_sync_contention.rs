@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 
 //! Sync primitives contention simulation E2E tests (T1.4).

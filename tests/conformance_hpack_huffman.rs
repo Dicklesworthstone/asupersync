@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RFC 7541 Appendix B Huffman Encoding Conformance Tests
 //!
 //! Tests HPACK Huffman encoding/decoding conformance per RFC 7541 Appendix B:

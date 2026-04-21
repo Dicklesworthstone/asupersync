@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RFC 6265 Cookie Signature Validation Conformance Tests
 //!
 //! Validates RFC 6265 cookie security and signature validation behavior with 5 MRs:

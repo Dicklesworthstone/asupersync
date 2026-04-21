@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for service::reconnect with exponential backoff and jitter
 //!
 //! Verifies metamorphic properties of reconnection behavior with exponential backoff

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! High-concurrency stress testing scenarios for channel cancellation.
 
 use crate::cancel_harness::{

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/2 frame metamorphic property tests.
 //!
 //! This module implements metamorphic testing patterns for HTTP/2 frame processing,

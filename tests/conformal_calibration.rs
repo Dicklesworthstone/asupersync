@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! E2E regression tests for conformal calibration of lab metrics.
 //!
 //! Tests the conformal prediction pipeline end-to-end: calibration from

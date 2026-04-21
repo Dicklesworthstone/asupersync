@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Comprehensive test suite for cancel protocol validator.
 //!
 //! This module provides extensive testing for the cancel-safe state machine validation

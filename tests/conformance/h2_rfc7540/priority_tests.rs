@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Priority handling conformance tests.
 //!
 //! Tests priority and dependency requirements from RFC 7540 Section 5.3.

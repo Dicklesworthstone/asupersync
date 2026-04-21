@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Edge case and boundary condition tests for RFC 6330.
 
 use crate::spec_derived::{

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RFC 9112 §7.1 Chunked Transfer-Encoding edge case tests.
 //!
 //! Tests specific edge cases and corner cases for chunked transfer-encoding

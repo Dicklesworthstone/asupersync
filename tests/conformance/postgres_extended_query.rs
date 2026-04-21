@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Conformance tests for PostgreSQL Extended Query Protocol (wire protocol v3)
 //!
 //! Tests the implementation in `src/database/postgres.rs` against the PostgreSQL

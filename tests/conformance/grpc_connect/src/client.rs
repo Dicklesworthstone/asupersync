@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! gRPC client implementations for conformance testing
 
 use anyhow::Result;

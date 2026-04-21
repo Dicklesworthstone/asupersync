@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 use asupersync::time::TimerWheel;
 use asupersync::types::Time;

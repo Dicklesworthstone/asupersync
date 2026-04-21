@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for trace::dpor independence detection invariants.
 //!
 //! These tests validate the correctness of Dynamic Partial Order Reduction (DPOR)

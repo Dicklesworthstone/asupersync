@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Tests for ActorId type.
 //!
 //! Note: The comprehensive ActorId unit tests are in src/actor.rs.

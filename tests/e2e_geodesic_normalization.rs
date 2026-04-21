@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! End-to-end geodesic normalization harness (bd-1i1w).
 //!
 //! Proves geodesic normalization works in practice by exercising:

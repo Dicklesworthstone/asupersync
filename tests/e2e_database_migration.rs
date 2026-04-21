@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! E2E: Database (SQLite) full lifecycle and migration configuration tests.
 //!
 //! Tests connection lifecycle, query execution, transactions, error recovery,

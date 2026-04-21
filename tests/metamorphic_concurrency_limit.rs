@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing: service::concurrency_limit fairness + Lyapunov bounded queue
 //!
 //! These tests verify fundamental properties of concurrency limiting that must hold

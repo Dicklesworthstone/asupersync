@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! DPOR Coverage & Backtracking regression tests.
 //!
 //! Verifies enhanced DPOR coverage metrics, sleep set optimization, HB-race

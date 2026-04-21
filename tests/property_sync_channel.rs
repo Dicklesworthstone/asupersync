@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Property-based tests for synchronization primitives and channels.
 //!
 //! Covers invariants NOT already tested by `algebraic_laws.rs` or `property_region_ops.rs`:

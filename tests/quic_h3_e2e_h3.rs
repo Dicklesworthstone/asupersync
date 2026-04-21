@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! QH3-E4: HTTP/3 control/request lifecycle and GOAWAY E2E tests.
 //!
 //! This test file covers the full H3 protocol lifecycle including request-response

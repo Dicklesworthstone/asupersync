@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Sync Primitives Test Suite
 //!
 //! Conformance tests for synchronization primitives as specified in

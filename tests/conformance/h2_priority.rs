@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/2 PRIORITY Frame Conformance Tests (RFC 9113 Section 6.3)
 //!
 //! This module provides comprehensive conformance testing for HTTP/2 PRIORITY frame

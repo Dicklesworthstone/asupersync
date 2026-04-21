@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic property tests for observability::metrics counter monotonicity invariants.
 //!
 //! These tests verify the core invariants of asupersync's metrics system using

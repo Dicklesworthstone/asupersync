@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use crate::common::*;
 use asupersync::security::AuthKey;
 use asupersync::util::DetRng;

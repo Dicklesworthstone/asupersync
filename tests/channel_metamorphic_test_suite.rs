@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing Suite for Channel Send/Recv Operations
 //!
 //! This module implements metamorphic testing for asupersync channel operations

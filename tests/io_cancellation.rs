@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! I/O Cancellation and Obligation Tests.
 //!

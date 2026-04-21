@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RFC 6330 conformance test harness for RaptorQ implementation.
 //!
 //! This module provides comprehensive conformance testing against RFC 6330

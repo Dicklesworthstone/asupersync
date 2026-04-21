@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! E2E: Database full lifecycle — pool init, acquire, release, exhaustion,
 //! concurrent access, health checks.
 

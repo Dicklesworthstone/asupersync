@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! WASM GA readiness review board checklist enforcement (WASM-17.4).
 //!
 //! Verifies that the GA go/no-go checklist contract exists, references all

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Golden artifact tests for HPACK header compression/decompression.
 //!
 //! These tests verify that HPACK encoding and decoding produce consistent,

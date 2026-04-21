@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Maintain Fixtures Binary
 //!
 //! CLI tool for automated maintenance of RaptorQ conformance test fixtures,

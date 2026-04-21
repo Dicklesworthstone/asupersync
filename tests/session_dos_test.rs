@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration coverage for empty-session middleware behavior.
 
 use asupersync::web::extract::Request;

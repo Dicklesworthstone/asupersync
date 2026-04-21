@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration tests for the io_uring reactor backend.
 //!
 //! These tests exercise real I/O using the `IoUringReactor` on Linux.

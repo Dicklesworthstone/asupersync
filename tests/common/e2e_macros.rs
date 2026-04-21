@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Phase/oracle assertion macros for E2E tests.
 
 /// Execute a named phase within an E2E test, logging entry and exit.

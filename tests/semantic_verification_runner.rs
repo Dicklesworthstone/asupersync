@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Unified Semantic Verification Runner Validation (SEM-12.9)
 //!
 //! Validates that the unified runner script exists, supports all required

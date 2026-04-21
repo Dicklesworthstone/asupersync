@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! QUIC Retry Packet Conformance Tests (RFC 9000 Section 17.2.5)
 //!
 //! This module provides comprehensive conformance testing for QUIC Retry packet

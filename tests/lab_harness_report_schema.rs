@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Schema + determinism contract test for the Spork harness report (bd-11dm5).
 
 use asupersync::lab::{HarnessAttachmentRef, LabConfig, LabRuntime, SporkHarnessReport};

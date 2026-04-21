@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Loser drain verification tests.
 //!
 //! These tests verify that race losers are FULLY DRAINED, not just dropped.

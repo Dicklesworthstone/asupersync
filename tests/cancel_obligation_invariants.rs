@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Combined cancellation + obligation invariant tests (bd-38kk).
 //!
 //! These tests exercise the interaction between cancellation protocol,

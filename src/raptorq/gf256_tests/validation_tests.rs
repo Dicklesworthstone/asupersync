@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Comprehensive validation tests for GF(256) finite field operations.
 //!
 //! This module provides systematic validation of the GF(256) implementation

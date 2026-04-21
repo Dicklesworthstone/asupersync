@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Comprehensive test logging infrastructure for Asupersync.
 //!
 //! This module provides detailed logging for tests that captures all I/O events,

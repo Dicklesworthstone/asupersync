@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Deterministic E2E integration tests for the native QUIC/H3 stack.
 //!
 //! This harness drives the full stack: connection setup, TLS handshake,

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for record::region obligation tracking invariants.
 //!
 //! This module provides comprehensive property-based testing for region record

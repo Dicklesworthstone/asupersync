@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! DNS Cache RFC 2308 Conformance Tests
 //!
 //! Validates RFC 2308 negative caching compliance and TTL management:

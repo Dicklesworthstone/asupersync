@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Shared helpers for WebSocket E2E tests.
 
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};

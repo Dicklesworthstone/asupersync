@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Comprehensive test suite for the cancel-safe resource pool abstraction.
 //!
 //! This test suite covers:

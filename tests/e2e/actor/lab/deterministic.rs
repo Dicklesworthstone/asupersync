@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Determinism tests for actors in the lab runtime.
 //!
 //! These tests verify that running the same actor scenario with the same seed

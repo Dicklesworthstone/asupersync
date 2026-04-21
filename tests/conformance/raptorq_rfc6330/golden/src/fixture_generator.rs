@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Test fixture generation for RaptorQ golden file testing.
 //!
 //! This module generates comprehensive test fixtures that cover various

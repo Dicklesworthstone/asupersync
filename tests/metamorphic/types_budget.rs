@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for types::budget consumption invariants.
 //!
 //! These tests validate the budget consumption properties using metamorphic relations

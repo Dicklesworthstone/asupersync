@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for QUIC packet number encoding (RFC 9000 compliance).
 //!
 //! Tests the 5 core metamorphic relations for packet number encoding:

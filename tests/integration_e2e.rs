@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Comprehensive cross-cutting E2E test suite.
 //!
 //! Unlike the per-subsystem E2E tests (sync_e2e, io_e2e, time_e2e, etc.),

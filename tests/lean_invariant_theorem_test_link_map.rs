@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Invariant-to-theorem and invariant-to-test link map checks (bd-2iwok).
 
 use serde_json::Value;

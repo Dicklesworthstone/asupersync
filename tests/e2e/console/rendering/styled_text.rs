@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Styled text rendering E2E tests.
 
 use crate::console_e2e::util::{

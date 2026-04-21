@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for combinator::join all-succeed / short-circuit semantics.
 //!
 //! These tests validate the core invariants of the join combinator using

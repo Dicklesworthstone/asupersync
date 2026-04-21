@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for combinator::join short-circuit behavior.
 //!
 //! This test suite verifies the join combinator's behavior under cancellation

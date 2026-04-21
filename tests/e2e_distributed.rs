@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! E2E: Distributed RaptorQ encode/distribute/recover pipeline.
 //!
 //! Tests the actual distributed module end-to-end: encode region state into

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Conformance test case definitions
 
 use crate::{TestRequest, StreamingTestRequest, ConformanceResult, TestCategory, TestStatus, TestMetadata};

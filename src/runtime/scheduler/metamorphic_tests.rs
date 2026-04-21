@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic property tests for scheduler fairness, work conservation, and starvation freedom.
 //!
 //! These tests verify scheduler invariants that must hold regardless of the specific

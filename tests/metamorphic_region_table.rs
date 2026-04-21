@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use asupersync::record::region::RegionState;
 use asupersync::runtime::{RegionCreateError, RegionTable};
 use asupersync::types::{Budget, TaskId, Time};

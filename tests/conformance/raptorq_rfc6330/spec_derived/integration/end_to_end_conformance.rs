@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! End-to-end conformance tests spanning multiple RFC sections.
 
 use crate::spec_derived::{

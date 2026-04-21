@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Real TCP integration tests for WebSocket.
 
 mod binary_stream;

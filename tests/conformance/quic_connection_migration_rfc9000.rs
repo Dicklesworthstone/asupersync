@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RFC 9000 §9 QUIC Connection Migration Conformance Tests
 //!
 //! This module contains comprehensive conformance tests for QUIC connection migration

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic testing for io::buf_reader/buf_writer read-ahead/write-behind invariants.
 //!
 //! Tests the core metamorphic relations that must hold for correct

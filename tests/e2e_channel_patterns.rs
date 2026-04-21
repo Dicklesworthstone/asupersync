@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! E2E channel producer/consumer pattern tests (T1.3).
 //!
 //! Three sub-scenarios exercising realistic channel usage under

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/3 RFC 9114 Section 6.1 connection preface conformance tests.
 //!
 //! These tests validate compliance with the HTTP/3 connection establishment

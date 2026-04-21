@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Test for once cell set bug.
 use asupersync::sync::OnceCell;
 use std::sync::Arc;

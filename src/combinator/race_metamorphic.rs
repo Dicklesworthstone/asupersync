@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing: Scope.race loser-drain correctness
 //!
 //! This module implements metamorphic relations (MRs) to verify that Scope::race

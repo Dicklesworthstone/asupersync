@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! E2E test suite for the time-travel demo pipeline (bd-77g6j.4).
 //!

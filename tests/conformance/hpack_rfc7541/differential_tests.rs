@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Differential testing against reference implementations.
 //!
 //! This module implements Pattern 1 (Differential Testing) by comparing

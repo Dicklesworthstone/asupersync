@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! WebSocket Extension Negotiation Conformance Tests (RFC 6455 + RFC 7692)
 //!
 //! This module provides comprehensive conformance testing for WebSocket extension

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Regression test for `read_line` across split UTF-8 boundaries.
 
 use asupersync::io::{AsyncBufRead, AsyncRead, ReadBuf};

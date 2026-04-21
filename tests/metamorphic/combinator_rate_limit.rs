@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for combinator::rate_limit token-bucket invariants
 //!
 //! Tests fundamental token bucket rate limiting behavior using metamorphic relations

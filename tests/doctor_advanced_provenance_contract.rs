@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration contract tests for advanced doctor provenance fixtures.
 #![cfg(feature = "cli")]
 

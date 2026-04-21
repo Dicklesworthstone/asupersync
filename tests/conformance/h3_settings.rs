@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/3 SETTINGS frame conformance tests for RFC 9114 Section 7.2.4
 //!
 //! This module implements metamorphic testing for HTTP/3 SETTINGS frame

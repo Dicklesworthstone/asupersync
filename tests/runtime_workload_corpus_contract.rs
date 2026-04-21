@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Runtime workload corpus contract invariants (AA-01.2).
 
 #![allow(missing_docs)]

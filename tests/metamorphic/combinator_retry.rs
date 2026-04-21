@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for combinator::retry exponential-backoff invariants
 //!
 //! This test suite validates the fundamental retry combinator semantics using

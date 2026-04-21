@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for cx::scope capability attenuation invariants.
 //!
 //! These tests validate the core invariants of capability attenuation in

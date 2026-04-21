@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! SEM-10.5 signal-quality gate contract tests.
 
 use std::path::{Path, PathBuf};

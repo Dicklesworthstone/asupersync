@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for obligation::ledger commit/abort idempotency invariants.
 //!
 //! These tests validate the core invariants of the obligation ledger commit/abort

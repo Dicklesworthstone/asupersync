@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic property tests for combinator::pipeline stream composition invariants.
 //!
 //! These tests verify pipeline combinator invariants related to sequential execution,

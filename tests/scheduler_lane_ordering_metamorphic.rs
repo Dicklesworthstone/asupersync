@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for Scheduler Lane Ordering Invariants
 //!
 //! Tests the four critical metamorphic relations in src/runtime/scheduler/three_lane.rs:

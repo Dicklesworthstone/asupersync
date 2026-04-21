@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Lease semantics and liveness tests (bd-yj06g).
 //!
 //! Validates lease renewal/expiry semantics using the obligation marking

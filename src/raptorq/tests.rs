@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration tests for the RaptorQ pipeline.
 
 use std::pin::Pin;

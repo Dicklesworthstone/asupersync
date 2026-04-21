@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Proof artifact manifest format validation (bd-2rhiq).
 //!
 //! Validates that the proof runner (scripts/run_proof_checks.sh) produces

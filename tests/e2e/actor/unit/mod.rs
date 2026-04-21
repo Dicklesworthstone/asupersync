@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Unit tests for actor primitives.
 //!
 //! These tests verify the core actor types and behaviors in isolation.

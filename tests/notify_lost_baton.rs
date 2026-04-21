@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Regression test for Notify baton handoff after mixed single/broadcast wakeups.
 
 use asupersync::sync::Notify;

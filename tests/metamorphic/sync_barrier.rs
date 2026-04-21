@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic testing for sync::barrier phase-synchronization invariants.
 //!
 //! Tests the core metamorphic relations that must hold for a correct

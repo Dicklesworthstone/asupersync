@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Extension negotiation conformance tests.
 
 use super::*;

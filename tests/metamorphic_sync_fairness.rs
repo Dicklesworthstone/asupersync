@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 
 //! Integration target for sync fairness metamorphic relations.

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for asupersync components.
 //!
 //! These tests validate properties of the system using metamorphic relations

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Fixture management for HPACK conformance testing.
 //!
 //! This module handles loading and managing test fixtures from reference

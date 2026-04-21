@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for runtime::region region-close quiescence invariants.
 //!
 //! These tests validate the core invariants of region lifecycle management,

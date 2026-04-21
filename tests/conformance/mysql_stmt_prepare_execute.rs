@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! MySQL COM_STMT_PREPARE/EXECUTE Conformance Tests
 //!
 //! This module provides comprehensive conformance testing for MySQL prepared statement

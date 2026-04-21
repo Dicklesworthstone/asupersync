@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! E2E: Signal handling under load — graceful shutdown, drain in-flight,
 //! ShutdownController coordination, multiple receivers, double shutdown.
 

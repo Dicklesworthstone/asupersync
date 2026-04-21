@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration test for mutex metamorphic relations
 //!
 //! This test verifies that the mutex poisoning metamorphic relations work

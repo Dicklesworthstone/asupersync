@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Migration Playbook Validation for FS/Process/Signal (Track 3.8)
 //!
 //! Validates that migration recipes documented in the playbook are

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for time::wheel hierarchical timer wheel invariants.
 //!
 //! These tests validate the core invariants of the hierarchical timer wheel

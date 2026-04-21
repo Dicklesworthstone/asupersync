@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for runtime::blocking_pool capacity and spawn invariants.
 //!
 //! These tests validate the blocking pool behavior using metamorphic relations

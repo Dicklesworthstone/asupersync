@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Stream state conformance tests.
 //!
 //! Tests stream lifecycle and state management requirements from RFC 7540 Section 5.

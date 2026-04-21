@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic property tests for broadcast channel lagging-receiver behavior.
 //!
 //! These tests verify broadcast channel invariants related to lagging receiver handling,

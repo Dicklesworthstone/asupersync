@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Tests for combinator::join_all
 //!
 //! Tests the join_all combinator using metamorphic relations (MRs) to verify

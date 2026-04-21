@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! BSD Kqueue Event Conformance Tests
 //!
 //! Tests compliance with BSD kqueue event semantics for macOS/FreeBSD systems.

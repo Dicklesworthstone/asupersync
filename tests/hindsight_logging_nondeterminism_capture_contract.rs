@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Hindsight logging and minimal nondeterminism capture contract invariants (AA-06.1).
 
 #![allow(missing_docs)]

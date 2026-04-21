@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing: combinator::timeout deadline-drain invariants
 //!
 //! This module implements metamorphic relations (MRs) to verify that timeout

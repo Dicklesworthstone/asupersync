@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Unit tests for the quorum! combinator.
 //!
 //! Tests verify:

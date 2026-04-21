@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic testing for combinator::hedge parallel fallback invariants.
 //!
 //! Tests hedge combinator properties through systematic property-based exploration:

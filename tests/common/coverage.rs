@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Coverage measurement for property tests.
 //!
 //! This module provides infrastructure for measuring which invariants

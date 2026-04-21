@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for session typed-protocol send/recv invariants.
 //!
 //! Tests the mathematical properties and protocol invariants of session types

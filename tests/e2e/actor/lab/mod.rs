@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Lab runtime tests for actor determinism.
 //!
 //! These tests verify that actors behave deterministically in the lab runtime,

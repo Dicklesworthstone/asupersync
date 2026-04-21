@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic testing for progress certificate sign/verify invariants.
 //!
 //! This module implements 5 metamorphic relations testing cryptographic

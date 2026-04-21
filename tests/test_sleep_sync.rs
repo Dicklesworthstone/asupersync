@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Verifies `Sleep` remains `Send + Sync` for cross-thread scheduler usage.
 
 use asupersync::time::Sleep;

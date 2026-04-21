@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Tests for mpsc waker bug — ensures unpolled Recv drop does not clear registered wakers.
 

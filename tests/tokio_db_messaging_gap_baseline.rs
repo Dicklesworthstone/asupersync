@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for the database and messaging gap baseline (2oh2u.6.1).
 //!
 //! Validates document structure, gap coverage, and classification consistency.

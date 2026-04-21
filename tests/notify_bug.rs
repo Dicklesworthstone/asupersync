@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Regression test for notify spurious wakeup detection.
 #![allow(missing_docs)]
 

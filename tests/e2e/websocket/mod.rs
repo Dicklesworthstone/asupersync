@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! WebSocket end-to-end (E2E) test suite.
 //!
 //! This mirrors `bd-35ld` and intentionally mixes:

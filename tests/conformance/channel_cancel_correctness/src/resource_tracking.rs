@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Resource leak detection infrastructure for cancellation testing.
 
 use std::sync::atomic::{AtomicUsize, Ordering};

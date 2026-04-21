@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for executable conformance contracts (2oh2u.10.2).
 //!
 //! Ensures the contract specification is machine-gateable and covers

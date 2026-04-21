@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RFC 9000 §18 Transport Parameter Conformance Tests
 //!
 //! This module contains comprehensive conformance tests for QUIC transport parameter

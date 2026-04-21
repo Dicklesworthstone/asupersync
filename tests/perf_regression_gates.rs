@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Perf regression gate tests and helpers (bd-274qo).
 //!
 //! Validates the regression gate mechanism used in CI to prevent performance

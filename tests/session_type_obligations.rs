@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration tests for session-typed obligation protocols (bd-3u5d3.6).
 //!
 //! Tests the typestate-encoded obligation protocols (SendPermit/Ack,

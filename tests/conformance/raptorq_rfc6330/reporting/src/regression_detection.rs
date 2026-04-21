@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Regression Detection Module
 //!
 //! This module provides functionality for detecting regressions in RaptorQ conformance

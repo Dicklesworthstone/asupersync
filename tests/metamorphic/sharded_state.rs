@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for runtime::sharded_state cross-shard invariants.
 //!
 //! Validates critical properties of the ShardedState architecture using

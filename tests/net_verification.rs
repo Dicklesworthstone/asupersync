@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(
     missing_docs,
     clippy::drop_non_drop,

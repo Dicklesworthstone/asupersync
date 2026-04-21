@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Property-based tests for capability sets and obligation typestate.
 //!
 //! Verifies algebraic properties of the capability subset lattice, the

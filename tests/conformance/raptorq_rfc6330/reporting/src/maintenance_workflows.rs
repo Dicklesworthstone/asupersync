@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Maintenance Workflows Module
 //!
 //! This module provides automated maintenance workflows for RaptorQ conformance testing,

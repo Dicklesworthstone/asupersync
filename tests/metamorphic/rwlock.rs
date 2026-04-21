@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for RwLock reader-writer fairness invariants.
 //!
 //! These tests validate the fairness properties of the writer-preference RwLock

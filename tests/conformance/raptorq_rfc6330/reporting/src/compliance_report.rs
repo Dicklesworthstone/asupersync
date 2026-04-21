@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Compliance report generation for RaptorQ RFC 6330 conformance.
 //!
 //! This module generates multi-format conformance reports including Markdown,

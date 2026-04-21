@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! gRPC Connect Conformance Test Runner
 //!
 //! This binary executes the complete conformance test suite and outputs

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! WebSocket masking-key conformance tests (RFC 6455 §5.3).
 //!
 //! This module provides comprehensive golden tests validating the WebSocket

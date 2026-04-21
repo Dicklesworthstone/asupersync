@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration test for obligation invariant conformance.
 //!
 //! This test validates all structured concurrency obligation invariants

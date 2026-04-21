@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! TLS 1.3 Server Name Indication (SNI) Conformance Tests
 //!
 //! Validates SNI implementation against RFC 6066 Section 3 with 5 metamorphic relations:

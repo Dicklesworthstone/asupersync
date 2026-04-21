@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Gap classification/risk/sequencing consistency checks (bd-1vhw5).
 
 use serde_json::Value;

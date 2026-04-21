@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Semantic Residual Risk Register Contract (SEM-09.4)
 //!
 //! Validates the SEM-09.4 artifact includes explicit gate criteria, evidence

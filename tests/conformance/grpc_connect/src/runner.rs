@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Test runner implementation for parallel execution and test management
 
 use crate::{ConformanceResult, ConformanceConfig, TestCategory, TestStatus};

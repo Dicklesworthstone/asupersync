@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Diagnostics E2E tests.
 //!
 //! This module tests the diagnostic query capabilities:

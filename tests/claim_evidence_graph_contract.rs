@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Claim/evidence graph contract invariants (AA-10.1).
 
 #![allow(missing_docs)]

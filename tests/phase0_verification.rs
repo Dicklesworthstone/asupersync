@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Phase 0 verification scenarios (oracle-driven E2E tests).
 //!
 //! These tests exercise the Phase 0 invariants and determinism guarantees

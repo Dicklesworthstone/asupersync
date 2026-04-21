@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! E2E: Transport TCP+UDP — connect, send, receive, close, large transfer.
 //!
 //! QUIC requires feature flag and external dependencies, tested separately.

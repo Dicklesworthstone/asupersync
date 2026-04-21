@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! TLS Handshake Metamorphic Testing (asupersync-yjt2ht)
 //!
 //! Metamorphic relations for TLS 1.2/1.3 handshake state machine invariants.

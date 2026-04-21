@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! G2: CI regression gates for correctness + performance.
 //!
 //! Integrates G8 `RegressionMonitor` (anytime-valid testing + conformal

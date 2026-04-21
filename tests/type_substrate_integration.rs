@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Cross-crate type substrate integration verification (bd-32awe).
 //!
 //! Verifies that all FrankenSuite foundation crates share the same canonical

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Golden File Generation CLI
 //!
 //! Generates golden files for RaptorQ RFC 6330 conformance testing.

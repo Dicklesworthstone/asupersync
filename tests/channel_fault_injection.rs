@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Channel fault injection integration tests (bd-2ktrc.1).
 //!

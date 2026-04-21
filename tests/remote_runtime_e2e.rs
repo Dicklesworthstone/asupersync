@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Remote Runtime E2E Suite + Network Faults (bd-2bohm).
 //!
 //! End-to-end remote execution tests: spawn/ack/cancel/result flows under

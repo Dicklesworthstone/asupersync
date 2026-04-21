@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! High-concurrency stress tests for channel atomicity verification.
 //!
 //! This module contains stress tests that exercise the two-phase channel protocol

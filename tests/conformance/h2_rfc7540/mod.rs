@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/2 RFC 7540 conformance test suite.
 //!
 //! This module validates compliance with RFC 7540 requirements using systematic

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Unicode width calculation E2E tests.
 
 use crate::console_e2e::util::init_console_test;

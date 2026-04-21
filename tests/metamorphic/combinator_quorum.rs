@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic testing for combinator::quorum k-of-n completion invariants.
 //!
 //! Property-based tests that validate fundamental quorum semantics using

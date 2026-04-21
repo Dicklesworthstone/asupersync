@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Decision plane validation contract invariants (AA-02.3).
 
 #![allow(missing_docs)]

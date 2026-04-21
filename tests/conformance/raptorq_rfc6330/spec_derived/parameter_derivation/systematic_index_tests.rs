@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Tests for systematic index calculation and K' derivation (RFC 6330 Section 5.2).
 
 use crate::spec_derived::{

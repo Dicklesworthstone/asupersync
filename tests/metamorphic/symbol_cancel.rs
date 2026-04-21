@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for cancel::symbol_cancel propagation and masking.
 //!
 //! These tests validate the cancellation protocol behavior using metamorphic relations

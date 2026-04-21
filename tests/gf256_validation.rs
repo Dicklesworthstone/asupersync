@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! GF(256) Kernel Bit-Exactness Validation Tests
 //!
 //! Comprehensive validation suite proving that SIMD-optimized GF(256) kernels

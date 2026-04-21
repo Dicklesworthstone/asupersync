@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Golden output tests for Asupersync.
 //!
 //! These tests verify behavioral equivalence across code changes by running

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for sync::rwlock writer-preference and reader-concurrency invariants
 //!
 //! This test suite validates the fundamental RwLock semantics using metamorphic

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic property tests for oneshot channel send/recv completion invariants.
 //!
 //! These tests verify oneshot channel invariants related to two-phase send/recv operations,

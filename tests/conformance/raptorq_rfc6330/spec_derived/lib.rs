@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RFC 6330 Spec-Derived Test Implementation
 //!
 //! This library provides comprehensive, systematic testing of every MUST and SHOULD

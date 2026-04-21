@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/1.1 Chunked Request Body Transfer-Encoding RFC 9112 Conformance Tests
 //!
 //! This module provides comprehensive conformance testing for HTTP/1.1 chunked

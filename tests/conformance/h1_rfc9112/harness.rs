@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/1.1 conformance test harness.
 //!
 //! Provides testing infrastructure for RFC 9112 HTTP/1.1 conformance,

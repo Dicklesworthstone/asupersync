@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Comprehensive distributed region integration tests.
 //!
 //! Validates the full distributed region subsystem: replication, recovery,

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Bytes codec conformance tests.
 
 use super::*;

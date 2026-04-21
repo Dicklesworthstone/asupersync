@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Golden artifact tests for HTTP/2 frame serialization.
 //!
 //! These tests verify that frame serialization produces deterministic binary output

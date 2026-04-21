@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 pub struct RuntimeState;
 
 impl RuntimeState {

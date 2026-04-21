@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Tests for K derivation from object size and symbol size (RFC 6330 Section 5.1).
 
 use crate::{

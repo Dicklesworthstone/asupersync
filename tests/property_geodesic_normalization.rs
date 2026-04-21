@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Property tests for geodesic trace normalization (bd-3hz77).
 //!
 //! Proves/validates that geodesic normalization:

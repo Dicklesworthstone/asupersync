@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Channel Cancellation Protocol Conformance Matrix
 //!
 //! This library provides comprehensive testing infrastructure for validating

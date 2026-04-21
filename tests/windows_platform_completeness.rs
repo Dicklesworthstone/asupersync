@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Track-I (`asupersync-t1nde`) Windows platform completeness contract tests.
 //!
 //! These tests are host-agnostic: they validate gated source contracts without

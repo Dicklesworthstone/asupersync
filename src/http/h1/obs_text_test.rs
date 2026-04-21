@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use asupersync::http::h1::codec::{Http1Codec, HttpError};
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;

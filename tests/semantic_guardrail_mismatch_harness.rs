@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! SEM-10.4 mismatch-fixture harness contract checks.
 //!
 //! Ensures the fixture catalog and harness script stay deterministic, complete,

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use super::RwLock;
 use crate::cx::Cx;
 use crate::types::{Budget, RegionId, TaskId};

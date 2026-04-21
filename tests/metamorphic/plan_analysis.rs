@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for plan analysis DAG equivalence invariants.
 //!
 //! Tests the 5 core metamorphic relations for plan DAG analysis:

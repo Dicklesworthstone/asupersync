@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 #![cfg(feature = "test-internals")]
 //! Regression coverage for create-time acquire timeouts in `GenericPool`.

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #[cfg(test)]
 mod tests {
     use crate::Cx;

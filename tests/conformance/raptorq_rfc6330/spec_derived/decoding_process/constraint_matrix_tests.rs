@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Tests for constraint matrix construction (RFC 6330 Section 4.3.1).
 
 use crate::spec_derived::{

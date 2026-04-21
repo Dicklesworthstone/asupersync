@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for bundle-size budgets and regression gates (asupersync-3qv04.6.7.1).
 //!
 //! Validates that per-package and per-artifact size budgets are defined,

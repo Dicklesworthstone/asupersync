@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! WebSocket frame fragmentation conformance tests per RFC 6455 Section 5.
 //!
 //! Tests the critical fragmentation behaviors required by the WebSocket protocol:

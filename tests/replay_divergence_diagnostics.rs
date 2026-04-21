@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! E2E tests for replay divergence diagnostics (bd-ahj21).
 //!

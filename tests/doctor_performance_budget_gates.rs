@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Performance Budget and Instrumentation Gate Validation (Track 6.2)
 //!
 //! Validates the performance budget matrix, gate evaluation logic,

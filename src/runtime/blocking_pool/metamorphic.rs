@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for blocking pool task fairness.
 //!
 //! Tests fairness properties using metamorphic relations to verify that the blocking

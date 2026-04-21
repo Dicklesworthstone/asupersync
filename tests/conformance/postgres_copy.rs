@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! PostgreSQL COPY IN/OUT Protocol Conformance Tests
 //!
 //! This module provides comprehensive conformance testing for the PostgreSQL

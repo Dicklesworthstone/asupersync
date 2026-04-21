@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use crate::websocket_e2e::util::init_ws_test;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;

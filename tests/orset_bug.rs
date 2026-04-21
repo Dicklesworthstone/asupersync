@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Tests for ORSet CRDT regressions.
 
 use asupersync::remote::NodeId;

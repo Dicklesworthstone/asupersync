@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for scheduler task migration and work stealing fairness.
 //!
 //! These tests validate the fairness properties of the work stealing scheduler

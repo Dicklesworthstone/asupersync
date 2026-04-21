@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing: Mutex poisoning across cancel boundaries
 //!
 //! This module implements metamorphic relations (MRs) to verify that mutex

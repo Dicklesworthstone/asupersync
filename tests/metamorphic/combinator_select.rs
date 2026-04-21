@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for combinator::select first-ready future invariants.
 //!
 //! These tests validate the core invariants of the select combinator including

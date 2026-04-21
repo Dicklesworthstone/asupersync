@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Cancellation test infrastructure for systematic channel conformance testing.
 
 use std::sync::atomic::{AtomicUsize, Ordering};

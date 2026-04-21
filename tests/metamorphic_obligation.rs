@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for record::obligation.rs
 //!
 //! Verifies metamorphic properties of obligation state transitions that must hold

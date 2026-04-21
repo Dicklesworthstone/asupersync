@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 
 //! Runtime E2E + stress tests with structured logging (bd-n6w9, bd-21f9).

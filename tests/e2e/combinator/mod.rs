@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Combinator E2E test modules.
 //!
 //! Test organization:

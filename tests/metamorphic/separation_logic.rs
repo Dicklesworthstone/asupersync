@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for obligation separation logic frame rule invariants.
 //!
 //! Tests the 5 core metamorphic relations for separation logic frame rules:

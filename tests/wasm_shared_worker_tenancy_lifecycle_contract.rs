@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract checks for the SharedWorker tenancy/lifecycle/downgrade policy and
 //! bounded browser-run proof surface (`asupersync-n6kwt.6.3`).
 

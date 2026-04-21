@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for the JS/TS package build tooling (asupersync-3qv04.4.3).
 //!
 //! These tests validate that the workspace configuration, package topology,

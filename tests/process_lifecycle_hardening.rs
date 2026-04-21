@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Process Lifecycle Parity Hardening Tests (Track 3.4)
 //!
 //! Validates process spawn, stdio, wait, kill, and exit status parity

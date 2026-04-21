@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Full-Stack Reference Project Matrix Validation (Track 6.5)
 //!
 //! Validates deterministic profile-matrix definitions used by the

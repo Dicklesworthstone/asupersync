@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for combinator::bracket resource cleanup invariants.
 //!
 //! These tests validate the core resource safety and cleanup semantics of the

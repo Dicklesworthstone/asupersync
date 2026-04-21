@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for differential behavior suites spec (2oh2u.10.3).
 //!
 //! Verifies suite schema, coverage, deterministic rules, artifact contract,

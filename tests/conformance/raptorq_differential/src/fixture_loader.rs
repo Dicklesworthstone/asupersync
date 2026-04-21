@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Fixture loading and management for differential testing.
 
 use serde::{Deserialize, Serialize};

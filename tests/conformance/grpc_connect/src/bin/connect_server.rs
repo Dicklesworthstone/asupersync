@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Connect-compatible gRPC test server
 //!
 //! This binary provides a standalone gRPC server that implements the Connect

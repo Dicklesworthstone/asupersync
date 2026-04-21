@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![deny(unsafe_code)]
 
 use asupersync::runtime::builder::{

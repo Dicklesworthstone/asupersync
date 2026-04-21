@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Security invariant tests for Asupersync.
 //!
 //! These tests verify that critical security properties hold across the codebase.

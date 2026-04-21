@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Coverage matrix calculation and compliance scoring for RaptorQ RFC 6330 conformance.
 //!
 //! This module implements the core coverage calculation engine that analyzes

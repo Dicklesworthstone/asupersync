@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(unsafe_code)]
 #![allow(missing_docs)]
 use asupersync::time::intrusive_wheel::{TimerNode, TimerWheel};

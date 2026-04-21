@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Simple Fixture Generator for RaptorQ Golden File Testing
 
 use serde::{Deserialize, Serialize};

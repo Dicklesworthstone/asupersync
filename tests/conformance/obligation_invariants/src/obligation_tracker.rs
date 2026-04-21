@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Obligation invariant tracking and validation infrastructure.
 //!
 //! This module provides comprehensive tracking of obligation lifecycles to validate

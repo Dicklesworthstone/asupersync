@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! WASM GA go/no-go evidence packet enforcement (WASM-17.4 support lane).
 //!
 //! Ensures the GA decision packet contract is explicit, deterministic, and

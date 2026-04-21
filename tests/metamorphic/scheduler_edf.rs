@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for EDF (Earliest Deadline First) scheduler deadline ordering.
 //!
 //! These tests validate the core EDF scheduling invariants using metamorphic relations

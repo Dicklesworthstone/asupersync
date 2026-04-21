@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RFC 7541 Section 4 HPACK Dynamic Table Eviction Conformance Tests
 //!
 //! Tests HPACK dynamic table management conformance per RFC 7541 Section 4:

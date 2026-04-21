@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/2 Stream State Machine Conformance Tests - RFC 7540 Section 5.1
 //!
 //! This test suite verifies complete conformance with RFC 7540 Section 5.1

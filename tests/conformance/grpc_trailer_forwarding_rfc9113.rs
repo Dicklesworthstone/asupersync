@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! gRPC Trailer Forwarding Conformance Tests (RFC 9113 + grpc-go parity)
 //!
 //! This module provides comprehensive conformance testing for gRPC trailer

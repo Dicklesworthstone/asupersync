@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Validation for RuntimeState cross-entity refinement mapping artifact (bd-23hq7).
 
 use serde_json::Value;

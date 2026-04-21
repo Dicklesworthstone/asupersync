@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration test: multiple poll_ready calls do not leak tokens.
 use asupersync::service::{RateLimit, Service};
 use asupersync::types::Time;

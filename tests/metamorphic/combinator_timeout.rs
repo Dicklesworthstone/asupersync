@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for combinator::timeout deadline invariants
 //!
 //! This test suite validates the fundamental timeout semantics using metamorphic

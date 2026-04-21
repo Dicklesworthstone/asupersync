@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! gRPC Health Checking Protocol v1 Conformance Tests
 //!
 //! This module implements metamorphic testing for the gRPC Health Checking

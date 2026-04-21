@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Kafka Offset Management Conformance Tests
 //!
 //! Implements metamorphic relations for Kafka consumer offset management to verify

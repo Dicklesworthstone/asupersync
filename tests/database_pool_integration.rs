@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration tests for database pool + transaction management helpers.
 //!
 //! These tests exercise the public API surface of `database::pool`,

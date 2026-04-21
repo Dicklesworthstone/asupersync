@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Async Streams Verification Suite - E2E Tests
 //!
 //! This test file provides comprehensive verification for the async streams module,

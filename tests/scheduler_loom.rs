@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Loom-based systematic concurrency tests for the scheduler.
 //!
 //! These tests use the `loom` crate to explore all possible interleavings

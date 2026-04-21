@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Golden artifact tests for RaptorQ encoded blocks.
 //!
 //! These tests verify that RaptorQ encoding produces consistent, deterministic

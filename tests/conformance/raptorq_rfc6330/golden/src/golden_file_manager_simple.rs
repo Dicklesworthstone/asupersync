@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Golden File Management for RaptorQ RFC 6330 Conformance Testing
 //!
 //! Implements Pattern 2 (Golden File Testing) with UPDATE_GOLDENS workflow

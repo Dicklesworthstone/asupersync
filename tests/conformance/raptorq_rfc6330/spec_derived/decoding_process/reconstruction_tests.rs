@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Tests for object reconstruction (RFC 6330 Section 4.3.3).
 
 use crate::spec_derived::{

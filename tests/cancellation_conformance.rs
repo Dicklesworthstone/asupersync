@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Cancellation protocol conformance tests.
 //!
 //! These tests verify the cancellation protocol invariants as specified in

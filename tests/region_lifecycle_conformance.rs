@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Region lifecycle conformance tests.
 //!
 //! These tests verify the region lifecycle invariants as specified in

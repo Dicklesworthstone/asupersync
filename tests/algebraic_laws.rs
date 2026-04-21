@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Algebraic law property tests for asupersync combinators.
 //!
 //! This module verifies the algebraic laws from `asupersync_v4_formal_semantics.md` §7

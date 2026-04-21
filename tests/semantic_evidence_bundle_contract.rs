@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! SEM-09.2 evidence bundle contract tests.
 //!
 //! Validates deterministic schema, rule traceability, and owner-bead mapping

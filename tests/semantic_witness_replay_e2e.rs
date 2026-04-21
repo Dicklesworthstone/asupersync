@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Cross-Artifact Witness-Replay E2E Suite (SEM-12.6)
 //!
 //! Bead: `asupersync-3cddg.12.6`

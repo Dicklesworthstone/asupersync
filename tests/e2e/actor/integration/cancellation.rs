@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Cancellation integration tests for actors.
 //!
 //! These tests verify actor behavior during cancellation scenarios.

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Obligation cleanup tests for combinators.
 //!
 //! These tests verify that obligations (permits, acks, leases) held by

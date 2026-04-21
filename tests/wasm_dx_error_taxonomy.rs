@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! WASM DX Error Taxonomy Validation (WASM-9.5)
 //!
 //! Validates that the DX error taxonomy document exists, covers all

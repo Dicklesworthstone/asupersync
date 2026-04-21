@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Controller interference validation contract invariants (AA-03.3).
 
 #![allow(missing_docs, clippy::cast_precision_loss)]

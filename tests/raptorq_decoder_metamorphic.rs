@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RaptorQ Decoder Metamorphic Testing (asupersync-1ucsnc)
 //!
 //! Focused metamorphic testing for RaptorQ decoder under systematic erasure patterns.

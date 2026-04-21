@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Minimal tests to verify SharedLabHandle behavior.
 
 mod common;

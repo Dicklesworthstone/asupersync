@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! BSD kqueue event semantics conformance tests.
 //!
 //! This module provides conformance testing for BSD-specific kqueue behaviors

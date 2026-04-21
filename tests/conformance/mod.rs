@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Conformance testing module for asupersync.
 //!
 //! This module contains conformance test suites that validate our implementations

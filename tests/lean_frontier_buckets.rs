@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Frontier bucket artifact integrity checks (bd-1dorb).
 
 use serde_json::Value;

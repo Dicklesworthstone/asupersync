@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Runtime tail-latency taxonomy contract invariants (AA-01.1).
 
 #![allow(missing_docs)]

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Check Conformance Regression Binary
 //!
 //! CLI tool for detecting regressions in RaptorQ RFC 6330 conformance tests

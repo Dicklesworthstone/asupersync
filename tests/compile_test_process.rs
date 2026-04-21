@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Compile-only smoke test for process command API.
 
 use asupersync::process::Command;

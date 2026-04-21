@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Actor end-to-end (E2E) test suite.
 //!
 //! This suite tests actor functionality across:

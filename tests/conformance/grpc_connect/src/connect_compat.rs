@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Connect protocol compatibility layer
 //!
 //! This module provides Connect protocol specific testing and compatibility

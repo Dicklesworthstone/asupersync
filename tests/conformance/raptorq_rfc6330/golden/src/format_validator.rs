@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Golden file format validation for RaptorQ conformance testing.
 //!
 //! This module validates the structure and content of golden files to ensure

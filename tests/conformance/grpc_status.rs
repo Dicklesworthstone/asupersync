@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Conformance tests for gRPC status codes and trailers per gRPC specification.
 //!
 //! Tests the implementation in `src/grpc/status.rs` against the gRPC status code

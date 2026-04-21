@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for the lab-vs-live verification taxonomy (2a6k9.1.4).
 //!
 //! Verifies the tier vocabulary, minimum coverage matrix, structured logging

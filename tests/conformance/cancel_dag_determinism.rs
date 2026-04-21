@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Cancel DAG Determinism Conformance Tests
 //!
 //! Focused tests for cancellation DAG determinism under identical LabRuntime seeds.

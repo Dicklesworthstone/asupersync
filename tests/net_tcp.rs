@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! TCP Integration Tests
 //!
 //! End-to-end integration tests for TCP primitives with real I/O.

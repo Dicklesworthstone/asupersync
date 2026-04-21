@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for combinator::first_ok first-success semantics.
 //!
 //! These tests validate the core invariants of the first_ok combinator using

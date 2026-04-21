@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RaptorQ RFC 6330 Golden File Testing and Round-Trip Validation
 //!
 //! Implements Pattern 2 (Golden File Testing) and Pattern 3 (Round-Trip Conformance)

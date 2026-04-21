@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for the Async I/O parity audit (2oh2u.2.1).
 //!
 //! Validates document structure, gap coverage, and semantic analysis completeness.

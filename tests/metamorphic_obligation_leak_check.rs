@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for obligation leak check reachability invariants.
 //!
 //! Tests mathematical properties of the static obligation leak checker through

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Provenance tracking for differential test fixtures.
 
 use serde::{Deserialize, Serialize};

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 
 //! Filesystem E2E test suite: io_uring and directory operation tests (bd-2auz).

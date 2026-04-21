@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! LabRuntime integration coverage for the current FABRIC subject-cell foundation.
 #![cfg(feature = "messaging-fabric")]
 

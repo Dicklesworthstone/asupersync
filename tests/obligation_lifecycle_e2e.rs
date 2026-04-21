@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 #![cfg(feature = "test-internals")]
 //! Obligation Lifecycle E2E Tests + Logging (bd-275by).

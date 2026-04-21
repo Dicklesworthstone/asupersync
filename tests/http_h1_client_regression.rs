@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/1 client regression tests.
 
 #![allow(clippy::items_after_statements)]

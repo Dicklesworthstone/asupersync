@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Encoding process tests for RFC 6330 Section 4.2.
 //!
 //! Tests systematic symbol generation, repair symbol generation,

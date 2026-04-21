@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Conformance tests for io_uring registered buffer pool functionality.
 //!
 //! These tests verify the expected behavior and contracts for io_uring's

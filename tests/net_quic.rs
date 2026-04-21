@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! QUIC Integration Tests
 //!
 //! End-to-end integration tests for QUIC protocol with real connections.

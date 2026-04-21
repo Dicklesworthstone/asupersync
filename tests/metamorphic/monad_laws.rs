@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for combinator::laws monadic bind/return invariants.
 //!
 //! These tests validate the monadic behavior using metamorphic relations

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![cfg(any())]
 #![allow(missing_docs)]
 //! Conformance tests for diagnostics runtime introspection endpoints.

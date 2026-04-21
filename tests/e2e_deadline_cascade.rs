@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! T5.3 — Deadline cascade through a 7-level deep region tree.
 //!
 //! Builds a binary tree of 7 levels (root + L1..L6, 127 regions total), spawns

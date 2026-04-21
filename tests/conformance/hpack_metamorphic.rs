@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HPACK Metamorphic Property Tests
 //!
 //! This module implements metamorphic relations for HPACK header compression

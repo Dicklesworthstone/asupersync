@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for trace::causality vclock merge invariants.
 //!
 //! These tests validate the vector clock merge behavior using metamorphic relations

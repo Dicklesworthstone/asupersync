@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Regression test for writer fairness (no barging) in `RwLock`.
 

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! End-to-end: Lyapunov governor vs baseline (bd-zsoh)
 //!
 //! Deterministic harness comparing governed and ungoverned scheduling across

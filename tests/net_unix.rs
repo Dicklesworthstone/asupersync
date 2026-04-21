@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 #![cfg(unix)]
 //! Unix Domain Socket Integration Tests

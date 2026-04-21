@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Golden tests for transport stream half-close conformance.
 //!
 //! Validates TCP/TLS half-close semantics per RFC specifications:

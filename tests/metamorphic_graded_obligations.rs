@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for Graded Obligations System
 //!
 //! Tests linear type discipline approximation, drop bomb behavior, and scope-based

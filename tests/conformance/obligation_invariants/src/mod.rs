@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Obligation invariant conformance testing infrastructure.
 //!
 //! This module provides comprehensive testing of all structured concurrency

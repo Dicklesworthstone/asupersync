@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/2 GOAWAY Frame Graceful Shutdown Conformance Tests
 //!
 //! Tests compliance with RFC 7540 Section 6.8: GOAWAY Frame for graceful connection

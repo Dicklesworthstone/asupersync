@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Property tests for WebSocket frame codec (RFC 6455).
 //!
 //! Verifies mask involution, encode/decode round-trips across all payload length

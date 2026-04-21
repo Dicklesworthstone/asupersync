@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Linux epoll semantics conformance tests.
 //!
 //! This module provides comprehensive conformance testing for Linux epoll

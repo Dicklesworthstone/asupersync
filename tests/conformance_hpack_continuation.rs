@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HPACK Continuation Frame Conformance Tests
 //!
 //! Tests compliance with RFC 7541 Section 4.3: Header Block Processing

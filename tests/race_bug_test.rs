@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Regression tests for race combinator panic precedence.
 
 use asupersync::combinator::race::{RaceError, RaceWinner, race2_to_result};

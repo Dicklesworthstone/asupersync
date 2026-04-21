@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for obligation::lyapunov governor stability invariants.
 //!
 //! Tests the Lyapunov function properties that ensure cancellation convergence:

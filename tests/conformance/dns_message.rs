@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! DNS RFC 1035 Message Format Conformance Tests
 //!
 //! Validates RFC 1035 Section 4.1 message format compliance:

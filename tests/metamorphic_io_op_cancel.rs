@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing: runtime::io_op cancel-safety invariants
 //!
 //! Tests the fundamental metamorphic properties of IoOp lifecycle management

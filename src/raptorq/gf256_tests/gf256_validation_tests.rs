@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Comprehensive bit-exact validation tests for GF(256) kernel implementations.
 //!
 //! Validates that all SIMD kernel variants produce identical results to the

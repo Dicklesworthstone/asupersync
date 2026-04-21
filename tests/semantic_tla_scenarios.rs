@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! TLA+ Scenario-Based Model Check Validation (SEM-12.4)
 //!
 //! Validates that the TLA+ scenario runner script exists and is well-formed,

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Lab reactor determinism tests.
 //!
 //! These tests verify that the lab runtime provides deterministic execution,

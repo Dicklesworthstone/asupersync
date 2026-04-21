@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for trace recorder deterministic replay.
 //!
 //! These tests validate trace recording and replay properties using metamorphic

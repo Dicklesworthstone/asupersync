@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RaptorQ RFC 6330 differential testing scaffold.
 //!
 //! This crate provides the provenance and fixture-catalog layer for

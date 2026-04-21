@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for obligation::marking token accounting invariants.
 //!
 //! These tests validate the core invariants of the VASS obligation marking system

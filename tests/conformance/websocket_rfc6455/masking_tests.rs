@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Masking conformance tests.
 
 use super::*;

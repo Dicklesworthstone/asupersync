@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for evidence ledger serialization roundtrips.
 //!
 //! These tests validate the serialization/deserialization properties of evidence

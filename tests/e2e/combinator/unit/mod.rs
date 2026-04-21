@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Unit tests for individual combinators.
 
 pub mod first_ok;

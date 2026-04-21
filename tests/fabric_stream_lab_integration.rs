@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! LabRuntime integration coverage for FABRIC stream and consumer surfaces.
 #![cfg(feature = "messaging-fabric")]
 

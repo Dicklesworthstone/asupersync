@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Flow control conformance tests.
 //!
 //! Tests flow control requirements from RFC 7540 Section 6.9.

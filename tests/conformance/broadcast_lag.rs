@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Conformance Tests: Broadcast Channel Lag Handling
 //!
 //! Validates RFC-compliant lag handling for broadcast channels with the following metamorphic relations:

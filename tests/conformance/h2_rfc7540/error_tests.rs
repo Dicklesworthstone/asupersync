@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Error handling conformance tests.
 //!
 //! Tests error handling requirements from RFC 7540 Section 7.

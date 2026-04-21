@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Handshake conformance tests.
 //!
 //! Tests handshake requirements from RFC 6455 Section 4.

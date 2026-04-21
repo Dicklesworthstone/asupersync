@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Channel state consistency validation during cancellation scenarios.
 
 use crate::cancel_harness::{ChannelType, CancelScenario, ProtocolViolation};

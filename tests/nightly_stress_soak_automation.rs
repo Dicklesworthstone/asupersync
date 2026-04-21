@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Schema and contract validation for nightly stress/soak automation (asupersync-umelq.18.10).
 //!

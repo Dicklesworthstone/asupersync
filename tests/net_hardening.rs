@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(clippy::items_after_statements, clippy::semicolon_if_nothing_returned)]
 //! Network Primitives Hardening Tests (bd-gl8u).
 //!

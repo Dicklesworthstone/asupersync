@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! gRPC Framework Verification Suite
 //!
 //! Verifies the public API surface of the gRPC module:

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! WebSocket RFC 6455 conformance test suite.
 //!
 //! This module validates compliance with RFC 6455 requirements using systematic

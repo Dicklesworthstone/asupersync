@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! PostgreSQL Logical Replication (pgoutput) Conformance Tests
 //!
 //! This module provides comprehensive conformance testing for PostgreSQL logical

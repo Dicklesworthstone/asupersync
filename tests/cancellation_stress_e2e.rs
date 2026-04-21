@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Cancellation Stress E2E Suite (bd-jj62v).
 //!
 //! Stress tests for cancellation protocol under adversarial conditions:

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! [ECOSYSTEM-PARITY][A.16] Web framework integration test suite.
 //!
 //! Comprehensive integration tests for the `asupersync::web` module covering:

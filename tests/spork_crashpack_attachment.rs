@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Scenario-level crashpack attachment/linking contract tests (bd-1wen4).
 
 use asupersync::app::AppSpec;

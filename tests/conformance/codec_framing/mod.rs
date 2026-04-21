@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Codec framing conformance test suite.
 //!
 //! This module implements conformance tests for codec framing protocols

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Baseline report consistency checks (bd-5w2lq).
 
 use serde_json::Value;

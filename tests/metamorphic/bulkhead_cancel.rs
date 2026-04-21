@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for bulkhead cancel behavior and concurrency limits.
 //!
 //! This test suite verifies that the bulkhead combinator correctly handles

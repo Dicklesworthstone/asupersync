@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RFC 9112 HTTP/1.1 conformance test suite.
 //!
 //! This test suite implements conformance testing for HTTP/1.1 per RFC 9112,

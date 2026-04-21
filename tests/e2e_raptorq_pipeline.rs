@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 
 //! E2E RaptorQ FEC pipeline under erasure (T4.1).

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Obligation Lifecycle Metamorphic Tests
 //!
 //! Metamorphic relations for obligation lifecycle (permit/ack/lease) commit-abort symmetry.

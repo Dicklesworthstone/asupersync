@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/2 RST_STREAM and PING Frame Conformance Tests (RFC 9113)
 //!
 //! This module provides comprehensive conformance testing for HTTP/2 RST_STREAM and PING

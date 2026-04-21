@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! WASM QA evidence matrix contract invariants (3qv04.8.1).
 
 #![allow(missing_docs)]

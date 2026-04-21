@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 /// Metamorphic tests for `io::copy` streaming invariants.
 use asupersync::io::{
     AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter, ReadBuf, copy, copy_buf,

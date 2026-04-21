@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! QH3-E3: Adversarial network scenario E2E tests.
 //!
 //! ACK ranges, loss detection, PTO, congestion edge scenarios.

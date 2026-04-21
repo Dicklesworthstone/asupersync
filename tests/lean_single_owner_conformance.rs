@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! SingleOwner invariant conformance checks (SEM-06.F1, asupersync-3cddg.6.6).
 //!
 //! Validates that:

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Replayable distributed FABRIC scenarios exercised under LabRuntime and DPOR.
 #![cfg(feature = "messaging-fabric")]
 

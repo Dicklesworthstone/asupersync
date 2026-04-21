@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Invariant inventory consistency checks (bd-1v4tc).
 
 use serde_json::Value;

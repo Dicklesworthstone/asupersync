@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Comprehensive test suite for epoch-based garbage collection.
 //!
 //! This test suite validates the epoch GC system requirements including:

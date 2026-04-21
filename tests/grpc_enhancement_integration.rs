@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration tests for gRPC enhancements: F.1 (reflection), F.2 (compression),
 //! F.3 (gRPC-web protocol).
 //!

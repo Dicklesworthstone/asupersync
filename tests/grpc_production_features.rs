@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! T5.7 — gRPC production features test suite.
 //!
 //! Verifies deadline enforcement, compression plumbing, interceptor chains,

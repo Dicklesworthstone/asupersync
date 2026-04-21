@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic testing for observability::task_inspector.
 //!
 //! Tests metamorphic relations for task inspector snapshots and state consistency

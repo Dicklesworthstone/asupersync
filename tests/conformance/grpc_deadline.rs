@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Conformance Tests: gRPC Deadline Propagation (RFC)
 //!
 //! Validates gRPC over HTTP/2 deadline propagation per gRPC specification with the following metamorphic relations:

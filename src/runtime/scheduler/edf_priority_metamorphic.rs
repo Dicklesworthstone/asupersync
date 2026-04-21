@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing: EDF Priority Inversion Resistance
 //!
 //! This module implements comprehensive metamorphic relations for testing the

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration with external RaptorQ reference implementations.
 
 use serde::{Deserialize, Serialize};

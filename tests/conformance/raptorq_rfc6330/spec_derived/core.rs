@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Comprehensive spec-derived tests for RFC 6330 RaptorQ implementation.
 //!
 //! This module implements systematic test coverage for every MUST and SHOULD clause

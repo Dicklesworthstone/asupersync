@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! WebSocket RFC 6455 Close Frame Conformance Tests
 //!
 //! This module provides comprehensive conformance testing for WebSocket close frame

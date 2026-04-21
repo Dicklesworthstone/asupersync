@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Golden test vectors for RFC 9112 HTTP/1.1 chunked encoding.
 //!
 //! Contains known-good test cases from RFC examples and edge cases

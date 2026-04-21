@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! E2E Contention Harness + Structured Artifacts (bd-ecaeo).
 //!

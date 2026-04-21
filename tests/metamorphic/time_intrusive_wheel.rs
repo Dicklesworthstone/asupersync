@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for time::intrusive_wheel hierarchical cascade invariants
 //!
 //! Tests fundamental hierarchical timer wheel behavior using metamorphic relations

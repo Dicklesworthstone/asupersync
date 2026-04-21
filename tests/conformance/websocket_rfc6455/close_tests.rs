@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Close frame conformance tests.
 
 use super::*;

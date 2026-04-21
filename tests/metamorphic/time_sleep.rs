@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for time::sleep cancel-drain virtual-time invariants
 //!
 //! Tests fundamental sleep behavior using metamorphic relations that must hold

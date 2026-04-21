@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Docs-to-Rule-ID Mapping Lint Tests (SEM-05.1)
 //!
 //! Validates that the section-to-rule-ID mapping in

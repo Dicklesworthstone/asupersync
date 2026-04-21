@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for obligation::choreography workflow invariants
 //!
 //! Tests choreographic protocol workflow execution using metamorphic relations

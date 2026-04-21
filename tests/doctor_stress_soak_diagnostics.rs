@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Deterministic Soak/Stress Diagnostics Validation (Track 6.8)
 //!
 //! Validates the stress/soak workload catalog, sustained budget-conformance

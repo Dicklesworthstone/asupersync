@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! TLS 1.3 Key Share Extension Conformance Tests
 //!
 //! Focused tests for TLS 1.3 key share extension per RFC 8446 Section 4.2.8.

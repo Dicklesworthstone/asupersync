@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for sync::pool acquire/release/reset invariants.
 //!
 //! These tests validate the core invariants of the resource pool acquisition,

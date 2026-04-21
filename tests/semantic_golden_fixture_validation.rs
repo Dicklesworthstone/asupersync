@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Golden Fixture Validation Tests (SEM-12.8)
 //!

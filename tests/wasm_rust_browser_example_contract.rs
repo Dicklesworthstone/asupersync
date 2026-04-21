@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for the maintained Rust-browser consumer fixture (`asupersync-4l9iw.2`).
 //!
 //! This suite keeps the repository-maintained Rust-authored browser example

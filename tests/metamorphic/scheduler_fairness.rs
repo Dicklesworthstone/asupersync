@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for runtime::scheduler fairness under load invariants.
 //!
 //! These tests verify that the three-lane scheduler (cancel > timed > ready)

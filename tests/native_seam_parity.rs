@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Native backend parity verification after seam extraction (asupersync-umelq.4.3).
 //!

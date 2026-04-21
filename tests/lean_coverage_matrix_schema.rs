@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Lean coverage matrix schema validation tests (bd-13aa6).
 
 use conformance::{

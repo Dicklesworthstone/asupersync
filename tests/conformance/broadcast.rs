@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Broadcast channel conformance tests.
 //!
 //! Tests the subscribe/lag/drop semantics of the broadcast channel implementation

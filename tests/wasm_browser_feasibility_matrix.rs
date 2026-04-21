@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Authoritative browser-feasibility support matrix contract tests.
 //!
 //! Bead: asupersync-1tte9

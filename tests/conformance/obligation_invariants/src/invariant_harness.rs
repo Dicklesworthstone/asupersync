@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Core invariant testing infrastructure for structured concurrency obligations.
 //!
 //! This module provides the harness and traits for systematically testing

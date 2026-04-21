@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! WASM Browser Troubleshooting Compendium Contract Checks (WASM-15).
 //!
 //! Bead: asupersync-umelq.16.4

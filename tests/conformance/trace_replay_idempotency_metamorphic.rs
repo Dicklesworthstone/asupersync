@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Trace Replay Idempotency Metamorphic Tests
 //!
 //! Metamorphic relations for observability trace replay idempotency.

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration tests: net/http/h2/websocket unit gaps (bd-2hvn).
 //!
 //! Covers invariants not exercised by in-module tests:

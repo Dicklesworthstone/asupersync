@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP Server/Client Verification Suite (bd-39ik).
 //!
 //! Comprehensive verification for the HTTP layer ensuring protocol compliance,

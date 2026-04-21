@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Conformance tests for Unix domain socket listener implementation.
 //!
 //! This module implements 5 metamorphic relations testing Unix domain socket

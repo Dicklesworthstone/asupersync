@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! TLS 1.3 record-layer conformance tests.
 //!
 //! Golden tests for TLS 1.3 record framing conformance per RFC 8446 §5.

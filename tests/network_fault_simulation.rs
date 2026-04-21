@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Network fault simulation E2E tests (bd-167hv).
 //!
 //! Validates remote protocol correctness under controlled network faults:

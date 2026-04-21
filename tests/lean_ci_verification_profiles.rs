@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Lean CI verification profile consistency checks (bd-rook4).
 
 use serde_json::Value;

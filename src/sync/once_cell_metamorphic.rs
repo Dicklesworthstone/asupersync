@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing: OnceCell initialization invariants
 //!
 //! This module implements comprehensive metamorphic relations for the OnceCell

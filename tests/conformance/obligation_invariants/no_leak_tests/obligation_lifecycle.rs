@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Basic obligation lifecycle tests - create, resolve, no leaks.
 //!
 //! These tests validate the most fundamental invariant: every created obligation

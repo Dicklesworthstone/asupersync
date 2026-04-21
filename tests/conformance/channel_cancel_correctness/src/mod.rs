@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Channel cancellation protocol conformance testing infrastructure.
 //!
 //! This module provides comprehensive testing for channel cancellation protocol

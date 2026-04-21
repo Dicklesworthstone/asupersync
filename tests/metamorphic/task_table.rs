@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for runtime::TaskTable lookup/insert/evict invariants.
 //!
 //! Validates critical properties of the TaskTable using metamorphic relations

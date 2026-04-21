@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for record::obligation permit/ack lifecycle invariants.
 //!
 //! These tests validate the core invariants of the obligation tracking system

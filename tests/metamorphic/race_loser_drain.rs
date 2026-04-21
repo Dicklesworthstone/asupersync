@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for combinator::race loser drain correctness invariants
 //!
 //! This test suite validates the critical invariants of the race combinator,

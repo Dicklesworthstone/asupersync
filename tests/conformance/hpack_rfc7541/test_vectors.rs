@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RFC 7541 Appendix C test vectors and systematic test cases.
 
 use asupersync::http::h2::hpack::Header;

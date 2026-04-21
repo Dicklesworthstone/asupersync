@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for channel::broadcast slow-receiver lag bound invariants.
 //!
 //! These tests verify metamorphic relations for broadcast channel slow receiver

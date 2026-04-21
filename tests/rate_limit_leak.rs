@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Regression coverage for rate limiter cancellation accounting.
 
 use asupersync::combinator::rate_limit::*;

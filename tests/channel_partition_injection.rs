@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Channel partition fault injection integration tests (bd-2ktrc.2).
 //!
 //! Validates the `PartitionController` and `PartitionSender` wrapper under

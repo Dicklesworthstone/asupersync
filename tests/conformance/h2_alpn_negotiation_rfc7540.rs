@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/2 ALPN Negotiation Conformance Tests (RFC 7540 + RFC 9113)
 //!
 //! This module provides comprehensive conformance testing for HTTP/2 ALPN (Application Layer

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Obligation Invariant Conformance Testing Infrastructure
 //!
 //! This module provides comprehensive testing for asupersync's structured concurrency

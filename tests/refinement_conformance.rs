@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Refinement map conformance tests (bd-3g13z).
 //!
 //! Verifies that the Rust implementation's state transitions match the

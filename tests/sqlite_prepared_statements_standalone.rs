@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Standalone SQLite Prepared Statement Round-Trip Conformance Tests.
 
 #![cfg(feature = "sqlite")]

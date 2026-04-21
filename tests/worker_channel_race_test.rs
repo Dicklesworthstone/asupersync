@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Regression coverage for stale worker status snapshots during cancellation.
 
 use asupersync::net::worker_channel::{

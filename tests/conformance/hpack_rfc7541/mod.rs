@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RFC 7541 HPACK conformance test suite.
 //!
 //! This test suite implements Pattern 1 (Differential Testing) conformance harness

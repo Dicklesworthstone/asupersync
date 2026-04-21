@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 
 //! Region tree stress tests (T1.2): structured concurrency invariants across

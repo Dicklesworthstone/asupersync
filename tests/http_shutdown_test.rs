@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 
 use asupersync::http::h1::server::{ConnectionPhase, Http1Server};

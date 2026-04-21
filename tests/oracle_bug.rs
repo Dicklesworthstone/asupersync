@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 use asupersync::actor::ActorId;
 use asupersync::lab::oracle::actor::*;

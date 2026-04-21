@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! WASM Bundler/Runtime Compatibility Matrix Validation (WASM-9.4)
 //!
 //! Validates that the bundler compatibility matrix document exists,

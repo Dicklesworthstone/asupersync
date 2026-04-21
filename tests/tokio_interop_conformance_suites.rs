@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Interop conformance suites for prioritized third-party crates (T7.7).
 //!
 //! Validates behavioral contracts for tower, hyper, and body bridge adapters

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! WASM Browser Rationale Index Contract Checks (WASM-15).
 //!
 //! Bead: asupersync-umelq.16.5

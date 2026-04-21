@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Deterministic benchmarks for topology-guided exploration (bd-1ny4).
 //!
 //! Demonstrates that H1-persistence-guided exploration finds concurrency

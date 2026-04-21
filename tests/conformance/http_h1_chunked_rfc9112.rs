@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RFC 9112 Section 7: Chunked Transfer Encoding Conformance Tests
 //!
 //! This test suite verifies compliance with RFC 9112 "HTTP/1.1" Section 7

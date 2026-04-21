@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Trace Event Schema Stability Conformance Tests
 //!
 //! Validates fundamental invariants of the trace event system:

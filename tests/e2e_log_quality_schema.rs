@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! E2E log quality + schema validation gates (asupersync-3narc.3.5).
 //!
 //! These tests ensure deterministic E2E logging contracts stay enforced in CI.

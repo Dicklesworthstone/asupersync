@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Region quiescence validation tests.
 //!
 //! These tests validate that region closure properly waits for all obligations

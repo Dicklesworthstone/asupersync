@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! T6.10 — Deterministic integration and fault-injection suites for database and messaging.
 #![cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 //!

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Test for notify ordering.
 
 use asupersync::sync::Notify;

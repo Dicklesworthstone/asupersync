@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! SQLite Prepared Statement Round-Trip Conformance Tests.
 //!
 //! This test suite implements comprehensive golden-file round-trip testing

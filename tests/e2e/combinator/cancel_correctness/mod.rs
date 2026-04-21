@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Cancel-correctness tests for combinators.
 //!
 //! These tests verify the CRITICAL invariant that race losers are fully

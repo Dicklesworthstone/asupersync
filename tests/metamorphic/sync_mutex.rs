@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for sync::mutex cancel-aware lock ordering invariants.
 //!
 //! These tests validate the core invariants of the async mutex lock acquisition,

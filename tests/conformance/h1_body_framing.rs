@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/1.1 body framing conformance tests per RFC 9112 Section 6.
 //!
 //! This test suite implements metamorphic testing for HTTP/1.1 body framing

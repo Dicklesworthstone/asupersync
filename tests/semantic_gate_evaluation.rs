@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Semantic Gate Evaluation Report Validation (SEM-09.3)
 //!
 //! Validates that the gate evaluation report exists, covers all gates,

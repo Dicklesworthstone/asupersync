@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Basic messaging tests for actors.
 //!
 //! These tests verify fundamental message send/receive patterns.

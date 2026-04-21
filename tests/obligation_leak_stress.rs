@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! E2E Obligation Leak Stress Test (bd-2ktrc.7).
 //!

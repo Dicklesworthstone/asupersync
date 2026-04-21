@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RaptorQ RFC 6330 Conformance Reporting and Maintenance Pipeline
 //!
 //! This crate provides a comprehensive framework for generating conformance reports

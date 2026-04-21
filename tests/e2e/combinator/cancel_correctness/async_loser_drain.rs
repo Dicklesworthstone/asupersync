@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Async loser drain tests using LabRuntime.
 //!
 //! These tests verify the loser drain invariant using actual async execution

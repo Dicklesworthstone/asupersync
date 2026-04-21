@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Oracle integration tests for actors.
 //!
 //! These tests verify that the actor-specific oracles correctly detect

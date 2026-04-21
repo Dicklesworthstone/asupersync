@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! NDJSON event schema, trace file naming, and artifact bundle helpers (bd-1t58q).
 //!
 //! This module defines the unified NDJSON (newline-delimited JSON) event format

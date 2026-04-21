@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic property tests for RaptorQ encode/decode correctness.
 //!
 //! These tests verify relationships between inputs/outputs rather than specific

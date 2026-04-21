@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for compiled supervision restart planning.
 //!
 //! These tests exercise the pure planning APIs in `src/supervision.rs`:

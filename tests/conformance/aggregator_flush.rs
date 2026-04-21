@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Conformance tests for src/transport::aggregator flush/drain RFC.
 //!
 //! These tests validate the multipath symbol aggregator's flush and drain behavior

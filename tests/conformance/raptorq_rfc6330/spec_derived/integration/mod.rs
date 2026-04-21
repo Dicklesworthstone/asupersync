@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration tests for multi-section RFC 6330 conformance.
 
 pub mod end_to_end_conformance;

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RFC 7301 ALPN Conformance Testing
 //!
 //! Tests conformance to RFC 7301 (Application-Layer Protocol Negotiation Extension)

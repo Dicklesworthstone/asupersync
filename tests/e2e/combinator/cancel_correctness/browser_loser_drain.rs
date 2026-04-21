@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Browser-context loser drain verification tests (asupersync-umelq.6.2).
 //!
 //! These tests verify that the loser drain invariant holds under browser-like

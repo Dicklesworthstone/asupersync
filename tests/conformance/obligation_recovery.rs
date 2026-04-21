@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Conformance tests for obligation ledger recovery state machine.
 //!
 //! Tests the critical recovery scenarios to ensure obligations are properly

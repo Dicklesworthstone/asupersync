@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Cross-track composition contract invariants (AA-10.4).
 
 #![allow(missing_docs, clippy::cast_precision_loss)]

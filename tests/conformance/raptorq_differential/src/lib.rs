@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RaptorQ Differential Testing Framework
 //!
 //! This crate implements Pattern 1 (Differential Testing) from the conformance

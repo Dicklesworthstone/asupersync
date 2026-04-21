@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for cancellation/drain fuzz-race campaign specification (2oh2u.10.4).
 //!
 //! Ensures campaign coverage, deterministic replay requirements, blocking policy,

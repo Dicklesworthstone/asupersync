@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Regression tests for HTTP/1.1 request-line parsing
 //!
 //! This module contains regression tests generated from fuzz target discoveries

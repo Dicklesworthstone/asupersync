@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Constructor-total preservation coverage checks for bd-112rm.
 
 use serde_json::Value;

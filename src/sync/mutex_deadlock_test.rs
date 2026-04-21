@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Regression test: two waiters on a Mutex both complete after the holder drops.
 
 #[cfg(test)]

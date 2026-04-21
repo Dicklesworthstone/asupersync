@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! RaptorQ RFC 6330 Golden File Testing Framework
 //!
 //! This crate provides a comprehensive framework for golden file testing of

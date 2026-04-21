@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use crate::provenance::{
     DifferentialFixtureCatalog, DifferentialFixtureError, FixtureArtifact, FixtureProvenanceRecord,
 };

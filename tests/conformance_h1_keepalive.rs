@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Conformance tests for HTTP/1.1 keep-alive connection reuse.
 //!
 //! These tests verify that HTTP/1.1 keep-alive connections are properly reused

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for T4.9: QUIC/H3 API Stabilization and Migration Guidance.
 //!
 //! Validates the public API surface, migration patterns, error taxonomy,

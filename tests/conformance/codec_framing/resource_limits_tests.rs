@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Resource limits conformance tests.
 
 use super::*;

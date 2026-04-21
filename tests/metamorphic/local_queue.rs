@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic testing for `runtime::scheduler::local_queue` work-stealing invariants.
 //!
 //! Tests fundamental work-stealing properties that must hold regardless of concurrent

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Stream/Sink Integration Tests — E.3
 //!
 //! End-to-end tests verifying that stream combinator pipelines correctly

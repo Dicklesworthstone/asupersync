@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for the migration strategy and decision framework (2oh2u.11.1).
 //!
 //! Validates scenario coverage, structured logging schema requirements,

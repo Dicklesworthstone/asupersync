@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(clippy::cast_possible_wrap)]
 //! Property tests for trace schema invariants and compatibility proofs.
 //!

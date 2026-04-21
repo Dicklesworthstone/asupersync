@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for sync::rwlock reader-writer fairness invariants.
 //!
 //! Tests RwLock fairness properties under concurrent access patterns:

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for JS/TS exports, type declarations, module-resolution
 //! entrypoints, and diagnostics semantics
 //! (asupersync-3qv04.8.3.1, asupersync-3qv04.8.3.2, asupersync-1sk16w.5.2).

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for channel session protocol invariants.
 //!
 //! These tests verify the mathematical properties and protocol invariants

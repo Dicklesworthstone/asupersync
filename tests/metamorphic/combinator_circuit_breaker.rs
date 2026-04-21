@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic testing for combinator::circuit_breaker state machine invariants.
 //!
 //! Tests the core metamorphic relations that must hold for a correct

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Regression test for join-handle readiness after runtime shutdown.
 
 use asupersync::runtime::RuntimeBuilder;

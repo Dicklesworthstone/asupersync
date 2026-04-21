@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! TLS 1.3 0-RTT Replay Protection Conformance Tests
 //!
 //! Focused tests for TLS 1.3 0-RTT replay protection per RFC 8446 Section 8.

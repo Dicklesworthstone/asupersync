@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! MySQL SSL/TLS negotiation conformance tests.
 //!
 //! This test suite verifies that the MySQL client correctly implements

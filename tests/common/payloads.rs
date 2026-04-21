@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Realistic payload generators for E2E tests.
 //!
 //! Generate realistic data instead of synthetic/mock BS:

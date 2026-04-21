@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic tests for oneshot channel close-or-send race conditions.
 //!
 //! These tests validate the race condition handling between close/drop operations

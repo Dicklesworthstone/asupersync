@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Bounded controller synthesis contract invariants (AA-03.2).
 
 #![allow(missing_docs, clippy::cast_precision_loss)]

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! T6.13 — End-to-end data-path scenarios for database and messaging ecosystems.
 //!
 //! Validates full lifecycle workflows across database backends (pool, transaction,

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Golden artifact tests for trace event serialization.
 //!
 //! **STATUS: gated off until the schema converges.**

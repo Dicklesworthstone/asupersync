@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! ADR regression tests for semantic harmonization (SEM-08.6).
 //!
 //! Each test locks in a ratified ADR decision from the semantic harmonization

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing for cx::macaroon attenuation commutativity
 //!
 //! Verifies metamorphic properties of macaroon attenuation operations that must hold

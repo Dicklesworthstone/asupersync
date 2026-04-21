@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Core Obligation Invariant Test Implementations
 //!
 //! This module contains the actual test implementations for each of the 5 core

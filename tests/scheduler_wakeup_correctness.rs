@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! B3 Scheduler Wakeup & Cancellation Correctness Tests (br-legjy.2.3).
 //!

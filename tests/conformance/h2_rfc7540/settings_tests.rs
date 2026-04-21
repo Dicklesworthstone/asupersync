@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! SETTINGS frame conformance tests.
 //!
 //! Tests SETTINGS frame handling requirements from RFC 7540 Section 6.5.

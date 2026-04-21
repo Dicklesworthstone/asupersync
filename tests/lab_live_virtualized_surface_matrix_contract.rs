@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Contract tests for the Phase 2 virtualized-surface coverage matrix
 //! (`asupersync-2a6k9.7.4`).
 //!

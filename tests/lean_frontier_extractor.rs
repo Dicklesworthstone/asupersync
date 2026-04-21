@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Deterministic Lean frontier extractor checks (bd-1dorb).
 
 use conformance::extract_frontier_report;

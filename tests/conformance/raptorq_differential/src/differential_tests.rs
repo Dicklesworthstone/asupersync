@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Core differential testing implementation.
 
 use crate::fixture_loader::{FixtureLoader, FixtureEntry};

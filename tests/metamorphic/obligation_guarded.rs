@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic testing for obligation::guarded RAII cleanup invariants.
 //!
 //! Property-based tests that validate fundamental RAII guard semantics for

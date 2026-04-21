@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Tests: sync::Semaphore Invariants (Five Relations)
 //!
 //! Tests five critical metamorphic relations for semaphore correctness using LabRuntime + proptest:

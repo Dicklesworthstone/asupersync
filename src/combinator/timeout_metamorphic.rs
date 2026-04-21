@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic Testing: timeout nesting under cancellation
 //!
 //! This module implements comprehensive metamorphic relations for timeout

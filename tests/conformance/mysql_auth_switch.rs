@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! MySQL AuthSwitchRequest Conformance Tests
 //!
 //! This module provides comprehensive conformance testing for MySQL wire protocol

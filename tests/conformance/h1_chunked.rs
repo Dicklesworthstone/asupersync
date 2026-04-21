@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Conformance Tests: HTTP/1.1 Chunked Transfer Encoding (RFC 9112 §7)
 //!
 //! Validates RFC 9112 §7 compliant chunked transfer encoding with the following metamorphic relations:

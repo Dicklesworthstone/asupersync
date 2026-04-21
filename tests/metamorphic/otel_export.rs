@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic testing for observability::otel span export invariants.
 //!
 //! Tests the core metamorphic relations that must hold for a correct

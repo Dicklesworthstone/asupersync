@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Golden snapshots for progress-certificate verdict serialization.
 
 use asupersync::cancel::progress_certificate::{

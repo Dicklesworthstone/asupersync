@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! HTTP/2 CONNECT method tunneling conformance tests per RFC 9113.
 //!
 //! This module tests CONNECT method compliance with RFC 9113 Section 8.5 with focus on:

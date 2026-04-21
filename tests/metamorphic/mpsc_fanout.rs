@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Metamorphic property tests for MPSC channel fan-out/fan-in invariants.
 //!
 //! These tests verify MPSC channel behavior in multi-sender scenarios where

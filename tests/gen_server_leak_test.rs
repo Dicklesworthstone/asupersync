@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Regression coverage for gen-server obligation leak handling.
 
 //! Regression test for GenServer resource leaks
