@@ -23,6 +23,7 @@ on:
           - fuzz_http1_response
           - dns_resolver_name_compression
           - h1_parsed_url
+          - length_delimited
           - length_delimited_encode_width
           - length_delimited_decoder_state
           - length_delimited_frame_boundary
@@ -58,6 +59,7 @@ jobs:
           - fuzz_http1_response
           - dns_resolver_name_compression
           - h1_parsed_url
+          - length_delimited
           - length_delimited_encode_width
           - length_delimited_decoder_state
           - length_delimited_frame_boundary

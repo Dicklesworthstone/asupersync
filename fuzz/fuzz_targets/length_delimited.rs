@@ -23,7 +23,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::{BufMut, BytesMut};
-use asupersync::codec::{Decoder, LengthDelimitedCodec};
+use asupersync::codec::{Decoder, Encoder, LengthDelimitedCodec};
 use libfuzzer_sys::fuzz_target;
 use std::io::ErrorKind;
 
@@ -69,7 +69,7 @@ impl LengthFieldWidth {
             Self::U32 => u32::MAX as u64,
             Self::U40 => 0xFF_FFFF_FFFF,
             Self::U48 => 0xFF_FFFF_FFFF_FFFF,
-            Self::U56 => 0xFF_FFFF_FFFF_FFFF_FF,
+            Self::U56 => 0xFFFF_FFFF_FFFF_FFFF,
             Self::U64 => u64::MAX,
         }
     }
@@ -306,176 +306,236 @@ impl FuzzInput {
     }
 }
 
+fn operation_payload(operation: &FuzzOperation) -> &[u8] {
+    match operation {
+        FuzzOperation::OversizedLength { payload, .. }
+        | FuzzOperation::TruncatedPayload { payload, .. }
+        | FuzzOperation::LengthAdjustmentEdgeCase { payload, .. }
+        | FuzzOperation::VariableWidthLength { payload, .. }
+        | FuzzOperation::MalformedHeader { payload, .. }
+        | FuzzOperation::BoundaryCondition { payload, .. } => payload,
+    }
+}
+
+fn header_len(config: &FuzzConfig) -> usize {
+    usize::from(config.length_field_offset) + config.length_field_width.to_bytes()
+}
+
+fn normalized_roundtrip_case(input: &FuzzInput) -> (FuzzConfig, BytesMut) {
+    let mut config = input.config.clone();
+    config.length_adjustment = config.length_adjustment.clamp(-64, 64);
+
+    let negative_adjustment = if config.length_adjustment < 0 {
+        (-config.length_adjustment) as usize
+    } else {
+        0
+    };
+    let positive_adjustment = if config.length_adjustment > 0 {
+        config.length_adjustment as usize
+    } else {
+        0
+    };
+
+    let width_cap = config.length_field_width.max_value().min(usize::MAX as u64) as usize;
+    let max_payload = width_cap
+        .saturating_sub(negative_adjustment)
+        .min(MAX_FRAME_PAYLOAD_SIZE);
+    let source = operation_payload(&input.operation);
+    let target_len = source
+        .len()
+        .min(max_payload)
+        .max(positive_adjustment.min(max_payload));
+
+    let mut payload = source[..source.len().min(target_len)].to_vec();
+    payload.resize(target_len, 0);
+
+    config.max_frame_length = config.max_frame_length.max(target_len as u32);
+    let total_frame_len = header_len(&config).saturating_add(target_len);
+    config.num_skip = usize::from(config.num_skip).min(total_frame_len) as u8;
+
+    (config, BytesMut::from(&payload[..]))
+}
+
+fn build_declared_frame(config: &FuzzConfig, declared_len: u64) -> BytesMut {
+    let mut frame = BytesMut::new();
+    for _ in 0..config.length_field_offset {
+        frame.put_u8(0);
+    }
+
+    let width = config.length_field_width.to_bytes();
+    let value = declared_len.min(config.length_field_width.max_value());
+    if config.big_endian {
+        match width {
+            1 => frame.put_u8(value as u8),
+            2 => frame.put_u16(value as u16),
+            3 => {
+                frame.put_u8((value >> 16) as u8);
+                frame.put_u16(value as u16);
+            }
+            4 => frame.put_u32(value as u32),
+            5 => {
+                frame.put_u8((value >> 32) as u8);
+                frame.put_u32(value as u32);
+            }
+            6 => {
+                frame.put_u16((value >> 32) as u16);
+                frame.put_u32(value as u32);
+            }
+            7 => {
+                frame.put_u8((value >> 48) as u8);
+                frame.put_u16((value >> 32) as u16);
+                frame.put_u32(value as u32);
+            }
+            8 => frame.put_u64(value),
+            _ => unreachable!("Invalid width"),
+        }
+    } else {
+        match width {
+            1 => frame.put_u8(value as u8),
+            2 => frame.put_u16_le(value as u16),
+            3 => {
+                frame.put_u16_le(value as u16);
+                frame.put_u8((value >> 16) as u8);
+            }
+            4 => frame.put_u32_le(value as u32),
+            5 => {
+                frame.put_u32_le(value as u32);
+                frame.put_u8((value >> 32) as u8);
+            }
+            6 => {
+                frame.put_u32_le(value as u32);
+                frame.put_u16_le((value >> 32) as u16);
+            }
+            7 => {
+                frame.put_u32_le(value as u32);
+                frame.put_u16_le((value >> 32) as u16);
+                frame.put_u8((value >> 48) as u8);
+            }
+            8 => frame.put_u64_le(value),
+            _ => unreachable!("Invalid width"),
+        }
+    }
+
+    frame
+}
+
 fuzz_target!(|input: FuzzInput| {
-    // Bound input size to prevent timeouts
     let frame_bytes = input.construct_frame_bytes();
     if frame_bytes.len() > MAX_FUZZ_INPUT_SIZE {
         return;
     }
 
-    // Attempt to build codec with fuzz configuration
     let mut codec = match input.config.build_codec() {
         Ok(codec) => codec,
-        Err(_) => {
-            // Invalid configuration should not panic during build
-            return;
-        }
+        Err(_) => return,
     };
-
-    // Clone frame bytes for multiple decode attempts
-    let mut frame = frame_bytes.clone();
-
-    // **ASSERTION 1: Oversized length fields guarded by max_frame_length**
-    if let FuzzOperation::OversizedLength {
-        oversized_value, ..
-    } = &input.operation
-    {
-        if *oversized_value > input.config.max_frame_length as u64 {
-            // Decoding should return an error, not panic or infinite loop
-            match codec.decode(&mut frame) {
-                Ok(_) => {
-                    // If decode succeeds, the frame length must be within bounds
-                    // This validates max_frame_length enforcement
-                }
-                Err(e) => {
-                    // Expected: should reject oversized frames
-                    assert!(
-                        matches!(e.kind(), ErrorKind::InvalidData),
-                        "Oversized frame should return InvalidData error, got: {:?}",
-                        e.kind()
-                    );
-                }
-            }
-        }
-    }
-
-    // **ASSERTION 2: Truncated payloads return Incomplete (None), not panic**
-    if let FuzzOperation::TruncatedPayload {
-        length_value,
-        payload,
-    } = &input.operation
-    {
-        let mut truncated_frame = frame_bytes.clone();
-
-        // Attempt decode on truncated payload
-        match codec.decode(&mut truncated_frame) {
-            Ok(None) => {
-                // Expected: incomplete frame should return None
-            }
-            Ok(Some(_)) => {
-                // If a frame was returned, it should be valid
-                // This means the truncation wasn't effective or length was small
-            }
-            Err(e) => {
-                // Acceptable: truncated frames may return errors
-                // Should not panic
-            }
-        }
-    }
-
-    // **ASSERTION 3: LENGTH_FIELD_ADJUSTMENT edge cases**
-    if let FuzzOperation::LengthAdjustmentEdgeCase { .. } = &input.operation {
-        // Test that extreme length adjustments don't cause integer overflow/underflow
-        let mut adjusted_frame = frame_bytes.clone();
-
-        match codec.decode(&mut adjusted_frame) {
-            Ok(_) => {
-                // If decode succeeds, adjustment was handled correctly
-            }
-            Err(e) => {
-                // Expected for edge cases: should return proper error
-                assert!(
-                    matches!(e.kind(), ErrorKind::InvalidData | ErrorKind::UnexpectedEof),
-                    "Length adjustment edge case should return InvalidData or UnexpectedEof, got: {:?}",
-                    e.kind()
-                );
-            }
-        }
-    }
-
-    // **ASSERTION 4: Variable-width length fields correctly decoded**
-    if let FuzzOperation::VariableWidthLength { length_value, .. } = &input.operation {
-        let mut width_frame = frame_bytes.clone();
-
-        // Verify that different width fields can be decoded without corruption
-        match codec.decode(&mut width_frame) {
-            Ok(Some(decoded)) => {
-                // If frame was decoded successfully, verify basic properties
-                let header_len = input.config.length_field_offset as usize
-                    + input.config.length_field_width.to_bytes();
-
-                // Frame should not be empty unless that was intended
-                // Basic sanity check that decode produces reasonable output
-            }
-            Ok(None) => {
-                // Incomplete frame - acceptable
-            }
-            Err(e) => {
-                // Decode error - should be proper error type
-                assert!(
-                    matches!(
-                        e.kind(),
-                        ErrorKind::InvalidData | ErrorKind::UnexpectedEof | ErrorKind::Other
-                    ),
-                    "Variable width decode should return proper error type, got: {:?}",
-                    e.kind()
-                );
-            }
-        }
-    }
-
-    // **GENERAL ROBUSTNESS: Malformed headers**
-    if let FuzzOperation::MalformedHeader { .. } = &input.operation {
-        let mut malformed_frame = frame_bytes.clone();
-
-        // Malformed headers should be handled gracefully
-        let _ = codec.decode(&mut malformed_frame);
-        // Should not panic - any result is acceptable for malformed input
-    }
-
-    // **BOUNDARY TESTING: Frames at size limits**
-    if let FuzzOperation::BoundaryCondition { at_boundary, .. } = &input.operation {
-        let mut boundary_frame = frame_bytes.clone();
-
-        match codec.decode(&mut boundary_frame) {
-            Ok(Some(decoded)) => {
-                // If boundary frame decoded successfully, size should be reasonable
-                if *at_boundary {
-                    // Frame at boundary should not exceed max_frame_length
-                    assert!(
-                        decoded.len() <= input.config.max_frame_length as usize,
-                        "Decoded frame exceeds max_frame_length: {} > {}",
-                        decoded.len(),
-                        input.config.max_frame_length
-                    );
-                }
-            }
-            Ok(None) => {
-                // Incomplete - acceptable
-            }
-            Err(e) => {
-                // Boundary errors should be proper error types
-                assert!(
-                    matches!(e.kind(), ErrorKind::InvalidData | ErrorKind::UnexpectedEof),
-                    "Boundary condition should return proper error type, got: {:?}",
-                    e.kind()
-                );
-            }
-        }
-    }
-
-    // **PERFORMANCE ASSERTION: No infinite loops**
-    // The function should return in reasonable time.
-    // LibFuzzer will detect hanging executions automatically.
-
-    // **MEMORY SAFETY: No buffer overflows**
-    // AddressSanitizer will detect any memory safety violations.
-
-    // **FINAL STRESS TEST: Multiple decode attempts**
-    // Test that codec state remains consistent across multiple operations
     let mut stress_frame = frame_bytes.clone();
-    for _ in 0..3 {
-        let _ = codec.decode(&mut stress_frame);
-        // Each call should be idempotent and not corrupt internal state
-    }
+    let _ = codec.decode(&mut stress_frame);
+
+    let (roundtrip_config, roundtrip_payload) = normalized_roundtrip_case(&input);
+
+    let mut roundtrip_encoder = roundtrip_config
+        .build_codec()
+        .expect("normalized config should build");
+    let mut roundtrip_wire = BytesMut::new();
+    roundtrip_encoder
+        .encode(roundtrip_payload.clone(), &mut roundtrip_wire)
+        .expect("normalized payload should encode");
+
+    let expected = BytesMut::from(&roundtrip_wire[usize::from(roundtrip_config.num_skip)..]);
+    let mut roundtrip_decoder = roundtrip_config
+        .build_codec()
+        .expect("normalized config should build");
+    let mut roundtrip_buf = roundtrip_wire.clone();
+    let decoded = roundtrip_decoder
+        .decode(&mut roundtrip_buf)
+        .expect("round-trip decode must not error")
+        .expect("round-trip frame must decode");
+    assert_eq!(decoded, expected, "round-trip retained bytes diverged");
+    assert!(roundtrip_buf.is_empty(), "round-trip left unread bytes");
+
+    let mut partial_decoder = roundtrip_config
+        .build_codec()
+        .expect("normalized config should build");
+    let split_at = roundtrip_wire.len().saturating_sub(1);
+    let mut partial_buf = BytesMut::from(&roundtrip_wire[..split_at]);
+    assert!(
+        partial_decoder
+            .decode(&mut partial_buf)
+            .expect("partial frame must not error")
+            .is_none(),
+        "partial frame decoded before the final byte arrived"
+    );
+
+    let mut second_encoder = roundtrip_config
+        .build_codec()
+        .expect("normalized config should build");
+    let mut second_wire = BytesMut::new();
+    second_encoder
+        .encode(roundtrip_payload.clone(), &mut second_wire)
+        .expect("second frame should encode");
+    let second_prefix_len = second_wire
+        .len()
+        .saturating_sub(1)
+        .min(header_len(&roundtrip_config).saturating_sub(1));
+
+    partial_buf.extend_from_slice(&roundtrip_wire[split_at..]);
+    partial_buf.extend_from_slice(&second_wire[..second_prefix_len]);
+    let decoded = partial_decoder
+        .decode(&mut partial_buf)
+        .expect("completed frame must not error")
+        .expect("completed frame should decode");
+    assert_eq!(decoded, expected, "completed frame decoded incorrectly");
+    assert!(
+        partial_decoder
+            .decode(&mut partial_buf)
+            .expect("partial second frame must not error")
+            .is_none(),
+        "incomplete second frame unexpectedly decoded"
+    );
+    assert_eq!(
+        &partial_buf[..],
+        &second_wire[..second_prefix_len],
+        "decoder retained the wrong second-frame prefix"
+    );
+
+    let mut max_config = input.config.clone();
+    max_config.length_adjustment = 0;
+    let width_cap = max_config
+        .length_field_width
+        .max_value()
+        .min(usize::MAX as u64) as usize;
+    let max_frame_cap = width_cap
+        .saturating_sub(1)
+        .min(MAX_FRAME_PAYLOAD_SIZE.saturating_sub(1));
+    max_config.max_frame_length = max_frame_cap as u32;
+    max_config.num_skip = u8::try_from(header_len(&max_config)).unwrap_or(u8::MAX);
+
+    let mut oversized_frame =
+        build_declared_frame(&max_config, u64::from(max_config.max_frame_length) + 1);
+    let mut max_decoder = max_config
+        .build_codec()
+        .expect("max-frame config should build");
+    let err = max_decoder
+        .decode(&mut oversized_frame)
+        .expect_err("oversized declared frame must error");
+    assert_eq!(
+        err.kind(),
+        ErrorKind::InvalidData,
+        "oversized decode should return InvalidData"
+    );
+
+    let oversized_payload = BytesMut::from(&vec![0u8; max_frame_cap.saturating_add(1)][..]);
+    let mut max_encoder = max_config
+        .build_codec()
+        .expect("max-frame config should build");
+    let mut encoded = BytesMut::new();
+    let err = max_encoder
+        .encode(oversized_payload, &mut encoded)
+        .expect_err("oversized payload must fail encode");
+    assert_eq!(
+        err.kind(),
+        ErrorKind::InvalidData,
+        "oversized encode should return InvalidData"
+    );
 });
