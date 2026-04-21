@@ -2025,6 +2025,88 @@ mod tests {
         let _ = <TryRecvError as std::error::Error>::source(&errors[0]);
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct BurstWraparoundSnapshot {
+        lagged_by: u64,
+        retained_values: Vec<i32>,
+        retained_indices: Vec<u64>,
+        total_sent: u64,
+        earliest_index: u64,
+    }
+
+    fn capture_burst_wraparound_snapshot(
+        capacity: usize,
+        burst_chunks: &[usize],
+        alternate_senders: bool,
+        drain_fast_receiver_each_chunk: bool,
+    ) -> (BurstWraparoundSnapshot, Vec<i32>) {
+        let cx = test_cx();
+        let (tx_primary, mut slow_rx) = channel::<i32>(capacity);
+        let tx_secondary = tx_primary.clone();
+        let mut fast_rx = drain_fast_receiver_each_chunk.then(|| tx_primary.subscribe());
+        let mut fast_sequence = Vec::new();
+        let mut next_value = 0i32;
+
+        for &chunk_len in burst_chunks {
+            for _ in 0..chunk_len {
+                let sender = if alternate_senders && next_value % 2 != 0 {
+                    &tx_secondary
+                } else {
+                    &tx_primary
+                };
+                sender.send(&cx, next_value).expect("send burst value");
+                next_value += 1;
+            }
+
+            if let Some(rx) = fast_rx.as_mut() {
+                for _ in 0..chunk_len {
+                    fast_sequence.push(block_on(rx.recv(&cx)).expect("fast receiver keeps up"));
+                }
+            }
+        }
+
+        let (total_sent, earliest_index, retained_indices) = {
+            let inner = tx_primary.channel.inner.lock();
+            (
+                inner.total_sent,
+                inner
+                    .buffer
+                    .front()
+                    .map_or(inner.total_sent, |slot| slot.index),
+                inner
+                    .buffer
+                    .iter()
+                    .map(|slot| slot.index)
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        let lagged_by = match slow_rx.try_recv() {
+            Err(TryRecvError::Lagged(n)) => n,
+            other => panic!("expected lagged receiver after burst wraparound, got {other:?}"),
+        };
+
+        let mut retained_values = Vec::new();
+        loop {
+            match slow_rx.try_recv() {
+                Ok(value) => retained_values.push(value),
+                Err(TryRecvError::Empty) => break,
+                Err(other) => panic!("expected retained suffix or empty after lag, got {other:?}"),
+            }
+        }
+
+        (
+            BurstWraparoundSnapshot {
+                lagged_by,
+                retained_values,
+                retained_indices,
+                total_sent,
+                earliest_index,
+            },
+            fast_sequence,
+        )
+    }
+
     // =========================================================================
     // METAMORPHIC TESTING SUITE (asupersync-xpzv2k)
     // =========================================================================
@@ -2163,6 +2245,104 @@ mod tests {
         }
 
         crate::test_complete!("metamorphic_lag_behavior_correctness");
+    }
+
+    /// MR2b: Slot Wraparound Under Burst (Equivalence Relation)
+    /// Different burst chunking and sender/receiver perturbations preserve the
+    /// same lag count and retained suffix once the ring buffer wraps.
+    #[test]
+    fn metamorphic_slot_wraparound_under_burst_preserves_suffix() {
+        init_test("metamorphic_slot_wraparound_under_burst_preserves_suffix");
+
+        for capacity in 2..=6usize {
+            for wraps in 1..=4usize {
+                let total_messages = capacity * (wraps + 1) + 1;
+                let expected_lag = (total_messages - capacity) as u64;
+                let expected_suffix: Vec<i32> =
+                    ((total_messages - capacity) as i32..total_messages as i32).collect();
+                let expected_indices: Vec<u64> =
+                    ((total_messages - capacity) as u64..total_messages as u64).collect();
+
+                let mut remaining = total_messages;
+                let mut chunk_seed = wraps + 1;
+                let mut irregular_chunks = Vec::new();
+                while remaining > 0 {
+                    let next = ((chunk_seed * 3) % (capacity + 2)).max(1);
+                    let chunk_len = next.min(remaining);
+                    irregular_chunks.push(chunk_len);
+                    remaining -= chunk_len;
+                    chunk_seed += 1;
+                }
+
+                let (base, _) =
+                    capture_burst_wraparound_snapshot(capacity, &[total_messages], false, false);
+                let (chunked, _) =
+                    capture_burst_wraparound_snapshot(capacity, &irregular_chunks, false, false);
+                let (perturbed, fast_sequence) =
+                    capture_burst_wraparound_snapshot(capacity, &irregular_chunks, true, true);
+
+                crate::assert_with_log!(
+                    base.lagged_by == expected_lag,
+                    format!("base lag count (cap={}, wraps={})", capacity, wraps),
+                    expected_lag,
+                    base.lagged_by
+                );
+                crate::assert_with_log!(
+                    base.retained_values == expected_suffix,
+                    format!("base suffix (cap={}, wraps={})", capacity, wraps),
+                    expected_suffix.clone(),
+                    base.retained_values.clone()
+                );
+                crate::assert_with_log!(
+                    base.retained_indices == expected_indices,
+                    format!("base indices (cap={}, wraps={})", capacity, wraps),
+                    expected_indices.clone(),
+                    base.retained_indices.clone()
+                );
+                crate::assert_with_log!(
+                    base.total_sent == total_messages as u64,
+                    format!("base total_sent (cap={}, wraps={})", capacity, wraps),
+                    total_messages as u64,
+                    base.total_sent
+                );
+                crate::assert_with_log!(
+                    base.earliest_index == (total_messages - capacity) as u64,
+                    format!("base earliest index (cap={}, wraps={})", capacity, wraps),
+                    (total_messages - capacity) as u64,
+                    base.earliest_index
+                );
+
+                crate::assert_with_log!(
+                    chunked == base,
+                    format!(
+                        "chunked burst matches base (cap={}, wraps={})",
+                        capacity, wraps
+                    ),
+                    format!("{base:?}"),
+                    format!("{chunked:?}")
+                );
+                crate::assert_with_log!(
+                    perturbed == base,
+                    format!(
+                        "sender/receiver perturbation matches base (cap={}, wraps={})",
+                        capacity, wraps
+                    ),
+                    format!("{base:?}"),
+                    format!("{perturbed:?}")
+                );
+                crate::assert_with_log!(
+                    fast_sequence == (0..total_messages as i32).collect::<Vec<_>>(),
+                    format!(
+                        "fast receiver keeps full order (cap={}, wraps={})",
+                        capacity, wraps
+                    ),
+                    (0..total_messages as i32).collect::<Vec<_>>(),
+                    fast_sequence
+                );
+            }
+        }
+
+        crate::test_complete!("metamorphic_slot_wraparound_under_burst_preserves_suffix");
     }
 
     /// MR3: Mid-Stream Subscription Isolation (Inclusive Relation)
