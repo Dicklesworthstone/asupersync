@@ -1,0 +1,177 @@
+---
+source: tests/cancellation_protocol_golden.rs
+expression: golden
+---
+{
+  "happy_path": {
+    "regions": [
+      {
+        "cancel_reason": null,
+        "cancelled": false,
+        "region": "R0"
+      }
+    ],
+    "scenario_id": "happy_path",
+    "summary": {
+      "cancelled_region_count": 0,
+      "check": "ok",
+      "region_count": 1,
+      "task_count": 1,
+      "violation_count": 0
+    },
+    "tasks": [
+      {
+        "cancel_request": {
+          "acknowledged": true,
+          "polls_since": 0,
+          "reason": "Timeout",
+          "requested_at_nanos": 100
+        },
+        "has_cancel_request": true,
+        "mask_depth": 0,
+        "region": "R0",
+        "state": "CompletedCancelled",
+        "task": "T0",
+        "transitions": [
+          {
+            "from": "Created",
+            "time_nanos": 0,
+            "to": "Running"
+          },
+          {
+            "from": "Running",
+            "time_nanos": 100,
+            "to": "CancelRequested"
+          },
+          {
+            "from": "CancelRequested",
+            "time_nanos": 200,
+            "to": "Cancelling"
+          },
+          {
+            "from": "Cancelling",
+            "time_nanos": 300,
+            "to": "Finalizing"
+          },
+          {
+            "from": "Finalizing",
+            "time_nanos": 400,
+            "to": "CompletedCancelled"
+          }
+        ]
+      }
+    ],
+    "version": 2,
+    "violations": []
+  },
+  "late_cancel_ack": {
+    "regions": [
+      {
+        "cancel_reason": null,
+        "cancelled": false,
+        "region": "R0"
+      }
+    ],
+    "scenario_id": "late_cancel_ack",
+    "summary": {
+      "cancelled_region_count": 0,
+      "check": "Task T0 cancel requested at 100ns but not acknowledged after 66 polls",
+      "region_count": 1,
+      "task_count": 1,
+      "violation_count": 2
+    },
+    "tasks": [
+      {
+        "cancel_request": {
+          "acknowledged": false,
+          "polls_since": 66,
+          "reason": "Timeout",
+          "requested_at_nanos": 100
+        },
+        "has_cancel_request": true,
+        "mask_depth": 0,
+        "region": "R0",
+        "state": "CancelRequested",
+        "task": "T0",
+        "transitions": [
+          {
+            "from": "Created",
+            "time_nanos": 0,
+            "to": "Running"
+          },
+          {
+            "from": "Running",
+            "time_nanos": 100,
+            "to": "CancelRequested"
+          }
+        ]
+      }
+    ],
+    "version": 2,
+    "violations": [
+      "Task T0 cancel requested at 100ns but not acknowledged after 66 polls",
+      "Task T0 cancel requested at 100ns but stuck in CancelRequested"
+    ]
+  },
+  "reentrant_cancel_strengthening": {
+    "regions": [
+      {
+        "cancel_reason": null,
+        "cancelled": false,
+        "region": "R0"
+      }
+    ],
+    "scenario_id": "reentrant_cancel_strengthening",
+    "summary": {
+      "cancelled_region_count": 0,
+      "check": "ok",
+      "region_count": 1,
+      "task_count": 1,
+      "violation_count": 0
+    },
+    "tasks": [
+      {
+        "cancel_request": {
+          "acknowledged": true,
+          "polls_since": 0,
+          "reason": "Shutdown",
+          "requested_at_nanos": 100
+        },
+        "has_cancel_request": true,
+        "mask_depth": 0,
+        "region": "R0",
+        "state": "CompletedCancelled",
+        "task": "T0",
+        "transitions": [
+          {
+            "from": "Running",
+            "time_nanos": 100,
+            "to": "CancelRequested"
+          },
+          {
+            "from": "CancelRequested",
+            "time_nanos": 150,
+            "to": "CancelRequested"
+          },
+          {
+            "from": "CancelRequested",
+            "time_nanos": 200,
+            "to": "Cancelling"
+          },
+          {
+            "from": "Cancelling",
+            "time_nanos": 300,
+            "to": "Finalizing"
+          },
+          {
+            "from": "Finalizing",
+            "time_nanos": 400,
+            "to": "CompletedCancelled"
+          }
+        ]
+      }
+    ],
+    "version": 2,
+    "violations": []
+  }
+}
