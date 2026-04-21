@@ -1,0 +1,54 @@
+---
+source: src/messaging/jetstream.rs
+expression: |-
+  json!({
+      "happy":
+      jetstream_ack_snapshot("orders.created",
+      br#"{"event":"created","status":"ok"}"#,
+      "$JS.ACK.orders.consumer.1.42.7.1713790000000000000.0", "+ACK",),
+      "redeliver":
+      jetstream_ack_snapshot("orders.retry",
+      br#"{"event":"retry","reason":"redelivery"}"#,
+      "$JS.ACK.orders.v2.retry.worker.3.108.14.1713790000000001234.2", "-NAK",),
+      "term":
+      jetstream_ack_snapshot("orders.poison",
+      br#"{"event":"poison","resolution":"term"}"#,
+      "$JS.ACK.orders.deadletter.processor.5.512.44.1713790000000005678.1",
+      "+TERM",),
+  })
+---
+{
+  "happy": {
+    "ack": {
+      "payload": "+ACK",
+      "terminal": true
+    },
+    "delivered": 1,
+    "payload_utf8": "{\"event\":\"created\",\"status\":\"ok\"}",
+    "reply_subject": "$JS.ACK.orders.consumer.1.[STREAM_SEQ].[CONSUMER_SEQ].[TIMESTAMP].[PENDING]",
+    "sequence": "[STREAM_SEQ]",
+    "subject": "orders.created"
+  },
+  "redeliver": {
+    "ack": {
+      "payload": "-NAK",
+      "terminal": true
+    },
+    "delivered": 3,
+    "payload_utf8": "{\"event\":\"retry\",\"reason\":\"redelivery\"}",
+    "reply_subject": "$JS.ACK.orders.v2.retry.worker.3.[STREAM_SEQ].[CONSUMER_SEQ].[TIMESTAMP].[PENDING]",
+    "sequence": "[STREAM_SEQ]",
+    "subject": "orders.retry"
+  },
+  "term": {
+    "ack": {
+      "payload": "+TERM",
+      "terminal": true
+    },
+    "delivered": 5,
+    "payload_utf8": "{\"event\":\"poison\",\"resolution\":\"term\"}",
+    "reply_subject": "$JS.ACK.orders.deadletter.processor.5.[STREAM_SEQ].[CONSUMER_SEQ].[TIMESTAMP].[PENDING]",
+    "sequence": "[STREAM_SEQ]",
+    "subject": "orders.poison"
+  }
+}

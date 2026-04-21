@@ -1237,6 +1237,46 @@ fn compute_client_deadline(now: Time, pull_timeout: Duration, slack: Duration) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn scrub_js_ack_reply_subject(reply: &str) -> String {
+        let mut parts: Vec<String> = reply.split('.').map(ToString::to_string).collect();
+        if parts.len() >= 9 {
+            let len = parts.len();
+            parts[len - 4] = "[STREAM_SEQ]".to_string();
+            parts[len - 3] = "[CONSUMER_SEQ]".to_string();
+            parts[len - 2] = "[TIMESTAMP]".to_string();
+            parts[len - 1] = "[PENDING]".to_string();
+        }
+        parts.join(".")
+    }
+
+    fn jetstream_ack_snapshot(
+        subject: &str,
+        payload: &[u8],
+        reply_subject: &str,
+        ack_payload: &str,
+    ) -> serde_json::Value {
+        let msg = Message {
+            subject: subject.to_string(),
+            sid: 7,
+            payload: payload.to_vec(),
+            reply_to: Some(reply_subject.to_string()),
+        };
+        let js_msg = Consumer::parse_js_message(msg).expect("valid JetStream reply subject");
+
+        json!({
+            "subject": js_msg.subject,
+            "payload_utf8": String::from_utf8_lossy(&js_msg.payload),
+            "delivered": js_msg.delivered,
+            "sequence": "[STREAM_SEQ]",
+            "reply_subject": scrub_js_ack_reply_subject(&js_msg.reply_subject),
+            "ack": {
+                "payload": ack_payload,
+                "terminal": matches!(ack_payload, "+ACK" | "-NAK" | "+TERM"),
+            }
+        })
+    }
 
     #[test]
     fn test_stream_config_to_json() {
@@ -1755,6 +1795,33 @@ mod tests {
             result,
             Some("hello world".to_string()),
             "unicode escape should be correctly parsed"
+        );
+    }
+
+    #[test]
+    fn jetstream_message_ack_format_snapshot_scrubs_sequences() {
+        insta::assert_json_snapshot!(
+            "jetstream_message_ack_format_scrubbed",
+            json!({
+                "happy": jetstream_ack_snapshot(
+                    "orders.created",
+                    br#"{"event":"created","status":"ok"}"#,
+                    "$JS.ACK.orders.consumer.1.42.7.1713790000000000000.0",
+                    "+ACK",
+                ),
+                "redeliver": jetstream_ack_snapshot(
+                    "orders.retry",
+                    br#"{"event":"retry","reason":"redelivery"}"#,
+                    "$JS.ACK.orders.v2.retry.worker.3.108.14.1713790000000001234.2",
+                    "-NAK",
+                ),
+                "term": jetstream_ack_snapshot(
+                    "orders.poison",
+                    br#"{"event":"poison","resolution":"term"}"#,
+                    "$JS.ACK.orders.deadletter.processor.5.512.44.1713790000000005678.1",
+                    "+TERM",
+                ),
+            })
         );
     }
 }
