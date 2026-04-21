@@ -50,11 +50,13 @@ const TEST_MAX_HEADER_SIZE: u32 = 65536;
 const TEST_STREAM_ID: u32 = 1;
 
 /// Helper to create a test stream in IDLE state
+#[allow(dead_code)]
 fn new_idle_stream(stream_id: u32) -> Stream {
     Stream::new(stream_id, TEST_INITIAL_WINDOW, TEST_MAX_HEADER_SIZE)
 }
 
 /// Helper to create a reserved (remote) stream
+#[allow(dead_code)]
 fn new_reserved_remote_stream(stream_id: u32) -> Stream {
     Stream::new_reserved_remote(stream_id, TEST_INITIAL_WINDOW, TEST_MAX_HEADER_SIZE)
 }
@@ -64,6 +66,7 @@ fn new_reserved_remote_stream(stream_id: u32) -> Stream {
 //
 
 #[test]
+#[allow(dead_code)]
 fn test_idle_to_open_on_send_headers_without_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::Idle);
@@ -74,6 +77,7 @@ fn test_idle_to_open_on_send_headers_without_end_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_idle_to_open_on_recv_headers_without_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::Idle);
@@ -84,6 +88,7 @@ fn test_idle_to_open_on_recv_headers_without_end_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_idle_to_half_closed_local_on_send_headers_with_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::Idle);
@@ -94,6 +99,7 @@ fn test_idle_to_half_closed_local_on_send_headers_with_end_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_idle_to_half_closed_remote_on_recv_headers_with_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::Idle);
@@ -108,6 +114,7 @@ fn test_idle_to_half_closed_remote_on_recv_headers_with_end_stream() {
 //
 
 #[test]
+#[allow(dead_code)]
 fn test_open_to_half_closed_local_on_send_data_with_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -121,6 +128,7 @@ fn test_open_to_half_closed_local_on_send_data_with_end_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_open_to_half_closed_remote_on_recv_data_with_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -134,6 +142,7 @@ fn test_open_to_half_closed_remote_on_recv_data_with_end_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_open_to_half_closed_local_on_send_headers_with_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -147,6 +156,7 @@ fn test_open_to_half_closed_local_on_send_headers_with_end_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_open_to_half_closed_remote_on_recv_headers_with_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -164,6 +174,7 @@ fn test_open_to_half_closed_remote_on_recv_headers_with_end_stream() {
 //
 
 #[test]
+#[allow(dead_code)]
 fn test_half_closed_local_to_closed_on_recv_data_with_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -177,6 +188,7 @@ fn test_half_closed_local_to_closed_on_recv_data_with_end_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_half_closed_local_to_closed_on_recv_headers_with_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -191,6 +203,7 @@ fn test_half_closed_local_to_closed_on_recv_headers_with_end_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_half_closed_remote_to_closed_on_send_data_with_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -204,6 +217,7 @@ fn test_half_closed_remote_to_closed_on_send_data_with_end_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_half_closed_remote_to_closed_on_send_headers_with_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -222,6 +236,7 @@ fn test_half_closed_remote_to_closed_on_send_headers_with_end_stream() {
 //
 
 #[test]
+#[allow(dead_code)]
 fn test_idle_to_closed_on_rst_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::Idle);
@@ -232,6 +247,7 @@ fn test_idle_to_closed_on_rst_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_open_to_closed_on_rst_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -245,6 +261,7 @@ fn test_open_to_closed_on_rst_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_half_closed_local_to_closed_on_rst_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -258,6 +275,7 @@ fn test_half_closed_local_to_closed_on_rst_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_half_closed_remote_to_closed_on_rst_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -271,6 +289,7 @@ fn test_half_closed_remote_to_closed_on_rst_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_reserved_local_to_closed_on_rst_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -282,6 +301,7 @@ fn test_reserved_local_to_closed_on_rst_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_reserved_remote_to_closed_on_rst_stream() {
     let mut stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
@@ -296,6 +316,7 @@ fn test_reserved_remote_to_closed_on_rst_stream() {
 //
 
 #[test]
+#[allow(dead_code)]
 fn test_closed_stream_rejects_send_headers() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -314,6 +335,7 @@ fn test_closed_stream_rejects_send_headers() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_closed_stream_rejects_recv_headers() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -332,6 +354,7 @@ fn test_closed_stream_rejects_recv_headers() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_closed_stream_rejects_send_data() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -350,6 +373,7 @@ fn test_closed_stream_rejects_send_data() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_closed_stream_rejects_recv_data() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -368,6 +392,7 @@ fn test_closed_stream_rejects_recv_data() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_half_closed_local_rejects_send_data() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -386,6 +411,7 @@ fn test_half_closed_local_rejects_send_data() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_half_closed_remote_rejects_recv_data() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -404,6 +430,7 @@ fn test_half_closed_remote_rejects_recv_data() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_reserved_local_rejects_send_data() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -425,6 +452,7 @@ fn test_reserved_local_rejects_send_data() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_reserved_remote_rejects_recv_data() {
     let mut stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
@@ -444,6 +472,7 @@ fn test_reserved_remote_rejects_recv_data() {
 //
 
 #[test]
+#[allow(dead_code)]
 fn test_reserved_remote_to_half_closed_local_on_send_headers() {
     let mut stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
@@ -454,6 +483,7 @@ fn test_reserved_remote_to_half_closed_local_on_send_headers() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_reserved_remote_to_closed_on_send_headers_with_end_stream() {
     let mut stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
@@ -464,6 +494,7 @@ fn test_reserved_remote_to_closed_on_send_headers_with_end_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_reserved_remote_to_half_closed_remote_on_recv_headers() {
     let mut stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
@@ -474,6 +505,7 @@ fn test_reserved_remote_to_half_closed_remote_on_recv_headers() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_reserved_remote_to_closed_on_recv_headers_with_end_stream() {
     let mut stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
@@ -484,6 +516,7 @@ fn test_reserved_remote_to_closed_on_recv_headers_with_end_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_reserved_remote_can_receive_headers() {
     let stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
@@ -491,6 +524,7 @@ fn test_reserved_remote_can_receive_headers() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_reserved_remote_can_send_headers() {
     let stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
@@ -498,6 +532,7 @@ fn test_reserved_remote_can_send_headers() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_reserved_remote_cannot_send_data() {
     let stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
@@ -505,6 +540,7 @@ fn test_reserved_remote_cannot_send_data() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_reserved_remote_cannot_recv_data() {
     let stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
@@ -516,6 +552,7 @@ fn test_reserved_remote_cannot_recv_data() {
 //
 
 #[test]
+#[allow(dead_code)]
 fn test_stream_state_is_active_semantics() {
     // Test that is_active() returns true for states that count toward max_concurrent_streams
 
@@ -543,6 +580,7 @@ fn test_stream_state_is_active_semantics() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_multiple_headers_frames_without_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -557,6 +595,7 @@ fn test_multiple_headers_frames_without_end_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_data_frames_preserve_state_without_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -574,6 +613,7 @@ fn test_data_frames_preserve_state_without_end_stream() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_bidirectional_half_closed_transitions() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
@@ -596,6 +636,7 @@ fn test_bidirectional_half_closed_transitions() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_rst_stream_error_code_persistence() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 

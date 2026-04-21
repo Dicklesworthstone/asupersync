@@ -22,6 +22,7 @@ use asupersync::{
 };
 
 /// Helper to create metadata with grpc-timeout header
+#[allow(dead_code)]
 fn metadata_with_timeout(timeout_str: &str) -> Metadata {
     let mut metadata = Metadata::new();
     metadata.insert("grpc-timeout", timeout_str);
@@ -29,8 +30,10 @@ fn metadata_with_timeout(timeout_str: &str) -> Metadata {
 }
 
 /// Helper to create a deterministic time source for testing
+#[allow(dead_code)]
 fn fixed_time_source() -> fn() -> Instant {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    #[allow(dead_code)]
     fn fixed_instant() -> Instant {
         *START.get_or_init(Instant::now)
     }
@@ -39,6 +42,7 @@ fn fixed_time_source() -> fn() -> Instant {
 
 /// MR1: grpc-timeout header (e.g. '100m' '10S' '1M') parsed to absolute deadline
 #[test]
+#[allow(dead_code)]
 fn mr1_grpc_timeout_header_parsing_metamorphic() {
     LabRuntime::test(|lab| async {
         let test_cases = vec![
@@ -89,6 +93,7 @@ fn mr1_grpc_timeout_header_parsing_metamorphic() {
 
 /// MR2: deadline propagates to server handler Cx
 #[test]
+#[allow(dead_code)]
 fn mr2_deadline_propagates_to_handler_cx() {
     LabRuntime::test(|lab| async {
         let test_cases = vec![
@@ -140,6 +145,7 @@ fn mr2_deadline_propagates_to_handler_cx() {
 
 /// MR3: handler exceeding deadline returns DEADLINE_EXCEEDED status
 #[test]
+#[allow(dead_code)]
 fn mr3_handler_deadline_exceeded_status() {
     LabRuntime::test(|lab| async {
         let test_cases = vec![
@@ -191,6 +197,7 @@ fn mr3_handler_deadline_exceeded_status() {
 
 /// MR4: deadline attenuates across nested calls (child ≤ parent)
 #[test]
+#[allow(dead_code)]
 fn mr4_deadline_attenuation_nested_calls() {
     LabRuntime::test(|lab| async {
         let parent_timeout = Duration::from_secs(10);
@@ -275,6 +282,7 @@ fn mr4_deadline_attenuation_nested_calls() {
 
 /// MR5: absent grpc-timeout → no server-side deadline (infinite)
 #[test]
+#[allow(dead_code)]
 fn mr5_absent_timeout_infinite_deadline() {
     LabRuntime::test(|lab| async {
         let test_cases = vec![
@@ -347,6 +355,7 @@ fn mr5_absent_timeout_infinite_deadline() {
 
 /// Property-based test: Deadline consistency across time progression
 #[test]
+#[allow(dead_code)]
 fn property_deadline_time_progression_consistency() {
     LabRuntime::test(|lab| async {
         let timeout_duration = Duration::from_secs(5);
@@ -409,6 +418,7 @@ fn property_deadline_time_progression_consistency() {
 
 /// Edge case: Zero and near-zero timeouts
 #[test]
+#[allow(dead_code)]
 fn edge_case_zero_and_minimal_timeouts() {
     LabRuntime::test(|lab| async {
         let base_time = fixed_time_source()();

@@ -14,6 +14,7 @@ mod tests {
 
     /// Test basic RecordBatch v2 encoding against known good data.
     #[test]
+    #[allow(dead_code)]
     fn test_basic_record_batch_encoding() {
         let harness = KafkaConformanceHarness::new();
 
@@ -50,6 +51,7 @@ mod tests {
 
     /// Test record attribute bits according to KIP-98.
     #[test]
+    #[allow(dead_code)]
     fn test_record_attribute_bits() {
         // Test compression bits (0-2)
         for compression in 0..8 {
@@ -89,6 +91,7 @@ mod tests {
 
     /// Test varint encoding for timestamp deltas.
     #[test]
+    #[allow(dead_code)]
     fn test_timestamp_delta_varint_encoding() {
         let harness = KafkaConformanceHarness::new();
 
@@ -127,6 +130,7 @@ mod tests {
 
     /// Test headers array encoding.
     #[test]
+    #[allow(dead_code)]
     fn test_headers_array_encoding() {
         let harness = KafkaConformanceHarness::new();
 
@@ -170,6 +174,7 @@ mod tests {
 
     /// Test producer ID, epoch, and sequence for exactly-once semantics.
     #[test]
+    #[allow(dead_code)]
     fn test_exactly_once_semantics_fields() {
         let harness = KafkaConformanceHarness::new();
 
@@ -204,6 +209,7 @@ mod tests {
 
     /// Test base_offset and last_offset_delta relationship.
     #[test]
+    #[allow(dead_code)]
     fn test_offset_relationship() {
         let harness = KafkaConformanceHarness::new();
 
@@ -252,6 +258,7 @@ mod tests {
 
     /// Test transactional record batch.
     #[test]
+    #[allow(dead_code)]
     fn test_transactional_record_batch() {
         let harness = KafkaConformanceHarness::new();
 
@@ -284,6 +291,7 @@ mod tests {
 
     /// Test control record batch.
     #[test]
+    #[allow(dead_code)]
     fn test_control_record_batch() {
         let harness = KafkaConformanceHarness::new();
 
@@ -319,6 +327,7 @@ mod tests {
 
     /// Test null key and value handling.
     #[test]
+    #[allow(dead_code)]
     fn test_null_key_value_handling() {
         let harness = KafkaConformanceHarness::new();
 
@@ -374,6 +383,7 @@ mod tests {
 
     /// Test CRC32 validation.
     #[test]
+    #[allow(dead_code)]
     fn test_crc32_validation() {
         let harness = KafkaConformanceHarness::new();
 
@@ -408,6 +418,7 @@ mod tests {
 
     /// Test empty record batch.
     #[test]
+    #[allow(dead_code)]
     fn test_empty_record_batch() {
         let harness = KafkaConformanceHarness::new();
 

@@ -62,6 +62,7 @@ pub const RFC_VERSION: &str = "6330:2011";
 ///
 /// This is the main entry point for comprehensive RFC 6330 conformance validation.
 /// It runs all registered test cases across all requirement levels and sections.
+#[allow(dead_code)]
 pub fn run_complete_conformance_suite() -> ConformanceReport {
     let suite = Rfc6330ConformanceSuite::new();
     suite.run_all()
@@ -71,6 +72,7 @@ pub fn run_complete_conformance_suite() -> ConformanceReport {
 ///
 /// This runs the subset of tests covering MUST clauses from RFC 6330,
 /// suitable for continuous integration and quick validation cycles.
+#[allow(dead_code)]
 pub fn run_must_requirements_only() -> ConformanceReport {
     let suite = Rfc6330ConformanceSuite::new();
     suite.run_by_level(RequirementLevel::Must)
@@ -80,6 +82,7 @@ pub fn run_must_requirements_only() -> ConformanceReport {
 ///
 /// Allows customization of test parameters, object sizes, symbol sizes,
 /// and other configuration options for specialized testing scenarios.
+#[allow(dead_code)]
 pub fn run_conformance_with_config(config: ConformanceConfig) -> ConformanceReport {
     let suite = Rfc6330ConformanceSuite::new().with_config(config);
     suite.run_all()
@@ -93,6 +96,7 @@ pub fn run_conformance_with_config(config: ConformanceConfig) -> ConformanceRepo
 /// # Panics
 ///
 /// Panics if MUST clause compliance is below 95% or if critical failures are detected.
+#[allow(dead_code)]
 pub fn validate_rfc6330_conformance() -> ConformanceReport {
     let report = run_complete_conformance_suite();
 
@@ -140,6 +144,7 @@ pub fn validate_rfc6330_conformance() -> ConformanceReport {
 ///
 /// Returns a detailed breakdown of test coverage by RFC section and requirement level,
 /// suitable for compliance documentation and audit trails.
+#[allow(dead_code)]
 pub fn generate_compliance_matrix() -> ComplianceMatrix {
     let suite = Rfc6330ConformanceSuite::new();
     let report = suite.run_all();
@@ -149,6 +154,7 @@ pub fn generate_compliance_matrix() -> ComplianceMatrix {
 
 /// Compliance matrix for requirement traceability.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ComplianceMatrix {
     /// Coverage by RFC section.
     pub section_coverage: std::collections::HashMap<String, SectionCoverage>,
@@ -162,6 +168,7 @@ pub struct ComplianceMatrix {
 
 /// Coverage information for a specific RFC section.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct SectionCoverage {
     /// Section identifier (e.g., "5.1").
     pub section: String,
@@ -173,6 +180,7 @@ pub struct SectionCoverage {
 
 /// Coverage information for a specific test case.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct TestCoverage {
     /// Test case identifier.
     pub test_id: String,
@@ -184,8 +192,11 @@ pub struct TestCoverage {
     pub duration: std::time::Duration,
 }
 
+#[allow(dead_code)]
+
 impl ComplianceMatrix {
     /// Create compliance matrix from conformance report.
+    #[allow(dead_code)]
     pub fn from_report(report: &ConformanceReport) -> Self {
         let mut section_coverage = std::collections::HashMap::new();
         let overall_scores = report.compliance_score_by_level();
@@ -238,6 +249,7 @@ impl ComplianceMatrix {
     }
 
     /// Print a detailed compliance matrix report.
+    #[allow(dead_code)]
     pub fn print_detailed_matrix(&self) {
         println!("=== RFC 6330 COMPLIANCE MATRIX ===");
         println!("Generated: {:?}", self.generated_at);
@@ -280,6 +292,7 @@ impl ComplianceMatrix {
     }
 
     /// Export compliance matrix as JSON.
+    #[allow(dead_code)]
     pub fn to_json(&self) -> String {
         // Simplified JSON export - in practice would use serde
         format!("{{\"compliance_matrix\": \"RFC 6330\", \"total_tests\": {}}}", self.total_tests)
@@ -289,6 +302,7 @@ impl ComplianceMatrix {
 /// Convenience function for CI integration.
 ///
 /// Returns exit code: 0 for compliance, 1 for non-compliance.
+#[allow(dead_code)]
 pub fn main() -> i32 {
     match std::panic::catch_unwind(|| {
         let report = validate_rfc6330_conformance();
@@ -317,6 +331,7 @@ mod integration_tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_conformance_suite_creation() {
         let suite = Rfc6330ConformanceSuite::new();
 
@@ -325,6 +340,7 @@ mod integration_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_must_requirements_compliance() {
         let report = run_must_requirements_only();
 
@@ -334,6 +350,7 @@ mod integration_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_compliance_matrix_generation() {
         let matrix = generate_compliance_matrix();
 
@@ -347,6 +364,7 @@ mod integration_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_custom_config_conformance() {
         let config = ConformanceConfig {
             test_object_sizes: vec![10, 100],

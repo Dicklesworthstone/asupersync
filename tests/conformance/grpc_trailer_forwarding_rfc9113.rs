@@ -60,6 +60,8 @@ mod grpc_trailer_conformance_tests {
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
+    #[allow(dead_code)]
+
     fn encode_grpc_message(message: &str) -> String {
         message
             .replace('%', "%25")
@@ -69,6 +71,7 @@ mod grpc_trailer_conformance_tests {
 
     /// Test result for a single gRPC trailer forwarding conformance requirement.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[allow(dead_code)]
     pub struct GrpcTrailerConformanceResult {
         pub test_id: String,
         pub description: String,
@@ -81,6 +84,7 @@ mod grpc_trailer_conformance_tests {
 
     /// Conformance test categories for gRPC trailer forwarding.
     #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[allow(dead_code)]
     pub enum TestCategory {
         /// grpc-status trailer placement
         StatusTrailerPlacement,
@@ -100,6 +104,7 @@ mod grpc_trailer_conformance_tests {
 
     /// Protocol requirement level per RFC 2119.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[allow(dead_code)]
     pub enum RequirementLevel {
         Must,   // RFC 2119: MUST
         Should, // RFC 2119: SHOULD
@@ -108,6 +113,7 @@ mod grpc_trailer_conformance_tests {
 
     /// Test execution result.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[allow(dead_code)]
     pub enum TestVerdict {
         Pass,
         Fail,
@@ -117,6 +123,7 @@ mod grpc_trailer_conformance_tests {
 
     /// Mock gRPC response for testing trailer forwarding.
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     pub struct MockGrpcResponse {
         pub initial_headers: Metadata,
         pub data_frames: Vec<Bytes>,
@@ -126,8 +133,11 @@ mod grpc_trailer_conformance_tests {
         pub rst_stream_error_code: Option<u32>,
     }
 
+    #[allow(dead_code)]
+
     impl MockGrpcResponse {
         /// Create a new mock gRPC response.
+        #[allow(dead_code)]
         pub fn new() -> Self {
             let mut initial_headers = Metadata::new();
             initial_headers.insert(":status", "200");
@@ -144,24 +154,28 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Set the gRPC status.
+        #[allow(dead_code)]
         pub fn with_status(mut self, status: Status) -> Self {
             self.status = status;
             self
         }
 
         /// Add a data frame.
+        #[allow(dead_code)]
         pub fn with_data_frame(mut self, data: Bytes) -> Self {
             self.data_frames.push(data);
             self
         }
 
         /// Add trailer metadata.
+        #[allow(dead_code)]
         pub fn with_trailer(mut self, key: &str, value: &str) -> Self {
             self.trailers.insert(key, value);
             self
         }
 
         /// Set RST_STREAM behavior.
+        #[allow(dead_code)]
         pub fn with_rst_stream(mut self, error_code: u32) -> Self {
             self.has_rst_stream = true;
             self.rst_stream_error_code = Some(error_code);
@@ -169,6 +183,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Build the final response with proper trailer placement.
+        #[allow(dead_code)]
         pub fn build_response(&mut self) {
             // Per gRPC spec: grpc-status MUST be in trailers, not initial headers
             self.trailers
@@ -181,11 +196,13 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Check if this is a trailer-only response (no data frames).
+        #[allow(dead_code)]
         pub fn is_trailer_only(&self) -> bool {
             self.data_frames.is_empty()
         }
 
         /// Validate trailer placement compliance.
+        #[allow(dead_code)]
         pub fn validate_trailer_placement(&self) -> Result<(), String> {
             // grpc-status MUST NOT be in initial headers
             if self.initial_headers.get("grpc-status").is_some() {
@@ -204,18 +221,23 @@ mod grpc_trailer_conformance_tests {
     }
 
     impl Default for MockGrpcResponse {
+        #[allow(dead_code)]
         fn default() -> Self {
             Self::new()
         }
     }
 
     /// gRPC trailer forwarding conformance test harness.
+    #[allow(dead_code)]
     pub struct GrpcTrailerConformanceHarness {
         start_time: Instant,
     }
 
+    #[allow(dead_code)]
+
     impl GrpcTrailerConformanceHarness {
         /// Create a new conformance test harness.
+        #[allow(dead_code)]
         pub fn new() -> Self {
             Self {
                 start_time: Instant::now(),
@@ -223,6 +245,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Run all gRPC trailer forwarding conformance tests.
+        #[allow(dead_code)]
         pub fn run_all_tests(&self) -> Vec<GrpcTrailerConformanceResult> {
             let mut results = Vec::new();
 
@@ -259,6 +282,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: grpc-status MUST be in trailers, not initial headers.
+        #[allow(dead_code)]
         fn test_grpc_status_in_trailers_not_headers(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
@@ -292,6 +316,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: grpc-status is required in trailers.
+        #[allow(dead_code)]
         fn test_grpc_status_required_in_trailers(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
@@ -321,6 +346,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: grpc-message percent-encodes reserved characters.
+        #[allow(dead_code)]
         fn test_grpc_message_percent_encoding_reserved_chars(
             &self,
         ) -> GrpcTrailerConformanceResult {
@@ -364,6 +390,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: grpc-message ASCII forwarding without extra encoding.
+        #[allow(dead_code)]
         fn test_grpc_message_ascii_encoding(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
@@ -405,6 +432,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: grpc-message empty handling.
+        #[allow(dead_code)]
         fn test_grpc_message_empty_handling(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
@@ -438,6 +466,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: trailer-only response for immediate errors.
+        #[allow(dead_code)]
         fn test_trailer_only_response_for_immediate_errors(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
@@ -473,6 +502,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: trailer-only response structure.
+        #[allow(dead_code)]
         fn test_trailer_only_response_structure(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
@@ -517,6 +547,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: RST_STREAM with NO_ERROR after trailers.
+        #[allow(dead_code)]
         fn test_rst_stream_no_error_after_trailers(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
@@ -552,6 +583,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: RST_STREAM not sent for trailer-only responses.
+        #[allow(dead_code)]
         fn test_rst_stream_not_sent_for_trailer_only(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
@@ -583,6 +615,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: grpc-timeout header parsing for all units.
+        #[allow(dead_code)]
         fn test_grpc_timeout_header_parsing_all_units(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
@@ -639,6 +672,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: grpc-timeout header formatting.
+        #[allow(dead_code)]
         fn test_grpc_timeout_header_formatting(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
@@ -688,6 +722,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: grpc-timeout invalid format handling.
+        #[allow(dead_code)]
         fn test_grpc_timeout_invalid_format_handling(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
@@ -737,6 +772,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: HTTP/2 frame ordering compliance.
+        #[allow(dead_code)]
         fn test_http2_frame_ordering_compliance(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
@@ -778,6 +814,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: DATA frames before trailers ordering.
+        #[allow(dead_code)]
         fn test_data_before_trailers_ordering(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
@@ -815,6 +852,7 @@ mod grpc_trailer_conformance_tests {
         }
 
         /// Test: Error response trailer forwarding.
+        #[allow(dead_code)]
         fn test_error_response_trailer_forwarding(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
@@ -863,6 +901,7 @@ mod grpc_trailer_conformance_tests {
     }
 
     impl Default for GrpcTrailerConformanceHarness {
+        #[allow(dead_code)]
         fn default() -> Self {
             Self::new()
         }
@@ -879,6 +918,7 @@ pub use grpc_trailer_conformance_tests::{
 
 // Tests that always run regardless of features
 #[test]
+#[allow(dead_code)]
 fn grpc_trailer_conformance_suite_availability() {
     let harness = GrpcTrailerConformanceHarness::new();
     let results = harness.run_all_tests();
@@ -901,6 +941,7 @@ mod tests {
     use asupersync::grpc::status::{Code, Status};
 
     #[test]
+    #[allow(dead_code)]
     fn test_mock_grpc_response() {
         let mut mock = MockGrpcResponse::new().with_status(Status::new(Code::Ok, "success"));
 
@@ -912,6 +953,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_conformance_harness_basic_functionality() {
         let harness = GrpcTrailerConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -939,6 +981,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_trailer_placement_validation() {
         let mut response = MockGrpcResponse::new().with_status(Status::ok());
 

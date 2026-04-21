@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 /// Configuration for regression detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct RegressionConfig {
     /// Minimum conformance score to consider as passing (0.0 to 1.0)
     pub min_conformance_score: f64,
@@ -26,6 +27,7 @@ pub struct RegressionConfig {
 }
 
 impl Default for RegressionConfig {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             min_conformance_score: 0.95,
@@ -39,6 +41,7 @@ impl Default for RegressionConfig {
 
 /// Historical conformance data point
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ConformanceSnapshot {
     /// Timestamp when this snapshot was taken
     pub timestamp: DateTime<Utc>,
@@ -52,6 +55,7 @@ pub struct ConformanceSnapshot {
 
 /// Build and environment information
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct BuildInfo {
     /// Rust version used for the build
     pub rust_version: String,
@@ -64,6 +68,7 @@ pub struct BuildInfo {
 }
 
 impl Default for BuildInfo {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             rust_version: "unknown".to_string(),
@@ -76,6 +81,7 @@ impl Default for BuildInfo {
 
 /// Result of regression detection analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct RegressionAnalysis {
     /// Whether any regressions were detected
     pub has_regressions: bool,
@@ -93,6 +99,7 @@ pub struct RegressionAnalysis {
 
 /// Individual regression finding
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct RegressionFinding {
     /// Type of regression detected
     pub regression_type: RegressionType,
@@ -112,6 +119,7 @@ pub struct RegressionFinding {
 
 /// Types of regressions that can be detected
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum RegressionType {
     /// Overall conformance score dropped significantly
     ConformanceScoreDrop,
@@ -129,6 +137,7 @@ pub enum RegressionType {
 
 /// Severity levels for regressions
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[allow(dead_code)]
 pub enum RegressionSeverity {
     /// Critical regression that should block releases
     Critical,
@@ -142,6 +151,7 @@ pub enum RegressionSeverity {
 
 /// Summary statistics for regression analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct RegressionSummary {
     /// Total number of regressions found
     pub total_regressions: usize,
@@ -155,6 +165,7 @@ pub struct RegressionSummary {
 
 /// Trend analysis for conformance over time
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ConformanceTrend {
     /// Conformance is improving over time
     Improving,
@@ -167,13 +178,17 @@ pub enum ConformanceTrend {
 }
 
 /// Main regression detection engine
+#[allow(dead_code)]
 pub struct RegressionDetector {
     config: RegressionConfig,
     calculator: CoverageMatrixCalculator,
 }
 
+#[allow(dead_code)]
+
 impl RegressionDetector {
     /// Create a new regression detector with the given configuration
+    #[allow(dead_code)]
     pub fn new(config: RegressionConfig) -> Self {
         Self {
             config,
@@ -182,11 +197,13 @@ impl RegressionDetector {
     }
 
     /// Create a regression detector with default configuration
+    #[allow(dead_code)]
     pub fn default() -> Self {
         Self::new(RegressionConfig::default())
     }
 
     /// Detect regressions by comparing current results against historical baseline
+    #[allow(dead_code)]
     pub fn detect_regressions(
         &self,
         current_matrix: &CoverageMatrix,
@@ -251,6 +268,7 @@ impl RegressionDetector {
     }
 
     /// Store a conformance snapshot for future regression detection
+    #[allow(dead_code)]
     pub fn store_snapshot(
         &self,
         coverage_matrix: &CoverageMatrix,
@@ -274,6 +292,7 @@ impl RegressionDetector {
     }
 
     /// Load historical conformance data from configured paths
+    #[allow(dead_code)]
     fn load_historical_data(&self) -> Result<Vec<ConformanceSnapshot>> {
         let mut snapshots = Vec::new();
 
@@ -297,6 +316,7 @@ impl RegressionDetector {
     }
 
     /// Calculate baseline metrics from historical data
+    #[allow(dead_code)]
     fn calculate_baseline(
         &self,
         historical_data: &[ConformanceSnapshot],
@@ -311,6 +331,7 @@ impl RegressionDetector {
     }
 
     /// Detect overall conformance score regression
+    #[allow(dead_code)]
     fn detect_score_regression(
         &self,
         current: &CoverageMatrix,
@@ -353,6 +374,7 @@ impl RegressionDetector {
     }
 
     /// Detect new test failures compared to baseline
+    #[allow(dead_code)]
     fn detect_new_test_failures(
         &self,
         current: &CoverageMatrix,
@@ -394,6 +416,7 @@ impl RegressionDetector {
     }
 
     /// Detect loss of critical section compliance
+    #[allow(dead_code)]
     fn detect_critical_compliance_loss(
         &self,
         current: &CoverageMatrix,
@@ -434,6 +457,7 @@ impl RegressionDetector {
     }
 
     /// Detect coverage decrease
+    #[allow(dead_code)]
     fn detect_coverage_decrease(
         &self,
         current: &CoverageMatrix,
@@ -477,6 +501,7 @@ impl RegressionDetector {
     }
 
     /// Calculate conformance trend from historical data
+    #[allow(dead_code)]
     fn calculate_trend(&self, historical_data: &[ConformanceSnapshot]) -> ConformanceTrend {
         if historical_data.len() < 3 {
             return ConformanceTrend::Insufficient;
@@ -506,6 +531,7 @@ impl RegressionDetector {
     }
 
     /// Build regression analysis summary
+    #[allow(dead_code)]
     fn build_summary(
         &self,
         regressions: &[RegressionFinding],
@@ -528,6 +554,7 @@ impl RegressionDetector {
     }
 
     /// Collect current build and environment information
+    #[allow(dead_code)]
     fn collect_build_info(&self) -> Result<BuildInfo> {
         let mut environment = HashMap::new();
 
@@ -557,6 +584,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_regression_config_default() {
         let config = RegressionConfig::default();
         assert_eq!(config.min_conformance_score, 0.95);
@@ -565,12 +593,14 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_build_info_default() {
         let build_info = BuildInfo::default();
         assert!(!build_info.target_platform.is_empty());
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_regression_detector_creation() {
         let config = RegressionConfig::default();
         let detector = RegressionDetector::new(config);
@@ -578,6 +608,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_conformance_trend_ordering() {
         assert!(RegressionSeverity::Critical > RegressionSeverity::High);
         assert!(RegressionSeverity::High > RegressionSeverity::Medium);
@@ -585,6 +616,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_store_snapshot() {
         use tempfile::NamedTempFile;
 

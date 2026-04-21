@@ -7,6 +7,7 @@ use std::time::Instant;
 
 /// Tracks resource usage to detect leaks during cancellation testing.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ResourceTracker {
     /// Current number of waker registrations.
     waker_count: AtomicUsize,
@@ -24,8 +25,11 @@ pub struct ResourceTracker {
     tracking_enabled: AtomicUsize, // 0 = disabled, 1 = enabled
 }
 
+#[allow(dead_code)]
+
 impl ResourceTracker {
     /// Create a new resource tracker.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             waker_count: AtomicUsize::new(0),
@@ -39,6 +43,7 @@ impl ResourceTracker {
     }
 
     /// Reset all tracking to current baseline.
+    #[allow(dead_code)]
     pub fn reset(&self) {
         let current_wakers = self.waker_count.load(Ordering::Acquire);
         let current_memory = self.memory_usage.load(Ordering::Acquire);
@@ -52,16 +57,19 @@ impl ResourceTracker {
     }
 
     /// Enable or disable tracking.
+    #[allow(dead_code)]
     pub fn set_tracking_enabled(&self, enabled: bool) {
         self.tracking_enabled.store(enabled as usize, Ordering::Release);
     }
 
     /// Check if tracking is enabled.
+    #[allow(dead_code)]
     pub fn is_tracking_enabled(&self) -> bool {
         self.tracking_enabled.load(Ordering::Acquire) != 0
     }
 
     /// Register a waker allocation.
+    #[allow(dead_code)]
     pub fn track_waker_allocation(&self) {
         if self.is_tracking_enabled() {
             self.waker_count.fetch_add(1, Ordering::Release);
@@ -70,6 +78,7 @@ impl ResourceTracker {
     }
 
     /// Register a waker deallocation.
+    #[allow(dead_code)]
     pub fn track_waker_deallocation(&self) {
         if self.is_tracking_enabled() {
             self.waker_count.fetch_sub(1, Ordering::Release);
@@ -78,6 +87,7 @@ impl ResourceTracker {
     }
 
     /// Register memory allocation.
+    #[allow(dead_code)]
     pub fn track_memory_allocation(&self, size: usize) {
         if self.is_tracking_enabled() {
             self.memory_usage.fetch_add(size, Ordering::Release);
@@ -86,6 +96,7 @@ impl ResourceTracker {
     }
 
     /// Register memory deallocation.
+    #[allow(dead_code)]
     pub fn track_memory_deallocation(&self, size: usize) {
         if self.is_tracking_enabled() {
             self.memory_usage.fetch_sub(size, Ordering::Release);
@@ -94,16 +105,19 @@ impl ResourceTracker {
     }
 
     /// Get current waker count.
+    #[allow(dead_code)]
     pub fn current_waker_count(&self) -> usize {
         self.waker_count.load(Ordering::Acquire)
     }
 
     /// Get current memory usage.
+    #[allow(dead_code)]
     pub fn current_memory_usage(&self) -> usize {
         self.memory_usage.load(Ordering::Acquire)
     }
 
     /// Get waker count delta from baseline.
+    #[allow(dead_code)]
     pub fn waker_count_delta(&self) -> isize {
         let current = self.waker_count.load(Ordering::Acquire) as isize;
         let baseline = self.baseline_waker_count.load(Ordering::Acquire) as isize;
@@ -111,6 +125,7 @@ impl ResourceTracker {
     }
 
     /// Get memory usage delta from baseline.
+    #[allow(dead_code)]
     pub fn memory_usage_delta(&self) -> isize {
         let current = self.memory_usage.load(Ordering::Acquire) as isize;
         let baseline = self.baseline_memory_usage.load(Ordering::Acquire) as isize;
@@ -118,6 +133,7 @@ impl ResourceTracker {
     }
 
     /// Assert that no resource leaks have occurred.
+    #[allow(dead_code)]
     pub fn assert_no_leaks(&self) -> Result<(), ResourceLeakError> {
         let waker_delta = self.waker_count_delta();
         let memory_delta = self.memory_usage_delta();
@@ -152,6 +168,7 @@ impl ResourceTracker {
     }
 
     /// Get detailed resource metrics.
+    #[allow(dead_code)]
     pub fn get_detailed_metrics(&self) -> HashMap<String, ResourceMetrics> {
         self.detailed_tracking
             .lock()
@@ -160,6 +177,7 @@ impl ResourceTracker {
     }
 
     /// Track a specific resource operation.
+    #[allow(dead_code)]
     fn track_resource(&self, resource_type: &str, amount: usize, operation: ResourceOperation) {
         if let Ok(mut tracking) = self.detailed_tracking.lock() {
             let metrics = tracking.entry(resource_type.to_string()).or_insert_with(ResourceMetrics::new);
@@ -184,6 +202,7 @@ impl ResourceTracker {
 }
 
 impl Default for ResourceTracker {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
@@ -191,6 +210,7 @@ impl Default for ResourceTracker {
 
 /// Detailed metrics for a specific resource type.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ResourceMetrics {
     /// Number of allocation operations.
     pub allocations: usize,
@@ -208,8 +228,11 @@ pub struct ResourceMetrics {
     pub last_operation: Option<(ResourceOperation, Instant)>,
 }
 
+#[allow(dead_code)]
+
 impl ResourceMetrics {
     /// Create new empty metrics.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             allocations: 0,
@@ -223,17 +246,20 @@ impl ResourceMetrics {
     }
 
     /// Check if this resource type is leaking.
+    #[allow(dead_code)]
     pub fn is_leaking(&self) -> bool {
         self.current_usage > 0
     }
 
     /// Get the leak amount.
+    #[allow(dead_code)]
     pub fn leak_amount(&self) -> usize {
         self.current_usage
     }
 }
 
 impl Default for ResourceMetrics {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
@@ -241,6 +267,7 @@ impl Default for ResourceMetrics {
 
 /// Type of resource operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ResourceOperation {
     Allocate,
     Deallocate,
@@ -248,6 +275,7 @@ pub enum ResourceOperation {
 
 /// Represents a detected resource leak.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ResourceLeak {
     /// Type of resource that leaked.
     pub resource_type: String,
@@ -260,6 +288,7 @@ pub struct ResourceLeak {
 }
 
 impl std::fmt::Display for ResourceLeak {
+    #[allow(dead_code)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} leak: {} units (baseline: {}, current: {})",
                self.resource_type, self.leaked_count, self.baseline_count, self.current_count)
@@ -268,12 +297,14 @@ impl std::fmt::Display for ResourceLeak {
 
 /// Error indicating resource leaks were detected.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ResourceLeakError {
     /// List of detected leaks.
     pub leaks: Vec<ResourceLeak>,
 }
 
 impl std::fmt::Display for ResourceLeakError {
+    #[allow(dead_code)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Resource leaks detected: ")?;
         for (i, leak) in self.leaks.iter().enumerate() {
@@ -289,6 +320,7 @@ impl std::fmt::Display for ResourceLeakError {
 impl std::error::Error for ResourceLeakError {}
 
 /// RAII guard for tracking resource usage within a scope.
+#[allow(dead_code)]
 pub struct ResourceTrackingScope<'a> {
     tracker: &'a ResourceTracker,
     initial_wakers: usize,
@@ -297,6 +329,7 @@ pub struct ResourceTrackingScope<'a> {
 
 impl<'a> ResourceTrackingScope<'a> {
     /// Create a new tracking scope.
+    #[allow(dead_code)]
     pub fn new(tracker: &'a ResourceTracker) -> Self {
         let initial_wakers = tracker.current_waker_count();
         let initial_memory = tracker.current_memory_usage();
@@ -309,6 +342,7 @@ impl<'a> ResourceTrackingScope<'a> {
     }
 
     /// Get the resource delta since scope creation.
+    #[allow(dead_code)]
     pub fn get_delta(&self) -> (isize, isize) {
         let current_wakers = self.tracker.current_waker_count() as isize;
         let current_memory = self.tracker.current_memory_usage() as isize;
@@ -320,6 +354,7 @@ impl<'a> ResourceTrackingScope<'a> {
     }
 
     /// Assert no leaks occurred in this scope.
+    #[allow(dead_code)]
     pub fn assert_no_leaks_in_scope(&self) -> Result<(), ResourceLeakError> {
         let (waker_delta, memory_delta) = self.get_delta();
         let mut leaks = Vec::new();
@@ -354,26 +389,31 @@ impl<'a> ResourceTrackingScope<'a> {
 static GLOBAL_TRACKER: std::sync::OnceLock<ResourceTracker> = std::sync::OnceLock::new();
 
 /// Get the global resource tracker instance.
+#[allow(dead_code)]
 pub fn global_tracker() -> &'static ResourceTracker {
     GLOBAL_TRACKER.get_or_init(ResourceTracker::new)
 }
 
 /// Convenience function to track waker allocation globally.
+#[allow(dead_code)]
 pub fn track_waker_allocation() {
     global_tracker().track_waker_allocation();
 }
 
 /// Convenience function to track waker deallocation globally.
+#[allow(dead_code)]
 pub fn track_waker_deallocation() {
     global_tracker().track_waker_deallocation();
 }
 
 /// Convenience function to track memory allocation globally.
+#[allow(dead_code)]
 pub fn track_memory_allocation(size: usize) {
     global_tracker().track_memory_allocation(size);
 }
 
 /// Convenience function to track memory deallocation globally.
+#[allow(dead_code)]
 pub fn track_memory_deallocation(size: usize) {
     global_tracker().track_memory_deallocation(size);
 }
@@ -385,6 +425,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    #[allow(dead_code)]
     fn test_resource_tracker_basic() {
         let tracker = ResourceTracker::new();
         tracker.reset();
@@ -410,6 +451,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_resource_tracking_scope() {
         let tracker = ResourceTracker::new();
         tracker.reset();
@@ -432,6 +474,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_detailed_metrics() {
         let tracker = ResourceTracker::new();
         tracker.reset();

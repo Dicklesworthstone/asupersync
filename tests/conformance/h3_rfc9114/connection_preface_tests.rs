@@ -16,6 +16,7 @@ use std::time::Instant;
 /// - Client MUST create control stream as first unidirectional stream (stream ID 2)
 /// - Client MUST send SETTINGS frame as first frame on control stream
 /// - Client MUST NOT send H3_DATAGRAM frames before receiving server SETTINGS with H3_DATAGRAM=1
+#[allow(dead_code)]
 pub fn test_h3_connection_preface_client() -> H3ConformanceResult {
     let start_time = Instant::now();
     let mut notes = Vec::new();
@@ -66,6 +67,7 @@ pub fn test_h3_connection_preface_client() -> H3ConformanceResult {
 /// - Server MUST process SETTINGS frame on control stream
 /// - Server MUST send its own SETTINGS frame response
 /// - Server MUST reject unknown stream types per Section 6.2
+#[allow(dead_code)]
 pub fn test_h3_connection_preface_server() -> H3ConformanceResult {
     let start_time = Instant::now();
     let mut notes = Vec::new();
@@ -122,6 +124,7 @@ pub fn test_h3_connection_preface_server() -> H3ConformanceResult {
 /// - SETTINGS frame MUST be first frame on control stream
 /// - SETTINGS frame MUST NOT appear on request/response streams
 /// - Duplicate SETTINGS frames MUST be treated as connection error
+#[allow(dead_code)]
 pub fn test_h3_control_stream_settings() -> H3ConformanceResult {
     let start_time = Instant::now();
     let mut notes = Vec::new();
@@ -171,6 +174,7 @@ pub fn test_h3_control_stream_settings() -> H3ConformanceResult {
 /// - Unknown unidirectional stream types MUST be ignored, not closed
 /// - Known stream types MUST be processed correctly
 /// - Stream type indicators MUST appear as first data on stream
+#[allow(dead_code)]
 pub fn test_h3_stream_type_validation() -> H3ConformanceResult {
     let start_time = Instant::now();
     let mut notes = Vec::new();
@@ -215,6 +219,7 @@ pub fn test_h3_stream_type_validation() -> H3ConformanceResult {
 }
 
 /// Run all connection preface tests.
+#[allow(dead_code)]
 pub fn run_connection_preface_tests() -> Vec<H3ConformanceResult> {
     vec![
         test_h3_connection_preface_client(),
@@ -227,6 +232,8 @@ pub fn run_connection_preface_tests() -> Vec<H3ConformanceResult> {
 // Private validation functions that would interact with actual H3 implementation
 // For now, these return true to allow compilation - actual implementation would
 // interact with the asupersync H3 stack
+
+#[allow(dead_code)]
 
 fn validate_client_control_stream_order() -> bool {
     // RFC 9114 §6.1: Client MUST create control stream as first unidirectional stream
@@ -242,6 +249,8 @@ fn validate_client_control_stream_order() -> bool {
         _ => false,
     }
 }
+
+#[allow(dead_code)]
 
 fn validate_client_settings_frame() -> bool {
     // RFC 9114 §6.1: Client MUST send SETTINGS frame as first frame on control stream
@@ -269,6 +278,8 @@ fn validate_client_settings_frame() -> bool {
     }
 }
 
+#[allow(dead_code)]
+
 fn validate_client_datagram_ordering() -> bool {
     // RFC 9114 §6.1: Client MUST NOT send H3_DATAGRAM frames before receiving
     // server SETTINGS frame with H3_DATAGRAM=1
@@ -290,6 +301,8 @@ fn validate_client_datagram_ordering() -> bool {
     !datagram_allowed // Should be true when datagrams are NOT allowed yet
 }
 
+#[allow(dead_code)]
+
 fn validate_server_accepts_control_stream() -> bool {
     // RFC 9114 §6.1: Server MUST accept control stream as first unidirectional stream
 
@@ -300,6 +313,8 @@ fn validate_server_accepts_control_stream() -> bool {
     // Server should properly recognize and accept control stream type
     matches!(decoded_type, H3UniStreamType::Control)
 }
+
+#[allow(dead_code)]
 
 fn validate_server_processes_settings() -> bool {
     // RFC 9114 §6.1: Server MUST process SETTINGS frame from client
@@ -331,6 +346,8 @@ fn validate_server_processes_settings() -> bool {
     }
 }
 
+#[allow(dead_code)]
+
 fn validate_server_sends_settings() -> bool {
     // RFC 9114 §6.1: Server MUST send its own SETTINGS frame in response
 
@@ -353,6 +370,8 @@ fn validate_server_sends_settings() -> bool {
         Err(_) => false,
     }
 }
+
+#[allow(dead_code)]
 
 fn validate_server_rejects_unknown_streams() -> bool {
     // RFC 9114 §6.2: Server MUST ignore unknown stream types, not close them
@@ -378,6 +397,8 @@ fn validate_server_rejects_unknown_streams() -> bool {
         && matches!(qpack_encoder_type, H3UniStreamType::QpackEncoder)
         && matches!(qpack_decoder_type, H3UniStreamType::QpackDecoder)
 }
+
+#[allow(dead_code)]
 
 fn validate_settings_frame_first() -> bool {
     // RFC 9114 §7.2.4: SETTINGS frame MUST be first frame on control stream
@@ -405,6 +426,8 @@ fn validate_settings_frame_first() -> bool {
     !control_stream_frames.is_empty() && control_stream_frames[0].0 == "SETTINGS"
 }
 
+#[allow(dead_code)]
+
 fn validate_no_settings_on_request_streams() -> bool {
     // RFC 9114 §7.2.4: SETTINGS frame MUST NOT appear on request/response streams
 
@@ -426,6 +449,8 @@ fn validate_no_settings_on_request_streams() -> bool {
     // In a real implementation, this would be enforced by the H3 protocol handler
     can_encode && !encoded.is_empty()
 }
+
+#[allow(dead_code)]
 
 fn validate_duplicate_settings_handling() -> bool {
     // RFC 9114 §7.2.4: Duplicate SETTINGS identifiers MUST cause connection error
@@ -450,6 +475,8 @@ fn validate_duplicate_settings_handling() -> bool {
     }
 }
 
+#[allow(dead_code)]
+
 fn validate_unknown_stream_preservation() -> bool {
     // RFC 9114 §6.2: Unknown unidirectional stream types MUST be ignored
 
@@ -469,6 +496,8 @@ fn validate_unknown_stream_preservation() -> bool {
 
     true
 }
+
+#[allow(dead_code)]
 
 fn validate_known_stream_processing() -> bool {
     // RFC 9114 §6.2: Known stream types MUST be processed correctly
@@ -490,6 +519,8 @@ fn validate_known_stream_processing() -> bool {
 
     true
 }
+
+#[allow(dead_code)]
 
 fn validate_stream_type_indicator_placement() -> bool {
     // RFC 9114 §6.2: Stream type indicator MUST be first data on unidirectional stream
@@ -523,6 +554,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_client_connection_preface() {
         let result = test_h3_connection_preface_client();
         assert_eq!(result.test_id, "RFC9114-6.1-CLIENT");
@@ -533,6 +565,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_server_connection_preface() {
         let result = test_h3_connection_preface_server();
         assert_eq!(result.test_id, "RFC9114-6.1-SERVER");
@@ -543,6 +576,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_settings_frame_ordering() {
         let result = test_h3_control_stream_settings();
         assert_eq!(result.test_id, "RFC9114-7.2.4-SETTINGS");
@@ -553,6 +587,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_stream_type_validation() {
         let result = test_h3_stream_type_validation();
         assert_eq!(result.test_id, "RFC9114-6.2-STREAM-TYPES");
@@ -563,6 +598,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_run_all_connection_preface_tests() {
         let results = run_connection_preface_tests();
         assert_eq!(results.len(), 4);

@@ -5,6 +5,7 @@ use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, LengthDelimitedCodec, LinesCodec};
 
 /// Run all error handling tests.
+#[allow(dead_code)]
 pub fn run_error_handling_tests() -> Vec<CodecConformanceResult> {
     let mut results = Vec::new();
 
@@ -15,6 +16,8 @@ pub fn run_error_handling_tests() -> Vec<CodecConformanceResult> {
 
     results
 }
+
+#[allow(dead_code)]
 
 fn test_malformed_length_handling() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -42,6 +45,8 @@ fn test_malformed_length_handling() -> CodecConformanceResult {
     )
 }
 
+#[allow(dead_code)]
+
 fn test_invalid_utf8_handling() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LinesCodec::new();
@@ -66,6 +71,8 @@ fn test_invalid_utf8_handling() -> CodecConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_buffer_underflow_handling() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -94,6 +101,8 @@ fn test_buffer_underflow_handling() -> CodecConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_decode_eof_partial_frame() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {

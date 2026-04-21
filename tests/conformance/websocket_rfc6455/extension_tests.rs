@@ -2,11 +2,15 @@
 
 use super::*;
 
+#[allow(dead_code)]
+
 pub fn run_extension_tests() -> Vec<WsConformanceResult> {
     let mut results = Vec::new();
     results.push(test_extension_negotiation());
     results
 }
+
+#[allow(dead_code)]
 
 fn test_extension_negotiation() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| Ok(()));

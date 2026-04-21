@@ -40,6 +40,7 @@ use std::sync::{Arc, Mutex};
 
 /// Test result for conformance verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct TcpListenerTestResult {
     pub test_id: String,
     pub description: String,
@@ -47,7 +48,10 @@ pub struct TcpListenerTestResult {
     pub error_message: Option<String>,
 }
 
+#[allow(dead_code)]
+
 impl TcpListenerTestResult {
+    #[allow(dead_code)]
     fn pass(test_id: &str, description: &str) -> Self {
         Self {
             test_id: test_id.to_string(),
@@ -56,6 +60,8 @@ impl TcpListenerTestResult {
             error_message: None,
         }
     }
+
+    #[allow(dead_code)]
 
     fn fail(test_id: &str, description: &str, error: &str) -> Self {
         Self {
@@ -74,6 +80,7 @@ impl TcpListenerTestResult {
 /// server restart scenarios where the server needs to rebind to the same
 /// port immediately after shutdown.
 #[test]
+#[allow(dead_code)]
 fn test_so_reuseaddr_allows_time_wait_rebinds() {
     // Get a free port for testing
     let addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
@@ -137,6 +144,7 @@ fn test_so_reuseaddr_allows_time_wait_rebinds() {
 /// them. This is a Linux-specific feature for connection load balancing.
 #[test]
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 fn test_so_reuseport_load_balancing() {
     let base_addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
 
@@ -179,6 +187,7 @@ fn test_so_reuseport_load_balancing() {
 /// socket's listen queue behavior. While the exact behavior is OS-dependent,
 /// the parameter should be respected within reasonable limits.
 #[test]
+#[allow(dead_code)]
 fn test_backlog_parameter_honored() {
     let addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
 
@@ -217,6 +226,7 @@ fn test_backlog_parameter_honored() {
 /// port from the ephemeral range and returning the actual assigned port via
 /// local_addr().
 #[test]
+#[allow(dead_code)]
 fn test_bind_port_zero_returns_os_assigned_port() {
     let mut assigned_ports = HashSet::new();
 
@@ -262,6 +272,7 @@ fn test_bind_port_zero_returns_os_assigned_port() {
 /// Validates that attempting to bind two sockets to the same address/port
 /// without SO_REUSEADDR or SO_REUSEPORT results in an address-in-use error.
 #[test]
+#[allow(dead_code)]
 fn test_double_bind_exclusive_socket_fails() {
     let addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
 
@@ -324,6 +335,7 @@ fn test_double_bind_exclusive_socket_fails() {
 }
 
 /// Helper to verify error is address-in-use related
+#[allow(dead_code)]
 fn assert_addr_in_use_error(error: &Error) {
     let is_addr_in_use = error.kind() == ErrorKind::AddrInUse
         || error.kind() == ErrorKind::PermissionDenied
@@ -338,6 +350,7 @@ fn assert_addr_in_use_error(error: &Error) {
 
 /// Mixed scenarios test: Combines multiple socket options
 #[test]
+#[allow(dead_code)]
 fn test_mixed_socket_option_scenarios() {
     let base_addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
 
@@ -383,6 +396,7 @@ fn test_mixed_socket_option_scenarios() {
 
 /// Comprehensive test runner for all TCP listener conformance tests
 #[test]
+#[allow(dead_code)]
 fn test_tcp_listener_rfc_conformance_comprehensive() {
     let mut results = Vec::new();
 
@@ -545,6 +559,7 @@ mod tests {
 
     /// Test the test result structure itself.
     #[test]
+    #[allow(dead_code)]
     fn test_tcp_listener_test_result_structure() {
         let pass_result = TcpListenerTestResult::pass("test-1", "Test description");
         assert!(pass_result.passed);
@@ -558,6 +573,7 @@ mod tests {
 
     /// Test socket creation and basic operations.
     #[test]
+    #[allow(dead_code)]
     fn test_socket_creation_and_binding() {
         let socket = TcpSocket::new_v4().expect("create IPv4 socket");
         let addr = "127.0.0.1:0".parse().expect("parse address");
@@ -571,6 +587,7 @@ mod tests {
 
     /// Test SO_REUSEADDR option setting.
     #[test]
+    #[allow(dead_code)]
     fn test_reuseaddr_option_setting() {
         let socket = TcpSocket::new_v4().expect("create socket");
         socket.set_reuseaddr(true).expect("set REUSEADDR");
@@ -581,6 +598,7 @@ mod tests {
     /// Test SO_REUSEPORT option setting (Unix only).
     #[test]
     #[cfg(unix)]
+    #[allow(dead_code)]
     fn test_reuseport_option_setting() {
         let socket = TcpSocket::new_v4().expect("create socket");
         socket.set_reuseport(true).expect("set REUSEPORT");
@@ -590,6 +608,7 @@ mod tests {
 
     /// Test IPv6 socket creation.
     #[test]
+    #[allow(dead_code)]
     fn test_ipv6_socket_creation() {
         let socket = TcpSocket::new_v6().expect("create IPv6 socket");
         let addr = "[::1]:0".parse().expect("parse IPv6 address");

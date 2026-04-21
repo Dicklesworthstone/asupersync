@@ -7,6 +7,7 @@ use asupersync::http::h2::frame::FrameType;
 use asupersync::http::h2::stream::StreamState;
 
 /// Run all stream conformance tests.
+#[allow(dead_code)]
 pub fn run_stream_tests() -> Vec<H2ConformanceResult> {
     let mut results = Vec::new();
 
@@ -23,6 +24,7 @@ pub fn run_stream_tests() -> Vec<H2ConformanceResult> {
 }
 
 /// RFC 7540 Section 5.1.1: Stream identifier requirements.
+#[allow(dead_code)]
 fn test_stream_id_requirements() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Stream IDs initiated by client MUST be odd
@@ -80,12 +82,14 @@ fn test_stream_id_requirements() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 5.1: Stream state machine transitions.
+#[allow(dead_code)]
 fn test_stream_state_transitions() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Test valid state transitions for HTTP/2 streams
         // This tests the logical state machine, not the actual implementation
 
         #[derive(Debug, Clone, Copy, PartialEq)]
+        #[allow(dead_code)]
         enum TestStreamState {
             Idle,
             ReservedLocal,
@@ -187,6 +191,7 @@ fn test_stream_state_transitions() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 5.1.2: Stream concurrency limits.
+#[allow(dead_code)]
 fn test_stream_concurrency_limits() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Test SETTINGS_MAX_CONCURRENT_STREAMS enforcement
@@ -240,6 +245,7 @@ fn test_stream_concurrency_limits() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 5.3: Stream dependencies and priority.
+#[allow(dead_code)]
 fn test_stream_dependency_validation() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Test stream dependency rules
@@ -278,6 +284,7 @@ fn test_stream_dependency_validation() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 5.3.2: Priority inheritance and weight.
+#[allow(dead_code)]
 fn test_stream_priority_inheritance() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Test stream priority and weight validation
@@ -328,6 +335,7 @@ fn test_stream_priority_inheritance() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 5.1: END_STREAM flag semantics.
+#[allow(dead_code)]
 fn test_end_stream_semantics() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // END_STREAM flag behavior validation
@@ -424,6 +432,7 @@ fn test_end_stream_semantics() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 5.1.1: Stream identifier space management.
+#[allow(dead_code)]
 fn test_stream_identifier_space() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Stream identifier space validation
@@ -474,6 +483,7 @@ fn test_stream_identifier_space() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 5.1.1: Stream creation order requirements.
+#[allow(dead_code)]
 fn test_stream_creation_order() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Stream creation must follow ordering rules

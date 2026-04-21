@@ -48,6 +48,7 @@ use std::time::{Duration, Instant};
 
 /// Test categories for SETTINGS frame conformance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// Initial SETTINGS frame exchange tests.
     InitialExchange,
@@ -65,6 +66,7 @@ pub enum TestCategory {
 
 /// Test result for SETTINGS frame conformance tests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct SettingsConformanceResult {
     /// Test category.
     pub category: TestCategory,
@@ -79,6 +81,7 @@ pub struct SettingsConformanceResult {
 }
 
 /// Mock connection for SETTINGS frame testing.
+#[allow(dead_code)]
 struct MockH2Connection {
     /// Connection state.
     state: ConnectionState,
@@ -94,8 +97,11 @@ struct MockH2Connection {
     settings_sent_time: Option<Instant>,
 }
 
+#[allow(dead_code)]
+
 impl MockH2Connection {
     /// Create a new mock connection.
+    #[allow(dead_code)]
     fn new() -> Self {
         Self {
             state: ConnectionState::Handshaking,
@@ -108,6 +114,7 @@ impl MockH2Connection {
     }
 
     /// Send initial SETTINGS frame.
+    #[allow(dead_code)]
     fn send_initial_settings(&mut self, settings: Vec<Setting>) -> Result<(), H2Error> {
         if self.initial_settings_sent {
             return Err(H2Error::new(
@@ -129,6 +136,7 @@ impl MockH2Connection {
     }
 
     /// Send SETTINGS ACK frame.
+    #[allow(dead_code)]
     fn send_settings_ack(&mut self) -> Result<(), H2Error> {
         let frame = SettingsFrame::ack();
         self.received_frames.push(Frame::Settings(frame));
@@ -137,6 +145,7 @@ impl MockH2Connection {
     }
 
     /// Process an incoming SETTINGS frame.
+    #[allow(dead_code)]
     fn process_settings_frame(&mut self, frame: SettingsFrame) -> Result<(), H2Error> {
         if frame.ack {
             if !frame.settings.is_empty() {
@@ -196,6 +205,7 @@ impl MockH2Connection {
     }
 
     /// Check if settings ACK timeout occurred.
+    #[allow(dead_code)]
     fn check_settings_ack_timeout(&self, timeout: Duration) -> bool {
         if let Some(sent_time) = self.settings_sent_time {
             !self.settings_ack_received && sent_time.elapsed() > timeout
@@ -210,6 +220,7 @@ impl MockH2Connection {
 /// SETTINGS frames MUST be sent as the first frame after connection preface
 /// in both directions. This test validates proper handshake sequencing.
 #[test]
+#[allow(dead_code)]
 fn test_initial_settings_first_frame_both_directions() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
 
@@ -269,6 +280,7 @@ fn test_initial_settings_first_frame_both_directions() -> Result<(), Box<dyn std
 /// Upon receiving a SETTINGS frame, an endpoint MUST send a SETTINGS ACK
 /// frame. This test validates ACK response timing requirements.
 #[test]
+#[allow(dead_code)]
 fn test_settings_ack_required_within_time_budget() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
 
@@ -313,6 +325,7 @@ fn test_settings_ack_required_within_time_budget() -> Result<(), Box<dyn std::er
 /// An endpoint that receives a SETTINGS frame with any unknown or unsupported
 /// identifier MUST ignore that setting.
 #[test]
+#[allow(dead_code)]
 fn test_unknown_settings_ids_ignored() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
 
@@ -378,6 +391,7 @@ fn test_unknown_settings_ids_ignored() -> Result<(), Box<dyn std::error::Error>>
 /// Values above the maximum flow-control window size of 2^31-1 MUST be
 /// treated as a connection error of type FLOW_CONTROL_ERROR.
 #[test]
+#[allow(dead_code)]
 fn test_invalid_settings_initial_window_size_flow_control_error() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
 
@@ -429,6 +443,7 @@ fn test_invalid_settings_initial_window_size_flow_control_error() -> Result<(), 
 /// allowed frame size (16,777,215). Values outside this range MUST be
 /// treated as a connection error of type PROTOCOL_ERROR.
 #[test]
+#[allow(dead_code)]
 fn test_settings_max_frame_size_bounds() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
 
@@ -497,6 +512,7 @@ fn test_settings_max_frame_size_bounds() -> Result<(), Box<dyn std::error::Error
 /// of 0. Receipt of a SETTINGS frame with the ACK flag set and a length
 /// field value other than 0 MUST be treated as a connection error.
 #[test]
+#[allow(dead_code)]
 fn test_settings_ack_flag_rejects_payload() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
 
@@ -551,6 +567,7 @@ fn test_settings_ack_flag_rejects_payload() -> Result<(), Box<dyn std::error::Er
 /// Tests the full SETTINGS negotiation sequence between client and server,
 /// validating proper handshake completion and settings application.
 #[test]
+#[allow(dead_code)]
 fn test_complete_settings_negotiation_handshake() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
 
@@ -617,6 +634,7 @@ fn test_complete_settings_negotiation_handshake() -> Result<(), Box<dyn std::err
 /// Validates that SETTINGS frame processing performs efficiently
 /// under typical and high-load scenarios.
 #[test]
+#[allow(dead_code)]
 fn test_settings_processing_performance() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
 

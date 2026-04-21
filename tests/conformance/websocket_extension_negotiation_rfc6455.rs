@@ -36,6 +36,7 @@ use std::time::Instant;
 
 /// Test result for a single extension negotiation conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct WsExtensionConformanceResult {
     pub test_id: String,
     pub description: String,
@@ -48,6 +49,7 @@ pub struct WsExtensionConformanceResult {
 
 /// Conformance test categories for WebSocket extension negotiation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// Sec-WebSocket-Extensions header processing
     ExtensionHeaderProcessing,
@@ -67,6 +69,7 @@ pub enum TestCategory {
 
 /// Protocol requirement level per RFC 2119.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // RFC 2119: MUST
     Should, // RFC 2119: SHOULD
@@ -75,6 +78,7 @@ pub enum RequirementLevel {
 
 /// Test execution result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -84,6 +88,7 @@ pub enum TestVerdict {
 
 /// Mock WebSocket extension negotiation for testing.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MockExtensionNegotiation {
     pub client_offered_extensions: Vec<String>,
     pub server_supported_extensions: Vec<String>,
@@ -91,8 +96,11 @@ pub struct MockExtensionNegotiation {
     pub negotiation_successful: bool,
 }
 
+#[allow(dead_code)]
+
 impl MockExtensionNegotiation {
     /// Create a new mock extension negotiation.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             client_offered_extensions: Vec::new(),
@@ -103,18 +111,21 @@ impl MockExtensionNegotiation {
     }
 
     /// Set client offered extensions.
+    #[allow(dead_code)]
     pub fn with_client_offers(mut self, extensions: Vec<String>) -> Self {
         self.client_offered_extensions = extensions;
         self
     }
 
     /// Set server supported extensions.
+    #[allow(dead_code)]
     pub fn with_server_support(mut self, extensions: Vec<String>) -> Self {
         self.server_supported_extensions = extensions;
         self
     }
 
     /// Set negotiated extensions result.
+    #[allow(dead_code)]
     pub fn with_negotiated(mut self, extensions: Vec<String>) -> Self {
         self.negotiation_successful = !extensions.is_empty();
         self.negotiated_extensions = extensions;
@@ -122,12 +133,14 @@ impl MockExtensionNegotiation {
     }
 
     /// Mark negotiation as successful.
+    #[allow(dead_code)]
     pub fn successful(mut self) -> Self {
         self.negotiation_successful = true;
         self
     }
 
     /// Simulate extension negotiation based on RFC rules.
+    #[allow(dead_code)]
     pub fn simulate_negotiation(&mut self) {
         let mut negotiated = Vec::new();
 
@@ -158,24 +171,30 @@ impl MockExtensionNegotiation {
     }
 
     /// Extract extension name from extension string (before first semicolon).
+    #[allow(dead_code)]
     fn extract_extension_name(extension: &str) -> &str {
         extension.split(';').next().unwrap_or("").trim()
     }
 }
 
 impl Default for MockExtensionNegotiation {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 /// WebSocket extension negotiation conformance test harness.
+#[allow(dead_code)]
 pub struct WsExtensionConformanceHarness {
     start_time: Instant,
 }
 
+#[allow(dead_code)]
+
 impl WsExtensionConformanceHarness {
     /// Create a new conformance test harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             start_time: Instant::now(),
@@ -183,6 +202,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Run all WebSocket extension negotiation conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<WsExtensionConformanceResult> {
         vec![
             self.test_extension_header_ordering_preserved(),
@@ -204,6 +224,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: Sec-WebSocket-Extensions header ordering MUST be preserved.
+    #[allow(dead_code)]
     fn test_extension_header_ordering_preserved(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -252,6 +273,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: Multiple extension headers are properly supported.
+    #[allow(dead_code)]
     fn test_multiple_extension_headers_supported(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -292,6 +314,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: permessage-deflate server_max_window_bits negotiation.
+    #[allow(dead_code)]
     fn test_permessage_deflate_server_max_window_bits(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -337,6 +360,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: permessage-deflate client_max_window_bits negotiation.
+    #[allow(dead_code)]
     fn test_permessage_deflate_client_max_window_bits(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -377,6 +401,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: permessage-deflate no_server_context_takeover parameter.
+    #[allow(dead_code)]
     fn test_permessage_deflate_no_server_context_takeover(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -418,6 +443,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: Unknown extensions MUST be gracefully rejected.
+    #[allow(dead_code)]
     fn test_unknown_extension_graceful_rejection(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -458,6 +484,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: Partial unknown extension handling.
+    #[allow(dead_code)]
     fn test_partial_unknown_extension_handling(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -500,6 +527,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: Multiple extensions compose correctly.
+    #[allow(dead_code)]
     fn test_multiple_extensions_compose_correctly(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -541,6 +569,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: Extension priority ordering is preserved.
+    #[allow(dead_code)]
     fn test_extension_priority_ordering(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -585,6 +614,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: Client/server parameter mismatch handling.
+    #[allow(dead_code)]
     fn test_client_server_parameter_mismatch(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -625,6 +655,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: Invalid parameter values are rejected.
+    #[allow(dead_code)]
     fn test_invalid_parameter_values_rejected(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -683,6 +714,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: Extension header injection protection.
+    #[allow(dead_code)]
     fn test_extension_header_injection_protection(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -722,6 +754,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: Malformed extension parameters are handled.
+    #[allow(dead_code)]
     fn test_malformed_extension_parameters(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -772,6 +805,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: Extension negotiation order preservation.
+    #[allow(dead_code)]
     fn test_extension_negotiation_order_preservation(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -824,6 +858,7 @@ impl WsExtensionConformanceHarness {
     }
 
     /// Test: Duplicate extension offers are handled.
+    #[allow(dead_code)]
     fn test_duplicate_extension_offers(&self) -> WsExtensionConformanceResult {
         let start = Instant::now();
 
@@ -862,6 +897,7 @@ impl WsExtensionConformanceHarness {
 }
 
 impl Default for WsExtensionConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
@@ -872,6 +908,7 @@ pub use WsExtensionConformanceResult as WsConformanceResult;
 
 // Tests that always run regardless of features
 #[test]
+#[allow(dead_code)]
 fn ws_extension_conformance_suite_availability() {
     println!("✓ WebSocket extension negotiation conformance test suite is available");
     println!(
@@ -885,6 +922,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_mock_extension_negotiation() {
         let mut mock = MockExtensionNegotiation::new()
             .with_client_offers(vec!["permessage-deflate".to_string()])
@@ -901,6 +939,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_conformance_harness_basic_functionality() {
         let harness = WsExtensionConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -928,6 +967,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_extension_name_extraction() {
         assert_eq!(
             MockExtensionNegotiation::extract_extension_name("permessage-deflate"),

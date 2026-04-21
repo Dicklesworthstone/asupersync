@@ -24,12 +24,16 @@ use crate::{TestRequest, TestResponse, StreamingTestRequest, StreamingTestRespon
 
 /// Conformance test service implementation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ConformanceTestService {
     server_id: String,
     request_counter: Arc<AtomicU32>,
 }
 
+#[allow(dead_code)]
+
 impl ConformanceTestService {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             server_id: Uuid::new_v4().to_string(),
@@ -295,23 +299,29 @@ impl ConformanceTestService {
 }
 
 impl Default for ConformanceTestService {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 /// Create and configure the conformance test service with all required methods
+#[allow(dead_code)]
 pub fn create_conformance_test_service() -> impl NamedService {
     ConformanceTestServiceWrapper::new()
 }
 
 /// Wrapper struct to implement the gRPC service traits
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ConformanceTestServiceWrapper {
     inner: ConformanceTestService,
 }
 
+#[allow(dead_code)]
+
 impl ConformanceTestServiceWrapper {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self {
             inner: ConformanceTestService::new(),
@@ -321,6 +331,8 @@ impl ConformanceTestServiceWrapper {
 
 impl NamedService for ConformanceTestServiceWrapper {
     const NAME: &'static str = "conformance.TestService";
+
+    #[allow(dead_code)]
 
     fn descriptor() -> ServiceDescriptor {
         ServiceDescriptor::new(Self::NAME)

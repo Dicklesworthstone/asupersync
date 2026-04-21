@@ -13,20 +13,28 @@ use std::time::{Duration, Instant};
 use std::thread;
 
 /// Test that MPSC send operations respond correctly to cancellation.
+#[allow(dead_code)]
 pub struct MpscSendCancelTest;
 
 impl CancelCorrectnessTest for MpscSendCancelTest {
+    #[allow(dead_code)]
     fn test_name(&self) -> &str {
         "mpsc_send_cancel_basic"
     }
+
+    #[allow(dead_code)]
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Mpsc
     }
 
+    #[allow(dead_code)]
+
     fn cancel_scenario(&self) -> CancelScenario {
         CancelScenario::SendCancel
     }
+
+    #[allow(dead_code)]
 
     fn run_test(&self, harness: &CancelTestHarness) -> CancelTestResult {
         let start = Instant::now();
@@ -78,8 +86,11 @@ impl CancelCorrectnessTest for MpscSendCancelTest {
     }
 }
 
+#[allow(dead_code)]
+
 impl MpscSendCancelTest {
     /// Test basic send operation cancellation.
+    #[allow(dead_code)]
     fn test_basic_send_cancel(&self, _harness: &CancelTestHarness) -> (bool, ProtocolViolation) {
         // Simulate MPSC channel creation and send cancellation
         // This is a mock implementation for demonstration
@@ -133,6 +144,7 @@ impl MpscSendCancelTest {
     }
 
     /// Test send cancellation when channel is under backpressure.
+    #[allow(dead_code)]
     fn test_send_cancel_with_backpressure(&self, _harness: &CancelTestHarness) -> (bool, ProtocolViolation) {
         // Simulate backpressure scenario where send blocks due to full channel
         // and then gets cancelled
@@ -178,6 +190,7 @@ impl MpscSendCancelTest {
     }
 
     /// Test concurrent send operations with some being cancelled.
+    #[allow(dead_code)]
     fn test_concurrent_send_cancel(&self, harness: &CancelTestHarness) -> (bool, ProtocolViolation) {
         let concurrency = harness.stress_config.concurrency_level;
         let total_operations = Arc::new(AtomicUsize::new(0));
@@ -235,6 +248,7 @@ impl MpscSendCancelTest {
     }
 
     /// Test reserve/commit pattern cancellation.
+    #[allow(dead_code)]
     fn test_reserve_commit_cancel(&self, _harness: &CancelTestHarness) -> (bool, ProtocolViolation) {
         // Test the two-phase reserve/commit pattern with cancellation
 
@@ -288,20 +302,28 @@ impl MpscSendCancelTest {
 }
 
 /// Test that MPSC send operations clean up properly when cancelled.
+#[allow(dead_code)]
 pub struct MpscSendCleanupTest;
 
 impl CancelCorrectnessTest for MpscSendCleanupTest {
+    #[allow(dead_code)]
     fn test_name(&self) -> &str {
         "mpsc_send_cancel_cleanup"
     }
+
+    #[allow(dead_code)]
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Mpsc
     }
 
+    #[allow(dead_code)]
+
     fn cancel_scenario(&self) -> CancelScenario {
         CancelScenario::SendCancel
     }
+
+    #[allow(dead_code)]
 
     fn run_test(&self, harness: &CancelTestHarness) -> CancelTestResult {
         let start = Instant::now();
@@ -326,7 +348,10 @@ impl CancelCorrectnessTest for MpscSendCleanupTest {
     }
 }
 
+#[allow(dead_code)]
+
 impl MpscSendCleanupTest {
+    #[allow(dead_code)]
     fn test_waker_cleanup_on_cancel(&self, _harness: &CancelTestHarness) -> (bool, ProtocolViolation) {
         // Mock test for waker cleanup
         // In real implementation, this would verify that wakers are properly
@@ -350,6 +375,8 @@ impl MpscSendCleanupTest {
         }
     }
 
+    #[allow(dead_code)]
+
     fn test_permit_cleanup_on_cancel(&self, _harness: &CancelTestHarness) -> (bool, ProtocolViolation) {
         // Mock test for permit cleanup during reserve cancellation
         // In real implementation, this would verify that reserved permits
@@ -364,20 +391,28 @@ impl MpscSendCleanupTest {
 }
 
 /// Test for MPSC send cancellation under high contention.
+#[allow(dead_code)]
 pub struct MpscSendContentionTest;
 
 impl CancelCorrectnessTest for MpscSendContentionTest {
+    #[allow(dead_code)]
     fn test_name(&self) -> &str {
         "mpsc_send_cancel_contention"
     }
+
+    #[allow(dead_code)]
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Mpsc
     }
 
+    #[allow(dead_code)]
+
     fn cancel_scenario(&self) -> CancelScenario {
         CancelScenario::SendCancel
     }
+
+    #[allow(dead_code)]
 
     fn run_test(&self, harness: &CancelTestHarness) -> CancelTestResult {
         let start = Instant::now();
@@ -396,7 +431,10 @@ impl CancelCorrectnessTest for MpscSendContentionTest {
     }
 }
 
+#[allow(dead_code)]
+
 impl MpscSendContentionTest {
+    #[allow(dead_code)]
     fn test_high_contention_cancel(&self, harness: &CancelTestHarness) -> (bool, ProtocolViolation) {
         let config = &harness.stress_config;
         let successful_cancels = Arc::new(AtomicUsize::new(0));
@@ -465,6 +503,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_mpsc_send_cancel_basic() {
         let harness = CancelTestHarness::new("test_mpsc_send");
         let test = MpscSendCancelTest;
@@ -477,6 +516,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mpsc_send_cleanup() {
         let harness = CancelTestHarness::new("test_mpsc_cleanup");
         let test = MpscSendCleanupTest;
@@ -488,6 +528,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mpsc_send_contention() {
         let harness = CancelTestHarness::new("test_mpsc_contention")
             .with_stress_config(crate::src::StressConfig {

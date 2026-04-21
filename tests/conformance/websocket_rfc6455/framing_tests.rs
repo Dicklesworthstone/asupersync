@@ -8,6 +8,7 @@ use asupersync::codec::{Decoder, Encoder};
 use asupersync::net::websocket::{Frame, FrameCodec, Opcode, apply_mask};
 
 /// Run all frame format conformance tests.
+#[allow(dead_code)]
 pub fn run_framing_tests() -> Vec<WsConformanceResult> {
     let mut results = Vec::new();
 
@@ -24,6 +25,7 @@ pub fn run_framing_tests() -> Vec<WsConformanceResult> {
 }
 
 /// RFC 6455 Section 5.2: Frame header format validation.
+#[allow(dead_code)]
 fn test_frame_header_format() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Frame header structure validation
@@ -67,6 +69,7 @@ fn test_frame_header_format() -> WsConformanceResult {
 }
 
 /// RFC 6455 Section 5.2: Opcode validation.
+#[allow(dead_code)]
 fn test_opcode_validation() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Test all defined opcodes
@@ -120,6 +123,7 @@ fn test_opcode_validation() -> WsConformanceResult {
 }
 
 /// RFC 6455 Section 5.2: Reserved bits validation.
+#[allow(dead_code)]
 fn test_reserved_bits() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Reserved bits (RSV1, RSV2, RSV3) must be 0 unless extension defines meaning
@@ -183,6 +187,7 @@ fn test_reserved_bits() -> WsConformanceResult {
 }
 
 /// RFC 6455 Section 5.2: Payload length encoding.
+#[allow(dead_code)]
 fn test_payload_length_encoding() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Test all payload length encodings
@@ -249,6 +254,7 @@ fn test_payload_length_encoding() -> WsConformanceResult {
 }
 
 /// RFC 6455 Section 5.3: Masking key format.
+#[allow(dead_code)]
 fn test_masking_key_format() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Test masking key handling
@@ -314,6 +320,7 @@ fn test_masking_key_format() -> WsConformanceResult {
 }
 
 /// RFC 6455 Section 5.5: Control frame constraints.
+#[allow(dead_code)]
 fn test_control_frame_constraints() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Control frames have specific constraints
@@ -391,6 +398,7 @@ fn test_control_frame_constraints() -> WsConformanceResult {
 }
 
 /// RFC 6455 Section 5.2: Data frame validation.
+#[allow(dead_code)]
 fn test_data_frame_validation() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Test data frame types: Text, Binary, Continuation
@@ -458,6 +466,7 @@ fn test_data_frame_validation() -> WsConformanceResult {
 }
 
 /// Frame size limit validation.
+#[allow(dead_code)]
 fn test_frame_size_limits() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Test frame size boundaries

@@ -49,6 +49,7 @@ use std::sync::{Arc, Mutex};
 
 /// Test result for UDP conformance verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct UdpSocketTestResult {
     pub test_id: String,
     pub description: String,
@@ -56,8 +57,11 @@ pub struct UdpSocketTestResult {
     pub error_message: Option<String>,
 }
 
+#[allow(dead_code)]
+
 impl UdpSocketTestResult {
     /// Create a successful test result.
+    #[allow(dead_code)]
     pub fn pass(test_id: &str, description: &str) -> Self {
         Self {
             test_id: test_id.to_string(),
@@ -68,6 +72,7 @@ impl UdpSocketTestResult {
     }
 
     /// Create a failed test result with error message.
+    #[allow(dead_code)]
     pub fn fail(test_id: &str, description: &str, error: &str) -> Self {
         Self {
             test_id: test_id.to_string(),
@@ -79,7 +84,10 @@ impl UdpSocketTestResult {
 }
 
 /// Comprehensive UDP socket conformance test suite.
+#[allow(dead_code)]
 pub struct UdpSocketConformanceTests;
+
+#[allow(dead_code)]
 
 impl UdpSocketConformanceTests {
     /// Run all UDP socket conformance tests.
@@ -467,6 +475,7 @@ mod tests {
     use asupersync::{region, Outcome};
 
     #[test]
+    #[allow(dead_code)]
     fn test_udp_socket_conformance_suite() {
         let mut runtime = LabRuntime::with_config(LabConfig::deterministic());
         let results = runtime.block_on(async {
@@ -507,6 +516,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_broadcast_permission() {
         let mut runtime = LabRuntime::with_config(LabConfig::deterministic());
         runtime.block_on(async {
@@ -519,6 +529,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_reuseaddr_multicast() {
         let mut runtime = LabRuntime::with_config(LabConfig::deterministic());
         runtime.block_on(async {
@@ -531,6 +542,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_pktinfo_control() {
         let mut runtime = LabRuntime::with_config(LabConfig::deterministic());
         runtime.block_on(async {
@@ -543,6 +555,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_msg_trunc() {
         let mut runtime = LabRuntime::with_config(LabConfig::deterministic());
         runtime.block_on(async {
@@ -555,6 +568,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_connected_icmp() {
         let mut runtime = LabRuntime::with_config(LabConfig::deterministic());
         runtime.block_on(async {

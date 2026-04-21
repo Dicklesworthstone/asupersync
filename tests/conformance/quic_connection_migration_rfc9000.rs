@@ -22,6 +22,7 @@ use std::time::Instant;
 /// Test categories for QUIC connection migration conformance.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum TestCategory {
     PathValidation,
     ConnectionIdRetirement,
@@ -35,6 +36,7 @@ pub enum TestCategory {
 /// Requirement levels from RFC 2119.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,
     Should,
@@ -44,6 +46,7 @@ pub enum RequirementLevel {
 /// Test verdict for individual conformance tests.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -53,6 +56,7 @@ pub enum TestVerdict {
 
 /// Result of a single conformance test.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(dead_code)]
 pub struct QuicConnectionMigrationConformanceResult {
     pub test_id: String,
     pub description: String,
@@ -65,6 +69,7 @@ pub struct QuicConnectionMigrationConformanceResult {
 
 /// Mock path validation framework for testing without real network infrastructure.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MockPathValidator {
     pub path_challenges: HashMap<u64, Vec<u8>>,
     pub path_responses: HashMap<u64, Vec<u8>>,
@@ -74,7 +79,10 @@ pub struct MockPathValidator {
     pub concurrent_migrations: Vec<(u64, u64)>,
 }
 
+#[allow(dead_code)]
+
 impl MockPathValidator {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             path_challenges: HashMap::new(),
@@ -87,11 +95,13 @@ impl MockPathValidator {
     }
 
     /// Simulate sending PATH_CHALLENGE frame per RFC 9000 §8.2.1
+    #[allow(dead_code)]
     pub fn send_path_challenge(&mut self, path_id: u64, challenge_data: Vec<u8>) {
         self.path_challenges.insert(path_id, challenge_data);
     }
 
     /// Simulate receiving PATH_RESPONSE frame per RFC 9000 §8.2.2
+    #[allow(dead_code)]
     pub fn receive_path_response(&mut self, path_id: u64, response_data: Vec<u8>) -> bool {
         if let Some(challenge) = self.path_challenges.get(&path_id) {
             if challenge == &response_data {
@@ -106,6 +116,7 @@ impl MockPathValidator {
     }
 
     /// Simulate anti-amplification limit enforcement per RFC 9000 §8.1
+    #[allow(dead_code)]
     pub fn check_anti_amplification_limit(&self, path_id: u64, bytes_to_send: u64) -> bool {
         let limit = self
             .anti_amplification_limits
@@ -115,21 +126,25 @@ impl MockPathValidator {
     }
 
     /// Set anti-amplification limit for a path
+    #[allow(dead_code)]
     pub fn set_anti_amplification_limit(&mut self, path_id: u64, limit: u64) {
         self.anti_amplification_limits.insert(path_id, limit);
     }
 
     /// Simulate source address change (NAT rebinding) per RFC 9000 §9.3
+    #[allow(dead_code)]
     pub fn simulate_source_address_change(&mut self, path_id: u64, new_address: String) {
         self.source_address_changes.insert(path_id, new_address);
     }
 
     /// Check if path is verified through PATH_CHALLENGE/PATH_RESPONSE exchange
+    #[allow(dead_code)]
     pub fn is_path_verified(&self, path_id: u64) -> bool {
         self.verified_paths.contains(&path_id)
     }
 
     /// Simulate concurrent migration from both endpoints
+    #[allow(dead_code)]
     pub fn simulate_concurrent_migration(&mut self, local_path_id: u64, remote_path_id: u64) {
         self.concurrent_migrations
             .push((local_path_id, remote_path_id));
@@ -138,13 +153,17 @@ impl MockPathValidator {
 
 /// Connection ID management mock for testing retirement per RFC 9000 §9.5
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MockConnectionIdManager {
     pub active_connection_ids: HashMap<u64, Vec<u8>>,
     pub retired_connection_ids: Vec<Vec<u8>>,
     pub retire_prior_to: u64,
 }
 
+#[allow(dead_code)]
+
 impl MockConnectionIdManager {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             active_connection_ids: HashMap::new(),
@@ -154,11 +173,13 @@ impl MockConnectionIdManager {
     }
 
     /// Add a new connection ID for a path
+    #[allow(dead_code)]
     pub fn add_connection_id(&mut self, path_id: u64, conn_id: Vec<u8>) {
         self.active_connection_ids.insert(path_id, conn_id);
     }
 
     /// Retire connection IDs prior to a given sequence number per RFC 9000 §19.16
+    #[allow(dead_code)]
     pub fn retire_connection_ids_prior_to(&mut self, retire_prior_to: u64) {
         self.retire_prior_to = retire_prior_to;
 
@@ -185,6 +206,7 @@ impl MockConnectionIdManager {
     }
 
     /// Check if a connection ID has been retired
+    #[allow(dead_code)]
     pub fn is_connection_id_retired(&self, conn_id: &[u8]) -> bool {
         self.retired_connection_ids
             .iter()
@@ -193,13 +215,17 @@ impl MockConnectionIdManager {
 }
 
 /// QUIC Connection Migration conformance test harness.
+#[allow(dead_code)]
 pub struct QuicConnectionMigrationConformanceHarness {
     path_validator: MockPathValidator,
     connection_id_manager: MockConnectionIdManager,
 }
 
+#[allow(dead_code)]
+
 impl QuicConnectionMigrationConformanceHarness {
     /// Create a new conformance test harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             path_validator: MockPathValidator::new(),
@@ -208,6 +234,7 @@ impl QuicConnectionMigrationConformanceHarness {
     }
 
     /// Run all QUIC connection migration conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<QuicConnectionMigrationConformanceResult> {
         let mut results = Vec::new();
 
@@ -229,6 +256,8 @@ impl QuicConnectionMigrationConformanceHarness {
         results
     }
 
+    #[allow(dead_code)]
+
     fn run_path_validation_tests(&self) -> Vec<QuicConnectionMigrationConformanceResult> {
         vec![
             self.test_path_challenge_response_exchange(),
@@ -238,6 +267,8 @@ impl QuicConnectionMigrationConformanceHarness {
         ]
     }
 
+    #[allow(dead_code)]
+
     fn run_connection_id_retirement_tests(&self) -> Vec<QuicConnectionMigrationConformanceResult> {
         vec![
             self.test_connection_id_retirement_after_migration(),
@@ -245,6 +276,8 @@ impl QuicConnectionMigrationConformanceHarness {
             self.test_connection_id_sequence_number_ordering(),
         ]
     }
+
+    #[allow(dead_code)]
 
     fn run_anti_amplification_tests(&self) -> Vec<QuicConnectionMigrationConformanceResult> {
         vec![
@@ -254,6 +287,8 @@ impl QuicConnectionMigrationConformanceHarness {
         ]
     }
 
+    #[allow(dead_code)]
+
     fn run_nat_rebinding_tests(&self) -> Vec<QuicConnectionMigrationConformanceResult> {
         vec![
             self.test_nat_rebinding_detection(),
@@ -261,6 +296,8 @@ impl QuicConnectionMigrationConformanceHarness {
             self.test_implicit_path_migration_on_nat_rebinding(),
         ]
     }
+
+    #[allow(dead_code)]
 
     fn run_concurrent_migration_tests(&self) -> Vec<QuicConnectionMigrationConformanceResult> {
         vec![
@@ -271,6 +308,8 @@ impl QuicConnectionMigrationConformanceHarness {
     }
 
     // Path Validation Tests
+
+    #[allow(dead_code)]
 
     fn test_path_challenge_response_exchange(&self) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
@@ -309,6 +348,8 @@ impl QuicConnectionMigrationConformanceHarness {
         result.execution_time_ms = start_time.elapsed().as_millis() as u64;
         result
     }
+
+    #[allow(dead_code)]
 
     fn test_path_validation_required_before_migration(
         &self,
@@ -356,6 +397,8 @@ impl QuicConnectionMigrationConformanceHarness {
         result
     }
 
+    #[allow(dead_code)]
+
     fn test_path_challenge_data_uniqueness(&self) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let mut result = QuicConnectionMigrationConformanceResult {
@@ -400,6 +443,8 @@ impl QuicConnectionMigrationConformanceHarness {
         result
     }
 
+    #[allow(dead_code)]
+
     fn test_path_validation_timeout_handling(&self) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let result = QuicConnectionMigrationConformanceResult {
@@ -418,6 +463,8 @@ impl QuicConnectionMigrationConformanceHarness {
     }
 
     // Connection ID Retirement Tests
+
+    #[allow(dead_code)]
 
     fn test_connection_id_retirement_after_migration(
         &self,
@@ -466,6 +513,8 @@ impl QuicConnectionMigrationConformanceHarness {
         result
     }
 
+    #[allow(dead_code)]
+
     fn test_retire_prior_to_frame_processing(&self) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let mut result = QuicConnectionMigrationConformanceResult {
@@ -512,6 +561,8 @@ impl QuicConnectionMigrationConformanceHarness {
         result
     }
 
+    #[allow(dead_code)]
+
     fn test_connection_id_sequence_number_ordering(
         &self,
     ) -> QuicConnectionMigrationConformanceResult {
@@ -532,6 +583,8 @@ impl QuicConnectionMigrationConformanceHarness {
     }
 
     // Anti-Amplification Tests
+
+    #[allow(dead_code)]
 
     fn test_anti_amplification_limit_enforcement(
         &self,
@@ -573,6 +626,8 @@ impl QuicConnectionMigrationConformanceHarness {
         result
     }
 
+    #[allow(dead_code)]
+
     fn test_three_times_rule_compliance(&self) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let mut result = QuicConnectionMigrationConformanceResult {
@@ -608,6 +663,8 @@ impl QuicConnectionMigrationConformanceHarness {
         result.execution_time_ms = start_time.elapsed().as_millis() as u64;
         result
     }
+
+    #[allow(dead_code)]
 
     fn test_anti_amplification_after_path_validation(
         &self,
@@ -656,6 +713,8 @@ impl QuicConnectionMigrationConformanceHarness {
 
     // NAT Rebinding Tests
 
+    #[allow(dead_code)]
+
     fn test_nat_rebinding_detection(&self) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let mut result = QuicConnectionMigrationConformanceResult {
@@ -693,6 +752,8 @@ impl QuicConnectionMigrationConformanceHarness {
         result
     }
 
+    #[allow(dead_code)]
+
     fn test_source_address_change_handling(&self) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let result = QuicConnectionMigrationConformanceResult {
@@ -707,6 +768,8 @@ impl QuicConnectionMigrationConformanceHarness {
 
         result
     }
+
+    #[allow(dead_code)]
 
     fn test_implicit_path_migration_on_nat_rebinding(
         &self,
@@ -728,6 +791,8 @@ impl QuicConnectionMigrationConformanceHarness {
     }
 
     // Concurrent Migration Tests
+
+    #[allow(dead_code)]
 
     fn test_concurrent_path_migration_both_endpoints(
         &self,
@@ -767,6 +832,8 @@ impl QuicConnectionMigrationConformanceHarness {
         result
     }
 
+    #[allow(dead_code)]
+
     fn test_migration_collision_resolution(&self) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let result = QuicConnectionMigrationConformanceResult {
@@ -783,6 +850,8 @@ impl QuicConnectionMigrationConformanceHarness {
 
         result
     }
+
+    #[allow(dead_code)]
 
     fn test_path_migration_race_condition_handling(
         &self,
@@ -803,12 +872,15 @@ impl QuicConnectionMigrationConformanceHarness {
 }
 
 impl Default for QuicConnectionMigrationConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 // Helper functions for testing
+
+#[allow(dead_code)]
 
 fn test_cx() -> Cx {
     Cx::new(
@@ -817,6 +889,8 @@ fn test_cx() -> Cx {
         Budget::INFINITE,
     )
 }
+
+#[allow(dead_code)]
 
 fn established_conn() -> NativeQuicConnection {
     let cx = test_cx();
@@ -833,6 +907,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_path_validator_basic_functionality() {
         let mut validator = MockPathValidator::new();
         let path_id = 1u64;
@@ -844,6 +919,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_connection_id_manager_retirement() {
         let mut manager = MockConnectionIdManager::new();
         let conn_id = vec![0xaa, 0xbb, 0xcc, 0xdd];
@@ -855,6 +931,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_anti_amplification_limit_checking() {
         let mut validator = MockPathValidator::new();
         let path_id = 1u64;
@@ -866,6 +943,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_conformance_harness_integration() {
         let harness = QuicConnectionMigrationConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -899,6 +977,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_all_bead_requirements_covered() {
         let harness = QuicConnectionMigrationConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -938,6 +1017,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_all_requirement_levels_represented() {
         let harness = QuicConnectionMigrationConformanceHarness::new();
         let results = harness.run_all_tests();

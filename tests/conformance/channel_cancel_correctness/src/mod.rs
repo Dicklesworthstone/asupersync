@@ -36,10 +36,14 @@ use std::time::Duration;
 
 /// Main entry point for running the complete channel cancellation protocol
 /// conformance test suite.
+#[allow(dead_code)]
 pub struct ChannelCancelCorrectnessRunner;
+
+#[allow(dead_code)]
 
 impl ChannelCancelCorrectnessRunner {
     /// Run the complete conformance test suite.
+    #[allow(dead_code)]
     pub fn run_complete_suite() -> ConformanceTestReport {
         let mut engine = CancelTestEngine::new();
 
@@ -64,6 +68,7 @@ impl ChannelCancelCorrectnessRunner {
     }
 
     /// Run a quick smoke test subset.
+    #[allow(dead_code)]
     pub fn run_smoke_tests() -> ConformanceTestReport {
         let mut engine = CancelTestEngine::new();
 
@@ -86,6 +91,7 @@ impl ChannelCancelCorrectnessRunner {
     }
 
     /// Register all conformance tests.
+    #[allow(dead_code)]
     fn register_all_tests(engine: &mut CancelTestEngine) {
         // MPSC tests
         Self::register_mpsc_tests(engine);
@@ -107,39 +113,46 @@ impl ChannelCancelCorrectnessRunner {
     }
 
     /// Register smoke tests only.
+    #[allow(dead_code)]
     fn register_smoke_tests(engine: &mut CancelTestEngine) {
         // Just the basic cancellation tests for each channel type
         // Implementation would go here
     }
 
     /// Register MPSC channel tests.
+    #[allow(dead_code)]
     fn register_mpsc_tests(engine: &mut CancelTestEngine) {
         // Implementation would go here
         // This would add specific test implementations for MPSC channels
     }
 
     /// Register broadcast channel tests.
+    #[allow(dead_code)]
     fn register_broadcast_tests(engine: &mut CancelTestEngine) {
         // Implementation would go here
     }
 
     /// Register watch channel tests.
+    #[allow(dead_code)]
     fn register_watch_tests(engine: &mut CancelTestEngine) {
         // Implementation would go here
     }
 
     /// Register oneshot channel tests.
+    #[allow(dead_code)]
     fn register_oneshot_tests(engine: &mut CancelTestEngine) {
         // Implementation would go here
     }
 
     /// Register cross-channel interaction tests.
+    #[allow(dead_code)]
     fn register_cross_channel_tests(engine: &mut CancelTestEngine) {
         // Tests for interactions between different channel types
         // Implementation would go here
     }
 
     /// Register stress tests.
+    #[allow(dead_code)]
     fn register_stress_tests(engine: &mut CancelTestEngine) {
         // High-concurrency stress testing scenarios
         // Implementation would go here
@@ -151,6 +164,7 @@ pub mod utils {
     use super::*;
 
     /// Create a standard test harness for channel testing.
+    #[allow(dead_code)]
     pub fn create_test_harness(test_id: &str) -> CancelTestHarness {
         CancelTestHarness::new(test_id)
             .with_timeout(Duration::from_secs(30))
@@ -159,6 +173,7 @@ pub mod utils {
     }
 
     /// Create a high-stress test harness.
+    #[allow(dead_code)]
     pub fn create_stress_harness(test_id: &str) -> CancelTestHarness {
         CancelTestHarness::new(test_id)
             .with_timeout(Duration::from_secs(120))
@@ -171,6 +186,7 @@ pub mod utils {
     }
 
     /// Check if test results meet quality thresholds.
+    #[allow(dead_code)]
     pub fn validate_test_quality(result: &CancelTestResult) -> Vec<String> {
         let mut issues = Vec::new();
 
@@ -201,6 +217,7 @@ pub mod utils {
     }
 
     /// Generate a comprehensive test report.
+    #[allow(dead_code)]
     pub fn generate_detailed_report(report: &ConformanceTestReport) -> String {
         let mut output = String::new();
 
@@ -267,6 +284,7 @@ pub mod utils {
     }
 
     /// Extract channel type from test ID.
+    #[allow(dead_code)]
     fn extract_channel_type_from_id(test_id: &str) -> Option<ChannelType> {
         if test_id.contains("mpsc") {
             Some(ChannelType::Mpsc)
@@ -287,6 +305,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_smoke_test_suite() {
         let report = ChannelCancelCorrectnessRunner::run_smoke_tests();
 
@@ -297,6 +316,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_harness_creation() {
         let harness = utils::create_test_harness("test_harness");
         assert_eq!(harness.test_id, "test_harness");
@@ -304,6 +324,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_stress_harness_creation() {
         let harness = utils::create_stress_harness("stress_test");
         assert_eq!(harness.stress_config.concurrency_level, 16);
@@ -311,6 +332,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_report_generation() {
         let mut results = HashMap::new();
         let test_result = CancelTestResult::new(true, Duration::from_millis(100));

@@ -50,16 +50,19 @@ thread_local! {
 }
 
 /// Set the test time for deterministic testing.
+#[allow(dead_code)]
 fn set_test_time(nanos: u64) {
     TEST_NOW.with(|now| now.set(nanos));
 }
 
 /// Get current test time.
+#[allow(dead_code)]
 fn test_time() -> Time {
     Time::from_nanos(TEST_NOW.with(Cell::get))
 }
 
 /// Advance test time by the given duration.
+#[allow(dead_code)]
 fn advance_time(duration: Duration) {
     let current = TEST_NOW.with(Cell::get);
     let new_time = current.saturating_add(duration.as_nanos() as u64);
@@ -67,11 +70,13 @@ fn advance_time(duration: Duration) {
 }
 
 /// Create a test cache with deterministic time.
+#[allow(dead_code)]
 fn test_cache(config: CacheConfig) -> DnsCache {
     DnsCache::with_time_getter(config, test_time)
 }
 
 /// Create a sample IP lookup result.
+#[allow(dead_code)]
 fn sample_lookup(addresses: &[&str], ttl_secs: u64) -> LookupIp {
     let addrs: Vec<IpAddr> = addresses
         .iter()
@@ -82,6 +87,7 @@ fn sample_lookup(addresses: &[&str], ttl_secs: u64) -> LookupIp {
 
 /// Simulated SOA record for testing negative caching per RFC 2308.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct SoaRecord {
     /// TTL of the SOA record itself
     pub ttl: Duration,
@@ -89,8 +95,11 @@ struct SoaRecord {
     pub minimum: Duration,
 }
 
+#[allow(dead_code)]
+
 impl SoaRecord {
     /// Compute negative cache TTL per RFC 2308: MIN(SOA.TTL, SOA.MINIMUM)
+    #[allow(dead_code)]
     pub fn negative_cache_ttl(&self) -> Duration {
         self.ttl.min(self.minimum)
     }
@@ -100,11 +109,15 @@ impl SoaRecord {
 ///
 /// This simulates RFC 2308 behavior by creating separate cache instances
 /// with appropriate negative_ttl configuration to represent SOA.MINIMUM values.
+#[allow(dead_code)]
 struct ExtendedDnsCache {
     cache: DnsCache,
 }
 
+#[allow(dead_code)]
+
 impl ExtendedDnsCache {
+    #[allow(dead_code)]
     fn new(config: CacheConfig) -> Self {
         Self {
             cache: test_cache(config),
@@ -116,6 +129,7 @@ impl ExtendedDnsCache {
     /// Since the current DnsCache doesn't have full SOA support, this simulates
     /// RFC 2308 behavior by creating a cache with the appropriate negative_ttl
     /// configuration that matches the computed SOA minimum.
+    #[allow(dead_code)]
     fn put_negative_with_soa(&self, host: &str, soa: &SoaRecord) -> Self {
         let negative_ttl = soa.negative_cache_ttl();
 
@@ -133,26 +147,31 @@ impl ExtendedDnsCache {
     }
 
     /// Get IP result including negative cache entries.
+    #[allow(dead_code)]
     fn get_ip_result(&self, host: &str) -> Option<Result<LookupIp, DnsError>> {
         self.cache.get_ip_result(host)
     }
 
     /// Get cache statistics.
+    #[allow(dead_code)]
     fn stats(&self) -> CacheStats {
         self.cache.stats()
     }
 
     /// Put positive IP result.
+    #[allow(dead_code)]
     fn put_ip(&self, host: &str, lookup: &LookupIp) {
         self.cache.put_ip(host, lookup);
     }
 
     /// Check if entry exists (for TTL testing).
+    #[allow(dead_code)]
     fn contains(&self, host: &str) -> bool {
         self.cache.get_ip_result(host).is_some()
     }
 
     /// Clear all cache entries.
+    #[allow(dead_code)]
     fn clear(&self) {
         self.cache.clear();
     }
@@ -167,6 +186,7 @@ impl ExtendedDnsCache {
 /// Per RFC 2308 Section 5, cached entries must have their TTL decremented
 /// as time passes, and entries become invalid when TTL reaches zero.
 #[test]
+#[allow(dead_code)]
 fn mr1_positive_ttl_decremented_on_access() {
     // Initialize test time
     set_test_time(0);
@@ -209,6 +229,7 @@ fn mr1_positive_ttl_decremented_on_access() {
 /// Expired entries must be automatically detected and removed during lookup,
 /// not just periodically cleaned up.
 #[test]
+#[allow(dead_code)]
 fn mr2_expired_entries_removed_on_lookup() {
     set_test_time(0);
 
@@ -251,6 +272,7 @@ fn mr2_expired_entries_removed_on_lookup() {
 ///
 /// RFC 2308 Section 4: negative cache TTL is minimum of SOA TTL and SOA MINIMUM field.
 #[test]
+#[allow(dead_code)]
 fn mr3_negative_ttl_per_soa_minimum() {
     set_test_time(0);
 
@@ -331,6 +353,7 @@ fn mr3_negative_ttl_per_soa_minimum() {
 /// The SOA record's MINIMUM field controls how long negative responses are cached,
 /// overriding default negative_ttl configuration.
 #[test]
+#[allow(dead_code)]
 fn mr4_soa_record_drives_negative_cache_duration() {
     set_test_time(0);
 
@@ -397,6 +420,7 @@ fn mr4_soa_record_drives_negative_cache_duration() {
 /// When cache reaches max capacity, oldest entries (by insertion time) are evicted
 /// to make room for new entries, implementing LRU (Least Recently Used) semantics.
 #[test]
+#[allow(dead_code)]
 fn mr5_cache_capacity_lru_evicts_oldest() {
     set_test_time(0);
 
@@ -473,6 +497,7 @@ fn mr5_cache_capacity_lru_evicts_oldest() {
 ///
 /// Tests all conformance properties together to ensure they work in combination.
 #[test]
+#[allow(dead_code)]
 fn comprehensive_rfc_2308_integration() {
     set_test_time(0);
 

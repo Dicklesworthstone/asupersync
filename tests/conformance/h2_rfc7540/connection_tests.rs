@@ -5,6 +5,7 @@
 use super::*;
 
 /// Run all connection management conformance tests.
+#[allow(dead_code)]
 pub fn run_connection_tests() -> Vec<H2ConformanceResult> {
     let mut results = Vec::new();
 
@@ -21,6 +22,7 @@ pub fn run_connection_tests() -> Vec<H2ConformanceResult> {
 }
 
 /// RFC 7540 Section 3.5: HTTP/2 connection preface.
+#[allow(dead_code)]
 fn test_connection_preface() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // HTTP/2 connection preface sequence
@@ -77,6 +79,7 @@ fn test_connection_preface() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 3.2: HTTP/2 version identification.
+#[allow(dead_code)]
 fn test_http2_identification() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // HTTP/2 version identification in ALPN
@@ -134,6 +137,7 @@ fn test_http2_identification() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 3.2: Connection header processing.
+#[allow(dead_code)]
 fn test_connection_header_processing() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // HTTP/1.1 specific headers that must be removed in HTTP/2
@@ -211,6 +215,7 @@ fn test_connection_header_processing() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 3.2: HTTP/1.1 to HTTP/2 upgrade.
+#[allow(dead_code)]
 fn test_connection_upgrade_from_http1() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // HTTP/1.1 Upgrade mechanism for HTTP/2
@@ -287,6 +292,7 @@ fn test_connection_upgrade_from_http1() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 3.4: Prior knowledge connection establishment.
+#[allow(dead_code)]
 fn test_prior_knowledge_connection() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Prior knowledge connection setup
@@ -351,6 +357,7 @@ fn test_prior_knowledge_connection() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 6.8: Connection termination with GOAWAY.
+#[allow(dead_code)]
 fn test_connection_termination() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Connection termination scenarios
@@ -421,6 +428,7 @@ fn test_connection_termination() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 6.8: GOAWAY frame processing.
+#[allow(dead_code)]
 fn test_goaway_frame_processing() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // GOAWAY frame structure validation
@@ -491,6 +499,7 @@ fn test_goaway_frame_processing() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 5.4.1: Connection error handling.
+#[allow(dead_code)]
 fn test_connection_error_handling() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Connection errors vs stream errors

@@ -19,6 +19,7 @@ use std::time::Duration;
 
 /// RFC 6330 requirement levels from the specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,
     Should,
@@ -26,6 +27,7 @@ pub enum RequirementLevel {
 }
 
 impl std::fmt::Display for RequirementLevel {
+    #[allow(dead_code)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RequirementLevel::Must => write!(f, "MUST"),
@@ -36,6 +38,7 @@ impl std::fmt::Display for RequirementLevel {
 }
 
 /// A conformance test case mapped to a specific RFC 6330 requirement.
+#[allow(dead_code)]
 pub struct Rfc6330ConformanceCase {
     /// Unique identifier for the test case (e.g., "RFC6330-4.2.1").
     pub id: &'static str,
@@ -50,6 +53,7 @@ pub struct Rfc6330ConformanceCase {
 }
 
 /// Context provided to conformance test functions.
+#[allow(dead_code)]
 pub struct ConformanceContext {
     /// Test configuration parameters.
     pub config: ConformanceConfig,
@@ -61,6 +65,7 @@ pub struct ConformanceContext {
 
 /// Configuration for conformance testing.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ConformanceConfig {
     /// Object sizes to test (in symbols).
     pub test_object_sizes: Vec<usize>,
@@ -77,6 +82,7 @@ pub struct ConformanceConfig {
 }
 
 impl Default for ConformanceConfig {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             test_object_sizes: vec![10, 100, 1000, 10000],
@@ -96,6 +102,7 @@ impl Default for ConformanceConfig {
 
 /// Different loss patterns for testing decode scenarios.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum LossPattern {
     /// No symbol loss.
     None,
@@ -108,6 +115,7 @@ pub enum LossPattern {
 }
 
 /// Result from executing a conformance test case.
+#[allow(dead_code)]
 pub struct ConformanceResult {
     /// Whether the test passed.
     pub passed: bool,
@@ -121,8 +129,11 @@ pub struct ConformanceResult {
     pub details: Vec<String>,
 }
 
+#[allow(dead_code)]
+
 impl ConformanceResult {
     /// Create a new passing result.
+    #[allow(dead_code)]
     pub fn pass() -> Self {
         Self {
             passed: true,
@@ -134,6 +145,7 @@ impl ConformanceResult {
     }
 
     /// Create a new failing result with error message.
+    #[allow(dead_code)]
     pub fn fail(message: impl Into<String>) -> Self {
         Self {
             passed: false,
@@ -145,18 +157,21 @@ impl ConformanceResult {
     }
 
     /// Add a metric to the result.
+    #[allow(dead_code)]
     pub fn with_metric(mut self, name: impl Into<String>, value: f64) -> Self {
         self.metrics.insert(name.into(), value);
         self
     }
 
     /// Add a detail message to the result.
+    #[allow(dead_code)]
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.details.push(detail.into());
         self
     }
 
     /// Set the test duration.
+    #[allow(dead_code)]
     pub fn with_duration(mut self, duration: Duration) -> Self {
         self.duration = duration;
         self
@@ -164,6 +179,7 @@ impl ConformanceResult {
 }
 
 /// Comprehensive test suite runner for RFC 6330 conformance.
+#[allow(dead_code)]
 pub struct Rfc6330ConformanceSuite {
     /// All registered test cases.
     test_cases: Vec<Rfc6330ConformanceCase>,
@@ -173,8 +189,11 @@ pub struct Rfc6330ConformanceSuite {
     fail_fast: bool,
 }
 
+#[allow(dead_code)]
+
 impl Rfc6330ConformanceSuite {
     /// Create a new conformance test suite.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         let mut suite = Self {
             test_cases: Vec::new(),
@@ -188,18 +207,21 @@ impl Rfc6330ConformanceSuite {
     }
 
     /// Configure the test suite.
+    #[allow(dead_code)]
     pub fn with_config(mut self, config: ConformanceConfig) -> Self {
         self.config = config;
         self
     }
 
     /// Enable or disable fail-fast behavior.
+    #[allow(dead_code)]
     pub fn with_fail_fast(mut self, fail_fast: bool) -> Self {
         self.fail_fast = fail_fast;
         self
     }
 
     /// Run all conformance tests.
+    #[allow(dead_code)]
     pub fn run_all(&self) -> ConformanceReport {
         let start_time = std::time::Instant::now();
         let mut results = HashMap::new();
@@ -246,6 +268,7 @@ impl Rfc6330ConformanceSuite {
     }
 
     /// Run only tests for a specific requirement level.
+    #[allow(dead_code)]
     pub fn run_by_level(&self, level: RequirementLevel) -> ConformanceReport {
         let filtered_tests: Vec<_> = self.test_cases
             .iter()
@@ -285,6 +308,7 @@ impl Rfc6330ConformanceSuite {
     }
 
     /// Register all test cases from the different modules.
+    #[allow(dead_code)]
     fn register_all_tests(&mut self) {
         // Parameter derivation tests
         crate::parameter_derivation::register_tests(self);
@@ -300,18 +324,21 @@ impl Rfc6330ConformanceSuite {
     }
 
     /// Add a test case to the suite.
+    #[allow(dead_code)]
     pub fn add_test_case(&mut self, test_case: Rfc6330ConformanceCase) {
         self.test_cases.push(test_case);
     }
 }
 
 impl Default for Rfc6330ConformanceSuite {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 /// Report from running the RFC 6330 conformance test suite.
+#[allow(dead_code)]
 pub struct ConformanceReport {
     /// Total number of tests executed.
     pub total_tests: usize,
@@ -325,8 +352,11 @@ pub struct ConformanceReport {
     pub results: HashMap<String, (Rfc6330ConformanceCase, ConformanceResult)>,
 }
 
+#[allow(dead_code)]
+
 impl ConformanceReport {
     /// Calculate the overall pass rate.
+    #[allow(dead_code)]
     pub fn pass_rate(&self) -> f64 {
         if self.total_tests == 0 {
             1.0
@@ -336,6 +366,7 @@ impl ConformanceReport {
     }
 
     /// Get compliance score by requirement level.
+    #[allow(dead_code)]
     pub fn compliance_score_by_level(&self) -> HashMap<RequirementLevel, f64> {
         let mut scores = HashMap::new();
 
@@ -360,6 +391,7 @@ impl ConformanceReport {
     }
 
     /// Print a detailed report.
+    #[allow(dead_code)]
     pub fn print_detailed_report(&self) {
         println!("=== RFC 6330 CONFORMANCE TEST REPORT ===");
         println!("Total Tests: {}", self.total_tests);
@@ -424,6 +456,7 @@ impl ConformanceReport {
 }
 
 impl Clone for Rfc6330ConformanceCase {
+    #[allow(dead_code)]
     fn clone(&self) -> Self {
         Self {
             id: self.id,
@@ -440,6 +473,7 @@ pub mod utils {
     use super::*;
 
     /// Generate test object sizes covering edge cases.
+    #[allow(dead_code)]
     pub fn generate_test_object_sizes() -> Vec<usize> {
         let mut sizes = vec![
             1, 2, 3, 4, 5,           // Very small
@@ -456,6 +490,7 @@ pub mod utils {
     }
 
     /// Generate test symbol sizes covering typical use cases.
+    #[allow(dead_code)]
     pub fn generate_test_symbol_sizes() -> Vec<usize> {
         vec![
             1, 4, 8, 16, 32,         // Small symbols
@@ -466,26 +501,35 @@ pub mod utils {
     }
 
     /// Create a deterministic pseudo-random number generator.
+    #[allow(dead_code)]
     pub fn create_test_rng(seed: u64) -> TestRng {
         TestRng::new(seed)
     }
 }
 
 /// Simple deterministic RNG for testing.
+#[allow(dead_code)]
 pub struct TestRng {
     state: u64,
 }
 
+#[allow(dead_code)]
+
 impl TestRng {
+    #[allow(dead_code)]
     pub fn new(seed: u64) -> Self {
         Self { state: seed }
     }
+
+    #[allow(dead_code)]
 
     pub fn next_u32(&mut self) -> u32 {
         // Linear congruential generator
         self.state = self.state.wrapping_mul(1103515245).wrapping_add(12345);
         (self.state >> 16) as u32
     }
+
+    #[allow(dead_code)]
 
     pub fn next_f64(&mut self) -> f64 {
         self.next_u32() as f64 / u32::MAX as f64

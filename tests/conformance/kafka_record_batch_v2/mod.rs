@@ -36,6 +36,7 @@ mod tests {
 
     /// Run the complete KIP-98 RecordBatch v2 conformance test suite.
     #[test]
+    #[allow(dead_code)]
     fn kip98_record_batch_v2_complete_conformance_suite() {
         let harness = KafkaConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -81,6 +82,7 @@ mod tests {
 
     /// Validate test infrastructure is working correctly.
     #[test]
+    #[allow(dead_code)]
     fn validate_conformance_infrastructure() {
         let harness = KafkaConformanceHarness::new();
 

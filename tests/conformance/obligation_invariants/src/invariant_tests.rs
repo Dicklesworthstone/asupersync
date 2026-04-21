@@ -14,20 +14,35 @@ use std::time::{Duration, Instant};
 // ============================================================================
 
 /// Test that every created obligation is properly resolved or cancelled
+#[allow(dead_code)]
 pub struct NoObligationLeaksTest;
 
 impl ObligationInvariantTest for NoObligationLeaksTest {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &'static str {
         "No Obligation Leaks"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
         InvariantTestCategory::NoLeakValidation
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn description(&self) -> &'static str {
         "Every created obligation must be properly resolved or cancelled - no leaked obligations"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn run_test(&self, ctx: &ObligationTestContext) -> InvariantTestResult {
         let start = Instant::now();
@@ -118,9 +133,17 @@ impl ObligationInvariantTest for NoObligationLeaksTest {
         }
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
         tracker.check_obligation_leaks().is_empty()
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn tags(&self) -> Vec<&str> {
         vec!["core", "leak-detection", "lifecycle"]
@@ -132,20 +155,35 @@ impl ObligationInvariantTest for NoObligationLeaksTest {
 // ============================================================================
 
 /// Test that region closure waits for all obligations to complete
+#[allow(dead_code)]
 pub struct RegionQuiescenceTest;
 
 impl ObligationInvariantTest for RegionQuiescenceTest {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &'static str {
         "Region Close = Quiescence"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
         InvariantTestCategory::RegionQuiescence
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn description(&self) -> &'static str {
         "Region closure must wait for all obligations to complete before closing"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn run_test(&self, ctx: &ObligationTestContext) -> InvariantTestResult {
         let start = Instant::now();
@@ -238,10 +276,18 @@ impl ObligationInvariantTest for RegionQuiescenceTest {
         }
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
         // Check that all closed regions have no pending obligations
         true // This would check actual region states in real implementation
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn tags(&self) -> Vec<&str> {
         vec!["core", "region-lifecycle", "quiescence"]
@@ -253,20 +299,35 @@ impl ObligationInvariantTest for RegionQuiescenceTest {
 // ============================================================================
 
 /// Test that cancel signals propagate correctly through obligation hierarchies
+#[allow(dead_code)]
 pub struct CancelPropagationTest;
 
 impl ObligationInvariantTest for CancelPropagationTest {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &'static str {
         "Cancel Propagation"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
         InvariantTestCategory::CancelPropagation
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn description(&self) -> &'static str {
         "Cancel signals must propagate correctly through obligation hierarchies"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn run_test(&self, ctx: &ObligationTestContext) -> InvariantTestResult {
         let start = Instant::now();
@@ -357,10 +418,18 @@ impl ObligationInvariantTest for CancelPropagationTest {
         }
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
         // This would validate that all cancellations have properly propagated
         !tracker.has_violations()
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn tags(&self) -> Vec<&str> {
         vec!["core", "cancellation", "hierarchy", "propagation"]
@@ -372,20 +441,35 @@ impl ObligationInvariantTest for CancelPropagationTest {
 // ============================================================================
 
 /// Test that obligation cleanup does not leak resources
+#[allow(dead_code)]
 pub struct ResourceCleanupTest;
 
 impl ObligationInvariantTest for ResourceCleanupTest {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &'static str {
         "Resource Cleanup"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
         InvariantTestCategory::ResourceCleanup
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn description(&self) -> &'static str {
         "Obligation cleanup must not leak resources (memory, wakers, handles)"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn run_test(&self, ctx: &ObligationTestContext) -> InvariantTestResult {
         let start = Instant::now();
@@ -497,11 +581,19 @@ impl ObligationInvariantTest for ResourceCleanupTest {
         }
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
         // Check that resource usage is within expected bounds
         let resources = tracker.check_resource_leaks();
         resources.wakers == 0 && resources.memory_bytes == 0 && resources.handles == 0
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn tags(&self) -> Vec<&str> {
         vec!["core", "resource-management", "cleanup", "leak-detection"]
@@ -513,20 +605,35 @@ impl ObligationInvariantTest for ResourceCleanupTest {
 // ============================================================================
 
 /// Test that obligations cannot outlive their parent regions
+#[allow(dead_code)]
 pub struct TemporalSafetyTest;
 
 impl ObligationInvariantTest for TemporalSafetyTest {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &'static str {
         "Temporal Safety"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
         InvariantTestCategory::TemporalSafety
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn description(&self) -> &'static str {
         "Obligations cannot outlive their parent regions - temporal safety invariant"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn run_test(&self, ctx: &ObligationTestContext) -> InvariantTestResult {
         let start = Instant::now();
@@ -621,14 +728,26 @@ impl ObligationInvariantTest for TemporalSafetyTest {
         }
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
         // Check that no obligations exist for closed regions
         true // This would validate actual region/obligation lifetime relationships
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn dependencies(&self) -> Vec<&str> {
         vec!["No Obligation Leaks", "Region Close = Quiescence"]
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn tags(&self) -> Vec<&str> {
         vec!["core", "temporal-safety", "lifetime", "scoping"]
@@ -640,6 +759,8 @@ impl ObligationInvariantTest for TemporalSafetyTest {
 // ============================================================================
 
 /// Get all core obligation invariant tests
+#[allow(dead_code)]
+#[allow(dead_code)]
 pub fn get_all_invariant_tests() -> Vec<Box<dyn ObligationInvariantTest>> {
     vec![
         Box::new(NoObligationLeaksTest),
@@ -651,6 +772,8 @@ pub fn get_all_invariant_tests() -> Vec<Box<dyn ObligationInvariantTest>> {
 }
 
 /// Get tests by category
+#[allow(dead_code)]
+#[allow(dead_code)]
 pub fn get_tests_by_category(category: InvariantTestCategory) -> Vec<Box<dyn ObligationInvariantTest>> {
     get_all_invariant_tests()
         .into_iter()
@@ -659,6 +782,8 @@ pub fn get_tests_by_category(category: InvariantTestCategory) -> Vec<Box<dyn Obl
 }
 
 /// Get critical invariant tests (core safety requirements)
+#[allow(dead_code)]
+#[allow(dead_code)]
 pub fn get_critical_invariant_tests() -> Vec<Box<dyn ObligationInvariantTest>> {
     vec![
         Box::new(NoObligationLeaksTest),

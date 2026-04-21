@@ -39,6 +39,7 @@ use std::time::Instant;
 
 /// Test categories for HPACK table size update conformance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// SETTINGS frame acknowledgment tests.
     SettingsAckRequired,
@@ -54,6 +55,7 @@ pub enum TestCategory {
 
 /// Test result for HPACK table size conformance tests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct HpackTableSizeConformanceResult {
     /// Test category.
     pub category: TestCategory,
@@ -68,6 +70,7 @@ pub struct HpackTableSizeConformanceResult {
 }
 
 /// Mock HPACK context for table size testing.
+#[allow(dead_code)]
 struct MockHpackContext {
     /// HPACK encoder.
     encoder: Encoder,
@@ -81,8 +84,11 @@ struct MockHpackContext {
     settings_sent_time: Option<Instant>,
 }
 
+#[allow(dead_code)]
+
 impl MockHpackContext {
     /// Create a new mock HPACK context.
+    #[allow(dead_code)]
     fn new() -> Self {
         Self {
             encoder: Encoder::new(),
@@ -94,6 +100,7 @@ impl MockHpackContext {
     }
 
     /// Create a context with specific table size.
+    #[allow(dead_code)]
     fn with_table_size(table_size: usize) -> Self {
         let encoder = Encoder::new();
         let mut decoder = Decoder::with_max_size(table_size);
@@ -109,6 +116,7 @@ impl MockHpackContext {
     }
 
     /// Simulate SETTINGS frame exchange for table size.
+    #[allow(dead_code)]
     fn exchange_settings(&mut self, new_table_size: usize) -> Result<(), H2Error> {
         self.settings_sent_time = Some(Instant::now());
         self.settings_table_size = new_table_size;
@@ -126,6 +134,7 @@ impl MockHpackContext {
     }
 
     /// Encode a raw dynamic table size update instruction.
+    #[allow(dead_code)]
     fn encode_size_update(size: usize) -> BytesMut {
         let mut buf = BytesMut::new();
         // Dynamic table size update: 001xxxxx where xxxxx encodes size
@@ -134,6 +143,7 @@ impl MockHpackContext {
     }
 
     /// Populate dynamic table with test headers.
+    #[allow(dead_code)]
     fn populate_table(&mut self, headers: &[Header]) {
         let mut buf = BytesMut::new();
         self.encoder.encode(headers, &mut buf);
@@ -147,17 +157,20 @@ impl MockHpackContext {
     }
 
     /// Get current dynamic table usage.
+    #[allow(dead_code)]
     fn table_usage(&self) -> usize {
         self.decoder.dynamic_table_size()
     }
 
     /// Get the decoder's current dynamic table size limit.
+    #[allow(dead_code)]
     fn table_max_size(&self) -> usize {
         self.decoder.dynamic_table_max_size()
     }
 }
 
 /// Encode an integer using HPACK integer encoding.
+#[allow(dead_code)]
 fn encode_integer(dst: &mut BytesMut, mut value: usize, prefix_bits: u8, prefix_pattern: u8) {
     let max_value = (1 << prefix_bits) - 1;
 
@@ -176,6 +189,7 @@ fn encode_integer(dst: &mut BytesMut, mut value: usize, prefix_bits: u8, prefix_
 }
 
 /// Generate arbitrary table sizes for testing.
+#[allow(dead_code)]
 fn arb_table_size() -> impl Strategy<Value = usize> {
     prop_oneof![
         Just(0),
@@ -189,6 +203,7 @@ fn arb_table_size() -> impl Strategy<Value = usize> {
 }
 
 /// Generate arbitrary headers for table population.
+#[allow(dead_code)]
 fn arb_header() -> impl Strategy<Value = Header> {
     (
         prop_oneof![
@@ -213,6 +228,7 @@ fn arb_header() -> impl Strategy<Value = Header> {
 }
 
 /// Generate header lists for table population.
+#[allow(dead_code)]
 fn arb_headers() -> impl Strategy<Value = Vec<Header>> {
     prop::collection::vec(arb_header(), 0..10)
 }
@@ -225,6 +241,7 @@ mod conformance_tests {
     /// Property: settings_frame(size) → encoder → ack_required
     /// Catches: Missing SETTINGS ACK handling, protocol violations
     #[test]
+    #[allow(dead_code)]
     fn mr1_settings_ack_required() {
         proptest!(|(table_size in arb_table_size())| {
             let mut context = MockHpackContext::new();
@@ -251,6 +268,7 @@ mod conformance_tests {
     /// Property: [size_update, header] = valid, [header, size_update] = invalid
     /// Catches: RFC 7541 Section 4.2 ordering violations
     #[test]
+    #[allow(dead_code)]
     fn mr2_size_update_precedes_encoded_block() {
         proptest!(|(new_size in arb_table_size(), headers in arb_headers())| {
             let mut context = MockHpackContext::with_table_size(4096);
@@ -280,6 +298,7 @@ mod conformance_tests {
     /// Property: size_update(100) → size_update(200) → final_size = 200
     /// Catches: Size update sequence processing bugs
     #[test]
+    #[allow(dead_code)]
     fn mr3_multiple_size_updates_honored() {
         proptest!(|(
             size1 in 1usize..8192,
@@ -316,6 +335,7 @@ mod conformance_tests {
     /// Property: max_size(1000) → size_update(2000) → DECOMPRESSION_FAILED
     /// Catches: Bounds checking failures, security violations
     #[test]
+    #[allow(dead_code)]
     fn mr4_oversized_update_triggers_decompression_failed() {
         proptest!(|(
             settings_size in 100usize..4096,
@@ -346,6 +366,7 @@ mod conformance_tests {
     /// Property: usage(500) → size_update(1000) → no_evictions
     /// Catches: Unnecessary entry eviction bugs
     #[test]
+    #[allow(dead_code)]
     fn mr5_size_update_preserves_entries_when_sufficient() {
         proptest!(|(
             initial_size in 2048usize..8192,
@@ -377,6 +398,7 @@ mod conformance_tests {
 
     /// Integration test: Complete SETTINGS exchange with size updates
     #[test]
+    #[allow(dead_code)]
     fn integration_complete_settings_exchange() {
         let mut context = MockHpackContext::new();
 
@@ -422,6 +444,7 @@ mod conformance_tests {
 
     /// Stress test: Rapid size update sequences
     #[test]
+    #[allow(dead_code)]
     fn stress_rapid_size_update_sequences() {
         let mut context = MockHpackContext::with_table_size(8192);
 
@@ -445,6 +468,7 @@ mod conformance_tests {
 
     /// Error case: Size update mixed with header representations (invalid)
     #[test]
+    #[allow(dead_code)]
     fn error_size_update_mixed_with_headers() {
         let mut context = MockHpackContext::with_table_size(4096);
 

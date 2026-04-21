@@ -10,6 +10,7 @@ pub mod tuple_generation_tests;
 use super::{Rfc6330ConformanceCase, Rfc6330ConformanceSuite};
 
 /// Register all parameter derivation tests.
+#[allow(dead_code)]
 pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
     k_calculation_tests::register_tests(suite);
     systematic_index_tests::register_tests(suite);

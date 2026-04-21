@@ -93,6 +93,7 @@ pub use format_validator::{
 };
 
 /// Main entry point for running complete golden file test suite
+#[allow(dead_code)]
 pub fn run_complete_test_suite<P: AsRef<std::path::Path>>(
     golden_dir: P,
     fixture_dir: P,
@@ -134,6 +135,7 @@ pub fn run_complete_test_suite<P: AsRef<std::path::Path>>(
 
 /// Results from running the complete test suite
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct TestSuiteResults {
     pub fixture_generation: FixtureGenerationSummary,
     pub round_trip_tests: RoundTripSummary,
@@ -141,8 +143,11 @@ pub struct TestSuiteResults {
     pub golden_file_validation: ValidationSummary,
 }
 
+#[allow(dead_code)]
+
 impl TestSuiteResults {
     /// Returns true if all test suite components passed
+    #[allow(dead_code)]
     pub fn is_success(&self) -> bool {
         self.fixture_generation.is_success() &&
         self.round_trip_tests.is_success() &&
@@ -151,6 +156,7 @@ impl TestSuiteResults {
     }
 
     /// Returns a summary report of the test suite execution
+    #[allow(dead_code)]
     pub fn summary_report(&self) -> String {
         format!(
             "RaptorQ Golden File Test Suite Results\n\
@@ -220,6 +226,7 @@ impl TestSuiteResults {
 
 /// Errors that can occur during test suite execution
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum TestSuiteError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
@@ -238,6 +245,7 @@ pub enum TestSuiteError {
 }
 
 /// Convenience function to run smoke tests (high-priority fixtures only)
+#[allow(dead_code)]
 pub fn run_smoke_tests<P: AsRef<std::path::Path>>(
     golden_dir: P,
 ) -> Result<RoundTripSummary, RoundTripError> {
@@ -286,6 +294,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[allow(dead_code)]
     fn test_complete_test_suite() {
         let temp_dir = TempDir::new().unwrap();
         let golden_path = temp_dir.path().join("golden");
@@ -311,6 +320,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_smoke_tests() {
         let temp_dir = TempDir::new().unwrap();
 
@@ -328,6 +338,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_suite_results_summary() {
         let results = TestSuiteResults {
             fixture_generation: FixtureGenerationSummary {

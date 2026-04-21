@@ -32,6 +32,7 @@ use std::time::Instant;
 
 /// RFC 2119 requirement level for conformance testing
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // RFC 2119: MUST
     Should, // RFC 2119: SHOULD
@@ -40,6 +41,7 @@ pub enum RequirementLevel {
 
 /// Test result for a single Expect: 100-continue conformance requirement
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ExpectContinueResult {
     pub test_id: String,
     pub description: String,
@@ -52,6 +54,7 @@ pub struct ExpectContinueResult {
 
 /// Conformance test categories for Expect: 100-continue handling
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// Basic 100-continue interim response processing
     InterimResponse,
@@ -69,6 +72,7 @@ pub enum TestCategory {
 
 /// Test execution result
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -77,6 +81,7 @@ pub enum TestVerdict {
 }
 
 /// Helper function to classify expectation actions from headers
+#[allow(dead_code)]
 fn classify_expectation_from_headers(version: Version, headers: &[(String, String)]) -> ExpectationAction {
     let mut saw_expect = false;
     let mut saw_continue = false;
@@ -119,6 +124,7 @@ fn classify_expectation_from_headers(version: Version, headers: &[(String, Strin
 
 /// Expectation action classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ExpectationAction {
     None,
     Continue,
@@ -126,11 +132,15 @@ pub enum ExpectationAction {
 }
 
 /// Test harness for HTTP/1.1 Expect: 100-continue conformance
+#[allow(dead_code)]
 pub struct ExpectContinueConformanceHarness {
     results: Vec<ExpectContinueResult>,
 }
 
+#[allow(dead_code)]
+
 impl ExpectContinueConformanceHarness {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             results: Vec::new(),
@@ -138,6 +148,7 @@ impl ExpectContinueConformanceHarness {
     }
 
     /// Run all Expect: 100-continue conformance tests
+    #[allow(dead_code)]
     pub fn run_all_tests(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Category 1: Basic expectation classification
         self.test_expect_continue_classification();
@@ -155,11 +166,13 @@ impl ExpectContinueConformanceHarness {
     }
 
     /// Get accumulated test results
+    #[allow(dead_code)]
     pub fn results(&self) -> &[ExpectContinueResult] {
         &self.results
     }
 
     /// Test: Expect: 100-continue classification
+    #[allow(dead_code)]
     fn test_expect_continue_classification(&mut self) {
         let start = Instant::now();
 
@@ -185,6 +198,7 @@ impl ExpectContinueConformanceHarness {
     }
 
     /// Test: Unknown expectation token handling
+    #[allow(dead_code)]
     fn test_unknown_expectation_classification(&mut self) {
         let start = Instant::now();
 
@@ -209,6 +223,7 @@ impl ExpectContinueConformanceHarness {
     }
 
     /// Test: HTTP/1.0 expectation handling
+    #[allow(dead_code)]
     fn test_http10_expectation_handling(&mut self) {
         let start = Instant::now();
 
@@ -233,6 +248,7 @@ impl ExpectContinueConformanceHarness {
     }
 
     /// Test: Conditional header interaction
+    #[allow(dead_code)]
     fn test_conditional_header_interaction(&mut self) {
         let start = Instant::now();
 
@@ -261,6 +277,7 @@ impl ExpectContinueConformanceHarness {
     }
 
     /// Test: Multiple expectation tokens
+    #[allow(dead_code)]
     fn test_multiple_expectation_tokens(&mut self) {
         let start = Instant::now();
 
@@ -286,6 +303,7 @@ impl ExpectContinueConformanceHarness {
     }
 
     /// Test: Response status codes
+    #[allow(dead_code)]
     fn test_response_status_codes(&mut self) {
         let start = Instant::now();
 
@@ -312,6 +330,7 @@ impl ExpectContinueConformanceHarness {
 }
 
 /// Generate conformance report for Expect: 100-continue handling
+#[allow(dead_code)]
 pub fn generate_conformance_report(results: &[ExpectContinueResult]) -> String {
     let total_tests = results.len();
     let passed = results.iter().filter(|r| r.verdict == TestVerdict::Pass).count();
@@ -368,6 +387,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_expect_continue_conformance() {
         let mut harness = ExpectContinueConformanceHarness::new();
 
@@ -392,6 +412,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_expectation_classification() {
         // Test basic expectation classification logic
         let headers_continue = vec![

@@ -4,6 +4,7 @@ use asupersync::http::h2::hpack::Header;
 
 /// Test vector from RFC 7541 Appendix C.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Rfc7541TestVector {
     pub id: &'static str,
     pub description: &'static str,
@@ -257,6 +258,7 @@ pub const RFC7541_TEST_VECTORS: &[Rfc7541TestVector] = &[
 ];
 
 /// Convert test vector headers to Header structs.
+#[allow(dead_code)]
 pub fn test_vector_to_headers(test_vector: &Rfc7541TestVector) -> Vec<Header> {
     test_vector
         .headers
@@ -267,6 +269,7 @@ pub fn test_vector_to_headers(test_vector: &Rfc7541TestVector) -> Vec<Header> {
 
 /// Additional systematic test cases beyond RFC Appendix C.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SystematicTestCase {
     pub id: &'static str,
     pub description: &'static str,
@@ -275,6 +278,7 @@ pub struct SystematicTestCase {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum TestCaseCategory {
     StaticTableHits,
     DynamicTableInteraction,
@@ -364,6 +368,7 @@ pub const SYSTEMATIC_TEST_CASES: &[SystematicTestCase] = &[
 ];
 
 /// Convert systematic test case to headers.
+#[allow(dead_code)]
 pub fn systematic_case_to_headers(test_case: &SystematicTestCase) -> Vec<Header> {
     test_case
         .headers
@@ -378,6 +383,7 @@ mod test_vector_validation {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn validate_rfc7541_test_vectors_integrity() {
         for vector in RFC7541_TEST_VECTORS {
             // Ensure test vector data is well-formed
@@ -404,6 +410,7 @@ mod test_vector_validation {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn validate_systematic_test_cases() {
         for test_case in SYSTEMATIC_TEST_CASES {
             assert!(

@@ -2,11 +2,15 @@
 
 use super::*;
 
+#[allow(dead_code)]
+
 pub fn run_control_frame_tests() -> Vec<WsConformanceResult> {
     let mut results = Vec::new();
     results.push(test_ping_pong_frames());
     results
 }
+
+#[allow(dead_code)]
 
 fn test_ping_pong_frames() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {

@@ -6,6 +6,8 @@ use clap::{Arg, Command};
 use raptorq_golden_testing::{FormatValidator, RoundTripHarness};
 use std::path::PathBuf;
 
+#[allow(dead_code)]
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = Command::new("validate_round_trips")
         .version("1.0.0")
@@ -157,6 +159,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 // Helper functions to create test configurations for specific categories
 
+#[allow(dead_code)]
+
 fn get_basic_test_configs() -> Vec<raptorq_golden_testing::RoundTripConfig> {
     use raptorq_golden_testing::RoundTripConfig;
 
@@ -179,6 +183,8 @@ fn get_basic_test_configs() -> Vec<raptorq_golden_testing::RoundTripConfig> {
         },
     ]
 }
+
+#[allow(dead_code)]
 
 fn get_edge_test_configs() -> Vec<raptorq_golden_testing::RoundTripConfig> {
     use raptorq_golden_testing::RoundTripConfig;
@@ -203,6 +209,8 @@ fn get_edge_test_configs() -> Vec<raptorq_golden_testing::RoundTripConfig> {
     ]
 }
 
+#[allow(dead_code)]
+
 fn get_performance_test_configs() -> Vec<raptorq_golden_testing::RoundTripConfig> {
     use raptorq_golden_testing::RoundTripConfig;
 
@@ -215,6 +223,8 @@ fn get_performance_test_configs() -> Vec<raptorq_golden_testing::RoundTripConfig
         erasure_probability: 0.15,
     }]
 }
+
+#[allow(dead_code)]
 
 fn get_error_test_configs() -> Vec<raptorq_golden_testing::RoundTripConfig> {
     use raptorq_golden_testing::RoundTripConfig;
@@ -229,6 +239,8 @@ fn get_error_test_configs() -> Vec<raptorq_golden_testing::RoundTripConfig> {
     }]
 }
 
+#[allow(dead_code)]
+
 fn get_spec_compliance_configs() -> Vec<raptorq_golden_testing::RoundTripConfig> {
     use raptorq_golden_testing::RoundTripConfig;
 
@@ -241,6 +253,8 @@ fn get_spec_compliance_configs() -> Vec<raptorq_golden_testing::RoundTripConfig>
         erasure_probability: 0.0,
     }]
 }
+
+#[allow(dead_code)]
 
 fn get_interop_configs() -> Vec<raptorq_golden_testing::RoundTripConfig> {
     use raptorq_golden_testing::RoundTripConfig;

@@ -38,6 +38,7 @@ use std::collections::BTreeMap;
 
 /// Test result for a single conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct MySqlStmtConformanceResult {
     pub test_id: String,
     pub description: String,
@@ -50,6 +51,7 @@ pub struct MySqlStmtConformanceResult {
 
 /// Conformance test categories for MySQL prepared statements.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     PacketFormat,
     ParameterTypes,
@@ -62,6 +64,7 @@ pub enum TestCategory {
 
 /// Protocol requirement level.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // Protocol requirement
     Should, // Recommended behavior
@@ -70,6 +73,7 @@ pub enum RequirementLevel {
 
 /// Test execution result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -80,6 +84,7 @@ pub enum TestVerdict {
 /// MySQL parameter types per protocol specification.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum MySqlType {
     Decimal = 0x00,
     Tiny = 0x01,
@@ -113,6 +118,7 @@ pub enum MySqlType {
 /// Cursor type flags.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum CursorType {
     NoCursor = 0x00,
     ReadOnly = 0x01,
@@ -121,12 +127,16 @@ pub enum CursorType {
 }
 
 /// MySQL COM_STMT_PREPARE/EXECUTE conformance harness.
+#[allow(dead_code)]
 pub struct MySqlStmtConformanceHarness {
     results: Vec<MySqlStmtConformanceResult>,
 }
 
+#[allow(dead_code)]
+
 impl MySqlStmtConformanceHarness {
     /// Create a new conformance test harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             results: Vec::new(),
@@ -134,6 +144,7 @@ impl MySqlStmtConformanceHarness {
     }
 
     /// Execute all conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&mut self) -> Vec<MySqlStmtConformanceResult> {
         // Packet Format Tests
         self.test_stmt_prepare_packet_format();
@@ -177,6 +188,8 @@ impl MySqlStmtConformanceHarness {
         self.results.clone()
     }
 
+    #[allow(dead_code)]
+
     fn record_result(
         &mut self,
         test_id: &str,
@@ -198,6 +211,8 @@ impl MySqlStmtConformanceHarness {
     }
 
     // ===== Packet Format Tests =====
+
+    #[allow(dead_code)]
 
     fn test_stmt_prepare_packet_format(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -242,6 +257,8 @@ impl MySqlStmtConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_stmt_prepare_ok_response(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -302,6 +319,8 @@ impl MySqlStmtConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_stmt_execute_packet_format(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -387,6 +406,8 @@ impl MySqlStmtConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_stmt_close_packet_format(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test COM_STMT_CLOSE packet structure
@@ -426,6 +447,8 @@ impl MySqlStmtConformanceHarness {
     }
 
     // ===== Parameter Type Tests =====
+
+    #[allow(dead_code)]
 
     fn test_parameter_type_signaling(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -484,6 +507,8 @@ impl MySqlStmtConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_type_code_compliance(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test that type codes match MySQL specification exactly
@@ -529,6 +554,8 @@ impl MySqlStmtConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_unsigned_flag_handling(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -588,6 +615,8 @@ impl MySqlStmtConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_parameter_length_encoding(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test length encoding for variable-length parameters
@@ -627,6 +656,8 @@ impl MySqlStmtConformanceHarness {
     }
 
     // ===== NULL Bitmap Tests =====
+
+    #[allow(dead_code)]
 
     fn test_null_bitmap_encoding(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -675,6 +706,8 @@ impl MySqlStmtConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_null_bitmap_length_calculation(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test NULL bitmap length calculation formula
@@ -718,6 +751,8 @@ impl MySqlStmtConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_null_bitmap_bit_ordering(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test NULL bitmap bit ordering (LSB first)
@@ -758,6 +793,8 @@ impl MySqlStmtConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_mixed_null_parameters(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -808,6 +845,8 @@ impl MySqlStmtConformanceHarness {
 
     // ===== Long Data Tests =====
 
+    #[allow(dead_code)]
+
     fn test_long_data_send_packet(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test COM_STMT_SEND_LONG_DATA packet format
@@ -857,6 +896,8 @@ impl MySqlStmtConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_long_data_chunking(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -912,6 +953,8 @@ impl MySqlStmtConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_long_data_parameter_reset(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test that long data parameters are reset between executions
@@ -965,6 +1008,8 @@ impl MySqlStmtConformanceHarness {
 
     // ===== Cursor Flag Tests =====
 
+    #[allow(dead_code)]
+
     fn test_cursor_type_flags(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test cursor type flags in COM_STMT_EXECUTE
@@ -1011,6 +1056,8 @@ impl MySqlStmtConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_cursor_read_only(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test CURSOR_TYPE_READ_ONLY behavior
@@ -1046,6 +1093,8 @@ impl MySqlStmtConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_cursor_scrollable_behavior(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -1088,6 +1137,8 @@ impl MySqlStmtConformanceHarness {
     }
 
     // ===== Binary Result Set Tests =====
+
+    #[allow(dead_code)]
 
     fn test_binary_result_set_format(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -1150,6 +1201,8 @@ impl MySqlStmtConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_binary_row_null_bitmap(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -1218,6 +1271,8 @@ impl MySqlStmtConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_binary_value_encoding(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test binary value encoding for different types
@@ -1274,6 +1329,8 @@ impl MySqlStmtConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_length_encoded_values(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -1334,6 +1391,8 @@ impl MySqlStmtConformanceHarness {
 
     // ===== Error Handling Tests =====
 
+    #[allow(dead_code)]
+
     fn test_invalid_statement_id(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test error handling for invalid statement IDs
@@ -1393,6 +1452,8 @@ impl MySqlStmtConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_parameter_count_mismatch(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test parameter count mismatch detection
@@ -1451,6 +1512,8 @@ impl MySqlStmtConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_invalid_cursor_type(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test invalid cursor type handling
@@ -1500,6 +1563,7 @@ impl MySqlStmtConformanceHarness {
 }
 
 impl Default for MySqlStmtConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
@@ -1508,6 +1572,7 @@ impl Default for MySqlStmtConformanceHarness {
 // ===== Helper Functions =====
 
 /// Encode a length-encoded integer per MySQL protocol.
+#[allow(dead_code)]
 fn encode_length_encoded_integer(value: u64) -> Vec<u8> {
     if value < 251 {
         vec![value as u8]
@@ -1527,6 +1592,7 @@ fn encode_length_encoded_integer(value: u64) -> Vec<u8> {
 }
 
 /// Decode a length-encoded integer per MySQL protocol.
+#[allow(dead_code)]
 fn decode_length_encoded_integer(data: &[u8]) -> (u64, usize) {
     if data.is_empty() {
         return (0, 0);
@@ -1563,6 +1629,7 @@ fn decode_length_encoded_integer(data: &[u8]) -> (u64, usize) {
 }
 
 /// Encode a length-encoded string per MySQL protocol.
+#[allow(dead_code)]
 fn encode_length_encoded_string(data: &[u8]) -> Vec<u8> {
     let mut result = encode_length_encoded_integer(data.len() as u64);
     result.extend_from_slice(data);
@@ -1570,6 +1637,7 @@ fn encode_length_encoded_string(data: &[u8]) -> Vec<u8> {
 }
 
 /// Decode a length-encoded string per MySQL protocol.
+#[allow(dead_code)]
 fn decode_length_encoded_string(data: &[u8]) -> (Vec<u8>, usize) {
     let (length, length_bytes) = decode_length_encoded_integer(data);
     let start = length_bytes;
@@ -1583,11 +1651,13 @@ fn decode_length_encoded_string(data: &[u8]) -> (Vec<u8>, usize) {
 }
 
 /// Create a COM_STMT_EXECUTE packet with specified parameters.
+#[allow(dead_code)]
 fn create_execute_packet(stmt_id: u32, cursor_type: CursorType) -> Vec<u8> {
     create_execute_packet_with_flags(stmt_id, cursor_type as u8)
 }
 
 /// Create a COM_STMT_EXECUTE packet with custom flags.
+#[allow(dead_code)]
 fn create_execute_packet_with_flags(stmt_id: u32, flags: u8) -> Vec<u8> {
     let mut packet = Vec::new();
 
@@ -1603,6 +1673,7 @@ fn create_execute_packet_with_flags(stmt_id: u32, flags: u8) -> Vec<u8> {
 }
 
 /// Create a COM_STMT_CLOSE packet.
+#[allow(dead_code)]
 fn create_close_packet(stmt_id: u32) -> Vec<u8> {
     let mut packet = Vec::new();
 
@@ -1613,6 +1684,7 @@ fn create_close_packet(stmt_id: u32) -> Vec<u8> {
 }
 
 /// Create a COM_STMT_SEND_LONG_DATA packet.
+#[allow(dead_code)]
 fn create_long_data_packet(stmt_id: u32, param_index: u16, data: &[u8]) -> Vec<u8> {
     let mut packet = Vec::new();
 
@@ -1629,6 +1701,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_mysql_stmt_conformance_suite_completeness() {
         let mut harness = MySqlStmtConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -1671,6 +1744,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mysql_type_codes() {
         // Verify MySQL type codes match specification
         assert_eq!(MySqlType::Tiny as u8, 0x01);
@@ -1682,6 +1756,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_cursor_type_values() {
         // Verify cursor type values match specification
         assert_eq!(CursorType::NoCursor as u8, 0x00);
@@ -1691,6 +1766,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_length_encoded_integer_roundtrip() {
         let test_values = vec![0, 1, 250, 251, 255, 256, 65535, 65536, 16777215, 16777216];
 
@@ -1702,6 +1778,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_null_bitmap_calculation() {
         // Test NULL bitmap length calculation
         assert_eq!(7 / 8, 0);
@@ -1713,6 +1790,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_packet_helpers() {
         let stmt_id = 12345u32;
 

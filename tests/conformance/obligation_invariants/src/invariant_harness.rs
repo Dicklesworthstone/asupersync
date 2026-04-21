@@ -15,6 +15,7 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::{ObligationId, RegionId};
 
 /// Main harness for running obligation invariant tests
+#[allow(dead_code)]
 pub struct ObligationInvariantHarness {
     tracker: ObligationTracker,
     config: InvariantTestConfig,
@@ -23,6 +24,7 @@ pub struct ObligationInvariantHarness {
 
 /// Configuration for invariant testing
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct InvariantTestConfig {
     /// Timeout for individual test scenarios
     pub test_timeout: Duration,
@@ -39,6 +41,7 @@ pub struct InvariantTestConfig {
 }
 
 /// Context provided to invariant tests
+#[allow(dead_code)]
 pub struct ObligationTestContext {
     pub tracker: ObligationTracker,
     pub config: InvariantTestConfig,
@@ -47,6 +50,7 @@ pub struct ObligationTestContext {
 
 /// Result of an invariant test
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct InvariantTestResult {
     pub test_name: String,
     pub category: InvariantTestCategory,
@@ -58,6 +62,7 @@ pub struct InvariantTestResult {
 
 /// Categories of invariant tests
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum InvariantTestCategory {
     NoLeakValidation,
     RegionQuiescence,
@@ -69,6 +74,7 @@ pub enum InvariantTestCategory {
 
 /// Test outcome classification
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum TestOutcome {
     Pass,
     Fail,
@@ -78,6 +84,7 @@ pub enum TestOutcome {
 
 /// Metrics collected during test execution
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct TestMetrics {
     pub obligations_created: usize,
     pub obligations_resolved: usize,
@@ -93,41 +100,63 @@ pub struct TestMetrics {
 /// Trait for implementing specific invariant tests
 pub trait ObligationInvariantTest: Send + Sync {
     /// Name of the invariant test
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &str;
 
     /// Category of the invariant test
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn test_category(&self) -> InvariantTestCategory;
 
     /// Description of what the test validates
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn description(&self) -> &str;
 
     /// Run the invariant test with the provided context
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn run_test<'a>(
         &'a self,
         ctx: &'a ObligationTestContext,
     ) -> Pin<Box<dyn Future<Output = InvariantTestResult> + Send + 'a>>;
 
     /// Validate the invariant holds after test execution
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool;
 
     /// Expected violations for negative tests (tests that should detect violations)
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn expected_violations(&self) -> Vec<InvariantViolationType> {
         Vec::new()
     }
 
     /// Whether this is a stress test requiring high concurrency
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn is_stress_test(&self) -> bool {
         false
     }
 
     /// Whether this test intentionally violates invariants (negative test)
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn is_negative_test(&self) -> bool {
         false
     }
 }
 
+#[allow(dead_code)]
+
+#[allow(dead_code)]
+
 impl ObligationInvariantHarness {
     /// Create a new invariant test harness
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn new(config: InvariantTestConfig) -> Self {
         Self {
             tracker: ObligationTracker::new(),
@@ -271,11 +300,15 @@ impl ObligationInvariantHarness {
     }
 
     /// Get all test results
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn get_results(&self) -> &HashMap<String, InvariantTestResult> {
         &self.results
     }
 
     /// Calculate test suite summary statistics
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn calculate_summary(&self, results: &[InvariantTestResult]) -> TestSuiteSummary {
         let total = results.len();
         let passed = results
@@ -310,6 +343,8 @@ impl ObligationInvariantHarness {
     }
 
     /// Calculate peak metrics across stress test results
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn calculate_peak_metrics(&self, results: &[InvariantTestResult]) -> TestMetrics {
         let mut peak = TestMetrics::default();
 
@@ -348,6 +383,7 @@ impl ObligationInvariantHarness {
 
 /// Result of running a complete test suite
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct TestSuiteResult {
     pub results: Vec<InvariantTestResult>,
     pub total_duration: Duration,
@@ -356,6 +392,7 @@ pub struct TestSuiteResult {
 
 /// Summary statistics for a test suite
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct TestSuiteSummary {
     pub total_tests: usize,
     pub passed: usize,
@@ -368,6 +405,7 @@ pub struct TestSuiteSummary {
 
 /// Result of stress testing
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct StressTestResult {
     pub test_name: String,
     pub iterations: usize,
@@ -379,6 +417,8 @@ pub struct StressTestResult {
 }
 
 impl Default for InvariantTestConfig {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             test_timeout: Duration::from_secs(30),
@@ -392,6 +432,8 @@ impl Default for InvariantTestConfig {
 }
 
 impl fmt::Display for InvariantTestCategory {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             InvariantTestCategory::NoLeakValidation => write!(f, "No Leak Validation"),
@@ -405,6 +447,8 @@ impl fmt::Display for InvariantTestCategory {
 }
 
 impl fmt::Display for TestOutcome {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TestOutcome::Pass => write!(f, "PASS"),
@@ -416,6 +460,8 @@ impl fmt::Display for TestOutcome {
 }
 
 impl fmt::Display for TestSuiteSummary {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -440,18 +486,29 @@ macro_rules! invariant_test {
         description: $desc:expr,
         test: |$ctx:ident| $test_body:expr
     ) => {
+        #[allow(dead_code)]
         struct InvariantTestImpl;
 
         impl ObligationInvariantTest for InvariantTestImpl {
+            #[allow(dead_code)]
+            #[allow(dead_code)]
             fn invariant_name(&self) -> &'static str {
                 $name
             }
+            #[allow(dead_code)]
+            #[allow(dead_code)]
             fn test_category(&self) -> InvariantTestCategory {
                 $category
             }
+            #[allow(dead_code)]
+            #[allow(dead_code)]
             fn description(&self) -> &'static str {
                 $desc
             }
+
+            #[allow(dead_code)]
+
+            #[allow(dead_code)]
 
             fn run_test<'a>(
                 &'a self,
@@ -459,6 +516,10 @@ macro_rules! invariant_test {
             ) -> Pin<Box<dyn Future<Output = InvariantTestResult> + Send + 'a>> {
                 Box::pin(async move { $test_body.await })
             }
+
+            #[allow(dead_code)]
+
+            #[allow(dead_code)]
 
             fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
                 tracker.get_invariant_violations().is_empty() && !tracker.has_active_obligations()
@@ -473,6 +534,8 @@ mod tests {
     // use crate::runtime::test_helpers::*;
 
     /// Helper to create a test runtime
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn create_test_runtime() -> LabRuntime {
         let config = LabConfig::default()
             .worker_count(2)
@@ -482,23 +545,36 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn test_harness_basic_functionality() {
         let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
         let mut harness = ObligationInvariantHarness::new(config);
 
         // Simple test that should pass
+        #[allow(dead_code)]
         struct PassingTest;
         impl ObligationInvariantTest for PassingTest {
+            #[allow(dead_code)]
+            #[allow(dead_code)]
             fn invariant_name(&self) -> &'static str {
                 "passing_test"
             }
+            #[allow(dead_code)]
+            #[allow(dead_code)]
             fn test_category(&self) -> InvariantTestCategory {
                 InvariantTestCategory::NoLeakValidation
             }
+            #[allow(dead_code)]
+            #[allow(dead_code)]
             fn description(&self) -> &'static str {
                 "A test that should pass"
             }
+
+            #[allow(dead_code)]
+
+            #[allow(dead_code)]
 
             fn run_test<'a>(
                 &'a self,
@@ -515,6 +591,10 @@ mod tests {
                     }
                 })
             }
+
+            #[allow(dead_code)]
+
+            #[allow(dead_code)]
 
             fn validate_invariant(&self, _tracker: &ObligationTracker) -> bool {
                 true

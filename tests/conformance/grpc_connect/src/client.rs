@@ -9,10 +9,13 @@ use tracing::debug;
 
 /// Connect-compatible client for conformance testing
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ConformanceClient {
     inner: GrpcClient,
     server_address: String,
 }
+
+#[allow(dead_code)]
 
 impl ConformanceClient {
     pub async fn connect(server_address: &str) -> Result<Self> {

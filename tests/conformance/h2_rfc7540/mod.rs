@@ -16,6 +16,7 @@ pub mod stream_tests;
 
 /// Conformance test result for HTTP/2 RFC 7540.
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 pub struct H2ConformanceResult {
     /// Test identifier (RFC section reference).
     pub test_id: String,
@@ -35,6 +36,7 @@ pub struct H2ConformanceResult {
 
 /// HTTP/2 conformance test categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// Frame format validation (RFC 7540 Section 4).
     FrameFormat,
@@ -56,6 +58,7 @@ pub enum TestCategory {
 
 /// RFC 7540 requirement levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     /// RFC 2119 MUST requirement.
     Must,
@@ -67,6 +70,7 @@ pub enum RequirementLevel {
 
 /// Test execution verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     /// Test passed.
     Pass,
@@ -79,17 +83,22 @@ pub enum TestVerdict {
 }
 
 /// HTTP/2 RFC 7540 conformance test harness.
+#[allow(dead_code)]
 pub struct H2ConformanceHarness {
     _private: (),
 }
 
+#[allow(dead_code)]
+
 impl H2ConformanceHarness {
     /// Create a new conformance harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self { _private: () }
     }
 
     /// Run all HTTP/2 RFC 7540 conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<H2ConformanceResult> {
         let mut results = Vec::new();
 
@@ -159,6 +168,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_h2_conformance_harness_integration() {
         let harness = H2ConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -200,6 +210,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_h2_conformance_requirement_levels() {
         let harness = H2ConformanceHarness::new();
         let results = harness.run_all_tests();

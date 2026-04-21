@@ -35,6 +35,7 @@ use asupersync::http::h1::types::{Method, Request, Version};
 
 /// Test result for chunked request conformance verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct ChunkedRequestTestResult {
     pub test_id: String,
     pub description: String,
@@ -43,7 +44,10 @@ pub struct ChunkedRequestTestResult {
     pub wire_format_valid: bool,
 }
 
+#[allow(dead_code)]
+
 impl ChunkedRequestTestResult {
+    #[allow(dead_code)]
     fn pass(test_id: &str, description: &str, wire_valid: bool) -> Self {
         Self {
             test_id: test_id.to_string(),
@@ -53,6 +57,8 @@ impl ChunkedRequestTestResult {
             wire_format_valid: wire_valid,
         }
     }
+
+    #[allow(dead_code)]
 
     fn fail(test_id: &str, description: &str, error: &str) -> Self {
         Self {
@@ -66,6 +72,7 @@ impl ChunkedRequestTestResult {
 }
 
 /// Helper to encode HTTP/1.1 chunked request and verify wire format.
+#[allow(dead_code)]
 fn encode_chunked_request(req: Request) -> Result<Vec<u8>, HttpError> {
     let mut codec = Http1ClientCodec::new();
     let mut buf = BytesMut::new();
@@ -75,6 +82,7 @@ fn encode_chunked_request(req: Request) -> Result<Vec<u8>, HttpError> {
 }
 
 /// Verify that encoded data contains proper chunked encoding structure.
+#[allow(dead_code)]
 fn verify_chunked_wire_format(data: &[u8], expected_body: &[u8]) -> bool {
     let data_str = String::from_utf8_lossy(data);
 
@@ -111,6 +119,7 @@ fn verify_chunked_wire_format(data: &[u8], expected_body: &[u8]) -> bool {
 /// Metamorphic relation: A valid HTTP/1.1 request with Transfer-Encoding: chunked
 /// must be successfully encoded and produce valid wire format.
 #[test]
+#[allow(dead_code)]
 fn test_mr1_chunked_request_allowed() {
     let test_body = b"Hello, world!";
 
@@ -148,6 +157,7 @@ fn test_mr1_chunked_request_allowed() {
 /// Metamorphic relation: All chunked requests must end with "0\r\n\r\n"
 /// regardless of body content.
 #[test]
+#[allow(dead_code)]
 fn test_mr2_zero_length_final_chunk() {
     let test_cases = vec![
         ("Empty body", Vec::new()),
@@ -193,6 +203,7 @@ fn test_mr2_zero_length_final_chunk() {
 /// Metamorphic relation: HTTP/1.0 requests with Transfer-Encoding header
 /// must be rejected since chunked encoding is only valid in HTTP/1.1+.
 #[test]
+#[allow(dead_code)]
 fn test_mr3_chunked_http10_rejected() {
     let req = Request::builder(Method::Post, "/test")
         .version(Version::Http10)
@@ -221,6 +232,7 @@ fn test_mr3_chunked_http10_rejected() {
 /// Metamorphic relation: The client codec should accept and properly format
 /// chunk extensions when encoding chunked requests.
 #[test]
+#[allow(dead_code)]
 fn test_mr4_chunk_extensions_tolerated() {
     // Note: This tests that the implementation can handle chunk extensions
     // even though the simple implementation may not support them directly.
@@ -259,6 +271,7 @@ fn test_mr4_chunk_extensions_tolerated() {
 /// Metamorphic relation: Chunked requests with trailer fields should be
 /// properly encoded with trailers appearing after the final chunk.
 #[test]
+#[allow(dead_code)]
 fn test_mr5_trailer_content_type_allowed() {
     let test_body = b"request body";
 
@@ -307,6 +320,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
     #[test]
+    #[allow(dead_code)]
     fn proptest_chunked_encoding_invariants(
         body in prop::collection::vec(any::<u8>(), 0..=1024),
         uri_suffix in "[a-zA-Z0-9_/-]{1,50}",
@@ -354,6 +368,7 @@ proptest! {
 
 /// Integration test combining all metamorphic relations
 #[test]
+#[allow(dead_code)]
 fn test_integration_all_mrs() {
     let test_cases = vec![
         // MR1 + MR2: Basic chunked request
@@ -421,6 +436,7 @@ mod benchmarks {
     use std::time::{Duration, Instant};
 
     #[test]
+    #[allow(dead_code)]
     fn benchmark_chunked_encoding_performance() {
         let body_sizes = vec![0, 64, 1024, 8192, 65536];
 

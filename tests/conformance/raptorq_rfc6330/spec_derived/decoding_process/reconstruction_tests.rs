@@ -6,6 +6,7 @@ use crate::spec_derived::{
 };
 
 /// Register reconstruction tests.
+#[allow(dead_code)]
 pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
     suite.add_test_case(Rfc6330ConformanceCase {
         id: "RFC6330-4.3.3",
@@ -17,6 +18,7 @@ pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
 }
 
 /// Test object reconstruction correctness.
+#[allow(dead_code)]
 fn test_object_reconstruction(ctx: &ConformanceContext) -> ConformanceResult {
     // Placeholder implementation
     ConformanceResult::pass()

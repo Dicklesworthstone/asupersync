@@ -6,6 +6,7 @@ use crate::spec_derived::{
 };
 
 /// Register edge case matrix tests.
+#[allow(dead_code)]
 pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
     suite.add_test_case(Rfc6330ConformanceCase {
         id: "RFC6330-EDGE-1",
@@ -33,6 +34,7 @@ pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
 }
 
 /// Test minimum K boundary (K=4).
+#[allow(dead_code)]
 fn test_minimum_k_boundary(ctx: &ConformanceContext) -> ConformanceResult {
     // Placeholder implementation - would test K=4 edge case
     ConformanceResult::pass()
@@ -40,6 +42,7 @@ fn test_minimum_k_boundary(ctx: &ConformanceContext) -> ConformanceResult {
 }
 
 /// Test maximum K boundary (K=8192).
+#[allow(dead_code)]
 fn test_maximum_k_boundary(ctx: &ConformanceContext) -> ConformanceResult {
     // Placeholder implementation - would test K=8192 edge case
     ConformanceResult::pass()
@@ -47,6 +50,7 @@ fn test_maximum_k_boundary(ctx: &ConformanceContext) -> ConformanceResult {
 }
 
 /// Test minimal symbol size handling.
+#[allow(dead_code)]
 fn test_minimal_symbol_size(ctx: &ConformanceContext) -> ConformanceResult {
     // Placeholder implementation - would test single-byte symbols
     ConformanceResult::pass()

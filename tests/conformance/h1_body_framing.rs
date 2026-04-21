@@ -32,6 +32,7 @@ use proptest::prelude::*;
 use std::collections::HashMap;
 
 /// Generates valid HTTP header names for testing.
+#[allow(dead_code)]
 fn http_header_name() -> impl Strategy<Value = String> {
     prop::string::string_regex(r"[a-zA-Z][a-zA-Z0-9\-_]{0,30}")
         .unwrap()
@@ -39,6 +40,7 @@ fn http_header_name() -> impl Strategy<Value = String> {
 }
 
 /// Generates valid HTTP header values for testing.
+#[allow(dead_code)]
 fn http_header_value() -> impl Strategy<Value = String> {
     prop::string::string_regex(r"[\x21-\x7E\x20\t]{0,200}")
         .unwrap()
@@ -46,6 +48,7 @@ fn http_header_value() -> impl Strategy<Value = String> {
 }
 
 /// Generates valid HTTP method strings.
+#[allow(dead_code)]
 fn http_method() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("GET".to_string()),
@@ -61,6 +64,7 @@ fn http_method() -> impl Strategy<Value = String> {
 }
 
 /// Generates valid HTTP/1.1 URIs.
+#[allow(dead_code)]
 fn http_uri() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("/".to_string()),
@@ -73,6 +77,7 @@ fn http_uri() -> impl Strategy<Value = String> {
 }
 
 /// Generates HTTP status codes for response testing.
+#[allow(dead_code)]
 fn http_status_code() -> impl Strategy<Value = u16> {
     prop_oneof![
         Just(100u16), Just(101u16), Just(200u16), Just(201u16), Just(204u16),
@@ -86,6 +91,7 @@ fn http_status_code() -> impl Strategy<Value = u16> {
 }
 
 /// Generates content-length values.
+#[allow(dead_code)]
 fn content_length_value() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("0".to_string()),
@@ -98,6 +104,7 @@ fn content_length_value() -> impl Strategy<Value = String> {
 }
 
 /// Generates transfer-encoding values.
+#[allow(dead_code)]
 fn transfer_encoding_value() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("chunked".to_string()),
@@ -113,6 +120,7 @@ fn transfer_encoding_value() -> impl Strategy<Value = String> {
 
 /// HTTP message generator for testing.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct HttpMessage {
     method: String,
     uri: String,
@@ -123,8 +131,11 @@ struct HttpMessage {
     status_code: Option<u16>,
 }
 
+#[allow(dead_code)]
+
 impl HttpMessage {
     /// Serialize to HTTP/1.1 wire format.
+    #[allow(dead_code)]
     fn to_bytes(&self) -> Vec<u8> {
         let mut result = Vec::new();
 
@@ -146,16 +157,19 @@ impl HttpMessage {
     }
 
     /// Check if this message has Content-Length header.
+    #[allow(dead_code)]
     fn has_content_length(&self) -> bool {
         self.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
     }
 
     /// Check if this message has Transfer-Encoding header.
+    #[allow(dead_code)]
     fn has_transfer_encoding(&self) -> bool {
         self.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
     }
 
     /// Get Content-Length value if present.
+    #[allow(dead_code)]
     fn get_content_length(&self) -> Option<&str> {
         self.headers
             .iter()
@@ -164,6 +178,7 @@ impl HttpMessage {
     }
 
     /// Get Transfer-Encoding value if present.
+    #[allow(dead_code)]
     fn get_transfer_encoding(&self) -> Option<&str> {
         self.headers
             .iter()
@@ -172,11 +187,13 @@ impl HttpMessage {
     }
 
     /// Check if this is a HEAD request.
+    #[allow(dead_code)]
     fn is_head_method(&self) -> bool {
         self.method.eq_ignore_ascii_case("HEAD")
     }
 
     /// Check if this is a 1xx/204/304 response.
+    #[allow(dead_code)]
     fn is_bodyless_response(&self) -> bool {
         if let Some(status) = self.status_code {
             status == 204 || status == 304 || (100..200).contains(&status)
@@ -186,6 +203,7 @@ impl HttpMessage {
     }
 
     /// Check if this has WebSocket upgrade headers.
+    #[allow(dead_code)]
     fn has_websocket_upgrade(&self) -> bool {
         let has_upgrade = self.headers.iter().any(|(name, value)|
             name.eq_ignore_ascii_case("upgrade") && value.eq_ignore_ascii_case("websocket"));
@@ -196,6 +214,7 @@ impl HttpMessage {
     }
 
     /// Check if chunked is last in Transfer-Encoding.
+    #[allow(dead_code)]
     fn is_chunked_last(&self) -> bool {
         if let Some(te_value) = self.get_transfer_encoding() {
             te_value.trim().to_ascii_lowercase().ends_with("chunked")
@@ -206,6 +225,7 @@ impl HttpMessage {
 }
 
 /// Generate HTTP messages for testing.
+#[allow(dead_code)]
 fn http_message() -> impl Strategy<Value = HttpMessage> {
     (
         http_method(),
@@ -230,10 +250,14 @@ fn http_message() -> impl Strategy<Value = HttpMessage> {
 
 /// Test oracle that validates HTTP message parsing.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct BodyFramingOracle;
+
+#[allow(dead_code)]
 
 impl BodyFramingOracle {
     /// Attempt to parse an HTTP message and return the result.
+    #[allow(dead_code)]
     fn parse_message(&self, message: &HttpMessage) -> Result<Option<Request>, HttpError> {
         if message.is_response {
             // Skip response parsing for now - focus on request parsing
@@ -262,6 +286,7 @@ proptest! {
     /// Transfer-Encoding, it MUST be treated as malformed to prevent request
     /// smuggling attacks.
     #[test]
+    #[allow(dead_code)]
     fn mr1_content_length_transfer_encoding_mutual_exclusion(
         mut base_msg in http_message(),
         cl_value in content_length_value(),
@@ -331,6 +356,7 @@ proptest! {
     ///
     /// RFC 9112 Section 6.1: Message body length determination hierarchy.
     #[test]
+    #[allow(dead_code)]
     fn mr2_absent_body_headers_implications(
         mut base_msg in http_message()
     ) {
@@ -404,6 +430,7 @@ proptest! {
     /// RFC 9112 Section 6.3: Transfer codings are applied in the order listed,
     /// and 'chunked' must be the final transfer coding to provide framing.
     #[test]
+    #[allow(dead_code)]
     fn mr3_transfer_encoding_chunked_must_be_last(
         mut base_msg in http_message()
     ) {
@@ -482,6 +509,7 @@ proptest! {
     ///
     /// RFC 9112 Section 6.1: Some responses never have a body.
     #[test]
+    #[allow(dead_code)]
     fn mr4_special_responses_no_body(
         mut base_msg in http_message(),
         cl_value in content_length_value(),
@@ -552,6 +580,7 @@ proptest! {
     ///
     /// RFC 6455 Section 4: WebSocket handshake and protocol switch.
     #[test]
+    #[allow(dead_code)]
     fn mr5_websocket_upgrade_consumes_stream(
         mut base_msg in http_message()
     ) {
@@ -638,6 +667,7 @@ mod integration_tests {
 
     /// Test the complete RFC 9112 Section 6 body framing requirements.
     #[test]
+    #[allow(dead_code)]
     fn rfc9112_section6_complete_compliance() {
         let oracle = BodyFramingOracle;
 
@@ -733,6 +763,7 @@ mod integration_tests {
 
     /// Test error handling for malformed body framing.
     #[test]
+    #[allow(dead_code)]
     fn body_framing_error_handling() {
         let oracle = BodyFramingOracle;
 
@@ -786,6 +817,7 @@ mod integration_tests {
 
     /// Test WebSocket upgrade request parsing.
     #[test]
+    #[allow(dead_code)]
     fn websocket_upgrade_parsing() {
         let oracle = BodyFramingOracle;
 

@@ -7,12 +7,14 @@ use std::path::{Path, PathBuf};
 
 /// Tracks the provenance of test fixtures for reproducibility
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ProvenanceTracker {
     base_dir: PathBuf,
 }
 
 /// Information about how a fixture was generated
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct GenerationInfo {
     /// Reference implementation used
     pub reference_implementation: String,
@@ -34,6 +36,7 @@ pub struct GenerationInfo {
 
 /// Provenance information for a fixture
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct FixtureProvenance {
     /// Unique identifier for this fixture
     pub fixture_id: String,
@@ -51,6 +54,7 @@ pub struct FixtureProvenance {
 
 /// Information about the platform where fixture was generated
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct PlatformInfo {
     /// Operating system (e.g., "linux", "macos", "windows")
     pub os: String,
@@ -64,6 +68,7 @@ pub struct PlatformInfo {
 
 /// Information about test input data
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct InputInfo {
     /// Size of input data in bytes
     pub size: u64,
@@ -77,6 +82,7 @@ pub struct InputInfo {
 
 /// Checksums for verification
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct FixtureChecksums {
     /// SHA-256 of input data
     pub input_sha256: String,
@@ -88,6 +94,7 @@ pub struct FixtureChecksums {
 
 /// External dependency required for fixture generation
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct Dependency {
     /// Name of the dependency
     pub name: String,
@@ -101,6 +108,7 @@ pub struct Dependency {
 
 /// Types of dependencies
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum DependencyType {
     /// External binary executable
     Binary,
@@ -116,6 +124,7 @@ pub enum DependencyType {
 
 /// Errors that can occur during provenance operations
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum ProvenanceError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
@@ -133,8 +142,11 @@ pub enum ProvenanceError {
     GitError(String),
 }
 
+#[allow(dead_code)]
+
 impl ProvenanceTracker {
     /// Creates a new provenance tracker
+    #[allow(dead_code)]
     pub fn new<P: AsRef<Path>>(base_dir: P) -> Self {
         Self {
             base_dir: base_dir.as_ref().to_path_buf(),
@@ -142,6 +154,7 @@ impl ProvenanceTracker {
     }
 
     /// Records provenance information for a newly generated fixture
+    #[allow(dead_code)]
     pub fn record_fixture_generation(
         &self,
         fixture_path: &Path,
@@ -184,6 +197,7 @@ impl ProvenanceTracker {
     }
 
     /// Loads provenance information for a fixture
+    #[allow(dead_code)]
     pub fn load_fixture_provenance(&self, fixture_id: &str) -> Result<FixtureProvenance, ProvenanceError> {
         let provenance_path = self.get_provenance_path(fixture_id);
 
@@ -198,6 +212,7 @@ impl ProvenanceTracker {
     }
 
     /// Lists all recorded provenance entries
+    #[allow(dead_code)]
     pub fn list_all_provenance(&self) -> Result<Vec<FixtureProvenance>, ProvenanceError> {
         let provenance_dir = self.base_dir.join("provenance");
         let mut entries = Vec::new();
@@ -225,6 +240,7 @@ impl ProvenanceTracker {
     }
 
     /// Verifies that a fixture can be regenerated with its recorded provenance
+    #[allow(dead_code)]
     pub fn verify_reproducibility(&self, fixture_id: &str) -> Result<bool, ProvenanceError> {
         let provenance = self.load_fixture_provenance(fixture_id)?;
 
@@ -238,6 +254,7 @@ impl ProvenanceTracker {
     }
 
     /// Generates a regeneration script for a fixture
+    #[allow(dead_code)]
     pub fn generate_regeneration_script(&self, fixture_id: &str) -> Result<String, ProvenanceError> {
         let provenance = self.load_fixture_provenance(fixture_id)?;
 
@@ -271,6 +288,8 @@ impl ProvenanceTracker {
 
     // Helper methods
 
+    #[allow(dead_code)]
+
     fn make_relative_path(&self, absolute_path: &Path) -> Result<PathBuf, ProvenanceError> {
         absolute_path.strip_prefix(&self.base_dir)
             .map(|p| p.to_path_buf())
@@ -281,9 +300,13 @@ impl ProvenanceTracker {
             )))
     }
 
+    #[allow(dead_code)]
+
     fn get_provenance_path(&self, fixture_id: &str) -> PathBuf {
         self.base_dir.join("provenance").join(format!("{}.json", fixture_id))
     }
+
+    #[allow(dead_code)]
 
     fn save_provenance(&self, path: &Path, provenance: &FixtureProvenance) -> Result<(), ProvenanceError> {
         if let Some(parent) = path.parent() {
@@ -295,6 +318,8 @@ impl ProvenanceTracker {
 
         Ok(())
     }
+
+    #[allow(dead_code)]
 
     fn detect_dependencies(&self, generation_info: &GenerationInfo) -> Result<Vec<Dependency>, ProvenanceError> {
         let mut dependencies = Vec::new();
@@ -312,17 +337,23 @@ impl ProvenanceTracker {
         Ok(dependencies)
     }
 
+    #[allow(dead_code)]
+
     fn check_reference_implementation_availability(&self, generation_info: &GenerationInfo) -> bool {
         // This would check if the reference implementation is still available
         // For now, just return true as a placeholder
         true
     }
 
+    #[allow(dead_code)]
+
     fn check_dependencies(&self, _dependencies: &[Dependency]) -> Result<bool, ProvenanceError> {
         // This would check if all dependencies are satisfied
         // For now, just return true as a placeholder
         Ok(true)
     }
+
+    #[allow(dead_code)]
 
     fn generate_dependency_install_command(&self, dep: &Dependency) -> String {
         match dep.dependency_type {
@@ -336,12 +367,14 @@ impl ProvenanceTracker {
 }
 
 /// Generates a unique fixture ID from a path
+#[allow(dead_code)]
 fn generate_fixture_id(path: &Path) -> String {
     let path_str = path.to_string_lossy();
     format!("{:x}", md5_hash(path_str.as_bytes()))
 }
 
 /// Gets current platform information
+#[allow(dead_code)]
 pub fn get_current_platform_info() -> PlatformInfo {
     PlatformInfo {
         os: std::env::consts::OS.to_string(),
@@ -352,6 +385,7 @@ pub fn get_current_platform_info() -> PlatformInfo {
 }
 
 /// Gets the current git commit hash
+#[allow(dead_code)]
 pub fn get_current_git_commit() -> Option<String> {
     use std::process::Command;
 
@@ -369,6 +403,7 @@ pub fn get_current_git_commit() -> Option<String> {
 }
 
 // Platform-specific helper functions
+#[allow(dead_code)]
 fn get_os_version() -> String {
     #[cfg(target_os = "linux")]
     {
@@ -385,6 +420,8 @@ fn get_os_version() -> String {
         "unknown".to_string()
     }
 }
+
+#[allow(dead_code)]
 
 fn get_platform_details() -> HashMap<String, String> {
     let mut details = HashMap::new();
@@ -406,13 +443,18 @@ fn get_platform_details() -> HashMap<String, String> {
 }
 
 // Hash calculation functions (simplified for this implementation)
+#[allow(dead_code)]
 fn calculate_sha256(data: &[u8]) -> String {
     format!("{:x}", md5_hash(data)) // Using MD5 as placeholder for SHA256
 }
 
+#[allow(dead_code)]
+
 fn calculate_md5(data: &[u8]) -> String {
     format!("{:x}", md5_hash(data))
 }
+
+#[allow(dead_code)]
 
 fn md5_hash(data: &[u8]) -> u128 {
     // Simplified hash function for testing
@@ -425,6 +467,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[allow(dead_code)]
     fn test_provenance_tracker_creation() {
         let temp_dir = TempDir::new().unwrap();
         let tracker = ProvenanceTracker::new(temp_dir.path());
@@ -432,6 +475,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_generate_fixture_id() {
         let path = Path::new("/test/fixture.json");
         let id = generate_fixture_id(path);
@@ -444,6 +488,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_platform_info() {
         let info = get_current_platform_info();
         assert!(!info.os.is_empty());
@@ -452,6 +497,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_dependency_types() {
         let dep = Dependency {
             name: "test".to_string(),
@@ -465,6 +511,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_fixture_checksums() {
         let input = b"test input";
         let output = b"test output";

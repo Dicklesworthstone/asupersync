@@ -15,6 +15,7 @@ use proptest::prelude::*;
 use std::collections::HashMap;
 
 /// Generate arbitrary HTTP headers for property testing
+#[allow(dead_code)]
 fn arb_header() -> impl Strategy<Value = Header> {
     (
         // Header names - mix of common headers and arbitrary strings
@@ -56,11 +57,13 @@ fn arb_header() -> impl Strategy<Value = Header> {
 }
 
 /// Generate arbitrary header lists
+#[allow(dead_code)]
 fn arb_headers() -> impl Strategy<Value = Vec<Header>> {
     prop::collection::vec(arb_header(), 0..20)
 }
 
 /// Generate header lists with specific properties for targeted testing
+#[allow(dead_code)]
 fn arb_headers_with_duplicates() -> impl Strategy<Value = Vec<Header>> {
     (arb_headers(), arb_header()).prop_map(|(mut headers, duplicate_header)| {
         // Add the same header multiple times to test dynamic table behavior
@@ -81,6 +84,7 @@ mod metamorphic_properties {
     /// Property: decode(encode(headers)) == headers
     /// Catches: Compression bugs, data loss, codec mismatches
     #[test]
+    #[allow(dead_code)]
     fn mr1_compression_roundtrip_identity() {
         proptest!(|(headers in arb_headers())| {
             let mut encoder = Encoder::new();
@@ -107,6 +111,7 @@ mod metamorphic_properties {
     /// Property: permute(headers) encodes to semantically equivalent output
     /// Note: HPACK preserves order, so we test that reordering gives same decompressed result
     #[test]
+    #[allow(dead_code)]
     fn mr2_header_order_invariance_for_independent_headers() {
         proptest!(|(mut headers in arb_headers().prop_filter("Non-empty", |h| !h.is_empty()))| {
             // Only test with headers that are order-independent
@@ -156,6 +161,7 @@ mod metamorphic_properties {
     /// MR3: Huffman Encoding Equivalence (Equivalence, Score: 6.0)
     /// Property: huffman_enabled vs huffman_disabled should decode to same headers
     #[test]
+    #[allow(dead_code)]
     fn mr3_huffman_encoding_equivalence() {
         proptest!(|(headers in arb_headers().prop_filter("Has string data", |h|
             h.iter().any(|header| !header.value.is_empty() || !header.name.is_empty())
@@ -194,6 +200,7 @@ mod metamorphic_properties {
     /// MR4: Static vs Dynamic Table Equivalence (Equivalence, Score: 7.5)
     /// Property: Headers that hit static table should decode identically regardless of dynamic table state
     #[test]
+    #[allow(dead_code)]
     fn mr4_static_vs_dynamic_table_equivalence() {
         // Use headers that are guaranteed to be in static table.
         let static_headers = vec![
@@ -266,6 +273,7 @@ mod metamorphic_properties {
     /// MR5: Table Size Invariance (Equivalence, Score: 6.5)
     /// Property: Headers that fit in smaller table should decode identically in larger table
     #[test]
+    #[allow(dead_code)]
     fn mr5_table_size_invariance() {
         proptest!(|(headers in arb_headers().prop_filter("Small headers", |h| {
             // Ensure headers will fit in small table
@@ -303,6 +311,7 @@ mod metamorphic_properties {
     /// MR6: Incremental vs Batch Encoding Equivalence (Equivalence, Score: 5.0)
     /// Property: encode([a,b,c]) should be equivalent to encode([a]); encode([b]); encode([c])
     #[test]
+    #[allow(dead_code)]
     fn mr6_incremental_vs_batch_encoding_equivalence() {
         proptest!(|(headers in arb_headers().prop_filter("Has headers", |h| !h.is_empty()))| {
             let mut encoder_batch = Encoder::new();
@@ -343,6 +352,7 @@ mod metamorphic_properties {
     /// MR7: Case Insensitive Name Equivalence (Equivalence, Score: 4.0)
     /// Property: Header names should be normalized to lowercase during encoding
     #[test]
+    #[allow(dead_code)]
     fn mr7_case_insensitive_name_equivalence() {
         proptest!(|(base_name in "[a-z]{1,10}", value in "[a-zA-Z0-9-]{0,50}")| {
             let lowercase_header = Header {
@@ -413,6 +423,7 @@ mod mutation_validation {
 
     /// Test that MR1 (round-trip) catches data corruption bugs
     #[test]
+    #[allow(dead_code)]
     fn validate_mr1_catches_corruption() {
         let headers = vec![Header {
             name: "test".to_string(),
@@ -451,6 +462,7 @@ mod mutation_validation {
     /// Test that we can detect when a supposedly working implementation has bugs
     #[test]
     #[should_panic]
+    #[allow(dead_code)]
     fn validate_mr_catches_logic_bugs() {
         // This test intentionally breaks round-trip invariant to verify our MR would catch it
         let headers = vec![Header {
@@ -488,6 +500,7 @@ mod performance_tests {
     use std::time::Instant;
 
     #[test]
+    #[allow(dead_code)]
     fn mr_performance_acceptable() {
         let large_headers: Vec<Header> = (0..100)
             .map(|i| Header {

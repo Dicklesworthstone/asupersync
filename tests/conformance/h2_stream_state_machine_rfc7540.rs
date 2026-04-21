@@ -50,11 +50,13 @@ const TEST_MAX_HEADER_SIZE: u32 = 65536;
 const TEST_STREAM_ID: u32 = 1;
 
 /// Helper to create a new test stream in idle state
+#[allow(dead_code)]
 fn new_test_stream() -> Stream {
     Stream::new(TEST_STREAM_ID, TEST_INITIAL_WINDOW, TEST_MAX_HEADER_SIZE)
 }
 
 /// Helper to create a new reserved (remote) stream
+#[allow(dead_code)]
 fn new_reserved_remote_stream() -> Stream {
     Stream::new_reserved_remote(TEST_STREAM_ID, TEST_INITIAL_WINDOW, TEST_MAX_HEADER_SIZE)
 }
@@ -68,6 +70,7 @@ mod state_properties {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_idle_state_properties() {
         let stream = new_test_stream();
         assert_eq!(stream.state(), StreamState::Idle);
@@ -80,6 +83,7 @@ mod state_properties {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_reserved_local_state_properties() {
         let stream = new_test_stream();
         // We don't have a direct constructor for ReservedLocal, but we know the properties
@@ -92,6 +96,7 @@ mod state_properties {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_reserved_remote_state_properties() {
         let stream = new_reserved_remote_stream();
         assert_eq!(stream.state(), StreamState::ReservedRemote);
@@ -104,6 +109,7 @@ mod state_properties {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_open_state_properties() {
         assert!(StreamState::Open.can_send());
         assert!(StreamState::Open.can_recv());
@@ -114,6 +120,7 @@ mod state_properties {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_half_closed_local_properties() {
         assert!(!StreamState::HalfClosedLocal.can_send());
         assert!(StreamState::HalfClosedLocal.can_recv());
@@ -124,6 +131,7 @@ mod state_properties {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_half_closed_remote_properties() {
         assert!(StreamState::HalfClosedRemote.can_send());
         assert!(!StreamState::HalfClosedRemote.can_recv());
@@ -134,6 +142,7 @@ mod state_properties {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_closed_state_properties() {
         assert!(!StreamState::Closed.can_send());
         assert!(!StreamState::Closed.can_recv());
@@ -153,6 +162,7 @@ mod send_headers_transitions {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_idle_send_headers_without_end_stream() {
         let mut stream = new_test_stream();
         assert_eq!(stream.state(), StreamState::Idle);
@@ -162,6 +172,7 @@ mod send_headers_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_idle_send_headers_with_end_stream() {
         let mut stream = new_test_stream();
         assert_eq!(stream.state(), StreamState::Idle);
@@ -171,6 +182,7 @@ mod send_headers_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_reserved_local_send_headers_without_end_stream() {
         // Create a stream and manually set to ReservedLocal
         // (normally done via PUSH_PROMISE processing)
@@ -188,6 +200,7 @@ mod send_headers_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_open_send_headers_with_end_stream() {
         let mut stream = new_test_stream();
 
@@ -201,6 +214,7 @@ mod send_headers_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_open_send_headers_without_end_stream() {
         let mut stream = new_test_stream();
 
@@ -214,6 +228,7 @@ mod send_headers_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_half_closed_remote_send_headers_with_end_stream() {
         let mut stream = new_test_stream();
 
@@ -228,6 +243,7 @@ mod send_headers_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_half_closed_remote_send_headers_without_end_stream() {
         let mut stream = new_test_stream();
 
@@ -251,6 +267,7 @@ mod recv_headers_transitions {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_idle_recv_headers_without_end_stream() {
         let mut stream = new_test_stream();
         assert_eq!(stream.state(), StreamState::Idle);
@@ -260,6 +277,7 @@ mod recv_headers_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_idle_recv_headers_with_end_stream() {
         let mut stream = new_test_stream();
         assert_eq!(stream.state(), StreamState::Idle);
@@ -269,6 +287,7 @@ mod recv_headers_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_reserved_remote_recv_headers_without_end_stream() {
         let mut stream = new_reserved_remote_stream();
         assert_eq!(stream.state(), StreamState::ReservedRemote);
@@ -278,6 +297,7 @@ mod recv_headers_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_reserved_remote_recv_headers_with_end_stream() {
         let mut stream = new_reserved_remote_stream();
         assert_eq!(stream.state(), StreamState::ReservedRemote);
@@ -287,6 +307,7 @@ mod recv_headers_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_open_recv_headers_with_end_stream() {
         let mut stream = new_test_stream();
 
@@ -300,6 +321,7 @@ mod recv_headers_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_open_recv_headers_without_end_stream() {
         let mut stream = new_test_stream();
 
@@ -313,6 +335,7 @@ mod recv_headers_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_half_closed_local_recv_headers_with_end_stream() {
         let mut stream = new_test_stream();
 
@@ -326,6 +349,7 @@ mod recv_headers_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_half_closed_local_recv_headers_without_end_stream() {
         let mut stream = new_test_stream();
 
@@ -348,6 +372,7 @@ mod data_frame_transitions {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_open_send_data_with_end_stream() {
         let mut stream = new_test_stream();
 
@@ -361,6 +386,7 @@ mod data_frame_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_open_send_data_without_end_stream() {
         let mut stream = new_test_stream();
 
@@ -374,6 +400,7 @@ mod data_frame_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_half_closed_remote_send_data_with_end_stream() {
         let mut stream = new_test_stream();
 
@@ -388,6 +415,7 @@ mod data_frame_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_open_recv_data_with_end_stream() {
         let mut stream = new_test_stream();
 
@@ -401,6 +429,7 @@ mod data_frame_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_half_closed_local_recv_data_with_end_stream() {
         let mut stream = new_test_stream();
 
@@ -423,6 +452,7 @@ mod invalid_transitions {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_closed_send_headers_error() {
         let mut stream = new_test_stream();
 
@@ -442,6 +472,7 @@ mod invalid_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_closed_recv_headers_error() {
         let mut stream = new_test_stream();
 
@@ -461,6 +492,7 @@ mod invalid_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_half_closed_local_send_data_error() {
         let mut stream = new_test_stream();
 
@@ -479,6 +511,7 @@ mod invalid_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_half_closed_remote_recv_data_error() {
         let mut stream = new_test_stream();
 
@@ -498,6 +531,7 @@ mod invalid_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_reserved_local_recv_headers_error() {
         // Note: We can't easily create ReservedLocal state without PUSH_PROMISE machinery
         // but we can test the state logic principles
@@ -505,6 +539,7 @@ mod invalid_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_reserved_remote_send_headers_error() {
         let mut stream = new_reserved_remote_stream();
         assert_eq!(stream.state(), StreamState::ReservedRemote);
@@ -520,6 +555,7 @@ mod invalid_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_idle_send_data_error() {
         let mut stream = new_test_stream();
         assert_eq!(stream.state(), StreamState::Idle);
@@ -535,6 +571,7 @@ mod invalid_transitions {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_idle_recv_data_error() {
         let mut stream = new_test_stream();
         assert_eq!(stream.state(), StreamState::Idle);
@@ -559,12 +596,14 @@ mod edge_cases {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_stream_id_validation() {
         let stream = new_test_stream();
         assert_eq!(stream.id(), TEST_STREAM_ID);
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_multiple_header_frames_same_state() {
         let mut stream = new_test_stream();
 
@@ -581,6 +620,7 @@ mod edge_cases {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_header_fragment_continuation() {
         let mut stream = new_test_stream();
 
@@ -595,6 +635,7 @@ mod edge_cases {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_continuation_on_closed_stream_error() {
         let mut stream = new_test_stream();
 
@@ -615,6 +656,7 @@ mod edge_cases {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_window_size_updates() {
         let mut stream = new_test_stream();
 
@@ -631,6 +673,7 @@ mod edge_cases {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_priority_updates() {
         let mut stream = new_test_stream();
 
@@ -647,6 +690,7 @@ mod edge_cases {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_flow_control_window_overflow() {
         let mut stream = new_test_stream();
 
@@ -664,6 +708,7 @@ mod edge_cases {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_data_length_exceeds_i32_max() {
         let mut stream = new_test_stream();
 
@@ -692,6 +737,7 @@ mod concurrent_streams {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_active_stream_counting() {
         // Test which states count toward concurrent stream limit per RFC 7540 §5.1.2
 
@@ -708,6 +754,7 @@ mod concurrent_streams {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_stream_lifecycle_active_counting() {
         let mut stream = new_test_stream();
 
@@ -742,6 +789,7 @@ mod complete_state_machine {
 
     /// Test all valid paths from Idle to Closed
     #[test]
+    #[allow(dead_code)]
     fn test_complete_lifecycle_paths() {
         // Path 1: Idle -> Open -> HalfClosedLocal -> Closed
         let mut stream1 = new_test_stream();
@@ -783,6 +831,7 @@ mod complete_state_machine {
 
     /// Verify all state transition combinations are either valid or properly rejected
     #[test]
+    #[allow(dead_code)]
     fn test_exhaustive_transition_matrix() {
         use StreamState::*;
 

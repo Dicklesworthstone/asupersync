@@ -23,6 +23,7 @@ pub mod constants {
 
 /// Connect protocol specific test configuration
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ConnectTestConfig {
     pub use_json_encoding: bool,
     pub use_streaming: bool,
@@ -32,6 +33,7 @@ pub struct ConnectTestConfig {
 }
 
 impl Default for ConnectTestConfig {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             use_json_encoding: false,
@@ -45,13 +47,17 @@ impl Default for ConnectTestConfig {
 
 /// Connect compression options
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ConnectCompression {
     Gzip,
     Deflate,
     Brotli,
 }
 
+#[allow(dead_code)]
+
 impl ConnectCompression {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             ConnectCompression::Gzip => "gzip",
@@ -62,6 +68,7 @@ impl ConnectCompression {
 }
 
 /// Connect request builder
+#[allow(dead_code)]
 pub struct ConnectRequestBuilder {
     method: Method,
     uri: Uri,
@@ -70,7 +77,10 @@ pub struct ConnectRequestBuilder {
     config: ConnectTestConfig,
 }
 
+#[allow(dead_code)]
+
 impl ConnectRequestBuilder {
+    #[allow(dead_code)]
     pub fn new(service: &str, method: &str) -> Self {
         let uri = format!("/{}/{}", service, method).parse().unwrap();
 
@@ -92,6 +102,8 @@ impl ConnectRequestBuilder {
             config: ConnectTestConfig::default(),
         }
     }
+
+    #[allow(dead_code)]
 
     pub fn with_config(mut self, config: ConnectTestConfig) -> Self {
         self.config = config;
@@ -135,10 +147,14 @@ impl ConnectRequestBuilder {
         self
     }
 
+    #[allow(dead_code)]
+
     pub fn with_body(mut self, body: Bytes) -> Self {
         self.body = body;
         self
     }
+
+    #[allow(dead_code)]
 
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
         self.headers.insert(
@@ -147,6 +163,8 @@ impl ConnectRequestBuilder {
         );
         self
     }
+
+    #[allow(dead_code)]
 
     pub fn build(self) -> ConnectRequest {
         ConnectRequest {
@@ -160,6 +178,7 @@ impl ConnectRequestBuilder {
 
 /// Connect protocol request
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ConnectRequest {
     pub method: Method,
     pub uri: Uri,
@@ -169,6 +188,7 @@ pub struct ConnectRequest {
 
 /// Connect protocol response
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ConnectResponse {
     pub status_code: u16,
     pub headers: HeaderMap,
@@ -178,6 +198,7 @@ pub struct ConnectResponse {
 
 /// Connect error format
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ConnectError {
     pub code: String,
     pub message: String,
@@ -187,6 +208,7 @@ pub struct ConnectError {
 
 /// Connect error detail
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ConnectErrorDetail {
     #[serde(rename = "type")]
     pub detail_type: String,
@@ -194,10 +216,14 @@ pub struct ConnectErrorDetail {
 }
 
 /// Connect protocol validator
+#[allow(dead_code)]
 pub struct ConnectProtocolValidator;
+
+#[allow(dead_code)]
 
 impl ConnectProtocolValidator {
     /// Validate that a request conforms to Connect protocol
+    #[allow(dead_code)]
     pub fn validate_request(request: &ConnectRequest) -> Result<ValidationResult> {
         let mut issues = Vec::new();
 
@@ -249,6 +275,7 @@ impl ConnectProtocolValidator {
     }
 
     /// Validate that a response conforms to Connect protocol
+    #[allow(dead_code)]
     pub fn validate_response(response: &ConnectResponse) -> Result<ValidationResult> {
         let mut issues = Vec::new();
 
@@ -292,6 +319,7 @@ impl ConnectProtocolValidator {
     }
 
     /// Map gRPC status codes to Connect error codes
+    #[allow(dead_code)]
     pub fn grpc_to_connect_status(grpc_code: i32) -> &'static str {
         match grpc_code {
             0 => "ok",
@@ -316,6 +344,7 @@ impl ConnectProtocolValidator {
     }
 
     /// Map HTTP status codes to gRPC status codes per Connect spec
+    #[allow(dead_code)]
     pub fn http_to_grpc_status(http_status: u16) -> i32 {
         match http_status {
             200 => 0,  // OK
@@ -337,13 +366,17 @@ impl ConnectProtocolValidator {
 
 /// Validation result
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ValidationResult {
     pub is_valid: bool,
     pub issues: Vec<String>,
 }
 
 /// Connect-specific conformance tests
+#[allow(dead_code)]
 pub struct ConnectConformanceTests;
+
+#[allow(dead_code)]
 
 impl ConnectConformanceTests {
     /// Test Connect protocol header requirements
@@ -394,6 +427,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_connect_request_builder() {
         let request = ConnectRequestBuilder::new("test.Service", "TestMethod")
             .with_config(ConnectTestConfig::default())
@@ -407,6 +441,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_grpc_to_connect_status() {
         assert_eq!(ConnectProtocolValidator::grpc_to_connect_status(0), "ok");
         assert_eq!(ConnectProtocolValidator::grpc_to_connect_status(1), "cancelled");
@@ -416,6 +451,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_http_to_grpc_status() {
         assert_eq!(ConnectProtocolValidator::http_to_grpc_status(200), 0);
         assert_eq!(ConnectProtocolValidator::http_to_grpc_status(400), 3);
@@ -424,6 +460,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_connect_request_validation() {
         let request = ConnectRequestBuilder::new("test.Service", "TestMethod")
             .with_config(ConnectTestConfig::default())

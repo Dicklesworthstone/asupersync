@@ -194,6 +194,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_cli_parsing() {
         let app = Command::new("test")
             .arg(
@@ -213,6 +214,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_bind_address_parsing() {
         let addr: Result<SocketAddr, _> = "127.0.0.1:8080".parse();
         assert!(addr.is_ok());

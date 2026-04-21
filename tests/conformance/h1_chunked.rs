@@ -22,6 +22,7 @@ use asupersync::{
 use std::collections::HashMap;
 
 /// Helper to encode a response and check the result
+#[allow(dead_code)]
 fn encode_response(resp: Response) -> Result<String, HttpError> {
     let mut codec = Http1Codec::new();
     let mut dst = BytesMut::with_capacity(1024);
@@ -30,6 +31,7 @@ fn encode_response(resp: Response) -> Result<String, HttpError> {
 }
 
 /// Helper to decode a request from raw bytes
+#[allow(dead_code)]
 fn decode_request(data: &[u8]) -> Result<Option<Request>, HttpError> {
     let mut codec = Http1Codec::new();
     let mut src = BytesMut::from(data);
@@ -37,6 +39,7 @@ fn decode_request(data: &[u8]) -> Result<Option<Request>, HttpError> {
 }
 
 /// Helper to create chunked request data with specific chunks
+#[allow(dead_code)]
 fn create_chunked_request(chunks: &[(usize, &[u8])], trailers: &[(&str, &str)]) -> Vec<u8> {
     let mut request = Vec::new();
     request.extend_from_slice(b"POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n");
@@ -64,6 +67,7 @@ fn create_chunked_request(chunks: &[(usize, &[u8])], trailers: &[(&str, &str)]) 
 
 /// MR1: Chunk size in hex + CRLF + data + CRLF round-trips cleanly
 #[test]
+#[allow(dead_code)]
 fn mr1_chunk_hex_crlf_roundtrip() {
     LabRuntime::test(|lab| async {
         let test_cases = vec![
@@ -102,6 +106,7 @@ fn mr1_chunk_hex_crlf_roundtrip() {
 
 /// MR2: Terminating zero-size chunk + optional trailers + CRLF CRLF parses cleanly
 #[test]
+#[allow(dead_code)]
 fn mr2_zero_chunk_trailers_termination() {
     LabRuntime::test(|lab| async {
         let test_cases = vec![
@@ -141,6 +146,7 @@ fn mr2_zero_chunk_trailers_termination() {
 
 /// MR3: Oversized chunk-size hex rejected (bounded parsing)
 #[test]
+#[allow(dead_code)]
 fn mr3_oversized_chunk_size_rejection() {
     LabRuntime::test(|lab| async {
         let test_cases = vec![
@@ -180,6 +186,7 @@ fn mr3_oversized_chunk_size_rejection() {
 
 /// MR4: Invalid hex chars in size cause 400 Bad Request
 #[test]
+#[allow(dead_code)]
 fn mr4_invalid_hex_chars_rejection() {
     LabRuntime::test(|lab| async {
         let test_cases = vec![
@@ -225,6 +232,7 @@ fn mr4_invalid_hex_chars_rejection() {
 
 /// MR5: Chunked response cannot have Content-Length — must emit Transfer-Encoding: chunked
 #[test]
+#[allow(dead_code)]
 fn mr5_chunked_response_header_exclusivity() {
     LabRuntime::test(|lab| async {
         // Test 1: Response with Transfer-Encoding: chunked should not have Content-Length
@@ -290,6 +298,7 @@ fn mr5_chunked_response_header_exclusivity() {
 
 /// Property-based test: Chunk extension parsing (RFC 9112 allows but ignores extensions)
 #[test]
+#[allow(dead_code)]
 fn property_chunk_extensions_ignored() {
     LabRuntime::test(|lab| async {
         let test_cases = vec![
@@ -324,6 +333,7 @@ fn property_chunk_extensions_ignored() {
 
 /// Edge case: Empty chunks and zero-length data
 #[test]
+#[allow(dead_code)]
 fn edge_case_empty_and_zero_chunks() {
     LabRuntime::test(|lab| async {
         // Test 1: Request with only zero chunk (empty body)
@@ -353,6 +363,7 @@ fn edge_case_empty_and_zero_chunks() {
 
 /// Edge case: Boundary conditions for chunk size limits
 #[test]
+#[allow(dead_code)]
 fn edge_case_chunk_size_boundaries() {
     LabRuntime::test(|lab| async {
         let test_cases = vec![
@@ -386,6 +397,7 @@ fn edge_case_chunk_size_boundaries() {
 
 /// Security test: CRLF injection in chunk data vs chunk framing
 #[test]
+#[allow(dead_code)]
 fn security_crlf_handling() {
     LabRuntime::test(|lab| async {
         // Test that CRLF within chunk data is preserved as-is and doesn't break parsing

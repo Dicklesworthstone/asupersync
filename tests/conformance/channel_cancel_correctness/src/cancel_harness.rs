@@ -9,6 +9,7 @@ use crate::resource_tracking::{ResourceTracker, ResourceLeakError};
 
 /// Configuration for cancellation test scenarios.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CancelTestHarness {
     /// Maximum duration for a single test.
     pub timeout: Duration,
@@ -25,6 +26,7 @@ pub struct CancelTestHarness {
 }
 
 impl Default for CancelTestHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(30),
@@ -37,8 +39,11 @@ impl Default for CancelTestHarness {
     }
 }
 
+#[allow(dead_code)]
+
 impl CancelTestHarness {
     /// Create a new harness with custom configuration.
+    #[allow(dead_code)]
     pub fn new(test_id: impl Into<String>) -> Self {
         Self {
             test_id: test_id.into(),
@@ -47,35 +52,41 @@ impl CancelTestHarness {
     }
 
     /// Set timeout for test execution.
+    #[allow(dead_code)]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
     /// Set delay before cancellation trigger.
+    #[allow(dead_code)]
     pub fn with_cancel_delay(mut self, delay: Duration) -> Self {
         self.cancel_delay = delay;
         self
     }
 
     /// Set stress testing configuration.
+    #[allow(dead_code)]
     pub fn with_stress_config(mut self, config: StressConfig) -> Self {
         self.stress_config = config;
         self
     }
 
     /// Enable or disable fail-fast mode.
+    #[allow(dead_code)]
     pub fn with_fail_fast(mut self, fail_fast: bool) -> Self {
         self.fail_fast = fail_fast;
         self
     }
 
     /// Assert that no resource leaks occurred during the test.
+    #[allow(dead_code)]
     pub fn assert_no_resource_leaks(&self) -> Result<(), ResourceLeakError> {
         self.resource_tracker.assert_no_leaks()
     }
 
     /// Reset resource tracking for a new test.
+    #[allow(dead_code)]
     pub fn reset_tracking(&self) {
         self.resource_tracker.reset();
     }
@@ -83,6 +94,7 @@ impl CancelTestHarness {
 
 /// Configuration for stress testing scenarios.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct StressConfig {
     /// Number of concurrent operations to run.
     pub concurrency_level: usize,
@@ -95,6 +107,7 @@ pub struct StressConfig {
 }
 
 impl Default for StressConfig {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             concurrency_level: 10,
@@ -107,6 +120,7 @@ impl Default for StressConfig {
 
 /// Channel types that can be tested for cancellation conformance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum ChannelType {
     Mpsc,
     Broadcast,
@@ -115,6 +129,7 @@ pub enum ChannelType {
 }
 
 impl std::fmt::Display for ChannelType {
+    #[allow(dead_code)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ChannelType::Mpsc => write!(f, "mpsc"),
@@ -127,6 +142,7 @@ impl std::fmt::Display for ChannelType {
 
 /// Different cancellation scenarios to test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum CancelScenario {
     SendCancel,
     ReceiveCancel,
@@ -136,6 +152,7 @@ pub enum CancelScenario {
 }
 
 impl std::fmt::Display for CancelScenario {
+    #[allow(dead_code)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CancelScenario::SendCancel => write!(f, "send_cancel"),
@@ -149,6 +166,7 @@ impl std::fmt::Display for CancelScenario {
 
 /// Results from a cancellation conformance test.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CancelTestResult {
     /// Whether the test passed all requirements.
     pub passed: bool,
@@ -168,8 +186,11 @@ pub struct CancelTestResult {
     pub metrics: HashMap<String, f64>,
 }
 
+#[allow(dead_code)]
+
 impl CancelTestResult {
     /// Create a new test result.
+    #[allow(dead_code)]
     pub fn new(passed: bool, duration: Duration) -> Self {
         Self {
             passed,
@@ -184,17 +205,20 @@ impl CancelTestResult {
     }
 
     /// Add a protocol violation to the result.
+    #[allow(dead_code)]
     pub fn add_violation(&mut self, violation: ProtocolViolation) {
         self.violations.push(violation);
         self.passed = false;
     }
 
     /// Add a custom metric to the result.
+    #[allow(dead_code)]
     pub fn add_metric(&mut self, name: impl Into<String>, value: f64) {
         self.metrics.insert(name.into(), value);
     }
 
     /// Check if any resource leaks were detected.
+    #[allow(dead_code)]
     pub fn has_resource_leaks(&self) -> bool {
         self.final_resources.waker_count > self.initial_resources.waker_count ||
         self.final_resources.memory_usage > self.initial_resources.memory_usage + 1024 // 1KB tolerance
@@ -203,6 +227,7 @@ impl CancelTestResult {
 
 /// Snapshot of resource usage at a point in time.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct ResourceSnapshot {
     /// Number of active waker registrations.
     pub waker_count: usize,
@@ -214,6 +239,7 @@ pub struct ResourceSnapshot {
 
 /// Protocol violations detected during testing.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum ProtocolViolation {
     /// Cancellation signal was not properly propagated.
     CancelNotPropagated {
@@ -248,6 +274,7 @@ pub enum ProtocolViolation {
 }
 
 impl std::fmt::Display for ProtocolViolation {
+    #[allow(dead_code)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProtocolViolation::CancelNotPropagated { channel_type, scenario, details } => {
@@ -274,29 +301,36 @@ impl std::fmt::Display for ProtocolViolation {
 /// Trait for implementing cancellation conformance tests.
 pub trait CancelCorrectnessTest {
     /// Name of the test for identification.
+    #[allow(dead_code)]
     fn test_name(&self) -> &str;
 
     /// Channel type being tested.
+    #[allow(dead_code)]
     fn channel_type(&self) -> ChannelType;
 
     /// Cancellation scenario being tested.
+    #[allow(dead_code)]
     fn cancel_scenario(&self) -> CancelScenario;
 
     /// Run the conformance test with the provided harness.
+    #[allow(dead_code)]
     fn run_test(&self, harness: &CancelTestHarness) -> CancelTestResult;
 
     /// Optional setup before running the test.
+    #[allow(dead_code)]
     fn setup(&self) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
 
     /// Optional cleanup after running the test.
+    #[allow(dead_code)]
     fn cleanup(&self) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
 }
 
 /// Test execution engine for running cancellation conformance test suites.
+#[allow(dead_code)]
 pub struct CancelTestEngine {
     /// All registered conformance tests.
     tests: Vec<Box<dyn CancelCorrectnessTest>>,
@@ -306,8 +340,11 @@ pub struct CancelTestEngine {
     fail_fast: bool,
 }
 
+#[allow(dead_code)]
+
 impl CancelTestEngine {
     /// Create a new test engine.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             tests: Vec::new(),
@@ -317,23 +354,27 @@ impl CancelTestEngine {
     }
 
     /// Add a conformance test to the engine.
+    #[allow(dead_code)]
     pub fn add_test(&mut self, test: Box<dyn CancelCorrectnessTest>) {
         self.tests.push(test);
     }
 
     /// Set the default harness configuration.
+    #[allow(dead_code)]
     pub fn with_default_harness(mut self, harness: CancelTestHarness) -> Self {
         self.default_harness = harness;
         self
     }
 
     /// Set fail-fast behavior.
+    #[allow(dead_code)]
     pub fn with_fail_fast(mut self, fail_fast: bool) -> Self {
         self.fail_fast = fail_fast;
         self
     }
 
     /// Run all registered conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> ConformanceTestReport {
         let start_time = Instant::now();
         let mut results = HashMap::new();
@@ -390,6 +431,7 @@ impl CancelTestEngine {
 
 /// Overall report from running the conformance test suite.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ConformanceTestReport {
     /// Total number of tests run.
     pub total_tests: usize,
@@ -405,13 +447,17 @@ pub struct ConformanceTestReport {
     pub results: HashMap<String, CancelTestResult>,
 }
 
+#[allow(dead_code)]
+
 impl ConformanceTestReport {
     /// Check if all tests passed.
+    #[allow(dead_code)]
     pub fn all_passed(&self) -> bool {
         self.failed_tests == 0
     }
 
     /// Get the pass rate as a percentage.
+    #[allow(dead_code)]
     pub fn pass_rate(&self) -> f64 {
         if self.total_tests == 0 {
             100.0
@@ -421,6 +467,7 @@ impl ConformanceTestReport {
     }
 
     /// Print a summary of the test results.
+    #[allow(dead_code)]
     pub fn print_summary(&self) {
         println!("=== Channel Cancellation Protocol Conformance Report ===");
         println!("Total tests: {}", self.total_tests);
@@ -446,6 +493,7 @@ impl ConformanceTestReport {
 }
 
 impl Default for CancelTestEngine {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }

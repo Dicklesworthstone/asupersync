@@ -42,6 +42,7 @@ const GRPC_STATUS_CODES: &[(Code, i32, &str)] = &[
 ];
 
 #[test]
+#[allow(dead_code)]
 fn test_all_17_standard_grpc_status_codes() {
     // Test that all 17 standard gRPC status codes are correctly defined
     // with proper numeric values and string representations
@@ -81,6 +82,7 @@ fn test_all_17_standard_grpc_status_codes() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_invalid_status_codes_map_to_unknown() {
     // Per gRPC spec, any unrecognized status code should map to UNKNOWN (2)
     let invalid_codes = [-1, 17, 18, 99, 255, 1000, i32::MAX, i32::MIN];
@@ -95,6 +97,7 @@ fn test_invalid_status_codes_map_to_unknown() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_status_code_default_is_unknown() {
     // Default status code should be UNKNOWN per gRPC specification
     let default_code = Code::default();
@@ -120,6 +123,7 @@ const HTTP_TO_GRPC_MAPPINGS: &[(u16, Code)] = &[
 ];
 
 #[test]
+#[allow(dead_code)]
 fn test_http_to_grpc_status_mapping() {
     // Test HTTP status code to gRPC status code mappings
     // This validates transport error conversion logic
@@ -149,6 +153,7 @@ fn test_http_to_grpc_status_mapping() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_grpc_error_transport_error_conversion() {
     // Test various transport error scenarios and their gRPC status mappings
 
@@ -173,6 +178,7 @@ fn test_grpc_error_transport_error_conversion() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_grpc_error_protocol_error_conversion() {
     // Test protocol error conversion to gRPC status codes
 
@@ -229,6 +235,7 @@ const UTF8_ENCODING_TEST_CASES: &[(&str, &str)] = &[
 ];
 
 /// Escape special characters in gRPC message for HTTP/2 header transmission.
+#[allow(dead_code)]
 fn escape_grpc_message(message: &str) -> String {
     message
         .chars()
@@ -244,6 +251,7 @@ fn escape_grpc_message(message: &str) -> String {
 }
 
 /// Unescape special characters from HTTP/2 header value.
+#[allow(dead_code)]
 fn unescape_grpc_message(escaped: &str) -> String {
     let mut result = String::with_capacity(escaped.len());
     let mut chars = escaped.chars().peekable();
@@ -271,6 +279,7 @@ fn unescape_grpc_message(escaped: &str) -> String {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_grpc_message_utf8_encoding() {
     // Test UTF-8 encoding and escaping for grpc-message trailer values
 
@@ -292,6 +301,7 @@ fn test_grpc_message_utf8_encoding() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_grpc_message_percent_encoding_edge_cases() {
     // Test edge cases for percent encoding in grpc-message
 
@@ -318,6 +328,7 @@ fn test_grpc_message_percent_encoding_edge_cases() {
 // ============================================================================
 
 #[test]
+#[allow(dead_code)]
 fn test_trailer_only_response_conformance() {
     // Test that trailer-only responses are properly supported per gRPC spec
     // Trailer-only responses contain only HTTP/2 trailers, no data frames
@@ -368,6 +379,7 @@ fn test_trailer_only_response_conformance() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_trailer_metadata_format() {
     // Test gRPC trailer metadata format conformance
 
@@ -411,6 +423,7 @@ fn test_trailer_metadata_format() {
 // ============================================================================
 
 #[test]
+#[allow(dead_code)]
 fn test_grpc_status_details_bin_conformance() {
     // Test grpc-status-details-bin trailer for rich error details
     // This allows structured error information beyond simple messages
@@ -464,6 +477,7 @@ fn test_grpc_status_details_bin_conformance() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_status_details_binary_safety() {
     // Test that status details handle arbitrary binary data safely
 
@@ -491,6 +505,7 @@ fn test_status_details_binary_safety() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_status_details_size_limits() {
     // Test handling of various detail sizes including edge cases
 
@@ -525,6 +540,7 @@ fn test_status_details_size_limits() {
 // ============================================================================
 
 #[test]
+#[allow(dead_code)]
 fn test_complete_grpc_status_conformance() {
     // Comprehensive integration test covering all aspects of gRPC status conformance
 
@@ -579,6 +595,7 @@ fn test_complete_grpc_status_conformance() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_grpc_status_error_conversion_chain() {
     // Test error conversion chain: std::io::Error -> GrpcError -> Status
 

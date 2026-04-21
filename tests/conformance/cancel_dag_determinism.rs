@@ -24,6 +24,7 @@ mod cancel_dag_determinism_tests {
     use std::time::Duration;
 
     /// Conformance harness for cancel DAG determinism tests.
+    #[allow(dead_code)]
     pub struct CancelDagDeterminismHarness {
         _config: LabConfig,
     }
@@ -31,6 +32,7 @@ mod cancel_dag_determinism_tests {
     /// Test category for cancel DAG determinism conformance tests.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum TestCategory {
         DagSerialization,
         CancellationOrdering,
@@ -42,6 +44,7 @@ mod cancel_dag_determinism_tests {
     /// Requirement level for conformance tests.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum RequirementLevel {
         Must,
         Should,
@@ -51,6 +54,7 @@ mod cancel_dag_determinism_tests {
     /// Test verdict for conformance tests.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum TestVerdict {
         Pass,
         Fail,
@@ -60,6 +64,7 @@ mod cancel_dag_determinism_tests {
 
     /// Result of a cancel DAG determinism conformance test.
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[allow(dead_code)]
     pub struct CancelDagDeterminismResult {
         pub test_id: String,
         pub description: String,
@@ -72,6 +77,7 @@ mod cancel_dag_determinism_tests {
 
     /// Cancel DAG serialization helper for determinism testing.
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[allow(dead_code)]
     pub struct CancelDagSnapshot {
         pub cancellation_events: Vec<CancelEvent>,
         pub dependency_graph: BTreeMap<ObjectId, Vec<ObjectId>>,
@@ -80,6 +86,7 @@ mod cancel_dag_determinism_tests {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    #[allow(dead_code)]
     pub struct CancelEvent {
         pub object_id: ObjectId,
         pub cancel_kind: u8, // CancelKind as u8 for deterministic serialization
@@ -88,6 +95,7 @@ mod cancel_dag_determinism_tests {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    #[allow(dead_code)]
     pub struct FinalizerEvent {
         pub object_id: ObjectId,
         pub trace_id: u64,
@@ -96,6 +104,7 @@ mod cancel_dag_determinism_tests {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    #[allow(dead_code)]
     pub struct BudgetEvent {
         pub object_id: ObjectId,
         pub budget_kind: u8, // Budget kind as u8
@@ -103,14 +112,18 @@ mod cancel_dag_determinism_tests {
         pub remaining: u64,
     }
 
+    #[allow(dead_code)]
+
     impl CancelDagDeterminismHarness {
         /// Create a new cancel DAG determinism conformance harness.
+        #[allow(dead_code)]
         pub fn new() -> Self {
             let config = LabConfig::default_for_test();
             Self { _config: config }
         }
 
         /// Run all cancel DAG determinism conformance tests.
+        #[allow(dead_code)]
         pub fn run_all_tests(&self) -> Vec<CancelDagDeterminismResult> {
             let mut results = Vec::new();
 
@@ -154,6 +167,7 @@ mod cancel_dag_determinism_tests {
         }
 
         /// Test 1: Same random seed produces byte-identical cancel DAG serialization.
+        #[allow(dead_code)]
         fn test_dag_serialization_determinism(&self) -> CancelDagDeterminismResult {
             let start_time = std::time::Instant::now();
 
@@ -203,6 +217,7 @@ mod cancel_dag_determinism_tests {
         }
 
         /// Test 2: Cancellation order preserved across 100 runs.
+        #[allow(dead_code)]
         fn test_cancellation_order_preservation(&self) -> CancelDagDeterminismResult {
             let start_time = std::time::Instant::now();
 
@@ -262,6 +277,7 @@ mod cancel_dag_determinism_tests {
         }
 
         /// Test 3: Panicked finalizers logged with same trace_id.
+        #[allow(dead_code)]
         fn test_finalizer_trace_id_consistency(&self) -> CancelDagDeterminismResult {
             let start_time = std::time::Instant::now();
 
@@ -321,6 +337,7 @@ mod cancel_dag_determinism_tests {
         }
 
         /// Test 4: Budget exhaustion deterministic across replays.
+        #[allow(dead_code)]
         fn test_budget_exhaustion_determinism(&self) -> CancelDagDeterminismResult {
             let start_time = std::time::Instant::now();
 
@@ -372,6 +389,7 @@ mod cancel_dag_determinism_tests {
         }
 
         /// Test 5: Symbol-cancel order matches declared dependency graph topo-sort.
+        #[allow(dead_code)]
         fn test_dependency_graph_topological_order(&self) -> CancelDagDeterminismResult {
             let start_time = std::time::Instant::now();
 
@@ -423,6 +441,7 @@ mod cancel_dag_determinism_tests {
         }
 
         /// Test 6: Multiple seed consistency validation.
+        #[allow(dead_code)]
         fn test_multiple_seed_consistency(&self) -> CancelDagDeterminismResult {
             let start_time = std::time::Instant::now();
 
@@ -478,6 +497,7 @@ mod cancel_dag_determinism_tests {
         }
 
         /// Test 7: Cancel DAG serialization byte ordering.
+        #[allow(dead_code)]
         fn test_serialization_byte_ordering(&self) -> CancelDagDeterminismResult {
             let start_time = std::time::Instant::now();
 
@@ -526,6 +546,7 @@ mod cancel_dag_determinism_tests {
         }
 
         /// Test 8: Hierarchical cancellation determinism.
+        #[allow(dead_code)]
         fn test_hierarchical_cancellation_determinism(&self) -> CancelDagDeterminismResult {
             let start_time = std::time::Instant::now();
 
@@ -583,6 +604,7 @@ mod cancel_dag_determinism_tests {
         }
 
         /// Test 9: Concurrent cancellation request ordering.
+        #[allow(dead_code)]
         fn test_concurrent_cancellation_ordering(&self) -> CancelDagDeterminismResult {
             let start_time = std::time::Instant::now();
 
@@ -636,6 +658,7 @@ mod cancel_dag_determinism_tests {
         }
 
         /// Test 10: Progress certificate determinism.
+        #[allow(dead_code)]
         fn test_progress_certificate_determinism(&self) -> CancelDagDeterminismResult {
             let start_time = std::time::Instant::now();
 
@@ -691,6 +714,7 @@ mod cancel_dag_determinism_tests {
         }
 
         /// Test 11: Symbol dependency chain validation.
+        #[allow(dead_code)]
         fn test_symbol_dependency_chain_validation(&self) -> CancelDagDeterminismResult {
             let start_time = std::time::Instant::now();
 
@@ -748,6 +772,7 @@ mod cancel_dag_determinism_tests {
         }
 
         /// Test 12: Cancel broadcast propagation determinism.
+        #[allow(dead_code)]
         fn test_cancel_broadcast_determinism(&self) -> CancelDagDeterminismResult {
             let start_time = std::time::Instant::now();
 
@@ -801,6 +826,8 @@ mod cancel_dag_determinism_tests {
 
         // Helper methods for creating test scenarios
 
+        #[allow(dead_code)]
+
         fn create_cancel_dag_snapshot(&self, seed: u64) -> Result<CancelDagSnapshot, String> {
             // Mock implementation for creating a deterministic cancel DAG
             let mut events = Vec::new();
@@ -837,6 +864,8 @@ mod cancel_dag_determinism_tests {
             })
         }
 
+        #[allow(dead_code)]
+
         fn create_cancel_dag_with_panicking_finalizers(
             &self,
             seed: u64,
@@ -855,6 +884,8 @@ mod cancel_dag_determinism_tests {
 
             Ok(snapshot)
         }
+
+        #[allow(dead_code)]
 
         fn create_cancel_dag_with_budget_limits(
             &self,
@@ -878,6 +909,8 @@ mod cancel_dag_determinism_tests {
             snapshot.budget_exhaustions.sort_by_key(|e| e.exhausted_at);
             Ok(snapshot)
         }
+
+        #[allow(dead_code)]
 
         fn create_cancel_dag_with_dependencies(
             &self,
@@ -907,11 +940,15 @@ mod cancel_dag_determinism_tests {
             Ok(snapshot)
         }
 
+        #[allow(dead_code)]
+
         fn create_hierarchical_cancel_dag(&self, seed: u64) -> Result<CancelDagSnapshot, String> {
             let snapshot = self.create_cancel_dag_snapshot(seed)?;
             // For now, return basic snapshot as hierarchical structure requires more complex setup
             Ok(snapshot)
         }
+
+        #[allow(dead_code)]
 
         fn create_concurrent_cancel_scenario(
             &self,
@@ -937,6 +974,8 @@ mod cancel_dag_determinism_tests {
             Ok(snapshot)
         }
 
+        #[allow(dead_code)]
+
         fn create_progress_certificate_trace(
             &self,
             seed: u64,
@@ -955,12 +994,16 @@ mod cancel_dag_determinism_tests {
             Ok(trace)
         }
 
+        #[allow(dead_code)]
+
         fn create_cancel_dag_with_symbol_chains(
             &self,
             seed: u64,
         ) -> Result<CancelDagSnapshot, String> {
             self.create_cancel_dag_with_dependencies(seed)
         }
+
+        #[allow(dead_code)]
 
         fn create_cancel_broadcast_scenario(&self, seed: u64) -> Result<CancelDagSnapshot, String> {
             let mut snapshot = self.create_cancel_dag_snapshot(seed)?;
@@ -980,6 +1023,8 @@ mod cancel_dag_determinism_tests {
 
         // Helper methods for graph operations
 
+        #[allow(dead_code)]
+
         fn topological_sort(
             &self,
             graph: &BTreeMap<ObjectId, Vec<ObjectId>>,
@@ -998,6 +1043,8 @@ mod cancel_dag_determinism_tests {
             result.reverse();
             Ok(result)
         }
+
+        #[allow(dead_code)]
 
         fn topo_visit(
             &self,
@@ -1028,9 +1075,13 @@ mod cancel_dag_determinism_tests {
             Ok(())
         }
 
+        #[allow(dead_code)]
+
         fn has_cycles(&self, graph: &BTreeMap<ObjectId, Vec<ObjectId>>) -> bool {
             self.topological_sort(graph).is_err()
         }
+
+        #[allow(dead_code)]
 
         fn get_dependency_chain_predecessors(
             &self,
@@ -1041,10 +1092,14 @@ mod cancel_dag_determinism_tests {
             graph.get(&_object_id).cloned().unwrap_or_default()
         }
 
+        #[allow(dead_code)]
+
         fn has_parent_dependency(&self, _object_id: ObjectId) -> bool {
             // Mock implementation
             _object_id.as_u32() % 2 == 0
         }
+
+        #[allow(dead_code)]
 
         fn is_parent_of(&self, _potential_parent: ObjectId, _child: ObjectId) -> bool {
             // Mock implementation
@@ -1052,6 +1107,7 @@ mod cancel_dag_determinism_tests {
         }
 
         /// Safe test execution wrapper that catches panics.
+        #[allow(dead_code)]
         fn run_test_safe<F>(&self, test_name: &str, test_fn: F) -> Result<(), String>
         where
             F: FnOnce() -> Result<(), String> + std::panic::UnwindSafe,
@@ -1077,6 +1133,7 @@ mod cancel_dag_determinism_tests {
         use super::*;
 
         #[test]
+        #[allow(dead_code)]
         fn test_cancel_dag_determinism_harness_creation() {
             let harness = CancelDagDeterminismHarness::new();
             // Just ensure harness can be created without panicking
@@ -1084,6 +1141,7 @@ mod cancel_dag_determinism_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_cancel_dag_determinism_suite_execution() {
             let harness = CancelDagDeterminismHarness::new();
             let results = harness.run_all_tests();
@@ -1118,6 +1176,7 @@ mod cancel_dag_determinism_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_cancel_dag_test_categories_coverage() {
             let harness = CancelDagDeterminismHarness::new();
             let results = harness.run_all_tests();
@@ -1150,6 +1209,7 @@ mod cancel_dag_determinism_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_cancel_dag_mock_snapshot_consistency() {
             let harness = CancelDagDeterminismHarness::new();
             let seed = 42u64;
@@ -1168,6 +1228,7 @@ mod cancel_dag_determinism_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_cancel_dag_dependency_graph_acyclicity() {
             let harness = CancelDagDeterminismHarness::new();
             let snapshot = harness
@@ -1190,6 +1251,7 @@ pub use cancel_dag_determinism_tests::{
 
 // Tests that always run regardless of features
 #[test]
+#[allow(dead_code)]
 fn cancel_dag_determinism_conformance_suite_availability() {
     #[cfg(feature = "deterministic-mode")]
     {

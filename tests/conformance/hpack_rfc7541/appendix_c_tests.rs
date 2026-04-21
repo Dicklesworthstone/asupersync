@@ -4,6 +4,7 @@ use asupersync::bytes::Bytes;
 use asupersync::http::h2::hpack::{Decoder, Header};
 
 #[test]
+#[allow(dead_code)]
 fn test_basic_decoder_functionality() {
     let mut decoder = Decoder::new();
 
@@ -19,6 +20,7 @@ fn test_basic_decoder_functionality() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_c2_literal_incremental_new_name() {
     let mut decoder = Decoder::new();
 
@@ -37,6 +39,7 @@ fn test_c2_literal_incremental_new_name() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_c3_multiple_requests() {
     let mut decoder = Decoder::new();
 
@@ -65,6 +68,7 @@ fn test_c3_multiple_requests() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_c4_request_sequence() {
     let mut decoder = Decoder::new();
 
@@ -108,6 +112,7 @@ fn test_c4_request_sequence() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_c5_request_examples() {
     let mut decoder = Decoder::new();
 
@@ -183,6 +188,7 @@ fn test_c5_request_examples() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_c6_indexed_header_field() {
     let mut decoder = Decoder::new();
 

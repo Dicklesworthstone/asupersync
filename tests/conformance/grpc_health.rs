@@ -37,6 +37,7 @@ const SERVICE_NAMES: &[&str] = &[
 
 /// All possible serving statuses for property testing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum TestServingStatus {
     Unknown,
     Serving,
@@ -44,7 +45,10 @@ enum TestServingStatus {
     ServiceUnknown,
 }
 
+#[allow(dead_code)]
+
 impl TestServingStatus {
+    #[allow(dead_code)]
     fn to_serving_status(self) -> ServingStatus {
         match self {
             Self::Unknown => ServingStatus::Unknown,
@@ -59,6 +63,8 @@ impl Arbitrary for TestServingStatus {
     type Parameters = ();
     type Strategy = BoxedStrategy<Self>;
 
+    #[allow(dead_code)]
+
     fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
         prop_oneof![
             Just(TestServingStatus::Unknown),
@@ -72,6 +78,7 @@ impl Arbitrary for TestServingStatus {
 
 /// Health service operation for metamorphic testing
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum HealthOperation {
     SetStatus { service: String, status: TestServingStatus },
     ClearStatus { service: String },
@@ -84,6 +91,8 @@ enum HealthOperation {
 impl Arbitrary for HealthOperation {
     type Parameters = ();
     type Strategy = BoxedStrategy<Self>;
+
+    #[allow(dead_code)]
 
     fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
         let service_names = SERVICE_NAMES.iter().map(|&s| s.to_string()).collect::<Vec<_>>();
@@ -107,12 +116,16 @@ impl Arbitrary for HealthOperation {
 
 /// Test context for health service conformance testing
 #[derive(Debug)]
+#[allow(dead_code)]
 struct HealthTestContext {
     service: HealthService,
     initial_operations: Vec<HealthOperation>,
 }
 
+#[allow(dead_code)]
+
 impl HealthTestContext {
+    #[allow(dead_code)]
     fn new(operations: Vec<HealthOperation>) -> Self {
         let service = HealthService::new();
         Self {
@@ -120,6 +133,8 @@ impl HealthTestContext {
             initial_operations: operations,
         }
     }
+
+    #[allow(dead_code)]
 
     fn apply_operations(&self, ops: &[HealthOperation]) -> HashMap<String, ServingStatus> {
         let mut expected_statuses = HashMap::new();
@@ -153,6 +168,8 @@ impl HealthTestContext {
         expected_statuses
     }
 
+    #[allow(dead_code)]
+
     fn compute_server_status(&self, service_statuses: &HashMap<String, ServingStatus>) -> ServingStatus {
         // Server status computation per gRPC health protocol
         if let Some(explicit_status) = service_statuses.get("") {
@@ -174,6 +191,8 @@ impl Arbitrary for HealthTestContext {
     type Parameters = ();
     type Strategy = BoxedStrategy<Self>;
 
+    #[allow(dead_code)]
+
     fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
         prop::collection::vec(any::<HealthOperation>(), 1..MAX_OPERATIONS)
             .prop_map(HealthTestContext::new)
@@ -186,6 +205,7 @@ impl Arbitrary for HealthTestContext {
 /// For any sequence of read operations (check calls), the service state
 /// should remain unchanged. Multiple checks of the same service should
 /// return consistent results.
+#[allow(dead_code)]
 fn mr_check_operation_idempotence(ctx: &HealthTestContext) {
     // Apply initial operations to establish state
     let expected_statuses = ctx.apply_operations(&ctx.initial_operations);
@@ -289,6 +309,7 @@ fn mr_check_operation_idempotence(ctx: &HealthTestContext) {
 /// When a service status changes, all watchers for that service must
 /// observe the change. Watchers for other services must not observe
 /// unrelated changes.
+#[allow(dead_code)]
 fn mr_watch_status_change_detection(ctx: &HealthTestContext) {
     // Apply initial operations
     let _initial_statuses = ctx.apply_operations(&ctx.initial_operations);
@@ -383,6 +404,7 @@ fn mr_watch_status_change_detection(ctx: &HealthTestContext) {
 /// - NOT_FOUND for unregistered services
 /// - OK for registered services (regardless of health status)
 /// - Server status checks never return NOT_FOUND
+#[allow(dead_code)]
 fn mr_status_code_error_semantics(ctx: &HealthTestContext) {
     // Apply initial operations
     let expected_statuses = ctx.apply_operations(&ctx.initial_operations);
@@ -456,6 +478,7 @@ fn mr_status_code_error_semantics(ctx: &HealthTestContext) {
 /// Changes to one service's status must not affect other services' statuses
 /// (except for server aggregate status). Service registrations and
 /// deregistrations must be independent.
+#[allow(dead_code)]
 fn mr_per_service_independence(ctx: &HealthTestContext) {
     // Set up multiple services with known statuses
     let service_a = SERVICE_NAMES[0];
@@ -544,6 +567,7 @@ fn mr_per_service_independence(ctx: &HealthTestContext) {
 /// Health reporters must properly clean up service registrations on drop.
 /// Multiple reporters for the same service must coordinate correctly,
 /// with only the final reporter drop clearing the service status.
+#[allow(dead_code)]
 fn mr_shutdown_cleanup_semantics(ctx: &HealthTestContext) {
     let test_service = "cleanup.test.Service";
 
@@ -670,26 +694,31 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr_check_operation_idempotence(ctx in any::<HealthTestContext>()) {
         mr_check_operation_idempotence(&ctx);
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr_watch_status_change_detection(ctx in any::<HealthTestContext>()) {
         mr_watch_status_change_detection(&ctx);
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr_status_code_error_semantics(ctx in any::<HealthTestContext>()) {
         mr_status_code_error_semantics(&ctx);
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr_per_service_independence(ctx in any::<HealthTestContext>()) {
         mr_per_service_independence(&ctx);
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr_shutdown_cleanup_semantics(ctx in any::<HealthTestContext>()) {
         mr_shutdown_cleanup_semantics(&ctx);
     }
@@ -702,6 +731,7 @@ mod conformance_tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn conformance_health_check_protocol_basic_contract() {
         let service = HealthService::new();
 
@@ -728,6 +758,7 @@ mod conformance_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn conformance_watch_protocol_basic_contract() {
         let service = HealthService::new();
         service.set_status("test.Service", ServingStatus::Serving);
@@ -748,6 +779,7 @@ mod conformance_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn conformance_service_unknown_semantics() {
         let service = HealthService::new();
 
@@ -767,6 +799,7 @@ mod conformance_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn conformance_aggregate_server_status_computation() {
         let service = HealthService::new();
 

@@ -5,6 +5,7 @@ use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{BytesCodec, Decoder, Encoder};
 
 /// Run all bytes codec tests.
+#[allow(dead_code)]
 pub fn run_bytes_codec_tests() -> Vec<CodecConformanceResult> {
     let mut results = Vec::new();
 
@@ -15,6 +16,8 @@ pub fn run_bytes_codec_tests() -> Vec<CodecConformanceResult> {
 
     results
 }
+
+#[allow(dead_code)]
 
 fn test_pass_through_decode() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -47,6 +50,8 @@ fn test_pass_through_decode() -> CodecConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_encode_decode_round_trip() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -86,6 +91,8 @@ fn test_encode_decode_round_trip() -> CodecConformanceResult {
     )
 }
 
+#[allow(dead_code)]
+
 fn test_empty_buffer() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = BytesCodec::new();
@@ -111,6 +118,8 @@ fn test_empty_buffer() -> CodecConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_large_buffer() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {

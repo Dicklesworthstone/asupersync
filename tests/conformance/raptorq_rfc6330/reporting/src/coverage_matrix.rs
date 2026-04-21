@@ -9,6 +9,7 @@ use std::path::Path;
 
 /// Overall coverage matrix with section-by-section breakdown
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[allow(dead_code)]
 pub struct CoverageMatrix {
     /// Per-section coverage details
     pub sections: BTreeMap<String, SectionCoverage>,
@@ -26,6 +27,7 @@ pub struct CoverageMatrix {
 
 /// Coverage details for a specific RFC section
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct SectionCoverage {
     /// RFC section identifier (e.g., "4.2", "5.3")
     pub section: String,
@@ -48,6 +50,7 @@ pub struct SectionCoverage {
 
 /// Overall coverage summary across all sections
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[allow(dead_code)]
 pub struct OverallCoverage {
     pub must_total: usize,
     pub must_passing: usize,
@@ -61,6 +64,7 @@ pub struct OverallCoverage {
 
 /// Conformance level based on compliance score thresholds
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[allow(dead_code)]
 pub enum ConformanceLevel {
     /// Score ≥ 0.98: Full conformance
     FullyConformant,
@@ -73,7 +77,10 @@ pub enum ConformanceLevel {
     NonConformant,
 }
 
+#[allow(dead_code)]
+
 impl ConformanceLevel {
+    #[allow(dead_code)]
     pub fn from_score(score: f64) -> Self {
         if score >= 0.98 {
             Self::FullyConformant
@@ -86,6 +93,8 @@ impl ConformanceLevel {
         }
     }
 
+    #[allow(dead_code)]
+
     pub fn description(&self) -> &'static str {
         match self {
             Self::FullyConformant => "Fully RFC 6330 conformant",
@@ -94,6 +103,8 @@ impl ConformanceLevel {
             Self::NonConformant => "Non-conformant",
         }
     }
+
+    #[allow(dead_code)]
 
     pub fn badge_color(&self) -> &'static str {
         match self {
@@ -107,6 +118,7 @@ impl ConformanceLevel {
 
 /// Section-level conformance status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum SectionConformanceStatus {
     /// All MUST requirements pass, ≥90% SHOULD requirements pass
     Pass,
@@ -118,6 +130,7 @@ pub enum SectionConformanceStatus {
 
 /// Details about a failing test
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct TestFailure {
     pub test_id: String,
     pub test_name: String,
@@ -129,6 +142,7 @@ pub struct TestFailure {
 
 /// RFC requirement levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,
     Should,
@@ -137,6 +151,7 @@ pub enum RequirementLevel {
 
 /// Types of conformance test failures
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum FailureType {
     /// Test failed due to incorrect behavior
     IncorrectBehavior,
@@ -152,6 +167,7 @@ pub enum FailureType {
 
 /// Test result from conformance test execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ConformanceTestResult {
     pub test_id: String,
     pub test_name: String,
@@ -164,6 +180,7 @@ pub struct ConformanceTestResult {
 }
 
 /// Coverage matrix calculator
+#[allow(dead_code)]
 pub struct CoverageMatrixCalculator {
     /// Minimum score threshold for MUST requirements (default: 1.0)
     pub must_threshold: f64,
@@ -174,6 +191,7 @@ pub struct CoverageMatrixCalculator {
 }
 
 impl Default for CoverageMatrixCalculator {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             must_threshold: 1.0,
@@ -183,13 +201,17 @@ impl Default for CoverageMatrixCalculator {
     }
 }
 
+#[allow(dead_code)]
+
 impl CoverageMatrixCalculator {
     /// Create a new coverage matrix calculator with default settings
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Calculate coverage matrix from golden files directory
+    #[allow(dead_code)]
     pub fn calculate_coverage<P: AsRef<Path>>(
         &self,
         golden_dir: P,
@@ -223,6 +245,7 @@ impl CoverageMatrixCalculator {
     }
 
     /// Calculate coverage matrix from test results
+    #[allow(dead_code)]
     pub fn calculate_coverage_from_results(
         &self,
         test_results: &[ConformanceTestResult],
@@ -306,6 +329,7 @@ impl CoverageMatrixCalculator {
     }
 
     /// Calculate section-specific score
+    #[allow(dead_code)]
     fn calculate_section_score(&self, section: &SectionCoverage) -> f64 {
         let must_score = if section.must_total > 0 {
             section.must_passing as f64 / section.must_total as f64
@@ -338,6 +362,7 @@ impl CoverageMatrixCalculator {
     }
 
     /// Determine section conformance status
+    #[allow(dead_code)]
     fn determine_section_status(&self, section: &SectionCoverage) -> SectionConformanceStatus {
         if section.must_total == 0 && section.should_total == 0 && section.may_total == 0 {
             return SectionConformanceStatus::NotApplicable;
@@ -363,6 +388,7 @@ impl CoverageMatrixCalculator {
     }
 
     /// Calculate overall coverage summary
+    #[allow(dead_code)]
     fn calculate_overall_coverage(
         &self,
         sections: &BTreeMap<String, SectionCoverage>,
@@ -394,6 +420,7 @@ impl CoverageMatrixCalculator {
     }
 
     /// Calculate overall compliance score
+    #[allow(dead_code)]
     fn calculate_compliance_score(&self, overall: &OverallCoverage) -> f64 {
         if overall.must_total == 0 && overall.should_total == 0 {
             return 1.0; // No requirements to test
@@ -410,6 +437,7 @@ impl CoverageMatrixCalculator {
     }
 
     /// Get current git commit hash
+    #[allow(dead_code)]
     fn get_git_commit() -> Option<String> {
         std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
@@ -427,6 +455,7 @@ impl CoverageMatrixCalculator {
     }
 
     /// Load test results from JSON file
+    #[allow(dead_code)]
     pub fn load_test_results<P: AsRef<Path>>(
         path: P,
     ) -> Result<Vec<ConformanceTestResult>, CoverageError> {
@@ -436,6 +465,7 @@ impl CoverageMatrixCalculator {
     }
 
     /// Save coverage matrix to JSON file
+    #[allow(dead_code)]
     pub fn save_coverage_matrix<P: AsRef<Path>>(
         matrix: &CoverageMatrix,
         path: P,
@@ -448,6 +478,7 @@ impl CoverageMatrixCalculator {
 
 /// Errors that can occur during coverage calculation
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum CoverageError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
@@ -465,6 +496,8 @@ pub enum CoverageError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[allow(dead_code)]
 
     fn create_test_result(
         section: &str,
@@ -492,6 +525,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_perfect_coverage() {
         let calculator = CoverageMatrixCalculator::default();
         let results = vec![
@@ -513,6 +547,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_partial_coverage() {
         let calculator = CoverageMatrixCalculator::default();
         let results = vec![
@@ -535,6 +570,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_conformance_levels() {
         assert_eq!(
             ConformanceLevel::from_score(0.99),
@@ -555,6 +591,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_section_score_calculation() {
         let calculator = CoverageMatrixCalculator::default();
         let section = SectionCoverage {

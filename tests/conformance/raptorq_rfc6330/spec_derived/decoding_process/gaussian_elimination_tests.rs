@@ -6,6 +6,7 @@ use crate::spec_derived::{
 };
 
 /// Register Gaussian elimination tests.
+#[allow(dead_code)]
 pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
     suite.add_test_case(Rfc6330ConformanceCase {
         id: "RFC6330-4.3.2",
@@ -17,6 +18,7 @@ pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
 }
 
 /// Test Gaussian elimination algorithm.
+#[allow(dead_code)]
 fn test_gaussian_elimination(ctx: &ConformanceContext) -> ConformanceResult {
     // Placeholder implementation
     ConformanceResult::pass()

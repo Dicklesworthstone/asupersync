@@ -50,6 +50,7 @@ use std::time::{Duration, Instant};
 
 /// Test result for a single conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct H2ConformanceResult {
     pub test_id: String,
     pub description: String,
@@ -62,6 +63,7 @@ pub struct H2ConformanceResult {
 
 /// Conformance test categories for HTTP/2 frames.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// RST_STREAM frame format validation
     RstStreamFormat,
@@ -81,6 +83,7 @@ pub enum TestCategory {
 
 /// Protocol requirement level per RFC 2119.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // RFC 2119: MUST
     Should, // RFC 2119: SHOULD
@@ -89,6 +92,7 @@ pub enum RequirementLevel {
 
 /// Test execution result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -97,13 +101,17 @@ pub enum TestVerdict {
 }
 
 /// HTTP/2 conformance test harness.
+#[allow(dead_code)]
 pub struct H2ConformanceHarness {
     /// Test execution timeout
     timeout: Duration,
 }
 
+#[allow(dead_code)]
+
 impl H2ConformanceHarness {
     /// Create a new conformance test harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             timeout: Duration::from_secs(30),
@@ -111,6 +119,7 @@ impl H2ConformanceHarness {
     }
 
     /// Run all conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<H2ConformanceResult> {
         let mut results = Vec::new();
 
@@ -132,6 +141,7 @@ impl H2ConformanceHarness {
     }
 
     /// Test RST_STREAM frame format requirements (RFC 9113 Section 6.4).
+    #[allow(dead_code)]
     fn test_rst_stream_format(&self) -> Vec<H2ConformanceResult> {
         let mut results = Vec::new();
 
@@ -240,6 +250,7 @@ impl H2ConformanceHarness {
     }
 
     /// Test RST_STREAM error code handling (RFC 9113 Section 7).
+    #[allow(dead_code)]
     fn test_rst_stream_error_codes(&self) -> Vec<H2ConformanceResult> {
         let mut results = Vec::new();
 
@@ -311,6 +322,7 @@ impl H2ConformanceHarness {
     }
 
     /// Test PING frame format requirements (RFC 9113 Section 6.7).
+    #[allow(dead_code)]
     fn test_ping_format(&self) -> Vec<H2ConformanceResult> {
         let mut results = Vec::new();
 
@@ -419,6 +431,7 @@ impl H2ConformanceHarness {
     }
 
     /// Test PING ACK behavior requirements (RFC 9113 Section 6.7).
+    #[allow(dead_code)]
     fn test_ping_ack_behavior(&self) -> Vec<H2ConformanceResult> {
         let mut results = Vec::new();
 
@@ -500,6 +513,7 @@ impl H2ConformanceHarness {
     }
 
     /// Test error classification requirements (RFC 9113).
+    #[allow(dead_code)]
     fn test_error_classification(&self) -> Vec<H2ConformanceResult> {
         let mut results = Vec::new();
 
@@ -555,6 +569,7 @@ impl H2ConformanceHarness {
     }
 
     /// Test protocol ordering requirements.
+    #[allow(dead_code)]
     fn test_protocol_ordering(&self) -> Vec<H2ConformanceResult> {
         let mut results = Vec::new();
 
@@ -645,6 +660,7 @@ impl H2ConformanceHarness {
     }
 
     /// Helper function to run a single test with proper error handling and timing.
+    #[allow(dead_code)]
     fn run_test<F>(
         &self,
         test_id: &str,
@@ -705,12 +721,14 @@ impl H2ConformanceHarness {
 }
 
 impl Default for H2ConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 // Helper function to convert H2Error to String for ? operator in tests
+#[allow(dead_code)]
 fn h2error_to_string(err: H2Error) -> String {
     format!("H2Error: {}", err)
 }
@@ -720,12 +738,14 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_harness_creation() {
         let harness = H2ConformanceHarness::new();
         assert_eq!(harness.timeout, Duration::from_secs(30));
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_all_conformance_tests() {
         let harness = H2ConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -773,6 +793,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_rst_stream_format_conformance() {
         let harness = H2ConformanceHarness::new();
         let results = harness.test_rst_stream_format();
@@ -792,6 +813,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_ping_format_conformance() {
         let harness = H2ConformanceHarness::new();
         let results = harness.test_ping_format();

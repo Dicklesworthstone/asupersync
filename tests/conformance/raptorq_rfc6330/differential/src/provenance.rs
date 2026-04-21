@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 /// Reference implementation language.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum ReferenceLanguage {
     C,
     Cpp,
@@ -13,8 +14,11 @@ pub enum ReferenceLanguage {
     Other(String),
 }
 
+#[allow(dead_code)]
+
 impl ReferenceLanguage {
     #[must_use]
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         match self {
             Self::C => "C",
@@ -29,6 +33,7 @@ impl ReferenceLanguage {
 
 /// Metadata describing the reference implementation used for a fixture set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ReferenceImplementation {
     pub name: String,
     pub language: ReferenceLanguage,
@@ -40,6 +45,7 @@ pub struct ReferenceImplementation {
 
 /// One generated fixture artifact produced by the reference implementation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct FixtureArtifact {
     pub relative_path: PathBuf,
     pub media_type: String,
@@ -49,6 +55,7 @@ pub struct FixtureArtifact {
 
 /// Provenance record for one differential test case.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct FixtureProvenanceRecord {
     pub case_id: String,
     pub rfc_section: String,
@@ -60,15 +67,21 @@ pub struct FixtureProvenanceRecord {
 
 /// Top-level catalog for differential fixtures.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[allow(dead_code)]
 pub struct DifferentialFixtureCatalog {
     pub records: Vec<FixtureProvenanceRecord>,
 }
 
+#[allow(dead_code)]
+
 impl DifferentialFixtureCatalog {
     #[must_use]
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
+
+    #[allow(dead_code)]
 
     pub fn add_record(&mut self, record: FixtureProvenanceRecord) {
         self.records.push(record);
@@ -76,6 +89,7 @@ impl DifferentialFixtureCatalog {
     }
 
     #[must_use]
+    #[allow(dead_code)]
     pub fn summary(&self) -> CatalogSummary {
         let artifact_count = self.records.iter().map(|record| record.artifacts.len()).sum();
         CatalogSummary {
@@ -83,6 +97,8 @@ impl DifferentialFixtureCatalog {
             artifact_count,
         }
     }
+
+    #[allow(dead_code)]
 
     pub fn save_json<P: AsRef<Path>>(&self, path: P) -> Result<(), DifferentialFixtureError> {
         let path = path.as_ref();
@@ -100,6 +116,8 @@ impl DifferentialFixtureCatalog {
         })
     }
 
+    #[allow(dead_code)]
+
     pub fn load_json<P: AsRef<Path>>(path: P) -> Result<Self, DifferentialFixtureError> {
         let path = path.as_ref();
         let json = fs::read_to_string(path).map_err(|error| DifferentialFixtureError::Io {
@@ -110,6 +128,7 @@ impl DifferentialFixtureCatalog {
     }
 
     #[must_use]
+    #[allow(dead_code)]
     pub fn render_provenance_markdown(&self) -> String {
         let mut markdown = String::from(
             "# Differential Fixture Provenance\n\n\
@@ -155,12 +174,14 @@ impl DifferentialFixtureCatalog {
 
 /// Lightweight summary for reporting.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct CatalogSummary {
     pub case_count: usize,
     pub artifact_count: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum DifferentialFixtureError {
     #[error("I/O error for {path}: {error}")]
     Io { path: PathBuf, error: std::io::Error },
@@ -184,6 +205,8 @@ pub enum DifferentialFixtureError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[allow(dead_code)]
 
     fn sample_record() -> FixtureProvenanceRecord {
         FixtureProvenanceRecord {
@@ -217,6 +240,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn catalog_round_trips_through_json() {
         let mut catalog = DifferentialFixtureCatalog::new();
         catalog.add_record(sample_record());
@@ -230,6 +254,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn markdown_contains_reproduction_metadata() {
         let mut catalog = DifferentialFixtureCatalog::new();
         catalog.add_record(sample_record());
@@ -243,6 +268,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn summary_counts_cases_and_artifacts() {
         let mut catalog = DifferentialFixtureCatalog::new();
         catalog.add_record(sample_record());

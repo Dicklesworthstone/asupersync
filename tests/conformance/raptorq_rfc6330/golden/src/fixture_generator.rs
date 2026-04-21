@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 /// Categories of test fixtures covering different RFC 6330 aspects
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum FixtureCategory {
     /// Basic encoding/decoding scenarios
     BasicOperations,
@@ -27,8 +28,11 @@ pub enum FixtureCategory {
     Interoperability,
 }
 
+#[allow(dead_code)]
+
 impl FixtureCategory {
     /// Returns human-readable description of the category
+    #[allow(dead_code)]
     pub fn description(&self) -> &'static str {
         match self {
             Self::BasicOperations => "Basic RaptorQ encode/decode operations",
@@ -41,6 +45,7 @@ impl FixtureCategory {
     }
 
     /// Returns RFC 6330 sections relevant to this category
+    #[allow(dead_code)]
     pub fn rfc_sections(&self) -> Vec<&'static str> {
         match self {
             Self::BasicOperations => vec!["5.3.2.1", "5.3.2.2", "5.4"],
@@ -55,6 +60,7 @@ impl FixtureCategory {
 
 /// Test fixture metadata and parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct FixtureSpec {
     /// Unique fixture identifier
     pub id: String,
@@ -78,6 +84,7 @@ pub struct FixtureSpec {
 
 /// Expected properties that should be validated for a fixture
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct FixtureProperties {
     /// Should succeed without errors
     pub should_succeed: bool,
@@ -95,6 +102,7 @@ pub struct FixtureProperties {
 
 /// Memory usage pattern expectations
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum MemoryProfile {
     /// Low memory usage (< 10MB)
     Low,
@@ -111,13 +119,17 @@ pub enum MemoryProfile {
 }
 
 /// Fixture generation engine
+#[allow(dead_code)]
 pub struct FixtureGenerator {
     fixtures: HashMap<FixtureCategory, Vec<FixtureSpec>>,
     output_dir: PathBuf,
 }
 
+#[allow(dead_code)]
+
 impl FixtureGenerator {
     /// Creates a new fixture generator
+    #[allow(dead_code)]
     pub fn new<P: AsRef<Path>>(output_dir: P) -> Self {
         let mut generator = Self {
             fixtures: HashMap::new(),
@@ -128,6 +140,7 @@ impl FixtureGenerator {
     }
 
     /// Generates all test fixtures and writes them to disk
+    #[allow(dead_code)]
     pub fn generate_all_fixtures(
         &self,
     ) -> Result<FixtureGenerationSummary, FixtureGenerationError> {
@@ -160,6 +173,7 @@ impl FixtureGenerator {
     }
 
     /// Generates a single fixture file
+    #[allow(dead_code)]
     fn generate_single_fixture(
         &self,
         spec: &FixtureSpec,
@@ -185,6 +199,7 @@ impl FixtureGenerator {
     }
 
     /// Creates test input data for a fixture
+    #[allow(dead_code)]
     fn create_fixture_input(
         &self,
         spec: &FixtureSpec,
@@ -215,6 +230,7 @@ impl FixtureGenerator {
     }
 
     /// Initializes the default set of test fixtures
+    #[allow(dead_code)]
     fn initialize_default_fixtures(&mut self) {
         self.add_basic_operation_fixtures();
         self.add_edge_case_fixtures();
@@ -225,6 +241,7 @@ impl FixtureGenerator {
     }
 
     /// Adds basic operation test fixtures
+    #[allow(dead_code)]
     fn add_basic_operation_fixtures(&mut self) {
         let fixtures = vec![
             FixtureSpec {
@@ -288,6 +305,7 @@ impl FixtureGenerator {
     }
 
     /// Adds edge case test fixtures
+    #[allow(dead_code)]
     fn add_edge_case_fixtures(&mut self) {
         let fixtures = vec![
             FixtureSpec {
@@ -350,6 +368,7 @@ impl FixtureGenerator {
     }
 
     /// Adds performance test fixtures
+    #[allow(dead_code)]
     fn add_performance_fixtures(&mut self) {
         let fixtures = vec![FixtureSpec {
             id: "perf_large_block".to_string(),
@@ -381,6 +400,7 @@ impl FixtureGenerator {
     }
 
     /// Adds error handling test fixtures
+    #[allow(dead_code)]
     fn add_error_handling_fixtures(&mut self) {
         let fixtures = vec![FixtureSpec {
             id: "error_high_erasure".to_string(),
@@ -413,6 +433,7 @@ impl FixtureGenerator {
     }
 
     /// Adds RFC 6330 specification compliance fixtures
+    #[allow(dead_code)]
     fn add_spec_compliance_fixtures(&mut self) {
         let fixtures = vec![FixtureSpec {
             id: "spec_systematic_indices".to_string(),
@@ -445,6 +466,7 @@ impl FixtureGenerator {
     }
 
     /// Adds interoperability test fixtures
+    #[allow(dead_code)]
     fn add_interoperability_fixtures(&mut self) {
         let fixtures = vec![FixtureSpec {
             id: "interop_standard_params".to_string(),
@@ -478,6 +500,8 @@ impl FixtureGenerator {
 
     // Data generation methods for different fixture categories
 
+    #[allow(dead_code)]
+
     fn generate_basic_data(&self, size: usize, seed: u64) -> Vec<u8> {
         let mut data = vec![0u8; size];
         let mut rng = seed;
@@ -489,6 +513,8 @@ impl FixtureGenerator {
 
         data
     }
+
+    #[allow(dead_code)]
 
     fn generate_edge_case_data(&self, size: usize, fixture_id: &str) -> Vec<u8> {
         match fixture_id {
@@ -505,10 +531,14 @@ impl FixtureGenerator {
         }
     }
 
+    #[allow(dead_code)]
+
     fn generate_performance_data(&self, size: usize, seed: u64) -> Vec<u8> {
         // Generate data with realistic content patterns
         self.generate_basic_data(size, seed)
     }
+
+    #[allow(dead_code)]
 
     fn generate_error_test_data(&self, size: usize, fixture_id: &str) -> Vec<u8> {
         match fixture_id {
@@ -524,10 +554,14 @@ impl FixtureGenerator {
         }
     }
 
+    #[allow(dead_code)]
+
     fn generate_spec_test_data(&self, size: usize, seed: u64) -> Vec<u8> {
         // Generate data suitable for specification compliance testing
         self.generate_basic_data(size, seed)
     }
+
+    #[allow(dead_code)]
 
     fn generate_interop_data(&self, size: usize, seed: u64) -> Vec<u8> {
         // Generate well-known test vectors for interoperability
@@ -535,11 +569,13 @@ impl FixtureGenerator {
     }
 
     /// Returns all fixtures in a specific category
+    #[allow(dead_code)]
     pub fn get_fixtures_by_category(&self, category: FixtureCategory) -> Option<&Vec<FixtureSpec>> {
         self.fixtures.get(&category)
     }
 
     /// Returns all fixture IDs matching given tags
+    #[allow(dead_code)]
     pub fn get_fixtures_by_tags(&self, tags: &[String]) -> Vec<&FixtureSpec> {
         self.fixtures
             .values()
@@ -549,6 +585,7 @@ impl FixtureGenerator {
     }
 
     /// Returns high-priority fixtures for smoke testing
+    #[allow(dead_code)]
     pub fn get_smoke_test_fixtures(&self) -> Vec<&FixtureSpec> {
         self.fixtures
             .values()
@@ -560,6 +597,7 @@ impl FixtureGenerator {
 
 /// Complete fixture data with metadata
 #[derive(Debug, Serialize, Deserialize)]
+#[allow(dead_code)]
 struct FixtureData {
     spec: FixtureSpec,
     input: RoundTripInput,
@@ -568,6 +606,7 @@ struct FixtureData {
 
 /// Metadata about fixture generation
 #[derive(Debug, Serialize, Deserialize)]
+#[allow(dead_code)]
 struct FixtureMetadata {
     generated_at: chrono::DateTime<chrono::Utc>,
     generator_version: String,
@@ -576,6 +615,7 @@ struct FixtureMetadata {
 
 /// Summary of fixture generation results
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct FixtureGenerationSummary {
     pub generated_fixtures: usize,
     pub failed_fixtures: usize,
@@ -583,7 +623,10 @@ pub struct FixtureGenerationSummary {
     pub errors: Vec<String>,
 }
 
+#[allow(dead_code)]
+
 impl FixtureGenerationSummary {
+    #[allow(dead_code)]
     pub fn is_success(&self) -> bool {
         self.failed_fixtures == 0 && self.generated_fixtures > 0
     }
@@ -591,6 +634,7 @@ impl FixtureGenerationSummary {
 
 /// Errors that can occur during fixture generation
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum FixtureGenerationError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
@@ -611,12 +655,14 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[allow(dead_code)]
     fn test_fixture_category_descriptions() {
         assert!(!FixtureCategory::BasicOperations.description().is_empty());
         assert!(!FixtureCategory::EdgeCases.rfc_sections().is_empty());
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_memory_profile_serialization() {
         let profile = MemoryProfile::Linear;
         let json = serde_json::to_string(&profile).unwrap();
@@ -625,6 +671,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_fixture_generator_creation() {
         let temp_dir = TempDir::new().unwrap();
         let generator = FixtureGenerator::new(temp_dir.path());
@@ -637,6 +684,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_fixture_filtering() {
         let temp_dir = TempDir::new().unwrap();
         let generator = FixtureGenerator::new(temp_dir.path());
@@ -649,6 +697,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_data_generation_deterministic() {
         let temp_dir = TempDir::new().unwrap();
         let generator = FixtureGenerator::new(temp_dir.path());

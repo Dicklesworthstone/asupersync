@@ -56,6 +56,7 @@ pub const VERSION: &str = "0.1.0";
 ///
 /// This is the main entry point for validation. It runs all registered
 /// conformance tests across all channel types and cancellation scenarios.
+#[allow(dead_code)]
 pub fn run_conformance_tests() -> ConformanceTestReport {
     ChannelCancelCorrectnessRunner::run_complete_suite()
 }
@@ -63,11 +64,13 @@ pub fn run_conformance_tests() -> ConformanceTestReport {
 /// Run a quick smoke test for basic cancellation protocol validation.
 ///
 /// This runs a subset of critical tests for fast validation during development.
+#[allow(dead_code)]
 pub fn run_smoke_tests() -> ConformanceTestReport {
     ChannelCancelCorrectnessRunner::run_smoke_tests()
 }
 
 /// Validate that a specific channel type meets cancellation protocol requirements.
+#[allow(dead_code)]
 pub fn validate_channel_type(channel_type: ChannelType) -> ConformanceTestReport {
     let mut engine = CancelTestEngine::new();
 
@@ -82,6 +85,7 @@ mod integration_tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_smoke_suite_runs() {
         let report = run_smoke_tests();
 
@@ -91,6 +95,7 @@ mod integration_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_individual_channel_validation() {
         let report = validate_channel_type(ChannelType::Mpsc);
 
@@ -99,6 +104,7 @@ mod integration_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_harness_configuration() {
         let harness = CancelTestHarness::new("integration_test")
             .with_timeout(std::time::Duration::from_secs(10))

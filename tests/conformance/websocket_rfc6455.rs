@@ -46,6 +46,7 @@ use asupersync::codec::{Decoder, Encoder};
 
 /// Test result for a single conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct WsConformanceResult {
     pub test_id: String,
     pub description: String,
@@ -58,6 +59,7 @@ pub struct WsConformanceResult {
 
 /// Conformance test categories for WebSocket close frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TestCategory {
     FrameFormat,
     Handshake,
@@ -73,6 +75,7 @@ pub enum TestCategory {
 
 /// RFC conformance requirement level.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // RFC 2119 MUST
     Should, // RFC 2119 SHOULD
@@ -81,6 +84,7 @@ pub enum RequirementLevel {
 
 /// Test execution result.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -89,12 +93,16 @@ pub enum TestVerdict {
 }
 
 /// WebSocket RFC 6455 close frame conformance test harness.
+#[allow(dead_code)]
 pub struct WsConformanceHarness {
     results: Vec<WsConformanceResult>,
 }
 
+#[allow(dead_code)]
+
 impl WsConformanceHarness {
     /// Create a new conformance test harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             results: Vec::new(),
@@ -102,6 +110,7 @@ impl WsConformanceHarness {
     }
 
     /// Execute all conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&mut self) -> Vec<WsConformanceResult> {
         // RFC 6455 §5.5.1 - Close Frame Format Tests
         self.test_close_frame_empty_payload();
@@ -158,6 +167,8 @@ impl WsConformanceHarness {
         self.results.clone()
     }
 
+    #[allow(dead_code)]
+
     fn record_result(&mut self, test_id: &str, description: &str, category: TestCategory,
                     requirement: RequirementLevel, verdict: TestVerdict, notes: Option<String>) {
         self.results.push(WsConformanceResult {
@@ -172,6 +183,8 @@ impl WsConformanceHarness {
     }
 
     // ===== RFC 6455 §5.5.1 - Close Frame Format Tests =====
+
+    #[allow(dead_code)]
 
     fn test_close_frame_empty_payload(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -194,6 +207,8 @@ impl WsConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_close_frame_code_only(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -218,6 +233,8 @@ impl WsConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_close_frame_code_and_reason(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -245,6 +262,8 @@ impl WsConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_close_frame_invalid_single_byte(&mut self) {
         let result = std::panic::catch_unwind(|| {
             let result = CloseReason::parse(&[0x42]);
@@ -261,6 +280,8 @@ impl WsConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_close_frame_oversized_payload(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -285,6 +306,8 @@ impl WsConformanceHarness {
 
     // ===== RFC 6455 §7.4 - Status Code Semantics Tests =====
 
+    #[allow(dead_code)]
+
     fn test_status_code_normal_closure(&mut self) {
         let result = std::panic::catch_unwind(|| {
             assert_eq!(u16::from(CloseCode::Normal), 1000);
@@ -305,6 +328,8 @@ impl WsConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_status_code_going_away(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -328,6 +353,8 @@ impl WsConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_status_code_protocol_error(&mut self) {
         let result = std::panic::catch_unwind(|| {
             assert_eq!(u16::from(CloseCode::ProtocolError), 1002);
@@ -348,6 +375,8 @@ impl WsConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_status_code_unsupported_data(&mut self) {
         let result = std::panic::catch_unwind(|| {
             assert_eq!(u16::from(CloseCode::Unsupported), 1003);
@@ -364,6 +393,8 @@ impl WsConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_status_code_invalid_payload(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -385,6 +416,8 @@ impl WsConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_status_code_policy_violation(&mut self) {
         let result = std::panic::catch_unwind(|| {
             assert_eq!(u16::from(CloseCode::PolicyViolation), 1008);
@@ -405,6 +438,8 @@ impl WsConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_status_code_message_too_big(&mut self) {
         let result = std::panic::catch_unwind(|| {
             assert_eq!(u16::from(CloseCode::MessageTooBig), 1009);
@@ -422,6 +457,8 @@ impl WsConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_status_code_mandatory_extension(&mut self) {
         let result = std::panic::catch_unwind(|| {
             assert_eq!(u16::from(CloseCode::MandatoryExtension), 1010);
@@ -438,6 +475,8 @@ impl WsConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_status_code_internal_error(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -460,6 +499,8 @@ impl WsConformanceHarness {
     }
 
     // ===== Reserved Status Code Tests =====
+
+    #[allow(dead_code)]
 
     fn test_status_code_reserved_never_sent(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -484,6 +525,8 @@ impl WsConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_status_code_no_status_received_never_sent(&mut self) {
         let result = std::panic::catch_unwind(|| {
             assert_eq!(u16::from(CloseCode::NoStatusReceived), 1005);
@@ -506,6 +549,8 @@ impl WsConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_status_code_abnormal_never_sent(&mut self) {
         let result = std::panic::catch_unwind(|| {
             assert_eq!(u16::from(CloseCode::Abnormal), 1006);
@@ -527,6 +572,8 @@ impl WsConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_status_code_tls_handshake_never_sent(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -551,6 +598,8 @@ impl WsConformanceHarness {
     }
 
     // ===== Status Code Range Validation =====
+
+    #[allow(dead_code)]
 
     fn test_status_code_range_validation(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -587,6 +636,8 @@ impl WsConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_status_code_iana_registered(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // IANA registered codes should be valid
@@ -606,6 +657,8 @@ impl WsConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_status_code_private_use(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Private use range 4000-4999
@@ -624,6 +677,8 @@ impl WsConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_status_code_unassigned_acceptance(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -649,6 +704,8 @@ impl WsConformanceHarness {
     }
 
     // ===== Close Handshake Protocol Tests =====
+
+    #[allow(dead_code)]
 
     fn test_handshake_initiator_flow(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -679,6 +736,8 @@ impl WsConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_handshake_receiver_flow(&mut self) {
         let result = std::panic::catch_unwind(|| {
             let mut handshake = CloseHandshake::new();
@@ -705,6 +764,8 @@ impl WsConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_handshake_echo_status_code(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -734,6 +795,8 @@ impl WsConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_handshake_empty_close_echo(&mut self) {
         let result = std::panic::catch_unwind(|| {
             let mut handshake = CloseHandshake::new();
@@ -760,6 +823,8 @@ impl WsConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_handshake_custom_code_echo(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -790,6 +855,8 @@ impl WsConformanceHarness {
 
     // ===== Control Frame Limits =====
 
+    #[allow(dead_code)]
+
     fn test_control_frame_125_byte_limit(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Maximum valid close frame: 2 bytes code + 123 bytes reason = 125 bytes
@@ -816,6 +883,8 @@ impl WsConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_control_frame_fin_bit_required(&mut self) {
         let result = std::panic::catch_unwind(|| {
             let frame = Frame::close(Some(1000), None);
@@ -834,6 +903,8 @@ impl WsConformanceHarness {
     }
 
     // ===== Text Encoding Tests =====
+
+    #[allow(dead_code)]
 
     fn test_close_reason_utf8_validation(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -855,6 +926,8 @@ impl WsConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_close_reason_invalid_utf8_rejection(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -879,6 +952,8 @@ impl WsConformanceHarness {
 
     // ===== Error Handling Tests =====
 
+    #[allow(dead_code)]
+
     fn test_invalid_opcode_rejection(&mut self) {
         let result = std::panic::catch_unwind(|| {
             let mut handshake = CloseHandshake::new();
@@ -900,6 +975,8 @@ impl WsConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_malformed_payload_rejection(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -926,6 +1003,8 @@ impl WsConformanceHarness {
     }
 
     // ===== Round-trip Tests =====
+
+    #[allow(dead_code)]
 
     fn test_close_frame_encode_decode_roundtrip(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -961,6 +1040,7 @@ impl WsConformanceHarness {
 }
 
 impl Default for WsConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
@@ -971,6 +1051,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_conformance_suite_completeness() {
         let mut harness = WsConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -1001,6 +1082,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_close_code_coverage() {
         // Verify we test all defined close codes
         assert_eq!(u16::from(CloseCode::Normal), 1000);
@@ -1019,6 +1101,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_rfc_section_coverage() {
         // Verify key RFC sections are tested
         let mut harness = WsConformanceHarness::new();

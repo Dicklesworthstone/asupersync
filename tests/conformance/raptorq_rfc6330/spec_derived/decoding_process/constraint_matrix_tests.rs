@@ -6,6 +6,7 @@ use crate::spec_derived::{
 };
 
 /// Register constraint matrix tests.
+#[allow(dead_code)]
 pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
     suite.add_test_case(Rfc6330ConformanceCase {
         id: "RFC6330-4.3.1",
@@ -17,6 +18,7 @@ pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
 }
 
 /// Test constraint matrix construction.
+#[allow(dead_code)]
 fn test_constraint_matrix_construction(ctx: &ConformanceContext) -> ConformanceResult {
     // Placeholder implementation
     ConformanceResult::pass()

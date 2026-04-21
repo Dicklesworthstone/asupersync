@@ -24,6 +24,7 @@ mod obligation_lifecycle_metamorphic_tests {
     use std::collections::HashSet;
 
     /// Metamorphic test harness for obligation lifecycle properties.
+    #[allow(dead_code)]
     pub struct ObligationLifecycleMetamorphicHarness {
         config: LabConfig,
     }
@@ -31,6 +32,7 @@ mod obligation_lifecycle_metamorphic_tests {
     /// Test category for obligation lifecycle metamorphic tests.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum TestCategory {
         CommitAbortSymmetry,
         SequentialConsistency,
@@ -44,6 +46,7 @@ mod obligation_lifecycle_metamorphic_tests {
     /// Requirement level for metamorphic relations.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum RequirementLevel {
         Must,
         Should,
@@ -53,6 +56,7 @@ mod obligation_lifecycle_metamorphic_tests {
     /// Test verdict for metamorphic relations.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum TestVerdict {
         Pass,
         Fail,
@@ -62,6 +66,7 @@ mod obligation_lifecycle_metamorphic_tests {
 
     /// Result of an obligation lifecycle metamorphic test.
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[allow(dead_code)]
     pub struct ObligationLifecycleMetamorphicResult {
         pub test_id: String,
         pub description: String,
@@ -75,6 +80,7 @@ mod obligation_lifecycle_metamorphic_tests {
 
     /// Obligation operation for testing sequences.
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[allow(dead_code)]
     pub enum ObligationOp {
         Acquire {
             task_id: TaskId,
@@ -85,6 +91,7 @@ mod obligation_lifecycle_metamorphic_tests {
 
     /// Obligation system state snapshot for metamorphic testing.
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     pub struct ObligationSnapshot {
         pub stats: LedgerStats,
         pub pending_obligations: HashSet<ObligationId>,
@@ -94,18 +101,23 @@ mod obligation_lifecycle_metamorphic_tests {
     }
 
     #[track_caller]
+    #[allow(dead_code)]
     fn source_location() -> SourceLocation {
         SourceLocation::from_panic_location(std::panic::Location::caller())
     }
 
+    #[allow(dead_code)]
+
     impl ObligationLifecycleMetamorphicHarness {
         /// Create a new obligation lifecycle metamorphic harness.
+        #[allow(dead_code)]
         pub fn new() -> Self {
             let config = LabConfig::default_for_test();
             Self { config }
         }
 
         /// Run all obligation lifecycle metamorphic tests.
+        #[allow(dead_code)]
         pub fn run_all_tests(&self) -> Vec<ObligationLifecycleMetamorphicResult> {
             let mut results = Vec::new();
 
@@ -152,6 +164,7 @@ mod obligation_lifecycle_metamorphic_tests {
 
         /// MR1: commit(abort(x)) ≡ no-op for any x
         /// This tests the fundamental symmetry that aborting and then trying to commit should be equivalent to just aborting.
+        #[allow(dead_code)]
         fn test_commit_abort_no_op_relation(&self) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
             let mut iterations = 0;
@@ -227,6 +240,7 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR2: abort-then-commit path yields error, never succeeds silently
+        #[allow(dead_code)]
         fn test_abort_then_commit_error_relation(&self) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
             let mut iterations = 0;
@@ -282,6 +296,7 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR3: obligation leak count invariant: total_tokens_alive + total_released = total_issued
+        #[allow(dead_code)]
         fn test_obligation_count_invariant_relation(&self) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
             let mut iterations = 0;
@@ -366,6 +381,7 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR4: ledger snapshot restore preserves all in-flight obligations
+        #[allow(dead_code)]
         fn test_snapshot_restore_preservation_relation(
             &self,
         ) -> ObligationLifecycleMetamorphicResult {
@@ -475,6 +491,7 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR5: parallel commits on independent obligations commute
+        #[allow(dead_code)]
         fn test_parallel_commits_commutation_relation(
             &self,
         ) -> ObligationLifecycleMetamorphicResult {
@@ -571,6 +588,7 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR6: acquire-then-abort is idempotent
+        #[allow(dead_code)]
         fn test_acquire_abort_idempotence_relation(&self) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
             let mut iterations = 0;
@@ -645,6 +663,7 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR7: acquire-then-commit is idempotent
+        #[allow(dead_code)]
         fn test_acquire_commit_idempotence_relation(&self) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
             let mut iterations = 0;
@@ -719,6 +738,7 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR8: operation ordering with different tasks
+        #[allow(dead_code)]
         fn test_cross_task_operation_ordering_relation(
             &self,
         ) -> ObligationLifecycleMetamorphicResult {
@@ -794,6 +814,7 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR9: region isolation metamorphic property
+        #[allow(dead_code)]
         fn test_region_isolation_relation(&self) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
             let mut iterations = 0;
@@ -875,6 +896,7 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR10: leak detection consistency
+        #[allow(dead_code)]
         fn test_leak_detection_consistency_relation(&self) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
             let mut iterations = 0;
@@ -945,6 +967,7 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR11: recovery protocol convergence
+        #[allow(dead_code)]
         fn test_recovery_protocol_convergence_relation(
             &self,
         ) -> ObligationLifecycleMetamorphicResult {
@@ -1005,6 +1028,7 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// MR12: temporal ordering preservation
+        #[allow(dead_code)]
         fn test_temporal_ordering_preservation_relation(
             &self,
         ) -> ObligationLifecycleMetamorphicResult {
@@ -1063,6 +1087,7 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         /// Safe test execution wrapper that catches panics.
+        #[allow(dead_code)]
         fn run_metamorphic_test<F>(&self, test_name: &str, test_fn: F) -> Result<(), String>
         where
             F: FnOnce(&LabConfig) -> Result<(), proptest::test_runner::TestCaseError>
@@ -1090,6 +1115,7 @@ mod obligation_lifecycle_metamorphic_tests {
         use super::*;
 
         #[test]
+        #[allow(dead_code)]
         fn test_obligation_metamorphic_harness_creation() {
             let harness = ObligationLifecycleMetamorphicHarness::new();
             // Just ensure harness can be created without panicking
@@ -1097,6 +1123,7 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_obligation_metamorphic_suite_execution() {
             let harness = ObligationLifecycleMetamorphicHarness::new();
             let results = harness.run_all_tests();
@@ -1134,6 +1161,7 @@ mod obligation_lifecycle_metamorphic_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_obligation_basic_metamorphic_relation() {
             // Test a simple metamorphic relation manually
             let mut ledger = ObligationLedger::new();
@@ -1166,6 +1194,7 @@ mod obligation_lifecycle_metamorphic_tests {
 
 // Tests that always run regardless of features
 #[test]
+#[allow(dead_code)]
 fn obligation_lifecycle_metamorphic_suite_availability() {
     #[cfg(feature = "deterministic-mode")]
     {

@@ -22,20 +22,35 @@ use crate::conformance::obligation_invariants::src::{
 use asupersync::types::{ObligationId, RegionId, Time};
 
 /// Test basic obligation creation and resolution
+#[allow(dead_code)]
 pub struct BasicObligationLifecycleTest;
 
 impl ObligationInvariantTest for BasicObligationLifecycleTest {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &'static str {
         "basic_obligation_lifecycle"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
         InvariantTestCategory::NoLeakValidation
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn description(&self) -> &'static str {
         "Tests basic obligation creation, execution, and resolution without leaks"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn run_test<'a>(
         &'a self,
@@ -93,26 +108,45 @@ impl ObligationInvariantTest for BasicObligationLifecycleTest {
         })
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
         !tracker.has_active_obligations() && tracker.get_invariant_violations().is_empty()
     }
 }
 
 /// Test nested obligation creation and resolution
+#[allow(dead_code)]
 pub struct NestedObligationTest;
 
 impl ObligationInvariantTest for NestedObligationTest {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &'static str {
         "nested_obligation_lifecycle"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
         InvariantTestCategory::NoLeakValidation
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn description(&self) -> &'static str {
         "Tests creation and resolution of nested obligation hierarchies without leaks"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn run_test<'a>(
         &'a self,
@@ -204,26 +238,45 @@ impl ObligationInvariantTest for NestedObligationTest {
         })
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
         !tracker.has_active_obligations() && tracker.get_invariant_violations().is_empty()
     }
 }
 
 /// Test concurrent obligation creation and resolution
+#[allow(dead_code)]
 pub struct ConcurrentObligationTest;
 
 impl ObligationInvariantTest for ConcurrentObligationTest {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &'static str {
         "concurrent_obligation_lifecycle"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
         InvariantTestCategory::NoLeakValidation
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn description(&self) -> &'static str {
         "Tests concurrent creation and resolution of obligations without race conditions or leaks"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn run_test<'a>(
         &'a self,
@@ -288,9 +341,17 @@ impl ObligationInvariantTest for ConcurrentObligationTest {
         })
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
         !tracker.has_active_obligations() && tracker.get_invariant_violations().is_empty()
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn is_stress_test(&self) -> bool {
         true
@@ -298,20 +359,35 @@ impl ObligationInvariantTest for ConcurrentObligationTest {
 }
 
 /// Test error path obligation cleanup
+#[allow(dead_code)]
 pub struct ErrorPathCleanupTest;
 
 impl ObligationInvariantTest for ErrorPathCleanupTest {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &'static str {
         "error_path_obligation_cleanup"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
         InvariantTestCategory::NoLeakValidation
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn description(&self) -> &'static str {
         "Tests that obligations are properly cleaned up when errors occur during execution"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn run_test<'a>(
         &'a self,
@@ -372,6 +448,10 @@ impl ObligationInvariantTest for ErrorPathCleanupTest {
         })
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
         !tracker.has_active_obligations() && tracker.get_invariant_violations().is_empty()
     }
@@ -382,6 +462,8 @@ mod tests {
     use super::*;
 
     /// Helper to create a test runtime
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn create_test_runtime() -> LabRuntime {
         let config = LabConfig::default()
             .worker_count(2)
@@ -396,6 +478,8 @@ mod tests {
     use futures_lite::future::block_on;
 
     #[test]
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn test_basic_obligation_lifecycle() {
         let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
@@ -413,6 +497,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn test_nested_obligations() {
         let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
@@ -430,6 +516,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn test_concurrent_obligations() {
         let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
@@ -445,6 +533,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn test_error_path_cleanup() {
         let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();

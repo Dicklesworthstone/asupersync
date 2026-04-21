@@ -32,6 +32,7 @@ mod tests {
 
     /// Run the complete RFC 7541 conformance test suite.
     #[test]
+    #[allow(dead_code)]
     fn rfc7541_complete_conformance_suite() {
         let harness = HpackConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -77,6 +78,7 @@ mod tests {
 
     /// Validate test infrastructure is working correctly.
     #[test]
+    #[allow(dead_code)]
     fn validate_conformance_infrastructure() {
         let harness = HpackConformanceHarness::new();
 

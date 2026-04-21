@@ -5,6 +5,7 @@
 use super::*;
 
 /// Run all priority handling conformance tests.
+#[allow(dead_code)]
 pub fn run_priority_tests() -> Vec<H2ConformanceResult> {
     let mut results = Vec::new();
 
@@ -15,6 +16,8 @@ pub fn run_priority_tests() -> Vec<H2ConformanceResult> {
 
     results
 }
+
+#[allow(dead_code)]
 
 fn test_priority_frame_format() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -41,6 +44,8 @@ fn test_priority_frame_format() -> H2ConformanceResult {
     )
 }
 
+#[allow(dead_code)]
+
 fn test_dependency_tree() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Stream dependency tree validation
@@ -59,6 +64,8 @@ fn test_dependency_tree() -> H2ConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_weight_validation() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -82,6 +89,8 @@ fn test_weight_validation() -> H2ConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_exclusive_dependencies() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {

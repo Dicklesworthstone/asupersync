@@ -31,6 +31,7 @@ const MAX_REASONABLE_FIELD_SECTION_SIZE: u64 = 1024 * 1024;
 
 /// Test input structure for SETTINGS frame metamorphic testing
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct SettingsTestCase {
     /// Primary settings configuration
     settings: H3Settings,
@@ -47,6 +48,8 @@ struct SettingsTestCase {
 impl Arbitrary for SettingsTestCase {
     type Parameters = ();
     type Strategy = BoxedStrategy<Self>;
+
+    #[allow(dead_code)]
 
     fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
         (
@@ -77,6 +80,8 @@ impl Arbitrary for SettingsTestCase {
     }
 }
 
+#[allow(dead_code)]
+
 fn arbitrary_h3_settings() -> BoxedStrategy<H3Settings> {
     (
         prop::option::of(0u64..=65536), // qpack_max_table_capacity
@@ -106,6 +111,8 @@ fn arbitrary_h3_settings() -> BoxedStrategy<H3Settings> {
         .boxed()
 }
 
+#[allow(dead_code)]
+
 fn arbitrary_unknown_setting() -> BoxedStrategy<UnknownSetting> {
     prop_oneof![
         // GREASE values
@@ -116,6 +123,8 @@ fn arbitrary_unknown_setting() -> BoxedStrategy<UnknownSetting> {
     ]
     .boxed()
 }
+
+#[allow(dead_code)]
 
 fn arbitrary_qpack_mode() -> BoxedStrategy<H3QpackMode> {
     prop_oneof![
@@ -131,6 +140,7 @@ fn arbitrary_qpack_mode() -> BoxedStrategy<H3QpackMode> {
 /// - If qpack_max_table_capacity is 0, qpack_blocked_streams must be 0 or unset
 /// - StaticOnly mode must reject any dynamic table configuration
 /// - Settings must survive encode/decode round-trip with values intact
+#[allow(dead_code)]
 fn mr_qpack_parameter_consistency(test_case: &SettingsTestCase) {
     let mut settings = test_case.settings.clone();
     settings.unknown = test_case.unknown_settings.clone();
@@ -210,6 +220,7 @@ fn mr_qpack_parameter_consistency(test_case: &SettingsTestCase) {
 /// - Value must be preserved exactly through encode/decode
 /// - Must handle edge cases (0, very large values)
 /// - Connection must respect the limit when processing headers
+#[allow(dead_code)]
 fn mr_max_field_section_size_enforcement(test_case: &SettingsTestCase) {
     let mut settings = test_case.settings.clone();
     settings.unknown = test_case.unknown_settings.clone();
@@ -263,6 +274,7 @@ fn mr_max_field_section_size_enforcement(test_case: &SettingsTestCase) {
 /// - First frame on control stream must be SETTINGS
 /// - Duplicate SETTINGS on control stream must be rejected
 /// - SETTINGS frames on non-control streams are protocol violations
+#[allow(dead_code)]
 fn mr_control_stream_only_restriction(test_case: &SettingsTestCase) {
     if !test_case.test_control_stream_only {
         return;
@@ -322,6 +334,7 @@ fn mr_control_stream_only_restriction(test_case: &SettingsTestCase) {
 /// - Same setting ID appearing twice should cause protocol error
 /// - Different setting IDs should be accepted
 /// - Unknown settings can be duplicated (for GREASE)
+#[allow(dead_code)]
 fn mr_duplicate_settings_rejection(test_case: &SettingsTestCase) {
     if !test_case.include_duplicates {
         return;
@@ -395,6 +408,7 @@ fn mr_duplicate_settings_rejection(test_case: &SettingsTestCase) {
 /// - GREASE values should be accepted without error
 /// - Unknown settings should be preserved through encode/decode
 /// - Connection should continue normally despite unknown settings
+#[allow(dead_code)]
 fn mr_grease_value_tolerance(test_case: &SettingsTestCase) {
     let mut settings = test_case.settings.clone();
 
@@ -482,26 +496,31 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr_qpack_parameter_consistency(test_case in any::<SettingsTestCase>()) {
         mr_qpack_parameter_consistency(&test_case);
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr_max_field_section_size_enforcement(test_case in any::<SettingsTestCase>()) {
         mr_max_field_section_size_enforcement(&test_case);
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr_control_stream_only_restriction(test_case in any::<SettingsTestCase>()) {
         mr_control_stream_only_restriction(&test_case);
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr_duplicate_settings_rejection(test_case in any::<SettingsTestCase>()) {
         mr_duplicate_settings_rejection(&test_case);
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr_grease_value_tolerance(test_case in any::<SettingsTestCase>()) {
         mr_grease_value_tolerance(&test_case);
     }
@@ -514,6 +533,7 @@ mod rfc_9114_settings_tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn rfc_9114_section_7_2_4_settings_frame_basic_conformance() {
         // Test basic SETTINGS frame structure per RFC 9114 Section 7.2.4
         let settings = H3Settings {
@@ -535,6 +555,7 @@ mod rfc_9114_settings_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn rfc_9114_settings_boolean_validation() {
         // Boolean settings must be 0 or 1 per RFC 9114
         let mut payload = Vec::new();
@@ -556,6 +577,7 @@ mod rfc_9114_settings_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn rfc_9114_settings_order_independence() {
         // Settings should be processed regardless of order
         let settings1 = H3Settings {
@@ -597,6 +619,7 @@ mod rfc_9114_settings_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn rfc_9114_settings_unknown_preservation() {
         // Unknown settings must be preserved for future extensibility
         let unknown_setting = UnknownSetting {
@@ -621,6 +644,7 @@ mod rfc_9114_settings_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn rfc_9114_settings_control_stream_first_frame() {
         // First frame on control stream must be SETTINGS (RFC 9114 Section 6.2.1)
         let mut control = H3ControlState::new();

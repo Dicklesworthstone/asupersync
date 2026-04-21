@@ -6,6 +6,7 @@ use super::*;
 use asupersync::http::h2::error::ErrorCode;
 
 /// Run all error handling conformance tests.
+#[allow(dead_code)]
 pub fn run_error_tests() -> Vec<H2ConformanceResult> {
     let mut results = Vec::new();
 
@@ -19,6 +20,7 @@ pub fn run_error_tests() -> Vec<H2ConformanceResult> {
 }
 
 /// RFC 7540 Section 7: Error code definitions.
+#[allow(dead_code)]
 fn test_error_code_definitions() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let error_codes = [
@@ -62,6 +64,7 @@ fn test_error_code_definitions() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 5.4: Connection vs stream errors.
+#[allow(dead_code)]
 fn test_connection_error_vs_stream_error() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Connection errors terminate the entire connection
@@ -93,6 +96,7 @@ fn test_connection_error_vs_stream_error() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 6.4: RST_STREAM frame processing.
+#[allow(dead_code)]
 fn test_rst_stream_processing() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // RST_STREAM frame validation
@@ -119,6 +123,7 @@ fn test_rst_stream_processing() -> H2ConformanceResult {
 }
 
 /// GOAWAY frame error handling.
+#[allow(dead_code)]
 fn test_goaway_error_handling() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // GOAWAY processing with different error codes
@@ -147,6 +152,7 @@ fn test_goaway_error_handling() -> H2ConformanceResult {
 }
 
 /// Malformed frame handling.
+#[allow(dead_code)]
 fn test_malformed_frame_handling() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Various malformed frame scenarios should be detected and rejected

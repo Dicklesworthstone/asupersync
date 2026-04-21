@@ -15,6 +15,7 @@ use walkdir::WalkDir;
 
 /// Configuration for maintenance workflows
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct MaintenanceConfig {
     /// Maximum age for golden files before they're considered stale (in days)
     pub max_golden_age_days: i64,
@@ -31,6 +32,7 @@ pub struct MaintenanceConfig {
 }
 
 impl Default for MaintenanceConfig {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             max_golden_age_days: 30,
@@ -45,6 +47,7 @@ impl Default for MaintenanceConfig {
 
 /// Result of maintenance workflow execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct MaintenanceResult {
     /// Timestamp when maintenance was performed
     pub timestamp: DateTime<Utc>,
@@ -62,6 +65,7 @@ pub struct MaintenanceResult {
 
 /// Individual maintenance action
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct MaintenanceAction {
     /// Type of action performed
     pub action_type: MaintenanceActionType,
@@ -77,6 +81,7 @@ pub struct MaintenanceAction {
 
 /// Types of maintenance actions
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum MaintenanceActionType {
     /// Cleanup old golden files
     CleanupGoldenFiles,
@@ -96,6 +101,7 @@ pub enum MaintenanceActionType {
 
 /// Statistics about maintenance operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct MaintenanceStatistics {
     /// Total files processed
     pub files_processed: usize,
@@ -113,6 +119,7 @@ pub struct MaintenanceStatistics {
 
 /// File health status
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct FileHealthStatus {
     /// Path to the file
     pub path: PathBuf,
@@ -133,6 +140,7 @@ pub struct FileHealthStatus {
 }
 
 /// Main maintenance workflow engine
+#[allow(dead_code)]
 pub struct MaintenanceWorkflow {
     config: MaintenanceConfig,
     calculator: CoverageMatrixCalculator,
@@ -140,8 +148,11 @@ pub struct MaintenanceWorkflow {
     regression_detector: RegressionDetector,
 }
 
+#[allow(dead_code)]
+
 impl MaintenanceWorkflow {
     /// Create a new maintenance workflow with the given configuration
+    #[allow(dead_code)]
     pub fn new(config: MaintenanceConfig) -> Self {
         Self {
             config,
@@ -152,11 +163,13 @@ impl MaintenanceWorkflow {
     }
 
     /// Create a maintenance workflow with default configuration
+    #[allow(dead_code)]
     pub fn default() -> Self {
         Self::new(MaintenanceConfig::default())
     }
 
     /// Execute the complete maintenance workflow
+    #[allow(dead_code)]
     pub fn execute_maintenance(
         &self,
         golden_dir: &Path,
@@ -237,6 +250,7 @@ impl MaintenanceWorkflow {
     }
 
     /// Analyze file health across the conformance test directories
+    #[allow(dead_code)]
     pub fn analyze_file_health(
         &self,
         golden_dir: &Path,
@@ -289,6 +303,7 @@ impl MaintenanceWorkflow {
     }
 
     /// Generate automated maintenance recommendations
+    #[allow(dead_code)]
     pub fn generate_recommendations(&self, health_statuses: &[FileHealthStatus]) -> Vec<String> {
         let mut recommendations = Vec::new();
 
@@ -345,6 +360,7 @@ impl MaintenanceWorkflow {
     }
 
     /// Cleanup stale golden files
+    #[allow(dead_code)]
     fn cleanup_golden_files(&self, golden_dir: &Path) -> Result<(MaintenanceAction, Vec<PathBuf>)> {
         let mut cleaned_files = Vec::new();
         let cutoff_date = Utc::now() - Duration::days(self.config.max_golden_age_days);
@@ -395,6 +411,7 @@ impl MaintenanceWorkflow {
     }
 
     /// Cleanup stale fixture files
+    #[allow(dead_code)]
     fn cleanup_fixture_files(
         &self,
         fixture_dir: &Path,
@@ -448,6 +465,7 @@ impl MaintenanceWorkflow {
     }
 
     /// Update outdated golden files
+    #[allow(dead_code)]
     fn update_golden_files(&self, golden_dir: &Path) -> Result<(MaintenanceAction, Vec<PathBuf>)> {
         let updated_files = Vec::new(); // TODO: Implement golden file updating logic
 
@@ -464,6 +482,7 @@ impl MaintenanceWorkflow {
     }
 
     /// Cleanup historical snapshots
+    #[allow(dead_code)]
     fn cleanup_historical_snapshots(
         &self,
         output_dir: &Path,
@@ -528,6 +547,7 @@ impl MaintenanceWorkflow {
     }
 
     /// Validate file integrity
+    #[allow(dead_code)]
     fn validate_file_integrity(&self, golden_dir: &Path) -> Result<MaintenanceAction> {
         let mut validated_files = Vec::new();
         let mut errors = Vec::new();
@@ -569,6 +589,7 @@ impl MaintenanceWorkflow {
     }
 
     /// Generate maintenance report
+    #[allow(dead_code)]
     fn generate_maintenance_report(
         &self,
         output_dir: &Path,
@@ -615,6 +636,7 @@ impl MaintenanceWorkflow {
     }
 
     /// Assess the health of a single file
+    #[allow(dead_code)]
     fn assess_file_health(
         &self,
         path: &Path,
@@ -664,6 +686,7 @@ impl MaintenanceWorkflow {
     }
 
     /// Calculate statistics for maintenance operations
+    #[allow(dead_code)]
     fn calculate_statistics(
         &self,
         actions: &[MaintenanceAction],
@@ -703,6 +726,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[allow(dead_code)]
     fn test_maintenance_config_default() {
         let config = MaintenanceConfig::default();
         assert_eq!(config.max_golden_age_days, 30);
@@ -712,6 +736,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_maintenance_workflow_creation() {
         let config = MaintenanceConfig::default();
         let workflow = MaintenanceWorkflow::new(config);
@@ -719,6 +744,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_file_health_assessment() {
         let workflow = MaintenanceWorkflow::default();
         let path = PathBuf::from("test.json");
@@ -739,6 +765,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_maintenance_action_types() {
         let action = MaintenanceAction {
             action_type: MaintenanceActionType::CleanupGoldenFiles,
@@ -757,6 +784,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_empty_directory_maintenance() {
         let workflow = MaintenanceWorkflow::default();
         let temp_dir = TempDir::new().unwrap();

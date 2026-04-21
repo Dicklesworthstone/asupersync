@@ -196,6 +196,7 @@ pub mod malformed {
 
 /// Test all golden test vectors.
 #[test]
+#[allow(dead_code)]
 fn test_all_golden_vectors() {
     let harness = H1ConformanceHarness::new();
 
@@ -250,6 +251,7 @@ fn test_all_golden_vectors() {
 
 /// Test all malformed vectors are properly rejected.
 #[test]
+#[allow(dead_code)]
 fn test_malformed_vectors_rejected() {
     let harness = H1ConformanceHarness::new();
 
@@ -279,6 +281,7 @@ fn test_malformed_vectors_rejected() {
 
 /// Test large hex variants.
 #[test]
+#[allow(dead_code)]
 fn test_large_hex_variants() {
     let harness = H1ConformanceHarness::new();
 

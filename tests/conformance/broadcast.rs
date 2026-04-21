@@ -17,6 +17,7 @@ use std::thread;
 use std::time::Duration;
 
 /// Test context for broadcast conformance
+#[allow(dead_code)]
 fn test_cx() -> Cx {
     Cx::new(
         RegionId::from_arena(ArenaIndex::new(0, 0)),
@@ -27,12 +28,16 @@ fn test_cx() -> Cx {
 
 /// Message type for broadcast testing
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 struct TestMessage {
     id: u64,
     content: String,
 }
 
+#[allow(dead_code)]
+
 impl TestMessage {
+    #[allow(dead_code)]
     fn new(id: u64, content: &str) -> Self {
         Self {
             id,
@@ -42,17 +47,20 @@ impl TestMessage {
 }
 
 /// Generate test messages for proptest
+#[allow(dead_code)]
 fn test_message_strategy() -> impl Strategy<Value = TestMessage> {
     (0u64..1000, "[a-z]{1,20}").prop_map(|(id, content)| TestMessage::new(id, &content))
 }
 
 /// Generate a sequence of test messages
+#[allow(dead_code)]
 fn message_sequence_strategy() -> impl Strategy<Value = Vec<TestMessage>> {
     prop::collection::vec(test_message_strategy(), 0..50)
 }
 
 /// Test operations for metamorphic testing
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum BroadcastOperation {
     Send(TestMessage),
     Subscribe,
@@ -62,6 +70,7 @@ enum BroadcastOperation {
 }
 
 /// Generate operation sequences for metamorphic testing
+#[allow(dead_code)]
 fn operation_sequence_strategy() -> impl Strategy<Value = Vec<BroadcastOperation>> {
     prop::collection::vec(
         prop_oneof![
@@ -77,6 +86,7 @@ fn operation_sequence_strategy() -> impl Strategy<Value = Vec<BroadcastOperation
 
 /// State tracker for broadcast channel behavior
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct BroadcastState {
     sent_messages: Vec<TestMessage>,
     receiver_states: HashMap<usize, ReceiverState>,
@@ -85,6 +95,7 @@ struct BroadcastState {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ReceiverState {
     subscription_point: usize, // Index in sent_messages when subscribed
     next_expected_index: usize,
@@ -92,7 +103,10 @@ struct ReceiverState {
     lag_count: u64,
 }
 
+#[allow(dead_code)]
+
 impl BroadcastState {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self {
             sent_messages: Vec::new(),
@@ -102,11 +116,15 @@ impl BroadcastState {
         }
     }
 
+    #[allow(dead_code)]
+
     fn send_message(&mut self, msg: TestMessage) {
         if !self.senders_closed {
             self.sent_messages.push(msg);
         }
     }
+
+    #[allow(dead_code)]
 
     fn subscribe(&mut self) -> usize {
         let receiver_id = self.next_receiver_id;
@@ -123,15 +141,21 @@ impl BroadcastState {
         receiver_id
     }
 
+    #[allow(dead_code)]
+
     fn drop_receiver(&mut self, receiver_id: usize) {
         if let Some(state) = self.receiver_states.get_mut(&receiver_id) {
             state.active = false;
         }
     }
 
+    #[allow(dead_code)]
+
     fn close_senders(&mut self) {
         self.senders_closed = true;
     }
+
+    #[allow(dead_code)]
 
     fn active_receiver_count(&self) -> usize {
         self.receiver_states.values().filter(|s| s.active).count()
@@ -139,6 +163,7 @@ impl BroadcastState {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_mr1_subscribe_returns_only_values_sent_after_subscribe() {
     proptest!(|(messages_before in message_sequence_strategy(), messages_after in message_sequence_strategy())| {
         let cx = test_cx();
@@ -176,6 +201,7 @@ fn test_mr1_subscribe_returns_only_values_sent_after_subscribe() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_mr2_lag_error_triggered_when_receiver_falls_behind_capacity() {
     proptest!(|(capacity in 1usize..=10, overflow_count in 1usize..=20)| {
         let cx = test_cx();
@@ -217,6 +243,7 @@ fn test_mr2_lag_error_triggered_when_receiver_falls_behind_capacity() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_mr3_drop_of_receiver_removes_from_broadcast_set() {
     proptest!(|(initial_receiver_count in 1usize..=5, drop_count in 0usize..=5)| {
         let cx = test_cx();
@@ -262,6 +289,7 @@ fn test_mr3_drop_of_receiver_removes_from_broadcast_set() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_mr4_subscriber_count_accurate_through_concurrent_subscribe_drop() {
     proptest!(|(operations in prop::collection::vec((0u8..3), 10..50))| {
         let cx = test_cx();
@@ -311,6 +339,7 @@ fn test_mr4_subscriber_count_accurate_through_concurrent_subscribe_drop() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_mr5_close_broadcasts_to_all_receivers_even_if_they_lag() {
     proptest!(|(capacity in 1usize..=5, receiver_count in 1usize..=3, lag_messages in 1usize..=10)| {
         let cx = test_cx();
@@ -379,6 +408,7 @@ fn test_mr5_close_broadcasts_to_all_receivers_even_if_they_lag() {
 
 /// Comprehensive metamorphic test combining all relations
 #[test]
+#[allow(dead_code)]
 fn test_broadcast_metamorphic_comprehensive() {
     proptest!(|(operations in operation_sequence_strategy().prop_filter("Non-empty operations", |ops| !ops.is_empty()))| {
         let cx = test_cx();
@@ -449,6 +479,7 @@ fn test_broadcast_metamorphic_comprehensive() {
 
 /// Test broadcast channel edge cases and boundary conditions
 #[test]
+#[allow(dead_code)]
 fn test_broadcast_edge_cases() {
     let cx = test_cx();
 
@@ -488,6 +519,7 @@ fn test_broadcast_edge_cases() {
 
 /// Performance/stress test for broadcast channel
 #[test]
+#[allow(dead_code)]
 fn test_broadcast_stress() {
     let cx = test_cx();
     let (sender, mut receiver) = broadcast::channel::<TestMessage>(1000);

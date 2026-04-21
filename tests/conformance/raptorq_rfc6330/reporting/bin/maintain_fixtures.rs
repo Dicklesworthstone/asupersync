@@ -10,6 +10,8 @@ use raptorq_conformance_reporting::maintenance_workflows::{
 };
 use std::path::PathBuf;
 
+#[allow(dead_code)]
+
 fn main() -> Result<()> {
     let app = Command::new("maintain_fixtures")
         .about("Automated maintenance for RaptorQ conformance test fixtures")
@@ -183,6 +185,8 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[allow(dead_code)]
 
 fn run_analyze_mode(
     workflow: &MaintenanceWorkflow,
@@ -374,6 +378,8 @@ fn run_analyze_mode(
     Ok(())
 }
 
+#[allow(dead_code)]
+
 fn run_health_mode(
     workflow: &MaintenanceWorkflow,
     golden_dir: &PathBuf,
@@ -465,6 +471,8 @@ fn run_health_mode(
     std::process::exit(exit_code);
 }
 
+#[allow(dead_code)]
+
 fn run_cleanup_mode(
     workflow: &MaintenanceWorkflow,
     golden_dir: &PathBuf,
@@ -546,6 +554,8 @@ fn run_cleanup_mode(
 
     Ok(())
 }
+
+#[allow(dead_code)]
 
 fn run_full_maintenance(
     workflow: &MaintenanceWorkflow,
@@ -682,6 +692,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[allow(dead_code)]
     fn test_cli_parsing() {
         let app = Command::new("maintain_fixtures")
             .arg(
@@ -722,6 +733,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_maintenance_config_creation() {
         let config = MaintenanceConfig {
             max_golden_age_days: 30,

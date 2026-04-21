@@ -51,6 +51,7 @@ use std::path::Path;
 use std::collections::HashMap;
 
 /// Main entry point for running the complete differential test suite
+#[allow(dead_code)]
 pub fn run_differential_suite<P: AsRef<Path>>(fixture_dir: P) -> Result<DifferentialSuiteResults, DifferentialSuiteError> {
     let harness = DifferentialHarness::new(fixture_dir)?;
     let results = harness.run_all_tests()?;
@@ -66,6 +67,7 @@ pub fn run_differential_suite<P: AsRef<Path>>(fixture_dir: P) -> Result<Differen
 
 /// Results from running the complete differential test suite
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DifferentialSuiteResults {
     /// Total number of tests executed
     pub total_tests: usize,
@@ -79,13 +81,17 @@ pub struct DifferentialSuiteResults {
     pub comparison_stats: ComparisonStats,
 }
 
+#[allow(dead_code)]
+
 impl DifferentialSuiteResults {
     /// Returns true if all tests passed
+    #[allow(dead_code)]
     pub fn is_success(&self) -> bool {
         self.failed_tests == 0 && self.total_tests > 0
     }
 
     /// Returns the pass rate as a percentage
+    #[allow(dead_code)]
     pub fn pass_rate(&self) -> f64 {
         if self.total_tests == 0 {
             0.0
@@ -95,6 +101,7 @@ impl DifferentialSuiteResults {
     }
 
     /// Generates a summary report
+    #[allow(dead_code)]
     pub fn summary_report(&self) -> String {
         format!(
             "RaptorQ Differential Testing Results\n\
@@ -119,6 +126,7 @@ impl DifferentialSuiteResults {
 
 /// Errors that can occur during differential test suite execution
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum DifferentialSuiteError {
     #[error("Harness initialization failed: {0}")]
     HarnessInit(#[from] DifferentialHarnessError),
@@ -135,6 +143,7 @@ pub enum DifferentialSuiteError {
 
 /// Errors that can occur during differential harness operations
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum DifferentialHarnessError {
     #[error("Configuration error: {0}")]
     Configuration(String),
@@ -148,6 +157,7 @@ pub enum DifferentialHarnessError {
 
 /// Configuration for differential testing
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct DifferentialConfig {
     /// Path to reference implementation binary
     pub reference_binary: Option<String>,
@@ -164,6 +174,7 @@ pub struct DifferentialConfig {
 }
 
 impl Default for DifferentialConfig {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             reference_binary: None,
@@ -177,6 +188,7 @@ impl Default for DifferentialConfig {
 }
 
 /// Convenience function for running a single differential test
+#[allow(dead_code)]
 pub fn run_single_test<P: AsRef<Path>>(
     fixture_path: P,
     our_implementation_result: &[u8]
@@ -199,6 +211,7 @@ pub fn run_single_test<P: AsRef<Path>>(
 }
 
 /// Finds the first byte position where two byte arrays differ
+#[allow(dead_code)]
 fn find_first_mismatch(expected: &[u8], actual: &[u8]) -> Option<usize> {
     expected.iter()
         .zip(actual.iter())
@@ -220,6 +233,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[allow(dead_code)]
     fn test_differential_config_default() {
         let config = DifferentialConfig::default();
         assert_eq!(config.max_allowed_mismatches, 0);
@@ -229,6 +243,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_find_first_mismatch() {
         let a = b"hello world";
         let b = b"hello earth";
@@ -241,6 +256,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_suite_results_pass_rate() {
         let results = DifferentialSuiteResults {
             total_tests: 10,
@@ -255,6 +271,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_suite_results_success() {
         let results = DifferentialSuiteResults {
             total_tests: 5,
@@ -269,6 +286,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_single_test_success() {
         let temp_dir = TempDir::new().unwrap();
         // This would test the single test runner, but requires fixture setup

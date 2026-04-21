@@ -9,9 +9,13 @@ use asupersync::http::h2::hpack::{Decoder, Encoder, Header};
 use std::time::Instant;
 
 /// Error condition test cases for HPACK conformance.
+#[allow(dead_code)]
 pub struct HpackErrorTester;
 
+#[allow(dead_code)]
+
 impl HpackErrorTester {
+    #[allow(dead_code)]
     fn encode_table_size_update(size: usize) -> Vec<u8> {
         let mut buf = BytesMut::new();
         let max_value = (1 << 5) - 1;
@@ -32,6 +36,7 @@ impl HpackErrorTester {
     }
 
     /// Run all error handling conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_error_tests() -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
 
@@ -50,6 +55,7 @@ impl HpackErrorTester {
     }
 
     /// Test malformed integer encoding handling.
+    #[allow(dead_code)]
     fn test_malformed_integer_encoding() -> ConformanceTestResult {
         let start_time = Instant::now();
 
@@ -94,6 +100,7 @@ impl HpackErrorTester {
     }
 
     /// Test malformed string encoding handling.
+    #[allow(dead_code)]
     fn test_malformed_string_encoding() -> ConformanceTestResult {
         let start_time = Instant::now();
 
@@ -138,6 +145,7 @@ impl HpackErrorTester {
     }
 
     /// Test invalid index reference handling.
+    #[allow(dead_code)]
     fn test_invalid_index_references() -> ConformanceTestResult {
         let start_time = Instant::now();
 
@@ -180,6 +188,7 @@ impl HpackErrorTester {
     }
 
     /// Test Huffman decode error handling.
+    #[allow(dead_code)]
     fn test_huffman_decode_errors() -> ConformanceTestResult {
         let start_time = Instant::now();
 
@@ -224,6 +233,7 @@ impl HpackErrorTester {
     }
 
     /// Test dynamic table size violation handling.
+    #[allow(dead_code)]
     fn test_table_size_violations() -> ConformanceTestResult {
         let start_time = Instant::now();
 
@@ -259,6 +269,7 @@ impl HpackErrorTester {
     }
 
     /// Test header list size limit enforcement.
+    #[allow(dead_code)]
     fn test_header_list_size_limits() -> ConformanceTestResult {
         let start_time = Instant::now();
 
@@ -293,6 +304,7 @@ impl HpackErrorTester {
     }
 
     /// Test incomplete header block handling.
+    #[allow(dead_code)]
     fn test_incomplete_headers() -> ConformanceTestResult {
         let start_time = Instant::now();
 
@@ -337,6 +349,7 @@ impl HpackErrorTester {
     }
 
     /// Test oversized dynamic table update handling.
+    #[allow(dead_code)]
     fn test_oversized_dynamic_table_updates() -> ConformanceTestResult {
         let start_time = Instant::now();
 
@@ -372,6 +385,7 @@ impl HpackErrorTester {
     }
 
     /// Test invalid Huffman padding handling.
+    #[allow(dead_code)]
     fn test_invalid_huffman_padding() -> ConformanceTestResult {
         let start_time = Instant::now();
 
@@ -413,6 +427,7 @@ impl HpackErrorTester {
     }
 
     /// Test context corruption and recovery.
+    #[allow(dead_code)]
     fn test_context_corruption_recovery() -> ConformanceTestResult {
         let start_time = Instant::now();
 
@@ -450,14 +465,19 @@ impl HpackErrorTester {
 }
 
 /// Edge case testing for boundary conditions.
+#[allow(dead_code)]
 pub struct HpackEdgeCaseTester;
 
+#[allow(dead_code)]
+
 impl HpackEdgeCaseTester {
+    #[allow(dead_code)]
     fn encode_table_size_update(size: usize) -> Vec<u8> {
         HpackErrorTester::encode_table_size_update(size)
     }
 
     /// Run all edge case tests.
+    #[allow(dead_code)]
     pub fn run_all_edge_case_tests() -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
 
@@ -469,6 +489,8 @@ impl HpackEdgeCaseTester {
 
         results
     }
+
+    #[allow(dead_code)]
 
     fn test_empty_header_names() -> ConformanceTestResult {
         let start_time = Instant::now();
@@ -500,6 +522,8 @@ impl HpackEdgeCaseTester {
             execution_time_ms: start_time.elapsed().as_millis() as u64,
         }
     }
+
+    #[allow(dead_code)]
 
     fn test_empty_header_values() -> ConformanceTestResult {
         let start_time = Instant::now();
@@ -535,6 +559,8 @@ impl HpackEdgeCaseTester {
         }
     }
 
+    #[allow(dead_code)]
+
     fn test_maximum_index_values() -> ConformanceTestResult {
         let start_time = Instant::now();
 
@@ -554,6 +580,8 @@ impl HpackEdgeCaseTester {
             execution_time_ms: start_time.elapsed().as_millis() as u64,
         }
     }
+
+    #[allow(dead_code)]
 
     fn test_zero_length_strings() -> ConformanceTestResult {
         let start_time = Instant::now();
@@ -580,6 +608,8 @@ impl HpackEdgeCaseTester {
             execution_time_ms: start_time.elapsed().as_millis() as u64,
         }
     }
+
+    #[allow(dead_code)]
 
     fn test_boundary_table_sizes() -> ConformanceTestResult {
         let start_time = Instant::now();
@@ -628,6 +658,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_error_tester_basic_functionality() {
         let results = HpackErrorTester::run_all_error_tests();
         assert!(!results.is_empty(), "Should have error test results");
@@ -642,6 +673,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_edge_case_tester_basic_functionality() {
         let results = HpackEdgeCaseTester::run_all_edge_case_tests();
         assert!(!results.is_empty(), "Should have edge case test results");
@@ -652,6 +684,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_malformed_integer_encoding() {
         let result = HpackErrorTester::test_malformed_integer_encoding();
 

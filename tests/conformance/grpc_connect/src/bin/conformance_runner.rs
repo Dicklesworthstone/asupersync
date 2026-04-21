@@ -167,6 +167,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_cli_parsing() {
         let app = Command::new("test")
             .arg(

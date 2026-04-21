@@ -14,6 +14,8 @@ use asupersync::bytes::Bytes;
 mod conformance_window_update {
     use super::*;
 
+    #[allow(dead_code)]
+
     fn init_test(name: &str) {
         asupersync::test_utils::init_test_logging();
         asupersync::test_phase!(name);
@@ -25,6 +27,7 @@ mod conformance_window_update {
     /// Both endpoints MUST use 65535 octets as the initial window size for
     /// connection-level flow control.
     #[test]
+    #[allow(dead_code)]
     fn mr1_initial_window_65535() {
         init_test("mr1_initial_window_65535");
 
@@ -78,6 +81,7 @@ mod conformance_window_update {
     /// of type PROTOCOL_ERROR; errors on the connection flow control window
     /// MUST be treated as a connection error (Section 5.4.1).
     #[test]
+    #[allow(dead_code)]
     fn mr2_window_update_increment_must_be_positive() {
         init_test("mr2_window_update_increment_must_be_positive");
 
@@ -134,6 +138,7 @@ mod conformance_window_update {
     /// size. A receiver MUST treat a flow control window overflow as a
     /// connection error of type FLOW_CONTROL_ERROR.
     #[test]
+    #[allow(dead_code)]
     fn mr3_window_overflow_triggers_flow_control_error() {
         init_test("mr3_window_overflow_triggers_flow_control_error");
 
@@ -191,6 +196,7 @@ mod conformance_window_update {
     /// connection. Both types of flow control use the window that is managed
     /// using the WINDOW_UPDATE frame.
     #[test]
+    #[allow(dead_code)]
     fn mr4_per_stream_and_connection_windows_separate() {
         init_test("mr4_per_stream_and_connection_windows_separate");
 
@@ -286,6 +292,7 @@ mod conformance_window_update {
     /// credit back. When this value decreases, and the currently available
     /// window size would become negative, endpoints MUST close the stream.
     #[test]
+    #[allow(dead_code)]
     fn mr5_settings_initial_window_size_rebalances() {
         init_test("mr5_settings_initial_window_size_rebalances");
 
@@ -383,6 +390,7 @@ mod conformance_window_update {
     /// Tests interaction between all window update mechanisms to ensure
     /// they work correctly together.
     #[test]
+    #[allow(dead_code)]
     fn integration_combined_flow_control_scenarios() {
         init_test("integration_combined_flow_control_scenarios");
 
@@ -445,6 +453,7 @@ mod conformance_window_update {
 
     /// **Edge Case Test**: Boundary conditions and error cases
     #[test]
+    #[allow(dead_code)]
     fn edge_cases_boundary_conditions() {
         init_test("edge_cases_boundary_conditions");
 
@@ -479,6 +488,7 @@ mod conformance_window_update {
 // Helper functions for test utilities
 
 /// Create a test connection with custom settings
+#[allow(dead_code)]
 fn create_test_connection(is_client: bool, settings: Settings) -> Connection {
     if is_client {
         Connection::client(settings)
@@ -488,11 +498,13 @@ fn create_test_connection(is_client: bool, settings: Settings) -> Connection {
 }
 
 /// Create a minimal headers frame for stream creation
+#[allow(dead_code)]
 fn create_test_headers(stream_id: u32, end_stream: bool) -> Frame {
     Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), end_stream, true))
 }
 
 /// Create a data frame with specified size
+#[allow(dead_code)]
 fn create_test_data(stream_id: u32, size: usize, end_stream: bool) -> Frame {
     let data = Bytes::from(vec![0u8; size]);
     Frame::Data(DataFrame::new(stream_id, data, end_stream))

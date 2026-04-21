@@ -7,6 +7,7 @@ use asupersync::bytes::BytesMut;
 use asupersync::http::h2::frame::{FRAME_HEADER_SIZE, FrameHeader, FrameType, MAX_FRAME_SIZE};
 
 /// Run all frame format conformance tests.
+#[allow(dead_code)]
 pub fn run_frame_format_tests() -> Vec<H2ConformanceResult> {
     let mut results = Vec::new();
 
@@ -23,6 +24,7 @@ pub fn run_frame_format_tests() -> Vec<H2ConformanceResult> {
 }
 
 /// RFC 7540 Section 4.1: Frame header MUST be 9 octets.
+#[allow(dead_code)]
 fn test_frame_header_size() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Frame header must be exactly 9 bytes
@@ -66,6 +68,7 @@ fn test_frame_header_size() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 4.1: Frame length MUST NOT exceed 2^24-1.
+#[allow(dead_code)]
 fn test_frame_length_limits() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Maximum frame size constant should be 2^24 - 1
@@ -105,6 +108,7 @@ fn test_frame_length_limits() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 4.1: Known frame types validation.
+#[allow(dead_code)]
 fn test_frame_type_validation() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Test all defined frame types (0x0 - 0x9)
@@ -164,6 +168,7 @@ fn test_frame_type_validation() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 4.1: Stream identifier reserved bit MUST be ignored.
+#[allow(dead_code)]
 fn test_stream_id_reserved_bit() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Test stream ID with reserved bit set (bit 31)
@@ -213,6 +218,7 @@ fn test_stream_id_reserved_bit() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 4.1: Frame header encoding format.
+#[allow(dead_code)]
 fn test_frame_header_encoding() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Test big-endian encoding of frame header fields
@@ -291,6 +297,7 @@ fn test_frame_header_encoding() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 4.1: Unknown frame types MUST be ignored.
+#[allow(dead_code)]
 fn test_unknown_frame_types() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Unknown frame types should parse but not be recognized
@@ -340,6 +347,7 @@ fn test_unknown_frame_types() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 4.2: Frame size validation.
+#[allow(dead_code)]
 fn test_frame_size_validation() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Test boundary conditions for frame sizes
@@ -386,6 +394,7 @@ fn test_frame_size_validation() -> H2ConformanceResult {
 }
 
 /// Frame flags validation.
+#[allow(dead_code)]
 fn test_frame_flags_validation() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Test frame flags are preserved during parsing

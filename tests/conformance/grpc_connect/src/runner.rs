@@ -8,11 +8,15 @@ use std::time::Instant;
 use tracing::{info, debug, warn};
 
 /// Parallel test runner for conformance tests
+#[allow(dead_code)]
 pub struct ParallelTestRunner {
     config: ConformanceConfig,
 }
 
+#[allow(dead_code)]
+
 impl ParallelTestRunner {
+    #[allow(dead_code)]
     pub fn new(config: ConformanceConfig) -> Self {
         Self { config }
     }
@@ -76,6 +80,7 @@ impl ParallelTestRunner {
     }
 
     /// Generate test execution summary
+    #[allow(dead_code)]
     pub fn generate_summary(&self, results: &[ConformanceResult]) -> TestSummary {
         let mut summary = TestSummary::default();
 
@@ -102,6 +107,7 @@ impl ParallelTestRunner {
 
 /// Test execution summary
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct TestSummary {
     pub total_tests: u32,
     pub passed_tests: u32,
@@ -112,13 +118,18 @@ pub struct TestSummary {
     pub by_category: HashMap<TestCategory, Vec<ConformanceResult>>,
 }
 
+#[allow(dead_code)]
+
 impl TestSummary {
+    #[allow(dead_code)]
     pub fn success_rate(&self) -> f64 {
         if self.total_tests == 0 {
             return 0.0;
         }
         self.passed_tests as f64 / self.total_tests as f64 * 100.0
     }
+
+    #[allow(dead_code)]
 
     pub fn print_summary(&self) {
         info!("=== Test Execution Summary ===");

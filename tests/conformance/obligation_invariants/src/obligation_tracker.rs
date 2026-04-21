@@ -11,11 +11,13 @@ use asupersync::types::{ObligationId, RegionId};
 
 /// Tracks obligations and validates structured concurrency invariants.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ObligationTracker {
     inner: Arc<Mutex<ObligationTrackerInner>>,
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct ObligationTrackerInner {
     /// Active obligations with their metadata
     active_obligations: HashMap<ObligationId, ObligationMetadata>,
@@ -31,6 +33,7 @@ struct ObligationTrackerInner {
 
 /// Metadata tracked for each obligation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ObligationMetadata {
     pub obligation_id: ObligationId,
     pub parent_region: RegionId,
@@ -43,6 +46,7 @@ pub struct ObligationMetadata {
 
 /// Current state of an obligation
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum ObligationState {
     Active,
     Resolving,
@@ -53,6 +57,7 @@ pub enum ObligationState {
 
 /// Tracks region hierarchy for quiescence validation
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct RegionTree {
     regions: HashMap<RegionId, RegionMetadata>,
     parent_child_map: HashMap<RegionId, HashSet<RegionId>>,
@@ -61,6 +66,7 @@ pub struct RegionTree {
 
 /// Metadata for each region
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RegionMetadata {
     pub region_id: RegionId,
     pub creation_time: Instant,
@@ -71,6 +77,7 @@ pub struct RegionMetadata {
 
 /// Current state of a region
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum RegionState {
     Active,
     Closing,
@@ -79,6 +86,7 @@ pub enum RegionState {
 
 /// Resource tracking for leak detection
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct ResourceTracker {
     /// File descriptors allocated by obligations
     file_descriptors: HashMap<ObligationId, HashSet<i32>>,
@@ -92,6 +100,7 @@ pub struct ResourceTracker {
 
 /// Handle to a tracked resource
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum ResourceHandle {
     FileDescriptor(i32),
     MemoryAllocation(usize),
@@ -101,6 +110,7 @@ pub enum ResourceHandle {
 
 /// Handle to a waker registration
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub struct WakerHandle {
     pub id: u64,
     pub registration_time: u64, // timestamp as u64 for hash
@@ -108,6 +118,7 @@ pub struct WakerHandle {
 
 /// Handle to a network connection
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub struct ConnectionHandle {
     pub id: u64,
     pub local_addr: String,
@@ -116,6 +127,7 @@ pub struct ConnectionHandle {
 
 /// Cancel token for obligation cancellation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CancelToken {
     pub token_id: u64,
     pub is_cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -123,6 +135,7 @@ pub struct CancelToken {
 
 /// Detected invariant violation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct InvariantViolation {
     pub violation_type: InvariantViolationType,
     pub obligation_id: Option<ObligationId>,
@@ -134,6 +147,7 @@ pub struct InvariantViolation {
 
 /// Types of invariant violations
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum InvariantViolationType {
     /// Obligation leak - obligation not properly resolved
     ObligationLeak,
@@ -147,8 +161,14 @@ pub enum InvariantViolationType {
     TemporalSafetyViolation,
 }
 
+#[allow(dead_code)]
+
+#[allow(dead_code)]
+
 impl ObligationTracker {
     /// Create a new obligation tracker
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(ObligationTrackerInner {
@@ -162,6 +182,8 @@ impl ObligationTracker {
     }
 
     /// Track creation of a new obligation
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn track_obligation_creation(&self, obligation_id: ObligationId, parent_region: RegionId) {
         let mut inner = self.inner.lock().unwrap();
 
@@ -184,6 +206,8 @@ impl ObligationTracker {
     }
 
     /// Track resolution of an obligation
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn track_obligation_resolution(&self, obligation_id: ObligationId) {
         let mut inner = self.inner.lock().unwrap();
 
@@ -217,6 +241,8 @@ impl ObligationTracker {
     }
 
     /// Track cancellation of an obligation
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn track_obligation_cancellation(&self, obligation_id: ObligationId) {
         let mut inner = self.inner.lock().unwrap();
 
@@ -241,6 +267,8 @@ impl ObligationTracker {
     }
 
     /// Track creation of a region
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn track_region_creation(&self, region_id: RegionId, parent_region: Option<RegionId>) {
         let mut inner = self.inner.lock().unwrap();
 
@@ -270,6 +298,8 @@ impl ObligationTracker {
     }
 
     /// Track initiation of region closure
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn track_region_close_initiation(&self, region_id: RegionId) {
         let mut inner = self.inner.lock().unwrap();
 
@@ -297,6 +327,8 @@ impl ObligationTracker {
     }
 
     /// Track completion of region closure
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn track_region_close_completion(&self, region_id: RegionId) {
         let mut inner = self.inner.lock().unwrap();
 
@@ -323,6 +355,8 @@ impl ObligationTracker {
     }
 
     /// Track resource allocation for an obligation
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn track_resource_allocation(&self, obligation_id: ObligationId, resource: ResourceHandle) {
         let mut inner = self.inner.lock().unwrap();
 
@@ -368,6 +402,8 @@ impl ObligationTracker {
     }
 
     /// Track resource deallocation for an obligation
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn track_resource_deallocation(
         &self,
         obligation_id: ObligationId,
@@ -421,12 +457,16 @@ impl ObligationTracker {
     }
 
     /// Check if there are any active obligations
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn has_active_obligations(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         !inner.active_obligations.is_empty()
     }
 
     /// Check if a region is quiescent (no active obligations)
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn is_region_quiescent(&self, region_id: RegionId) -> bool {
         let inner = self.inner.lock().unwrap();
         if let Some(region) = inner.region_hierarchy.regions.get(&region_id) {
@@ -437,18 +477,24 @@ impl ObligationTracker {
     }
 
     /// Get count of active obligations
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn active_obligation_count(&self) -> usize {
         let inner = self.inner.lock().unwrap();
         inner.active_obligations.len()
     }
 
     /// Get all detected invariant violations
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn get_invariant_violations(&self) -> Vec<InvariantViolation> {
         let inner = self.inner.lock().unwrap();
         inner.invariant_violations.clone()
     }
 
     /// Clear all tracked data (for test cleanup)
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn reset(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.active_obligations.clear();
@@ -459,6 +505,8 @@ impl ObligationTracker {
     }
 
     /// Validate all invariants and return violations
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn validate_invariants(&self) -> Vec<InvariantViolation> {
         let mut inner = self.inner.lock().unwrap();
         let mut violations = Vec::new();
@@ -515,6 +563,8 @@ impl ObligationTracker {
 }
 
 impl Default for ObligationTracker {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }

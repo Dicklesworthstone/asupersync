@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 
 /// RFC 9112 §7 conformance test case
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ChunkedConformanceCase {
     /// Test identifier (e.g., "RFC9112-7.1.1-valid-chunk")
     id: &'static str,
@@ -43,6 +44,7 @@ struct ChunkedConformanceCase {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 enum ChunkedParseResult {
     /// Successfully parsed to body bytes
     Success(Vec<u8>),
@@ -55,6 +57,7 @@ enum ChunkedParseResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 enum RequirementLevel {
     Must,
     Should,
@@ -197,18 +200,24 @@ const RFC9112_CHUNKED_CASES: &[ChunkedConformanceCase] = &[
 ];
 
 /// Mock chunked transfer encoding parser for testing
+#[allow(dead_code)]
 struct ChunkedParser {
     input: Vec<u8>,
     position: usize,
 }
 
+#[allow(dead_code)]
+
 impl ChunkedParser {
+    #[allow(dead_code)]
     fn new(input: &[u8]) -> Self {
         Self {
             input: input.to_vec(),
             position: 0,
         }
     }
+
+    #[allow(dead_code)]
 
     fn parse(&mut self) -> (ChunkedParseResult, Vec<(String, String)>) {
         let mut body = Vec::new();
@@ -243,6 +252,8 @@ impl ChunkedParser {
             }
         }
     }
+
+    #[allow(dead_code)]
 
     fn read_chunk_size(&mut self) -> Result<usize, ChunkedParseResult> {
         let start_pos = self.position;
@@ -280,6 +291,8 @@ impl ChunkedParser {
         Ok(size)
     }
 
+    #[allow(dead_code)]
+
     fn skip_chunk_extensions(&mut self) {
         // Skip optional chunk extensions: ;name=value;name=value
         while self.position < self.input.len() && self.input[self.position] == b';' {
@@ -289,6 +302,8 @@ impl ChunkedParser {
             }
         }
     }
+
+    #[allow(dead_code)]
 
     fn read_chunk_data(&mut self, size: usize, body: &mut Vec<u8>) -> Result<(), ChunkedParseResult> {
         if self.position + size > self.input.len() {
@@ -305,6 +320,8 @@ impl ChunkedParser {
 
         Ok(())
     }
+
+    #[allow(dead_code)]
 
     fn read_trailers(&mut self) -> Vec<(String, String)> {
         let mut trailers = Vec::new();
@@ -339,6 +356,8 @@ impl ChunkedParser {
         trailers
     }
 
+    #[allow(dead_code)]
+
     fn expect_crlf(&mut self) -> bool {
         if self.position + 1 < self.input.len()
             && self.input[self.position] == b'\r'
@@ -358,6 +377,7 @@ mod tests {
 
     /// Main conformance test runner for RFC 9112 §7
     #[test]
+    #[allow(dead_code)]
     fn rfc9112_section7_full_conformance() {
         let mut results = ConformanceResults::new();
 
@@ -369,6 +389,8 @@ mod tests {
         results.print_summary();
         results.assert_compliance();
     }
+
+    #[allow(dead_code)]
 
     fn run_conformance_case(case: &ChunkedConformanceCase) -> TestVerdict {
         let mut parser = ChunkedParser::new(case.input);
@@ -409,6 +431,7 @@ mod tests {
     }
 
     #[derive(Debug)]
+    #[allow(dead_code)]
     enum TestVerdict {
         Pass,
         Fail { reason: String },
@@ -416,23 +439,32 @@ mod tests {
         ExpectedFail { reason: String },
     }
 
+    #[allow(dead_code)]
     struct ConformanceResults {
         cases: Vec<CaseResult>,
     }
 
+    #[allow(dead_code)]
     struct CaseResult {
         case: &'static ChunkedConformanceCase,
         verdict: TestVerdict,
     }
 
+    #[allow(dead_code)]
+
     impl ConformanceResults {
+        #[allow(dead_code)]
         fn new() -> Self {
             Self { cases: Vec::new() }
         }
 
+        #[allow(dead_code)]
+
         fn record(&mut self, case: &'static ChunkedConformanceCase, verdict: TestVerdict) {
             self.cases.push(CaseResult { case, verdict });
         }
+
+        #[allow(dead_code)]
 
         fn print_summary(&self) {
             let mut must_pass = 0;
@@ -486,6 +518,8 @@ mod tests {
             }
         }
 
+        #[allow(dead_code)]
+
         fn assert_compliance(&self) {
             let must_failures: Vec<_> = self.cases.iter()
                 .filter(|r| r.case.level == RequirementLevel::Must)
@@ -502,6 +536,7 @@ mod tests {
     /// Individual test cases for easier debugging
 
     #[test]
+    #[allow(dead_code)]
     fn rfc9112_simple_chunked_body() {
         let case = &RFC9112_CHUNKED_CASES[0]; // simple-chunk
         let verdict = run_conformance_case(case);
@@ -509,6 +544,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn rfc9112_multiple_chunks() {
         let case = &RFC9112_CHUNKED_CASES[1]; // multiple-chunks
         let verdict = run_conformance_case(case);
@@ -516,6 +552,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn rfc9112_case_insensitive_hex() {
         // Test both uppercase and lowercase hex
         for case in &RFC9112_CHUNKED_CASES[3..=4] {
@@ -526,6 +563,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn rfc9112_chunk_extensions() {
         let case = &RFC9112_CHUNKED_CASES[5]; // chunk-extensions
         let verdict = run_conformance_case(case);
@@ -533,6 +571,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn rfc9112_trailer_headers() {
         let case = &RFC9112_CHUNKED_CASES[6]; // trailers
         let verdict = run_conformance_case(case);
@@ -540,6 +579,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn rfc9112_error_cases() {
         // Test all error cases should be properly rejected
         for case in &RFC9112_CHUNKED_CASES[8..] {
@@ -553,6 +593,7 @@ mod tests {
 
     /// Integration test with actual HTTP/1.1 server
     #[test]
+    #[allow(dead_code)]
     fn rfc9112_integration_with_h1_server() {
         // This would test the actual server implementation
         // For now, placeholder that the mock parser covers the RFC requirements

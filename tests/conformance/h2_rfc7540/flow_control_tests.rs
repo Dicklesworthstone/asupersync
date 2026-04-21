@@ -5,6 +5,7 @@
 use super::*;
 
 /// Run all flow control conformance tests.
+#[allow(dead_code)]
 pub fn run_flow_control_tests() -> Vec<H2ConformanceResult> {
     let mut results = Vec::new();
 
@@ -15,6 +16,8 @@ pub fn run_flow_control_tests() -> Vec<H2ConformanceResult> {
 
     results
 }
+
+#[allow(dead_code)]
 
 fn test_window_update_frame() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -45,6 +48,8 @@ fn test_window_update_frame() -> H2ConformanceResult {
     )
 }
 
+#[allow(dead_code)]
+
 fn test_initial_window_size() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let default_window_size = 65535u32;
@@ -64,6 +69,8 @@ fn test_initial_window_size() -> H2ConformanceResult {
     )
 }
 
+#[allow(dead_code)]
+
 fn test_flow_control_limits() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let max_window_size = 0x7FFFFFFFu32;
@@ -82,6 +89,8 @@ fn test_flow_control_limits() -> H2ConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_connection_flow_control() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {

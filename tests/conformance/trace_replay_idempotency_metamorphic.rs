@@ -34,22 +34,28 @@ mod trace_replay_idempotency_metamorphic_tests {
     use tempfile::TempDir;
 
     /// Metamorphic test harness for trace replay idempotency properties.
+    #[allow(dead_code)]
     pub struct TraceReplayIdempotencyMetamorphicHarness {
         config: LabConfig,
     }
 
+    #[allow(dead_code)]
     struct TraceFileHandle {
         _temp_dir: TempDir,
         path: PathBuf,
     }
 
+    #[allow(dead_code)]
+
     impl TraceFileHandle {
+        #[allow(dead_code)]
         fn path(&self) -> &Path {
             &self.path
         }
     }
 
     impl AsRef<Path> for TraceFileHandle {
+        #[allow(dead_code)]
         fn as_ref(&self) -> &Path {
             self.path()
         }
@@ -58,6 +64,7 @@ mod trace_replay_idempotency_metamorphic_tests {
     /// Test category for trace replay idempotency metamorphic tests.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum TestCategory {
         ReplayFidelity,
         IdempotentReplay,
@@ -69,6 +76,7 @@ mod trace_replay_idempotency_metamorphic_tests {
     /// Requirement level for metamorphic relations.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum RequirementLevel {
         Must,
         Should,
@@ -78,6 +86,7 @@ mod trace_replay_idempotency_metamorphic_tests {
     /// Test verdict for metamorphic relation evaluation.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum TestVerdict {
         Pass,
         Fail,
@@ -87,6 +96,7 @@ mod trace_replay_idempotency_metamorphic_tests {
 
     /// Result of a trace replay idempotency metamorphic test.
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[allow(dead_code)]
     pub struct TraceReplayIdempotencyMetamorphicResult {
         pub test_id: String,
         pub description: String,
@@ -97,8 +107,11 @@ mod trace_replay_idempotency_metamorphic_tests {
         pub execution_time_ms: u64,
     }
 
+    #[allow(dead_code)]
+
     impl TraceReplayIdempotencyMetamorphicHarness {
         /// Creates a new metamorphic test harness.
+        #[allow(dead_code)]
         pub fn new() -> Self {
             Self {
                 config: LabConfig::deterministic_testing(),
@@ -106,6 +119,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Runs all metamorphic tests for trace replay idempotency.
+        #[allow(dead_code)]
         pub fn run_all_tests(&self) -> Vec<TraceReplayIdempotencyMetamorphicResult> {
             let mut results = Vec::new();
 
@@ -137,6 +151,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Creates a test execution context with deterministic seed.
+        #[allow(dead_code)]
         fn create_test_context(&self, seed: u64) -> Cx {
             Cx::new(
                 RegionId::from_arena(ArenaIndex::new(0, 0)),
@@ -146,6 +161,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Creates a sample trace with deterministic events for testing.
+        #[allow(dead_code)]
         fn create_sample_trace(&self, seed: u64, event_count: usize) -> Vec<ReplayEvent> {
             let mut events = Vec::new();
 
@@ -186,6 +202,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Writes events to a trace file and returns the path.
+        #[allow(dead_code)]
         fn write_trace_file(
             &self,
             metadata: &TraceMetadata,
@@ -211,6 +228,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Reads events from a trace file.
+        #[allow(dead_code)]
         fn read_trace_file(
             &self,
             path: &Path,
@@ -222,6 +240,8 @@ mod trace_replay_idempotency_metamorphic_tests {
             Ok((metadata, events))
         }
 
+        #[allow(dead_code)]
+
         fn run_metamorphic_test<F>(&self, test_name: &str, test_fn: F) -> Result<(), String>
         where
             F: FnOnce(&LabConfig) -> Result<(), proptest::test_runner::TestCaseError>,
@@ -231,6 +251,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// MR1: replay(record(execution)) ≡ execution for deterministic runs
+        #[allow(dead_code)]
         fn run_replay_fidelity_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -290,6 +311,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// MR2: replay-of-replay produces byte-identical output
+        #[allow(dead_code)]
         fn run_idempotent_replay_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -354,6 +376,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// MR3: trace file truncation produces loss annotation, never silent drop
+        #[allow(dead_code)]
         fn run_truncation_handling_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -436,6 +459,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// MR4: epoch boundary transitions preserve temporal ordering
+        #[allow(dead_code)]
         fn run_epoch_boundary_ordering_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -548,6 +572,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// MR5: cross-region traces join correctly under concurrent regions
+        #[allow(dead_code)]
         fn run_cross_region_joining_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -676,6 +701,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Additional MR: compression roundtrip preserves all data
+        #[allow(dead_code)]
         fn run_compression_roundtrip_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -735,6 +761,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Additional MR: metadata consistency across all operations
+        #[allow(dead_code)]
         fn run_metadata_consistency_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -797,6 +824,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Additional MR: event ordering preservation under all conditions
+        #[allow(dead_code)]
         fn run_event_ordering_preservation_relation(
             &self,
         ) -> TraceReplayIdempotencyMetamorphicResult {
@@ -873,6 +901,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Additional MR: schema version compatibility checking
+        #[allow(dead_code)]
         fn run_schema_version_compatibility_relation(
             &self,
         ) -> TraceReplayIdempotencyMetamorphicResult {
@@ -935,6 +964,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Additional MR: concurrent region replay determinism
+        #[allow(dead_code)]
         fn run_concurrent_region_replay_relation(&self) -> TraceReplayIdempotencyMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -1043,6 +1073,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Additional MR: streaming vs batch read equivalence
+        #[allow(dead_code)]
         fn run_streaming_vs_batch_equivalence_relation(
             &self,
         ) -> TraceReplayIdempotencyMetamorphicResult {
@@ -1107,6 +1138,7 @@ mod trace_replay_idempotency_metamorphic_tests {
         }
 
         /// Additional MR: temporal causality preservation
+        #[allow(dead_code)]
         fn run_temporal_causality_preservation_relation(
             &self,
         ) -> TraceReplayIdempotencyMetamorphicResult {
@@ -1272,6 +1304,7 @@ mod trace_replay_idempotency_metamorphic_tests {
     }
 
     impl Default for TraceReplayIdempotencyMetamorphicHarness {
+        #[allow(dead_code)]
         fn default() -> Self {
             Self::new()
         }
@@ -1280,6 +1313,7 @@ mod trace_replay_idempotency_metamorphic_tests {
 
 // Tests that always run regardless of features
 #[test]
+#[allow(dead_code)]
 fn trace_replay_idempotency_metamorphic_suite_availability() {
     #[cfg(feature = "deterministic-mode")]
     {
@@ -1309,6 +1343,7 @@ pub use trace_replay_idempotency_metamorphic_tests::{
 #[cfg(not(feature = "deterministic-mode"))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum TestCategory {
     ReplayFidelity,
     IdempotentReplay,
@@ -1320,6 +1355,7 @@ pub enum TestCategory {
 #[cfg(not(feature = "deterministic-mode"))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,
     Should,
@@ -1329,6 +1365,7 @@ pub enum RequirementLevel {
 #[cfg(not(feature = "deterministic-mode"))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -1338,6 +1375,7 @@ pub enum TestVerdict {
 
 #[cfg(not(feature = "deterministic-mode"))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(dead_code)]
 pub struct TraceReplayIdempotencyMetamorphicResult {
     pub test_id: String,
     pub description: String,
@@ -1349,16 +1387,20 @@ pub struct TraceReplayIdempotencyMetamorphicResult {
 }
 
 #[cfg(not(feature = "deterministic-mode"))]
+#[allow(dead_code)]
 pub struct TraceReplayIdempotencyMetamorphicHarness;
 
 #[cfg(not(feature = "deterministic-mode"))]
+#[allow(dead_code)]
 impl TraceReplayIdempotencyMetamorphicHarness {
     #[must_use]
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self
     }
 
     #[must_use]
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<TraceReplayIdempotencyMetamorphicResult> {
         Vec::new()
     }

@@ -10,6 +10,7 @@ use std::time::Instant;
 
 /// Requirement levels per RFC 2119.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     /// MUST requirement (mandatory).
     Must,
@@ -21,6 +22,7 @@ pub enum RequirementLevel {
 
 /// Test verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     /// Test passed.
     Pass,
@@ -34,6 +36,7 @@ pub enum TestVerdict {
 
 /// Test categories for HTTP/1.1 conformance.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[allow(dead_code)]
 pub enum H1TestCategory {
     /// Chunked transfer-encoding parsing.
     ChunkedEncoding,
@@ -55,6 +58,7 @@ pub enum H1TestCategory {
 
 /// Result of a single conformance test.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(dead_code)]
 pub struct H1ConformanceResult {
     pub test_id: String,
     pub description: String,
@@ -67,6 +71,7 @@ pub struct H1ConformanceResult {
 
 /// Decoded HTTP/1.1 request result.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DecodedRequest {
     pub method: String,
     pub uri: String,
@@ -77,12 +82,16 @@ pub struct DecodedRequest {
 }
 
 /// HTTP/1.1 conformance test harness.
+#[allow(dead_code)]
 pub struct H1ConformanceHarness {
     codec: Http1Codec,
 }
 
+#[allow(dead_code)]
+
 impl H1ConformanceHarness {
     /// Create a new HTTP/1.1 conformance test harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             codec: Http1Codec::new(),
@@ -90,12 +99,14 @@ impl H1ConformanceHarness {
     }
 
     /// Decode a chunked HTTP/1.1 request.
+    #[allow(dead_code)]
     pub fn decode_chunked_request(&self, data: &[u8]) -> Result<DecodedRequest, HttpError> {
         self.decode_chunked_request_with_remainder(data)
             .map(|(request, _remaining)| request)
     }
 
     /// Decode a chunked HTTP/1.1 request and preserve any pipelined remainder.
+    #[allow(dead_code)]
     pub fn decode_chunked_request_with_remainder(
         &self,
         data: &[u8],
@@ -122,6 +133,7 @@ impl H1ConformanceHarness {
     }
 
     /// Run all conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<H1ConformanceResult> {
         let mut results = Vec::new();
 
@@ -154,6 +166,7 @@ impl H1ConformanceHarness {
     }
 
     /// Test basic chunked encoding conformance.
+    #[allow(dead_code)]
     fn test_chunked_encoding_basic(&self) -> Vec<H1ConformanceResult> {
         let mut results = Vec::new();
 
@@ -225,6 +238,7 @@ impl H1ConformanceHarness {
     }
 
     /// Test chunked decoding boundaries and pipelined follow-up preservation.
+    #[allow(dead_code)]
     fn test_chunked_encoding_boundaries(&self) -> Vec<H1ConformanceResult> {
         let mut results = Vec::new();
 
@@ -273,6 +287,7 @@ impl H1ConformanceHarness {
     }
 
     /// Test chunk extension parameter handling.
+    #[allow(dead_code)]
     fn test_chunk_extensions(&self) -> Vec<H1ConformanceResult> {
         let mut results = Vec::new();
 
@@ -344,6 +359,7 @@ impl H1ConformanceHarness {
     }
 
     /// Test trailer field processing.
+    #[allow(dead_code)]
     fn test_trailer_fields(&self) -> Vec<H1ConformanceResult> {
         let mut results = Vec::new();
 
@@ -428,6 +444,7 @@ impl H1ConformanceHarness {
     }
 
     /// Test CRLF vs LF line ending tolerance.
+    #[allow(dead_code)]
     fn test_line_ending_tolerance(&self) -> Vec<H1ConformanceResult> {
         let mut results = Vec::new();
 
@@ -466,6 +483,7 @@ impl H1ConformanceHarness {
     }
 
     /// Test hex chunk size case variants.
+    #[allow(dead_code)]
     fn test_hex_case_variants(&self) -> Vec<H1ConformanceResult> {
         let mut results = Vec::new();
 
@@ -506,6 +524,7 @@ impl H1ConformanceHarness {
     }
 
     /// Test resource limits and security.
+    #[allow(dead_code)]
     fn test_resource_limits(&self) -> Vec<H1ConformanceResult> {
         let mut results = Vec::new();
 
@@ -541,6 +560,7 @@ impl H1ConformanceHarness {
     }
 
     /// Test transfer coding stacking.
+    #[allow(dead_code)]
     fn test_transfer_coding_stacking(&self) -> Vec<H1ConformanceResult> {
         let mut results = Vec::new();
 
@@ -574,6 +594,7 @@ impl H1ConformanceHarness {
     }
 
     /// Test error handling edge cases.
+    #[allow(dead_code)]
     fn test_error_handling(&self) -> Vec<H1ConformanceResult> {
         let mut results = Vec::new();
 
@@ -643,6 +664,7 @@ impl H1ConformanceHarness {
 }
 
 impl Default for H1ConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }

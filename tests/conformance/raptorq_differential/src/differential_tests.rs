@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 /// Main differential testing harness
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct DifferentialHarness {
     fixture_loader: FixtureLoader,
     config: DifferentialConfig,
@@ -15,12 +16,14 @@ pub struct DifferentialHarness {
 
 /// Configuration for differential testing
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct DifferentialConfig {
     pub max_allowed_mismatches: usize,
     pub parallel_execution: bool,
 }
 
 impl Default for DifferentialConfig {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             max_allowed_mismatches: 0,
@@ -31,6 +34,7 @@ impl Default for DifferentialConfig {
 
 /// A single differential test
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DifferentialTest {
     pub name: String,
     pub fixture_path: PathBuf,
@@ -39,6 +43,7 @@ pub struct DifferentialTest {
 
 /// Parameters for a differential test
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct TestParameters {
     pub source_symbols: usize,
     pub symbol_size: usize,
@@ -47,18 +52,26 @@ pub struct TestParameters {
 
 /// Results from differential test execution
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct DifferentialResult {
     tests: Vec<TestResult>,
 }
 
+#[allow(dead_code)]
+
 impl DifferentialResult {
+    #[allow(dead_code)]
     pub fn total_tests(&self) -> usize {
         self.tests.len()
     }
 
+    #[allow(dead_code)]
+
     pub fn passed_tests(&self) -> usize {
         self.tests.iter().filter(|t| t.passed).count()
     }
+
+    #[allow(dead_code)]
 
     pub fn failed_tests(&self) -> usize {
         self.tests.iter().filter(|t| !t.passed).count()
@@ -67,6 +80,7 @@ impl DifferentialResult {
 
 /// Result from a single test
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TestResult {
     pub name: String,
     pub passed: bool,
@@ -78,6 +92,7 @@ pub struct TestResult {
 
 /// Statistics about byte comparisons
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct ComparisonStats {
     pub total_bytes_compared: u64,
     pub total_mismatches: u64,
@@ -87,6 +102,7 @@ pub struct ComparisonStats {
 
 /// Test suite container
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TestSuite {
     pub name: String,
     pub tests: Vec<DifferentialTest>,
@@ -94,6 +110,7 @@ pub struct TestSuite {
 
 /// Individual test case
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TestCase {
     pub id: String,
     pub description: String,
@@ -102,8 +119,11 @@ pub struct TestCase {
     pub parameters: TestParameters,
 }
 
+#[allow(dead_code)]
+
 impl DifferentialHarness {
     /// Creates a new differential harness
+    #[allow(dead_code)]
     pub fn new<P: AsRef<Path>>(fixture_dir: P) -> Result<Self, crate::DifferentialHarnessError> {
         let fixture_loader = FixtureLoader::new(fixture_dir)?;
         let config = DifferentialConfig::default();
@@ -115,6 +135,7 @@ impl DifferentialHarness {
     }
 
     /// Runs all available differential tests
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Result<DifferentialResult, crate::DifferentialSuiteError> {
         let fixtures = self.fixture_loader.list_fixtures()?;
         let mut results = Vec::new();
@@ -142,6 +163,7 @@ impl DifferentialHarness {
     }
 
     /// Runs a test against a single fixture
+    #[allow(dead_code)]
     fn run_single_fixture_test(&self, fixture_path: &Path) -> Result<TestResult, crate::DifferentialSuiteError> {
         let start_time = Instant::now();
 
@@ -174,6 +196,7 @@ impl DifferentialHarness {
 
     /// Mock implementation for testing the framework
     /// TODO: Replace with actual RaptorQ implementation calls
+    #[allow(dead_code)]
     fn mock_our_implementation(&self, _fixture: &FixtureEntry) -> Result<Vec<u8>, crate::DifferentialSuiteError> {
         // This is a placeholder that returns the expected result
         // In practice, this would:
@@ -184,6 +207,7 @@ impl DifferentialHarness {
     }
 
     /// Compares two byte arrays and returns (mismatches, bytes_compared)
+    #[allow(dead_code)]
     fn compare_outputs(&self, expected: &[u8], actual: &[u8]) -> (usize, usize) {
         let max_len = std::cmp::max(expected.len(), actual.len());
         let min_len = std::cmp::min(expected.len(), actual.len());
@@ -204,6 +228,7 @@ impl DifferentialHarness {
     }
 
     /// Gets comparison statistics from recent test runs
+    #[allow(dead_code)]
     pub fn get_comparison_stats(&self) -> ComparisonStats {
         // This would be populated from actual test runs
         ComparisonStats::default()
@@ -216,6 +241,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[allow(dead_code)]
     fn test_differential_config_default() {
         let config = DifferentialConfig::default();
         assert_eq!(config.max_allowed_mismatches, 0);
@@ -223,6 +249,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_compare_outputs_identical() {
         let harness = create_test_harness();
         let data = b"test data";
@@ -233,6 +260,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_compare_outputs_different() {
         let harness = create_test_harness();
         let expected = b"hello world";
@@ -244,6 +272,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_compare_outputs_different_length() {
         let harness = create_test_harness();
         let expected = b"hello";
@@ -253,6 +282,8 @@ mod tests {
         assert_eq!(bytes_compared, 11); // Length of longer array
         assert_eq!(mismatches, 6); // 6 extra bytes in actual
     }
+
+    #[allow(dead_code)]
 
     fn create_test_harness() -> DifferentialHarness {
         let temp_dir = TempDir::new().unwrap();

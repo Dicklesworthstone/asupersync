@@ -33,6 +33,7 @@ mod tests {
 
     /// Run the complete RFC 9112 HTTP/1.1 conformance test suite.
     #[test]
+    #[allow(dead_code)]
     fn rfc9112_complete_conformance_suite() {
         let harness = H1ConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -82,6 +83,7 @@ mod tests {
 
     /// Validate test infrastructure is working correctly.
     #[test]
+    #[allow(dead_code)]
     fn validate_h1_conformance_infrastructure() {
         let harness = H1ConformanceHarness::new();
 
@@ -104,6 +106,7 @@ mod tests {
 
     /// Test chunked encoding edge cases from RFC 9112 §7.1.
     #[test]
+    #[allow(dead_code)]
     fn rfc9112_chunked_encoding_edge_cases() {
         let harness = H1ConformanceHarness::new();
 
@@ -159,6 +162,7 @@ mod tests {
 
     /// Test error handling for malformed chunked encoding.
     #[test]
+    #[allow(dead_code)]
     fn rfc9112_chunked_encoding_error_handling() {
         let harness = H1ConformanceHarness::new();
 
@@ -187,6 +191,7 @@ mod tests {
 
     /// Test that chunked decoding preserves the next pipelined request boundary.
     #[test]
+    #[allow(dead_code)]
     fn rfc9112_chunked_preserves_pipelined_followup() {
         let harness = H1ConformanceHarness::new();
 

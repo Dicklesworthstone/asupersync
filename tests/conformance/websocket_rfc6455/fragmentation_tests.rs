@@ -2,11 +2,15 @@
 
 use super::*;
 
+#[allow(dead_code)]
+
 pub fn run_fragmentation_tests() -> Vec<WsConformanceResult> {
     let mut results = Vec::new();
     results.push(test_message_fragmentation());
     results
 }
+
+#[allow(dead_code)]
 
 fn test_message_fragmentation() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| Ok(()));

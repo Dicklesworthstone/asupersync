@@ -5,6 +5,7 @@
 use super::*;
 
 /// Run all SETTINGS frame conformance tests.
+#[allow(dead_code)]
 pub fn run_settings_tests() -> Vec<H2ConformanceResult> {
     let mut results = Vec::new();
 
@@ -21,6 +22,7 @@ pub fn run_settings_tests() -> Vec<H2ConformanceResult> {
 }
 
 /// RFC 7540 Section 6.5.1: SETTINGS frame format.
+#[allow(dead_code)]
 fn test_settings_frame_format() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // SETTINGS frame structure validation
@@ -97,6 +99,7 @@ fn test_settings_frame_format() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 6.5.3: SETTINGS acknowledgment.
+#[allow(dead_code)]
 fn test_settings_acknowledgment() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // SETTINGS ACK processing
@@ -167,6 +170,7 @@ fn test_settings_acknowledgment() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 6.5.2: SETTINGS parameters validation.
+#[allow(dead_code)]
 fn test_settings_parameters() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Defined SETTINGS parameters
@@ -263,6 +267,7 @@ fn test_settings_parameters() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 6.5.2: SETTINGS value validation.
+#[allow(dead_code)]
 fn test_settings_validation() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Parameter-specific value validation
@@ -335,6 +340,7 @@ fn test_settings_validation() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 6.5.3: SETTINGS application timing.
+#[allow(dead_code)]
 fn test_settings_application() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // SETTINGS application timing
@@ -399,6 +405,7 @@ fn test_settings_application() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 6.5.2: SETTINGS default values.
+#[allow(dead_code)]
 fn test_settings_default_values() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Default SETTINGS values
@@ -467,6 +474,7 @@ fn test_settings_default_values() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 6.5: SETTINGS error handling.
+#[allow(dead_code)]
 fn test_settings_error_handling() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // SETTINGS frame error conditions
@@ -546,6 +554,7 @@ fn test_settings_error_handling() -> H2ConformanceResult {
 }
 
 /// RFC 7540 Section 6.5: SETTINGS ordering and synchronization.
+#[allow(dead_code)]
 fn test_settings_ordering() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // SETTINGS frame ordering requirements

@@ -35,6 +35,7 @@ mod trace_event_schema_stability_tests {
 
     /// Test category for trace event schema stability tests.
     #[derive(Debug, Clone, PartialEq, Eq)]
+    #[allow(dead_code)]
     pub enum SchemaTestCategory {
         EnumStability,
         TimestampOrdering,
@@ -45,6 +46,7 @@ mod trace_event_schema_stability_tests {
 
     /// Test result for schema stability verification.
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     pub struct SchemaStabilityTestResult {
         pub test_id: String,
         pub description: String,
@@ -54,13 +56,18 @@ mod trace_event_schema_stability_tests {
     }
 
     // Test fixture helpers
+    #[allow(dead_code)]
     fn task_id(n: u32) -> TaskId {
         TaskId::from_arena(ArenaIndex::new(n, 1))
     }
 
+    #[allow(dead_code)]
+
     fn region_id(n: u32) -> RegionId {
         RegionId::from_arena(ArenaIndex::new(n, 1))
     }
+
+    #[allow(dead_code)]
 
     fn obligation_id(n: u32) -> ObligationId {
         ObligationId::from_arena(ArenaIndex::new(n, 1))
@@ -72,6 +79,7 @@ mod trace_event_schema_stability_tests {
     /// and field requirements across schema versions. This ensures log parsers and
     /// analysis tools can reliably process traces from different runtime versions.
     #[test]
+    #[allow(dead_code)]
     fn requirement_1_event_kind_enum_stable_across_versions() {
         // Test 1.1: All event kinds have stable string representations
         let mut stable_names = BTreeSet::new();
@@ -131,6 +139,7 @@ mod trace_event_schema_stability_tests {
     /// Validates that trace events from a single recorder maintain monotonically
     /// increasing timestamps, preserving temporal causality for deterministic replay.
     #[test]
+    #[allow(dead_code)]
     fn requirement_2_timestamp_ordering_monotonic_per_recorder() {
         // Test 2.1: Sequential event creation maintains timestamp order
         let start_time = Time::from_nanos(1000);
@@ -200,6 +209,7 @@ mod trace_event_schema_stability_tests {
     /// Validates that LogicalTime values correctly establish happens-before
     /// relationships and maintain causal consistency across distributed traces.
     #[test]
+    #[allow(dead_code)]
     fn requirement_3_correlation_ids_thread_through_causality_chain() {
         // Test 3.1: LogicalTime attachment and retrieval
         let mut logical_clock = LamportTime::new();
@@ -304,6 +314,7 @@ mod trace_event_schema_stability_tests {
     /// Validates that trace events serialize and deserialize identically through
     /// JSON with optional LZ4 compression, ensuring no data loss during storage.
     #[test]
+    #[allow(dead_code)]
     fn requirement_4_serialization_round_trip() {
         // Test 4.1: Basic event serialization round-trip
         let original_event = TraceEvent::spawn(42, Time::from_nanos(12345),
@@ -393,6 +404,7 @@ mod trace_event_schema_stability_tests {
     /// Validates that the trace system gracefully handles future schema extensions
     /// by ignoring unknown event kinds rather than failing to parse traces.
     #[test]
+    #[allow(dead_code)]
     fn requirement_5_forward_compat_unknown_event_kinds_ignored() {
         // Test 5.1: Current schema validation baseline
         let current_schema = browser_trace_schema_v1();
@@ -491,6 +503,7 @@ mod trace_event_schema_stability_tests {
 
     /// Helper function to create a comprehensive suite of trace events covering
     /// all TraceEventKind variants for serialization testing.
+    #[allow(dead_code)]
     fn create_comprehensive_event_suite() -> Vec<TraceEvent> {
         let mut events = Vec::new();
         let base_time = Time::from_nanos(10000);
@@ -584,6 +597,7 @@ mod trace_event_schema_stability_tests {
 
     /// Integration test: All requirements working together
     #[test]
+    #[allow(dead_code)]
     fn integration_test_all_requirements_working_together() {
         // Create a comprehensive event sequence
         let events = create_comprehensive_event_suite();
@@ -666,6 +680,7 @@ mod trace_event_schema_stability_tests {
 
     /// Performance regression test: Ensure conformance tests complete quickly
     #[test]
+    #[allow(dead_code)]
     fn performance_conformance_tests_complete_quickly() {
         use std::time::Instant;
 
@@ -691,6 +706,7 @@ mod trace_event_schema_stability_tests {
 
 /// Test module availability regardless of feature flags
 #[test]
+#[allow(dead_code)]
 fn trace_event_conformance_suite_availability() {
     println!("✓ Trace event schema stability conformance test suite is available");
     println!("✓ Covers: event kind stability, timestamp ordering, correlation IDs, serialization round-trip, forward compatibility");

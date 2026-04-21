@@ -57,6 +57,7 @@ mod pg_type_oids {
 }
 
 /// Helper to validate Extended Query Protocol message structure
+#[allow(dead_code)]
 fn build_message(msg_type: u8, data: &[u8]) -> Vec<u8> {
     let mut msg = Vec::new();
     msg.push(msg_type);
@@ -66,6 +67,7 @@ fn build_message(msg_type: u8, data: &[u8]) -> Vec<u8> {
 }
 
 /// Extract message type from a protocol message
+#[allow(dead_code)]
 fn extract_message_type(data: &[u8]) -> Option<u8> {
     if data.is_empty() {
         return None;
@@ -78,6 +80,7 @@ fn extract_message_type(data: &[u8]) -> Option<u8> {
 // ============================================================================
 
 #[test]
+#[allow(dead_code)]
 fn test_extended_query_protocol_message_types() {
     // Test that all Extended Query Protocol message types are defined correctly
     // as per PostgreSQL wire protocol v3 specification
@@ -108,6 +111,7 @@ fn test_extended_query_protocol_message_types() {
 // ============================================================================
 
 #[test]
+#[allow(dead_code)]
 fn test_postgresql_type_oids() {
     // Validate that common PostgreSQL data type OIDs are correctly defined
     // These OIDs must match the PostgreSQL system catalog values
@@ -129,6 +133,7 @@ fn test_postgresql_type_oids() {
 // ============================================================================
 
 #[test]
+#[allow(dead_code)]
 fn test_protocol_message_format() {
     // Test that protocol message format follows PostgreSQL wire protocol v3
     // Message format: [type:u8][length:u32][data:...]
@@ -153,6 +158,7 @@ fn test_protocol_message_format() {
 // ============================================================================
 
 #[test]
+#[allow(dead_code)]
 fn test_error_response_message_structure() {
     // Test that error response messages follow PostgreSQL wire protocol format
     // ErrorResponse messages contain field-value pairs terminated by null bytes
@@ -195,6 +201,7 @@ fn test_error_response_message_structure() {
 // ============================================================================
 
 #[test]
+#[allow(dead_code)]
 fn test_row_description_message_structure() {
     // Test RowDescription message format per PostgreSQL wire protocol
     // RowDescription: [field_count:i16][field_info...]
@@ -241,6 +248,7 @@ fn test_row_description_message_structure() {
 // ============================================================================
 
 #[test]
+#[allow(dead_code)]
 fn test_copy_protocol_message_types() {
     // Test COPY-specific message types in PostgreSQL wire protocol
     // COPY operations use different message flow than regular queries
@@ -278,6 +286,7 @@ fn test_copy_protocol_message_types() {
 // ============================================================================
 
 #[test]
+#[allow(dead_code)]
 fn test_extended_vs_simple_query_protocol_distinction() {
     // Test that Extended Query Protocol and Simple Query Protocol use different message flows
     // Extended Query: Parse -> Bind -> Describe -> Execute -> Sync
@@ -310,6 +319,7 @@ fn test_extended_vs_simple_query_protocol_distinction() {
 // ============================================================================
 
 #[test]
+#[allow(dead_code)]
 fn test_ready_for_query_transaction_status() {
     // ReadyForQuery message includes transaction status indicator
     // 'I' = idle (not in transaction)

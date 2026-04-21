@@ -31,6 +31,7 @@ mod race_loser_drain_metamorphic_tests {
     use std::time::Instant;
 
     /// Metamorphic test harness for race loser-drain properties.
+    #[allow(dead_code)]
     pub struct RaceLoserDrainMetamorphicHarness {
         config: LabConfig,
     }
@@ -38,6 +39,7 @@ mod race_loser_drain_metamorphic_tests {
     /// Test category for race loser-drain metamorphic tests.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum TestCategory {
         RaceCommutativity,
         LoserCancellation,
@@ -49,6 +51,7 @@ mod race_loser_drain_metamorphic_tests {
     /// Requirement level for metamorphic relations.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum RequirementLevel {
         Must,
         Should,
@@ -58,6 +61,7 @@ mod race_loser_drain_metamorphic_tests {
     /// Test verdict for metamorphic relation evaluation.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum TestVerdict {
         Pass,
         Fail,
@@ -67,6 +71,7 @@ mod race_loser_drain_metamorphic_tests {
 
     /// Result of a race loser-drain metamorphic test.
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[allow(dead_code)]
     pub struct RaceLoserDrainMetamorphicResult {
         pub test_id: String,
         pub description: String,
@@ -78,6 +83,7 @@ mod race_loser_drain_metamorphic_tests {
     }
 
     /// A mock future that can be cancelled and tracked for testing.
+    #[allow(dead_code)]
     struct MockFuture {
         id: u64,
         delay_ticks: u64,
@@ -89,7 +95,10 @@ mod race_loser_drain_metamorphic_tests {
         wakeup_count: Arc<AtomicUsize>,
     }
 
+    #[allow(dead_code)]
+
     impl MockFuture {
+        #[allow(dead_code)]
         fn new(id: u64, delay_ticks: u64, result: i32, current_tick: Arc<AtomicU64>) -> Self {
             Self {
                 id,
@@ -103,9 +112,13 @@ mod race_loser_drain_metamorphic_tests {
             }
         }
 
+        #[allow(dead_code)]
+
         fn is_finalizer_called(&self) -> bool {
             self.finalizer_called.load(Ordering::Acquire)
         }
+
+        #[allow(dead_code)]
 
         fn wakeup_count(&self) -> usize {
             self.wakeup_count.load(Ordering::Acquire)
@@ -114,6 +127,8 @@ mod race_loser_drain_metamorphic_tests {
 
     impl Future for MockFuture {
         type Output = Outcome<i32, &'static str>;
+
+        #[allow(dead_code)]
 
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             self.wakeup_count.fetch_add(1, Ordering::AcqRel);
@@ -139,14 +154,19 @@ mod race_loser_drain_metamorphic_tests {
     }
 
     impl Cancel for MockFuture {
+        #[allow(dead_code)]
         fn cancel(&mut self, reason: CancelReason) {
             self.cancelled.store(true, Ordering::Release);
             *self.cancel_reason.lock().unwrap() = Some(reason);
         }
 
+        #[allow(dead_code)]
+
         fn is_cancelled(&self) -> bool {
             self.cancelled.load(Ordering::Acquire)
         }
+
+        #[allow(dead_code)]
 
         fn cancel_reason(&self) -> Option<&CancelReason> {
             // Note: This is a simplified implementation for testing
@@ -156,13 +176,17 @@ mod race_loser_drain_metamorphic_tests {
     }
 
     impl Drop for MockFuture {
+        #[allow(dead_code)]
         fn drop(&mut self) {
             self.finalizer_called.store(true, Ordering::Release);
         }
     }
 
+    #[allow(dead_code)]
+
     impl RaceLoserDrainMetamorphicHarness {
         /// Creates a new metamorphic test harness.
+        #[allow(dead_code)]
         pub fn new() -> Self {
             Self {
                 config: LabConfig::deterministic_testing(),
@@ -170,6 +194,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// Runs all metamorphic tests for race loser-drain behavior.
+        #[allow(dead_code)]
         pub fn run_all_tests(&self) -> Vec<RaceLoserDrainMetamorphicResult> {
             let mut results = Vec::new();
 
@@ -201,6 +226,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// Creates a test execution context with deterministic seed.
+        #[allow(dead_code)]
         fn create_test_context(&self, seed: u64) -> Cx {
             Cx::new(
                 RegionId::from_arena(ArenaIndex::new(seed as u32, 1)),
@@ -210,6 +236,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// Simulates race execution with mock futures.
+        #[allow(dead_code)]
         fn simulate_race_execution(
             &self,
             futures: Vec<MockFuture>,
@@ -245,6 +272,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// MR1: race(a,b) result equals race(b,a) when times permit determinism
+        #[allow(dead_code)]
         fn run_race_commutativity_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -346,6 +374,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// MR2: loser observably cancelled (no residual wakeups post-drain)
+        #[allow(dead_code)]
         fn run_loser_cancellation_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -430,6 +459,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// MR3: budget exhaustion during drain yields Budget::Exceeded, not panic
+        #[allow(dead_code)]
         fn run_budget_exhaustion_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -501,6 +531,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// MR4: losers finalizers all called exactly once
+        #[allow(dead_code)]
         fn run_finalizer_invocation_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -586,6 +617,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// MR5: region-close after race quiesces in O(1) additional ticks
+        #[allow(dead_code)]
         fn run_region_quiescence_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -675,6 +707,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// Additional MR: deterministic winner selection under identical conditions
+        #[allow(dead_code)]
         fn run_deterministic_winner_selection_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -742,6 +775,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// Additional MR: loser drain ordering is consistent
+        #[allow(dead_code)]
         fn run_loser_drain_ordering_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -810,6 +844,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// Additional MR: cancellation reason propagation is correct
+        #[allow(dead_code)]
         fn run_cancellation_reason_propagation_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -884,6 +919,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// Additional MR: resource cleanup completeness
+        #[allow(dead_code)]
         fn run_resource_cleanup_completeness_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -962,6 +998,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// Additional MR: concurrent race independence
+        #[allow(dead_code)]
         fn run_concurrent_race_independence_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -1030,6 +1067,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// Additional MR: nested race consistency
+        #[allow(dead_code)]
         fn run_nested_race_consistency_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -1115,6 +1153,7 @@ mod race_loser_drain_metamorphic_tests {
         }
 
         /// Additional MR: polling order invariance
+        #[allow(dead_code)]
         fn run_polling_order_invariance_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
@@ -1195,6 +1234,7 @@ mod race_loser_drain_metamorphic_tests {
     }
 
     impl Default for RaceLoserDrainMetamorphicHarness {
+        #[allow(dead_code)]
         fn default() -> Self {
             Self::new()
         }
@@ -1203,6 +1243,7 @@ mod race_loser_drain_metamorphic_tests {
 
 // Tests that always run regardless of features
 #[test]
+#[allow(dead_code)]
 fn race_loser_drain_metamorphic_suite_availability() {
     #[cfg(feature = "deterministic-mode")]
     {

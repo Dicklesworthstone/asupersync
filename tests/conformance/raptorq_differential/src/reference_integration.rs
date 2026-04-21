@@ -8,6 +8,7 @@ use std::time::Duration;
 
 /// Interface to external reference implementations
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ReferenceImplementation {
     name: String,
     binary_path: String,
@@ -17,6 +18,7 @@ pub struct ReferenceImplementation {
 
 /// Output from a reference implementation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ReferenceOutput {
     /// Encoded or decoded data
     pub data: Vec<u8>,
@@ -32,6 +34,7 @@ pub struct ReferenceOutput {
 
 /// Information about a reference implementation
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ImplementationInfo {
     /// Name of the implementation
     pub name: String,
@@ -47,6 +50,7 @@ pub struct ImplementationInfo {
 
 /// Errors from reference implementation integration
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum ReferenceError {
     #[error("Binary not found: {0}")]
     BinaryNotFound(String),
@@ -67,8 +71,11 @@ pub enum ReferenceError {
     IoError(#[from] std::io::Error),
 }
 
+#[allow(dead_code)]
+
 impl ReferenceImplementation {
     /// Creates a new reference implementation interface
+    #[allow(dead_code)]
     pub fn new(name: String, binary_path: String) -> Result<Self, ReferenceError> {
         // Verify binary exists
         if !Path::new(&binary_path).exists() {
@@ -87,12 +94,14 @@ impl ReferenceImplementation {
     }
 
     /// Sets the timeout for reference implementation calls
+    #[allow(dead_code)]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
     /// Gets version information from the reference binary
+    #[allow(dead_code)]
     fn get_version(binary_path: &str) -> Result<String, ReferenceError> {
         let output = Command::new(binary_path)
             .arg("--version")
@@ -103,6 +112,7 @@ impl ReferenceImplementation {
     }
 
     /// Encodes data using the reference implementation
+    #[allow(dead_code)]
     pub fn encode(
         &self,
         input_data: &[u8],
@@ -154,6 +164,7 @@ impl ReferenceImplementation {
     }
 
     /// Decodes data using the reference implementation
+    #[allow(dead_code)]
     pub fn decode(
         &self,
         encoded_symbols: &[Vec<u8>],
@@ -206,6 +217,7 @@ impl ReferenceImplementation {
     }
 
     /// Gets information about this reference implementation
+    #[allow(dead_code)]
     pub fn get_info(&self) -> ImplementationInfo {
         let mut constraints = HashMap::new();
         let mut supported_operations = vec!["encode".to_string(), "decode".to_string()];
@@ -234,6 +246,8 @@ impl ReferenceImplementation {
 
     // Implementation-specific command building
 
+    #[allow(dead_code)]
+
     fn build_libraptorq_encode_args(
         &self,
         source_symbols: usize,
@@ -253,6 +267,8 @@ impl ReferenceImplementation {
         ])
     }
 
+    #[allow(dead_code)]
+
     fn build_libraptorq_decode_args(
         &self,
         source_symbols: usize,
@@ -268,6 +284,8 @@ impl ReferenceImplementation {
             "binary".to_string(),
         ])
     }
+
+    #[allow(dead_code)]
 
     fn build_python_encode_args(
         &self,
@@ -286,6 +304,8 @@ impl ReferenceImplementation {
             ),
         ])
     }
+
+    #[allow(dead_code)]
 
     fn build_python_decode_args(
         &self,
@@ -306,6 +326,8 @@ impl ReferenceImplementation {
         ])
     }
 
+    #[allow(dead_code)]
+
     fn serialize_symbols_for_decode(&self, symbols: &[Vec<u8>], indices: &[u32]) -> Result<Vec<u8>, ReferenceError> {
         // Simple serialization: length prefix + symbol data
         let mut data = Vec::new();
@@ -319,6 +341,8 @@ impl ReferenceImplementation {
         Ok(data)
     }
 
+    #[allow(dead_code)]
+
     fn get_cli_format(&self) -> String {
         match self.name.as_str() {
             "libraptorq" => "libraptorq [encode|decode] --source-symbols K --symbol-size T [options]".to_string(),
@@ -329,6 +353,7 @@ impl ReferenceImplementation {
 }
 
 /// Discovers available reference implementations on the system
+#[allow(dead_code)]
 pub fn discover_reference_implementations() -> Vec<ImplementationInfo> {
     let mut implementations = Vec::new();
 
@@ -356,6 +381,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_implementation_info_creation() {
         let info = ImplementationInfo {
             name: "test-impl".to_string(),
@@ -371,6 +397,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_reference_error_display() {
         let error = ReferenceError::BinaryNotFound("/nonexistent/binary".to_string());
         assert!(format!("{}", error).contains("Binary not found"));
@@ -380,6 +407,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_reference_output_creation() {
         let output = ReferenceOutput {
             data: b"test data".to_vec(),
@@ -395,6 +423,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_discover_reference_implementations() {
         let implementations = discover_reference_implementations();
         // This will vary by system, so just check that it doesn't crash

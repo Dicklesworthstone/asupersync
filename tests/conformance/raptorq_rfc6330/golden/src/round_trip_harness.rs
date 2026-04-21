@@ -12,6 +12,7 @@ use std::path::Path;
 
 /// Configuration for round-trip test execution
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(dead_code)]
 pub struct RoundTripConfig {
     /// Number of source symbols (K)
     pub source_symbols: usize,
@@ -28,6 +29,7 @@ pub struct RoundTripConfig {
 }
 
 impl Default for RoundTripConfig {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             source_symbols: 100,
@@ -42,6 +44,7 @@ impl Default for RoundTripConfig {
 
 /// Input data for a round-trip test
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(dead_code)]
 pub struct RoundTripInput {
     /// Original source data
     pub source_data: Vec<u8>,
@@ -53,6 +56,7 @@ pub struct RoundTripInput {
 
 /// Expected output from a round-trip test
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(dead_code)]
 pub struct RoundTripOutput {
     /// Encoded symbols (source + repair)
     pub encoded_symbols: Vec<Vec<u8>>,
@@ -73,6 +77,7 @@ pub struct RoundTripOutput {
 
 /// Metrics for validating round-trip correctness
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[allow(dead_code)]
 pub struct ValidationMetrics {
     /// Data integrity check passed
     pub data_integrity: bool,
@@ -87,13 +92,17 @@ pub struct ValidationMetrics {
 }
 
 /// Round-trip test harness for RaptorQ conformance validation
+#[allow(dead_code)]
 pub struct RoundTripHarness {
     golden_manager: GoldenFileManager,
     configs: Vec<RoundTripConfig>,
 }
 
+#[allow(dead_code)]
+
 impl RoundTripHarness {
     /// Creates a new round-trip test harness
+    #[allow(dead_code)]
     pub fn new<P: AsRef<Path>>(golden_dir: P) -> Self {
         Self {
             golden_manager: GoldenFileManager::new(golden_dir),
@@ -102,6 +111,7 @@ impl RoundTripHarness {
     }
 
     /// Creates a harness with custom test configurations
+    #[allow(dead_code)]
     pub fn with_configs<P: AsRef<Path>>(golden_dir: P, configs: Vec<RoundTripConfig>) -> Self {
         Self {
             golden_manager: GoldenFileManager::new(golden_dir),
@@ -110,6 +120,7 @@ impl RoundTripHarness {
     }
 
     /// Default set of test configurations covering common RFC 6330 scenarios
+    #[allow(dead_code)]
     fn default_test_configs() -> Vec<RoundTripConfig> {
         vec![
             // Basic small block
@@ -161,6 +172,7 @@ impl RoundTripHarness {
     }
 
     /// Executes all round-trip tests and validates against golden files
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Result<RoundTripSummary, RoundTripError> {
         let mut summary = RoundTripSummary::default();
 
@@ -193,6 +205,7 @@ impl RoundTripHarness {
     }
 
     /// Executes a single round-trip test
+    #[allow(dead_code)]
     pub fn run_single_test(
         &self,
         test_name: &str,
@@ -216,6 +229,7 @@ impl RoundTripHarness {
     }
 
     /// Generates deterministic test input data
+    #[allow(dead_code)]
     fn generate_test_input(
         &self,
         test_name: &str,
@@ -240,6 +254,7 @@ impl RoundTripHarness {
     }
 
     /// Executes the actual round-trip encode/decode process
+    #[allow(dead_code)]
     fn execute_round_trip(
         &self,
         input: &RoundTripInput,
@@ -284,6 +299,7 @@ impl RoundTripHarness {
     }
 
     /// Validates round-trip correctness
+    #[allow(dead_code)]
     fn validate_round_trip(
         &self,
         original: &[u8],
@@ -310,6 +326,7 @@ impl RoundTripHarness {
     }
 
     /// Creates metadata for test golden files
+    #[allow(dead_code)]
     fn create_test_metadata(
         &self,
         test_name: &str,
@@ -347,12 +364,14 @@ impl RoundTripHarness {
     }
 
     /// Creates a seeded PRNG for deterministic test data
+    #[allow(dead_code)]
     fn create_seeded_rng(seed: u64) -> u64 {
         // Simple LCG for reproducible test data
         seed
     }
 
     /// Generates next pseudo-random byte
+    #[allow(dead_code)]
     fn next_random_byte(rng: &mut u64) -> u8 {
         // Linear Congruential Generator (LCG)
         *rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
@@ -362,6 +381,7 @@ impl RoundTripHarness {
     // TODO: Replace these mock implementations with actual RaptorQ calls
 
     /// Mock encoder for testing infrastructure
+    #[allow(dead_code)]
     fn mock_encode(
         &self,
         data: &[u8],
@@ -397,6 +417,7 @@ impl RoundTripHarness {
     }
 
     /// Mock decoder for testing infrastructure
+    #[allow(dead_code)]
     fn mock_decode(
         &self,
         symbols: &[Vec<u8>],
@@ -424,6 +445,7 @@ impl RoundTripHarness {
 
 /// Result from mock encoding
 #[derive(Debug)]
+#[allow(dead_code)]
 struct MockEncodeResult {
     symbols: Vec<Vec<u8>>,
     indices: Vec<u32>,
@@ -431,6 +453,7 @@ struct MockEncodeResult {
 
 /// Summary of round-trip test execution
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct RoundTripSummary {
     pub total_tests: usize,
     pub passed_tests: usize,
@@ -438,10 +461,15 @@ pub struct RoundTripSummary {
     pub failures: Vec<String>,
 }
 
+#[allow(dead_code)]
+
 impl RoundTripSummary {
+    #[allow(dead_code)]
     pub fn is_success(&self) -> bool {
         self.failed_tests == 0 && self.total_tests > 0
     }
+
+    #[allow(dead_code)]
 
     pub fn pass_rate(&self) -> f64 {
         if self.total_tests == 0 {
@@ -453,6 +481,7 @@ impl RoundTripSummary {
 }
 
 impl fmt::Display for RoundTripSummary {
+    #[allow(dead_code)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -475,6 +504,7 @@ impl fmt::Display for RoundTripSummary {
 
 /// Errors that can occur during round-trip testing
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum RoundTripError {
     #[error("Golden file error: {0}")]
     GoldenFileError(GoldenError),
@@ -501,6 +531,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[allow(dead_code)]
     fn test_default_config() {
         let config = RoundTripConfig::default();
         assert_eq!(config.source_symbols, 100);
@@ -512,6 +543,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_seeded_rng_deterministic() {
         let mut rng1 = RoundTripHarness::create_seeded_rng(12345);
         let mut rng2 = RoundTripHarness::create_seeded_rng(12345);
@@ -524,6 +556,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_validation_metrics_default() {
         let metrics = ValidationMetrics::default();
         assert!(!metrics.data_integrity);
@@ -534,6 +567,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_round_trip_summary_pass_rate() {
         let mut summary = RoundTripSummary::default();
         assert_eq!(summary.pass_rate(), 0.0);
@@ -545,6 +579,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_harness_creation() {
         let temp_dir = TempDir::new().unwrap();
         let harness = RoundTripHarness::new(temp_dir.path());
@@ -552,6 +587,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_generate_test_input() {
         let temp_dir = TempDir::new().unwrap();
         let harness = RoundTripHarness::new(temp_dir.path());

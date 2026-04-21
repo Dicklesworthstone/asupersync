@@ -11,6 +11,8 @@ use raptorq_conformance_reporting::{
 };
 use std::path::PathBuf;
 
+#[allow(dead_code)]
+
 fn main() -> Result<()> {
     let app = Command::new("check_conformance_regression")
         .about("Check for RaptorQ RFC 6330 conformance regressions")
@@ -258,6 +260,8 @@ fn main() -> Result<()> {
     std::process::exit(exit_code);
 }
 
+#[allow(dead_code)]
+
 fn print_json_output(
     analysis: &raptorq_conformance_reporting::regression_detection::RegressionAnalysis,
     output_file: Option<&PathBuf>,
@@ -279,6 +283,8 @@ fn print_json_output(
 
     Ok(())
 }
+
+#[allow(dead_code)]
 
 fn print_text_output(
     analysis: &raptorq_conformance_reporting::regression_detection::RegressionAnalysis,
@@ -420,6 +426,8 @@ fn print_text_output(
     Ok(())
 }
 
+#[allow(dead_code)]
+
 fn print_summary_output(
     analysis: &raptorq_conformance_reporting::regression_detection::RegressionAnalysis,
     _verbose: bool,
@@ -468,6 +476,8 @@ fn print_summary_output(
 
     Ok(())
 }
+
+#[allow(dead_code)]
 
 fn calculate_exit_code(
     analysis: &raptorq_conformance_reporting::regression_detection::RegressionAnalysis,
@@ -529,6 +539,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    #[allow(dead_code)]
     fn test_exit_code_calculation() {
         let mut coverage_matrix = CoverageMatrix::default();
         coverage_matrix.overall_conformance_score = 0.98;
@@ -566,6 +577,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_cli_parsing() {
         let app = Command::new("check_conformance_regression")
             .arg(

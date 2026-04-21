@@ -20,6 +20,7 @@ mod tls_0rtt_tests {
     use std::time::Duration;
 
     /// Create a test context for TLS operations.
+    #[allow(dead_code)]
     fn create_test_context() -> Cx {
         Cx::new(
             RegionId::from_arena(asupersync::util::ArenaIndex::new(0, 0)),
@@ -29,9 +30,12 @@ mod tls_0rtt_tests {
     }
 
     /// Simple block_on implementation for tests.
+    #[allow(dead_code)]
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        #[allow(dead_code)]
         struct NoopWaker;
         impl std::task::Wake for NoopWaker {
+            #[allow(dead_code)]
             fn wake(self: std::sync::Arc<Self>) {}
         }
         let waker = std::task::Waker::noop().clone();
@@ -46,6 +50,7 @@ mod tls_0rtt_tests {
     }
 
     /// Conformance harness for TLS 1.3 0-RTT replay protection tests.
+    #[allow(dead_code)]
     pub struct Tls0RttConformanceHarness {
         _cx: Cx,
     }
@@ -53,6 +58,7 @@ mod tls_0rtt_tests {
     /// Test category for 0-RTT replay protection conformance tests.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum TestCategory {
         PreSharedKeyExtension,
         TicketAgeObfuscation,
@@ -66,6 +72,7 @@ mod tls_0rtt_tests {
     /// Requirement level from RFC 8446.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum RequirementLevel {
         Must,
         Should,
@@ -75,6 +82,7 @@ mod tls_0rtt_tests {
     /// Test verdict for conformance tests.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum TestVerdict {
         Pass,
         Fail,
@@ -84,6 +92,7 @@ mod tls_0rtt_tests {
 
     /// Result of a TLS 0-RTT conformance test.
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[allow(dead_code)]
     pub struct Tls0RttConformanceResult {
         pub test_id: String,
         pub description: String,
@@ -94,8 +103,11 @@ mod tls_0rtt_tests {
         pub execution_time_ms: u64,
     }
 
+    #[allow(dead_code)]
+
     impl Tls0RttConformanceHarness {
         /// Create a new TLS 0-RTT conformance harness.
+        #[allow(dead_code)]
         pub fn new() -> Self {
             Self {
                 _cx: create_test_context(),
@@ -103,6 +115,7 @@ mod tls_0rtt_tests {
         }
 
         /// Run all TLS 1.3 0-RTT conformance tests.
+        #[allow(dead_code)]
         pub fn run_all_tests(&self) -> Vec<Tls0RttConformanceResult> {
             let mut results = Vec::new();
 
@@ -155,6 +168,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 1: PreSharedKey extension with early_data per RFC 8446 Section 8.1.
+        #[allow(dead_code)]
         fn test_presharedkey_early_data_extension(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -203,6 +217,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 2: Ticket age obfuscation validation per RFC 8446 Section 8.2.
+        #[allow(dead_code)]
         fn test_ticket_age_obfuscation(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -244,6 +259,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 3: Freshness window enforcement per RFC 8446 Section 8.2.
+        #[allow(dead_code)]
         fn test_freshness_window_enforcement(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -280,6 +296,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 4: Server rejection via HelloRetryRequest per RFC 8446 Section 8.1.
+        #[allow(dead_code)]
         fn test_server_replay_rejection_hello_retry(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -325,6 +342,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 5: Anti-replay cache TTL enforcement per RFC 8446 Section 8.2.
+        #[allow(dead_code)]
         fn test_anti_replay_cache_ttl(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -370,6 +388,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 6: max_early_data_size limits per RFC 8446 Section 8.1.
+        #[allow(dead_code)]
         fn test_max_early_data_size_limits(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -405,6 +424,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 7: Early data ordering requirements.
+        #[allow(dead_code)]
         fn test_early_data_ordering(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -439,6 +459,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 8: PSK binder validation with early data.
+        #[allow(dead_code)]
         fn test_psk_binder_validation_early_data(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -472,6 +493,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 9: Client early data indication validation.
+        #[allow(dead_code)]
         fn test_client_early_data_indication(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -503,6 +525,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 10: Server early data acceptance decision.
+        #[allow(dead_code)]
         fn test_server_early_data_acceptance(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -541,6 +564,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 11: Early data stream limits enforcement.
+        #[allow(dead_code)]
         fn test_early_data_stream_limits(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -575,6 +599,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 12: Replay protection across sessions.
+        #[allow(dead_code)]
         fn test_replay_protection_across_sessions(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -618,6 +643,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 13: Invalid ticket age handling.
+        #[allow(dead_code)]
         fn test_invalid_ticket_age_handling(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -656,6 +682,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 14: Early data without PSK rejection.
+        #[allow(dead_code)]
         fn test_early_data_without_psk_rejection(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -687,6 +714,7 @@ mod tls_0rtt_tests {
         }
 
         /// Test 15: Multiple early data extensions handling.
+        #[allow(dead_code)]
         fn test_multiple_early_data_extensions(&self) -> Tls0RttConformanceResult {
             let start_time = std::time::Instant::now();
 
@@ -717,6 +745,7 @@ mod tls_0rtt_tests {
         }
 
         /// Safe test execution wrapper that catches panics.
+        #[allow(dead_code)]
         fn run_test_safe<F>(&self, test_name: &str, test_fn: F) -> Result<(), String>
         where
             F: FnOnce() -> Result<(), String> + std::panic::UnwindSafe,
@@ -742,6 +771,7 @@ mod tls_0rtt_tests {
         use super::*;
 
         #[test]
+        #[allow(dead_code)]
         fn test_0rtt_conformance_harness_creation() {
             let harness = Tls0RttConformanceHarness::new();
             // Just ensure harness can be created without panicking
@@ -749,6 +779,7 @@ mod tls_0rtt_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_0rtt_conformance_suite_execution() {
             let harness = Tls0RttConformanceHarness::new();
             let results = harness.run_all_tests();
@@ -775,6 +806,7 @@ mod tls_0rtt_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_0rtt_test_categories_coverage() {
             let harness = Tls0RttConformanceHarness::new();
             let results = harness.run_all_tests();
@@ -807,6 +839,7 @@ mod tls_0rtt_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_0rtt_requirement_levels() {
             let harness = Tls0RttConformanceHarness::new();
             let results = harness.run_all_tests();
@@ -832,6 +865,7 @@ mod tls_0rtt_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_0rtt_expected_failures() {
             let harness = Tls0RttConformanceHarness::new();
             let results = harness.run_all_tests();
@@ -853,6 +887,7 @@ mod tls_0rtt_tests {
 
 // Tests that always run regardless of features
 #[test]
+#[allow(dead_code)]
 fn tls_0rtt_conformance_suite_availability() {
     #[cfg(feature = "tls")]
     {

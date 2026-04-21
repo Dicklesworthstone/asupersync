@@ -50,6 +50,7 @@ use std::time::{Duration, Instant};
 
 /// RFC 2119 requirement level for conformance testing
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // RFC 2119: MUST
     Should, // RFC 2119: SHOULD
@@ -58,6 +59,7 @@ pub enum RequirementLevel {
 
 /// Test result for a single DNS message format conformance requirement
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct DnsConformanceResult {
     pub test_id: String,
     pub description: String,
@@ -70,6 +72,7 @@ pub struct DnsConformanceResult {
 
 /// DNS conformance test categories per RFC 1035 Section 4.1
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum DnsTestCategory {
     /// Header ID field echo validation
     HeaderIdEcho,
@@ -95,6 +98,7 @@ pub enum DnsTestCategory {
 
 /// Test execution result
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum DnsTestVerdict {
     Pass,
     Fail,
@@ -103,12 +107,14 @@ pub enum DnsTestVerdict {
 }
 
 /// DNS message format conformance test harness
+#[allow(dead_code)]
 pub struct DnsMessageConformanceHarness {
     /// Test execution timeout
     timeout: Duration,
 }
 
 impl Default for DnsMessageConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(30),
@@ -116,13 +122,17 @@ impl Default for DnsMessageConformanceHarness {
     }
 }
 
+#[allow(dead_code)]
+
 impl DnsMessageConformanceHarness {
     /// Create new DNS message format conformance harness
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Run all DNS message format conformance tests
+    #[allow(dead_code)]
     pub fn run_all_tests(&mut self) -> Vec<DnsConformanceResult> {
         let mut results = Vec::new();
 
@@ -160,6 +170,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test header ID echo validation (RFC 1035 Section 4.1.1)
+    #[allow(dead_code)]
     fn test_header_id_echo(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -194,6 +205,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test header flag bit positions (RFC 1035 Section 4.1.1)
+    #[allow(dead_code)]
     fn test_header_flags(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -256,6 +268,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test message section counters (RFC 1035 Section 4.1.1)
+    #[allow(dead_code)]
     fn test_section_counters(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -297,6 +310,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test domain name compression (RFC 1035 Section 4.1.4)
+    #[allow(dead_code)]
     fn test_name_compression(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -338,6 +352,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test DNS question types.
+    #[allow(dead_code)]
     fn test_question_types(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -386,6 +401,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test additional-record framing.
+    #[allow(dead_code)]
     fn test_additional_records(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -406,6 +422,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test replayable golden vectors.
+    #[allow(dead_code)]
     fn test_golden_vectors(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -433,6 +450,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test UDP message size limits (RFC 1035 Section 4.2.1)
+    #[allow(dead_code)]
     fn test_message_size_limits(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -467,6 +485,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test DNS class values (RFC 1035 Section 3.2.4)
+    #[allow(dead_code)]
     fn test_dns_classes(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -501,6 +520,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test response codes (RFC 1035 Section 4.1.1)
+    #[allow(dead_code)]
     fn test_response_codes(&self) -> Vec<DnsConformanceResult> {
         vec![
             self.run_test(
@@ -556,6 +576,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Run a single conformance test with timing and error handling
+    #[allow(dead_code)]
     fn run_test<F>(
         &self,
         test_id: &str,
@@ -598,6 +619,7 @@ impl DnsMessageConformanceHarness {
     // =========================================================================
 
     /// Test ID echo validation
+    #[allow(dead_code)]
     fn test_id_echo_validation(&self) -> Result<(), String> {
         // Test that response ID matches query ID
         let test_packet = create_dns_response_packet(
@@ -615,6 +637,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test ID mismatch rejection
+    #[allow(dead_code)]
     fn test_id_mismatch_rejection(&self) -> Result<(), String> {
         let response_packet = create_dns_response_packet(
             0x5678, // Different ID
@@ -631,6 +654,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test zero ID handling
+    #[allow(dead_code)]
     fn test_zero_id_handling(&self) -> Result<(), String> {
         let packet = create_dns_response_packet(0x0000, 0x8000, 0, 0, 0, 0);
         let id = parse_dns_id(&packet)?;
@@ -642,6 +666,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test maximum ID value support
+    #[allow(dead_code)]
     fn test_max_id_support(&self) -> Result<(), String> {
         let packet = create_dns_response_packet(0xFFFF, 0x8000, 0, 0, 0, 0);
         let id = parse_dns_id(&packet)?;
@@ -660,6 +685,7 @@ impl DnsMessageConformanceHarness {
     // =========================================================================
 
     /// Test QR bit validation
+    #[allow(dead_code)]
     fn test_qr_bit_validation(&self) -> Result<(), String> {
         // Test query (QR=0)
         let query_packet = create_dns_response_packet(0x1234, 0x0000, 1, 0, 0, 0);
@@ -677,6 +703,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test OPCODE field parsing
+    #[allow(dead_code)]
     fn test_opcode_field_parsing(&self) -> Result<(), String> {
         let opcodes = [
             (0x0000, 0, "QUERY"),
@@ -699,6 +726,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test AA bit processing
+    #[allow(dead_code)]
     fn test_aa_bit_processing(&self) -> Result<(), String> {
         // Test non-authoritative (AA=0)
         let non_auth_packet = create_dns_response_packet(0x1234, 0x8000, 0, 1, 0, 0);
@@ -716,6 +744,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test TC bit indication
+    #[allow(dead_code)]
     fn test_tc_bit_indication(&self) -> Result<(), String> {
         // Test not truncated (TC=0)
         let complete_packet = create_dns_response_packet(0x1234, 0x8000, 0, 1, 0, 0);
@@ -733,6 +762,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test RD bit echo
+    #[allow(dead_code)]
     fn test_rd_bit_echo(&self) -> Result<(), String> {
         // Test recursion not desired (RD=0)
         let no_rd_packet = create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0);
@@ -750,6 +780,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test RA bit capability indication
+    #[allow(dead_code)]
     fn test_ra_bit_capability(&self) -> Result<(), String> {
         // Test recursion not available (RA=0)
         let no_ra_packet = create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0);
@@ -767,6 +798,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test reserved Z bits
+    #[allow(dead_code)]
     fn test_z_bits_reserved(&self) -> Result<(), String> {
         // Test that Z bits (0x0070) are properly masked/ignored
         let packet_with_z_bits = create_dns_response_packet(0x1234, 0x8070, 0, 0, 0, 0);
@@ -781,6 +813,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test RCODE field status indication
+    #[allow(dead_code)]
     fn test_rcode_field_status(&self) -> Result<(), String> {
         let rcodes = [
             (0, "NOERROR"),
@@ -809,6 +842,7 @@ impl DnsMessageConformanceHarness {
     // =========================================================================
 
     /// Test QDCOUNT (question count)
+    #[allow(dead_code)]
     fn test_qdcount_questions(&self) -> Result<(), String> {
         let test_cases = [
             (0, "no questions"),
@@ -830,6 +864,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test ANCOUNT (answer count)
+    #[allow(dead_code)]
     fn test_ancount_answers(&self) -> Result<(), String> {
         let test_cases = [
             (0, "no answers"),
@@ -851,6 +886,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test NSCOUNT (authority record count)
+    #[allow(dead_code)]
     fn test_nscount_authority(&self) -> Result<(), String> {
         let test_cases = [
             (0, "no authority"),
@@ -872,6 +908,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test ARCOUNT (additional record count)
+    #[allow(dead_code)]
     fn test_arcount_additional(&self) -> Result<(), String> {
         let test_cases = [
             (0, "no additional"),
@@ -893,6 +930,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test section counter overflow handling
+    #[allow(dead_code)]
     fn test_section_counter_overflow(&self) -> Result<(), String> {
         // Test maximum counter values
         let packet = create_dns_response_packet(0x1234, 0x8000, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF);
@@ -914,6 +952,7 @@ impl DnsMessageConformanceHarness {
     // =========================================================================
 
     /// Test name compression pointer expansion
+    #[allow(dead_code)]
     fn test_name_compression_expansion(&self) -> Result<(), String> {
         // Create a packet with compression pointer
         let mut packet = Vec::new();
@@ -958,6 +997,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test compression pointer loop detection
+    #[allow(dead_code)]
     fn test_compression_loop_detection(&self) -> Result<(), String> {
         let mut packet = create_basic_dns_packet();
 
@@ -975,6 +1015,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test forward compression pointer rejection
+    #[allow(dead_code)]
     fn test_forward_pointer_rejection(&self) -> Result<(), String> {
         let mut packet = create_basic_dns_packet();
         packet.truncate(12);
@@ -990,6 +1031,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test invalid compression format
+    #[allow(dead_code)]
     fn test_invalid_compression_format(&self) -> Result<(), String> {
         let mut packet = create_basic_dns_packet();
         packet.truncate(12);
@@ -1005,6 +1047,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test multilevel compression chains
+    #[allow(dead_code)]
     fn test_multilevel_compression(&self) -> Result<(), String> {
         // Test compression pointer that points to another compression pointer
         let mut packet = Vec::new();
@@ -1045,6 +1088,8 @@ impl DnsMessageConformanceHarness {
     // Question Type Tests
     // =========================================================================
 
+    #[allow(dead_code)]
+
     fn test_question_type_encoding(
         &self,
         name: &str,
@@ -1073,6 +1118,8 @@ impl DnsMessageConformanceHarness {
     // =========================================================================
     // Additional Record Tests
     // =========================================================================
+
+    #[allow(dead_code)]
 
     fn test_edns0_opt_record_encoding(&self) -> Result<(), String> {
         let opt_record = create_opt_record(4096, 0, 0, 0x8000, &[0xde, 0xad, 0xbe, 0xef]);
@@ -1108,6 +1155,8 @@ impl DnsMessageConformanceHarness {
         Ok(())
     }
 
+    #[allow(dead_code)]
+
     fn test_edns0_opt_record_count(&self) -> Result<(), String> {
         let opt_record = create_opt_record(1232, 0, 0, 0, &[]);
         let packet = create_dns_query_with_additional(
@@ -1137,6 +1186,8 @@ impl DnsMessageConformanceHarness {
     // Golden Vector Tests
     // =========================================================================
 
+    #[allow(dead_code)]
+
     fn test_a_query_golden_vector(&self) -> Result<(), String> {
         let packet = create_dns_query_with_class(0x1234, "example.com", TYPE_A, CLASS_IN);
         let expected = vec![
@@ -1148,6 +1199,8 @@ impl DnsMessageConformanceHarness {
         assert_packet_matches_golden("A query", &packet, &expected)
     }
 
+    #[allow(dead_code)]
+
     fn test_ptr_query_golden_vector(&self) -> Result<(), String> {
         let packet = create_dns_query_with_class(0x1234, "ptr.example.com", TYPE_PTR, CLASS_IN);
         let expected = vec![
@@ -1158,6 +1211,8 @@ impl DnsMessageConformanceHarness {
 
         assert_packet_matches_golden("PTR query", &packet, &expected)
     }
+
+    #[allow(dead_code)]
 
     fn test_opt_record_golden_vector(&self) -> Result<(), String> {
         let opt_record = create_opt_record(4096, 0, 0, 0x8000, &[0xde, 0xad, 0xbe, 0xef]);
@@ -1178,6 +1233,7 @@ impl DnsMessageConformanceHarness {
     // =========================================================================
 
     /// Test UDP 512-byte limit with TC flag
+    #[allow(dead_code)]
     fn test_udp_512_limit_tc_flag(&self) -> Result<(), String> {
         // Create a message that would exceed 512 bytes
         let large_response_packet = create_dns_response_packet(0x1234, 0x8200, 0, 20, 0, 0); // TC=1
@@ -1190,6 +1246,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test messages within 512 bytes don't set TC
+    #[allow(dead_code)]
     fn test_within_512_no_tc(&self) -> Result<(), String> {
         let normal_packet = create_dns_response_packet(0x1234, 0x8000, 0, 1, 0, 0); // TC=0
 
@@ -1201,6 +1258,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test minimum message size (12-byte header)
+    #[allow(dead_code)]
     fn test_minimum_message_size(&self) -> Result<(), String> {
         let minimal_packet = create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0);
 
@@ -1214,6 +1272,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test oversized message rejection
+    #[allow(dead_code)]
     fn test_oversized_message_rejection(&self) -> Result<(), String> {
         // This is typically enforced at the transport layer
         // Here we test that our parser handles large packets gracefully
@@ -1235,6 +1294,7 @@ impl DnsMessageConformanceHarness {
     // =========================================================================
 
     /// Test Class IN (Internet) processing
+    #[allow(dead_code)]
     fn test_class_in_processing(&self) -> Result<(), String> {
         let packet_with_class_in = create_dns_query_with_class(0x1234, "example.com", 1, 1); // Type A, Class IN
         let class = extract_question_class(&packet_with_class_in)?;
@@ -1249,6 +1309,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test Class CH (Chaos) processing
+    #[allow(dead_code)]
     fn test_class_ch_processing(&self) -> Result<(), String> {
         let packet_with_class_ch = create_dns_query_with_class(0x1234, "example.com", 1, 3); // Type A, Class CH
         let class = extract_question_class(&packet_with_class_ch)?;
@@ -1263,6 +1324,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test Class ANY (wildcard) processing
+    #[allow(dead_code)]
     fn test_class_any_processing(&self) -> Result<(), String> {
         let packet_with_class_any = create_dns_query_with_class(0x1234, "example.com", 1, 255); // Type A, Class ANY
         let class = extract_question_class(&packet_with_class_any)?;
@@ -1277,6 +1339,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test invalid class rejection
+    #[allow(dead_code)]
     fn test_invalid_class_rejection(&self) -> Result<(), String> {
         // Test with reserved class value
         let packet_with_invalid_class = create_dns_query_with_class(0x1234, "example.com", 1, 0); // Class 0 is reserved
@@ -1295,6 +1358,7 @@ impl DnsMessageConformanceHarness {
     // =========================================================================
 
     /// Test RCODE 0 (NOERROR)
+    #[allow(dead_code)]
     fn test_rcode_noerror(&self) -> Result<(), String> {
         let packet = create_dns_response_packet(0x1234, 0x8000, 0, 1, 0, 0); // RCODE=0
         let rcode = parse_rcode(&packet)?;
@@ -1306,6 +1370,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test RCODE 1 (FORMERR)
+    #[allow(dead_code)]
     fn test_rcode_formerr(&self) -> Result<(), String> {
         let packet = create_dns_response_packet(0x1234, 0x8001, 0, 0, 0, 0); // RCODE=1
         let rcode = parse_rcode(&packet)?;
@@ -1317,6 +1382,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test RCODE 2 (SERVFAIL)
+    #[allow(dead_code)]
     fn test_rcode_servfail(&self) -> Result<(), String> {
         let packet = create_dns_response_packet(0x1234, 0x8002, 0, 0, 0, 0); // RCODE=2
         let rcode = parse_rcode(&packet)?;
@@ -1328,6 +1394,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test RCODE 3 (NXDOMAIN)
+    #[allow(dead_code)]
     fn test_rcode_nxdomain(&self) -> Result<(), String> {
         let packet = create_dns_response_packet(0x1234, 0x8003, 0, 0, 0, 0); // RCODE=3
         let rcode = parse_rcode(&packet)?;
@@ -1339,6 +1406,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test RCODE 4 (NOTIMP)
+    #[allow(dead_code)]
     fn test_rcode_notimp(&self) -> Result<(), String> {
         let packet = create_dns_response_packet(0x1234, 0x8004, 0, 0, 0, 0); // RCODE=4
         let rcode = parse_rcode(&packet)?;
@@ -1350,6 +1418,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test RCODE 5 (REFUSED)
+    #[allow(dead_code)]
     fn test_rcode_refused(&self) -> Result<(), String> {
         let packet = create_dns_response_packet(0x1234, 0x8005, 0, 0, 0, 0); // RCODE=5
         let rcode = parse_rcode(&packet)?;
@@ -1361,6 +1430,7 @@ impl DnsMessageConformanceHarness {
     }
 
     /// Test reserved RCODE values
+    #[allow(dead_code)]
     fn test_reserved_rcode_values(&self) -> Result<(), String> {
         // Test RCODE values 6-15 (reserved in RFC 1035)
         for rcode in 6..=15 {
@@ -1391,6 +1461,7 @@ const TYPE_AAAA: u16 = 28;
 const TYPE_OPT: u16 = 41;
 const CLASS_IN: u16 = 1;
 
+#[allow(dead_code)]
 struct AdditionalRecord {
     name_len: usize,
     record_type: u16,
@@ -1400,6 +1471,7 @@ struct AdditionalRecord {
 }
 
 /// Create a basic DNS response packet
+#[allow(dead_code)]
 fn create_dns_response_packet(
     id: u16,
     flags: u16,
@@ -1419,11 +1491,13 @@ fn create_dns_response_packet(
 }
 
 /// Create a basic DNS packet for testing
+#[allow(dead_code)]
 fn create_basic_dns_packet() -> Vec<u8> {
     create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0)
 }
 
 /// Create DNS query packet with specific class
+#[allow(dead_code)]
 fn create_dns_query_with_class(id: u16, name: &str, qtype: u16, qclass: u16) -> Vec<u8> {
     let mut packet = Vec::new();
 
@@ -1442,6 +1516,7 @@ fn create_dns_query_with_class(id: u16, name: &str, qtype: u16, qclass: u16) -> 
 }
 
 /// Create DNS query packet with a single additional record.
+#[allow(dead_code)]
 fn create_dns_query_with_additional(
     id: u16,
     name: &str,
@@ -1467,6 +1542,7 @@ fn create_dns_query_with_additional(
 }
 
 /// Create an EDNS0 OPT additional record.
+#[allow(dead_code)]
 fn create_opt_record(
     udp_payload_size: u16,
     extended_rcode: u8,
@@ -1488,6 +1564,7 @@ fn create_opt_record(
 }
 
 /// Encode domain name in DNS format
+#[allow(dead_code)]
 fn encode_domain_name(name: &str, output: &mut Vec<u8>) {
     if name.is_empty() {
         output.push(0);
@@ -1504,6 +1581,7 @@ fn encode_domain_name(name: &str, output: &mut Vec<u8>) {
 }
 
 /// Parse DNS message ID from packet
+#[allow(dead_code)]
 fn parse_dns_id(packet: &[u8]) -> Result<u16, String> {
     if packet.len() < 2 {
         return Err("Packet too short for ID field".to_string());
@@ -1512,6 +1590,7 @@ fn parse_dns_id(packet: &[u8]) -> Result<u16, String> {
 }
 
 /// Validate response ID matches expected
+#[allow(dead_code)]
 fn validate_response_id(packet: &[u8], expected_id: u16) -> Result<(), String> {
     let actual_id = parse_dns_id(packet)?;
     if actual_id != expected_id {
@@ -1525,6 +1604,7 @@ fn validate_response_id(packet: &[u8], expected_id: u16) -> Result<(), String> {
 }
 
 /// Check if packet is a DNS response (QR bit set)
+#[allow(dead_code)]
 fn is_dns_response(packet: &[u8]) -> Result<bool, String> {
     if packet.len() < 4 {
         return Err("Packet too short for flags field".to_string());
@@ -1534,6 +1614,7 @@ fn is_dns_response(packet: &[u8]) -> Result<bool, String> {
 }
 
 /// Parse OPCODE field from DNS flags
+#[allow(dead_code)]
 fn parse_dns_opcode(packet: &[u8]) -> Result<u8, String> {
     if packet.len() < 4 {
         return Err("Packet too short for flags field".to_string());
@@ -1543,6 +1624,7 @@ fn parse_dns_opcode(packet: &[u8]) -> Result<u8, String> {
 }
 
 /// Check if response is authoritative (AA bit set)
+#[allow(dead_code)]
 fn is_authoritative_answer(packet: &[u8]) -> Result<bool, String> {
     if packet.len() < 4 {
         return Err("Packet too short for flags field".to_string());
@@ -1552,6 +1634,7 @@ fn is_authoritative_answer(packet: &[u8]) -> Result<bool, String> {
 }
 
 /// Check if message is truncated (TC bit set)
+#[allow(dead_code)]
 fn is_truncated(packet: &[u8]) -> Result<bool, String> {
     if packet.len() < 4 {
         return Err("Packet too short for flags field".to_string());
@@ -1561,6 +1644,7 @@ fn is_truncated(packet: &[u8]) -> Result<bool, String> {
 }
 
 /// Check if recursion desired (RD bit set)
+#[allow(dead_code)]
 fn recursion_desired(packet: &[u8]) -> Result<bool, String> {
     if packet.len() < 4 {
         return Err("Packet too short for flags field".to_string());
@@ -1570,6 +1654,7 @@ fn recursion_desired(packet: &[u8]) -> Result<bool, String> {
 }
 
 /// Check if recursion available (RA bit set)
+#[allow(dead_code)]
 fn recursion_available(packet: &[u8]) -> Result<bool, String> {
     if packet.len() < 4 {
         return Err("Packet too short for flags field".to_string());
@@ -1579,6 +1664,7 @@ fn recursion_available(packet: &[u8]) -> Result<bool, String> {
 }
 
 /// Parse reserved Z bits
+#[allow(dead_code)]
 fn parse_reserved_bits(packet: &[u8]) -> Result<u8, String> {
     if packet.len() < 4 {
         return Err("Packet too short for flags field".to_string());
@@ -1588,6 +1674,7 @@ fn parse_reserved_bits(packet: &[u8]) -> Result<u8, String> {
 }
 
 /// Parse RCODE field
+#[allow(dead_code)]
 fn parse_rcode(packet: &[u8]) -> Result<u8, String> {
     if packet.len() < 4 {
         return Err("Packet too short for flags field".to_string());
@@ -1597,12 +1684,15 @@ fn parse_rcode(packet: &[u8]) -> Result<u8, String> {
 }
 
 /// Parse section counts
+#[allow(dead_code)]
 fn parse_qdcount(packet: &[u8]) -> Result<u16, String> {
     if packet.len() < 6 {
         return Err("Packet too short for QDCOUNT".to_string());
     }
     Ok(u16::from_be_bytes([packet[4], packet[5]]))
 }
+
+#[allow(dead_code)]
 
 fn parse_ancount(packet: &[u8]) -> Result<u16, String> {
     if packet.len() < 8 {
@@ -1611,12 +1701,16 @@ fn parse_ancount(packet: &[u8]) -> Result<u16, String> {
     Ok(u16::from_be_bytes([packet[6], packet[7]]))
 }
 
+#[allow(dead_code)]
+
 fn parse_nscount(packet: &[u8]) -> Result<u16, String> {
     if packet.len() < 10 {
         return Err("Packet too short for NSCOUNT".to_string());
     }
     Ok(u16::from_be_bytes([packet[8], packet[9]]))
 }
+
+#[allow(dead_code)]
 
 fn parse_arcount(packet: &[u8]) -> Result<u16, String> {
     if packet.len() < 12 {
@@ -1626,11 +1720,13 @@ fn parse_arcount(packet: &[u8]) -> Result<u16, String> {
 }
 
 /// Extract compressed name from DNS packet
+#[allow(dead_code)]
 fn extract_compressed_name(packet: &[u8], offset: usize) -> Result<String, String> {
     decode_dns_name_from_offset(packet, offset, 0)
 }
 
 /// Decode DNS name with compression support
+#[allow(dead_code)]
 fn decode_dns_name_from_offset(
     packet: &[u8],
     start_offset: usize,
@@ -1694,6 +1790,7 @@ fn decode_dns_name_from_offset(
 }
 
 /// Extract question class from DNS query packet
+#[allow(dead_code)]
 fn extract_question_class(packet: &[u8]) -> Result<u16, String> {
     if packet.len() < 12 {
         return Err("Packet too short to contain question".to_string());
@@ -1709,6 +1806,7 @@ fn extract_question_class(packet: &[u8]) -> Result<u16, String> {
 }
 
 /// Extract question type from DNS query packet.
+#[allow(dead_code)]
 fn extract_question_type(packet: &[u8]) -> Result<u16, String> {
     if packet.len() < 12 {
         return Err("Packet too short to contain question".to_string());
@@ -1723,6 +1821,7 @@ fn extract_question_type(packet: &[u8]) -> Result<u16, String> {
 }
 
 /// Extract a single additional record after the first question.
+#[allow(dead_code)]
 fn extract_additional_record(packet: &[u8]) -> Result<AdditionalRecord, String> {
     let mut offset = question_end_offset(packet)?;
     if offset + 4 > packet.len() {
@@ -1762,6 +1861,8 @@ fn extract_additional_record(packet: &[u8]) -> Result<AdditionalRecord, String> 
     })
 }
 
+#[allow(dead_code)]
+
 fn question_end_offset(packet: &[u8]) -> Result<usize, String> {
     let offset = skip_dns_name(packet, 12)?;
     if offset + 4 > packet.len() {
@@ -1770,6 +1871,8 @@ fn question_end_offset(packet: &[u8]) -> Result<usize, String> {
 
     Ok(offset)
 }
+
+#[allow(dead_code)]
 
 fn skip_dns_name(packet: &[u8], start_offset: usize) -> Result<usize, String> {
     let mut offset = start_offset;
@@ -1799,6 +1902,8 @@ fn skip_dns_name(packet: &[u8], start_offset: usize) -> Result<usize, String> {
     }
 }
 
+#[allow(dead_code)]
+
 fn assert_packet_matches_golden(label: &str, actual: &[u8], expected: &[u8]) -> Result<(), String> {
     if actual != expected {
         return Err(format!(
@@ -1811,6 +1916,7 @@ fn assert_packet_matches_golden(label: &str, actual: &[u8], expected: &[u8]) -> 
 }
 
 /// Generate conformance report for DNS message format tests
+#[allow(dead_code)]
 pub fn generate_dns_conformance_report(results: &[DnsConformanceResult]) -> String {
     let total = results.len();
     let passed = results
@@ -1894,6 +2000,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_dns_message_conformance_harness() {
         let mut harness = DnsMessageConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -1940,6 +2047,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_dns_header_parsing() {
         let packet = create_dns_response_packet(0x1234, 0x8180, 1, 2, 0, 1);
 
@@ -1954,6 +2062,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_dns_flag_bits() {
         // Test individual flag bits
         assert!(is_dns_response(&create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0)).unwrap());
@@ -1973,6 +2082,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_dns_compression_basic() {
         let packet = create_basic_dns_packet();
         let result = extract_compressed_name(&packet, 12);
@@ -1981,6 +2091,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_dns_class_extraction() {
         let packet = create_dns_query_with_class(0x1234, "example.com", 1, 1);
         let class = extract_question_class(&packet).unwrap();
@@ -1988,6 +2099,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_rcode_values() {
         for rcode in 0..=5 {
             let packet = create_dns_response_packet(0x1234, 0x8000 | rcode, 0, 0, 0, 0);

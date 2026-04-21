@@ -80,6 +80,7 @@ pub use maintenance_workflows::{
 };
 
 /// Main entry point for running the complete conformance reporting pipeline
+#[allow(dead_code)]
 pub fn run_complete_reporting_pipeline<P: AsRef<std::path::Path>>(
     golden_dir: P,
     fixture_dir: P,
@@ -144,6 +145,7 @@ pub fn run_complete_reporting_pipeline<P: AsRef<std::path::Path>>(
 
 /// Results from running the complete reporting pipeline
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ReportingPipelineResults {
     pub coverage_matrix: CoverageMatrix,
     pub regression_analysis: Option<RegressionAnalysis>,
@@ -151,8 +153,11 @@ pub struct ReportingPipelineResults {
     pub output_directory: std::path::PathBuf,
 }
 
+#[allow(dead_code)]
+
 impl ReportingPipelineResults {
     /// Returns true if the pipeline completed successfully with no critical issues
+    #[allow(dead_code)]
     pub fn is_success(&self) -> bool {
         let coverage_ok = self.coverage_matrix.compliance_score >= 0.95;
         let regression_ok = self
@@ -166,6 +171,7 @@ impl ReportingPipelineResults {
     }
 
     /// Returns a summary report of the pipeline execution
+    #[allow(dead_code)]
     pub fn summary_report(&self) -> String {
         format!(
             "RaptorQ Conformance Reporting Pipeline Results\n\
@@ -222,6 +228,7 @@ impl ReportingPipelineResults {
 
 /// Errors that can occur during pipeline execution
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum ReportingPipelineError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
@@ -245,6 +252,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[allow(dead_code)]
     fn test_pipeline_results_success_determination() {
         let mut coverage_matrix = CoverageMatrix::default();
         coverage_matrix.compliance_score = 0.98;
@@ -276,6 +284,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_pipeline_results_summary_report() {
         let mut coverage_matrix = CoverageMatrix::default();
         coverage_matrix.compliance_score = 0.95;
@@ -312,6 +321,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_complete_pipeline_api() {
         let temp_dir = TempDir::new().unwrap();
         let golden_path = temp_dir.path().join("golden");

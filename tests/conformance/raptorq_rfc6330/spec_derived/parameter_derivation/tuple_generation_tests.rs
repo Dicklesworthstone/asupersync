@@ -7,6 +7,7 @@ use crate::spec_derived::{
 use std::time::Instant;
 
 /// Register tuple generation tests.
+#[allow(dead_code)]
 pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
     suite.add_test_case(Rfc6330ConformanceCase {
         id: "RFC6330-5.3.1",
@@ -58,6 +59,7 @@ pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
 }
 
 /// Test systematic symbol tuple (d, a, b) generation.
+#[allow(dead_code)]
 fn test_systematic_tuple_generation(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -102,6 +104,7 @@ fn test_systematic_tuple_generation(ctx: &ConformanceContext) -> ConformanceResu
 }
 
 /// Test repair symbol tuple (d1, a1, b1) generation.
+#[allow(dead_code)]
 fn test_repair_tuple_generation(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -150,6 +153,7 @@ fn test_repair_tuple_generation(ctx: &ConformanceContext) -> ConformanceResult {
 }
 
 /// Test Rand function implementation using V0, V1 tables.
+#[allow(dead_code)]
 fn test_rand_function_implementation(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -188,6 +192,7 @@ fn test_rand_function_implementation(ctx: &ConformanceContext) -> ConformanceRes
 }
 
 /// Test degree generation according to RFC specification.
+#[allow(dead_code)]
 fn test_degree_generation(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -234,6 +239,7 @@ fn test_degree_generation(ctx: &ConformanceContext) -> ConformanceResult {
 }
 
 /// Test tuple generation determinism.
+#[allow(dead_code)]
 fn test_tuple_determinism(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -272,6 +278,7 @@ fn test_tuple_determinism(ctx: &ConformanceContext) -> ConformanceResult {
 }
 
 /// Test handling of large ESI values.
+#[allow(dead_code)]
 fn test_large_esi_handling(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -308,6 +315,7 @@ fn test_large_esi_handling(ctx: &ConformanceContext) -> ConformanceResult {
 
 /// Tuple structure for RFC 6330.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct Tuple {
     pub d: usize, // degree
     pub a: usize, // first index
@@ -315,6 +323,7 @@ pub struct Tuple {
 }
 
 /// Generate systematic symbol tuple (d, a, b).
+#[allow(dead_code)]
 fn generate_systematic_tuple(k: usize, w: usize, esi: usize) -> Tuple {
     // Simplified implementation for testing
     // Real implementation would follow RFC 6330 Section 5.3 exactly
@@ -329,6 +338,7 @@ fn generate_systematic_tuple(k: usize, w: usize, esi: usize) -> Tuple {
 }
 
 /// Generate repair symbol tuple (d1, a1, b1).
+#[allow(dead_code)]
 fn generate_repair_tuple(k: usize, w: usize, esi: usize) -> Tuple {
     // Simplified implementation for testing
     // Real implementation would follow RFC 6330 Section 5.4 exactly
@@ -343,6 +353,7 @@ fn generate_repair_tuple(k: usize, w: usize, esi: usize) -> Tuple {
 }
 
 /// RFC 6330 Rand function using V0, V1 tables.
+#[allow(dead_code)]
 fn rand_function(y: u32, i: u8, m: u8) -> u32 {
     // Simplified implementation - real implementation would use V0, V1 tables
     // from RFC 6330 Section 5.5
@@ -357,6 +368,7 @@ fn rand_function(y: u32, i: u8, m: u8) -> u32 {
 }
 
 /// Generate degree according to RFC distribution.
+#[allow(dead_code)]
 fn generate_degree(k: usize, w: usize, i: usize) -> usize {
     // Simplified degree generation for testing
     // Real implementation would follow RFC 6330 degree distribution
@@ -368,6 +380,7 @@ fn generate_degree(k: usize, w: usize, i: usize) -> usize {
 }
 
 /// Calculate W parameter (reused from systematic_index_tests).
+#[allow(dead_code)]
 fn calculate_w_parameter(k: usize) -> Option<usize> {
     let s = match k {
         4 => 2,
@@ -409,6 +422,8 @@ mod tests {
     use super::*;
     use crate::spec_derived::{ConformanceConfig, ConformanceContext};
 
+    #[allow(dead_code)]
+
     fn create_test_context() -> ConformanceContext {
         ConformanceContext {
             config: ConformanceConfig::default(),
@@ -418,6 +433,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_tuple_generation() {
         let k = 64;
         let w = calculate_w_parameter(k).unwrap();
@@ -434,6 +450,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_rand_function() {
         let result1 = rand_function(0, 0, 8);
         let result2 = rand_function(0, 0, 8);
@@ -444,6 +461,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_tuple_conformance() {
         let ctx = create_test_context();
         let result = test_systematic_tuple_generation(&ctx);

@@ -9,13 +9,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Golden file manager with UPDATE_GOLDENS workflow
+#[allow(dead_code)]
 pub struct GoldenFileManager {
     base_path: PathBuf,
     update_mode: bool,
 }
 
+#[allow(dead_code)]
+
 impl GoldenFileManager {
     /// Create new golden file manager
+    #[allow(dead_code)]
     pub fn new() -> Self {
         let base_path = PathBuf::from("tests/conformance/raptorq_rfc6330/golden/fixtures");
         let update_mode = env::var("UPDATE_GOLDENS").is_ok();
@@ -24,6 +28,7 @@ impl GoldenFileManager {
     }
 
     /// Create manager with custom base path
+    #[allow(dead_code)]
     pub fn with_base_path<P: Into<PathBuf>>(base_path: P) -> Self {
         let base_path = base_path.into();
         let update_mode = env::var("UPDATE_GOLDENS").is_ok();
@@ -32,6 +37,7 @@ impl GoldenFileManager {
     }
 
     /// Assert binary data matches golden file
+    #[allow(dead_code)]
     pub fn assert_golden_binary(&self, test_name: &str, category: &str, actual: &[u8]) {
         let golden_path = self.golden_path(category, test_name, "golden");
 
@@ -48,6 +54,7 @@ impl GoldenFileManager {
     }
 
     /// Assert structured data matches golden file (JSON format)
+    #[allow(dead_code)]
     pub fn assert_golden_json<T>(&self, test_name: &str, category: &str, actual: &T)
     where
         T: serde::Serialize + for<'de> serde::Deserialize<'de> + PartialEq + std::fmt::Debug,
@@ -73,6 +80,7 @@ impl GoldenFileManager {
     }
 
     /// Assert hex-encoded data matches golden file
+    #[allow(dead_code)]
     pub fn assert_golden_hex(&self, test_name: &str, category: &str, actual: &[u8]) {
         let actual_hex = hex::encode(actual);
         let golden_path = self.golden_path(category, test_name, "hex");
@@ -96,6 +104,7 @@ impl GoldenFileManager {
     }
 
     /// Generate golden file path for test
+    #[allow(dead_code)]
     fn golden_path(&self, category: &str, test_name: &str, extension: &str) -> PathBuf {
         self.base_path
             .join(category)
@@ -103,6 +112,7 @@ impl GoldenFileManager {
     }
 
     /// Read golden file with error handling
+    #[allow(dead_code)]
     fn read_golden_file(&self, path: &Path) -> Vec<u8> {
         fs::read(path).unwrap_or_else(|_| {
             panic!(
@@ -114,6 +124,7 @@ impl GoldenFileManager {
     }
 
     /// Update golden file safely
+    #[allow(dead_code)]
     fn update_golden_file(&self, path: &Path, content: &[u8]) {
         // Ensure directory exists
         if let Some(parent) = path.parent() {
@@ -126,6 +137,7 @@ impl GoldenFileManager {
     }
 
     /// Handle binary data mismatch
+    #[allow(dead_code)]
     fn handle_mismatch(&self, test_name: &str, golden_path: &Path, actual: &[u8], expected: &[u8]) {
         // Write actual output for debugging
         let actual_path = golden_path.with_extension("actual");
@@ -150,6 +162,7 @@ impl GoldenFileManager {
     }
 
     /// Handle JSON data mismatch
+    #[allow(dead_code)]
     fn handle_json_mismatch(&self, test_name: &str, golden_path: &Path, actual: &str, expected: &str) {
         let actual_path = golden_path.with_extension("actual.json");
         fs::write(&actual_path, actual)

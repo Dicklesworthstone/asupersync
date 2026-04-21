@@ -12,6 +12,8 @@ use raptorq_conformance_reporting::{
 };
 use std::path::PathBuf;
 
+#[allow(dead_code)]
+
 fn main() -> Result<()> {
     let app = Command::new("generate_compliance_report")
         .about("Generate RaptorQ RFC 6330 conformance compliance reports")
@@ -329,6 +331,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[allow(dead_code)]
     fn test_cli_parsing() {
         // Test that the CLI parsing works without actually running the main function
         let app = Command::new("generate_compliance_report")

@@ -50,6 +50,7 @@ use std::time::{Duration, Instant};
 
 /// Test result for a single QUIC Initial packet conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct QuicInitialConformanceResult {
     pub test_id: String,
     pub description: String,
@@ -62,6 +63,7 @@ pub struct QuicInitialConformanceResult {
 
 /// Conformance test categories for QUIC Initial packets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// Long header packet type bits validation
     PacketTypeDecoding,
@@ -81,6 +83,7 @@ pub enum TestCategory {
 
 /// Protocol requirement level per RFC 2119.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // RFC 2119: MUST
     Should, // RFC 2119: SHOULD
@@ -89,6 +92,7 @@ pub enum RequirementLevel {
 
 /// Test execution result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -97,12 +101,14 @@ pub enum TestVerdict {
 }
 
 /// QUIC Initial packet conformance test harness.
+#[allow(dead_code)]
 pub struct QuicInitialConformanceHarness {
     /// Test execution timeout
     timeout: Duration,
 }
 
 impl Default for QuicInitialConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(30),
@@ -110,18 +116,23 @@ impl Default for QuicInitialConformanceHarness {
     }
 }
 
+#[allow(dead_code)]
+
 impl QuicInitialConformanceHarness {
     /// Create a new QUIC Initial packet conformance harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Create harness with custom timeout.
+    #[allow(dead_code)]
     pub fn with_timeout(timeout: Duration) -> Self {
         Self { timeout }
     }
 
     /// Run all conformance tests for QUIC Initial packets.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<QuicInitialConformanceResult> {
         let mut results = Vec::new();
 
@@ -147,6 +158,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test Long Header Packet Type bits are correctly decoded (RFC 9000 Section 17.2)
+    #[allow(dead_code)]
     fn test_packet_type_decoding(&self) -> Vec<QuicInitialConformanceResult> {
         vec![
             self.run_test(
@@ -181,6 +193,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test version field validation (RFC 9000 Section 17.2)
+    #[allow(dead_code)]
     fn test_version_validation(&self) -> Vec<QuicInitialConformanceResult> {
         vec![
             self.run_test(
@@ -215,6 +228,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test token length and token field parsing (RFC 9000 Section 17.2.2)
+    #[allow(dead_code)]
     fn test_token_field_parsing(&self) -> Vec<QuicInitialConformanceResult> {
         vec![
             self.run_test(
@@ -256,6 +270,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test packet number length from Long Header (RFC 9000 Section 17.1)
+    #[allow(dead_code)]
     fn test_packet_number_length(&self) -> Vec<QuicInitialConformanceResult> {
         vec![
             self.run_test(
@@ -304,6 +319,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test Source/Destination Connection ID length bounds (RFC 9000 Section 17.2)
+    #[allow(dead_code)]
     fn test_connection_id_bounds(&self) -> Vec<QuicInitialConformanceResult> {
         vec![
             self.run_test(
@@ -345,6 +361,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test version negotiation behavior (RFC 9000 Section 17.2.1)
+    #[allow(dead_code)]
     fn test_version_negotiation(&self) -> Vec<QuicInitialConformanceResult> {
         vec![
             self.run_test(
@@ -379,6 +396,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Run a single conformance test with timing and error handling.
+    #[allow(dead_code)]
     fn run_test<F>(
         &self,
         test_id: &str,
@@ -413,6 +431,7 @@ impl QuicInitialConformanceHarness {
     // =========================================================================
 
     /// Test that Initial packet type bits (00) are correctly decoded.
+    #[allow(dead_code)]
     fn test_initial_packet_type_bits(&self) -> Result<(), String> {
         // Create a minimal valid Initial packet
         let header = PacketHeader::Long(LongHeader {
@@ -444,6 +463,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test reserved bits validation.
+    #[allow(dead_code)]
     fn test_reserved_bits_validation(&self) -> Result<(), String> {
         // Test with reserved bits set (should be rejected)
         let mut buf = vec![
@@ -464,6 +484,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test fixed bit validation.
+    #[allow(dead_code)]
     fn test_fixed_bit_validation(&self) -> Result<(), String> {
         // Test with fixed bit unset (should be rejected)
         let mut buf = vec![
@@ -484,6 +505,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test packet type distinction.
+    #[allow(dead_code)]
     fn test_packet_type_distinction(&self) -> Result<(), String> {
         let packet_types = [
             (LongPacketType::Initial, 0b00),
@@ -532,6 +554,7 @@ impl QuicInitialConformanceHarness {
     // =========================================================================
 
     /// Test QUIC v1 version validation.
+    #[allow(dead_code)]
     fn test_quic_v1_version(&self) -> Result<(), String> {
         let header = PacketHeader::Long(LongHeader {
             packet_type: LongPacketType::Initial,
@@ -560,6 +583,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test invalid version rejection.
+    #[allow(dead_code)]
     fn test_invalid_version_rejection(&self) -> Result<(), String> {
         // Test various invalid versions - these should parse but would be rejected at protocol level
         let invalid_versions = [0x00000000, 0x12345678, 0xFFFFFFFF, 0x1A2A3A4A];
@@ -594,6 +618,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test version negotiation trigger.
+    #[allow(dead_code)]
     fn test_version_negotiation_trigger(&self) -> Result<(), String> {
         // This is a semantic test - version negotiation would be triggered at the connection level
         // Here we just verify that different versions can be encoded/decoded
@@ -624,6 +649,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test version zero reserved for version negotiation.
+    #[allow(dead_code)]
     fn test_version_zero_reserved(&self) -> Result<(), String> {
         // Version 0 should be able to be encoded (used in Version Negotiation packets)
         let header = PacketHeader::Long(LongHeader {
@@ -657,6 +683,7 @@ impl QuicInitialConformanceHarness {
     // =========================================================================
 
     /// Test token length field as QUIC varint.
+    #[allow(dead_code)]
     fn test_token_length_varint(&self) -> Result<(), String> {
         let test_cases = [
             (0u64, vec![0x00]), // 1-byte varint
@@ -688,6 +715,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test empty token handling.
+    #[allow(dead_code)]
     fn test_empty_token(&self) -> Result<(), String> {
         let header = PacketHeader::Long(LongHeader {
             packet_type: LongPacketType::Initial,
@@ -716,6 +744,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test non-empty token parsing.
+    #[allow(dead_code)]
     fn test_non_empty_token(&self) -> Result<(), String> {
         let test_tokens = [
             vec![0xAA],
@@ -755,6 +784,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test oversized token rejection.
+    #[allow(dead_code)]
     fn test_oversized_token(&self) -> Result<(), String> {
         // Create a packet with token length that would exceed reasonable bounds
         // This tests the varint parsing edge case
@@ -781,6 +811,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test token only present in Initial packets.
+    #[allow(dead_code)]
     fn test_token_only_in_initial(&self) -> Result<(), String> {
         // Test that non-Initial packets cannot have tokens
         let non_initial_types = [LongPacketType::ZeroRtt, LongPacketType::Handshake];
@@ -815,6 +846,7 @@ impl QuicInitialConformanceHarness {
     // =========================================================================
 
     /// Test packet number length field decoding.
+    #[allow(dead_code)]
     fn test_packet_number_length_field(&self) -> Result<(), String> {
         let length_cases = [1u8, 2u8, 3u8, 4u8];
 
@@ -858,6 +890,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test 1-byte packet number.
+    #[allow(dead_code)]
     fn test_1_byte_packet_number(&self) -> Result<(), String> {
         let test_values = [0u32, 1u32, 127u32, 255u32];
 
@@ -888,6 +921,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test 2-byte packet number.
+    #[allow(dead_code)]
     fn test_2_byte_packet_number(&self) -> Result<(), String> {
         let test_values = [256u32, 1000u32, 32768u32, 65535u32];
 
@@ -918,6 +952,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test 3-byte packet number.
+    #[allow(dead_code)]
     fn test_3_byte_packet_number(&self) -> Result<(), String> {
         let test_values = [65536u32, 1000000u32, 8388607u32, 16777215u32];
 
@@ -948,6 +983,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test 4-byte packet number.
+    #[allow(dead_code)]
     fn test_4_byte_packet_number(&self) -> Result<(), String> {
         let test_values = [16777216u32, 100000000u32, 2147483647u32, 4294967295u32];
 
@@ -978,6 +1014,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test invalid packet number length rejection.
+    #[allow(dead_code)]
     fn test_invalid_packet_number_length(&self) -> Result<(), String> {
         let invalid_lengths = [0u8, 5u8, 255u8];
 
@@ -1011,6 +1048,7 @@ impl QuicInitialConformanceHarness {
     // =========================================================================
 
     /// Test zero-length connection IDs.
+    #[allow(dead_code)]
     fn test_zero_length_connection_ids(&self) -> Result<(), String> {
         let header = PacketHeader::Long(LongHeader {
             packet_type: LongPacketType::Initial,
@@ -1040,6 +1078,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test maximum connection ID length.
+    #[allow(dead_code)]
     fn test_max_connection_id_length(&self) -> Result<(), String> {
         let max_cid_bytes = [0xAB; 20]; // 20 bytes
         let header = PacketHeader::Long(LongHeader {
@@ -1075,6 +1114,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test oversized connection ID rejection.
+    #[allow(dead_code)]
     fn test_oversized_connection_id(&self) -> Result<(), String> {
         let oversized_cid = [0xFF; 21]; // 21 bytes (too large)
 
@@ -1086,6 +1126,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test connection ID length field parsing.
+    #[allow(dead_code)]
     fn test_connection_id_length_field(&self) -> Result<(), String> {
         let cid_lengths = [0usize, 1usize, 8usize, 16usize, 20usize];
 
@@ -1129,6 +1170,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test independent CID validation.
+    #[allow(dead_code)]
     fn test_independent_cid_validation(&self) -> Result<(), String> {
         // Test different lengths for src and dst CIDs
         let test_cases = [
@@ -1177,6 +1219,7 @@ impl QuicInitialConformanceHarness {
     // =========================================================================
 
     /// Test version negotiation packet format.
+    #[allow(dead_code)]
     fn test_version_negotiation_format(&self) -> Result<(), String> {
         // Version Negotiation packets have version=0 and specific format
         // This is a conceptual test since VN packets are handled differently
@@ -1204,6 +1247,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test version negotiation supported version list.
+    #[allow(dead_code)]
     fn test_version_negotiation_list(&self) -> Result<(), String> {
         // This would be implemented at the connection/protocol level
         // Here we test that different versions can be encoded
@@ -1235,6 +1279,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test version negotiation selective triggering.
+    #[allow(dead_code)]
     fn test_version_negotiation_selective(&self) -> Result<(), String> {
         // Test that supported versions parse normally
         let quic_v1_header = PacketHeader::Long(LongHeader {
@@ -1288,6 +1333,7 @@ impl QuicInitialConformanceHarness {
     }
 
     /// Test version negotiation connection ID swapping.
+    #[allow(dead_code)]
     fn test_version_negotiation_cid_swap(&self) -> Result<(), String> {
         // VN packet should swap src/dst CIDs from client's Initial
         let original_dst = ConnectionId::new(&[0x01, 0x02, 0x03, 0x04]).map_err(|e| e.to_string())?;
@@ -1323,6 +1369,7 @@ impl QuicInitialConformanceHarness {
 }
 
 /// Generate a conformance report for QUIC Initial packet tests.
+#[allow(dead_code)]
 pub fn generate_conformance_report(results: &[QuicInitialConformanceResult]) -> String {
     let total = results.len();
     let passed = results.iter().filter(|r| r.verdict == TestVerdict::Pass).count();
@@ -1372,6 +1419,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_quic_initial_conformance_harness() {
         let harness = QuicInitialConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -1403,6 +1451,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_packet_type_conformance() {
         let harness = QuicInitialConformanceHarness::new();
         let results = harness.test_packet_type_decoding();
@@ -1415,6 +1464,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_version_validation_conformance() {
         let harness = QuicInitialConformanceHarness::new();
         let results = harness.test_version_validation();
@@ -1427,6 +1477,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_token_parsing_conformance() {
         let harness = QuicInitialConformanceHarness::new();
         let results = harness.test_token_field_parsing();
@@ -1439,6 +1490,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_packet_number_length_conformance() {
         let harness = QuicInitialConformanceHarness::new();
         let results = harness.test_packet_number_length();
@@ -1451,6 +1503,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_connection_id_bounds_conformance() {
         let harness = QuicInitialConformanceHarness::new();
         let results = harness.test_connection_id_bounds();
@@ -1463,6 +1516,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_version_negotiation_conformance() {
         let harness = QuicInitialConformanceHarness::new();
         let results = harness.test_version_negotiation();
@@ -1475,6 +1529,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_requirement_levels_coverage() {
         let harness = QuicInitialConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -1498,6 +1553,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_test_categories_coverage() {
         let harness = QuicInitialConformanceHarness::new();
         let results = harness.run_all_tests();

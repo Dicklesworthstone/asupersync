@@ -15,6 +15,7 @@ mod bsd_tests {
 /// kqueue tests on BSD systems where kqueue is available.
 #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 #[test]
+#[allow(dead_code)]
 fn kqueue_conformance_requires_bsd_platform() {
     // This test serves as documentation that kqueue conformance tests
     // are only available on macOS and FreeBSD platforms.

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use std::fmt::Debug;
 
 /// Validates that channel state remains consistent during cancellation operations.
+#[allow(dead_code)]
 pub struct StateValidator {
     /// Tracked state snapshots by channel ID.
     state_snapshots: Arc<Mutex<HashMap<String, Vec<StateSnapshot>>>>,
@@ -16,6 +17,7 @@ pub struct StateValidator {
 
 /// Configuration for state validation behavior.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct StateValidationConfig {
     /// Whether to track detailed state transitions.
     pub track_transitions: bool,
@@ -28,6 +30,7 @@ pub struct StateValidationConfig {
 }
 
 impl Default for StateValidationConfig {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             track_transitions: true,
@@ -38,8 +41,11 @@ impl Default for StateValidationConfig {
     }
 }
 
+#[allow(dead_code)]
+
 impl StateValidator {
     /// Create a new state validator.
+    #[allow(dead_code)]
     pub fn new(config: StateValidationConfig) -> Self {
         Self {
             state_snapshots: Arc::new(Mutex::new(HashMap::new())),
@@ -48,6 +54,7 @@ impl StateValidator {
     }
 
     /// Take a snapshot of channel state.
+    #[allow(dead_code)]
     pub fn snapshot_state<T: Debug + Clone + Send + 'static>(
         &self,
         channel_id: &str,
@@ -75,6 +82,7 @@ impl StateValidator {
     }
 
     /// Validate state consistency for a channel.
+    #[allow(dead_code)]
     pub fn validate_consistency(&self, channel_id: &str) -> Vec<ProtocolViolation> {
         let snapshots = if let Ok(state_map) = self.state_snapshots.lock() {
             state_map.get(channel_id).cloned().unwrap_or_default()
@@ -104,6 +112,7 @@ impl StateValidator {
     }
 
     /// Reset state tracking for a channel.
+    #[allow(dead_code)]
     pub fn reset_channel(&self, channel_id: &str) {
         if let Ok(mut snapshots) = self.state_snapshots.lock() {
             snapshots.remove(channel_id);
@@ -111,6 +120,7 @@ impl StateValidator {
     }
 
     /// Reset all state tracking.
+    #[allow(dead_code)]
     pub fn reset_all(&self) {
         if let Ok(mut snapshots) = self.state_snapshots.lock() {
             snapshots.clear();
@@ -118,6 +128,7 @@ impl StateValidator {
     }
 
     /// Get state snapshots for a channel.
+    #[allow(dead_code)]
     pub fn get_snapshots(&self, channel_id: &str) -> Vec<StateSnapshot> {
         self.state_snapshots
             .lock()
@@ -127,6 +138,7 @@ impl StateValidator {
     }
 
     /// Check if a state transition is valid.
+    #[allow(dead_code)]
     fn check_state_transition(
         &self,
         prev: &StateSnapshot,
@@ -156,6 +168,7 @@ impl StateValidator {
     }
 
     /// Check state invariants for a snapshot.
+    #[allow(dead_code)]
     fn check_state_invariants(&self, snapshot: &StateSnapshot) -> Option<ProtocolViolation> {
         // Channel-specific invariant validation
         match snapshot.channel_type {
@@ -167,6 +180,7 @@ impl StateValidator {
     }
 
     /// Validate MPSC state transitions.
+    #[allow(dead_code)]
     fn validate_mpsc_transition(
         &self,
         prev: &StateSnapshot,
@@ -178,6 +192,7 @@ impl StateValidator {
     }
 
     /// Validate broadcast state transitions.
+    #[allow(dead_code)]
     fn validate_broadcast_transition(
         &self,
         prev: &StateSnapshot,
@@ -188,6 +203,7 @@ impl StateValidator {
     }
 
     /// Validate watch state transitions.
+    #[allow(dead_code)]
     fn validate_watch_transition(
         &self,
         prev: &StateSnapshot,
@@ -198,6 +214,7 @@ impl StateValidator {
     }
 
     /// Validate oneshot state transitions.
+    #[allow(dead_code)]
     fn validate_oneshot_transition(
         &self,
         prev: &StateSnapshot,
@@ -208,24 +225,28 @@ impl StateValidator {
     }
 
     /// Validate MPSC state invariants.
+    #[allow(dead_code)]
     fn validate_mpsc_invariants(&self, snapshot: &StateSnapshot) -> Option<ProtocolViolation> {
         // MPSC invariant validation would go here
         None
     }
 
     /// Validate broadcast state invariants.
+    #[allow(dead_code)]
     fn validate_broadcast_invariants(&self, snapshot: &StateSnapshot) -> Option<ProtocolViolation> {
         // Broadcast invariant validation would go here
         None
     }
 
     /// Validate watch state invariants.
+    #[allow(dead_code)]
     fn validate_watch_invariants(&self, snapshot: &StateSnapshot) -> Option<ProtocolViolation> {
         // Watch invariant validation would go here
         None
     }
 
     /// Validate oneshot state invariants.
+    #[allow(dead_code)]
     fn validate_oneshot_invariants(&self, snapshot: &StateSnapshot) -> Option<ProtocolViolation> {
         // Oneshot invariant validation would go here
         None
@@ -234,6 +255,7 @@ impl StateValidator {
 
 /// A snapshot of channel state at a specific point in time.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct StateSnapshot {
     /// When the snapshot was taken.
     pub timestamp: Instant,
@@ -247,6 +269,7 @@ pub struct StateSnapshot {
 
 /// Context about the operation that led to this state.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OperationContext {
     /// Type of operation performed.
     pub operation_type: OperationType,
@@ -260,6 +283,7 @@ pub struct OperationContext {
 
 /// Types of operations that can be performed on channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum OperationType {
     Send,
     Receive,
@@ -271,6 +295,7 @@ pub enum OperationType {
 }
 
 impl std::fmt::Display for OperationType {
+    #[allow(dead_code)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OperationType::Send => write!(f, "send"),
@@ -287,17 +312,21 @@ impl std::fmt::Display for OperationType {
 /// Trait for types that can be stored in state snapshots.
 pub trait StateContainer: Debug + Send + Sync {
     /// Get a description of the state.
+    #[allow(dead_code)]
     fn describe(&self) -> String;
 
     /// Check if the state is consistent.
+    #[allow(dead_code)]
     fn is_consistent(&self) -> bool;
 
     /// Get state-specific metrics.
+    #[allow(dead_code)]
     fn get_metrics(&self) -> HashMap<String, f64>;
 }
 
 /// Generic channel state representation.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ChannelState<T: Debug + Clone> {
     /// Number of active senders.
     pub sender_count: usize,
@@ -318,6 +347,7 @@ pub struct ChannelState<T: Debug + Clone> {
 }
 
 impl<T: Debug + Clone + Send + Sync + 'static> StateContainer for ChannelState<T> {
+    #[allow(dead_code)]
     fn describe(&self) -> String {
         format!(
             "senders: {}, receivers: {}, queue: {}/{:?}, closed: {}, cancelled: {}, waiting: {}",
@@ -330,6 +360,8 @@ impl<T: Debug + Clone + Send + Sync + 'static> StateContainer for ChannelState<T
             self.waiting_operations
         )
     }
+
+    #[allow(dead_code)]
 
     fn is_consistent(&self) -> bool {
         // Basic consistency checks
@@ -347,6 +379,8 @@ impl<T: Debug + Clone + Send + Sync + 'static> StateContainer for ChannelState<T
         // Channel-specific consistency would be checked here
         true
     }
+
+    #[allow(dead_code)]
 
     fn get_metrics(&self) -> HashMap<String, f64> {
         let mut metrics = HashMap::new();
@@ -367,6 +401,7 @@ impl<T: Debug + Clone + Send + Sync + 'static> StateContainer for ChannelState<T
 
 /// Specific state for MPSC channels.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MpscChannelState {
     /// Number of permits currently reserved.
     pub reserved_permits: usize,
@@ -378,6 +413,7 @@ pub struct MpscChannelState {
 
 /// Specific state for broadcast channels.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct BroadcastChannelState {
     /// Current sequence number.
     pub sequence_number: u64,
@@ -389,6 +425,7 @@ pub struct BroadcastChannelState {
 
 /// Specific state for watch channels.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct WatchChannelState {
     /// Current version number.
     pub version: u64,
@@ -400,6 +437,7 @@ pub struct WatchChannelState {
 
 /// Specific state for oneshot channels.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OneshotChannelState {
     /// Whether the value has been sent.
     pub value_sent: bool,
@@ -412,6 +450,7 @@ pub struct OneshotChannelState {
 }
 
 /// RAII guard for automatic state validation within a scope.
+#[allow(dead_code)]
 pub struct StateValidationScope<'a> {
     validator: &'a StateValidator,
     channel_id: String,
@@ -420,6 +459,7 @@ pub struct StateValidationScope<'a> {
 
 impl<'a> StateValidationScope<'a> {
     /// Create a new validation scope.
+    #[allow(dead_code)]
     pub fn new(validator: &'a StateValidator, channel_id: impl Into<String>) -> Self {
         let channel_id = channel_id.into();
         let initial_snapshot_count = validator.get_snapshots(&channel_id).len();
@@ -432,11 +472,13 @@ impl<'a> StateValidationScope<'a> {
     }
 
     /// Validate state consistency for this scope.
+    #[allow(dead_code)]
     pub fn validate(&self) -> Vec<ProtocolViolation> {
         self.validator.validate_consistency(&self.channel_id)
     }
 
     /// Get the number of new snapshots taken in this scope.
+    #[allow(dead_code)]
     pub fn snapshot_count_delta(&self) -> usize {
         let current_count = self.validator.get_snapshots(&self.channel_id).len();
         current_count.saturating_sub(self.initial_snapshot_count)
@@ -444,6 +486,7 @@ impl<'a> StateValidationScope<'a> {
 }
 
 impl<'a> Drop for StateValidationScope<'a> {
+    #[allow(dead_code)]
     fn drop(&mut self) {
         // Automatically validate on drop if configured to do so
         if self.validator.config.immediate_validation {
@@ -461,6 +504,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_state_validator_basic() {
         let validator = StateValidator::new(StateValidationConfig::default());
 
@@ -486,6 +530,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_state_validation_scope() {
         let validator = StateValidator::new(StateValidationConfig::default());
 
@@ -515,6 +560,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_channel_state_consistency() {
         // Test with inconsistent state (queue length exceeds capacity)
         let bad_state = ChannelState {

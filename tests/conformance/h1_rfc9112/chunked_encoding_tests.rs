@@ -8,6 +8,7 @@ use super::harness::H1ConformanceHarness;
 
 /// Test chunk extension parsing with various forms.
 #[test]
+#[allow(dead_code)]
 fn test_chunk_extensions_edge_cases() {
     let harness = H1ConformanceHarness::new();
 
@@ -67,6 +68,7 @@ fn test_chunk_extensions_edge_cases() {
 
 /// Test trailer field parsing after final chunk.
 #[test]
+#[allow(dead_code)]
 fn test_trailer_fields_edge_cases() {
     let harness = H1ConformanceHarness::new();
 
@@ -126,6 +128,7 @@ fn test_trailer_fields_edge_cases() {
 
 /// Test CRLF vs LF tolerance (RFC 9112 is strict about line endings).
 #[test]
+#[allow(dead_code)]
 fn test_line_ending_strictness() {
     let harness = H1ConformanceHarness::new();
 
@@ -166,6 +169,7 @@ fn test_line_ending_strictness() {
 
 /// Test hex chunk-size case variants.
 #[test]
+#[allow(dead_code)]
 fn test_hex_case_sensitivity() {
     let harness = H1ConformanceHarness::new();
 
@@ -221,6 +225,7 @@ fn test_hex_case_sensitivity() {
 
 /// Test oversized chunk headers and resource limits.
 #[test]
+#[allow(dead_code)]
 fn test_resource_limit_enforcement() {
     let harness = H1ConformanceHarness::new();
 
@@ -261,6 +266,7 @@ fn test_resource_limit_enforcement() {
 
 /// Test error conditions and malformed input.
 #[test]
+#[allow(dead_code)]
 fn test_malformed_input_handling() {
     let harness = H1ConformanceHarness::new();
 

@@ -63,6 +63,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
 -----END PRIVATE KEY-----";
 
 /// Helper to create test chain and key
+#[allow(dead_code)]
 fn create_test_tls_materials() -> (CertificateChain, PrivateKey, Vec<Certificate>) {
     let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
     let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
@@ -72,6 +73,7 @@ fn create_test_tls_materials() -> (CertificateChain, PrivateKey, Vec<Certificate
 
 /// Test scenario for ALPN conformance
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct AlpnTestScenario {
     /// Description of the test
     description: &'static str,
@@ -93,6 +95,7 @@ struct AlpnTestScenario {
 /// Property: With overlapping protocols, server's preference order determines the selection
 #[test]
 #[cfg(feature = "tls")]
+#[allow(dead_code)]
 fn mr1_server_preference_determines_selection() {
     let _lab = LabRuntime::new(LabConfig::default());
 
@@ -195,6 +198,7 @@ fn mr1_server_preference_determines_selection() {
 /// Property: When client and server have no common protocols, handshake must fail
 #[test]
 #[cfg(feature = "tls")]
+#[allow(dead_code)]
 fn mr2_no_overlap_triggers_fatal_alert() {
     let _lab = LabRuntime::new(LabConfig::default());
 
@@ -288,6 +292,7 @@ fn mr2_no_overlap_triggers_fatal_alert() {
 /// Property: Server cannot negotiate a protocol that the client didn't offer
 #[test]
 #[cfg(feature = "tls")]
+#[allow(dead_code)]
 fn mr3_server_cannot_choose_unadvertised_protocol() {
     let _lab = LabRuntime::new(LabConfig::default());
 
@@ -374,6 +379,7 @@ fn mr3_server_cannot_choose_unadvertised_protocol() {
 /// Property: ALPN extension appears only in ClientHello/ServerHello/EncryptedExtensions
 #[test]
 #[cfg(feature = "tls")]
+#[allow(dead_code)]
 fn mr4_alpn_extension_valid_only_in_handshake() {
     let _lab = LabRuntime::new(LabConfig::default());
 
@@ -461,6 +467,7 @@ fn mr4_alpn_extension_valid_only_in_handshake() {
 /// Property: Protocol matching is byte-exact and case-sensitive, no normalization
 #[test]
 #[cfg(feature = "tls")]
+#[allow(dead_code)]
 fn mr5_protocol_names_require_exact_byte_match() {
     let _lab = LabRuntime::new(LabConfig::default());
 
@@ -608,6 +615,7 @@ fn mr5_protocol_names_require_exact_byte_match() {
 /// Property: Various edge cases are handled according to RFC 7301
 #[test]
 #[cfg(feature = "tls")]
+#[allow(dead_code)]
 fn comprehensive_alpn_edge_cases() {
     let _lab = LabRuntime::new(LabConfig::default());
 
@@ -729,6 +737,7 @@ fn comprehensive_alpn_edge_cases() {
 /// Property: ALPN negotiation respects handshake timeouts
 #[test]
 #[cfg(feature = "tls")]
+#[allow(dead_code)]
 fn alpn_respects_handshake_timeouts() {
     let _lab = LabRuntime::new(LabConfig::default());
 

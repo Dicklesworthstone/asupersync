@@ -36,14 +36,17 @@ use std::time::{Duration, Instant};
 
 /// Unique identifier for an obligation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ObligationId(pub u64);
 
 /// Unique identifier for a region
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct RegionId(pub u64);
 
 /// Obligation lifecycle state
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum ObligationState {
     /// Obligation created but not yet started
     Created,
@@ -59,6 +62,7 @@ pub enum ObligationState {
 
 /// Region lifecycle state
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum RegionState {
     /// Region created and accepting obligations
     Open,
@@ -72,6 +76,7 @@ pub enum RegionState {
 
 /// Metadata for tracking obligation behavior
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ObligationMetadata {
     pub id: ObligationId,
     pub region_id: RegionId,
@@ -84,6 +89,7 @@ pub struct ObligationMetadata {
 
 /// Resource usage tracking for leak detection
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ResourceCount {
     pub wakers: usize,
     pub memory_bytes: usize,
@@ -93,6 +99,7 @@ pub struct ResourceCount {
 
 /// Region hierarchy metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct RegionMetadata {
     pub id: RegionId,
     pub parent_id: Option<RegionId>,
@@ -109,6 +116,7 @@ pub struct RegionMetadata {
 
 /// Category of obligation invariant being tested
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum InvariantTestCategory {
     /// Test obligation leak detection and prevention
     NoLeakValidation,
@@ -124,6 +132,7 @@ pub enum InvariantTestCategory {
 
 /// Result of an invariant test execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum InvariantTestResult {
     /// Test passed - invariant holds
     Passed {
@@ -142,14 +151,28 @@ pub enum InvariantTestResult {
     },
 }
 
+#[allow(dead_code)]
+
+#[allow(dead_code)]
+
 impl InvariantTestResult {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn is_passed(&self) -> bool {
         matches!(self, InvariantTestResult::Passed { .. })
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     pub fn is_failed(&self) -> bool {
         matches!(self, InvariantTestResult::Failed { .. })
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     pub fn duration(&self) -> Option<Duration> {
         match self {
@@ -162,6 +185,7 @@ impl InvariantTestResult {
 
 /// Detailed information about an invariant violation
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct InvariantViolation {
     pub invariant_name: String,
     pub violation_type: ViolationType,
@@ -173,6 +197,7 @@ pub struct InvariantViolation {
 
 /// Type of invariant violation detected
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum ViolationType {
     /// Obligation leaked - not properly cleaned up
     ObligationLeak {
@@ -198,6 +223,7 @@ pub enum ViolationType {
 
 /// Test execution metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct TestMetadata {
     pub obligations_created: usize,
     pub regions_created: usize,
@@ -208,26 +234,40 @@ pub struct TestMetadata {
 /// Core trait for obligation invariant tests
 pub trait ObligationInvariantTest: Send + Sync {
     /// Name of the invariant being tested
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &str;
 
     /// Category of invariant test
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn test_category(&self) -> InvariantTestCategory;
 
     /// Human-readable description of what this test validates
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn description(&self) -> &str;
 
     /// Execute the invariant test
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn run_test(&self, ctx: &ObligationTestContext) -> InvariantTestResult;
 
     /// Validate that the invariant holds given current system state
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool;
 
     /// Test dependencies - other invariants that must pass first
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn dependencies(&self) -> Vec<&str> {
         Vec::new()
     }
 
     /// Test tags for organization and filtering
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn tags(&self) -> Vec<&str> {
         Vec::new()
     }
@@ -239,6 +279,7 @@ pub trait ObligationInvariantTest: Send + Sync {
 
 /// Comprehensive obligation and region tracking for invariant validation
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ObligationTracker {
     /// Active obligations and their metadata
     pub active_obligations: Arc<Mutex<HashMap<ObligationId, ObligationMetadata>>>,
@@ -253,8 +294,14 @@ pub struct ObligationTracker {
     next_region_id: Arc<Mutex<u64>>,
 }
 
+#[allow(dead_code)]
+
+#[allow(dead_code)]
+
 impl ObligationTracker {
     /// Create new obligation tracker
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             active_obligations: Arc::new(Mutex::new(HashMap::new())),
@@ -267,6 +314,8 @@ impl ObligationTracker {
     }
 
     /// Create a new region
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn create_region(&self, parent_id: Option<RegionId>) -> RegionId {
         let id = {
             let mut next_id = self.next_region_id.lock().unwrap();
@@ -301,6 +350,8 @@ impl ObligationTracker {
     }
 
     /// Create a new obligation in the specified region
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn create_obligation(&self, region_id: RegionId) -> ObligationId {
         let id = {
             let mut next_id = self.next_obligation_id.lock().unwrap();
@@ -335,6 +386,8 @@ impl ObligationTracker {
     }
 
     /// Mark obligation as active
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn activate_obligation(&self, id: ObligationId) {
         let mut obligations = self.active_obligations.lock().unwrap();
         if let Some(obligation) = obligations.get_mut(&id) {
@@ -343,6 +396,8 @@ impl ObligationTracker {
     }
 
     /// Resolve an obligation (successful completion)
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn resolve_obligation(&self, id: ObligationId) {
         let mut obligations = self.active_obligations.lock().unwrap();
         if let Some(obligation) = obligations.get_mut(&id) {
@@ -352,6 +407,8 @@ impl ObligationTracker {
     }
 
     /// Cancel an obligation
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn cancel_obligation(&self, id: ObligationId, source: RegionId) {
         let mut obligations = self.active_obligations.lock().unwrap();
         if let Some(obligation) = obligations.get_mut(&id) {
@@ -362,6 +419,8 @@ impl ObligationTracker {
     }
 
     /// Close a region (triggers quiescence waiting)
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn close_region(&self, id: RegionId) -> Result<(), String> {
         {
             let mut regions = self.regions.lock().unwrap();
@@ -402,6 +461,8 @@ impl ObligationTracker {
     }
 
     /// Cancel a region (propagates to all obligations)
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn cancel_region(&self, id: RegionId) {
         // Mark region as cancelled
         {
@@ -425,6 +486,8 @@ impl ObligationTracker {
     }
 
     /// Get all obligations in a specific region
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn get_obligations_for_region(&self, region_id: RegionId) -> Vec<ObligationId> {
         let obligations = self.active_obligations.lock().unwrap();
         obligations
@@ -435,6 +498,8 @@ impl ObligationTracker {
     }
 
     /// Get pending obligations (not resolved or cancelled) for a region
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn get_pending_obligations_for_region(&self, region_id: RegionId) -> Vec<ObligationId> {
         let obligations = self.active_obligations.lock().unwrap();
         obligations
@@ -451,6 +516,8 @@ impl ObligationTracker {
     }
 
     /// Get child regions of a given region
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn get_child_regions(&self, region_id: RegionId) -> Vec<RegionId> {
         let regions = self.regions.lock().unwrap();
         if let Some(region) = regions.get(&region_id) {
@@ -461,6 +528,8 @@ impl ObligationTracker {
     }
 
     /// Check for obligation leaks
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn check_obligation_leaks(&self) -> Vec<ObligationId> {
         let obligations = self.active_obligations.lock().unwrap();
         obligations
@@ -474,6 +543,8 @@ impl ObligationTracker {
     }
 
     /// Check for resource leaks
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn check_resource_leaks(&self) -> ResourceCount {
         // This would integrate with actual resource tracking
         // For now, return current tracked resources
@@ -481,22 +552,30 @@ impl ObligationTracker {
     }
 
     /// Record an invariant violation
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn record_violation(&self, violation: InvariantViolation) {
         let mut violations = self.invariant_violations.lock().unwrap();
         violations.push(violation);
     }
 
     /// Get all recorded violations
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn get_violations(&self) -> Vec<InvariantViolation> {
         self.invariant_violations.lock().unwrap().clone()
     }
 
     /// Check if any invariants are currently violated
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn has_violations(&self) -> bool {
         !self.invariant_violations.lock().unwrap().is_empty()
     }
 
     /// Reset tracker state for new test
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn reset(&self) {
         self.active_obligations.lock().unwrap().clear();
         self.regions.lock().unwrap().clear();
@@ -507,11 +586,15 @@ impl ObligationTracker {
     }
 
     /// Get count of active obligations
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn active_obligation_count(&self) -> usize {
         self.active_obligations.lock().unwrap().len()
     }
 
     /// Get count of open regions
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn open_region_count(&self) -> usize {
         let regions = self.regions.lock().unwrap();
         regions
@@ -521,6 +604,8 @@ impl ObligationTracker {
     }
 
     /// Validate all core invariants
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn validate_all_invariants(&self) -> Result<(), Vec<InvariantViolation>> {
         let mut violations = Vec::new();
 
@@ -553,6 +638,8 @@ impl ObligationTracker {
 }
 
 impl Default for ObligationTracker {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
@@ -564,6 +651,7 @@ impl Default for ObligationTracker {
 
 /// Context for obligation invariant test execution
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ObligationTestContext {
     /// Maximum test duration
     pub timeout: Duration,
@@ -578,6 +666,8 @@ pub struct ObligationTestContext {
 }
 
 impl Default for ObligationTestContext {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(30),
@@ -589,8 +679,14 @@ impl Default for ObligationTestContext {
     }
 }
 
+#[allow(dead_code)]
+
+#[allow(dead_code)]
+
 impl ObligationTestContext {
     /// Create context optimized for stress testing
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn stress_test_context() -> Self {
         Self {
             timeout: Duration::from_secs(60),
@@ -602,6 +698,8 @@ impl ObligationTestContext {
     }
 
     /// Create context with verbose logging
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn verbose_context() -> Self {
         Self {
             verbose: true,

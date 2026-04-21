@@ -8,6 +8,7 @@ use std::time::Instant;
 /// Conformance test requirement level per RFC keywords.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,
     Should,
@@ -17,6 +18,7 @@ pub enum RequirementLevel {
 /// Test verdict for conformance validation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -27,6 +29,7 @@ pub enum TestVerdict {
 /// Test category classification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum TestCategory {
     StaticTable,
     DynamicTable,
@@ -39,6 +42,7 @@ pub enum TestCategory {
 
 /// Structured conformance test result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ConformanceTestResult {
     pub test_id: String,
     pub description: String,
@@ -52,28 +56,37 @@ pub struct ConformanceTestResult {
 /// Core conformance test trait.
 pub trait ConformanceTest: Send + Sync {
     /// Unique test identifier (e.g., "RFC7541-4.1").
+    #[allow(dead_code)]
     fn id(&self) -> &str;
 
     /// Human-readable test description.
+    #[allow(dead_code)]
     fn description(&self) -> &str;
 
     /// Test category for reporting.
+    #[allow(dead_code)]
     fn category(&self) -> TestCategory;
 
     /// RFC requirement level.
+    #[allow(dead_code)]
     fn requirement_level(&self) -> RequirementLevel;
 
     /// Execute the test and return result.
+    #[allow(dead_code)]
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult;
 }
 
 /// Main HPACK conformance test harness.
+#[allow(dead_code)]
 pub struct HpackConformanceHarness {
     test_cases: Vec<Box<dyn ConformanceTest>>,
 }
 
+#[allow(dead_code)]
+
 impl HpackConformanceHarness {
     /// Create a new HPACK conformance harness with all test cases.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         let mut harness = Self {
             test_cases: Vec::new(),
@@ -92,6 +105,7 @@ impl HpackConformanceHarness {
     }
 
     /// Run all registered conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
 
@@ -109,6 +123,7 @@ impl HpackConformanceHarness {
     }
 
     /// Encode headers using our implementation.
+    #[allow(dead_code)]
     pub fn encode_headers(&self, headers: &[Header], use_huffman: bool) -> Vec<u8> {
         let mut encoder = Encoder::new();
         encoder.set_use_huffman(use_huffman);
@@ -118,6 +133,7 @@ impl HpackConformanceHarness {
     }
 
     /// Decode headers using our implementation.
+    #[allow(dead_code)]
     pub fn decode_headers(&self, encoded: &[u8]) -> Result<Vec<Header>, String> {
         let mut decoder = Decoder::new();
         let mut src = Bytes::copy_from_slice(encoded);
@@ -127,6 +143,7 @@ impl HpackConformanceHarness {
     }
 
     /// Encode headers with sensitive flag.
+    #[allow(dead_code)]
     pub fn encode_headers_sensitive(&self, headers: &[Header]) -> Vec<u8> {
         let mut encoder = Encoder::new();
         let mut dst = BytesMut::new();
@@ -135,44 +152,52 @@ impl HpackConformanceHarness {
     }
 
     /// Register static table conformance tests.
+    #[allow(dead_code)]
     fn register_static_table_tests(&mut self) {
         self.test_cases.push(Box::new(StaticTableTest));
     }
 
     /// Register dynamic table conformance tests.
+    #[allow(dead_code)]
     fn register_dynamic_table_tests(&mut self) {
         self.test_cases.push(Box::new(DynamicTableEvictionTest));
         self.test_cases.push(Box::new(DynamicTableSizeUpdateTest));
     }
 
     /// Register Huffman encoding conformance tests.
+    #[allow(dead_code)]
     fn register_huffman_tests(&mut self) {
         self.test_cases.push(Box::new(HuffmanRoundTripTest));
     }
 
     /// Register indexing strategy conformance tests.
+    #[allow(dead_code)]
     fn register_indexing_tests(&mut self) {
         self.test_cases.push(Box::new(IndexedHeaderFieldTest));
         self.test_cases.push(Box::new(LiteralHeaderFieldTest));
     }
 
     /// Register context management conformance tests.
+    #[allow(dead_code)]
     fn register_context_tests(&mut self) {
         self.test_cases.push(Box::new(ContextSynchronizationTest));
     }
 
     /// Register error handling conformance tests.
+    #[allow(dead_code)]
     fn register_error_tests(&mut self) {
         self.test_cases.push(Box::new(MalformedInputTest));
     }
 
     /// Register round-trip conformance tests.
+    #[allow(dead_code)]
     fn register_roundtrip_tests(&mut self) {
         self.test_cases.push(Box::new(HeaderRoundTripTest));
     }
 }
 
 impl Default for HpackConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
@@ -182,24 +207,34 @@ impl Default for HpackConformanceHarness {
 // Static Table Tests
 // ============================================================================
 
+#[allow(dead_code)]
 struct StaticTableTest;
 
 impl ConformanceTest for StaticTableTest {
+    #[allow(dead_code)]
     fn id(&self) -> &str {
         "RFC7541-AppA-1"
     }
+
+    #[allow(dead_code)]
 
     fn description(&self) -> &str {
         "Static table entries match RFC 7541 Appendix A"
     }
 
+    #[allow(dead_code)]
+
     fn category(&self) -> TestCategory {
         TestCategory::StaticTable
     }
 
+    #[allow(dead_code)]
+
     fn requirement_level(&self) -> RequirementLevel {
         RequirementLevel::Must
     }
+
+    #[allow(dead_code)]
 
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult {
         // Test that static table lookups work correctly
@@ -242,24 +277,34 @@ impl ConformanceTest for StaticTableTest {
 // Dynamic Table Tests
 // ============================================================================
 
+#[allow(dead_code)]
 struct DynamicTableEvictionTest;
 
 impl ConformanceTest for DynamicTableEvictionTest {
+    #[allow(dead_code)]
     fn id(&self) -> &str {
         "RFC7541-4.1-1"
     }
+
+    #[allow(dead_code)]
 
     fn description(&self) -> &str {
         "Dynamic table evicts oldest entries when size limit exceeded"
     }
 
+    #[allow(dead_code)]
+
     fn category(&self) -> TestCategory {
         TestCategory::DynamicTable
     }
 
+    #[allow(dead_code)]
+
     fn requirement_level(&self) -> RequirementLevel {
         RequirementLevel::Must
     }
+
+    #[allow(dead_code)]
 
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult {
         // Test dynamic table eviction by adding entries that exceed table size
@@ -294,24 +339,34 @@ impl ConformanceTest for DynamicTableEvictionTest {
     }
 }
 
+#[allow(dead_code)]
 struct DynamicTableSizeUpdateTest;
 
 impl ConformanceTest for DynamicTableSizeUpdateTest {
+    #[allow(dead_code)]
     fn id(&self) -> &str {
         "RFC7541-4.2-1"
     }
+
+    #[allow(dead_code)]
 
     fn description(&self) -> &str {
         "Dynamic table size update emitted when size changes"
     }
 
+    #[allow(dead_code)]
+
     fn category(&self) -> TestCategory {
         TestCategory::DynamicTable
     }
 
+    #[allow(dead_code)]
+
     fn requirement_level(&self) -> RequirementLevel {
         RequirementLevel::Must
     }
+
+    #[allow(dead_code)]
 
     fn run(&self, _harness: &HpackConformanceHarness) -> ConformanceTestResult {
         let start_time = Instant::now();
@@ -360,24 +415,34 @@ impl ConformanceTest for DynamicTableSizeUpdateTest {
 // Huffman Encoding Tests
 // ============================================================================
 
+#[allow(dead_code)]
 struct HuffmanRoundTripTest;
 
 impl ConformanceTest for HuffmanRoundTripTest {
+    #[allow(dead_code)]
     fn id(&self) -> &str {
         "RFC7541-AppB-1"
     }
+
+    #[allow(dead_code)]
 
     fn description(&self) -> &str {
         "Huffman encoding/decoding preserves header values"
     }
 
+    #[allow(dead_code)]
+
     fn category(&self) -> TestCategory {
         TestCategory::Huffman
     }
 
+    #[allow(dead_code)]
+
     fn requirement_level(&self) -> RequirementLevel {
         RequirementLevel::Should
     }
+
+    #[allow(dead_code)]
 
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult {
         let test_headers = vec![
@@ -444,24 +509,34 @@ impl ConformanceTest for HuffmanRoundTripTest {
 // Indexing Strategy Tests
 // ============================================================================
 
+#[allow(dead_code)]
 struct IndexedHeaderFieldTest;
 
 impl ConformanceTest for IndexedHeaderFieldTest {
+    #[allow(dead_code)]
     fn id(&self) -> &str {
         "RFC7541-6.1-1"
     }
+
+    #[allow(dead_code)]
 
     fn description(&self) -> &str {
         "Indexed header field representation for static table hits"
     }
 
+    #[allow(dead_code)]
+
     fn category(&self) -> TestCategory {
         TestCategory::Indexing
     }
 
+    #[allow(dead_code)]
+
     fn requirement_level(&self) -> RequirementLevel {
         RequirementLevel::Must
     }
+
+    #[allow(dead_code)]
 
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult {
         // Test that common static table entries use indexed representation
@@ -506,24 +581,34 @@ impl ConformanceTest for IndexedHeaderFieldTest {
     }
 }
 
+#[allow(dead_code)]
 struct LiteralHeaderFieldTest;
 
 impl ConformanceTest for LiteralHeaderFieldTest {
+    #[allow(dead_code)]
     fn id(&self) -> &str {
         "RFC7541-6.2-1"
     }
+
+    #[allow(dead_code)]
 
     fn description(&self) -> &str {
         "Literal header field representation for custom headers"
     }
 
+    #[allow(dead_code)]
+
     fn category(&self) -> TestCategory {
         TestCategory::Indexing
     }
 
+    #[allow(dead_code)]
+
     fn requirement_level(&self) -> RequirementLevel {
         RequirementLevel::Must
     }
+
+    #[allow(dead_code)]
 
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult {
         // Test custom headers that should use literal representation
@@ -571,21 +656,28 @@ impl ConformanceTest for LiteralHeaderFieldTest {
 // Context and Error Tests (Stubs)
 // ============================================================================
 
+#[allow(dead_code)]
 struct ContextSynchronizationTest;
 
 impl ConformanceTest for ContextSynchronizationTest {
+    #[allow(dead_code)]
     fn id(&self) -> &str {
         "RFC7541-4.3-1"
     }
+    #[allow(dead_code)]
     fn description(&self) -> &str {
         "Context synchronization between encoder/decoder"
     }
+    #[allow(dead_code)]
     fn category(&self) -> TestCategory {
         TestCategory::Context
     }
+    #[allow(dead_code)]
     fn requirement_level(&self) -> RequirementLevel {
         RequirementLevel::Must
     }
+
+    #[allow(dead_code)]
 
     fn run(&self, _harness: &HpackConformanceHarness) -> ConformanceTestResult {
         let start_time = Instant::now();
@@ -651,21 +743,28 @@ impl ConformanceTest for ContextSynchronizationTest {
     }
 }
 
+#[allow(dead_code)]
 struct MalformedInputTest;
 
 impl ConformanceTest for MalformedInputTest {
+    #[allow(dead_code)]
     fn id(&self) -> &str {
         "RFC7541-Err-1"
     }
+    #[allow(dead_code)]
     fn description(&self) -> &str {
         "Malformed input handling"
     }
+    #[allow(dead_code)]
     fn category(&self) -> TestCategory {
         TestCategory::ErrorHandling
     }
+    #[allow(dead_code)]
     fn requirement_level(&self) -> RequirementLevel {
         RequirementLevel::Must
     }
+
+    #[allow(dead_code)]
 
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult {
         // Test various malformed inputs
@@ -706,21 +805,28 @@ impl ConformanceTest for MalformedInputTest {
     }
 }
 
+#[allow(dead_code)]
 struct HeaderRoundTripTest;
 
 impl ConformanceTest for HeaderRoundTripTest {
+    #[allow(dead_code)]
     fn id(&self) -> &str {
         "RFC7541-RT-1"
     }
+    #[allow(dead_code)]
     fn description(&self) -> &str {
         "Header encoding/decoding round-trip integrity"
     }
+    #[allow(dead_code)]
     fn category(&self) -> TestCategory {
         TestCategory::RoundTrip
     }
+    #[allow(dead_code)]
     fn requirement_level(&self) -> RequirementLevel {
         RequirementLevel::Must
     }
+
+    #[allow(dead_code)]
 
     fn run(&self, harness: &HpackConformanceHarness) -> ConformanceTestResult {
         let test_cases = vec![

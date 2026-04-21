@@ -18,6 +18,7 @@ use proptest::prelude::*;
 use std::collections::HashSet;
 
 /// Helper to decode a complete HTTP request from raw bytes
+#[allow(dead_code)]
 fn decode_request(raw_http: &str) -> Result<Request, HttpError> {
     let mut codec = Http1Codec::new();
     let mut buf = BytesMut::from(raw_http.as_bytes());
@@ -29,6 +30,7 @@ fn decode_request(raw_http: &str) -> Result<Request, HttpError> {
 }
 
 /// Helper to check if a request-target is valid for a given method
+#[allow(dead_code)]
 fn is_valid_request_target_for_method(method: &Method, uri: &str) -> bool {
     match method {
         Method::Connect => {
@@ -52,16 +54,19 @@ fn is_valid_request_target_for_method(method: &Method, uri: &str) -> bool {
 }
 
 /// Check if URI is valid origin-form: starts with "/"
+#[allow(dead_code)]
 fn origin_form_valid(uri: &str) -> bool {
     uri.starts_with('/') && !uri.contains("://") && uri != "*"
 }
 
 /// Check if URI is valid absolute-form: full URL
+#[allow(dead_code)]
 fn absolute_form_valid(uri: &str) -> bool {
     uri.starts_with("http://") || uri.starts_with("https://")
 }
 
 /// Check if URI is valid authority-form: host:port
+#[allow(dead_code)]
 fn authority_form_valid(uri: &str) -> bool {
     !uri.starts_with('/') &&
     !uri.contains("://") &&
@@ -72,6 +77,7 @@ fn authority_form_valid(uri: &str) -> bool {
 }
 
 /// Generate a valid origin-form request-target
+#[allow(dead_code)]
 fn origin_form_strategy() -> impl Strategy<Value = String> {
     prop::collection::vec(
         prop::char::range('a', 'z').prop_union(prop::char::range('A', 'Z'))
@@ -95,6 +101,7 @@ fn origin_form_strategy() -> impl Strategy<Value = String> {
 }
 
 /// Generate a valid absolute-form request-target
+#[allow(dead_code)]
 fn absolute_form_strategy() -> impl Strategy<Value = String> {
     let scheme = prop::sample::select(vec!["http", "https"]);
     let host = prop::collection::vec(
@@ -112,6 +119,7 @@ fn absolute_form_strategy() -> impl Strategy<Value = String> {
 }
 
 /// Generate a valid authority-form request-target
+#[allow(dead_code)]
 fn authority_form_strategy() -> impl Strategy<Value = String> {
     let host = prop::collection::vec(
         prop::char::range('a', 'z'),
@@ -125,6 +133,7 @@ fn authority_form_strategy() -> impl Strategy<Value = String> {
 }
 
 /// Generate invalid request-target forms
+#[allow(dead_code)]
 fn invalid_request_target_strategy() -> impl Strategy<Value = String> {
     prop::sample::select(vec![
         // Empty
@@ -156,6 +165,7 @@ fn invalid_request_target_strategy() -> impl Strategy<Value = String> {
 /// For non-CONNECT methods, valid origin-form request-targets should be accepted
 /// and invalid ones should be rejected with appropriate errors.
 #[test]
+#[allow(dead_code)]
 fn mr1_origin_form_validity() {
     proptest!(|(
         method in prop::sample::select(vec![Method::Get, Method::Post, Method::Put, Method::Delete, Method::Head, Method::Patch]),
@@ -197,6 +207,7 @@ fn mr1_origin_form_validity() {
 ///
 /// Absolute-form URIs should be valid for standard HTTP methods when used in proxy scenarios.
 #[test]
+#[allow(dead_code)]
 fn mr2_absolute_form_validity() {
     proptest!(|(
         method in prop::sample::select(vec![Method::Get, Method::Post, Method::Put, Method::Delete]),
@@ -223,6 +234,7 @@ fn mr2_absolute_form_validity() {
 ///
 /// CONNECT method must use authority-form (host:port), not origin-form or absolute-form.
 #[test]
+#[allow(dead_code)]
 fn mr3_connect_authority_form() {
     proptest!(|(
         authority_uri in authority_form_strategy(),
@@ -269,6 +281,7 @@ fn mr3_connect_authority_form() {
 ///
 /// OPTIONS method with asterisk-form (*) should be valid for server-wide queries.
 #[test]
+#[allow(dead_code)]
 fn mr4_options_asterisk_form() {
     // MR4.1: OPTIONS * should be valid
     let asterisk_request = "OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n";
@@ -315,6 +328,7 @@ fn mr4_options_asterisk_form() {
 /// The request-target form should be preserved consistently through parsing and
 /// remain valid according to the method-specific rules.
 #[test]
+#[allow(dead_code)]
 fn mr5_request_target_consistency() {
     proptest!(|(
         method in prop::sample::select(vec![
@@ -357,6 +371,7 @@ fn mr5_request_target_consistency() {
 /// Test all request-target forms together to ensure they work correctly
 /// in combination and edge cases are handled properly.
 #[test]
+#[allow(dead_code)]
 fn comprehensive_request_target_validation() {
     // Test case matrix: method × request-target form
     let test_cases = vec![
@@ -412,6 +427,7 @@ fn comprehensive_request_target_validation() {
 ///
 /// Test edge cases that could lead to request smuggling or parsing ambiguities.
 #[test]
+#[allow(dead_code)]
 fn edge_cases_and_security() {
     let dangerous_cases = vec![
         // Request smuggling vectors
@@ -457,6 +473,7 @@ mod prop_tests {
     proptest! {
         /// Property: Request-target parsing should be deterministic
         #[test]
+        #[allow(dead_code)]
         fn prop_deterministic_parsing(
             method in prop::sample::select(vec![Method::Get, Method::Post, Method::Options, Method::Connect]),
             uri in "[ -~]{1,100}" // Printable ASCII
@@ -485,6 +502,7 @@ mod prop_tests {
 
         /// Property: Valid request-targets should never contain control characters
         #[test]
+        #[allow(dead_code)]
         fn prop_no_control_characters(
             method in prop::sample::select(vec![Method::Get, Method::Post, Method::Put]),
             path in "[a-zA-Z0-9/_?&=.-]{1,50}"

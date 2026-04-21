@@ -5,6 +5,7 @@ use super::test_vectors::*;
 
 /// Test verdict for conformance results.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -13,6 +14,7 @@ pub enum TestVerdict {
 
 /// Test category for organizing conformance tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TestCategory {
     Encoding,
     Decoding,
@@ -29,6 +31,7 @@ pub use super::test_vectors::RequirementLevel;
 
 /// Conformance test result.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ConformanceTestResult {
     pub test_id: String,
     pub description: String,
@@ -40,6 +43,7 @@ pub struct ConformanceTestResult {
 
 /// Kafka RecordBatch v2 conformance test harness.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct KafkaConformanceHarness {
     /// Whether to run tests that are expected to fail.
     pub run_expected_failures: bool,
@@ -48,13 +52,17 @@ pub struct KafkaConformanceHarness {
 }
 
 impl Default for KafkaConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[allow(dead_code)]
+
 impl KafkaConformanceHarness {
     /// Create a new conformance test harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             run_expected_failures: true,
@@ -63,6 +71,7 @@ impl KafkaConformanceHarness {
     }
 
     /// Run all conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
 
@@ -91,6 +100,7 @@ impl KafkaConformanceHarness {
     }
 
     /// Test basic RecordBatch v2 format encoding/decoding.
+    #[allow(dead_code)]
     pub fn run_format_tests(&self) -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
 
@@ -110,6 +120,7 @@ impl KafkaConformanceHarness {
     }
 
     /// Test record attribute bit manipulations.
+    #[allow(dead_code)]
     pub fn run_attribute_tests(&self) -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
 
@@ -129,6 +140,7 @@ impl KafkaConformanceHarness {
     }
 
     /// Test varint encoding for various field types.
+    #[allow(dead_code)]
     pub fn run_varint_tests(&self) -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
 
@@ -145,6 +157,7 @@ impl KafkaConformanceHarness {
     }
 
     /// Test header array encoding.
+    #[allow(dead_code)]
     pub fn run_header_tests(&self) -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
 
@@ -155,6 +168,7 @@ impl KafkaConformanceHarness {
     }
 
     /// Test exactly-once semantics fields.
+    #[allow(dead_code)]
     pub fn run_exactly_once_tests(&self) -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
 
@@ -174,6 +188,7 @@ impl KafkaConformanceHarness {
     }
 
     /// Test edge cases and boundary conditions.
+    #[allow(dead_code)]
     pub fn run_edge_case_tests(&self) -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
 
@@ -185,6 +200,7 @@ impl KafkaConformanceHarness {
     }
 
     /// Test round-trip encoding/decoding for all test vectors.
+    #[allow(dead_code)]
     pub fn run_round_trip_tests(&self) -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
 
@@ -196,16 +212,20 @@ impl KafkaConformanceHarness {
     }
 
     /// Encode a RecordBatch for testing.
+    #[allow(dead_code)]
     pub fn encode_record_batch(&self, batch: &RecordBatchV2) -> Vec<u8> {
         batch.encode()
     }
 
     /// Decode a RecordBatch for testing.
+    #[allow(dead_code)]
     pub fn decode_record_batch(&self, data: &[u8]) -> Result<RecordBatchV2, String> {
         RecordBatchV2::decode(data)
     }
 
     // Individual test implementations
+
+    #[allow(dead_code)]
 
     fn test_encode_record_batch(&self, test_vector: &Kip98TestVector) -> ConformanceTestResult {
         let encoded = self.encode_record_batch(&test_vector.record_batch);
@@ -236,6 +256,8 @@ impl KafkaConformanceHarness {
         }
     }
 
+    #[allow(dead_code)]
+
     fn test_decode_record_batch(&self, test_vector: &Kip98TestVector) -> ConformanceTestResult {
         match self.decode_record_batch(test_vector.expected_encoded) {
             Ok(decoded) => {
@@ -264,6 +286,8 @@ impl KafkaConformanceHarness {
             },
         }
     }
+
+    #[allow(dead_code)]
 
     fn test_round_trip(&self, test_vector: &Kip98TestVector) -> ConformanceTestResult {
         let encoded = self.encode_record_batch(&test_vector.record_batch);
@@ -296,6 +320,8 @@ impl KafkaConformanceHarness {
         }
     }
 
+    #[allow(dead_code)]
+
     fn test_compression_attributes(&self) -> ConformanceTestResult {
         let mut all_passed = true;
         let mut details = Vec::new();
@@ -327,6 +353,8 @@ impl KafkaConformanceHarness {
         }
     }
 
+    #[allow(dead_code)]
+
     fn test_transactional_attribute(&self) -> ConformanceTestResult {
         let attr_false = RecordAttribute::new().with_transactional(false);
         let attr_true = RecordAttribute::new().with_transactional(true);
@@ -347,6 +375,8 @@ impl KafkaConformanceHarness {
         }
     }
 
+    #[allow(dead_code)]
+
     fn test_control_attribute(&self) -> ConformanceTestResult {
         let attr_false = RecordAttribute::new().with_control(false);
         let attr_true = RecordAttribute::new().with_control(true);
@@ -366,6 +396,8 @@ impl KafkaConformanceHarness {
             details: None,
         }
     }
+
+    #[allow(dead_code)]
 
     fn test_timestamp_type_attribute(&self) -> ConformanceTestResult {
         let attr_create = RecordAttribute::new().with_timestamp_type(TimestampType::CreateTime);
@@ -388,6 +420,8 @@ impl KafkaConformanceHarness {
             details: None,
         }
     }
+
+    #[allow(dead_code)]
 
     fn test_timestamp_delta_varint(&self) -> ConformanceTestResult {
         let test_vector = timestamp_delta_encoding();
@@ -437,6 +471,8 @@ impl KafkaConformanceHarness {
         }
     }
 
+    #[allow(dead_code)]
+
     fn test_length_varint_encoding(&self) -> ConformanceTestResult {
         let test_vector = basic_record_batch_no_compression();
         let encoded = self.encode_record_batch(&test_vector.record_batch);
@@ -477,6 +513,8 @@ impl KafkaConformanceHarness {
             },
         }
     }
+
+    #[allow(dead_code)]
 
     fn test_offset_delta_varint(&self) -> ConformanceTestResult {
         let test_vector = offset_relationship();
@@ -525,6 +563,8 @@ impl KafkaConformanceHarness {
             },
         }
     }
+
+    #[allow(dead_code)]
 
     fn test_header_encoding(&self, test_vector: &Kip98TestVector) -> ConformanceTestResult {
         let encoded = self.encode_record_batch(&test_vector.record_batch);
@@ -578,6 +618,8 @@ impl KafkaConformanceHarness {
         }
     }
 
+    #[allow(dead_code)]
+
     fn test_producer_id_validation(&self) -> ConformanceTestResult {
         let test_vector = producer_id_epoch_sequence();
 
@@ -596,6 +638,8 @@ impl KafkaConformanceHarness {
             details: None,
         }
     }
+
+    #[allow(dead_code)]
 
     fn test_producer_epoch_validation(&self) -> ConformanceTestResult {
         let test_vector = producer_id_epoch_sequence();
@@ -616,6 +660,8 @@ impl KafkaConformanceHarness {
         }
     }
 
+    #[allow(dead_code)]
+
     fn test_base_sequence_validation(&self) -> ConformanceTestResult {
         let test_vector = producer_id_epoch_sequence();
 
@@ -634,6 +680,8 @@ impl KafkaConformanceHarness {
             details: None,
         }
     }
+
+    #[allow(dead_code)]
 
     fn test_offset_relationship_validation(&self) -> ConformanceTestResult {
         let test_vector = offset_relationship();
@@ -655,6 +703,8 @@ impl KafkaConformanceHarness {
             details: None,
         }
     }
+
+    #[allow(dead_code)]
 
     fn test_edge_case(&self, test_vector: &Kip98TestVector) -> ConformanceTestResult {
         let encoded = self.encode_record_batch(&test_vector.record_batch);
@@ -680,6 +730,7 @@ impl KafkaConformanceHarness {
     }
 
     /// Compare two RecordBatch instances for equality.
+    #[allow(dead_code)]
     fn compare_batches(&self, original: &RecordBatchV2, decoded: &RecordBatchV2) -> bool {
         original.base_offset == decoded.base_offset
             && original.magic == decoded.magic

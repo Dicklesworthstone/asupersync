@@ -10,6 +10,7 @@ pub mod esi_validation_tests;
 use super::{Rfc6330ConformanceCase, Rfc6330ConformanceSuite};
 
 /// Register all encoding process tests.
+#[allow(dead_code)]
 pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
     systematic_encoding_tests::register_tests(suite);
     repair_symbol_tests::register_tests(suite);

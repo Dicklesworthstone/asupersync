@@ -8,12 +8,16 @@ use std::path::{Path, PathBuf};
 /// Resolves differential fixture catalogs and artifact paths from a base
 /// directory on disk.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DifferentialFixtureLoader {
     base_path: PathBuf,
 }
 
+#[allow(dead_code)]
+
 impl DifferentialFixtureLoader {
     #[must_use]
+    #[allow(dead_code)]
     pub fn new<P: AsRef<Path>>(base_path: P) -> Self {
         Self {
             base_path: base_path.as_ref().to_path_buf(),
@@ -21,25 +25,32 @@ impl DifferentialFixtureLoader {
     }
 
     #[must_use]
+    #[allow(dead_code)]
     pub fn base_path(&self) -> &Path {
         &self.base_path
     }
 
     #[must_use]
+    #[allow(dead_code)]
     pub fn default_catalog_path(&self) -> PathBuf {
         self.base_path.join("fixtures").join("catalog.json")
     }
 
     #[must_use]
+    #[allow(dead_code)]
     pub fn default_provenance_path(&self) -> PathBuf {
         self.base_path.join("fixtures").join("PROVENANCE.md")
     }
+
+    #[allow(dead_code)]
 
     pub fn load_catalog(&self) -> Result<DifferentialFixtureCatalog, DifferentialFixtureError> {
         let catalog = DifferentialFixtureCatalog::load_json(self.default_catalog_path())?;
         self.validate_catalog(&catalog)?;
         Ok(catalog)
     }
+
+    #[allow(dead_code)]
 
     pub fn validate_catalog(
         &self,
@@ -64,6 +75,8 @@ impl DifferentialFixtureLoader {
         }
         Ok(())
     }
+
+    #[allow(dead_code)]
 
     pub fn load_case<'a>(
         &self,
@@ -91,9 +104,12 @@ impl DifferentialFixtureLoader {
     }
 
     #[must_use]
+    #[allow(dead_code)]
     pub fn resolve_artifact_path(&self, artifact: &FixtureArtifact) -> PathBuf {
         self.base_path.join(&artifact.relative_path)
     }
+
+    #[allow(dead_code)]
 
     pub fn write_provenance_markdown(
         &self,
@@ -118,6 +134,7 @@ impl DifferentialFixtureLoader {
 
 /// A catalog case plus its resolved artifact paths on disk.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FixtureCaseView<'a> {
     pub record: &'a FixtureProvenanceRecord,
     pub resolved_artifacts: Vec<PathBuf>,
@@ -127,6 +144,8 @@ pub struct FixtureCaseView<'a> {
 mod tests {
     use super::*;
     use crate::provenance::{ReferenceImplementation, ReferenceLanguage};
+
+    #[allow(dead_code)]
 
     fn sample_catalog() -> DifferentialFixtureCatalog {
         DifferentialFixtureCatalog {
@@ -156,6 +175,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn loader_resolves_case_artifact_paths() {
         let loader = DifferentialFixtureLoader::new("/tmp/differential");
         let catalog = sample_catalog();
@@ -174,6 +194,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn loader_rejects_duplicate_case_ids() {
         let loader = DifferentialFixtureLoader::new("/tmp/differential");
         let record = sample_catalog().records.into_iter().next().expect("record");
@@ -190,6 +211,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn loader_rejects_absolute_artifact_paths() {
         let loader = DifferentialFixtureLoader::new("/tmp/differential");
         let mut catalog = sample_catalog();
@@ -205,6 +227,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn provenance_markdown_is_regenerated_from_catalog() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let loader = DifferentialFixtureLoader::new(tempdir.path());

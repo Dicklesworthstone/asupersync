@@ -13,10 +13,14 @@ use std::time::{Duration, Instant};
 use std::collections::HashMap;
 
 /// High-concurrency stress test scenarios for channel cancellation.
+#[allow(dead_code)]
 pub struct StressTestScenarios;
+
+#[allow(dead_code)]
 
 impl StressTestScenarios {
     /// Run all stress test scenarios.
+    #[allow(dead_code)]
     pub fn run_all_stress_tests(harness: &CancelTestHarness) -> HashMap<String, CancelTestResult> {
         let mut results = HashMap::new();
 
@@ -46,6 +50,7 @@ impl StressTestScenarios {
     }
 
     /// Stress test for concurrent send operations with cancellation.
+    #[allow(dead_code)]
     fn concurrent_send_cancel_stress(harness: &CancelTestHarness) -> CancelTestResult {
         let config = &harness.stress_config;
         let start = Instant::now();
@@ -119,6 +124,7 @@ impl StressTestScenarios {
     }
 
     /// Stress test for concurrent receive operations with cancellation.
+    #[allow(dead_code)]
     fn concurrent_receive_cancel_stress(harness: &CancelTestHarness) -> CancelTestResult {
         let config = &harness.stress_config;
         let start = Instant::now();
@@ -171,6 +177,7 @@ impl StressTestScenarios {
     }
 
     /// Stress test for mixed channel operations with cancellation.
+    #[allow(dead_code)]
     fn mixed_operations_cancel_stress(harness: &CancelTestHarness) -> CancelTestResult {
         let config = &harness.stress_config;
         let start = Instant::now();
@@ -247,6 +254,7 @@ impl StressTestScenarios {
     }
 
     /// Stress test for rapid channel creation and destruction with cancellation.
+    #[allow(dead_code)]
     fn rapid_create_destroy_stress(harness: &CancelTestHarness) -> CancelTestResult {
         let config = &harness.stress_config;
         let start = Instant::now();
@@ -315,6 +323,7 @@ impl StressTestScenarios {
     }
 
     /// Stress test for cascading cancellation scenarios.
+    #[allow(dead_code)]
     fn cascade_cancellation_stress(harness: &CancelTestHarness) -> CancelTestResult {
         let config = &harness.stress_config;
         let start = Instant::now();
@@ -373,6 +382,7 @@ impl StressTestScenarios {
     }
 
     /// Stress test for cancellation under memory pressure.
+    #[allow(dead_code)]
     fn memory_pressure_cancel_stress(harness: &CancelTestHarness) -> CancelTestResult {
         let config = &harness.stress_config;
         let start = Instant::now();
@@ -444,6 +454,7 @@ impl StressTestScenarios {
 
 /// Configuration specifically for stress testing scenarios.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct StressTestConfig {
     /// Base stress configuration.
     pub base_config: StressConfig,
@@ -460,6 +471,7 @@ pub struct StressTestConfig {
 }
 
 impl Default for StressTestConfig {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             base_config: StressConfig::default(),
@@ -473,10 +485,14 @@ impl Default for StressTestConfig {
 }
 
 /// Utilities for stress testing scenarios.
+#[allow(dead_code)]
 pub struct StressTestUtils;
+
+#[allow(dead_code)]
 
 impl StressTestUtils {
     /// Generate a random delay within specified bounds.
+    #[allow(dead_code)]
     pub fn random_delay(min: Duration, max: Duration) -> Duration {
         let min_nanos = min.as_nanos() as u64;
         let max_nanos = max.as_nanos() as u64;
@@ -499,11 +515,13 @@ impl StressTestUtils {
     }
 
     /// Calculate operation throughput.
+    #[allow(dead_code)]
     pub fn calculate_throughput(operations: usize, duration: Duration) -> f64 {
         operations as f64 / duration.as_secs_f64()
     }
 
     /// Check if performance meets threshold.
+    #[allow(dead_code)]
     pub fn meets_performance_threshold(
         actual_ops_per_sec: f64,
         target_ops_per_sec: f64,
@@ -514,6 +532,7 @@ impl StressTestUtils {
     }
 
     /// Generate realistic workload distribution.
+    #[allow(dead_code)]
     pub fn generate_workload_pattern(total_ops: usize) -> Vec<Duration> {
         let mut pattern = Vec::with_capacity(total_ops);
 
@@ -545,6 +564,7 @@ mod tests {
     use crate::cancel_harness::CancelTestHarness;
 
     #[test]
+    #[allow(dead_code)]
     fn test_concurrent_send_cancel_stress() {
         let harness = CancelTestHarness::new("test_concurrent_send")
             .with_stress_config(StressConfig {
@@ -562,6 +582,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mixed_operations_stress() {
         let harness = CancelTestHarness::new("test_mixed_ops")
             .with_stress_config(StressConfig {
@@ -579,6 +600,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_stress_utils() {
         // Test random delay generation
         let min = Duration::from_millis(1);

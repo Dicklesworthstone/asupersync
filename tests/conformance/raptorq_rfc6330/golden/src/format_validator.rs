@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 /// Format validation configuration
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ValidationConfig {
     /// Require specific metadata fields
     pub required_metadata_fields: HashSet<String>,
@@ -32,6 +33,7 @@ pub struct ValidationConfig {
 }
 
 impl Default for ValidationConfig {
+    #[allow(dead_code)]
     fn default() -> Self {
         let mut required_fields = HashSet::new();
         required_fields.insert("test_name".to_string());
@@ -60,6 +62,7 @@ impl Default for ValidationConfig {
 
 /// Result of golden file format validation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ValidationResult {
     /// Whether validation passed
     pub is_valid: bool,
@@ -73,8 +76,11 @@ pub struct ValidationResult {
     pub rfc_compliance: RfcComplianceStatus,
 }
 
+#[allow(dead_code)]
+
 impl ValidationResult {
     /// Returns true if there are no critical issues
+    #[allow(dead_code)]
     pub fn has_critical_issues(&self) -> bool {
         self.issues
             .iter()
@@ -82,6 +88,7 @@ impl ValidationResult {
     }
 
     /// Returns the number of issues at each severity level
+    #[allow(dead_code)]
     pub fn issue_counts(&self) -> (usize, usize, usize) {
         let mut critical = 0;
         let mut warning = 0;
@@ -101,6 +108,7 @@ impl ValidationResult {
 
 /// Individual validation issue
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ValidationIssue {
     /// Issue severity level
     pub severity: IssueSeverity,
@@ -116,6 +124,7 @@ pub struct ValidationIssue {
 
 /// Severity level of validation issues
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum IssueSeverity {
     /// Critical issues that prevent using the golden file
     Critical,
@@ -127,6 +136,7 @@ pub enum IssueSeverity {
 
 /// Categories of validation issues
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum IssueCategory {
     /// JSON structure or schema issues
     Schema,
@@ -144,6 +154,7 @@ pub enum IssueCategory {
 
 /// Summary of file metadata
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MetadataSummary {
     /// File size in bytes
     pub file_size: u64,
@@ -161,6 +172,7 @@ pub struct MetadataSummary {
 
 /// Data integrity validation status
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DataIntegrityStatus {
     /// Checksum validation passed
     pub checksum_valid: bool,
@@ -176,6 +188,7 @@ pub struct DataIntegrityStatus {
 
 /// RFC 6330 compliance validation status
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RfcComplianceStatus {
     /// Symbol sizes are valid per RFC 6330
     pub symbol_sizes_valid: bool,
@@ -190,12 +203,16 @@ pub struct RfcComplianceStatus {
 }
 
 /// Golden file format validator
+#[allow(dead_code)]
 pub struct FormatValidator {
     config: ValidationConfig,
 }
 
+#[allow(dead_code)]
+
 impl FormatValidator {
     /// Creates a new format validator with default configuration
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             config: ValidationConfig::default(),
@@ -203,11 +220,13 @@ impl FormatValidator {
     }
 
     /// Creates a validator with custom configuration
+    #[allow(dead_code)]
     pub fn with_config(config: ValidationConfig) -> Self {
         Self { config }
     }
 
     /// Validates a single golden file
+    #[allow(dead_code)]
     pub fn validate_file<P: AsRef<Path>>(
         &self,
         file_path: P,
@@ -269,6 +288,7 @@ impl FormatValidator {
     }
 
     /// Validates all golden files in a directory
+    #[allow(dead_code)]
     pub fn validate_directory<P: AsRef<Path>>(
         &self,
         dir_path: P,
@@ -306,6 +326,7 @@ impl FormatValidator {
     }
 
     /// Validates a parsed golden file entry
+    #[allow(dead_code)]
     fn validate_golden_entry(
         &self,
         entry: &GoldenFileEntry<RoundTripOutput>,
@@ -349,6 +370,7 @@ impl FormatValidator {
     }
 
     /// Validates metadata fields and content
+    #[allow(dead_code)]
     fn validate_metadata(&self, metadata: &GoldenMetadata) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
@@ -425,6 +447,7 @@ impl FormatValidator {
     }
 
     /// Validates round-trip data structure and content
+    #[allow(dead_code)]
     fn validate_round_trip_data(&self, data: &RoundTripOutput) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
@@ -489,6 +512,7 @@ impl FormatValidator {
     }
 
     /// Validates RFC 6330 compliance
+    #[allow(dead_code)]
     fn validate_rfc_compliance(
         &self,
         metadata: &GoldenMetadata,
@@ -561,6 +585,7 @@ impl FormatValidator {
     }
 
     /// Builds metadata summary
+    #[allow(dead_code)]
     fn build_metadata_summary(&self, metadata: &GoldenMetadata, file_size: u64) -> MetadataSummary {
         let last_updated = chrono::DateTime::from_timestamp(
             metadata
@@ -582,6 +607,7 @@ impl FormatValidator {
     }
 
     /// Assesses data integrity status
+    #[allow(dead_code)]
     fn assess_data_integrity(
         &self,
         entry: &GoldenFileEntry<RoundTripOutput>,
@@ -608,6 +634,7 @@ impl FormatValidator {
     }
 
     /// Assesses RFC compliance status
+    #[allow(dead_code)]
     fn assess_rfc_compliance(
         &self,
         _metadata: &GoldenMetadata,
@@ -629,6 +656,7 @@ impl FormatValidator {
 }
 
 impl Default for FormatValidator {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
@@ -636,13 +664,17 @@ impl Default for FormatValidator {
 
 /// Result of validating an entire directory
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct DirectoryValidationResult {
     pub total_files: usize,
     pub valid_files: usize,
     pub results: Vec<(PathBuf, Result<ValidationResult, ValidationError>)>,
 }
 
+#[allow(dead_code)]
+
 impl DirectoryValidationResult {
+    #[allow(dead_code)]
     pub fn success_rate(&self) -> f64 {
         if self.total_files == 0 {
             1.0
@@ -654,6 +686,7 @@ impl DirectoryValidationResult {
 
 /// Errors that can occur during validation
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum ValidationError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
@@ -674,6 +707,8 @@ mod tests {
     use crate::golden_file_manager::create_metadata;
     use crate::round_trip_harness::{RoundTripOutput, ValidationMetrics};
     use std::collections::HashMap;
+
+    #[allow(dead_code)]
 
     fn create_test_golden_file() -> GoldenFileEntry<RoundTripOutput> {
         let metadata = create_metadata("test_case", "5.3.1", "Test golden file", HashMap::new());
@@ -702,6 +737,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_validation_config_default() {
         let config = ValidationConfig::default();
         assert!(config.required_metadata_fields.contains("test_name"));
@@ -710,6 +746,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_format_validator_creation() {
         let validator = FormatValidator::new();
         assert!(validator.config.validate_checksums);
@@ -717,6 +754,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_validate_golden_entry_success() {
         let validator = FormatValidator::new();
         let entry = create_test_golden_file();
@@ -731,6 +769,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_validation_issue_severity() {
         let issue = ValidationIssue {
             severity: IssueSeverity::Critical,
@@ -744,6 +783,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_directory_validation_result() {
         let result = DirectoryValidationResult {
             total_files: 10,

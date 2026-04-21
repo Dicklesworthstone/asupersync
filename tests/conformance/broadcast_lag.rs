@@ -20,6 +20,7 @@ use std::collections::HashMap;
 
 /// Helper to track per-subscriber lag state for validation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct SubscriberTracker {
     id: usize,
     next_expected: u64,
@@ -27,7 +28,10 @@ struct SubscriberTracker {
     received_values: Vec<u64>,
 }
 
+#[allow(dead_code)]
+
 impl SubscriberTracker {
+    #[allow(dead_code)]
     fn new(id: usize) -> Self {
         Self {
             id,
@@ -37,10 +41,14 @@ impl SubscriberTracker {
         }
     }
 
+    #[allow(dead_code)]
+
     fn record_value(&mut self, value: u64) {
         self.received_values.push(value);
         self.next_expected = value + 1;
     }
+
+    #[allow(dead_code)]
 
     fn record_lag(&mut self, count: u64) {
         self.lag_events.push(count);
@@ -50,6 +58,7 @@ impl SubscriberTracker {
 
 /// MR1: Slow subscriber falls behind → Lagged(n) error with count of skipped values
 #[test]
+#[allow(dead_code)]
 fn mr1_slow_subscriber_lag_detection() {
     LabRuntime::test(|lab| async {
         let cx = test_cx();
@@ -75,6 +84,7 @@ fn mr1_slow_subscriber_lag_detection() {
 
 /// MR2: recv() after Lagged resumes at current position (not resubscribe)
 #[test]
+#[allow(dead_code)]
 fn mr2_lag_recovery_positioning() {
     LabRuntime::test(|lab| async {
         let cx = test_cx();
@@ -105,6 +115,7 @@ fn mr2_lag_recovery_positioning() {
 
 /// MR3: Ring buffer capacity bound respected — oldest values dropped first
 #[test]
+#[allow(dead_code)]
 fn mr3_fifo_capacity_enforcement() {
     LabRuntime::test(|lab| async {
         let cx = test_cx();
@@ -143,6 +154,7 @@ fn mr3_fifo_capacity_enforcement() {
 
 /// MR4: Lagged count is exact (matches dropped msg count)
 #[test]
+#[allow(dead_code)]
 fn mr4_exact_lag_accounting() {
     LabRuntime::test(|lab| async {
         let cx = test_cx();
@@ -181,6 +193,7 @@ fn mr4_exact_lag_accounting() {
 
 /// MR5: Concurrent subscribers with different consumption rates independently track their own lag
 #[test]
+#[allow(dead_code)]
 fn mr5_independent_lag_tracking() {
     LabRuntime::test(|lab| async {
         let cx = test_cx();
@@ -261,6 +274,7 @@ fn mr5_independent_lag_tracking() {
 
 /// Property-based test: Lag count invariant across different consumption patterns
 #[test]
+#[allow(dead_code)]
 fn property_lag_count_invariant() {
     use std::collections::VecDeque;
 
@@ -320,6 +334,7 @@ fn property_lag_count_invariant() {
 
 /// Edge case: Empty channel lag behavior
 #[test]
+#[allow(dead_code)]
 fn edge_case_empty_channel_no_lag() {
     LabRuntime::test(|lab| async {
         let (_tx, mut rx) = broadcast::channel::<u64>(4);
@@ -336,6 +351,7 @@ fn edge_case_empty_channel_no_lag() {
 
 /// Edge case: Exact capacity boundary (no lag at capacity limit)
 #[test]
+#[allow(dead_code)]
 fn edge_case_exact_capacity_no_lag() {
     LabRuntime::test(|lab| async {
         let cx = test_cx();

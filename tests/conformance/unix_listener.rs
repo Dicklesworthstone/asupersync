@@ -17,6 +17,8 @@ use std::path::Path;
 use std::time::Duration;
 use tempfile::tempdir;
 
+#[allow(dead_code)]
+
 fn init_test(name: &str) {
     println!("Starting test: {}", name);
 }
@@ -33,6 +35,7 @@ mod tests {
     /// Metamorphic relation: bind_abstract(name) ⇒ no filesystem path exists, but socket is functional
     #[test]
     #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
     fn mr1_abstract_namespace_bind() {
         init_test("mr1_abstract_namespace_bind");
 
@@ -93,6 +96,7 @@ mod tests {
     ///
     /// Metamorphic relation: send(msg1); send(msg2); send(msg3) ⇒ recv order = send order
     #[test]
+    #[allow(dead_code)]
     fn mr2_stream_ordering_preservation() {
         init_test("mr2_stream_ordering_preservation");
 
@@ -158,6 +162,7 @@ mod tests {
     ///
     /// Metamorphic relation: send(large_datagram) ⇒ recv(complete_datagram) ∨ recv_fails
     #[test]
+    #[allow(dead_code)]
     fn mr3_datagram_buffer_overflow_handling() {
         init_test("mr3_datagram_buffer_overflow_handling");
 
@@ -260,6 +265,7 @@ mod tests {
     ///
     /// Metamorphic relation: bind(path) where len(path) > 107 ⇒ Error
     #[test]
+    #[allow(dead_code)]
     fn mr4_path_length_limit_108_bytes() {
         init_test("mr4_path_length_limit_108_bytes");
 
@@ -347,6 +353,7 @@ mod tests {
     ///
     /// Metamorphic relation: bind(path); chmod(path, mode) ⇒ stat(path).mode == mode
     #[test]
+    #[allow(dead_code)]
     fn mr5_permissions_honored_filesystem_bound() {
         init_test("mr5_permissions_honored_filesystem_bound");
 

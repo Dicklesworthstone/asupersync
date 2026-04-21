@@ -23,18 +23,26 @@ use std::collections::HashMap;
 
 /// Lightweight test clock for deterministic assertions local to this harness.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ConnectTestTimeGetter {
     elapsed_nanos: u64,
 }
 
+#[allow(dead_code)]
+
 impl ConnectTestTimeGetter {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self { elapsed_nanos: 0 }
     }
 
+    #[allow(dead_code)]
+
     fn advance(&mut self, nanos: u64) {
         self.elapsed_nanos += nanos;
     }
+
+    #[allow(dead_code)]
 
     fn now_nanos(&self) -> u64 {
         self.elapsed_nanos
@@ -43,6 +51,7 @@ impl ConnectTestTimeGetter {
 
 /// CONNECT request test input structure
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ConnectRequestInput {
     /// Target authority (hostname:port)
     authority: Option<String>,
@@ -60,7 +69,10 @@ struct ConnectRequestInput {
     stream_id: u32,
 }
 
+#[allow(dead_code)]
+
 impl ConnectRequestInput {
+    #[allow(dead_code)]
     fn to_headers_frame(&self) -> Result<HeadersFrame, H2Error> {
         let mut headers = Vec::new();
 
@@ -103,6 +115,8 @@ impl ConnectRequestInput {
         ))
     }
 
+    #[allow(dead_code)]
+
     fn has_forbidden_pseudo_headers(&self) -> bool {
         self.scheme.is_some() || self.path.is_some()
     }
@@ -110,6 +124,7 @@ impl ConnectRequestInput {
 
 /// CONNECT response test input structure
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ConnectResponseInput {
     /// HTTP status code
     status: u16,
@@ -125,6 +140,7 @@ struct ConnectResponseInput {
 
 /// Target connection state for testing connection establishment timing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum TargetConnectionState {
     /// No connection attempted
     NotAttempted,
@@ -138,12 +154,16 @@ enum TargetConnectionState {
 
 /// Test context for CONNECT method conformance tests
 #[derive(Debug)]
+#[allow(dead_code)]
 struct ConnectTestContext {
     target_connections: HashMap<String, TargetConnectionState>,
     time_getter: ConnectTestTimeGetter,
 }
 
+#[allow(dead_code)]
+
 impl ConnectTestContext {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self {
             target_connections: HashMap::new(),
@@ -151,12 +171,16 @@ impl ConnectTestContext {
         }
     }
 
+    #[allow(dead_code)]
+
     fn server() -> Self {
         Self {
             target_connections: HashMap::new(),
             time_getter: ConnectTestTimeGetter::new(),
         }
     }
+
+    #[allow(dead_code)]
 
     fn establish_target_connection(
         &mut self,
@@ -168,6 +192,8 @@ impl ConnectTestContext {
         Ok(())
     }
 
+    #[allow(dead_code)]
+
     fn get_target_connection_state(&self, authority: &str) -> TargetConnectionState {
         self.target_connections
             .get(authority)
@@ -177,6 +203,7 @@ impl ConnectTestContext {
 }
 
 /// Validate CONNECT request pseudo-headers according to RFC 9113 §8.5
+#[allow(dead_code)]
 fn validate_connect_pseudo_headers(input: &ConnectRequestInput) -> Result<(), H2Error> {
     // RFC 9113 §8.5: CONNECT method MUST include :authority
     if input.authority.is_none() {
@@ -211,6 +238,7 @@ fn validate_connect_pseudo_headers(input: &ConnectRequestInput) -> Result<(), H2
 }
 
 /// Generate valid ConnectRequestInput for property-based testing
+#[allow(dead_code)]
 fn arb_valid_connect_request() -> impl Strategy<Value = ConnectRequestInput> {
     (
         "[a-z]+\\.(com|org|net):[1-9][0-9]{1,4}", // authority (hostname:port)
@@ -237,6 +265,7 @@ fn arb_valid_connect_request() -> impl Strategy<Value = ConnectRequestInput> {
 }
 
 /// Generate invalid ConnectRequestInput for testing error cases
+#[allow(dead_code)]
 fn arb_invalid_connect_request() -> impl Strategy<Value = ConnectRequestInput> {
     prop_oneof![
         // Missing authority
@@ -305,6 +334,7 @@ fn arb_invalid_connect_request() -> impl Strategy<Value = ConnectRequestInput> {
 proptest! {
     /// MR1: CONNECT requests without :authority must be rejected with PROTOCOL_ERROR.
     #[test]
+    #[allow(dead_code)]
     fn connect_without_authority_rejected(
         input in arb_invalid_connect_request()
             .prop_filter("missing authority only", |input| input.authority.is_none())
@@ -324,6 +354,7 @@ proptest! {
 
     /// MR1 (inverse): CONNECT requests with valid :authority should be accepted.
     #[test]
+    #[allow(dead_code)]
     fn connect_with_authority_accepted(input in arb_valid_connect_request()) {
         let result = validate_connect_pseudo_headers(&input);
 
@@ -339,6 +370,7 @@ proptest! {
 proptest! {
     /// MR2: CONNECT requests with :scheme or :path must be rejected with PROTOCOL_ERROR.
     #[test]
+    #[allow(dead_code)]
     fn connect_with_scheme_or_path_rejected(
         input in arb_invalid_connect_request()
             .prop_filter("has forbidden headers", |input| input.has_forbidden_pseudo_headers())
@@ -366,6 +398,7 @@ proptest! {
 
     /// MR2 (inverse): CONNECT requests without :scheme or :path should be accepted.
     #[test]
+    #[allow(dead_code)]
     fn connect_without_scheme_path_accepted(input in arb_valid_connect_request()) {
         prop_assume!(!input.has_forbidden_pseudo_headers());
         prop_assume!(input.authority.is_some());
@@ -383,6 +416,7 @@ proptest! {
 proptest! {
     /// MR3: CONNECT requests must end with END_STREAM flag per RFC 9113 §8.5.
     #[test]
+    #[allow(dead_code)]
     fn connect_request_ends_with_end_stream(input in arb_valid_connect_request()) {
         prop_assert!(input.end_stream,
             "CONNECT request must have END_STREAM flag set (RFC 9113 §8.5)");
@@ -397,6 +431,7 @@ proptest! {
 
     /// MR3 (frame-level): CONNECT frames without END_STREAM should be protocol violations.
     #[test]
+    #[allow(dead_code)]
     fn connect_without_end_stream_is_invalid(
         input in arb_valid_connect_request().prop_map(|mut input| {
             input.end_stream = false;
@@ -420,6 +455,7 @@ proptest! {
 proptest! {
     /// MR4: Target connection must be established before sending HEADERS response.
     #[test]
+    #[allow(dead_code)]
     fn target_connected_before_success_response(
         authority in "[a-z]+\\.(com|org|net):[1-9][0-9]{1,4}",
         status in 200u16..=299u16
@@ -455,6 +491,7 @@ proptest! {
 
     /// MR4 (error case): Target connection failure should precede error response.
     #[test]
+    #[allow(dead_code)]
     fn target_failed_before_error_response(
         authority in "[a-z]+\\.(com|org|net):[1-9][0-9]{1,4}",
         error_status in prop::sample::select(vec![502u16, 503u16, 504u16])
@@ -483,6 +520,7 @@ proptest! {
 proptest! {
     /// MR5: CONNECT response must not contain a message body per RFC 9113 §8.5.
     #[test]
+    #[allow(dead_code)]
     fn connect_response_without_body(
         response in (
             200u16..=599u16,
@@ -509,6 +547,7 @@ proptest! {
 
     /// MR5 (violation case): CONNECT responses with bodies should be rejected.
     #[test]
+    #[allow(dead_code)]
     fn connect_response_with_body_is_violation(
         response in (
             200u16..=299u16,
@@ -540,6 +579,7 @@ proptest! {
 proptest! {
     /// Integration test: Complete valid CONNECT request/response flow.
     #[test]
+    #[allow(dead_code)]
     fn complete_connect_flow(
         authority in "[a-z]+\\.(com|org|net):[1-9][0-9]{1,4}",
         success_status in 200u16..=299u16
@@ -583,6 +623,7 @@ proptest! {
 
     /// Integration test: CONNECT error scenarios.
     #[test]
+    #[allow(dead_code)]
     fn connect_error_scenarios(
         authority in prop::option::of("[a-z]+\\.(com|org|net):[1-9][0-9]{1,4}"),
         has_scheme in any::<bool>(),
@@ -633,6 +674,7 @@ mod unit_tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_validate_connect_pseudo_headers_valid() {
         let valid_request = ConnectRequestInput {
             authority: Some("example.com:443".to_string()),
@@ -652,6 +694,7 @@ mod unit_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_validate_connect_pseudo_headers_missing_authority() {
         let invalid_request = ConnectRequestInput {
             authority: None, // Missing required authority
@@ -676,6 +719,7 @@ mod unit_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_validate_connect_pseudo_headers_forbidden_scheme() {
         let invalid_request = ConnectRequestInput {
             authority: Some("example.com:443".to_string()),
@@ -697,6 +741,7 @@ mod unit_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_validate_connect_pseudo_headers_forbidden_path() {
         let invalid_request = ConnectRequestInput {
             authority: Some("example.com:443".to_string()),
@@ -718,6 +763,7 @@ mod unit_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_target_connection_state_tracking() {
         let mut ctx = ConnectTestContext::server();
         let authority = "example.com:443";
@@ -741,6 +787,7 @@ mod unit_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_validate_connect_pseudo_headers_rejects_rfc8441_websocket_vector() {
         let extended_connect_request = ConnectRequestInput {
             authority: Some("server.example.com:443".to_string()),

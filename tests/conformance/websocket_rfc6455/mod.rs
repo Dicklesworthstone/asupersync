@@ -17,6 +17,7 @@ pub mod masking_tests;
 
 /// Conformance test result for WebSocket RFC 6455.
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 pub struct WsConformanceResult {
     /// Test identifier (RFC section reference).
     pub test_id: String,
@@ -36,6 +37,7 @@ pub struct WsConformanceResult {
 
 /// WebSocket conformance test categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// Frame format validation (RFC 6455 Section 5).
     FrameFormat,
@@ -61,6 +63,7 @@ pub enum TestCategory {
 
 /// RFC 6455 requirement levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     /// RFC 2119 MUST requirement.
     Must,
@@ -72,6 +75,7 @@ pub enum RequirementLevel {
 
 /// Test execution verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     /// Test passed.
     Pass,
@@ -84,17 +88,22 @@ pub enum TestVerdict {
 }
 
 /// WebSocket RFC 6455 conformance test harness.
+#[allow(dead_code)]
 pub struct WsConformanceHarness {
     _private: (),
 }
 
+#[allow(dead_code)]
+
 impl WsConformanceHarness {
     /// Create a new conformance harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self { _private: () }
     }
 
     /// Run all WebSocket RFC 6455 conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<WsConformanceResult> {
         let mut results = Vec::new();
 
@@ -167,6 +176,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_ws_conformance_harness_integration() {
         let harness = WsConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -208,6 +218,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_ws_conformance_requirement_levels() {
         let harness = WsConformanceHarness::new();
         let results = harness.run_all_tests();

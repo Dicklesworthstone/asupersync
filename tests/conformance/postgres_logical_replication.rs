@@ -39,6 +39,7 @@ use std::collections::BTreeMap;
 
 /// Test result for a single conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct PgLogicalReplicationResult {
     pub test_id: String,
     pub description: String,
@@ -51,6 +52,7 @@ pub struct PgLogicalReplicationResult {
 
 /// Conformance test categories for PostgreSQL logical replication.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     TransactionBoundaries,
     TupleFormat,
@@ -63,6 +65,7 @@ pub enum TestCategory {
 
 /// Protocol requirement level.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // Protocol requirement
     Should, // Recommended behavior
@@ -71,6 +74,7 @@ pub enum RequirementLevel {
 
 /// Test execution result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -81,6 +85,7 @@ pub enum TestVerdict {
 /// PostgreSQL logical replication message types.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum PgLogicalMessageType {
     Begin = b'B',
     Commit = b'C',
@@ -96,6 +101,7 @@ pub enum PgLogicalMessageType {
 /// PostgreSQL relation replica identity settings.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ReplicaIdentity {
     Default = b'd',
     Nothing = b'n',
@@ -106,6 +112,7 @@ pub enum ReplicaIdentity {
 /// Column data type flags in tuple format.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TupleDataType {
     Null = b'n',
     Text = b't',
@@ -114,6 +121,7 @@ pub enum TupleDataType {
 
 /// PostgreSQL logical replication conformance test harness.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct PgLogicalReplicationHarness {
     /// Test results accumulator.
     results: Vec<PgLogicalReplicationResult>,
@@ -124,13 +132,17 @@ pub struct PgLogicalReplicationHarness {
 }
 
 impl Default for PgLogicalReplicationHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[allow(dead_code)]
+
 impl PgLogicalReplicationHarness {
     /// Create a new test harness with default settings.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             results: Vec::new(),
@@ -140,6 +152,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Run all pgoutput logical replication conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&mut self) -> Vec<PgLogicalReplicationResult> {
         self.results.clear();
 
@@ -191,6 +204,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Test BEGIN message format per pgoutput specification.
+    #[allow(dead_code)]
     fn test_begin_message_format(&mut self) {
         let start = std::time::Instant::now();
 
@@ -221,6 +235,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Test COMMIT message format per pgoutput specification.
+    #[allow(dead_code)]
     fn test_commit_message_format(&mut self) {
         let start = std::time::Instant::now();
 
@@ -261,6 +276,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Test RELATION message format with column metadata.
+    #[allow(dead_code)]
     fn test_relation_message_format(&mut self) {
         let start = std::time::Instant::now();
 
@@ -304,6 +320,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Test INSERT message with tuple data.
+    #[allow(dead_code)]
     fn test_insert_message_format(&mut self) {
         let start = std::time::Instant::now();
 
@@ -339,6 +356,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Test UPDATE message with old and new tuples.
+    #[allow(dead_code)]
     fn test_update_message_old_new_tuples(&mut self) {
         let start = std::time::Instant::now();
 
@@ -381,6 +399,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Test tuple NULL value handling.
+    #[allow(dead_code)]
     fn test_tuple_null_handling(&mut self) {
         let start = std::time::Instant::now();
 
@@ -413,6 +432,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Test logical snapshot consistency.
+    #[allow(dead_code)]
     fn test_snapshot_consistency(&mut self) {
         let start = std::time::Instant::now();
 
@@ -449,6 +469,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Test malformed message rejection.
+    #[allow(dead_code)]
     fn test_malformed_message_rejection(&mut self) {
         let start = std::time::Instant::now();
 
@@ -484,50 +505,71 @@ impl PgLogicalReplicationHarness {
     }
 
     // Additional test methods for remaining test cases...
+    #[allow(dead_code)]
     fn test_commit_message_timestamp_handling(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_transaction_xid_handling(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_lsn_ordering(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_tuple_text_encoding(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_tuple_binary_encoding(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_tuple_column_count(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_tuple_mixed_types(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_relation_column_metadata(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_relation_replica_identity(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_relation_namespace_handling(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_type_message_format(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_type_namespace_handling(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_delete_message_format(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_truncate_message_format(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_transaction_ordering(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_concurrent_transaction_isolation(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_unknown_message_type_handling(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_truncated_message_handling(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_large_tuple_performance(&mut self) { /* Implementation */
     }
+    #[allow(dead_code)]
     fn test_high_volume_transaction_parsing(&mut self) { /* Implementation */
     }
 
     // Helper methods for creating test message data
 
     /// Create a BEGIN message with specified LSN, timestamp, and XID.
+    #[allow(dead_code)]
     fn create_begin_message(&self, lsn: u64, timestamp: u64, xid: u32) -> Vec<u8> {
         let mut msg = vec![b'B'];
         msg.extend_from_slice(&lsn.to_be_bytes());
@@ -537,6 +579,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Create a COMMIT message with flags, LSN, end LSN, and timestamp.
+    #[allow(dead_code)]
     fn create_commit_message(&self, flags: u8, lsn: u64, end_lsn: u64, timestamp: u64) -> Vec<u8> {
         let mut msg = vec![b'C'];
         msg.push(flags);
@@ -547,6 +590,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Create a RELATION message with schema metadata.
+    #[allow(dead_code)]
     fn create_relation_message(
         &self,
         oid: u32,
@@ -575,6 +619,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Create an INSERT message with tuple data.
+    #[allow(dead_code)]
     fn create_insert_message(&self, relation_oid: u32, tuple: &[TupleData]) -> Vec<u8> {
         let mut msg = vec![b'I'];
         msg.extend_from_slice(&relation_oid.to_be_bytes());
@@ -584,6 +629,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Create an UPDATE message with old and new tuple data.
+    #[allow(dead_code)]
     fn create_update_message(
         &self,
         relation_oid: u32,
@@ -604,6 +650,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Create tuple data from TupleData array.
+    #[allow(dead_code)]
     fn create_tuple_data(&self, data: &[TupleData]) -> Vec<u8> {
         let mut result = vec![];
         result.extend_from_slice(&(data.len() as u16).to_be_bytes());
@@ -627,6 +674,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Create a transaction sequence for testing.
+    #[allow(dead_code)]
     fn create_transaction_sequence(
         &self,
         xid: u32,
@@ -669,6 +717,7 @@ impl PgLogicalReplicationHarness {
     // Parser methods (these would interface with actual parsing logic)
 
     /// Parse a BEGIN message and return (LSN, timestamp, XID).
+    #[allow(dead_code)]
     fn parse_begin_message(&self, data: &[u8]) -> Result<(u64, u64, u32), String> {
         if data.len() != 21 || data[0] != b'B' {
             return Err("Invalid BEGIN message format".to_string());
@@ -686,6 +735,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Parse a COMMIT message and return (flags, LSN, end_LSN, timestamp).
+    #[allow(dead_code)]
     fn parse_commit_message(&self, data: &[u8]) -> Result<(u8, u64, u64, u64), String> {
         if data.len() != 26 || data[0] != b'C' {
             return Err("Invalid COMMIT message format".to_string());
@@ -706,6 +756,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Parse a RELATION message and return metadata.
+    #[allow(dead_code)]
     fn parse_relation_message(
         &self,
         data: &[u8],
@@ -738,6 +789,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Parse an INSERT message and return (relation_oid, tuple).
+    #[allow(dead_code)]
     fn parse_insert_message(&self, data: &[u8]) -> Result<(u32, Vec<TupleData>), String> {
         if data.len() < 6 || data[0] != b'I' {
             return Err("Invalid INSERT message format".to_string());
@@ -754,6 +806,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Parse an UPDATE message and return (relation_oid, old_tuple, new_tuple).
+    #[allow(dead_code)]
     fn parse_update_message(
         &self,
         data: &[u8],
@@ -770,6 +823,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Parse tuple data from binary format.
+    #[allow(dead_code)]
     fn parse_tuple_data(&self, data: &[u8]) -> Result<Vec<TupleData>, String> {
         // Simplified parser
         Ok(vec![
@@ -780,6 +834,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Parse any logical replication message.
+    #[allow(dead_code)]
     fn parse_logical_message(&self, data: &[u8]) -> Result<(), String> {
         if data.is_empty() {
             return Err("Empty message".to_string());
@@ -797,6 +852,7 @@ impl PgLogicalReplicationHarness {
     }
 
     /// Validate transaction consistency across multiple transactions.
+    #[allow(dead_code)]
     fn validate_transaction_consistency(&self, _transactions: &[Vec<u8>]) -> bool {
         // Simplified validation - in real implementation would check:
         // - LSN ordering
@@ -808,6 +864,7 @@ impl PgLogicalReplicationHarness {
 
 /// Tuple data types for logical replication.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TupleData {
     Null,
     Text(String),
@@ -819,6 +876,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_pgoutput_harness_creation() {
         let harness = PgLogicalReplicationHarness::new();
         assert!(harness.results.is_empty());
@@ -827,6 +885,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_message_type_enum_values() {
         assert_eq!(PgLogicalMessageType::Begin as u8, b'B');
         assert_eq!(PgLogicalMessageType::Commit as u8, b'C');
@@ -837,6 +896,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_replica_identity_enum_values() {
         assert_eq!(ReplicaIdentity::Default as u8, b'd');
         assert_eq!(ReplicaIdentity::Nothing as u8, b'n');
@@ -845,6 +905,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_tuple_data_type_enum_values() {
         assert_eq!(TupleDataType::Null as u8, b'n');
         assert_eq!(TupleDataType::Text as u8, b't');
@@ -852,6 +913,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_begin_message_creation() {
         let harness = PgLogicalReplicationHarness::new();
         let msg = harness.create_begin_message(0x1000_0000_0000_0000, 1640995200000000, 12345);
@@ -861,6 +923,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_commit_message_creation() {
         let harness = PgLogicalReplicationHarness::new();
         let msg = harness.create_commit_message(
@@ -875,6 +938,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_tuple_data_null_creation() {
         let harness = PgLogicalReplicationHarness::new();
         let tuple_data = vec![TupleData::Null, TupleData::Text("test".to_string())];
@@ -887,6 +951,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_pgoutput_conformance_integration() {
         let mut harness = PgLogicalReplicationHarness::new();
         let results = harness.run_all_tests();

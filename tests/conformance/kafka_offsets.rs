@@ -12,6 +12,7 @@ use std::time::Duration;
 
 /// Test configuration for Kafka conformance testing
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ConformanceConfig {
     pub group_id: String,
     pub retention_minutes: u32,
@@ -20,6 +21,7 @@ struct ConformanceConfig {
 }
 
 impl Default for ConformanceConfig {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             group_id: "conformance-test-group".to_string(),
@@ -61,6 +63,7 @@ async fn create_test_consumer(
 }
 
 /// Helper to create test offset data
+#[allow(dead_code)]
 fn create_test_offsets(
     topic: &str,
     partitions: &[i32],
@@ -82,6 +85,7 @@ fn create_test_offsets(
 /// Property: For a given topic/partition, committed offsets must never decrease
 /// unless explicitly reset. This ensures no message loss through offset regression.
 #[test]
+#[allow(dead_code)]
 fn mr1_commit_offsets_monotonic_per_partition() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = RuntimeBuilder::current_thread()
         .build()
@@ -169,6 +173,7 @@ fn mr1_commit_offsets_monotonic_per_partition() -> Result<(), Box<dyn std::error
 /// should be idempotent - committing offset O twice should result in the same
 /// state as committing it once.
 #[test]
+#[allow(dead_code)]
 fn mr2_idempotent_commit_same_group() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = RuntimeBuilder::current_thread()
         .build()
@@ -255,6 +260,7 @@ fn mr2_idempotent_commit_same_group() -> Result<(), Box<dyn std::error::Error>> 
 /// Property: Offsets should be retained for at least the configured retention period.
 /// Offsets committed within the retention window should remain accessible.
 #[test]
+#[allow(dead_code)]
 fn mr3_offset_retention_respected() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = RuntimeBuilder::current_thread()
         .build()
@@ -333,6 +339,7 @@ fn mr3_offset_retention_respected() -> Result<(), Box<dyn std::error::Error>> {
 /// Property: Consumer group rebalancing should preserve previously committed offsets.
 /// After a rebalance, consumers should see the same committed offsets as before.
 #[test]
+#[allow(dead_code)]
 fn mr4_rebalance_preserves_committed_offsets() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = RuntimeBuilder::current_thread()
         .build()
@@ -419,6 +426,7 @@ fn mr4_rebalance_preserves_committed_offsets() -> Result<(), Box<dyn std::error:
 /// Property: Transactional offset commits should be atomic - either all offsets
 /// in a transaction are committed, or none are. Partial commits should not occur.
 #[test]
+#[allow(dead_code)]
 fn mr5_transactional_commit_atomic() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = RuntimeBuilder::current_thread()
         .build()
@@ -535,6 +543,7 @@ fn mr5_transactional_commit_atomic() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Integration test that exercises all metamorphic relations in sequence
 #[test]
+#[allow(dead_code)]
 fn integration_all_metamorphic_relations() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = RuntimeBuilder::current_thread()
         .build()
@@ -587,6 +596,7 @@ mod tests {
 
     /// Test helper functions and utilities
     #[test]
+    #[allow(dead_code)]
     fn test_create_test_offsets() {
         let offsets = create_test_offsets("test-topic", &[0, 1, 2], 1000);
 
@@ -603,6 +613,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_conformance_config_default() {
         let config = ConformanceConfig::default();
         assert_eq!(config.group_id, "conformance-test-group");

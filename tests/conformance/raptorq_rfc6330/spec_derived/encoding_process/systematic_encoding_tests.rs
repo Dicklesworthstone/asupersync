@@ -7,6 +7,7 @@ use crate::spec_derived::{
 use std::time::Instant;
 
 /// Register systematic encoding tests.
+#[allow(dead_code)]
 pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
     suite.add_test_case(Rfc6330ConformanceCase {
         id: "RFC6330-4.2.1",
@@ -34,6 +35,7 @@ pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
 }
 
 /// Test systematic symbol ordering requirements.
+#[allow(dead_code)]
 fn test_systematic_symbol_ordering(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -74,6 +76,7 @@ fn test_systematic_symbol_ordering(ctx: &ConformanceContext) -> ConformanceResul
 }
 
 /// Test source symbol ESI assignment.
+#[allow(dead_code)]
 fn test_source_symbol_esi_assignment(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -110,6 +113,7 @@ fn test_source_symbol_esi_assignment(ctx: &ConformanceContext) -> ConformanceRes
 }
 
 /// Test symbol size consistency.
+#[allow(dead_code)]
 fn test_symbol_size_consistency(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -136,12 +140,14 @@ fn test_symbol_size_consistency(ctx: &ConformanceContext) -> ConformanceResult {
 
 /// Represents an encoded symbol.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct EncodedSymbol {
     pub esi: usize,
     pub data: Vec<u8>,
 }
 
 /// Generate systematic symbols from source data.
+#[allow(dead_code)]
 fn generate_systematic_symbols(source_data: &[u8], k: usize, symbol_size: usize) -> Vec<EncodedSymbol> {
     let mut symbols = Vec::new();
 
@@ -166,6 +172,7 @@ fn generate_systematic_symbols(source_data: &[u8], k: usize, symbol_size: usize)
 }
 
 /// Generate test data of specified size.
+#[allow(dead_code)]
 fn generate_test_data(size: usize) -> Vec<u8> {
     (0..size).map(|i| (i % 256) as u8).collect()
 }
@@ -174,6 +181,8 @@ fn generate_test_data(size: usize) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::spec_derived::{ConformanceConfig, ConformanceContext};
+
+    #[allow(dead_code)]
 
     fn create_test_context() -> ConformanceContext {
         ConformanceContext {
@@ -184,6 +193,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_systematic_symbol_generation() {
         let source_data = generate_test_data(500);
         let symbols = generate_systematic_symbols(&source_data, 5, 100);
@@ -196,6 +206,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_systematic_ordering_conformance() {
         let ctx = create_test_context();
         let result = test_systematic_symbol_ordering(&ctx);

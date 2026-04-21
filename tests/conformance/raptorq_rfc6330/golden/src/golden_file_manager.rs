@@ -15,6 +15,7 @@ pub const UPDATE_GOLDENS_ENV: &str = "UPDATE_GOLDENS";
 
 /// Golden file metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct GoldenMetadata {
     /// Test case name
     pub test_name: String,
@@ -34,6 +35,7 @@ pub struct GoldenMetadata {
 
 /// Golden file entry combining metadata and data
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct GoldenFileEntry<T> {
     /// Metadata about this golden file
     pub metadata: GoldenMetadata,
@@ -43,13 +45,17 @@ pub struct GoldenFileEntry<T> {
 
 /// Manager for golden file operations
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct GoldenFileManager {
     base_path: PathBuf,
     update_mode: bool,
 }
 
+#[allow(dead_code)]
+
 impl GoldenFileManager {
     /// Creates a new golden file manager
+    #[allow(dead_code)]
     pub fn new<P: AsRef<Path>>(base_path: P) -> Self {
         let update_mode = std::env::var(UPDATE_GOLDENS_ENV).is_ok();
         Self {
@@ -59,6 +65,7 @@ impl GoldenFileManager {
     }
 
     /// Creates a new golden file manager with explicit update mode
+    #[allow(dead_code)]
     pub fn with_update_mode<P: AsRef<Path>>(base_path: P, update_mode: bool) -> Self {
         Self {
             base_path: base_path.as_ref().to_path_buf(),
@@ -67,6 +74,7 @@ impl GoldenFileManager {
     }
 
     /// Saves or validates a golden file entry
+    #[allow(dead_code)]
     pub fn assert_golden<T>(
         &self,
         filename: &str,
@@ -86,6 +94,7 @@ impl GoldenFileManager {
     }
 
     /// Saves a golden file (update mode)
+    #[allow(dead_code)]
     fn save_golden<T>(
         &self,
         path: &Path,
@@ -116,6 +125,7 @@ impl GoldenFileManager {
     }
 
     /// Validates against existing golden file
+    #[allow(dead_code)]
     fn validate_golden<T>(&self, path: &Path, data: &T) -> Result<(), GoldenError>
     where
         T: for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug,
@@ -147,6 +157,7 @@ impl GoldenFileManager {
     }
 
     /// Lists all golden files in the base directory
+    #[allow(dead_code)]
     pub fn list_golden_files(&self) -> Result<Vec<PathBuf>, GoldenError> {
         let mut files = Vec::new();
         self.collect_golden_files(&self.base_path, &mut files)?;
@@ -154,6 +165,7 @@ impl GoldenFileManager {
     }
 
     /// Recursively collects golden files
+    #[allow(dead_code)]
     fn collect_golden_files(
         &self,
         dir: &Path,
@@ -186,6 +198,7 @@ impl GoldenFileManager {
     }
 
     /// Validates all golden files in the directory
+    #[allow(dead_code)]
     pub fn validate_all(&self) -> Result<ValidationSummary, GoldenError> {
         let files = self.list_golden_files()?;
         let mut summary = ValidationSummary::default();
@@ -216,6 +229,7 @@ impl GoldenFileManager {
 
 /// Summary of golden file validation
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct ValidationSummary {
     pub total: usize,
     pub passed: usize,
@@ -223,7 +237,10 @@ pub struct ValidationSummary {
     pub failures: Vec<String>,
 }
 
+#[allow(dead_code)]
+
 impl ValidationSummary {
+    #[allow(dead_code)]
     pub fn is_success(&self) -> bool {
         self.failed == 0
     }
@@ -231,6 +248,7 @@ impl ValidationSummary {
 
 /// Golden file operation errors
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum GoldenError {
     #[error("Missing golden file at {path}: {hint}")]
     MissingGoldenFile { path: PathBuf, hint: String },
@@ -266,6 +284,7 @@ macro_rules! assert_golden {
 }
 
 /// Helper function to create metadata
+#[allow(dead_code)]
 pub fn create_metadata(
     test_name: &str,
     rfc_section: &str,
@@ -295,12 +314,14 @@ mod tests {
     use tempfile::TempDir;
 
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[allow(dead_code)]
     struct TestData {
         values: Vec<u32>,
         name: String,
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_golden_file_creation() {
         let temp_dir = TempDir::new().unwrap();
         let manager = GoldenFileManager::with_update_mode(temp_dir.path(), true);
@@ -324,6 +345,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_golden_file_validation() {
         let temp_dir = TempDir::new().unwrap();
         let manager = GoldenFileManager::with_update_mode(temp_dir.path(), true);
@@ -364,6 +386,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_missing_golden_file() {
         let temp_dir = TempDir::new().unwrap();
         let manager = GoldenFileManager::with_update_mode(temp_dir.path(), false);

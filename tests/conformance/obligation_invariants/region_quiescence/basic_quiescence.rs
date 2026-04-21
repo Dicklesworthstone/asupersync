@@ -22,20 +22,35 @@ use crate::conformance::obligation_invariants::src::{
 use asupersync::types::{ObligationId, RegionId, Time};
 
 /// Test basic region quiescence - region waits for obligations
+#[allow(dead_code)]
 pub struct BasicRegionQuiescenceTest;
 
 impl ObligationInvariantTest for BasicRegionQuiescenceTest {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &'static str {
         "basic_region_quiescence"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
         InvariantTestCategory::RegionQuiescence
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn description(&self) -> &'static str {
         "Tests that region closure waits for all obligations to complete"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn run_test<'a>(
         &'a self,
@@ -101,26 +116,45 @@ impl ObligationInvariantTest for BasicRegionQuiescenceTest {
         })
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
         !tracker.has_active_obligations() && tracker.get_invariant_violations().is_empty()
     }
 }
 
 /// Test nested region quiescence - parent waits for children
+#[allow(dead_code)]
 pub struct NestedRegionQuiescenceTest;
 
 impl ObligationInvariantTest for NestedRegionQuiescenceTest {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &'static str {
         "nested_region_quiescence"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
         InvariantTestCategory::RegionQuiescence
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn description(&self) -> &'static str {
         "Tests that parent region closure waits for child region obligations"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn run_test<'a>(
         &'a self,
@@ -220,26 +254,45 @@ impl ObligationInvariantTest for NestedRegionQuiescenceTest {
         })
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
         !tracker.has_active_obligations() && tracker.get_invariant_violations().is_empty()
     }
 }
 
 /// Test that attempts to close region with active obligations (negative test)
+#[allow(dead_code)]
 pub struct RegionCloseWithActiveObligationsTest;
 
 impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &'static str {
         "region_close_with_active_obligations"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
         InvariantTestCategory::RegionQuiescence
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn description(&self) -> &'static str {
         "Tests that attempting to close region with active obligations is detected as violation"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn run_test<'a>(
         &'a self,
@@ -302,6 +355,10 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
         })
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
         // For this negative test, we expect violations to be present
         !tracker.has_active_obligations()
@@ -311,9 +368,17 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
                 .any(|v| v.violation_type == InvariantViolationType::RegionQuiescenceViolation)
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn expected_violations(&self) -> Vec<InvariantViolationType> {
         vec![InvariantViolationType::RegionQuiescenceViolation]
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn is_negative_test(&self) -> bool {
         true
@@ -321,20 +386,35 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
 }
 
 /// Test concurrent region closure scenarios
+#[allow(dead_code)]
 pub struct ConcurrentRegionClosureTest;
 
 impl ObligationInvariantTest for ConcurrentRegionClosureTest {
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn invariant_name(&self) -> &'static str {
         "concurrent_region_closure"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
         InvariantTestCategory::RegionQuiescence
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn description(&self) -> &'static str {
         "Tests concurrent region closure with obligations resolving concurrently"
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn run_test<'a>(
         &'a self,
@@ -418,9 +498,17 @@ impl ObligationInvariantTest for ConcurrentRegionClosureTest {
         })
     }
 
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
+
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
         !tracker.has_active_obligations() && tracker.get_invariant_violations().is_empty()
     }
+
+    #[allow(dead_code)]
+
+    #[allow(dead_code)]
 
     fn is_stress_test(&self) -> bool {
         true
@@ -432,6 +520,8 @@ mod tests {
     use super::*;
 
     /// Helper to create a test runtime
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn create_test_runtime() -> LabRuntime {
         let config = LabConfig::default()
             .worker_count(2)
@@ -446,6 +536,8 @@ mod tests {
     use futures_lite::future::block_on;
 
     #[test]
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn test_basic_quiescence() {
         let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
@@ -459,6 +551,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn test_nested_quiescence() {
         let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
@@ -472,6 +566,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn test_close_with_active_obligations() {
         let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();
@@ -492,6 +588,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     fn test_concurrent_closure() {
         let _runtime = create_test_runtime();
         let config = InvariantTestConfig::default();

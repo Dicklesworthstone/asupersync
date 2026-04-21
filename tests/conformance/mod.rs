@@ -113,6 +113,7 @@ pub use websocket_extension_negotiation_rfc6455::{
 // Unified test categories for all conformance suites
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum TestCategory {
     // Aggregator flush/drain categories
     FlushSynchronous,
@@ -259,6 +260,7 @@ pub enum TestCategory {
 
 // Unified conformance test result
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(dead_code)]
 pub struct ConformanceTestResult {
     pub test_id: String,
     pub description: String,
@@ -270,6 +272,7 @@ pub struct ConformanceTestResult {
 }
 
 /// Run all available conformance test suites.
+#[allow(dead_code)]
 pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
     let mut results = Vec::new();
 
@@ -957,6 +960,7 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
 }
 
 /// Generate conformance compliance report in JSON format.
+#[allow(dead_code)]
 pub fn generate_compliance_report() -> serde_json::Value {
     let results = run_all_conformance_tests();
 
@@ -1138,6 +1142,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_conformance_suite_integration() {
         let results = run_all_conformance_tests();
         assert!(!results.is_empty(), "Should have conformance test results");
@@ -1168,6 +1173,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_h1_conformance_integration() {
         let h1_harness = H1ConformanceHarness::new();
         let results = h1_harness.run_all_tests();
@@ -1189,6 +1195,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_h2_conformance_integration() {
         let h2_harness = H2ConformanceHarness::new();
         let results = h2_harness.run_all_tests();
@@ -1225,6 +1232,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "tls")]
+    #[allow(dead_code)]
     fn test_h2_alpn_conformance_integration() {
         use h2_alpn_negotiation_rfc7540::H2AlpnConformanceHarness;
 
@@ -1321,6 +1329,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_quic_conformance_integration() {
         let quic_harness = QuicRetryConformanceHarness::new();
         let results = quic_harness.run_all_tests();
@@ -1361,6 +1370,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "quic")]
+    #[allow(dead_code)]
     fn test_quic_connection_migration_conformance_integration() {
         use quic_connection_migration_rfc9000::QuicConnectionMigrationConformanceHarness;
 
@@ -1459,6 +1469,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "tls")]
+    #[allow(dead_code)]
     fn test_tls_0rtt_conformance_integration() {
         let tls_0rtt_harness = Tls0RttConformanceHarness::new();
         let results = tls_0rtt_harness.run_all_tests();
@@ -1508,6 +1519,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "deterministic-mode")]
+    #[allow(dead_code)]
     fn test_cancel_dag_determinism_conformance_integration() {
         let cancel_dag_harness = CancelDagDeterminismHarness::new();
         let results = cancel_dag_harness.run_all_tests();
@@ -1564,6 +1576,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "deterministic-mode")]
+    #[allow(dead_code)]
     fn test_obligation_lifecycle_metamorphic_conformance_integration() {
         let obligation_lifecycle_harness = ObligationLifecycleMetamorphicHarness::new();
         let results = obligation_lifecycle_harness.run_all_tests();
@@ -1647,6 +1660,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "deterministic-mode")]
+    #[allow(dead_code)]
     fn test_trace_replay_idempotency_metamorphic_conformance_integration() {
         let trace_replay_harness = TraceReplayIdempotencyMetamorphicHarness::new();
         let results = trace_replay_harness.run_all_tests();
@@ -1739,6 +1753,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "deterministic-mode")]
+    #[allow(dead_code)]
     fn test_race_loser_drain_metamorphic_conformance_integration() {
         let race_loser_drain_harness = RaceLoserDrainMetamorphicHarness::new();
         let results = race_loser_drain_harness.run_all_tests();
@@ -1848,6 +1863,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_ws_extension_conformance_integration() {
         let ws_ext_harness = WsExtensionConformanceHarness::new();
         let results = ws_ext_harness.run_all_tests();
@@ -1956,6 +1972,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_grpc_trailer_conformance_integration() {
         let grpc_trailer_harness = GrpcTrailerConformanceHarness::new();
         let results = grpc_trailer_harness.run_all_tests();
@@ -2057,6 +2074,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_compliance_report_generation() {
         let report = generate_compliance_report();
         let summary = &report["conformance_report"]["summary"];

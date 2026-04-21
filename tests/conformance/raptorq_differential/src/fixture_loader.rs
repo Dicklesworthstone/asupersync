@@ -7,12 +7,14 @@ use std::path::{Path, PathBuf};
 
 /// Manages loading and validation of test fixtures
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct FixtureLoader {
     fixture_dir: PathBuf,
 }
 
 /// Collection of related fixtures
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FixtureSet {
     pub name: String,
     pub fixtures: Vec<FixtureEntry>,
@@ -21,6 +23,7 @@ pub struct FixtureSet {
 
 /// Individual fixture entry
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FixtureEntry {
     /// Test metadata
     pub metadata: FixtureMetadata,
@@ -32,6 +35,7 @@ pub struct FixtureEntry {
 
 /// Metadata for a test fixture
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct FixtureMetadata {
     /// Name of the test case
     pub test_name: String,
@@ -53,6 +57,7 @@ pub struct FixtureMetadata {
 
 /// Metadata for a collection of fixtures
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct FixtureSetMetadata {
     /// Name of the fixture set
     pub set_name: String,
@@ -66,6 +71,7 @@ pub struct FixtureSetMetadata {
 
 /// Errors that can occur during fixture operations
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum FixtureError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
@@ -86,8 +92,11 @@ pub enum FixtureError {
     MissingField(String),
 }
 
+#[allow(dead_code)]
+
 impl FixtureLoader {
     /// Creates a new fixture loader for the given directory
+    #[allow(dead_code)]
     pub fn new<P: AsRef<Path>>(fixture_dir: P) -> Result<Self, FixtureError> {
         let fixture_dir = fixture_dir.as_ref().to_path_buf();
 
@@ -99,6 +108,7 @@ impl FixtureLoader {
     }
 
     /// Lists all available fixture files
+    #[allow(dead_code)]
     pub fn list_fixtures(&self) -> Result<Vec<PathBuf>, FixtureError> {
         let mut fixtures = Vec::new();
         self.scan_directory(&self.fixture_dir, &mut fixtures)?;
@@ -106,6 +116,7 @@ impl FixtureLoader {
     }
 
     /// Recursively scans for fixture files
+    #[allow(dead_code)]
     fn scan_directory(&self, dir: &Path, fixtures: &mut Vec<PathBuf>) -> Result<(), FixtureError> {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
@@ -122,6 +133,7 @@ impl FixtureLoader {
     }
 
     /// Loads a single fixture from file
+    #[allow(dead_code)]
     pub fn load_fixture<P: AsRef<Path>>(&self, fixture_path: P) -> Result<FixtureEntry, FixtureError> {
         let path = fixture_path.as_ref();
 
@@ -166,6 +178,7 @@ impl FixtureLoader {
     }
 
     /// Loads all fixtures in a directory as a fixture set
+    #[allow(dead_code)]
     pub fn load_fixture_set<P: AsRef<Path>>(&self, set_dir: P) -> Result<FixtureSet, FixtureError> {
         let set_path = set_dir.as_ref();
         let metadata_path = set_path.join("metadata.json");
@@ -208,6 +221,7 @@ impl FixtureLoader {
     }
 
     /// Saves a fixture to file
+    #[allow(dead_code)]
     pub fn save_fixture<P: AsRef<Path>>(&self, fixture_path: P, fixture: &FixtureEntry) -> Result<(), FixtureError> {
         let serialized = SerializedFixture {
             metadata: fixture.metadata.clone(),
@@ -222,6 +236,7 @@ impl FixtureLoader {
     }
 
     /// Validates all fixtures in the directory
+    #[allow(dead_code)]
     pub fn validate_all_fixtures(&self) -> Result<ValidationReport, FixtureError> {
         let fixture_paths = self.list_fixtures()?;
         let mut report = ValidationReport {
@@ -243,6 +258,7 @@ impl FixtureLoader {
 
 /// Serialized format for fixtures on disk
 #[derive(Debug, Serialize, Deserialize)]
+#[allow(dead_code)]
 struct SerializedFixture {
     metadata: FixtureMetadata,
     reference_output_base64: String,
@@ -251,19 +267,24 @@ struct SerializedFixture {
 
 /// Report from fixture validation
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ValidationReport {
     pub total_fixtures: usize,
     pub valid_fixtures: usize,
     pub invalid_fixtures: Vec<(PathBuf, FixtureError)>,
 }
 
+#[allow(dead_code)]
+
 impl ValidationReport {
     /// Returns true if all fixtures are valid
+    #[allow(dead_code)]
     pub fn is_all_valid(&self) -> bool {
         self.invalid_fixtures.is_empty()
     }
 
     /// Returns the percentage of valid fixtures
+    #[allow(dead_code)]
     pub fn validity_percentage(&self) -> f64 {
         if self.total_fixtures == 0 {
             100.0
@@ -274,6 +295,7 @@ impl ValidationReport {
 }
 
 /// Calculates SHA-256 hash of data
+#[allow(dead_code)]
 fn calculate_hash(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -288,6 +310,7 @@ mod tests {
     use std::fs;
 
     #[test]
+    #[allow(dead_code)]
     fn test_fixture_loader_creation() {
         let temp_dir = TempDir::new().unwrap();
         let loader = FixtureLoader::new(temp_dir.path()).unwrap();
@@ -295,6 +318,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_fixture_loader_nonexistent_dir() {
         let result = FixtureLoader::new("/nonexistent/path");
         assert!(result.is_err());
@@ -302,6 +326,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_list_fixtures_empty_dir() {
         let temp_dir = TempDir::new().unwrap();
         let loader = FixtureLoader::new(temp_dir.path()).unwrap();
@@ -310,6 +335,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_calculate_hash() {
         let data = b"test data";
         let hash = calculate_hash(data);
@@ -322,6 +348,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_validation_report() {
         let report = ValidationReport {
             total_fixtures: 10,
@@ -332,6 +359,8 @@ mod tests {
         assert_eq!(report.validity_percentage(), 80.0);
         assert!(report.is_all_valid()); // No invalid fixtures recorded
     }
+
+    #[allow(dead_code)]
 
     fn create_test_fixture() -> FixtureEntry {
         FixtureEntry {
@@ -356,6 +385,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_fixture_save_load_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let loader = FixtureLoader::new(temp_dir.path()).unwrap();
@@ -380,9 +410,12 @@ mod tests {
 // Add missing base64 and sha2 dependencies for compilation
 #[cfg(not(test))]
 mod base64 {
+    #[allow(dead_code)]
     pub fn encode(_data: &[u8]) -> String {
         "mock_base64".to_string()
     }
+
+    #[allow(dead_code)]
 
     pub fn decode(_data: &str) -> Result<Vec<u8>, &'static str> {
         Ok(vec![0x42; 64])
@@ -392,18 +425,26 @@ mod base64 {
 #[cfg(not(test))]
 mod sha2 {
     pub trait Digest {
+        #[allow(dead_code)]
         fn update(&mut self, data: &[u8]);
+        #[allow(dead_code)]
         fn finalize(self) -> [u8; 32];
     }
 
+    #[allow(dead_code)]
     pub struct Sha256;
 
+    #[allow(dead_code)]
+
     impl Sha256 {
+        #[allow(dead_code)]
         pub fn new() -> Self { Self }
     }
 
     impl Digest for Sha256 {
+        #[allow(dead_code)]
         fn update(&mut self, _data: &[u8]) {}
+        #[allow(dead_code)]
         fn finalize(self) -> [u8; 32] { [0; 32] }
     }
 }

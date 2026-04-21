@@ -5,6 +5,7 @@
 use super::*;
 
 /// Run all handshake conformance tests.
+#[allow(dead_code)]
 pub fn run_handshake_tests() -> Vec<WsConformanceResult> {
     let mut results = Vec::new();
 
@@ -15,6 +16,8 @@ pub fn run_handshake_tests() -> Vec<WsConformanceResult> {
 
     results
 }
+
+#[allow(dead_code)]
 
 fn test_websocket_key_validation() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -38,6 +41,8 @@ fn test_websocket_key_validation() -> WsConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_accept_header_computation() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -64,6 +69,8 @@ fn test_accept_header_computation() -> WsConformanceResult {
     )
 }
 
+#[allow(dead_code)]
+
 fn test_version_negotiation() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // WebSocket version must be 13
@@ -83,6 +90,8 @@ fn test_version_negotiation() -> WsConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_origin_validation() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {

@@ -7,6 +7,7 @@ use crate::spec_derived::{
 use std::time::Instant;
 
 /// Register repair symbol tests.
+#[allow(dead_code)]
 pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
     suite.add_test_case(Rfc6330ConformanceCase {
         id: "RFC6330-4.2.4",
@@ -26,6 +27,7 @@ pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
 }
 
 /// Test repair symbol generation using constraint matrix.
+#[allow(dead_code)]
 fn test_repair_symbol_generation(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -38,6 +40,7 @@ fn test_repair_symbol_generation(ctx: &ConformanceContext) -> ConformanceResult 
 }
 
 /// Test repair symbol ESI range validation.
+#[allow(dead_code)]
 fn test_repair_symbol_esi_range(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 

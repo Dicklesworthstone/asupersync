@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 /// Test data for Content-Encoding metamorphic relations
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct EncodingTestScenario {
     /// Original data to compress
     pub data: Vec<u8>,
@@ -25,8 +26,11 @@ struct EncodingTestScenario {
     pub headers: Vec<(String, String)>,
 }
 
+#[allow(dead_code)]
+
 impl EncodingTestScenario {
     /// Create a new test scenario with given data
+    #[allow(dead_code)]
     fn new(
         data: Vec<u8>,
         accept_encoding: Option<String>,
@@ -43,6 +47,7 @@ impl EncodingTestScenario {
     }
 
     /// Add a Content-Encoding header to the scenario
+    #[allow(dead_code)]
     fn with_content_encoding(mut self, encoding: ContentEncoding) -> Self {
         self.headers
             .push(("Content-Encoding".to_owned(), encoding.as_token().to_owned()));
@@ -51,6 +56,7 @@ impl EncodingTestScenario {
 }
 
 /// Generate test scenarios for property-based testing
+#[allow(dead_code)]
 fn encoding_scenarios() -> impl Strategy<Value = EncodingTestScenario> {
     let data_strategy = prop::collection::vec(any::<u8>(), 0..1000);
     let encoding_list = vec!["gzip", "deflate", "br", "identity", "*"];
@@ -101,6 +107,7 @@ fn encoding_scenarios() -> impl Strategy<Value = EncodingTestScenario> {
 /// - "br" → Brotli
 /// - "identity" → Identity
 #[test]
+#[allow(dead_code)]
 fn mr1_codec_identifier_conformance() {
     proptest!(|(
         variant in prop::sample::select(vec![
@@ -137,6 +144,7 @@ fn mr1_codec_identifier_conformance() {
 /// - Empty Accept-Encoding means only identity is acceptable
 /// - No Accept-Encoding header prefers identity when available
 #[test]
+#[allow(dead_code)]
 fn mr2_identity_default_behavior() {
     proptest!(|(
         server_encodings in prop::collection::vec(
@@ -198,6 +206,7 @@ fn mr2_identity_default_behavior() {
 /// - Negotiation ignores unknown encodings in Accept-Encoding
 /// - make_compressor() returns None for unavailable encodings
 #[test]
+#[allow(dead_code)]
 fn mr3_unknown_codec_rejection() {
     proptest!(|(
         unknown_token in "[a-z]{1,10}",
@@ -245,6 +254,7 @@ fn mr3_unknown_codec_rejection() {
 /// - Server preference order breaks ties
 /// - Explicit rejections (q=0) are respected
 #[test]
+#[allow(dead_code)]
 fn mr4_multi_codec_negotiation_order() {
     proptest!(|(scenario in encoding_scenarios())| {
         let negotiated = negotiate_encoding(
@@ -307,6 +317,7 @@ fn mr4_multi_codec_negotiation_order() {
 /// - Encoder order reversal: encode(A) |> encode(B) |> decode(B) |> decode(A) === original
 /// - Multiple compression stages preserve data integrity
 #[test]
+#[allow(dead_code)]
 fn mr5_compression_decompression_reversibility() {
     proptest!(|(
         data in prop::collection::vec(any::<u8>(), 0..500),
@@ -374,6 +385,7 @@ fn mr5_compression_decompression_reversibility() {
 ///
 /// Tests the full HTTP Content-Encoding workflow from negotiation to compression
 #[test]
+#[allow(dead_code)]
 fn integration_content_encoding_workflow() {
     let lab = LabRuntime::new(LabConfig::default());
 
@@ -434,6 +446,7 @@ fn integration_content_encoding_workflow() {
 
 /// **Edge Case Test: Malformed Accept-Encoding Headers**
 #[test]
+#[allow(dead_code)]
 fn edge_case_malformed_accept_encoding() {
     let server_supported = vec![ContentEncoding::Gzip, ContentEncoding::Identity];
 
@@ -467,6 +480,7 @@ fn edge_case_malformed_accept_encoding() {
 
 /// **Boundary Condition Test: Quality Value Edge Cases**
 #[test]
+#[allow(dead_code)]
 fn boundary_quality_values() {
     let server_supported = vec![
         ContentEncoding::Gzip,
@@ -495,6 +509,7 @@ mod conformance_suite {
 
     /// Run all Content-Encoding conformance tests
     #[test]
+    #[allow(dead_code)]
     fn run_content_encoding_conformance_suite() {
         println!("Running RFC 9110 Section 8.4 Content-Encoding Conformance Tests");
 

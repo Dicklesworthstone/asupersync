@@ -11,6 +11,7 @@ use asupersync::http::h2::hpack::{Decoder, Header};
 
 /// Fixture metadata for provenance tracking.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FixtureMetadata {
     pub generator: String,
     pub version: String,
@@ -21,6 +22,7 @@ pub struct FixtureMetadata {
 
 /// A test fixture containing reference implementation output.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct HpackFixture {
     pub name: String,
     pub description: String,
@@ -31,12 +33,16 @@ pub struct HpackFixture {
 }
 
 /// Fixture loader for reference implementation outputs.
+#[allow(dead_code)]
 pub struct FixtureLoader {
     fixtures: HashMap<String, HpackFixture>,
 }
 
+#[allow(dead_code)]
+
 impl FixtureLoader {
     /// Create a new fixture loader with built-in fixtures.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         let mut loader = Self {
             fixtures: HashMap::new(),
@@ -48,16 +54,19 @@ impl FixtureLoader {
     }
 
     /// Get a fixture by name.
+    #[allow(dead_code)]
     pub fn get_fixture(&self, name: &str) -> Option<&HpackFixture> {
         self.fixtures.get(name)
     }
 
     /// List all available fixture names.
+    #[allow(dead_code)]
     pub fn fixture_names(&self) -> Vec<&String> {
         self.fixtures.keys().collect()
     }
 
     /// Load fixtures from a directory (for external reference implementations).
+    #[allow(dead_code)]
     pub fn load_from_directory<P: AsRef<Path>>(
         &mut self,
         _path: P,
@@ -68,6 +77,7 @@ impl FixtureLoader {
     }
 
     /// Load built-in fixtures derived from RFC 7541 and known implementations.
+    #[allow(dead_code)]
     fn load_builtin_fixtures(&mut self) {
         let metadata = FixtureMetadata {
             generator: "RFC 7541 Appendix C".to_string(),
@@ -157,6 +167,7 @@ impl FixtureLoader {
 }
 
 impl Default for FixtureLoader {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
@@ -164,6 +175,7 @@ impl Default for FixtureLoader {
 
 /// Fixture comparison result for differential testing.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum FixtureComparisonResult {
     /// Exact match with reference implementation.
     ExactMatch,
@@ -174,6 +186,7 @@ pub enum FixtureComparisonResult {
 }
 
 /// Compare our implementation output against a fixture.
+#[allow(dead_code)]
 pub fn compare_against_fixture(
     fixture: &HpackFixture,
     our_encoded: &[u8],
@@ -228,6 +241,7 @@ pub fn compare_against_fixture(
 }
 
 /// Generate fixtures from our implementation (for creating reference outputs).
+#[allow(dead_code)]
 pub fn generate_fixture_from_headers(
     name: &str,
     description: &str,
@@ -269,6 +283,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_fixture_loader_basic_functionality() {
         let loader = FixtureLoader::new();
 
@@ -287,6 +302,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_fixture_comparison() {
         let fixture = HpackFixture {
             name: "test".to_string(),
@@ -329,6 +345,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_fixture_generation() {
         let headers = vec![(":method".to_string(), "GET".to_string())];
 

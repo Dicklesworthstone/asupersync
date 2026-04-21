@@ -7,6 +7,7 @@ use crate::{
 use std::time::Instant;
 
 /// Register K calculation conformance tests.
+#[allow(dead_code)]
 pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
     suite.add_test_case(Rfc6330ConformanceCase {
         id: "RFC6330-5.1.1",
@@ -58,6 +59,7 @@ pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
 }
 
 /// Test basic K calculation according to RFC 6330 formula.
+#[allow(dead_code)]
 fn test_k_calculation_basic(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -88,6 +90,7 @@ fn test_k_calculation_basic(ctx: &ConformanceContext) -> ConformanceResult {
 }
 
 /// Test K range validation according to RFC 6330 limits.
+#[allow(dead_code)]
 fn test_k_range_validation(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -123,6 +126,7 @@ fn test_k_range_validation(ctx: &ConformanceContext) -> ConformanceResult {
 }
 
 /// Test source block subdivision for large objects.
+#[allow(dead_code)]
 fn test_source_block_subdivision(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -167,6 +171,7 @@ fn test_source_block_subdivision(ctx: &ConformanceContext) -> ConformanceResult 
 }
 
 /// Test symbol padding behavior for partial symbols.
+#[allow(dead_code)]
 fn test_symbol_padding(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -204,6 +209,7 @@ fn test_symbol_padding(ctx: &ConformanceContext) -> ConformanceResult {
 }
 
 /// Test that K calculation is deterministic.
+#[allow(dead_code)]
 fn test_k_calculation_deterministic(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -233,6 +239,7 @@ fn test_k_calculation_deterministic(ctx: &ConformanceContext) -> ConformanceResu
 }
 
 /// Test edge cases for K calculation.
+#[allow(dead_code)]
 fn test_k_calculation_edge_cases(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
     let mut edge_cases_tested = 0;
@@ -279,6 +286,7 @@ fn test_k_calculation_edge_cases(ctx: &ConformanceContext) -> ConformanceResult 
 }
 
 /// Calculate K according to RFC 6330 Section 5.1.
+#[allow(dead_code)]
 fn calculate_k_rfc6330(object_size: usize, symbol_size: usize) -> usize {
     if symbol_size == 0 {
         return 0; // Invalid input
@@ -289,11 +297,13 @@ fn calculate_k_rfc6330(object_size: usize, symbol_size: usize) -> usize {
 }
 
 /// Validate that K is within the supported range.
+#[allow(dead_code)]
 fn validate_k_in_range(k: usize) -> bool {
     k >= 1 && k <= 8192
 }
 
 /// Calculate source block subdivision for large objects.
+#[allow(dead_code)]
 fn calculate_source_block_subdivision(object_size: usize, symbol_size: usize) -> Vec<usize> {
     const MAX_K: usize = 8192;
 
@@ -315,6 +325,8 @@ mod tests {
     use super::*;
     use crate::{ConformanceConfig, ConformanceContext};
 
+    #[allow(dead_code)]
+
     fn create_test_context() -> ConformanceContext {
         ConformanceContext {
             config: ConformanceConfig::default(),
@@ -324,6 +336,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_k_calculation_formula() {
         assert_eq!(calculate_k_rfc6330(1000, 100), 10);
         assert_eq!(calculate_k_rfc6330(1000, 300), 4);
@@ -332,6 +345,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_k_range_validation_fn() {
         assert!(validate_k_in_range(1));
         assert!(validate_k_in_range(8192));
@@ -340,6 +354,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_source_block_subdivision_fn() {
         let subdivision = calculate_source_block_subdivision(100000, 10);
         assert!(subdivision.iter().all(|&k| k <= 8192));
@@ -351,6 +366,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_k_calculation_conformance() {
         let ctx = create_test_context();
         let result = test_k_calculation_basic(&ctx);
@@ -358,6 +374,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_k_range_validation_conformance() {
         let ctx = create_test_context();
         let result = test_k_range_validation(&ctx);

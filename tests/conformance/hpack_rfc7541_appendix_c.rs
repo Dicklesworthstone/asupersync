@@ -12,6 +12,7 @@ use asupersync::http::h2::hpack::{Decoder, Header};
 
 /// Basic test to verify the decoder is working
 #[test]
+#[allow(dead_code)]
 fn test_decoder_basic() {
     let mut decoder = Decoder::new();
 
@@ -39,6 +40,7 @@ fn test_decoder_basic() {
 ///
 /// The custom header field is added to the dynamic table.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_c2_literal_incremental_new_name() {
     let mut decoder = Decoder::new();
 
@@ -68,6 +70,7 @@ fn rfc7541_c2_literal_incremental_new_name() {
 /// Shows the addition of a custom header with an indexed name (cache-control)
 /// and literal value "no-cache". The cache-control name is in the static table at index 24.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_c2_literal_incremental_indexed_name() {
     let mut decoder = Decoder::new();
 
@@ -86,6 +89,7 @@ fn rfc7541_c2_literal_incremental_indexed_name() {
 ///
 /// Shows the same header as C.2.2 but with Huffman encoded value.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_c2_literal_incremental_indexed_name_huffman() {
     let mut decoder = Decoder::new();
 
@@ -104,6 +108,7 @@ fn rfc7541_c2_literal_incremental_indexed_name_huffman() {
 ///
 /// Shows a dynamic table size update to 32 bytes.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_c3_dynamic_table_size_update() {
     let mut decoder = Decoder::new();
 
@@ -121,6 +126,7 @@ fn rfc7541_c3_dynamic_table_size_update() {
 ///
 /// Shows a literal header field without indexing using a new name.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_c4_literal_without_indexing_new_name() {
     let mut decoder = Decoder::new();
 
@@ -142,6 +148,7 @@ fn rfc7541_c4_literal_without_indexing_new_name() {
 ///
 /// Shows a literal header field without indexing using an indexed name.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_c4_literal_without_indexing_indexed_name() {
     let mut decoder = Decoder::new();
 
@@ -160,6 +167,7 @@ fn rfc7541_c4_literal_without_indexing_indexed_name() {
 ///
 /// Shows the same as C.4.2 but with Huffman encoded value.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_c4_literal_without_indexing_indexed_name_huffman() {
     let mut decoder = Decoder::new();
 
@@ -178,6 +186,7 @@ fn rfc7541_c4_literal_without_indexing_indexed_name_huffman() {
 ///
 /// Shows a literal header field with never indexed flag using a new name.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_c5_literal_never_indexed_new_name() {
     let mut decoder = Decoder::new();
 
@@ -199,6 +208,7 @@ fn rfc7541_c5_literal_never_indexed_new_name() {
 ///
 /// Shows a literal header field with never indexed flag using an indexed name.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_c5_literal_never_indexed_indexed_name() {
     let mut decoder = Decoder::new();
 
@@ -217,6 +227,7 @@ fn rfc7541_c5_literal_never_indexed_indexed_name() {
 ///
 /// Shows the same as C.5.2 but with Huffman encoded value.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_c5_literal_never_indexed_indexed_name_huffman() {
     let mut decoder = Decoder::new();
 
@@ -235,6 +246,7 @@ fn rfc7541_c5_literal_never_indexed_indexed_name_huffman() {
 ///
 /// Shows an indexed header field representation.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_c6_indexed_header_field() {
     let mut decoder = Decoder::new();
 
@@ -253,6 +265,7 @@ fn rfc7541_c6_indexed_header_field() {
 ///
 /// Tests a complete sequence from C.2-C.6 representing a typical HTTP request.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_appendix_c_integration_request_without_huffman() {
     let mut decoder = Decoder::new();
 
@@ -284,6 +297,7 @@ fn rfc7541_appendix_c_integration_request_without_huffman() {
 ///
 /// Tests the same request as above but with Huffman coding enabled.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_appendix_c_integration_request_with_huffman() {
     let mut decoder = Decoder::new();
 
@@ -314,6 +328,7 @@ fn rfc7541_appendix_c_integration_request_with_huffman() {
 ///
 /// Tests decoding of a complete HTTP response header block.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_appendix_c_integration_response() {
     let mut decoder = Decoder::new();
 
@@ -338,6 +353,7 @@ fn rfc7541_appendix_c_integration_response() {
 ///
 /// Tests dynamic table management when entries are evicted.
 #[test]
+#[allow(dead_code)]
 fn rfc7541_appendix_c_dynamic_table_eviction() {
     let mut decoder = Decoder::with_max_size(128); // Small table for testing eviction
 

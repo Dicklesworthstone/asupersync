@@ -26,6 +26,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// Test context for TCP accept conformance
+#[allow(dead_code)]
 fn test_cx() -> Cx {
     let reactor = Arc::new(LabReactor::new());
     let driver = IoDriverHandle::new(reactor);
@@ -39,12 +40,15 @@ fn test_cx() -> Cx {
     )
 }
 
+#[allow(dead_code)]
+
 fn bind_listener() -> TcpListener {
     block_on(TcpListener::bind("127.0.0.1:0")).expect("bind listener")
 }
 
 /// Connection attempt result for tracking
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 enum ConnectionOutcome {
     Accepted,
     Refused,
@@ -54,6 +58,7 @@ enum ConnectionOutcome {
 
 /// TCP accept operation for metamorphic testing
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum AcceptOperation {
     StartListening(u16),  // port (0 = any)
     ConnectClient(usize), // connection index
@@ -64,6 +69,7 @@ enum AcceptOperation {
 }
 
 /// Generate operation sequences for metamorphic testing
+#[allow(dead_code)]
 fn operation_sequence_strategy() -> impl Strategy<Value = Vec<AcceptOperation>> {
     prop::collection::vec(
         prop_oneof![
@@ -80,6 +86,7 @@ fn operation_sequence_strategy() -> impl Strategy<Value = Vec<AcceptOperation>> 
 
 /// State tracker for accept loop behavior
 #[derive(Debug)]
+#[allow(dead_code)]
 struct AcceptState {
     listener_addr: Option<SocketAddr>,
     connections: HashMap<usize, ConnectionOutcome>,
@@ -90,7 +97,10 @@ struct AcceptState {
     next_connection_id: usize,
 }
 
+#[allow(dead_code)]
+
 impl AcceptState {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self {
             listener_addr: None,
@@ -102,6 +112,8 @@ impl AcceptState {
             next_connection_id: 0,
         }
     }
+
+    #[allow(dead_code)]
 
     fn record_connection(&mut self, outcome: ConnectionOutcome) -> usize {
         let id = self.next_connection_id;
@@ -120,11 +132,15 @@ impl AcceptState {
 }
 
 /// Simple wake counter for testing
+#[allow(dead_code)]
 struct TestWaker {
     wake_count: Arc<AtomicUsize>,
 }
 
+#[allow(dead_code)]
+
 impl TestWaker {
+    #[allow(dead_code)]
     fn new() -> (Self, Arc<AtomicUsize>) {
         let wake_count = Arc::new(AtomicUsize::new(0));
         (
@@ -137,9 +153,12 @@ impl TestWaker {
 }
 
 impl Wake for TestWaker {
+    #[allow(dead_code)]
     fn wake(self: Arc<Self>) {
         self.wake_count.fetch_add(1, Ordering::SeqCst);
     }
+
+    #[allow(dead_code)]
 
     fn wake_by_ref(self: &Arc<Self>) {
         self.wake_count.fetch_add(1, Ordering::SeqCst);
@@ -147,6 +166,7 @@ impl Wake for TestWaker {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_mr1_backlog_bounded_by_somaxconn() {
     proptest!(|(connection_count in 1usize..=200)| {
         let cx = test_cx();
@@ -208,6 +228,7 @@ fn test_mr1_backlog_bounded_by_somaxconn() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_mr2_accept_reports_emfile_cleanly_when_fd_exhausted() {
     proptest!(|(attempt_count in 5usize..=20)| {
         let cx = test_cx();
@@ -275,6 +296,7 @@ fn test_mr2_accept_reports_emfile_cleanly_when_fd_exhausted() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_mr3_connection_reset_before_accept_tolerated() {
     proptest!(|(reset_count in 1usize..=10)| {
         let cx = test_cx();
@@ -358,6 +380,7 @@ fn test_mr3_connection_reset_before_accept_tolerated() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_mr4_syn_flood_does_not_lock_accept_loop() {
     proptest!(|(flood_size in 10usize..=50, accept_attempts in 5usize..=20)| {
         let cx = test_cx();
@@ -443,6 +466,7 @@ fn test_mr4_syn_flood_does_not_lock_accept_loop() {
 }
 
 #[test]
+#[allow(dead_code)]
 fn test_mr5_accepted_socket_keepalive_can_be_enabled() {
     proptest!(|(connection_count in 1usize..=5)| {
         let cx = test_cx();
@@ -515,6 +539,7 @@ fn test_mr5_accepted_socket_keepalive_can_be_enabled() {
 
 /// Comprehensive metamorphic test combining all relations
 #[test]
+#[allow(dead_code)]
 fn test_tcp_accept_metamorphic_comprehensive() {
     proptest!(|(operations in operation_sequence_strategy().prop_filter("Non-empty operations", |ops| !ops.is_empty()))| {
         let cx = test_cx();
@@ -621,6 +646,7 @@ fn test_tcp_accept_metamorphic_comprehensive() {
 
 /// Edge case testing for TCP accept behavior
 #[test]
+#[allow(dead_code)]
 fn test_tcp_accept_edge_cases() {
     let cx = test_cx();
     let _guard = Cx::set_current(Some(cx));
@@ -653,6 +679,7 @@ fn test_tcp_accept_edge_cases() {
 
 /// Performance baseline test for accept loop
 #[test]
+#[allow(dead_code)]
 fn test_tcp_accept_performance() {
     let cx = test_cx();
     let _guard = Cx::set_current(Some(cx));

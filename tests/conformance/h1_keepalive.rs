@@ -39,6 +39,7 @@ use std::task::{Context, Poll};
 
 /// RFC 2119 requirement level for conformance testing
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // RFC 2119: MUST
     Should, // RFC 2119: SHOULD
@@ -47,6 +48,7 @@ pub enum RequirementLevel {
 
 /// Test result for a single keep-alive conformance requirement
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct KeepAliveResult {
     pub test_id: String,
     pub description: String,
@@ -59,6 +61,7 @@ pub struct KeepAliveResult {
 
 /// Test categories for HTTP/1.1 keep-alive conformance
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// Connection: keep-alive header honored
     KeepAliveReuse,
@@ -76,6 +79,7 @@ pub enum TestCategory {
 
 /// Test verdict
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -84,6 +88,7 @@ pub enum TestVerdict {
 }
 
 /// Mock HTTP server for testing connection behavior
+#[allow(dead_code)]
 struct MockHttpServer {
     responses: Arc<Mutex<VecDeque<MockResponse>>>,
     connections_created: Arc<Mutex<u32>>,
@@ -92,6 +97,7 @@ struct MockHttpServer {
 
 /// Mock HTTP response configuration
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct MockResponse {
     status: u16,
     headers: Vec<(String, String)>,
@@ -102,7 +108,10 @@ struct MockResponse {
     malformed_body: bool,
 }
 
+#[allow(dead_code)]
+
 impl MockHttpServer {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self {
             responses: Arc::new(Mutex::new(VecDeque::new())),
@@ -111,17 +120,25 @@ impl MockHttpServer {
         }
     }
 
+    #[allow(dead_code)]
+
     fn add_response(&self, response: MockResponse) {
         self.responses.lock().unwrap().push_back(response);
     }
+
+    #[allow(dead_code)]
 
     fn connections_created(&self) -> u32 {
         *self.connections_created.lock().unwrap()
     }
 
+    #[allow(dead_code)]
+
     fn connections_closed(&self) -> u32 {
         *self.connections_closed.lock().unwrap()
     }
+
+    #[allow(dead_code)]
 
     fn reset_counters(&self) {
         *self.connections_created.lock().unwrap() = 0;
@@ -130,6 +147,7 @@ impl MockHttpServer {
 }
 
 /// Mock transport that simulates HTTP server behavior
+#[allow(dead_code)]
 struct MockTransport {
     server: Arc<MockHttpServer>,
     buffer: Vec<u8>,
@@ -138,7 +156,10 @@ struct MockTransport {
     closed: bool,
 }
 
+#[allow(dead_code)]
+
 impl MockTransport {
+    #[allow(dead_code)]
     fn new(server: Arc<MockHttpServer>) -> Self {
         {
             let mut count = server.connections_created.lock().unwrap();
@@ -153,6 +174,8 @@ impl MockTransport {
             closed: false,
         }
     }
+
+    #[allow(dead_code)]
 
     fn prepare_response(&mut self) {
         let mut responses = self.server.responses.lock().unwrap();
@@ -187,6 +210,7 @@ impl MockTransport {
 }
 
 impl AsyncRead for MockTransport {
+    #[allow(dead_code)]
     fn poll_read(
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
@@ -210,6 +234,7 @@ impl AsyncRead for MockTransport {
 }
 
 impl AsyncWrite for MockTransport {
+    #[allow(dead_code)]
     fn poll_write(
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
@@ -219,9 +244,13 @@ impl AsyncWrite for MockTransport {
         Poll::Ready(Ok(buf.len()))
     }
 
+    #[allow(dead_code)]
+
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         Poll::Ready(Ok(()))
     }
+
+    #[allow(dead_code)]
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         {
@@ -235,12 +264,16 @@ impl AsyncWrite for MockTransport {
 impl Unpin for MockTransport {}
 
 /// HTTP/1.1 keep-alive conformance test harness
+#[allow(dead_code)]
 pub struct H1KeepAliveHarness {
     server: Arc<MockHttpServer>,
     pool_config: PoolConfig,
 }
 
+#[allow(dead_code)]
+
 impl H1KeepAliveHarness {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             server: Arc::new(MockHttpServer::new()),
@@ -248,12 +281,15 @@ impl H1KeepAliveHarness {
         }
     }
 
+    #[allow(dead_code)]
+
     pub fn with_pool_config(mut self, config: PoolConfig) -> Self {
         self.pool_config = config;
         self
     }
 
     /// Run all HTTP/1.1 keep-alive conformance tests
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<KeepAliveResult> {
         let mut results = Vec::new();
 
@@ -279,6 +315,7 @@ impl H1KeepAliveHarness {
     }
 
     /// Test RFC 9112: Connection: keep-alive honored for reuse (Requirement 1)
+    #[allow(dead_code)]
     fn test_keep_alive_reuse(&self) -> KeepAliveResult {
         let start = Instant::now();
 
@@ -345,6 +382,7 @@ impl H1KeepAliveHarness {
     }
 
     /// Test RFC 9112: Connection: close terminates after response (Requirement 2)
+    #[allow(dead_code)]
     fn test_connection_close(&self) -> KeepAliveResult {
         let start = Instant::now();
 
@@ -394,6 +432,7 @@ impl H1KeepAliveHarness {
     }
 
     /// Test idle timeout recycles stale connections (Requirement 3)
+    #[allow(dead_code)]
     fn test_idle_timeout(&self) -> KeepAliveResult {
         let start = Instant::now();
 
@@ -443,6 +482,7 @@ impl H1KeepAliveHarness {
     }
 
     /// Test pool capacity bounds enforcement (Requirement 4)
+    #[allow(dead_code)]
     fn test_pool_capacity_bounds(&self) -> KeepAliveResult {
         let start = Instant::now();
 
@@ -492,6 +532,7 @@ impl H1KeepAliveHarness {
     }
 
     /// Test poisoned connection removal (Requirement 5)
+    #[allow(dead_code)]
     fn test_poisoned_connection_removal(&self) -> KeepAliveResult {
         let start = Instant::now();
 
@@ -542,6 +583,7 @@ impl H1KeepAliveHarness {
     }
 
     /// Test HTTP/1.0 vs HTTP/1.1 default behavior (Requirement 6)
+    #[allow(dead_code)]
     fn test_http_version_defaults(&self) -> KeepAliveResult {
         let start = Instant::now();
 
@@ -600,6 +642,7 @@ mod tests {
 
     /// Run the complete RFC 9112 HTTP/1.1 keep-alive conformance test suite
     #[test]
+    #[allow(dead_code)]
     fn rfc9112_keepalive_complete_conformance_suite() {
         let harness = H1KeepAliveHarness::new();
         let results = harness.run_all_tests();
@@ -668,6 +711,7 @@ mod tests {
 
     /// Test basic keep-alive connection reuse behavior
     #[test]
+    #[allow(dead_code)]
     fn test_basic_keepalive_reuse() {
         let harness = H1KeepAliveHarness::new();
         let result = harness.test_keep_alive_reuse();
@@ -676,6 +720,7 @@ mod tests {
 
     /// Test connection close header enforcement
     #[test]
+    #[allow(dead_code)]
     fn test_connection_close_enforcement() {
         let harness = H1KeepAliveHarness::new();
         let result = harness.test_connection_close();
@@ -684,6 +729,7 @@ mod tests {
 
     /// Test idle connection timeout mechanics
     #[test]
+    #[allow(dead_code)]
     fn test_idle_connection_timeout() {
         let harness = H1KeepAliveHarness::new();
         let result = harness.test_idle_timeout();
@@ -692,6 +738,7 @@ mod tests {
 
     /// Test pool capacity bounds enforcement
     #[test]
+    #[allow(dead_code)]
     fn test_pool_capacity_enforcement() {
         let harness = H1KeepAliveHarness::new();
         let result = harness.test_pool_capacity_bounds();
@@ -700,6 +747,7 @@ mod tests {
 
     /// Test poisoned connection removal from pool
     #[test]
+    #[allow(dead_code)]
     fn test_poisoned_connection_cleanup() {
         let harness = H1KeepAliveHarness::new();
         let result = harness.test_poisoned_connection_removal();
@@ -708,6 +756,7 @@ mod tests {
 
     /// Test HTTP version default connection behavior
     #[test]
+    #[allow(dead_code)]
     fn test_http_version_connection_defaults() {
         let harness = H1KeepAliveHarness::new();
         let result = harness.test_http_version_defaults();
@@ -716,6 +765,7 @@ mod tests {
 
     /// Test custom pool configuration
     #[test]
+    #[allow(dead_code)]
     fn test_custom_pool_configuration() {
         let custom_config = PoolConfig {
             max_connections_per_host: 1,
@@ -736,6 +786,7 @@ mod tests {
 
     /// Test comprehensive RFC 9112 coverage
     #[test]
+    #[allow(dead_code)]
     fn test_rfc9112_coverage_completeness() {
         let harness = H1KeepAliveHarness::new();
         let results = harness.run_all_tests();

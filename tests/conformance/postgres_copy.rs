@@ -47,6 +47,7 @@ use asupersync::database::postgres::{
 
 /// Test result for a single COPY protocol conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct PostgresCopyResult {
     pub test_id: String,
     pub description: String,
@@ -59,6 +60,7 @@ pub struct PostgresCopyResult {
 
 /// Conformance test categories for PostgreSQL COPY protocol.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// CopyInResponse format specifier validation
     FormatSpecification,
@@ -78,6 +80,7 @@ pub enum TestCategory {
 
 /// Protocol requirement level.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // Protocol requirement
     Should, // Recommended behavior
@@ -86,6 +89,7 @@ pub enum RequirementLevel {
 
 /// Test execution result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -96,6 +100,7 @@ pub enum TestVerdict {
 /// PostgreSQL COPY protocol message types.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum CopyMessageType {
     CopyInResponse = b'G',
     CopyOutResponse = b'H',
@@ -106,6 +111,7 @@ pub enum CopyMessageType {
 
 /// COPY format specifications.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct CopyFormat {
     /// Overall format: 0 = text, 1 = binary
     pub overall_format: u8,
@@ -115,7 +121,10 @@ pub struct CopyFormat {
     pub format_codes: Vec<i16>,
 }
 
+#[allow(dead_code)]
+
 impl CopyFormat {
+    #[allow(dead_code)]
     pub fn new_text(column_count: u16) -> Self {
         Self {
             overall_format: 0,
@@ -124,6 +133,8 @@ impl CopyFormat {
         }
     }
 
+    #[allow(dead_code)]
+
     pub fn new_binary(column_count: u16) -> Self {
         Self {
             overall_format: 1,
@@ -131,6 +142,8 @@ impl CopyFormat {
             format_codes: vec![1; column_count as usize],
         }
     }
+
+    #[allow(dead_code)]
 
     pub fn new_mixed(format_codes: Vec<i16>) -> Self {
         Self {
@@ -143,6 +156,7 @@ impl CopyFormat {
 
 /// Test data generator for COPY protocol validation.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CopyTestData {
     /// Text format data (tab-separated values)
     pub text_data: Vec<u8>,
@@ -152,8 +166,11 @@ pub struct CopyTestData {
     pub format: CopyFormat,
 }
 
+#[allow(dead_code)]
+
 impl CopyTestData {
     /// Generate sample test data for text format
+    #[allow(dead_code)]
     pub fn new_text_sample() -> Self {
         let text_data = b"123\tJohn Doe\ttrue\n456\tJane Smith\tfalse\n".to_vec();
         let binary_data = Self::build_binary_sample();
@@ -166,6 +183,7 @@ impl CopyTestData {
     }
 
     /// Generate sample test data for binary format
+    #[allow(dead_code)]
     pub fn new_binary_sample() -> Self {
         let text_data = b"789\tBob Johnson\ttrue\n".to_vec();
         let binary_data = Self::build_binary_sample();
@@ -178,6 +196,7 @@ impl CopyTestData {
     }
 
     /// Generate sample test data with mixed formats
+    #[allow(dead_code)]
     pub fn new_mixed_sample() -> Self {
         let text_data = b"999\tMixed User\tfalse\n".to_vec();
         let binary_data = Self::build_binary_sample();
@@ -188,6 +207,8 @@ impl CopyTestData {
             format: CopyFormat::new_mixed(vec![1, 0, 1]), // binary int, text string, binary bool
         }
     }
+
+    #[allow(dead_code)]
 
     fn build_binary_sample() -> Vec<u8> {
         let mut buf = Vec::new();
@@ -220,6 +241,7 @@ impl CopyTestData {
 
 /// Shadow model for tracking COPY protocol state and validation
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct CopyProtocolState {
     /// Current COPY operation mode (None, In, Out)
     pub mode: Option<CopyMode>,
@@ -238,15 +260,21 @@ pub struct CopyProtocolState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum CopyMode {
     In,
     Out,
 }
 
+#[allow(dead_code)]
+
 impl CopyProtocolState {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
+
+    #[allow(dead_code)]
 
     pub fn start_copy_in(&mut self, format: CopyFormat) {
         self.mode = Some(CopyMode::In);
@@ -258,6 +286,8 @@ impl CopyProtocolState {
         self.error_message = None;
     }
 
+    #[allow(dead_code)]
+
     pub fn start_copy_out(&mut self, format: CopyFormat) {
         self.mode = Some(CopyMode::Out);
         self.format = Some(format);
@@ -268,19 +298,27 @@ impl CopyProtocolState {
         self.error_message = None;
     }
 
+    #[allow(dead_code)]
+
     pub fn add_data_chunk(&mut self, data: Vec<u8>) {
         self.total_bytes += data.len();
         self.chunks.push(data);
     }
 
+    #[allow(dead_code)]
+
     pub fn complete(&mut self) {
         self.completed = true;
     }
+
+    #[allow(dead_code)]
 
     pub fn fail_with_error(&mut self, error: String) {
         self.failed = true;
         self.error_message = Some(error);
     }
+
+    #[allow(dead_code)]
 
     pub fn validate_format_honored(&self) -> Result<(), String> {
         let format = self.format.as_ref()
@@ -308,6 +346,8 @@ impl CopyProtocolState {
         Ok(())
     }
 
+    #[allow(dead_code)]
+
     pub fn validate_chunk_boundaries(&self) -> Result<(), String> {
         // Each chunk should be within reasonable bounds and properly formed
         for (i, chunk) in self.chunks.iter().enumerate() {
@@ -321,6 +361,7 @@ impl CopyProtocolState {
 }
 
 /// Message builders for COPY protocol testing
+#[allow(dead_code)]
 pub fn build_copy_in_response(format: &CopyFormat) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -344,6 +385,8 @@ pub fn build_copy_in_response(format: &CopyFormat) -> Vec<u8> {
 
     buf
 }
+
+#[allow(dead_code)]
 
 pub fn build_copy_out_response(format: &CopyFormat) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -369,6 +412,8 @@ pub fn build_copy_out_response(format: &CopyFormat) -> Vec<u8> {
     buf
 }
 
+#[allow(dead_code)]
+
 pub fn build_copy_data_message(data: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -384,9 +429,13 @@ pub fn build_copy_data_message(data: &[u8]) -> Vec<u8> {
     buf
 }
 
+#[allow(dead_code)]
+
 pub fn build_copy_done_message() -> Vec<u8> {
     vec![CopyMessageType::CopyDone as u8, 0, 0, 0, 0] // type + 4-byte length (0 for no data)
 }
+
+#[allow(dead_code)]
 
 pub fn build_copy_fail_message(error_msg: &str) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -405,16 +454,22 @@ pub fn build_copy_fail_message(error_msg: &str) -> Vec<u8> {
 }
 
 /// Conformance harness for PostgreSQL COPY protocol tests.
+#[allow(dead_code)]
 pub struct PostgresCopyConformanceHarness {
     tests: Vec<Box<dyn Fn() -> PostgresCopyResult>>,
 }
 
+#[allow(dead_code)]
+
 impl PostgresCopyConformanceHarness {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         let mut harness = Self { tests: Vec::new() };
         harness.register_tests();
         harness
     }
+
+    #[allow(dead_code)]
 
     fn register_tests(&mut self) {
         // MR1: CopyInResponse format specifier honored
@@ -464,6 +519,8 @@ impl PostgresCopyConformanceHarness {
         }));
     }
 
+    #[allow(dead_code)]
+
     pub fn run_all_tests(&self) -> Vec<PostgresCopyResult> {
         self.tests.iter().map(|test| test()).collect()
     }
@@ -471,6 +528,7 @@ impl PostgresCopyConformanceHarness {
     /// MR1: CopyInResponse format specifier honored
     /// Property: format_codes in CopyInResponse MUST match actual data format
     /// Catches: Format mismatch between declared and actual data encoding
+    #[allow(dead_code)]
     fn mr1_copy_in_response_format_specifier_honored() -> PostgresCopyResult {
         let start = Instant::now();
         let mut state = CopyProtocolState::new();
@@ -537,6 +595,7 @@ impl PostgresCopyConformanceHarness {
     /// MR2: CopyData chunks bounded by message-length
     /// Property: CopyData payload MUST NOT exceed declared message length
     /// Catches: Buffer overruns and protocol violations in chunk boundaries
+    #[allow(dead_code)]
     fn mr2_copy_data_chunks_bounded_by_message_length() -> PostgresCopyResult {
         let start = Instant::now();
         let mut state = CopyProtocolState::new();
@@ -623,6 +682,7 @@ impl PostgresCopyConformanceHarness {
     /// MR3: CopyDone terminates COPY IN
     /// Property: CopyDone MUST successfully terminate COPY IN operation
     /// Catches: Incomplete termination or state transition errors
+    #[allow(dead_code)]
     fn mr3_copy_done_terminates_copy_in() -> PostgresCopyResult {
         let start = Instant::now();
         let mut state = CopyProtocolState::new();
@@ -726,6 +786,7 @@ impl PostgresCopyConformanceHarness {
     /// MR4: CopyFail rolls back
     /// Property: CopyFail MUST abort COPY IN and trigger transaction rollback
     /// Catches: Partial commits or failed rollback handling
+    #[allow(dead_code)]
     fn mr4_copy_fail_rolls_back() -> PostgresCopyResult {
         let start = Instant::now();
         let mut state = CopyProtocolState::new();
@@ -838,6 +899,7 @@ impl PostgresCopyConformanceHarness {
     /// MR5: COPY OUT sends CopyOutResponse then CopyData stream then CopyDone
     /// Property: COPY OUT MUST follow exact message sequence for protocol compliance
     /// Catches: Message ordering violations and incomplete sequences
+    #[allow(dead_code)]
     fn mr5_copy_out_sequence_conformance() -> PostgresCopyResult {
         let start = Instant::now();
         let mut state = CopyProtocolState::new();
@@ -958,6 +1020,7 @@ impl PostgresCopyConformanceHarness {
     }
 
     /// Additional conformance test: Binary format signature validation
+    #[allow(dead_code)]
     fn test_binary_format_signature_validation() -> PostgresCopyResult {
         let start = Instant::now();
 
@@ -1001,6 +1064,7 @@ impl PostgresCopyConformanceHarness {
     }
 
     /// Additional conformance test: Mixed format column specification
+    #[allow(dead_code)]
     fn test_mixed_format_column_specification() -> PostgresCopyResult {
         let start = Instant::now();
 
@@ -1052,6 +1116,7 @@ impl PostgresCopyConformanceHarness {
     }
 
     /// Additional conformance test: Copy data chunk size limits
+    #[allow(dead_code)]
     fn test_copy_data_chunk_size_limits() -> PostgresCopyResult {
         let start = Instant::now();
 
@@ -1105,6 +1170,7 @@ impl PostgresCopyConformanceHarness {
     }
 
     /// Additional conformance test: Copy protocol state transitions
+    #[allow(dead_code)]
     fn test_copy_protocol_state_transitions() -> PostgresCopyResult {
         let start = Instant::now();
         let mut state = CopyProtocolState::new();
@@ -1181,6 +1247,7 @@ impl PostgresCopyConformanceHarness {
     }
 
     /// Additional conformance test: Copy fail error message encoding
+    #[allow(dead_code)]
     fn test_copy_fail_error_message_encoding() -> PostgresCopyResult {
         let start = Instant::now();
 
@@ -1266,6 +1333,7 @@ impl PostgresCopyConformanceHarness {
 }
 
 impl Default for PostgresCopyConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
@@ -1276,12 +1344,14 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_copy_protocol_harness_creation() {
         let harness = PostgresCopyConformanceHarness::new();
         assert!(!harness.tests.is_empty(), "Should have registered tests");
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_copy_format_creation() {
         let text_format = CopyFormat::new_text(3);
         assert_eq!(text_format.overall_format, 0);
@@ -1300,6 +1370,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_copy_test_data_generation() {
         let text_data = CopyTestData::new_text_sample();
         assert!(!text_data.text_data.is_empty());
@@ -1314,6 +1385,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_copy_protocol_state_management() {
         let mut state = CopyProtocolState::new();
 
@@ -1339,6 +1411,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_copy_message_builders() {
         let format = CopyFormat::new_text(2);
 
@@ -1366,6 +1439,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_conformance_test_execution() {
         let harness = PostgresCopyConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -1395,6 +1469,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_binary_format_signature() {
         let binary_data = CopyTestData::new_binary_sample();
         assert!(binary_data.binary_data.len() >= 11);
@@ -1404,6 +1479,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_format_validation() {
         let mut state = CopyProtocolState::new();
 

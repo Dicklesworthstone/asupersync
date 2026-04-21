@@ -6,6 +6,7 @@ use crate::spec_derived::{
 };
 
 /// Register ESI validation tests.
+#[allow(dead_code)]
 pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
     suite.add_test_case(Rfc6330ConformanceCase {
         id: "RFC6330-ESI-1",
@@ -17,6 +18,7 @@ pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
 }
 
 /// Test ESI uniqueness within source block.
+#[allow(dead_code)]
 fn test_esi_uniqueness(ctx: &ConformanceContext) -> ConformanceResult {
     // Placeholder implementation
     ConformanceResult::pass()

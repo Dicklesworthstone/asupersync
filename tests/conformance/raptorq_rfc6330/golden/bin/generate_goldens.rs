@@ -7,6 +7,8 @@ use raptorq_golden_testing::{run_complete_test_suite, FixtureGenerator};
 use std::env;
 use std::path::PathBuf;
 
+#[allow(dead_code)]
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = Command::new("generate_goldens")
         .version("1.0.0")

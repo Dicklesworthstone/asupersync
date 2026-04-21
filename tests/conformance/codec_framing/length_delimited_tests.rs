@@ -12,6 +12,7 @@ use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::codec::{Decoder, LengthDelimitedCodec};
 
 /// Run all length delimited codec tests.
+#[allow(dead_code)]
 pub fn run_length_delimited_tests() -> Vec<CodecConformanceResult> {
     let mut results = Vec::new();
 
@@ -54,6 +55,7 @@ pub fn run_length_delimited_tests() -> Vec<CodecConformanceResult> {
 }
 
 /// Test basic frame decoding with default 4-byte length prefix.
+#[allow(dead_code)]
 fn test_basic_frame_decode() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::new();
@@ -92,6 +94,7 @@ fn test_basic_frame_decode() -> CodecConformanceResult {
 }
 
 /// Test encode-decode round-trip.
+#[allow(dead_code)]
 fn test_basic_frame_encode_decode() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Note: LengthDelimitedCodec in the current implementation appears to be decode-only
@@ -133,6 +136,7 @@ fn test_basic_frame_encode_decode() -> CodecConformanceResult {
 }
 
 /// Test multiple frames in a single buffer.
+#[allow(dead_code)]
 fn test_multiple_frames_single_buffer() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::new();
@@ -185,6 +189,7 @@ fn test_multiple_frames_single_buffer() -> CodecConformanceResult {
 }
 
 /// Test frame spanning multiple buffers (partial reads).
+#[allow(dead_code)]
 fn test_frame_spanning_multiple_buffers() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::new();
@@ -243,6 +248,7 @@ fn test_frame_spanning_multiple_buffers() -> CodecConformanceResult {
 }
 
 /// Test 1-byte length field configuration.
+#[allow(dead_code)]
 fn test_1_byte_length_field() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::builder()
@@ -278,6 +284,7 @@ fn test_1_byte_length_field() -> CodecConformanceResult {
 }
 
 /// Test 2-byte length field configuration.
+#[allow(dead_code)]
 fn test_2_byte_length_field() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::builder()
@@ -314,6 +321,7 @@ fn test_2_byte_length_field() -> CodecConformanceResult {
 }
 
 /// Test 4-byte length field (default).
+#[allow(dead_code)]
 fn test_4_byte_length_field() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::new(); // Default is 4-byte
@@ -347,6 +355,7 @@ fn test_4_byte_length_field() -> CodecConformanceResult {
 }
 
 /// Test 8-byte length field configuration.
+#[allow(dead_code)]
 fn test_8_byte_length_field() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::builder()
@@ -383,6 +392,7 @@ fn test_8_byte_length_field() -> CodecConformanceResult {
 }
 
 /// Test big-endian length field (default).
+#[allow(dead_code)]
 fn test_big_endian_length_field() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::new(); // Default is big-endian
@@ -416,6 +426,7 @@ fn test_big_endian_length_field() -> CodecConformanceResult {
 }
 
 /// Test little-endian length field.
+#[allow(dead_code)]
 fn test_little_endian_length_field() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::builder().little_endian().new_codec();
@@ -449,6 +460,7 @@ fn test_little_endian_length_field() -> CodecConformanceResult {
 }
 
 /// Test length field offset.
+#[allow(dead_code)]
 fn test_length_field_offset() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::builder()
@@ -489,6 +501,7 @@ fn test_length_field_offset() -> CodecConformanceResult {
 }
 
 /// Test positive length adjustment.
+#[allow(dead_code)]
 fn test_length_adjustment_positive() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::builder()
@@ -524,6 +537,7 @@ fn test_length_adjustment_positive() -> CodecConformanceResult {
 }
 
 /// Test negative length adjustment.
+#[allow(dead_code)]
 fn test_length_adjustment_negative() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::builder()
@@ -559,6 +573,7 @@ fn test_length_adjustment_negative() -> CodecConformanceResult {
 }
 
 /// Test num_skip parameter.
+#[allow(dead_code)]
 fn test_num_skip_bytes() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::builder()
@@ -598,6 +613,7 @@ fn test_num_skip_bytes() -> CodecConformanceResult {
 }
 
 /// Test maximum frame length enforcement.
+#[allow(dead_code)]
 fn test_max_frame_length_enforcement() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::builder()
@@ -627,6 +643,7 @@ fn test_max_frame_length_enforcement() -> CodecConformanceResult {
 }
 
 /// Test empty frame handling.
+#[allow(dead_code)]
 fn test_empty_frame() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::new();
@@ -658,6 +675,7 @@ fn test_empty_frame() -> CodecConformanceResult {
 }
 
 /// Test zero-length frame (same as empty).
+#[allow(dead_code)]
 fn test_zero_length_frame() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::new();
@@ -688,6 +706,7 @@ fn test_zero_length_frame() -> CodecConformanceResult {
 }
 
 /// Test incomplete length field.
+#[allow(dead_code)]
 fn test_incomplete_length_field() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::new();
@@ -717,6 +736,7 @@ fn test_incomplete_length_field() -> CodecConformanceResult {
 }
 
 /// Test incomplete frame data.
+#[allow(dead_code)]
 fn test_incomplete_frame_data() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::new();
@@ -747,6 +767,7 @@ fn test_incomplete_frame_data() -> CodecConformanceResult {
 }
 
 /// Test length field overflow.
+#[allow(dead_code)]
 fn test_length_field_overflow() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::builder()
@@ -774,6 +795,7 @@ fn test_length_field_overflow() -> CodecConformanceResult {
 }
 
 /// Test malformed length field.
+#[allow(dead_code)]
 fn test_malformed_length_field() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::builder()
@@ -800,6 +822,7 @@ fn test_malformed_length_field() -> CodecConformanceResult {
 }
 
 /// Test EOF with partial frame.
+#[allow(dead_code)]
 fn test_eof_with_partial_frame() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::new();
@@ -828,6 +851,7 @@ fn test_eof_with_partial_frame() -> CodecConformanceResult {
 }
 
 /// Test EOF with complete frame.
+#[allow(dead_code)]
 fn test_eof_with_complete_frame() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LengthDelimitedCodec::new();

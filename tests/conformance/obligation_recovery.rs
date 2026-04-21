@@ -12,13 +12,19 @@ use asupersync::record::{ObligationAbortReason, ObligationKind, SourceLocation};
 use asupersync::types::{ObligationId, RegionId, TaskId, Time};
 use asupersync::util::ArenaIndex;
 
+#[allow(dead_code)]
+
 fn make_task() -> TaskId {
     TaskId::from_arena(ArenaIndex::new(1, 0))
 }
 
+#[allow(dead_code)]
+
 fn make_region() -> RegionId {
     RegionId::from_arena(ArenaIndex::new(0, 0))
 }
+
+#[allow(dead_code)]
 
 fn make_time() -> Time {
     Time::from_nanos(1000)
@@ -30,6 +36,7 @@ fn make_time() -> Time {
 /// in the ledger before any commit operation, ensuring visibility for
 /// recovery operations.
 #[test]
+#[allow(dead_code)]
 fn test_pending_obligations_logged_before_commit() {
     let mut ledger = ObligationLedger::new();
     let task = make_task();
@@ -70,6 +77,7 @@ fn test_pending_obligations_logged_before_commit() {
 /// This test simulates a crash scenario where obligations are acquired but
 /// not committed, then verifies recovery by replaying the commit operation.
 #[test]
+#[allow(dead_code)]
 fn test_crash_between_log_and_commit_resumes_by_replaying() {
     let mut ledger = ObligationLedger::new();
     let task = make_task();
@@ -110,6 +118,7 @@ fn test_crash_between_log_and_commit_resumes_by_replaying() {
 /// This test verifies that attempting to commit the same obligation token
 /// twice is properly rejected to prevent double-resolution bugs.
 #[test]
+#[allow(dead_code)]
 fn test_duplicate_commit_via_generation_token_rejected() {
     let mut ledger = ObligationLedger::new();
     let task = make_task();
@@ -147,6 +156,7 @@ fn test_duplicate_commit_via_generation_token_rejected() {
 /// This test verifies that obligations can be properly aborted during recovery
 /// operations to restore system balance after a crash.
 #[test]
+#[allow(dead_code)]
 fn test_abort_after_crash_restores_balance() {
     let mut ledger = ObligationLedger::new();
     let task = make_task();
@@ -192,6 +202,7 @@ fn test_abort_after_crash_restores_balance() {
 /// This test verifies that the reset() operation preserves the generation
 /// counter to prevent ID reuse across recovery cycles.
 #[test]
+#[allow(dead_code)]
 fn test_reset_after_crash_preserves_next_gen_counter() {
     let mut ledger = ObligationLedger::new();
     let task = make_task();
@@ -261,6 +272,7 @@ fn test_reset_after_crash_preserves_next_gen_counter() {
 /// when obligations are still pending or leaked.
 #[test]
 #[should_panic(expected = "cannot reset obligation ledger with pending obligations")]
+#[allow(dead_code)]
 fn test_reset_panics_with_pending_obligations() {
     let mut ledger = ObligationLedger::new();
     let task = make_task();
@@ -279,6 +291,7 @@ fn test_reset_panics_with_pending_obligations() {
 /// This test ensures generation counter increments correctly and maintains
 /// uniqueness across multiple acquire operations.
 #[test]
+#[allow(dead_code)]
 fn test_generation_counter_monotonic_increment() {
     let mut ledger = ObligationLedger::new();
     let task = make_task();

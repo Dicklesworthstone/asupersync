@@ -21,6 +21,7 @@ mod tls_sni_conformance_tests {
     use std::time::{Duration, Instant};
 
     /// Create a test context for TLS operations.
+    #[allow(dead_code)]
     fn create_test_context() -> Cx {
         Cx::new(
             RegionId::from_arena(asupersync::util::ArenaIndex::new(0, 0)),
@@ -30,9 +31,12 @@ mod tls_sni_conformance_tests {
     }
 
     /// Simple block_on implementation for tests.
+    #[allow(dead_code)]
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        #[allow(dead_code)]
         struct NoopWaker;
         impl std::task::Wake for NoopWaker {
+            #[allow(dead_code)]
             fn wake(self: std::sync::Arc<Self>) {}
         }
         let waker = std::task::Waker::noop().clone();
@@ -47,6 +51,7 @@ mod tls_sni_conformance_tests {
     }
 
     /// SNI conformance test harness.
+    #[allow(dead_code)]
     pub struct SniConformanceHarness {
         _cx: Cx,
         test_results: Vec<ConformanceTestResult>,
@@ -55,6 +60,7 @@ mod tls_sni_conformance_tests {
     /// Test category for SNI conformance tests.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum SniTestCategory {
         ServerNameExtension,
         HostnameNameType,
@@ -68,6 +74,7 @@ mod tls_sni_conformance_tests {
     /// Requirement level from RFC 6066.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum RequirementLevel {
         Must,
         Should,
@@ -77,6 +84,7 @@ mod tls_sni_conformance_tests {
     /// Test verdict for conformance tests.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum TestVerdict {
         Pass,
         Fail,
@@ -86,6 +94,7 @@ mod tls_sni_conformance_tests {
 
     /// Individual conformance test result.
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[allow(dead_code)]
     pub struct ConformanceTestResult {
         pub test_id: String,
         pub category: SniTestCategory,
@@ -99,12 +108,14 @@ mod tls_sni_conformance_tests {
     /// SNI name type enumeration per RFC 6066.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[repr(u8)]
+    #[allow(dead_code)]
     pub enum SniNameType {
         HostName = 0x00,
         // RFC 6066 reserves 0x01-0xFF for future use
     }
 
     /// Test domain names for various SNI scenarios.
+    #[allow(dead_code)]
     pub struct TestDomains {
         /// Valid ASCII hostname
         pub ascii_hostname: &'static str,
@@ -122,7 +133,10 @@ mod tls_sni_conformance_tests {
         pub deep_subdomain: &'static str,
     }
 
+    #[allow(dead_code)]
+
     impl TestDomains {
+        #[allow(dead_code)]
         fn new() -> Self {
             Self {
                 ascii_hostname: "example.com",
@@ -138,6 +152,7 @@ mod tls_sni_conformance_tests {
 
     /// SNI extension parsing state for validation.
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     pub struct SniExtensionState {
         pub extension_present: bool,
         pub server_names: Vec<SniEntry>,
@@ -146,13 +161,17 @@ mod tls_sni_conformance_tests {
 
     /// Individual SNI entry.
     #[derive(Debug, Clone, PartialEq, Eq)]
+    #[allow(dead_code)]
     pub struct SniEntry {
         pub name_type: u8,
         pub hostname: String,
     }
 
+    #[allow(dead_code)]
+
     impl SniConformanceHarness {
         /// Create a new SNI conformance test harness.
+        #[allow(dead_code)]
         pub fn new() -> Self {
             Self {
                 _cx: create_test_context(),
@@ -161,6 +180,7 @@ mod tls_sni_conformance_tests {
         }
 
         /// Execute all SNI conformance tests.
+        #[allow(dead_code)]
         pub fn run_all_tests(&mut self) {
             // MR1: Server name extension in ClientHello
             self.test_server_name_extension_presence();
@@ -183,11 +203,13 @@ mod tls_sni_conformance_tests {
         }
 
         /// Get the test results.
+        #[allow(dead_code)]
         pub fn results(&self) -> &[ConformanceTestResult] {
             &self.test_results
         }
 
         /// Clear previous test results.
+        #[allow(dead_code)]
         pub fn clear_results(&mut self) {
             self.test_results.clear();
         }
@@ -197,6 +219,7 @@ mod tls_sni_conformance_tests {
         // ================================================================================
 
         /// Test that server name extension is present in ClientHello.
+        #[allow(dead_code)]
         fn test_server_name_extension_presence(&mut self) {
             let test_start = Instant::now();
             let test_id = "sni-mr1-extension-presence";
@@ -224,6 +247,7 @@ mod tls_sni_conformance_tests {
         }
 
         /// Validate that SNI extension is present in ClientHello.
+        #[allow(dead_code)]
         fn validate_sni_extension_presence(&self, hostname: &str) -> Result<SniExtensionState, TlsError> {
             // Create connector with SNI enabled
             let connector = TlsConnectorBuilder::new()
@@ -254,6 +278,7 @@ mod tls_sni_conformance_tests {
         // ================================================================================
 
         /// Test that only hostname name_type 0x00 is supported.
+        #[allow(dead_code)]
         fn test_hostname_name_type_validation(&mut self) {
             let test_start = Instant::now();
             let test_id = "sni-mr2-name-type-validation";
@@ -286,6 +311,7 @@ mod tls_sni_conformance_tests {
         }
 
         /// Validate that HostName name_type is supported.
+        #[allow(dead_code)]
         fn validate_sni_name_type(&self, name_type: SniNameType) -> Result<(), TlsError> {
             match name_type {
                 SniNameType::HostName => {
@@ -297,6 +323,7 @@ mod tls_sni_conformance_tests {
         }
 
         /// Validate that invalid name_types are rejected.
+        #[allow(dead_code)]
         fn validate_invalid_sni_name_type(&self, name_type: u8) -> Result<(), TlsError> {
             // Invalid name types should be rejected
             // In practice, rustls handles this internally and would reject
@@ -314,6 +341,7 @@ mod tls_sni_conformance_tests {
         // ================================================================================
 
         /// Test hostname UTF-8 and punycode encoding conformance.
+        #[allow(dead_code)]
         fn test_hostname_encoding_conformance(&mut self) {
             let test_start = Instant::now();
             let test_id = "sni-mr3-hostname-encoding";
@@ -351,6 +379,7 @@ mod tls_sni_conformance_tests {
         }
 
         /// Validate hostname encoding per RFC 6066.
+        #[allow(dead_code)]
         fn validate_hostname_encoding(&self, hostname: &str) -> Result<(), TlsError> {
             // Test domain validation which includes encoding validation
             TlsConnector::validate_domain(hostname)?;
@@ -373,12 +402,14 @@ mod tls_sni_conformance_tests {
         }
 
         /// Check if a hostname is valid punycode.
+        #[allow(dead_code)]
         fn is_valid_punycode(hostname: &str) -> bool {
             // Simple punycode validation: contains xn-- prefix
             hostname.split('.').any(|label| label.starts_with("xn--"))
         }
 
         /// Test international domain to punycode conversion.
+        #[allow(dead_code)]
         fn test_punycode_conversion(&mut self) {
             let test_start = Instant::now();
             let test_id = "sni-mr3-punycode-conversion";
@@ -403,6 +434,7 @@ mod tls_sni_conformance_tests {
         }
 
         /// Validate international domain handling.
+        #[allow(dead_code)]
         fn validate_international_domain_handling(&self, _international: &str, punycode: &str) -> Result<(), TlsError> {
             // In practice, applications should convert international domains to punycode
             // before passing to TLS libraries. Test the punycode form.
@@ -414,6 +446,7 @@ mod tls_sni_conformance_tests {
         // ================================================================================
 
         /// Test that duplicate SNI entries are rejected.
+        #[allow(dead_code)]
         fn test_duplicate_sni_entries_rejected(&mut self) {
             let test_start = Instant::now();
             let test_id = "sni-mr4-duplicate-entries";
@@ -460,6 +493,7 @@ mod tls_sni_conformance_tests {
         }
 
         /// Validate that duplicate SNI entries are rejected.
+        #[allow(dead_code)]
         fn validate_duplicate_sni_rejection(&self, hostnames: &[&str]) -> Result<(), TlsError> {
             // Check for duplicates
             let mut seen = HashSet::new();
@@ -474,6 +508,7 @@ mod tls_sni_conformance_tests {
         }
 
         /// Validate that unique SNI entries are allowed.
+        #[allow(dead_code)]
         fn validate_unique_sni_entries(&self, hostnames: &[&str]) -> Result<(), TlsError> {
             // All hostnames should be unique
             let mut seen = HashSet::new();
@@ -492,6 +527,7 @@ mod tls_sni_conformance_tests {
         // ================================================================================
 
         /// Test that SNI mismatch triggers unrecognized_name alert.
+        #[allow(dead_code)]
         fn test_sni_mismatch_alert_behavior(&mut self) {
             let test_start = Instant::now();
             let test_id = "sni-mr5-mismatch-alert";
@@ -542,6 +578,7 @@ mod tls_sni_conformance_tests {
         }
 
         /// Validate SNI mismatch handling.
+        #[allow(dead_code)]
         fn validate_sni_mismatch_handling(&self, requested_name: &str, server_cert_name: &str) -> Result<(), TlsError> {
             // Validate the requested name format
             TlsConnector::validate_domain(requested_name)?;
@@ -559,6 +596,7 @@ mod tls_sni_conformance_tests {
         }
 
         /// Validate SNI match success.
+        #[allow(dead_code)]
         fn validate_sni_match_success(&self, requested_name: &str, server_cert_name: &str) -> Result<(), TlsError> {
             TlsConnector::validate_domain(requested_name)?;
             TlsConnector::validate_domain(server_cert_name)?;
@@ -576,6 +614,7 @@ mod tls_sni_conformance_tests {
         // ================================================================================
 
         /// Test SNI extension format conformance.
+        #[allow(dead_code)]
         fn test_sni_extension_format(&mut self) {
             let test_start = Instant::now();
             let test_id = "sni-extension-format";
@@ -601,6 +640,7 @@ mod tls_sni_conformance_tests {
         }
 
         /// Test SNI protocol violations.
+        #[allow(dead_code)]
         fn test_sni_protocol_violations(&mut self) {
             let test_start = Instant::now();
             let test_id = "sni-protocol-violations";
@@ -626,17 +666,23 @@ mod tls_sni_conformance_tests {
 
         // Format validation helper methods
 
+        #[allow(dead_code)]
+
         fn validate_sni_extension_length(&self) -> Result<(), TlsError> {
             // RFC 6066: Extension data length must be valid
             // This is typically handled by the TLS library
             Ok(())
         }
 
+        #[allow(dead_code)]
+
         fn validate_server_name_list_format(&self) -> Result<(), TlsError> {
             // RFC 6066: Server name list must be properly formatted
             // Each entry: type (1 byte) + length (2 bytes) + name (variable)
             Ok(())
         }
+
+        #[allow(dead_code)]
 
         fn validate_hostname_length_limits(&self) -> Result<(), TlsError> {
             let domains = TestDomains::new();
@@ -651,6 +697,8 @@ mod tls_sni_conformance_tests {
                 Err(e) => Err(e),
             }
         }
+
+        #[allow(dead_code)]
 
         fn validate_sni_disabled_behavior(&self) -> Result<(), TlsError> {
             // Test connector with SNI disabled
@@ -667,11 +715,15 @@ mod tls_sni_conformance_tests {
             }
         }
 
+        #[allow(dead_code)]
+
         fn validate_malformed_extension_rejection(&self) -> Result<(), TlsError> {
             // Malformed extensions should be rejected during handshake
             // This is typically handled by the TLS library internally
             Ok(())
         }
+
+        #[allow(dead_code)]
 
         fn validate_empty_server_name_list(&self) -> Result<(), TlsError> {
             // Empty server name list should be handled appropriately
@@ -685,6 +737,7 @@ mod tls_sni_conformance_tests {
     // ================================================================================
 
     #[test]
+    #[allow(dead_code)]
     fn test_sni_conformance_mr1_server_name_extension() {
         let mut harness = SniConformanceHarness::new();
         harness.test_server_name_extension_presence();
@@ -701,6 +754,7 @@ mod tls_sni_conformance_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_sni_conformance_mr2_hostname_name_type() {
         let mut harness = SniConformanceHarness::new();
         harness.test_hostname_name_type_validation();
@@ -716,6 +770,7 @@ mod tls_sni_conformance_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_sni_conformance_mr3_hostname_encoding() {
         let mut harness = SniConformanceHarness::new();
         harness.test_hostname_encoding_conformance();
@@ -731,6 +786,7 @@ mod tls_sni_conformance_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_sni_conformance_mr4_duplicate_entries() {
         let mut harness = SniConformanceHarness::new();
         harness.test_duplicate_sni_entries_rejected();
@@ -746,6 +802,7 @@ mod tls_sni_conformance_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_sni_conformance_mr5_mismatch_alert() {
         let mut harness = SniConformanceHarness::new();
         harness.test_sni_mismatch_alert_behavior();
@@ -761,6 +818,7 @@ mod tls_sni_conformance_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_sni_conformance_comprehensive() {
         let mut harness = SniConformanceHarness::new();
         harness.run_all_tests();
@@ -796,6 +854,7 @@ mod tls_sni_conformance_tests {
 #[cfg(not(feature = "tls"))]
 mod tls_sni_conformance_tests {
     #[test]
+    #[allow(dead_code)]
     fn test_sni_conformance_tls_disabled() {
         // When TLS feature is disabled, SNI tests are not applicable
         println!("SNI conformance tests skipped: TLS feature not enabled");

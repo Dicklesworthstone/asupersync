@@ -11,6 +11,7 @@ use std::fs;
 
 /// Report output formats
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum ReportFormat {
     /// Markdown format for documentation
     Markdown,
@@ -24,6 +25,7 @@ pub enum ReportFormat {
 
 /// Report generation configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ReportConfig {
     /// Output directory for generated reports
     pub output_dir: String,
@@ -50,6 +52,7 @@ pub struct ReportConfig {
 }
 
 impl Default for ReportConfig {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             output_dir: "reports".to_string(),
@@ -69,6 +72,7 @@ impl Default for ReportConfig {
 
 /// Generated report artifacts
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct GeneratedReports {
     pub markdown_path: Option<String>,
     pub json_path: Option<String>,
@@ -79,6 +83,7 @@ pub struct GeneratedReports {
 
 /// High-level report summary
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ReportSummary {
     pub total_sections: usize,
     pub passing_sections: usize,
@@ -90,13 +95,17 @@ pub struct ReportSummary {
 }
 
 /// Report generator
+#[allow(dead_code)]
 pub struct ComplianceReportGenerator {
     handlebars: Handlebars<'static>,
     config: ReportConfig,
 }
 
+#[allow(dead_code)]
+
 impl ComplianceReportGenerator {
     /// Create a new report generator
+    #[allow(dead_code)]
     pub fn new(config: ReportConfig) -> Result<Self, ReportError> {
         let mut handlebars = Handlebars::new();
 
@@ -115,6 +124,7 @@ impl ComplianceReportGenerator {
     }
 
     /// Generate a single report in the specified format
+    #[allow(dead_code)]
     pub fn generate_report(
         &self,
         matrix: &CoverageMatrix,
@@ -131,6 +141,7 @@ impl ComplianceReportGenerator {
     }
 
     /// Generate all configured report formats
+    #[allow(dead_code)]
     pub fn generate_reports(
         &self,
         matrix: &CoverageMatrix,
@@ -175,6 +186,7 @@ impl ComplianceReportGenerator {
     }
 
     /// Create template context data
+    #[allow(dead_code)]
     fn create_template_context(&self, matrix: &CoverageMatrix) -> TemplateContext {
         let sections: Vec<SectionData> = matrix
             .sections
@@ -226,6 +238,7 @@ impl ComplianceReportGenerator {
     }
 
     /// Generate Markdown report
+    #[allow(dead_code)]
     fn generate_markdown_report(&self, context: &TemplateContext) -> Result<String, ReportError> {
         let content = self.handlebars.render("markdown", context)?;
         let path = format!("{}/CONFORMANCE_REPORT.md", self.config.output_dir);
@@ -234,6 +247,7 @@ impl ComplianceReportGenerator {
     }
 
     /// Generate JSON report
+    #[allow(dead_code)]
     fn generate_json_report(&self, matrix: &CoverageMatrix) -> Result<String, ReportError> {
         let json = serde_json::to_string_pretty(matrix)?;
         let path = format!("{}/conformance_matrix.json", self.config.output_dir);
@@ -242,6 +256,7 @@ impl ComplianceReportGenerator {
     }
 
     /// Generate HTML report
+    #[allow(dead_code)]
     fn generate_html_report(&self, context: &TemplateContext) -> Result<String, ReportError> {
         let content = self.handlebars.render("html", context)?;
         let path = format!("{}/conformance_report.html", self.config.output_dir);
@@ -250,6 +265,7 @@ impl ComplianceReportGenerator {
     }
 
     /// Generate SVG badges
+    #[allow(dead_code)]
     fn generate_badges(&self, context: &TemplateContext) -> Result<String, ReportError> {
         let badge_data = BadgeData {
             score: context.overall.compliance_score,
@@ -269,6 +285,7 @@ impl ComplianceReportGenerator {
     }
 
     /// Create high-level report summary
+    #[allow(dead_code)]
     fn create_report_summary(&self, matrix: &CoverageMatrix) -> ReportSummary {
         let total_sections = matrix.sections.len();
         let passing_sections = matrix
@@ -294,6 +311,7 @@ impl ComplianceReportGenerator {
     }
 
     /// Generate actionable recommendations based on failures
+    #[allow(dead_code)]
     fn generate_recommendations(&self, matrix: &CoverageMatrix) -> Vec<String> {
         let mut recommendations = Vec::new();
 
@@ -359,6 +377,7 @@ impl ComplianceReportGenerator {
 
 // Template context structures
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct TemplateContext {
     title: String,
     generated_at: String,
@@ -368,6 +387,7 @@ struct TemplateContext {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct SectionData {
     section: String,
     must_passing: usize,
@@ -382,6 +402,7 @@ struct SectionData {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct FailureData {
     test_name: String,
     error_message: String,
@@ -390,6 +411,7 @@ struct FailureData {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct OverallData {
     must_passing: usize,
     must_total: usize,
@@ -404,12 +426,14 @@ struct OverallData {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct BadgeData {
     score: f64,
     level: ConformanceLevel,
 }
 
 // Handlebars helper functions
+#[allow(dead_code)]
 fn percentage_helper(
     h: &handlebars::Helper,
     _: &Handlebars,
@@ -431,6 +455,8 @@ fn percentage_helper(
     Ok(())
 }
 
+#[allow(dead_code)]
+
 fn status_icon_helper(
     h: &handlebars::Helper,
     _: &Handlebars,
@@ -448,6 +474,8 @@ fn status_icon_helper(
     }
     Ok(())
 }
+
+#[allow(dead_code)]
 
 fn badge_color_helper(
     h: &handlebars::Helper,
@@ -471,6 +499,7 @@ fn badge_color_helper(
 
 /// Errors that can occur during report generation
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum ReportError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
@@ -667,6 +696,8 @@ mod tests {
     use super::*;
     use crate::coverage_matrix::*;
 
+    #[allow(dead_code)]
+
     fn create_test_matrix() -> CoverageMatrix {
         let mut sections = BTreeMap::new();
         sections.insert(
@@ -705,6 +736,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_report_generator_creation() {
         let config = ReportConfig::default();
         let generator = ComplianceReportGenerator::new(config);
@@ -712,6 +744,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_template_context_creation() {
         let config = ReportConfig::default();
         let generator = ComplianceReportGenerator::new(config).unwrap();
@@ -723,6 +756,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_report_summary_creation() {
         let config = ReportConfig::default();
         let generator = ComplianceReportGenerator::new(config).unwrap();

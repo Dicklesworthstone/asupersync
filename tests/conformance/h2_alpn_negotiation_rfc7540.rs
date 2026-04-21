@@ -48,6 +48,7 @@ mod h2_alpn_conformance_tests {
 
     /// Test result for a single ALPN conformance requirement.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[allow(dead_code)]
     pub struct H2AlpnConformanceResult {
         pub test_id: String,
         pub description: String,
@@ -60,6 +61,7 @@ mod h2_alpn_conformance_tests {
 
     /// Conformance test categories for HTTP/2 ALPN negotiation.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[allow(dead_code)]
     pub enum TestCategory {
         /// ClientHello ALPN protocol advertisement
         ClientHelloAlpn,
@@ -79,6 +81,7 @@ mod h2_alpn_conformance_tests {
 
     /// Protocol requirement level per RFC 2119.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[allow(dead_code)]
     pub enum RequirementLevel {
         Must,   // RFC 2119: MUST
         Should, // RFC 2119: SHOULD
@@ -87,6 +90,7 @@ mod h2_alpn_conformance_tests {
 
     /// Test execution result.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[allow(dead_code)]
     pub enum TestVerdict {
         Pass,
         Fail,
@@ -96,6 +100,7 @@ mod h2_alpn_conformance_tests {
 
     /// Mock TLS handshake data for testing ALPN negotiation.
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     pub struct MockTlsHandshake {
         pub client_alpn_protocols: Vec<String>,
         pub server_selected_protocol: Option<String>,
@@ -103,8 +108,11 @@ mod h2_alpn_conformance_tests {
         pub has_valid_extensions: bool,
     }
 
+    #[allow(dead_code)]
+
     impl MockTlsHandshake {
         /// Create a new mock TLS handshake.
+        #[allow(dead_code)]
         pub fn new() -> Self {
             Self {
                 client_alpn_protocols: Vec::new(),
@@ -115,24 +123,28 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Set client ALPN protocols.
+        #[allow(dead_code)]
         pub fn with_client_alpn(mut self, protocols: Vec<String>) -> Self {
             self.client_alpn_protocols = protocols;
             self
         }
 
         /// Set server selected protocol.
+        #[allow(dead_code)]
         pub fn with_server_selection(mut self, protocol: Option<String>) -> Self {
             self.server_selected_protocol = protocol;
             self
         }
 
         /// Mark handshake as completed.
+        #[allow(dead_code)]
         pub fn completed(mut self) -> Self {
             self.handshake_completed = true;
             self
         }
 
         /// Mark extensions as invalid.
+        #[allow(dead_code)]
         pub fn with_invalid_extensions(mut self) -> Self {
             self.has_valid_extensions = false;
             self
@@ -140,12 +152,16 @@ mod h2_alpn_conformance_tests {
     }
 
     /// HTTP/2 ALPN conformance test harness.
+    #[allow(dead_code)]
     pub struct H2AlpnConformanceHarness {
         start_time: Instant,
     }
 
+    #[allow(dead_code)]
+
     impl H2AlpnConformanceHarness {
         /// Create a new conformance test harness.
+        #[allow(dead_code)]
         pub fn new() -> Self {
             Self {
                 start_time: Instant::now(),
@@ -153,6 +169,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Run all HTTP/2 ALPN conformance tests.
+        #[allow(dead_code)]
         pub fn run_all_tests(&self) -> Vec<H2AlpnConformanceResult> {
             let mut results = Vec::new();
 
@@ -187,6 +204,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: Client MUST advertise "h2" in ClientHello ALPN extension.
+        #[allow(dead_code)]
         fn test_client_hello_alpn_advertisement(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -222,6 +240,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: Client SHOULD order ALPN protocols by preference.
+        #[allow(dead_code)]
         fn test_client_alpn_protocol_ordering(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -265,6 +284,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: Server MUST prefer "h2" over "h2c" when both available.
+        #[allow(dead_code)]
         fn test_server_h2_preference_over_h2c(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -303,6 +323,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: Server protocol selection with valid ALPN identifiers.
+        #[allow(dead_code)]
         fn test_server_protocol_selection_valid(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -364,6 +385,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: Server MUST reject unknown protocol identifiers.
+        #[allow(dead_code)]
         fn test_server_unknown_protocol_rejection(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -397,6 +419,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: Invalid TLS extension rejection.
+        #[allow(dead_code)]
         fn test_invalid_tls_extension_rejection(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -430,6 +453,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: Malformed ALPN extension handling.
+        #[allow(dead_code)]
         fn test_malformed_alpn_extension_handling(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -481,6 +505,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: HTTP/1.1 fallback on ALPN mismatch.
+        #[allow(dead_code)]
         fn test_http11_fallback_on_alpn_mismatch(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -518,6 +543,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: Graceful fallback behavior.
+        #[allow(dead_code)]
         fn test_graceful_fallback_behavior(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -553,6 +579,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: SETTINGS frame exchange immediately after ALPN.
+        #[allow(dead_code)]
         fn test_settings_frame_after_alpn(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -596,6 +623,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: Connection preface after ALPN.
+        #[allow(dead_code)]
         fn test_connection_preface_after_alpn(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -637,6 +665,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: SETTINGS ACK exchange.
+        #[allow(dead_code)]
         fn test_settings_ack_exchange(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -677,6 +706,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: ALPN downgrade protection.
+        #[allow(dead_code)]
         fn test_alpn_downgrade_protection(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -716,6 +746,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: Connection state transitions.
+        #[allow(dead_code)]
         fn test_connection_state_transitions(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -768,6 +799,7 @@ mod h2_alpn_conformance_tests {
         }
 
         /// Test: Concurrent ALPN negotiations.
+        #[allow(dead_code)]
         fn test_concurrent_alpn_negotiations(&self) -> H2AlpnConformanceResult {
             let start = Instant::now();
 
@@ -811,12 +843,14 @@ mod h2_alpn_conformance_tests {
     }
 
     impl Default for H2AlpnConformanceHarness {
+        #[allow(dead_code)]
         fn default() -> Self {
             Self::new()
         }
     }
 
     /// Create a test SETTINGS frame for validation.
+    #[allow(dead_code)]
     fn create_test_settings_frame() -> Result<SettingsFrame, H2Error> {
         let settings = vec![
             Setting::HeaderTableSize(4096),
@@ -831,6 +865,7 @@ mod h2_alpn_conformance_tests {
     }
 
     /// Create a test SETTINGS ACK frame.
+    #[allow(dead_code)]
     fn create_test_settings_ack_frame() -> Result<SettingsFrame, H2Error> {
         Ok(SettingsFrame::new(vec![], true))
     }
@@ -845,6 +880,7 @@ mod h2_alpn_conformance_tests {
 
 // Tests that always run regardless of features
 #[test]
+#[allow(dead_code)]
 fn h2_alpn_conformance_suite_availability() {
     #[cfg(feature = "tls")]
     {

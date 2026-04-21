@@ -6,6 +6,7 @@ use crate::spec_derived::{
 };
 
 /// Register end-to-end conformance tests.
+#[allow(dead_code)]
 pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
     suite.add_test_case(Rfc6330ConformanceCase {
         id: "RFC6330-E2E-1",
@@ -25,6 +26,7 @@ pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
 }
 
 /// Test complete encode-decode cycle.
+#[allow(dead_code)]
 fn test_complete_encode_decode_cycle(ctx: &ConformanceContext) -> ConformanceResult {
     // Placeholder implementation - would test full RFC 6330 workflow
     ConformanceResult::pass()
@@ -32,6 +34,7 @@ fn test_complete_encode_decode_cycle(ctx: &ConformanceContext) -> ConformanceRes
 }
 
 /// Test handling of various loss patterns.
+#[allow(dead_code)]
 fn test_loss_pattern_handling(ctx: &ConformanceContext) -> ConformanceResult {
     // Placeholder implementation - would test different loss scenarios
     ConformanceResult::pass()

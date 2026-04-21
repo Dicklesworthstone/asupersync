@@ -35,6 +35,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// RFC 2119 requirement level for conformance testing
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // RFC 2119: MUST
     Should, // RFC 2119: SHOULD
@@ -43,6 +44,7 @@ pub enum RequirementLevel {
 
 /// Test result for a single cookie security requirement
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct CookieSecurityResult {
     pub test_id: String,
     pub description: String,
@@ -56,6 +58,7 @@ pub struct CookieSecurityResult {
 
 /// Test categories for RFC 6265 cookie security conformance
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// HMAC signature validation
     SignatureValidation,
@@ -71,6 +74,7 @@ pub enum TestCategory {
 
 /// Test verdict
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -80,6 +84,7 @@ pub enum TestVerdict {
 
 /// Mock signed cookie for testing signature validation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SignedCookie {
     pub name: String,
     pub value: String,
@@ -89,6 +94,7 @@ pub struct SignedCookie {
 
 /// Mock request context for testing cookie behavior
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MockRequestContext {
     pub scheme: String,  // "http" or "https"
     pub origin: String,  // request origin
@@ -98,17 +104,22 @@ pub struct MockRequestContext {
 }
 
 /// HMAC-SHA256 signature implementation for testing
+#[allow(dead_code)]
 pub struct CookieSigner {
     secret_key: [u8; 32],
 }
 
+#[allow(dead_code)]
+
 impl CookieSigner {
     /// Create a new cookie signer with a secret key
+    #[allow(dead_code)]
     pub fn new(key: &[u8; 32]) -> Self {
         Self { secret_key: *key }
     }
 
     /// Sign cookie data with HMAC-SHA256
+    #[allow(dead_code)]
     pub fn sign(&self, data: &str) -> String {
         use sha2::{Sha256, Digest};
 
@@ -122,6 +133,7 @@ impl CookieSigner {
     }
 
     /// Verify cookie signature
+    #[allow(dead_code)]
     pub fn verify(&self, data: &str, signature: &str) -> bool {
         let expected = self.sign(data);
         constant_time_compare(&expected, signature)
@@ -129,6 +141,7 @@ impl CookieSigner {
 }
 
 /// Constant-time string comparison to prevent timing attacks
+#[allow(dead_code)]
 fn constant_time_compare(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
@@ -146,12 +159,16 @@ fn constant_time_compare(a: &str, b: &str) -> bool {
 }
 
 /// Cookie behavioral simulator for testing RFC 6265 compliance
+#[allow(dead_code)]
 pub struct CookieSimulator {
     signer: CookieSigner,
 }
 
+#[allow(dead_code)]
+
 impl CookieSimulator {
     /// Create a new cookie simulator
+    #[allow(dead_code)]
     pub fn new(secret_key: &[u8; 32]) -> Self {
         Self {
             signer: CookieSigner::new(secret_key),
@@ -159,6 +176,7 @@ impl CookieSimulator {
     }
 
     /// Create a signed cookie
+    #[allow(dead_code)]
     pub fn create_signed_cookie(&self, name: &str, value: &str, config: SessionConfig) -> SignedCookie {
         let data = format!("{}={}", name, value);
         let signature = self.signer.sign(&data);
@@ -172,6 +190,7 @@ impl CookieSimulator {
     }
 
     /// Simulate browser cookie sending behavior based on RFC 6265
+    #[allow(dead_code)]
     pub fn should_send_cookie(&self, cookie: &SignedCookie, context: &MockRequestContext) -> bool {
         // Check Secure flag (MR4)
         if cookie.config.secure && context.scheme != "https" {
@@ -205,11 +224,13 @@ impl CookieSimulator {
     }
 
     /// Simulate document.cookie access for HttpOnly testing (MR5)
+    #[allow(dead_code)]
     pub fn can_access_via_script(&self, cookie: &SignedCookie) -> bool {
         !cookie.config.http_only // HttpOnly blocks script access
     }
 
     /// Verify cookie signature (MR1 and MR2)
+    #[allow(dead_code)]
     pub fn verify_cookie_signature(&self, cookie: &SignedCookie) -> bool {
         let data = format!("{}={}", cookie.name, cookie.value);
         self.signer.verify(&data, &cookie.signature)
@@ -217,6 +238,7 @@ impl CookieSimulator {
 }
 
 /// MR1: Signature Consistency - sign(data, key) → verify(signed_data, key) = true
+#[allow(dead_code)]
 pub fn metamorphic_relation_1_signature_consistency(secret_key: &[u8; 32]) -> CookieSecurityResult {
     let start_time = SystemTime::now();
     let mut result = CookieSecurityResult {
@@ -262,6 +284,7 @@ pub fn metamorphic_relation_1_signature_consistency(secret_key: &[u8; 32]) -> Co
 }
 
 /// MR2: Integrity Verification - tamper(signed_data) → verify(tampered_data, key) = false
+#[allow(dead_code)]
 pub fn metamorphic_relation_2_integrity_verification(secret_key: &[u8; 32]) -> CookieSecurityResult {
     let start_time = SystemTime::now();
     let mut result = CookieSecurityResult {
@@ -333,6 +356,7 @@ pub fn metamorphic_relation_2_integrity_verification(secret_key: &[u8; 32]) -> C
 }
 
 /// MR3: Same-Site Enforcement - cross_site_request(cookie) → cookie_sent = false when SameSite=Strict
+#[allow(dead_code)]
 pub fn metamorphic_relation_3_same_site_enforcement(secret_key: &[u8; 32]) -> CookieSecurityResult {
     let start_time = SystemTime::now();
     let mut result = CookieSecurityResult {
@@ -395,6 +419,7 @@ pub fn metamorphic_relation_3_same_site_enforcement(secret_key: &[u8; 32]) -> Co
 }
 
 /// MR4: Transport Security - http_request(secure_cookie) → cookie_sent = false
+#[allow(dead_code)]
 pub fn metamorphic_relation_4_transport_security(secret_key: &[u8; 32]) -> CookieSecurityResult {
     let start_time = SystemTime::now();
     let mut result = CookieSecurityResult {
@@ -452,6 +477,7 @@ pub fn metamorphic_relation_4_transport_security(secret_key: &[u8; 32]) -> Cooki
 }
 
 /// MR5: Script Access Control - document.cookie.access(httponly_cookie) → access_denied = true
+#[allow(dead_code)]
 pub fn metamorphic_relation_5_script_access_control(secret_key: &[u8; 32]) -> CookieSecurityResult {
     let start_time = SystemTime::now();
     let mut result = CookieSecurityResult {
@@ -498,6 +524,7 @@ pub fn metamorphic_relation_5_script_access_control(secret_key: &[u8; 32]) -> Co
 }
 
 /// Run all RFC 6265 cookie security metamorphic relations
+#[allow(dead_code)]
 pub fn run_cookie_security_conformance_tests() -> Vec<CookieSecurityResult> {
     // Use a fixed test key for reproducible results
     let secret_key: [u8; 32] = [
@@ -521,6 +548,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr1_signature_consistency() {
         let secret_key: [u8; 32] = [1; 32]; // Simple test key
         let result = metamorphic_relation_1_signature_consistency(&secret_key);
@@ -529,6 +557,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr2_integrity_verification() {
         let secret_key: [u8; 32] = [2; 32]; // Simple test key
         let result = metamorphic_relation_2_integrity_verification(&secret_key);
@@ -537,6 +566,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr3_same_site_enforcement() {
         let secret_key: [u8; 32] = [3; 32]; // Simple test key
         let result = metamorphic_relation_3_same_site_enforcement(&secret_key);
@@ -545,6 +575,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr4_transport_security() {
         let secret_key: [u8; 32] = [4; 32]; // Simple test key
         let result = metamorphic_relation_4_transport_security(&secret_key);
@@ -553,6 +584,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_mr5_script_access_control() {
         let secret_key: [u8; 32] = [5; 32]; // Simple test key
         let result = metamorphic_relation_5_script_access_control(&secret_key);
@@ -561,6 +593,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_full_conformance_suite() {
         let results = run_cookie_security_conformance_tests();
         assert_eq!(results.len(), 5);
@@ -581,6 +614,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_constant_time_compare() {
         // Test basic equality
         assert!(constant_time_compare("hello", "hello"));
@@ -596,6 +630,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_cookie_signer() {
         let key = [42; 32];
         let signer = CookieSigner::new(&key);

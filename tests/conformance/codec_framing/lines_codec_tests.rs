@@ -5,6 +5,7 @@ use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder, LinesCodec};
 
 /// Run all lines codec tests.
+#[allow(dead_code)]
 pub fn run_lines_codec_tests() -> Vec<CodecConformanceResult> {
     let mut results = Vec::new();
 
@@ -19,6 +20,8 @@ pub fn run_lines_codec_tests() -> Vec<CodecConformanceResult> {
 
     results
 }
+
+#[allow(dead_code)]
 
 fn test_basic_line_decode() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -56,6 +59,8 @@ fn test_basic_line_decode() -> CodecConformanceResult {
     )
 }
 
+#[allow(dead_code)]
+
 fn test_crlf_line_endings() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LinesCodec::new();
@@ -83,6 +88,8 @@ fn test_crlf_line_endings() -> CodecConformanceResult {
     )
 }
 
+#[allow(dead_code)]
+
 fn test_lf_line_endings() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LinesCodec::new();
@@ -109,6 +116,8 @@ fn test_lf_line_endings() -> CodecConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_multiple_lines() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -142,6 +151,8 @@ fn test_multiple_lines() -> CodecConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_empty_lines() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -191,6 +202,8 @@ fn test_empty_lines() -> CodecConformanceResult {
     )
 }
 
+#[allow(dead_code)]
+
 fn test_max_line_length() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let mut codec = LinesCodec::new_with_max_length(10);
@@ -211,6 +224,8 @@ fn test_max_line_length() -> CodecConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_utf8_validation() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -240,6 +255,8 @@ fn test_utf8_validation() -> CodecConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_encode_decode_round_trip() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {

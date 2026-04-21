@@ -7,6 +7,7 @@ use crate::spec_derived::{
 use std::time::Instant;
 
 /// Register systematic index tests.
+#[allow(dead_code)]
 pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
     suite.add_test_case(Rfc6330ConformanceCase {
         id: "RFC6330-5.2.1",
@@ -58,6 +59,7 @@ pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
 }
 
 /// Test systematic index lookup according to RFC 6330 Table 2.
+#[allow(dead_code)]
 fn test_systematic_index_lookup(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -106,6 +108,7 @@ fn test_systematic_index_lookup(ctx: &ConformanceContext) -> ConformanceResult {
 }
 
 /// Test K' calculation from systematic index.
+#[allow(dead_code)]
 fn test_k_prime_calculation(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -147,6 +150,7 @@ fn test_k_prime_calculation(ctx: &ConformanceContext) -> ConformanceResult {
 }
 
 /// Test J parameter derivation (J = K' - K).
+#[allow(dead_code)]
 fn test_j_parameter_derivation(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -188,6 +192,7 @@ fn test_j_parameter_derivation(ctx: &ConformanceContext) -> ConformanceResult {
 }
 
 /// Test S and H parameter calculation from Table 2.
+#[allow(dead_code)]
 fn test_s_h_parameter_calculation(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -239,6 +244,7 @@ fn test_s_h_parameter_calculation(ctx: &ConformanceContext) -> ConformanceResult
 }
 
 /// Test W parameter calculation (W = K + S + H).
+#[allow(dead_code)]
 fn test_w_parameter_calculation(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -275,6 +281,7 @@ fn test_w_parameter_calculation(ctx: &ConformanceContext) -> ConformanceResult {
 }
 
 /// Test handling of unsupported K values.
+#[allow(dead_code)]
 fn test_unsupported_k_handling(ctx: &ConformanceContext) -> ConformanceResult {
     let start = Instant::now();
 
@@ -307,6 +314,7 @@ fn test_unsupported_k_handling(ctx: &ConformanceContext) -> ConformanceResult {
 }
 
 /// Lookup systematic index X from RFC 6330 Table 2.
+#[allow(dead_code)]
 fn lookup_systematic_index(k: usize) -> Option<usize> {
     match k {
         4 => Some(0),
@@ -326,18 +334,21 @@ fn lookup_systematic_index(k: usize) -> Option<usize> {
 }
 
 /// Calculate K' from systematic index.
+#[allow(dead_code)]
 fn calculate_k_prime(k: usize) -> Option<usize> {
     let x = lookup_systematic_index(k)?;
     Some(1 << x) // K' = 2^X
 }
 
 /// Calculate J parameter (J = K' - K).
+#[allow(dead_code)]
 fn calculate_j_parameter(k: usize) -> Option<usize> {
     let k_prime = calculate_k_prime(k)?;
     Some(k_prime - k)
 }
 
 /// Calculate S parameter from RFC 6330 Table 2.
+#[allow(dead_code)]
 fn calculate_s_parameter(k: usize) -> Option<usize> {
     match k {
         4 => Some(2),
@@ -357,6 +368,7 @@ fn calculate_s_parameter(k: usize) -> Option<usize> {
 }
 
 /// Calculate H parameter from RFC 6330 Table 2.
+#[allow(dead_code)]
 fn calculate_h_parameter(k: usize) -> Option<usize> {
     match k {
         4 => Some(2),
@@ -376,6 +388,7 @@ fn calculate_h_parameter(k: usize) -> Option<usize> {
 }
 
 /// Calculate W parameter (W = K + S + H).
+#[allow(dead_code)]
 fn calculate_w_parameter(k: usize) -> Option<usize> {
     let s = calculate_s_parameter(k)?;
     let h = calculate_h_parameter(k)?;
@@ -387,6 +400,8 @@ mod tests {
     use super::*;
     use crate::spec_derived::{ConformanceConfig, ConformanceContext};
 
+    #[allow(dead_code)]
+
     fn create_test_context() -> ConformanceContext {
         ConformanceContext {
             config: ConformanceConfig::default(),
@@ -396,6 +411,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_systematic_index_lookup_fn() {
         assert_eq!(lookup_systematic_index(4), Some(0));
         assert_eq!(lookup_systematic_index(8), Some(2));
@@ -406,6 +422,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_k_prime_calculation_fn() {
         assert_eq!(calculate_k_prime(4), Some(1)); // 2^0 = 1, but this would be adjusted
         assert_eq!(calculate_k_prime(8), Some(4)); // 2^2 = 4
@@ -413,6 +430,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_parameter_calculations() {
         // Test W = K + S + H formula
         let k = 64;
@@ -423,6 +441,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_systematic_index_conformance() {
         let ctx = create_test_context();
         let result = test_systematic_index_lookup(&ctx);

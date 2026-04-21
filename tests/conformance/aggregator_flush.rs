@@ -24,6 +24,7 @@ use proptest::prelude::*;
 /// Test category for aggregator flush/drain conformance tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum TestCategory {
     FlushSynchronous,
     DrainThenClose,
@@ -35,6 +36,7 @@ pub enum TestCategory {
 /// Requirement level for conformance tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,
     Should,
@@ -44,6 +46,7 @@ pub enum RequirementLevel {
 /// Test verdict for conformance tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -53,6 +56,7 @@ pub enum TestVerdict {
 
 /// Result of an aggregator flush/drain conformance test.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(dead_code)]
 pub struct AggregatorFlushConformanceResult {
     pub test_id: String,
     pub description: String,
@@ -64,16 +68,21 @@ pub struct AggregatorFlushConformanceResult {
 }
 
 /// Conformance test harness for aggregator flush/drain behavior.
+#[allow(dead_code)]
 pub struct AggregatorFlushConformanceHarness;
+
+#[allow(dead_code)]
 
 impl AggregatorFlushConformanceHarness {
     /// Creates a new aggregator flush conformance test harness.
     #[must_use]
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self
     }
 
     /// Runs all conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<AggregatorFlushConformanceResult> {
         let mut results = Vec::new();
 
@@ -96,6 +105,7 @@ impl AggregatorFlushConformanceHarness {
     }
 
     /// MR1: flush drains pending writes synchronously
+    #[allow(dead_code)]
     fn test_flush_drains_pending_synchronously(&self) -> Vec<AggregatorFlushConformanceResult> {
         let mut results = Vec::new();
         let start_time = std::time::Instant::now();
@@ -185,6 +195,7 @@ impl AggregatorFlushConformanceHarness {
     }
 
     /// MR2: drain then close waits for all in-flight
+    #[allow(dead_code)]
     fn test_drain_then_close_waits_for_inflight(&self) -> Vec<AggregatorFlushConformanceResult> {
         let mut results = Vec::new();
         let start_time = std::time::Instant::now();
@@ -279,6 +290,7 @@ impl AggregatorFlushConformanceHarness {
     }
 
     /// MR3: cancel during drain preserves sent count
+    #[allow(dead_code)]
     fn test_cancel_during_drain_preserves_count(&self) -> Vec<AggregatorFlushConformanceResult> {
         let mut results = Vec::new();
         let start_time = std::time::Instant::now();
@@ -352,6 +364,7 @@ impl AggregatorFlushConformanceHarness {
     }
 
     /// MR4: backpressure propagates
+    #[allow(dead_code)]
     fn test_backpressure_propagates(&self) -> Vec<AggregatorFlushConformanceResult> {
         let mut results = Vec::new();
         let start_time = std::time::Instant::now();
@@ -430,6 +443,7 @@ impl AggregatorFlushConformanceHarness {
     }
 
     /// MR5: concurrent writers share aggregator safely
+    #[allow(dead_code)]
     fn test_concurrent_writers_safe(&self) -> Vec<AggregatorFlushConformanceResult> {
         let mut results = Vec::new();
         let start_time = std::time::Instant::now();
@@ -564,12 +578,14 @@ impl AggregatorFlushConformanceHarness {
 }
 
 impl Default for AggregatorFlushConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 /// Creates a test symbol with specified object ID, ESI (Encoding Symbol ID), and SBN (Source Block Number).
+#[allow(dead_code)]
 fn create_test_symbol(object_id: u64, esi: u64, sbn: u64) -> Symbol {
     Symbol::new_for_test(
         object_id,
@@ -586,6 +602,7 @@ mod property_tests {
 
     proptest! {
         #[test]
+        #[allow(dead_code)]
         fn prop_flush_interval_respected(
             interval_ms in 1u64..100,
             symbols in prop::collection::vec(0u64..10, 1..5)
@@ -617,6 +634,7 @@ mod property_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn prop_symbol_deduplication(
             object_id in 1u64..10,
             esi in 0u64..100
@@ -639,6 +657,7 @@ mod property_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn prop_ordering_preservation(
             symbols in prop::collection::vec(0u64..10, 3..8)
         ) {
@@ -685,11 +704,13 @@ mod unit_tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_conformance_harness_creation() {
         let _harness = AggregatorFlushConformanceHarness::new();
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_create_test_symbol() {
         let symbol = create_test_symbol(1, 5, 10);
         assert_eq!(symbol.object_id(), ObjectId::new_for_test(1));
@@ -698,6 +719,7 @@ mod unit_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_all_conformance_tests_run() {
         let harness = AggregatorFlushConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -717,6 +739,7 @@ mod unit_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_flush_basic_behavior() {
         let aggregator = MultipathAggregator::new(AggregatorConfig {
             flush_interval: Time::from_millis(10),

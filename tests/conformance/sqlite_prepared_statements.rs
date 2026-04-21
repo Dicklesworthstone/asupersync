@@ -34,6 +34,7 @@ use std::task::{Context, Poll, Waker};
 // ============================================================================
 
 /// Create a test context for deterministic execution.
+#[allow(dead_code)]
 fn test_cx() -> Cx {
     Cx::new(
         RegionId::from_arena(ArenaIndex::new(0, 0)),
@@ -43,9 +44,12 @@ fn test_cx() -> Cx {
 }
 
 /// Simple block_on implementation for tests.
+#[allow(dead_code)]
 fn block_on<F: Future>(f: F) -> F::Output {
+    #[allow(dead_code)]
     struct NoopWaker;
     impl std::task::Wake for NoopWaker {
+        #[allow(dead_code)]
         fn wake(self: std::sync::Arc<Self>) {}
     }
     let waker = std::task::Waker::noop().clone();
@@ -61,6 +65,7 @@ fn block_on<F: Future>(f: F) -> F::Output {
 
 /// Serializable representation of a test execution result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(dead_code)]
 struct TestExecution {
     /// Input SQL statement.
     sql: String,
@@ -77,6 +82,7 @@ struct TestExecution {
 /// Serializable representation of execution results.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
+#[allow(dead_code)]
 enum TestResult {
     /// Query result with rows.
     Query { rows: Vec<SerializableRow> },
@@ -89,6 +95,7 @@ enum TestResult {
 /// Serializable representation of SQLite values.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "value")]
+#[allow(dead_code)]
 enum SerializableValue {
     Null,
     Integer(i64),
@@ -98,6 +105,7 @@ enum SerializableValue {
 }
 
 impl From<&SqliteValue> for SerializableValue {
+    #[allow(dead_code)]
     fn from(value: &SqliteValue) -> Self {
         match value {
             SqliteValue::Null => Self::Null,
@@ -110,6 +118,7 @@ impl From<&SqliteValue> for SerializableValue {
 }
 
 impl From<SerializableValue> for SqliteValue {
+    #[allow(dead_code)]
     fn from(value: SerializableValue) -> Self {
         match value {
             SerializableValue::Null => Self::Null,
@@ -123,12 +132,16 @@ impl From<SerializableValue> for SqliteValue {
 
 /// Serializable representation of a result row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(dead_code)]
 struct SerializableRow {
     /// Column values in deterministic order.
     columns: BTreeMap<String, SerializableValue>,
 }
 
+#[allow(dead_code)]
+
 impl SerializableRow {
+    #[allow(dead_code)]
     fn from_sqlite_row(row: &SqliteRow) -> Result<Self, SqliteError> {
         let mut columns = BTreeMap::new();
 
@@ -149,11 +162,14 @@ impl SerializableRow {
 }
 
 /// Comprehensive test harness for SQLite prepared statement testing.
+#[allow(dead_code)]
 struct SqlitePreparedStatementHarness {
     runtime: Arc<LabRuntime>,
     connection: SqliteConnection,
     executions: Vec<TestExecution>,
 }
+
+#[allow(dead_code)]
 
 impl SqlitePreparedStatementHarness {
     async fn new() -> Result<Self, SqliteError> {
@@ -274,6 +290,7 @@ impl SqlitePreparedStatementHarness {
     }
 
     /// Get all recorded executions for golden file serialization.
+    #[allow(dead_code)]
     fn get_executions(&self) -> &[TestExecution] {
         &self.executions
     }
@@ -289,6 +306,7 @@ mod parameter_binding_tests {
 
     /// Test parameter binding for all SQLite types: NULL, INTEGER, REAL, TEXT, BLOB.
     #[test]
+    #[allow(dead_code)]
     fn test_parameter_binding_all_types() {
         block_on(async {
             let mut harness = SqlitePreparedStatementHarness::new().await.unwrap();
@@ -382,6 +400,7 @@ mod parameter_binding_tests {
 
     /// Test SQLite type affinity rules with parameter binding.
     #[test]
+    #[allow(dead_code)]
     fn test_type_affinity_rules() {
         block_on(async {
             let mut harness = SqlitePreparedStatementHarness::new().await.unwrap();
@@ -455,6 +474,7 @@ mod schema_evolution_tests {
 
     /// Test that prepared statements handle schema changes correctly.
     #[test]
+    #[allow(dead_code)]
     fn test_column_metadata_stability() {
         block_on(async {
             let mut harness = SqlitePreparedStatementHarness::new().await.unwrap();
@@ -546,6 +566,7 @@ mod transaction_rollback_tests {
 
     /// Test transaction rollback behavior during prepared statement execution.
     #[test]
+    #[allow(dead_code)]
     fn test_transaction_rollback_on_cancel() {
         block_on(async {
             let mut harness = SqlitePreparedStatementHarness::new().await.unwrap();
@@ -619,6 +640,7 @@ mod deterministic_replay_tests {
 
     /// Test deterministic behavior across 1000 seeded iterations.
     #[test]
+    #[allow(dead_code)]
     fn test_1000_iteration_deterministic_replay() {
         let iterations = 1000;
         let mut execution_fingerprints: HashMap<u64, Vec<TestExecution>> = HashMap::new();
@@ -701,6 +723,7 @@ mod integration_tests {
 
     /// Comprehensive integration test combining all conformance areas.
     #[test]
+    #[allow(dead_code)]
     fn test_sqlite_prepared_statement_conformance_suite() {
         block_on(async {
             let mut harness = SqlitePreparedStatementHarness::new().await.unwrap();

@@ -46,6 +46,7 @@ use std::time::{Duration, Instant};
 
 /// Test result for a single conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct H2PriorityConformanceResult {
     pub test_id: String,
     pub description: String,
@@ -58,6 +59,7 @@ pub struct H2PriorityConformanceResult {
 
 /// Conformance test categories for HTTP/2 PRIORITY frames.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// PRIORITY frame format validation
     PriorityFormat,
@@ -77,6 +79,7 @@ pub enum TestCategory {
 
 /// Protocol requirement level per RFC 2119.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // RFC 2119: MUST
     Should, // RFC 2119: SHOULD
@@ -85,6 +88,7 @@ pub enum RequirementLevel {
 
 /// Test execution result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -94,6 +98,7 @@ pub enum TestVerdict {
 
 /// Simple stream dependency tracker for testing dependency tree operations.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct StreamDependencyTracker {
     /// Maps stream ID to its parent dependency
     dependencies: HashMap<u32, u32>,
@@ -105,7 +110,10 @@ pub struct StreamDependencyTracker {
     closed_streams: HashSet<u32>,
 }
 
+#[allow(dead_code)]
+
 impl StreamDependencyTracker {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             dependencies: HashMap::new(),
@@ -117,6 +125,7 @@ impl StreamDependencyTracker {
 
     /// Update stream priority and detect circular dependencies.
     /// Returns Ok(()) if update is valid, Err if circular dependency would occur.
+    #[allow(dead_code)]
     pub fn update_priority(&mut self, stream_id: u32, priority: PrioritySpec) -> Result<(), String> {
         // Check for immediate self-dependency (should be caught by frame parsing)
         if priority.dependency == stream_id {
@@ -146,6 +155,7 @@ impl StreamDependencyTracker {
     }
 
     /// Check if making stream_id depend on target_parent would create a cycle.
+    #[allow(dead_code)]
     fn would_create_cycle(&self, stream_id: u32, target_parent: u32) -> bool {
         let mut current = target_parent;
         let mut visited = HashSet::new();
@@ -162,6 +172,7 @@ impl StreamDependencyTracker {
     }
 
     /// Restructure tree for exclusive dependency.
+    #[allow(dead_code)]
     fn restructure_for_exclusive_dependency(&mut self, stream_id: u32, parent: u32) {
         // Find all current children of parent and make them children of stream_id
         let children: Vec<u32> = self
@@ -176,9 +187,13 @@ impl StreamDependencyTracker {
         }
     }
 
+    #[allow(dead_code)]
+
     pub fn mark_stream_closed(&mut self, stream_id: u32) {
         self.closed_streams.insert(stream_id);
     }
+
+    #[allow(dead_code)]
 
     pub fn is_closed(&self, stream_id: u32) -> bool {
         self.closed_streams.contains(&stream_id)
@@ -186,13 +201,17 @@ impl StreamDependencyTracker {
 }
 
 /// HTTP/2 PRIORITY frame conformance test harness.
+#[allow(dead_code)]
 pub struct H2PriorityConformanceHarness {
     /// Test execution timeout
     timeout: Duration,
 }
 
+#[allow(dead_code)]
+
 impl H2PriorityConformanceHarness {
     /// Create a new conformance test harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             timeout: Duration::from_secs(30),
@@ -200,6 +219,7 @@ impl H2PriorityConformanceHarness {
     }
 
     /// Run all conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<H2PriorityConformanceResult> {
         let mut results = Vec::new();
 
@@ -228,6 +248,7 @@ impl H2PriorityConformanceHarness {
     }
 
     /// Test PRIORITY frame format requirements (RFC 9113 Section 6.3).
+    #[allow(dead_code)]
     fn test_priority_frame_format(&self) -> Vec<H2PriorityConformanceResult> {
         let mut results = Vec::new();
 
@@ -330,6 +351,7 @@ impl H2PriorityConformanceHarness {
     }
 
     /// Test stream dependency tree update operations.
+    #[allow(dead_code)]
     fn test_dependency_tree_updates(&self) -> Vec<H2PriorityConformanceResult> {
         let mut results = Vec::new();
 
@@ -412,6 +434,7 @@ impl H2PriorityConformanceHarness {
     }
 
     /// Test priority weight field validation (1-256 range, stored as 0-255).
+    #[allow(dead_code)]
     fn test_weight_field_validation(&self) -> Vec<H2PriorityConformanceResult> {
         let mut results = Vec::new();
 
@@ -498,6 +521,7 @@ impl H2PriorityConformanceHarness {
     }
 
     /// Test exclusive dependency flag behavior.
+    #[allow(dead_code)]
     fn test_exclusive_dependency_flag(&self) -> Vec<H2PriorityConformanceResult> {
         let mut results = Vec::new();
 
@@ -643,6 +667,7 @@ impl H2PriorityConformanceHarness {
     }
 
     /// Test priority handling for closed/idle streams.
+    #[allow(dead_code)]
     fn test_closed_stream_priority(&self) -> Vec<H2PriorityConformanceResult> {
         let mut results = Vec::new();
 
@@ -708,6 +733,7 @@ impl H2PriorityConformanceHarness {
     }
 
     /// Test circular dependency prevention mechanisms.
+    #[allow(dead_code)]
     fn test_circular_dependency_prevention(&self) -> Vec<H2PriorityConformanceResult> {
         let mut results = Vec::new();
 
@@ -820,6 +846,7 @@ impl H2PriorityConformanceHarness {
     }
 
     /// Test PRIORITY frame on Stream ID 0 protocol error.
+    #[allow(dead_code)]
     fn test_connection_stream_error(&self) -> Vec<H2PriorityConformanceResult> {
         let mut results = Vec::new();
 
@@ -891,6 +918,7 @@ impl H2PriorityConformanceHarness {
     }
 
     /// Execute a single test and capture the result.
+    #[allow(dead_code)]
     fn run_test<F>(
         &self,
         test_id: &str,
@@ -951,12 +979,14 @@ impl H2PriorityConformanceHarness {
 }
 
 impl Default for H2PriorityConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 // Helper function to convert H2Error to String for ? operator in tests
+#[allow(dead_code)]
 fn h2error_to_string(err: H2Error) -> String {
     format!("H2Error: {}", err)
 }
@@ -966,12 +996,14 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_harness_creation() {
         let harness = H2PriorityConformanceHarness::new();
         assert_eq!(harness.timeout, Duration::from_secs(30));
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_all_priority_conformance_tests() {
         let harness = H2PriorityConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -1024,6 +1056,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_priority_frame_format_conformance() {
         let harness = H2PriorityConformanceHarness::new();
         let results = harness.test_priority_frame_format();
@@ -1043,6 +1076,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_dependency_tracker() {
         let mut tracker = StreamDependencyTracker::new();
 
@@ -1066,6 +1100,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_circular_dependency_detection() {
         let mut tracker = StreamDependencyTracker::new();
 

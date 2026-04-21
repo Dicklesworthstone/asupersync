@@ -45,6 +45,7 @@ use std::collections::BTreeMap;
 
 /// Test result for a single conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct MySqlAuthConformanceResult {
     pub test_id: String,
     pub description: String,
@@ -57,6 +58,7 @@ pub struct MySqlAuthConformanceResult {
 
 /// Conformance test categories for MySQL authentication.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TestCategory {
     PacketFormat,
     AuthAlgorithm,
@@ -68,6 +70,7 @@ pub enum TestCategory {
 
 /// Protocol requirement level.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // Protocol requirement
     Should, // Recommended behavior
@@ -76,6 +79,7 @@ pub enum RequirementLevel {
 
 /// Test execution result.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -84,12 +88,16 @@ pub enum TestVerdict {
 }
 
 /// MySQL AuthSwitch conformance test harness.
+#[allow(dead_code)]
 pub struct MySqlAuthConformanceHarness {
     results: Vec<MySqlAuthConformanceResult>,
 }
 
+#[allow(dead_code)]
+
 impl MySqlAuthConformanceHarness {
     /// Create a new conformance test harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             results: Vec::new(),
@@ -97,6 +105,7 @@ impl MySqlAuthConformanceHarness {
     }
 
     /// Execute all conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&mut self) -> Vec<MySqlAuthConformanceResult> {
         // Packet Format Tests
         self.test_auth_switch_packet_format();
@@ -136,6 +145,8 @@ impl MySqlAuthConformanceHarness {
         self.results.clone()
     }
 
+    #[allow(dead_code)]
+
     fn record_result(&mut self, test_id: &str, description: &str, category: TestCategory,
                     requirement: RequirementLevel, verdict: TestVerdict, notes: Option<String>) {
         self.results.push(MySqlAuthConformanceResult {
@@ -150,6 +161,8 @@ impl MySqlAuthConformanceHarness {
     }
 
     // ===== Packet Format Tests =====
+
+    #[allow(dead_code)]
 
     fn test_auth_switch_packet_format(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -182,6 +195,8 @@ impl MySqlAuthConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_auth_switch_plugin_name_parsing(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -217,6 +232,8 @@ impl MySqlAuthConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_auth_switch_auth_data_parsing(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test auth data parsing with optional null termination
@@ -251,6 +268,8 @@ impl MySqlAuthConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_auth_switch_null_termination(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test proper null termination handling edge cases
@@ -279,6 +298,8 @@ impl MySqlAuthConformanceHarness {
     }
 
     // ===== Authentication Algorithm Tests =====
+
+    #[allow(dead_code)]
 
     fn test_caching_sha2_algorithm_compliance(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -322,6 +343,8 @@ impl MySqlAuthConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_mysql_native_algorithm_compliance(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test mysql_native_password algorithm implementation
@@ -360,6 +383,8 @@ impl MySqlAuthConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_algorithm_test_vectors(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Known test vectors for algorithm validation
@@ -393,6 +418,8 @@ impl MySqlAuthConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_empty_password_handling(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Both algorithms must handle empty passwords correctly
@@ -416,6 +443,8 @@ impl MySqlAuthConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_auth_deterministic_output(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -456,10 +485,13 @@ impl MySqlAuthConformanceHarness {
 
     // ===== State Machine Tests =====
 
+    #[allow(dead_code)]
+
     fn test_auth_switch_state_transitions(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test authentication state machine transitions
             #[derive(Debug, PartialEq)]
+            #[allow(dead_code)]
             enum AuthState {
                 Initial,
                 AuthSwitchReceived,
@@ -500,6 +532,8 @@ impl MySqlAuthConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_multi_step_auth_flow(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -545,6 +579,8 @@ impl MySqlAuthConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_fast_auth_success(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test fast auth success scenario (cached credentials)
@@ -566,6 +602,8 @@ impl MySqlAuthConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_full_auth_required(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -594,6 +632,8 @@ impl MySqlAuthConformanceHarness {
     }
 
     // ===== Error Handling Tests =====
+
+    #[allow(dead_code)]
 
     fn test_malformed_packet_rejection(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -628,6 +668,8 @@ impl MySqlAuthConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_unsupported_plugin_rejection(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test rejection of unsupported authentication plugins
@@ -659,6 +701,8 @@ impl MySqlAuthConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_invalid_auth_data_handling(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test handling of invalid authentication data
@@ -688,6 +732,8 @@ impl MySqlAuthConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_sequence_number_validation(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -727,6 +773,8 @@ impl MySqlAuthConformanceHarness {
 
     // ===== Plugin Negotiation Tests =====
 
+    #[allow(dead_code)]
+
     fn test_plugin_fallback_mechanism(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test plugin fallback behavior
@@ -752,6 +800,8 @@ impl MySqlAuthConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_plugin_compatibility_matrix(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -780,9 +830,12 @@ impl MySqlAuthConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_auth_method_negotiation(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test authentication method negotiation flow
+            #[allow(dead_code)]
             struct AuthNegotiation {
                 client_default: String,
                 server_request: Option<String>,
@@ -822,6 +875,8 @@ impl MySqlAuthConformanceHarness {
 
     // ===== Security Validation Tests =====
 
+    #[allow(dead_code)]
+
     fn test_nonce_uniqueness_requirement(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test that nonce/salt values should be unique per connection
@@ -846,6 +901,8 @@ impl MySqlAuthConformanceHarness {
             None,
         );
     }
+
+    #[allow(dead_code)]
 
     fn test_auth_data_scrambling(&mut self) {
         let result = std::panic::catch_unwind(|| {
@@ -877,6 +934,8 @@ impl MySqlAuthConformanceHarness {
         );
     }
 
+    #[allow(dead_code)]
+
     fn test_plaintext_prevention(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Test that plaintext passwords are never transmitted
@@ -906,6 +965,7 @@ impl MySqlAuthConformanceHarness {
 }
 
 impl Default for MySqlAuthConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
@@ -916,6 +976,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_mysql_auth_conformance_suite_completeness() {
         let mut harness = MySqlAuthConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -947,6 +1008,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_auth_algorithm_coverage() {
         // Verify we test all required authentication algorithms
         let required_algorithms = vec![
@@ -964,6 +1026,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_packet_type_coverage() {
         // Verify we test all relevant packet types
         let packet_types = vec![
@@ -989,6 +1052,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_security_requirement_coverage() {
         // Verify we test all security requirements
         let security_checks = vec![

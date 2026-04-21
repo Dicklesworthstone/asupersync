@@ -5,6 +5,7 @@ use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::codec::{Decoder, LengthDelimitedCodec, LinesCodec};
 
 /// Run all resource limits tests.
+#[allow(dead_code)]
 pub fn run_resource_limits_tests() -> Vec<CodecConformanceResult> {
     let mut results = Vec::new();
 
@@ -15,6 +16,8 @@ pub fn run_resource_limits_tests() -> Vec<CodecConformanceResult> {
 
     results
 }
+
+#[allow(dead_code)]
 
 fn test_max_frame_size_limit() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -52,6 +55,8 @@ fn test_max_frame_size_limit() -> CodecConformanceResult {
     )
 }
 
+#[allow(dead_code)]
+
 fn test_max_line_length_limit() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let max_length = 50;
@@ -78,6 +83,8 @@ fn test_max_line_length_limit() -> CodecConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_memory_usage_bounds() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
@@ -110,6 +117,8 @@ fn test_memory_usage_bounds() -> CodecConformanceResult {
         elapsed,
     )
 }
+
+#[allow(dead_code)]
 
 fn test_buffer_growth_limits() -> CodecConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {

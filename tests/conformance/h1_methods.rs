@@ -31,6 +31,7 @@ use asupersync::http::h1::types::Method;
 
 /// Classification of HTTP method semantic properties per RFC 9110
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct MethodProperties {
     /// Method has safe semantics (read-only, no side effects)
     pub is_safe: bool,
@@ -42,9 +43,12 @@ pub struct MethodProperties {
     pub allows_response_body: bool,
 }
 
+#[allow(dead_code)]
+
 impl MethodProperties {
     /// Get the standard properties for a method per RFC 9110
     #[must_use]
+    #[allow(dead_code)]
     pub fn for_method(method: &Method) -> Self {
         match method {
             // Safe and idempotent methods (RFC 9110 Section 9.2.1 and 9.2.2)
@@ -134,6 +138,7 @@ impl MethodProperties {
 
 /// Test result for method conformance verification
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct MethodTestResult {
     pub test_id: String,
     pub description: String,
@@ -142,7 +147,10 @@ pub struct MethodTestResult {
     pub method_parsed: bool,
 }
 
+#[allow(dead_code)]
+
 impl MethodTestResult {
+    #[allow(dead_code)]
     fn pass(test_id: &str, description: &str, method_parsed: bool) -> Self {
         Self {
             test_id: test_id.to_string(),
@@ -152,6 +160,8 @@ impl MethodTestResult {
             method_parsed,
         }
     }
+
+    #[allow(dead_code)]
 
     fn fail(test_id: &str, description: &str, error: &str) -> Self {
         Self {
@@ -165,6 +175,7 @@ impl MethodTestResult {
 }
 
 /// Validate that a string follows HTTP token grammar per RFC 9110 Section 5.6.2
+#[allow(dead_code)]
 fn is_valid_http_token(s: &str) -> bool {
     !s.is_empty()
         && s.bytes().all(|b| {
@@ -178,6 +189,7 @@ fn is_valid_http_token(s: &str) -> bool {
 }
 
 /// Generate arbitrary valid HTTP method tokens
+#[allow(dead_code)]
 fn arb_valid_method_token() -> impl Strategy<Value = String> {
     prop::string::string_regex("[!#$%&'*+\\-.^_`|~0-9A-Za-z]+")
         .unwrap()
@@ -187,6 +199,7 @@ fn arb_valid_method_token() -> impl Strategy<Value = String> {
 }
 
 /// Generate arbitrary invalid method strings (for negative testing)
+#[allow(dead_code)]
 fn arb_invalid_method_token() -> impl Strategy<Value = String> {
     prop_oneof![
         // Empty string
@@ -205,6 +218,7 @@ fn arb_invalid_method_token() -> impl Strategy<Value = String> {
 proptest! {
     /// MR1: Method properties are correctly classified per RFC 9110
     #[test]
+    #[allow(dead_code)]
     fn mr1_method_properties_classified_correctly(
         method_name in prop_oneof![
             Just("GET".to_string()),
@@ -253,6 +267,7 @@ proptest! {
 proptest! {
     /// MR2: Safe methods maintain read-only semantics and idempotency
     #[test]
+    #[allow(dead_code)]
     fn mr2_safe_methods_are_safe_and_idempotent(
         safe_method_name in prop_oneof![
             Just("GET"),
@@ -296,6 +311,7 @@ proptest! {
 proptest! {
     /// MR3: PUT and DELETE are idempotent but not safe (allow state modification)
     #[test]
+    #[allow(dead_code)]
     fn mr3_put_delete_idempotent_not_safe(
         idempotent_method_name in prop_oneof![
             Just("PUT"),
@@ -333,6 +349,7 @@ proptest! {
 proptest! {
     /// MR4: POST and CONNECT have no safety or idempotency guarantees
     #[test]
+    #[allow(dead_code)]
     fn mr4_post_connect_unsafe_and_non_idempotent(
         unsafe_method_name in prop_oneof![
             Just("POST"),
@@ -375,6 +392,7 @@ proptest! {
 proptest! {
     /// MR5: Extension methods follow token grammar and parse consistently
     #[test]
+    #[allow(dead_code)]
     fn mr5_extension_methods_follow_token_grammar(
         valid_token in arb_valid_method_token(),
     ) {
@@ -413,6 +431,7 @@ proptest! {
 proptest! {
     /// MR5b: Invalid method strings are rejected per token grammar
     #[test]
+    #[allow(dead_code)]
     fn mr5b_invalid_methods_rejected(
         invalid_token in arb_invalid_method_token(),
     ) {
@@ -436,6 +455,7 @@ proptest! {
 proptest! {
     /// Integration test: Method parsing and classification consistency
     #[test]
+    #[allow(dead_code)]
     fn integration_method_parsing_classification_consistency(
         method_bytes in prop_oneof![
             // Standard methods
@@ -512,6 +532,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_standard_method_properties() {
         // Test all standard methods have correct properties
         let test_cases = vec![
@@ -543,6 +564,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_token_grammar_validation() {
         // Valid tokens
         let valid_tokens = vec![
@@ -591,6 +613,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_method_round_trip_consistency() {
         let methods = vec![
             Method::Get,
@@ -622,6 +645,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_method_case_sensitivity() {
         // Methods are case-sensitive per RFC 9110
         let case_variants = vec![

@@ -8,21 +8,27 @@ use std::io::{Cursor, Read, Write};
 
 /// Record attributes bit flags per KIP-98.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct RecordAttribute(u8);
+
+#[allow(dead_code)]
 
 impl RecordAttribute {
     /// Create empty attributes.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self(0)
     }
 
     /// Set compression type (bits 0-2).
+    #[allow(dead_code)]
     pub fn with_compression(mut self, compression: u8) -> Self {
         self.0 = (self.0 & 0xF8) | (compression & 0x07);
         self
     }
 
     /// Set timestamp type (bit 3).
+    #[allow(dead_code)]
     pub fn with_timestamp_type(mut self, timestamp_type: TimestampType) -> Self {
         if timestamp_type == TimestampType::LogAppendTime {
             self.0 |= 0x08;
@@ -33,6 +39,7 @@ impl RecordAttribute {
     }
 
     /// Set transactional flag (bit 4).
+    #[allow(dead_code)]
     pub fn with_transactional(mut self, transactional: bool) -> Self {
         if transactional {
             self.0 |= 0x10;
@@ -43,6 +50,7 @@ impl RecordAttribute {
     }
 
     /// Set control flag (bit 5).
+    #[allow(dead_code)]
     pub fn with_control(mut self, control: bool) -> Self {
         if control {
             self.0 |= 0x20;
@@ -53,11 +61,13 @@ impl RecordAttribute {
     }
 
     /// Get compression type.
+    #[allow(dead_code)]
     pub fn compression(self) -> u8 {
         self.0 & 0x07
     }
 
     /// Get timestamp type.
+    #[allow(dead_code)]
     pub fn timestamp_type(self) -> TimestampType {
         if (self.0 & 0x08) != 0 {
             TimestampType::LogAppendTime
@@ -67,27 +77,32 @@ impl RecordAttribute {
     }
 
     /// Check if transactional.
+    #[allow(dead_code)]
     pub fn is_transactional(self) -> bool {
         (self.0 & 0x10) != 0
     }
 
     /// Check if control record.
+    #[allow(dead_code)]
     pub fn is_control(self) -> bool {
         (self.0 & 0x20) != 0
     }
 
     /// Get raw attribute byte.
+    #[allow(dead_code)]
     pub fn as_u8(self) -> u8 {
         self.0
     }
 
     /// Create from raw attribute byte.
+    #[allow(dead_code)]
     pub fn from_u8(value: u8) -> Self {
         Self(value)
     }
 }
 
 impl Default for RecordAttribute {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
@@ -95,6 +110,7 @@ impl Default for RecordAttribute {
 
 /// Timestamp type for records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TimestampType {
     /// Timestamp set by the producer.
     CreateTime,
@@ -104,6 +120,7 @@ pub enum TimestampType {
 
 /// Individual record within a RecordBatch.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RecordV2 {
     /// Length of the record (varint).
     pub length: i32,
@@ -127,6 +144,7 @@ pub struct RecordV2 {
 
 /// Record header key-value pair.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RecordHeader {
     /// Header key length (varint).
     pub key_length: i32,
@@ -138,8 +156,11 @@ pub struct RecordHeader {
     pub value: Option<Vec<u8>>,
 }
 
+#[allow(dead_code)]
+
 impl RecordV2 {
     /// Create a new record with given key and value.
+    #[allow(dead_code)]
     pub fn new(key: Option<Vec<u8>>, value: Option<Vec<u8>>) -> Self {
         let key_length = key.as_ref().map_or(-1, |k| k.len() as i32);
         let value_length = value.as_ref().map_or(-1, |v| v.len() as i32);
@@ -158,6 +179,7 @@ impl RecordV2 {
     }
 
     /// Add a header to the record.
+    #[allow(dead_code)]
     pub fn with_header(mut self, key: String, value: Option<Vec<u8>>) -> Self {
         let value_length = value.as_ref().map_or(-1, |v| v.len() as i32);
         self.headers.push(RecordHeader {
@@ -170,18 +192,21 @@ impl RecordV2 {
     }
 
     /// Set timestamp delta.
+    #[allow(dead_code)]
     pub fn with_timestamp_delta(mut self, delta: i64) -> Self {
         self.timestamp_delta = delta;
         self
     }
 
     /// Set offset delta.
+    #[allow(dead_code)]
     pub fn with_offset_delta(mut self, delta: i32) -> Self {
         self.offset_delta = delta;
         self
     }
 
     /// Set attributes.
+    #[allow(dead_code)]
     pub fn with_attributes(mut self, attributes: RecordAttribute) -> Self {
         self.attributes = attributes;
         self
@@ -190,6 +215,7 @@ impl RecordV2 {
 
 /// RecordBatch v2 format per KIP-98.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RecordBatchV2 {
     /// Base offset of first record in batch.
     pub base_offset: i64,
@@ -221,8 +247,11 @@ pub struct RecordBatchV2 {
     pub records: Vec<RecordV2>,
 }
 
+#[allow(dead_code)]
+
 impl RecordBatchV2 {
     /// Create a new RecordBatch v2.
+    #[allow(dead_code)]
     pub fn new(
         base_offset: i64,
         producer_id: i64,
@@ -248,6 +277,7 @@ impl RecordBatchV2 {
     }
 
     /// Create a test batch for conformance testing.
+    #[allow(dead_code)]
     pub fn new_test_batch() -> Self {
         let mut batch = Self::new(0, 12345, 0, 0);
 
@@ -266,6 +296,7 @@ impl RecordBatchV2 {
     }
 
     /// Add a record to the batch.
+    #[allow(dead_code)]
     pub fn add_record(&mut self, mut record: RecordV2) {
         record.offset_delta = self.records.len() as i32;
         self.records.push(record);
@@ -277,12 +308,14 @@ impl RecordBatchV2 {
     }
 
     /// Set batch attributes.
+    #[allow(dead_code)]
     pub fn with_attributes(mut self, attributes: RecordAttribute) -> Self {
         self.attributes = attributes;
         self
     }
 
     /// Set base timestamp.
+    #[allow(dead_code)]
     pub fn with_base_timestamp(mut self, timestamp: i64) -> Self {
         self.base_timestamp = timestamp;
         self.max_timestamp = timestamp;
@@ -290,11 +323,13 @@ impl RecordBatchV2 {
     }
 
     /// Get number of records.
+    #[allow(dead_code)]
     pub fn record_count(&self) -> i32 {
         self.record_count
     }
 
     /// Encode the batch to bytes.
+    #[allow(dead_code)]
     pub fn encode(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
 
@@ -335,6 +370,7 @@ impl RecordBatchV2 {
     }
 
     /// Decode a batch from bytes.
+    #[allow(dead_code)]
     pub fn decode(data: &[u8]) -> Result<Self, String> {
         if data.len() < 61 {
             return Err("Buffer too short for RecordBatch v2 header".to_string());
@@ -398,6 +434,7 @@ impl RecordBatchV2 {
 }
 
 /// Encode a single record.
+#[allow(dead_code)]
 fn encode_record(record: &RecordV2, buffer: &mut Vec<u8>) {
     let record_start = buffer.len();
 
@@ -441,6 +478,7 @@ fn encode_record(record: &RecordV2, buffer: &mut Vec<u8>) {
 }
 
 /// Decode a single record.
+#[allow(dead_code)]
 fn decode_record(cursor: &mut Cursor<&[u8]>) -> Result<RecordV2, String> {
     let length = decode_varint(cursor)?;
     let attributes = RecordAttribute::from_u8(read_u8(cursor)?);
@@ -513,18 +551,21 @@ fn decode_record(cursor: &mut Cursor<&[u8]>) -> Result<RecordV2, String> {
 }
 
 /// Encode a varint (zigzag encoded signed integer).
+#[allow(dead_code)]
 fn encode_varint(value: i32, buffer: &mut Vec<u8>) {
     let unsigned = ((value << 1) ^ (value >> 31)) as u32;
     encode_varint_u32(unsigned, buffer);
 }
 
 /// Encode a varint (zigzag encoded signed 64-bit integer).
+#[allow(dead_code)]
 fn encode_varint_i64(value: i64, buffer: &mut Vec<u8>) {
     let unsigned = ((value << 1) ^ (value >> 63)) as u64;
     encode_varint_u64(unsigned, buffer);
 }
 
 /// Encode an unsigned varint.
+#[allow(dead_code)]
 fn encode_varint_u32(mut value: u32, buffer: &mut Vec<u8>) {
     while value >= 0x80 {
         buffer.push((value & 0x7F) as u8 | 0x80);
@@ -534,6 +575,7 @@ fn encode_varint_u32(mut value: u32, buffer: &mut Vec<u8>) {
 }
 
 /// Encode an unsigned 64-bit varint.
+#[allow(dead_code)]
 fn encode_varint_u64(mut value: u64, buffer: &mut Vec<u8>) {
     while value >= 0x80 {
         buffer.push((value & 0x7F) as u8 | 0x80);
@@ -543,6 +585,7 @@ fn encode_varint_u64(mut value: u64, buffer: &mut Vec<u8>) {
 }
 
 /// Get the size of a varint encoding.
+#[allow(dead_code)]
 fn varint_size(value: i32) -> usize {
     let unsigned = ((value << 1) ^ (value >> 31)) as u32;
     if unsigned < 0x80 {
@@ -559,18 +602,21 @@ fn varint_size(value: i32) -> usize {
 }
 
 /// Decode a varint.
+#[allow(dead_code)]
 fn decode_varint(cursor: &mut Cursor<&[u8]>) -> Result<i32, String> {
     let unsigned = decode_varint_u32(cursor)?;
     Ok(((unsigned >> 1) as i32) ^ (-((unsigned & 1) as i32)))
 }
 
 /// Decode a 64-bit varint.
+#[allow(dead_code)]
 fn decode_varint_i64(cursor: &mut Cursor<&[u8]>) -> Result<i64, String> {
     let unsigned = decode_varint_u64(cursor)?;
     Ok(((unsigned >> 1) as i64) ^ (-((unsigned & 1) as i64)))
 }
 
 /// Decode an unsigned varint.
+#[allow(dead_code)]
 fn decode_varint_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32, String> {
     let mut result = 0u32;
     let mut shift = 0;
@@ -589,6 +635,7 @@ fn decode_varint_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32, String> {
 }
 
 /// Decode an unsigned 64-bit varint.
+#[allow(dead_code)]
 fn decode_varint_u64(cursor: &mut Cursor<&[u8]>) -> Result<u64, String> {
     let mut result = 0u64;
     let mut shift = 0;
@@ -607,15 +654,20 @@ fn decode_varint_u64(cursor: &mut Cursor<&[u8]>) -> Result<u64, String> {
 }
 
 // Helper functions for reading primitive types
+#[allow(dead_code)]
 fn read_u8(cursor: &mut Cursor<&[u8]>) -> Result<u8, String> {
     let mut buf = [0u8; 1];
     cursor.read_exact(&mut buf).map_err(|e| e.to_string())?;
     Ok(buf[0])
 }
 
+#[allow(dead_code)]
+
 fn read_i8(cursor: &mut Cursor<&[u8]>) -> Result<i8, String> {
     Ok(read_u8(cursor)? as i8)
 }
+
+#[allow(dead_code)]
 
 fn read_i16(cursor: &mut Cursor<&[u8]>) -> Result<i16, String> {
     let mut buf = [0u8; 2];
@@ -623,17 +675,23 @@ fn read_i16(cursor: &mut Cursor<&[u8]>) -> Result<i16, String> {
     Ok(i16::from_be_bytes(buf))
 }
 
+#[allow(dead_code)]
+
 fn read_i32(cursor: &mut Cursor<&[u8]>) -> Result<i32, String> {
     let mut buf = [0u8; 4];
     cursor.read_exact(&mut buf).map_err(|e| e.to_string())?;
     Ok(i32::from_be_bytes(buf))
 }
 
+#[allow(dead_code)]
+
 fn read_i64(cursor: &mut Cursor<&[u8]>) -> Result<i64, String> {
     let mut buf = [0u8; 8];
     cursor.read_exact(&mut buf).map_err(|e| e.to_string())?;
     Ok(i64::from_be_bytes(buf))
 }
+
+#[allow(dead_code)]
 
 fn read_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32, String> {
     let mut buf = [0u8; 4];

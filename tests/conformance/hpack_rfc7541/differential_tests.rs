@@ -10,12 +10,16 @@ use asupersync::http::h2::hpack::Header;
 use std::time::Instant;
 
 /// Differential test runner for HPACK conformance.
+#[allow(dead_code)]
 pub struct HpackDifferentialTester {
     fixture_loader: FixtureLoader,
 }
 
+#[allow(dead_code)]
+
 impl HpackDifferentialTester {
     /// Create a new differential tester.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             fixture_loader: FixtureLoader::new(),
@@ -23,6 +27,7 @@ impl HpackDifferentialTester {
     }
 
     /// Run all differential tests against loaded fixtures.
+    #[allow(dead_code)]
     pub fn run_all_differential_tests(&self) -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
 
@@ -42,6 +47,7 @@ impl HpackDifferentialTester {
     }
 
     /// Test our implementation against an RFC 7541 test vector.
+    #[allow(dead_code)]
     fn test_against_rfc_vector(&self, test_vector: &Rfc7541TestVector) -> ConformanceTestResult {
         let start_time = Instant::now();
 
@@ -80,6 +86,7 @@ impl HpackDifferentialTester {
     }
 
     /// Test our implementation against a reference fixture.
+    #[allow(dead_code)]
     fn test_against_fixture(&self, fixture: &HpackFixture) -> ConformanceTestResult {
         let start_time = Instant::now();
 
@@ -112,6 +119,7 @@ impl HpackDifferentialTester {
     }
 
     /// Encode headers using our implementation.
+    #[allow(dead_code)]
     fn encode_headers(&self, headers: &[Header], use_huffman: bool) -> Vec<u8> {
         use asupersync::bytes::BytesMut;
         use asupersync::http::h2::hpack::Encoder;
@@ -124,6 +132,7 @@ impl HpackDifferentialTester {
     }
 
     /// Compare functional equivalence by decoding both encodings.
+    #[allow(dead_code)]
     fn compare_functional_equivalence(
         &self,
         our_encoded: &[u8],
@@ -154,24 +163,30 @@ impl HpackDifferentialTester {
 }
 
 impl Default for HpackDifferentialTester {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 /// Cross-implementation interoperability tests.
+#[allow(dead_code)]
 pub struct CrossImplementationTester {
     // Note: In a full implementation, this would connect to external
     // reference implementations (Go net/http2, nghttp2, etc.)
 }
 
+#[allow(dead_code)]
+
 impl CrossImplementationTester {
     /// Create a new cross-implementation tester.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {}
     }
 
     /// Test interoperability with Go net/http2 HPACK implementation.
+    #[allow(dead_code)]
     pub fn test_go_interop(&self) -> Vec<ConformanceTestResult> {
         // Note: This would require setting up Go test harness
         // For now, return placeholder results
@@ -187,6 +202,7 @@ impl CrossImplementationTester {
     }
 
     /// Test interoperability with nghttp2 HPACK implementation.
+    #[allow(dead_code)]
     pub fn test_nghttp2_interop(&self) -> Vec<ConformanceTestResult> {
         vec![ConformanceTestResult {
             test_id: "INTEROP-NGHTTP2-1".to_string(),
@@ -200,6 +216,7 @@ impl CrossImplementationTester {
     }
 
     /// Run all cross-implementation tests.
+    #[allow(dead_code)]
     pub fn run_all_interop_tests(&self) -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
         results.extend(self.test_go_interop());
@@ -209,16 +226,21 @@ impl CrossImplementationTester {
 }
 
 impl Default for CrossImplementationTester {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 /// Compression efficiency validation tests.
+#[allow(dead_code)]
 pub struct CompressionEfficiencyTester;
+
+#[allow(dead_code)]
 
 impl CompressionEfficiencyTester {
     /// Test compression efficiency against reference implementations.
+    #[allow(dead_code)]
     pub fn test_compression_efficiency() -> Vec<ConformanceTestResult> {
         let mut results = Vec::new();
 
@@ -230,6 +252,8 @@ impl CompressionEfficiencyTester {
 
         results
     }
+
+    #[allow(dead_code)]
 
     fn test_huffman_efficiency() -> ConformanceTestResult {
         use asupersync::bytes::BytesMut;
@@ -282,6 +306,8 @@ impl CompressionEfficiencyTester {
         }
     }
 
+    #[allow(dead_code)]
+
     fn test_dynamic_table_efficiency() -> ConformanceTestResult {
         // Test that repeated headers get indexed in dynamic table
         use asupersync::bytes::BytesMut;
@@ -327,6 +353,7 @@ mod tests {
     use chrono::Utc;
 
     #[test]
+    #[allow(dead_code)]
     fn test_differential_tester_creation() {
         let tester = HpackDifferentialTester::new();
         // Should not panic and should have fixture loader
@@ -334,6 +361,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_rfc_vector_testing() {
         let tester = HpackDifferentialTester::new();
 
@@ -350,6 +378,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_compression_efficiency() {
         let results = CompressionEfficiencyTester::test_compression_efficiency();
         assert!(!results.is_empty(), "Should have efficiency test results");
@@ -361,6 +390,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_fixture_differential_accepts_functionally_equivalent_encoding() {
         let tester = HpackDifferentialTester::new();
         let fixture = HpackFixture {

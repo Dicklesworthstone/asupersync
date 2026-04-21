@@ -50,6 +50,7 @@ pub mod connect_compat;
 
 /// Test result tracking
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ConformanceResult {
     pub test_name: String,
     pub category: TestCategory,
@@ -61,6 +62,7 @@ pub struct ConformanceResult {
 
 /// Test categories for organizing conformance tests
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     UnaryRpc,
     ServerStreaming,
@@ -76,6 +78,7 @@ pub enum TestCategory {
 
 /// Test execution status
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestStatus {
     Passed,
     Failed,
@@ -85,6 +88,7 @@ pub enum TestStatus {
 
 /// Additional test metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct TestMetadata {
     pub request_count: u32,
     pub response_count: u32,
@@ -96,6 +100,7 @@ pub struct TestMetadata {
 }
 
 impl Default for TestMetadata {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             request_count: 0,
@@ -111,6 +116,7 @@ impl Default for TestMetadata {
 
 /// Test message types for conformance testing
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct TestRequest {
     pub message: String,
     pub echo_metadata: bool,
@@ -121,6 +127,7 @@ pub struct TestRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct TestResponse {
     pub message: String,
     pub server_id: Option<String>,
@@ -130,6 +137,7 @@ pub struct TestResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct AuthContext {
     pub peer_identity: Option<String>,
     pub peer_identity_property_name: Option<String>,
@@ -137,6 +145,7 @@ pub struct AuthContext {
 
 /// Streaming test message
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct StreamingTestRequest {
     pub message: String,
     pub sequence_number: u32,
@@ -144,6 +153,7 @@ pub struct StreamingTestRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct StreamingTestResponse {
     pub message: String,
     pub sequence_number: u32,
@@ -152,6 +162,7 @@ pub struct StreamingTestResponse {
 
 /// Configuration for conformance test runs
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ConformanceConfig {
     pub server_address: String,
     pub timeout: Duration,
@@ -163,6 +174,7 @@ pub struct ConformanceConfig {
 }
 
 impl Default for ConformanceConfig {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self {
             server_address: "http://127.0.0.1:8080".to_string(),
@@ -177,12 +189,16 @@ impl Default for ConformanceConfig {
 }
 
 /// Main conformance test suite
+#[allow(dead_code)]
 pub struct ConformanceTestSuite {
     config: ConformanceConfig,
     results: Vec<ConformanceResult>,
 }
 
+#[allow(dead_code)]
+
 impl ConformanceTestSuite {
+    #[allow(dead_code)]
     pub fn new(config: ConformanceConfig) -> Self {
         Self {
             config,
@@ -471,6 +487,8 @@ impl ConformanceTestSuite {
         Ok(())
     }
 
+    #[allow(dead_code)]
+
     fn generate_conformance_report(&self) -> Result<()> {
         let total_tests = self.results.len();
         let passed_tests = self.results.iter().filter(|r| r.status == TestStatus::Passed).count();
@@ -513,9 +531,13 @@ impl ConformanceTestSuite {
         Ok(())
     }
 
+    #[allow(dead_code)]
+
     pub fn get_results(&self) -> &[ConformanceResult] {
         &self.results
     }
+
+    #[allow(dead_code)]
 
     pub fn conformance_percentage(&self) -> f64 {
         if self.results.is_empty() {
@@ -527,9 +549,12 @@ impl ConformanceTestSuite {
 }
 
 /// Handle for managing the test server lifetime
+#[allow(dead_code)]
 pub struct TestServerHandle {
     handle: tokio::task::JoinHandle<()>,
 }
+
+#[allow(dead_code)]
 
 impl TestServerHandle {
     pub async fn shutdown(self) -> Result<()> {

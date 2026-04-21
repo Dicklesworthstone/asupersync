@@ -46,6 +46,7 @@ use std::time::{Duration, Instant};
 
 /// Test result for a single QUIC Retry conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct QuicRetryConformanceResult {
     pub test_id: String,
     pub description: String,
@@ -58,6 +59,7 @@ pub struct QuicRetryConformanceResult {
 
 /// Conformance test categories for QUIC Retry packets.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// Retry packet format validation
     PacketFormat,
@@ -77,6 +79,7 @@ pub enum TestCategory {
 
 /// Protocol requirement level per RFC 2119.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // RFC 2119: MUST
     Should, // RFC 2119: SHOULD
@@ -85,6 +88,7 @@ pub enum RequirementLevel {
 
 /// Test execution result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
     Fail,
@@ -93,13 +97,17 @@ pub enum TestVerdict {
 }
 
 /// QUIC Retry packet conformance test harness.
+#[allow(dead_code)]
 pub struct QuicRetryConformanceHarness {
     /// Test execution timeout
     timeout: Duration,
 }
 
+#[allow(dead_code)]
+
 impl QuicRetryConformanceHarness {
     /// Create a new conformance test harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             timeout: Duration::from_secs(30),
@@ -107,6 +115,7 @@ impl QuicRetryConformanceHarness {
     }
 
     /// Run all conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<QuicRetryConformanceResult> {
         let mut results = Vec::new();
 
@@ -123,6 +132,7 @@ impl QuicRetryConformanceHarness {
     }
 
     /// Test Retry packet format requirements (RFC 9000 Section 17.2.5).
+    #[allow(dead_code)]
     fn test_packet_format(&self) -> Vec<QuicRetryConformanceResult> {
         let mut results = Vec::new();
 
@@ -279,6 +289,7 @@ impl QuicRetryConformanceHarness {
     }
 
     /// Test connection ID handling requirements (RFC 9000 Section 17.2.5).
+    #[allow(dead_code)]
     fn test_connection_id_handling(&self) -> Vec<QuicRetryConformanceResult> {
         let mut results = Vec::new();
 
@@ -363,6 +374,7 @@ impl QuicRetryConformanceHarness {
     }
 
     /// Test retry token processing requirements.
+    #[allow(dead_code)]
     fn test_token_processing(&self) -> Vec<QuicRetryConformanceResult> {
         let mut results = Vec::new();
 
@@ -445,6 +457,7 @@ impl QuicRetryConformanceHarness {
     }
 
     /// Test integrity tag validation requirements.
+    #[allow(dead_code)]
     fn test_integrity_validation(&self) -> Vec<QuicRetryConformanceResult> {
         let mut results = Vec::new();
 
@@ -531,6 +544,7 @@ impl QuicRetryConformanceHarness {
     }
 
     /// Test client processing requirements.
+    #[allow(dead_code)]
     fn test_client_processing(&self) -> Vec<QuicRetryConformanceResult> {
         let mut results = Vec::new();
 
@@ -609,6 +623,7 @@ impl QuicRetryConformanceHarness {
     }
 
     /// Test server processing requirements.
+    #[allow(dead_code)]
     fn test_server_processing(&self) -> Vec<QuicRetryConformanceResult> {
         let mut results = Vec::new();
 
@@ -660,6 +675,7 @@ impl QuicRetryConformanceHarness {
     }
 
     /// Test protocol ordering and state requirements.
+    #[allow(dead_code)]
     fn test_protocol_ordering(&self) -> Vec<QuicRetryConformanceResult> {
         let mut results = Vec::new();
 
@@ -735,6 +751,7 @@ impl QuicRetryConformanceHarness {
     }
 
     /// Helper function to run a single test with proper error handling and timing.
+    #[allow(dead_code)]
     fn run_test<F>(
         &self,
         test_id: &str,
@@ -795,12 +812,14 @@ impl QuicRetryConformanceHarness {
 }
 
 impl Default for QuicRetryConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 /// Helper function to convert errors to strings.
+#[allow(dead_code)]
 fn to_string<E: std::fmt::Debug>(err: E) -> String {
     format!("{:?}", err)
 }
@@ -810,12 +829,14 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_harness_creation() {
         let harness = QuicRetryConformanceHarness::new();
         assert_eq!(harness.timeout, Duration::from_secs(30));
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_all_conformance_tests() {
         let harness = QuicRetryConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -865,6 +886,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_packet_format_conformance() {
         let harness = QuicRetryConformanceHarness::new();
         let results = harness.test_packet_format();
@@ -884,6 +906,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_connection_id_handling() {
         let harness = QuicRetryConformanceHarness::new();
         let results = harness.test_connection_id_handling();
@@ -903,6 +926,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_retry_roundtrip_basic() {
         // Basic smoke test for Retry packet encoding/decoding
         let retry = RetryHeader {

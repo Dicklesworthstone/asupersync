@@ -4,6 +4,7 @@ use super::format::*;
 
 /// Test vector for KIP-98 RecordBatch v2 format.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Kip98TestVector {
     pub id: &'static str,
     pub description: &'static str,
@@ -14,6 +15,7 @@ pub struct Kip98TestVector {
 
 /// Requirement level for conformance testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     Must,
     Should,
@@ -21,6 +23,7 @@ pub enum RequirementLevel {
 }
 
 /// Test vector for basic record batch with no compression.
+#[allow(dead_code)]
 pub fn basic_record_batch_no_compression() -> Kip98TestVector {
     let mut batch = RecordBatchV2::new(0, 12345, 0, 0).with_base_timestamp(1234567890000);
 
@@ -41,6 +44,7 @@ pub fn basic_record_batch_no_compression() -> Kip98TestVector {
 }
 
 /// Test vector for transactional record batch.
+#[allow(dead_code)]
 pub fn transactional_record_batch() -> Kip98TestVector {
     let mut batch = RecordBatchV2::new(100, 98765, 1, 42)
         .with_base_timestamp(1234567890000)
@@ -67,6 +71,7 @@ pub fn transactional_record_batch() -> Kip98TestVector {
 }
 
 /// Test vector for control record batch.
+#[allow(dead_code)]
 pub fn control_record_batch() -> Kip98TestVector {
     let mut batch = RecordBatchV2::new(200, 54321, 2, 10)
         .with_base_timestamp(1234567890000)
@@ -96,6 +101,7 @@ pub fn control_record_batch() -> Kip98TestVector {
 }
 
 /// Test vector for record with headers.
+#[allow(dead_code)]
 pub fn record_with_headers() -> Kip98TestVector {
     let mut batch = RecordBatchV2::new(50, 11111, 0, 5).with_base_timestamp(1234567890000);
 
@@ -121,6 +127,7 @@ pub fn record_with_headers() -> Kip98TestVector {
 }
 
 /// Test vector for compressed record batch.
+#[allow(dead_code)]
 pub fn compressed_record_batch_gzip() -> Kip98TestVector {
     let mut batch = RecordBatchV2::new(75, 22222, 1, 20)
         .with_base_timestamp(1234567890000)
@@ -153,6 +160,7 @@ pub fn compressed_record_batch_gzip() -> Kip98TestVector {
 }
 
 /// Test vector for timestamp delta encoding.
+#[allow(dead_code)]
 pub fn timestamp_delta_encoding() -> Kip98TestVector {
     let base_timestamp = 1234567890000i64;
     let mut batch = RecordBatchV2::new(300, 33333, 0, 100).with_base_timestamp(base_timestamp);
@@ -181,6 +189,7 @@ pub fn timestamp_delta_encoding() -> Kip98TestVector {
 }
 
 /// Test vector for null key and value.
+#[allow(dead_code)]
 pub fn null_key_value_record() -> Kip98TestVector {
     let mut batch = RecordBatchV2::new(400, 44444, 0, 0).with_base_timestamp(1234567890000);
 
@@ -213,6 +222,7 @@ pub fn null_key_value_record() -> Kip98TestVector {
 }
 
 /// Test vector for producer ID/epoch/sequence validation.
+#[allow(dead_code)]
 pub fn producer_id_epoch_sequence() -> Kip98TestVector {
     let mut batch = RecordBatchV2::new(500, 9223372036854775807i64, 32767, 2147483647)
         .with_base_timestamp(1234567890000);
@@ -236,6 +246,7 @@ pub fn producer_id_epoch_sequence() -> Kip98TestVector {
 }
 
 /// Test vector for base_offset and last_offset_delta relationship.
+#[allow(dead_code)]
 pub fn offset_relationship() -> Kip98TestVector {
     let base_offset = 1000i64;
     let mut batch =
@@ -266,6 +277,7 @@ pub fn offset_relationship() -> Kip98TestVector {
 }
 
 /// Test vector for LogAppendTime timestamp type.
+#[allow(dead_code)]
 pub fn log_append_time_timestamp() -> Kip98TestVector {
     let mut batch = RecordBatchV2::new(600, 66666, 0, 0).with_base_timestamp(1234567890000);
 
@@ -294,6 +306,7 @@ pub fn log_append_time_timestamp() -> Kip98TestVector {
 }
 
 /// Get all test vectors for the conformance test suite.
+#[allow(dead_code)]
 pub fn all_test_vectors() -> Vec<Kip98TestVector> {
     vec![
         basic_record_batch_no_compression(),
@@ -310,6 +323,7 @@ pub fn all_test_vectors() -> Vec<Kip98TestVector> {
 }
 
 /// Test vectors specifically for edge cases and boundary conditions.
+#[allow(dead_code)]
 pub fn edge_case_test_vectors() -> Vec<Kip98TestVector> {
     vec![
         producer_id_epoch_sequence(), // Max values
@@ -319,6 +333,7 @@ pub fn edge_case_test_vectors() -> Vec<Kip98TestVector> {
 }
 
 /// Test vectors for MUST requirements per KIP-98.
+#[allow(dead_code)]
 pub fn must_requirement_test_vectors() -> Vec<Kip98TestVector> {
     all_test_vectors()
         .into_iter()

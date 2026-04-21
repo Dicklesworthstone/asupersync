@@ -23,6 +23,7 @@ pub mod resource_limits_tests;
 
 /// Test result for codec conformance tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct CodecConformanceResult {
     /// Unique test identifier.
     pub test_id: String,
@@ -42,6 +43,7 @@ pub struct CodecConformanceResult {
 
 /// Categories of codec conformance tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// Frame boundary detection.
     Framing,
@@ -59,6 +61,7 @@ pub enum TestCategory {
 
 /// RFC compliance requirement levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     /// MUST requirements (critical for interoperability).
     Must,
@@ -70,6 +73,7 @@ pub enum RequirementLevel {
 
 /// Test execution verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     /// Test passed.
     Pass,
@@ -82,15 +86,20 @@ pub enum TestVerdict {
 }
 
 /// Main codec conformance test harness.
+#[allow(dead_code)]
 pub struct CodecConformanceHarness;
+
+#[allow(dead_code)]
 
 impl CodecConformanceHarness {
     /// Create a new conformance test harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self
     }
 
     /// Run all codec conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<CodecConformanceResult> {
         let mut results = Vec::new();
 
@@ -113,6 +122,7 @@ impl CodecConformanceHarness {
     }
 
     /// Generate conformance compliance report in JSON format.
+    #[allow(dead_code)]
     pub fn generate_compliance_report(&self) -> serde_json::Value {
         let results = self.run_all_tests();
 
@@ -223,12 +233,14 @@ impl CodecConformanceHarness {
 }
 
 impl Default for CodecConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 /// Helper function to measure test execution time.
+#[allow(dead_code)]
 pub fn timed_test<F, R>(test_fn: F) -> (R, u64)
 where
     F: FnOnce() -> R,
@@ -240,6 +252,7 @@ where
 }
 
 /// Helper function to create test results.
+#[allow(dead_code)]
 pub fn create_test_result(
     test_id: &str,
     description: &str,
@@ -269,6 +282,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_conformance_harness_creation() {
         let harness = CodecConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -290,6 +304,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_compliance_report_generation() {
         let harness = CodecConformanceHarness::new();
         let report = harness.generate_compliance_report();
@@ -314,6 +329,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_timed_test_helper() {
         let (result, elapsed) = timed_test(|| {
             std::thread::sleep(std::time::Duration::from_millis(1));

@@ -20,6 +20,7 @@ mod tls_key_share_tests {
     use std::time::Duration;
 
     /// Create a test context for TLS operations.
+    #[allow(dead_code)]
     fn create_test_context() -> Cx {
         Cx::new(
             RegionId::from_arena(asupersync::util::ArenaIndex::new(0, 0)),
@@ -29,9 +30,12 @@ mod tls_key_share_tests {
     }
 
     /// Simple block_on implementation for tests.
+    #[allow(dead_code)]
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        #[allow(dead_code)]
         struct NoopWaker;
         impl std::task::Wake for NoopWaker {
+            #[allow(dead_code)]
             fn wake(self: std::sync::Arc<Self>) {}
         }
         let waker = std::task::Waker::noop().clone();
@@ -46,6 +50,7 @@ mod tls_key_share_tests {
     }
 
     /// Conformance harness for TLS 1.3 key share extension tests.
+    #[allow(dead_code)]
     pub struct TlsKeyShareConformanceHarness {
         _cx: Cx,
     }
@@ -53,6 +58,7 @@ mod tls_key_share_tests {
     /// Test category for key share extension conformance tests.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum TestCategory {
         SupportedGroupsNegotiation,
         HelloRetryRequest,
@@ -66,6 +72,7 @@ mod tls_key_share_tests {
     /// Requirement level from RFC 8446.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum RequirementLevel {
         Must,
         Should,
@@ -75,6 +82,7 @@ mod tls_key_share_tests {
     /// Test verdict for conformance tests.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
     pub enum TestVerdict {
         Pass,
         Fail,
@@ -84,6 +92,7 @@ mod tls_key_share_tests {
 
     /// Individual conformance test result.
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[allow(dead_code)]
     pub struct ConformanceTestResult {
         pub test_id: String,
         pub category: TestCategory,
@@ -97,6 +106,7 @@ mod tls_key_share_tests {
     /// Supported ECDHE groups per RFC 8446.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[repr(u16)]
+    #[allow(dead_code)]
     pub enum SupportedGroup {
         /// secp256r1 (NIST P-256)
         Secp256r1 = 0x0017,
@@ -108,8 +118,11 @@ mod tls_key_share_tests {
         X25519 = 0x001d,
     }
 
+    #[allow(dead_code)]
+
     impl SupportedGroup {
         /// Get all standard supported groups.
+        #[allow(dead_code)]
         fn all() -> Vec<Self> {
             vec![
                 Self::X25519,
@@ -120,6 +133,7 @@ mod tls_key_share_tests {
         }
 
         /// Get the group name.
+        #[allow(dead_code)]
         fn name(&self) -> &'static str {
             match self {
                 Self::Secp256r1 => "secp256r1",
@@ -130,13 +144,17 @@ mod tls_key_share_tests {
         }
 
         /// Check if this group is considered safe for general use.
+        #[allow(dead_code)]
         fn is_recommended(&self) -> bool {
             matches!(self, Self::X25519 | Self::Secp256r1 | Self::Secp384r1)
         }
     }
 
+    #[allow(dead_code)]
+
     impl TlsKeyShareConformanceHarness {
         /// Create a new conformance test harness.
+        #[allow(dead_code)]
         pub fn new() -> Self {
             Self {
                 _cx: create_test_context(),
@@ -144,6 +162,7 @@ mod tls_key_share_tests {
         }
 
         /// Generate test certificates and keys for testing.
+        #[allow(dead_code)]
         fn generate_test_cert_and_key() -> Result<(asupersync::tls::CertificateChain, asupersync::tls::PrivateKey), TlsError> {
             // For testing, we'll create a minimal self-signed certificate
             // In a real implementation, this would use a proper test certificate
@@ -169,6 +188,7 @@ mod tls_key_share_tests {
         }
 
         /// Run a single conformance test and capture the result.
+        #[allow(dead_code)]
         fn run_test<F>(&self, test_id: &str, category: TestCategory, requirement_level: RequirementLevel, description: &str, test_fn: F) -> ConformanceTestResult
         where
             F: FnOnce() -> Result<(), TlsError>,
@@ -193,6 +213,7 @@ mod tls_key_share_tests {
 
         /// Test 1: Supported groups (x25519, secp256r1, secp384r1, secp521r1) properly negotiated.
         /// RFC 8446 Section 4.2.8: Servers MUST support at least one supported group.
+        #[allow(dead_code)]
         pub fn test_supported_groups_negotiation(&self) -> Vec<ConformanceTestResult> {
             let mut results = Vec::new();
 
@@ -258,6 +279,7 @@ mod tls_key_share_tests {
 
         /// Test 2: HelloRetryRequest triggers retry with matching key share.
         /// RFC 8446 Section 4.2.8: Server can request specific key share via HelloRetryRequest.
+        #[allow(dead_code)]
         pub fn test_hello_retry_request_key_share(&self) -> Vec<ConformanceTestResult> {
             let mut results = Vec::new();
 
@@ -308,6 +330,7 @@ mod tls_key_share_tests {
 
         /// Test 3: Empty key_share list triggers alert.
         /// RFC 8446 Section 4.2.8: Empty key_share in ClientHello causes handshake failure.
+        #[allow(dead_code)]
         pub fn test_empty_key_share_alert(&self) -> Vec<ConformanceTestResult> {
             let mut results = Vec::new();
 
@@ -356,6 +379,7 @@ mod tls_key_share_tests {
 
         /// Test 4: Unknown group IDs ignored.
         /// RFC 8446 Section 4.2.8: Unknown groups in supported_groups MUST be ignored.
+        #[allow(dead_code)]
         pub fn test_unknown_group_handling(&self) -> Vec<ConformanceTestResult> {
             let mut results = Vec::new();
 
@@ -405,6 +429,7 @@ mod tls_key_share_tests {
 
         /// Test 5: Pre-shared Key Ephemeral DH correctly combines key share with PSK.
         /// RFC 8446 Section 4.2.8: PSK with (EC)DHE combines PSK and key share for key derivation.
+        #[allow(dead_code)]
         pub fn test_psk_ephemeral_dh(&self) -> Vec<ConformanceTestResult> {
             let mut results = Vec::new();
 
@@ -476,6 +501,7 @@ mod tls_key_share_tests {
         }
 
         /// Run all key share conformance tests and return results.
+        #[allow(dead_code)]
         pub fn run_all_tests(&self) -> Vec<ConformanceTestResult> {
             let mut all_results = Vec::new();
 
@@ -498,6 +524,7 @@ mod tls_key_share_tests {
         }
 
         /// Generate a conformance report.
+        #[allow(dead_code)]
         pub fn generate_report(&self) -> TlsKeyShareConformanceReport {
             let results = self.run_all_tests();
             TlsKeyShareConformanceReport::new(results)
@@ -506,6 +533,7 @@ mod tls_key_share_tests {
 
     /// Conformance report for TLS 1.3 key share extension tests.
     #[derive(Debug, serde::Serialize, serde::Deserialize)]
+    #[allow(dead_code)]
     pub struct TlsKeyShareConformanceReport {
         pub total_tests: usize,
         pub passed: usize,
@@ -519,8 +547,11 @@ mod tls_key_share_tests {
         pub compliance_score: f64,
     }
 
+    #[allow(dead_code)]
+
     impl TlsKeyShareConformanceReport {
         /// Create a new report from test results.
+        #[allow(dead_code)]
         pub fn new(results: Vec<ConformanceTestResult>) -> Self {
             let total_tests = results.len();
             let passed = results.iter().filter(|r| r.verdict == TestVerdict::Pass).count();
@@ -565,6 +596,7 @@ mod tls_key_share_tests {
         }
 
         /// Check if all MUST requirements are satisfied.
+        #[allow(dead_code)]
         pub fn is_compliant(&self) -> bool {
             self.must_requirements_passed == self.must_requirements_total
         }
@@ -576,6 +608,7 @@ mod tls_key_share_tests {
         use super::*;
 
         #[test]
+        #[allow(dead_code)]
         fn test_key_share_supported_groups() {
             let harness = TlsKeyShareConformanceHarness::new();
             let results = harness.test_supported_groups_negotiation();
@@ -593,6 +626,7 @@ mod tls_key_share_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_key_share_hello_retry_request() {
             let harness = TlsKeyShareConformanceHarness::new();
             let results = harness.test_hello_retry_request_key_share();
@@ -609,6 +643,7 @@ mod tls_key_share_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_key_share_empty_alert() {
             let harness = TlsKeyShareConformanceHarness::new();
             let results = harness.test_empty_key_share_alert();
@@ -623,6 +658,7 @@ mod tls_key_share_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_key_share_unknown_groups() {
             let harness = TlsKeyShareConformanceHarness::new();
             let results = harness.test_unknown_group_handling();
@@ -636,6 +672,7 @@ mod tls_key_share_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_key_share_psk_ephemeral_dh() {
             let harness = TlsKeyShareConformanceHarness::new();
             let results = harness.test_psk_ephemeral_dh();
@@ -652,6 +689,7 @@ mod tls_key_share_tests {
         }
 
         #[test]
+        #[allow(dead_code)]
         fn test_full_conformance_report() {
             let harness = TlsKeyShareConformanceHarness::new();
             let report = harness.generate_report();
@@ -680,6 +718,7 @@ mod tls_key_share_tests {
 #[cfg(not(feature = "tls"))]
 mod tls_disabled {
     #[test]
+    #[allow(dead_code)]
     fn test_tls_feature_disabled() {
         // When TLS feature is disabled, we should skip all tests gracefully
         println!("TLS feature disabled - skipping key share conformance tests");

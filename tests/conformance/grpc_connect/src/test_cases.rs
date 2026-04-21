@@ -6,6 +6,7 @@ use std::time::Duration;
 
 /// Test case definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct TestCase {
     pub name: String,
     pub category: TestCategory,
@@ -20,6 +21,7 @@ pub struct TestCase {
 /// Test case request variants
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[allow(dead_code)]
 pub enum TestCaseRequest {
     Unary { request: TestRequest },
     ServerStreaming { request: StreamingTestRequest },
@@ -30,6 +32,7 @@ pub enum TestCaseRequest {
 /// Expected response for validation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[allow(dead_code)]
 pub enum TestCaseResponse {
     Unary { response_pattern: String },
     Streaming { response_count: u32 },
@@ -37,6 +40,7 @@ pub enum TestCaseResponse {
 }
 
 /// Generate standard conformance test cases
+#[allow(dead_code)]
 pub fn generate_standard_test_cases() -> Vec<TestCase> {
     vec![
         // Unary RPC tests
@@ -280,6 +284,7 @@ pub fn generate_standard_test_cases() -> Vec<TestCase> {
 }
 
 /// Filter test cases by category
+#[allow(dead_code)]
 pub fn filter_test_cases_by_category(test_cases: Vec<TestCase>, category: TestCategory) -> Vec<TestCase> {
     test_cases.into_iter()
         .filter(|tc| tc.category == category)
@@ -287,6 +292,7 @@ pub fn filter_test_cases_by_category(test_cases: Vec<TestCase>, category: TestCa
 }
 
 /// Filter test cases by pattern matching name
+#[allow(dead_code)]
 pub fn filter_test_cases_by_pattern(test_cases: Vec<TestCase>, pattern: &str) -> Vec<TestCase> {
     test_cases.into_iter()
         .filter(|tc| tc.name.contains(pattern))
@@ -294,6 +300,7 @@ pub fn filter_test_cases_by_pattern(test_cases: Vec<TestCase>, pattern: &str) ->
 }
 
 /// Remove skipped test cases
+#[allow(dead_code)]
 pub fn remove_skipped_test_cases(test_cases: Vec<TestCase>) -> Vec<TestCase> {
     test_cases.into_iter()
         .filter(|tc| tc.skip_reason.is_none())
@@ -305,6 +312,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_generate_standard_test_cases() {
         let test_cases = generate_standard_test_cases();
         assert!(!test_cases.is_empty());
@@ -320,6 +328,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_filter_by_category() {
         let test_cases = generate_standard_test_cases();
         let unary_cases = filter_test_cases_by_category(test_cases.clone(), TestCategory::UnaryRpc);
@@ -329,6 +338,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_filter_by_pattern() {
         let test_cases = generate_standard_test_cases();
         let error_cases = filter_test_cases_by_pattern(test_cases, "invalid");
@@ -338,6 +348,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_remove_skipped() {
         let test_cases = generate_standard_test_cases();
         let runnable_cases = remove_skipped_test_cases(test_cases.clone());

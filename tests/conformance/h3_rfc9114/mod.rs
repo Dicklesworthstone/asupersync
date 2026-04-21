@@ -10,6 +10,7 @@ pub mod connection_preface_tests;
 
 /// Conformance test result for HTTP/3 RFC 9114.
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 pub struct H3ConformanceResult {
     /// Test identifier (RFC section reference).
     pub test_id: String,
@@ -29,6 +30,7 @@ pub struct H3ConformanceResult {
 
 /// HTTP/3 conformance test categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[allow(dead_code)]
 pub enum TestCategory {
     /// Connection preface validation (RFC 9114 Section 6.1).
     ConnectionPreface,
@@ -44,6 +46,7 @@ pub enum TestCategory {
 
 /// Requirement level from RFC keywords.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[allow(dead_code)]
 pub enum RequirementLevel {
     /// MUST requirements (mandatory).
     Must,
@@ -55,6 +58,7 @@ pub enum RequirementLevel {
 
 /// Test verdict classification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[allow(dead_code)]
 pub enum TestVerdict {
     /// Test passed.
     Pass,
@@ -67,6 +71,7 @@ pub enum TestVerdict {
 }
 
 /// Wrapper for timed test execution.
+#[allow(dead_code)]
 fn timed_test<F, T>(test_fn: F) -> (Result<T, String>, u64)
 where
     F: FnOnce() -> Result<T, String>,
@@ -78,21 +83,30 @@ where
 }
 
 /// HTTP/3 conformance harness for RFC 9114.
+#[allow(dead_code)]
 pub struct H3ConformanceHarness {
     test_cases: Vec<Box<dyn ConformanceTest>>,
 }
 
 /// Trait for implementing HTTP/3 conformance tests.
 pub trait ConformanceTest: Send + Sync {
+    #[allow(dead_code)]
     fn test_id(&self) -> &str;
+    #[allow(dead_code)]
     fn description(&self) -> &str;
+    #[allow(dead_code)]
     fn category(&self) -> TestCategory;
+    #[allow(dead_code)]
     fn requirement_level(&self) -> RequirementLevel;
+    #[allow(dead_code)]
     fn run(&self) -> H3ConformanceResult;
 }
 
+#[allow(dead_code)]
+
 impl H3ConformanceHarness {
     /// Create a new HTTP/3 conformance harness.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             test_cases: Vec::new(),
@@ -100,6 +114,7 @@ impl H3ConformanceHarness {
     }
 
     /// Run all HTTP/3 conformance tests.
+    #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<H3ConformanceResult> {
         let mut results = Vec::new();
 
@@ -110,6 +125,7 @@ impl H3ConformanceHarness {
     }
 
     /// Get coverage report for RFC 9114 requirements.
+    #[allow(dead_code)]
     pub fn coverage_report(&self) -> CoverageReport {
         let results = self.run_all_tests();
         CoverageReport::generate(&results)
@@ -118,6 +134,7 @@ impl H3ConformanceHarness {
 
 /// Coverage report for conformance testing.
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 pub struct CoverageReport {
     /// Total number of tests.
     pub total_tests: usize,
@@ -131,8 +148,11 @@ pub struct CoverageReport {
     pub must_coverage: f64,
 }
 
+#[allow(dead_code)]
+
 impl CoverageReport {
     /// Generate a coverage report from test results.
+    #[allow(dead_code)]
     pub fn generate(results: &[H3ConformanceResult]) -> Self {
         let total_tests = results.len();
         let passed = results
@@ -174,6 +194,7 @@ impl CoverageReport {
 }
 
 impl Default for H3ConformanceHarness {
+    #[allow(dead_code)]
     fn default() -> Self {
         Self::new()
     }
@@ -184,6 +205,7 @@ mod integration_tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_h3_conformance_harness_integration() {
         let harness = H3ConformanceHarness::new();
         let results = harness.run_all_tests();
@@ -212,6 +234,7 @@ mod integration_tests {
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_h3_conformance_categories() {
         let harness = H3ConformanceHarness::new();
         let results = harness.run_all_tests();
