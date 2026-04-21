@@ -1082,6 +1082,8 @@ mod tests {
     use super::*;
     use insta::assert_json_snapshot;
     use serde::Serialize;
+    use std::sync::Arc;
+    use std::thread;
 
     #[derive(Serialize)]
     struct ProgressCertificateSnapshot {
@@ -1185,6 +1187,48 @@ mod tests {
             },
             verdict_display: verdict.to_string(),
         }
+    }
+
+    fn certificate_from_potentials(
+        config: ProgressConfig,
+        potentials: &[f64],
+    ) -> ProgressCertificate {
+        let mut cert = ProgressCertificate::new(config);
+        for &potential in potentials {
+            cert.observe(potential);
+        }
+        cert
+    }
+
+    fn verdict_fingerprint(verdict: &CertificateVerdict) -> String {
+        let mut fingerprint = format!(
+            concat!(
+                "converging={};stall={};steps={};current={:.6};initial={:.6};",
+                "mean_credit={:.6};confidence={:.6};azuma={:.6};freedman={:.6};",
+                "phase={};variance={:?};remaining={:?}"
+            ),
+            verdict.converging,
+            verdict.stall_detected,
+            verdict.total_steps,
+            verdict.current_potential,
+            verdict.initial_potential,
+            verdict.mean_credit,
+            verdict.confidence_bound,
+            verdict.azuma_bound,
+            verdict.freedman_bound,
+            verdict.drain_phase,
+            verdict.empirical_variance.map(fmt_f64),
+            verdict.estimated_remaining_steps.map(fmt_f64),
+        );
+
+        for entry in &verdict.evidence {
+            fingerprint.push_str(&format!(
+                "|step={};potential={:.6};bound={:.6};desc={}",
+                entry.step, entry.potential, entry.bound, entry.description
+            ));
+        }
+
+        fingerprint
     }
 
     // -- ProgressConfig --
@@ -3220,6 +3264,113 @@ mod tests {
         assert!(verdict3.azuma_bound <= 1.0 && verdict3.azuma_bound >= 0.0);
         assert!(verdict3.freedman_bound <= 1.0 && verdict3.freedman_bound >= 0.0);
         assert!(verdict3.freedman_bound <= verdict3.azuma_bound + 1e-10); // Allow tiny numerical error
+    }
+
+    #[test]
+    fn metamorphic_verdict_remains_true_once_stable_on_same_input() {
+        let config = ProgressConfig {
+            confidence: 0.90,
+            max_step_bound: 40.0,
+            stall_threshold: 5,
+            min_observations: 4,
+            epsilon: 1e-9,
+        };
+        let potentials = [220.0, 178.0, 140.0, 106.0, 76.0, 50.0, 29.0, 13.0, 4.0, 0.0];
+
+        let mut cert = ProgressCertificate::new(config);
+        let mut first_true_index = None;
+
+        for (index, potential) in potentials.into_iter().enumerate() {
+            cert.observe(potential);
+            let verdict = cert.verdict();
+
+            if let Some(stable_from) = first_true_index {
+                assert!(
+                    verdict.converging,
+                    "verdict regressed from converging at step {stable_from} when replaying the same input prefix through step {index}",
+                );
+            } else if verdict.converging {
+                first_true_index = Some(index);
+            }
+        }
+
+        assert!(
+            first_true_index.is_some(),
+            "test sequence should reach a stable converging verdict",
+        );
+    }
+
+    #[test]
+    fn metamorphic_concurrent_verdict_reads_are_identical() {
+        let cert = Arc::new(certificate_from_potentials(
+            ProgressConfig {
+                confidence: 0.92,
+                max_step_bound: 45.0,
+                stall_threshold: 5,
+                min_observations: 4,
+                epsilon: 1e-9,
+            },
+            &[180.0, 142.0, 108.0, 78.0, 52.0, 30.0, 14.0, 3.0, 0.0],
+        ));
+        let baseline = verdict_fingerprint(&cert.verdict());
+
+        thread::scope(|scope| {
+            let mut workers = Vec::new();
+            for _ in 0..8 {
+                let cert = Arc::clone(&cert);
+                workers.push(scope.spawn(move || {
+                    let mut fingerprints = Vec::new();
+                    for _ in 0..32 {
+                        fingerprints.push(verdict_fingerprint(&cert.verdict()));
+                    }
+                    fingerprints
+                }));
+            }
+
+            for worker in workers {
+                for fingerprint in worker.join().expect("verdict reader should not panic") {
+                    assert_eq!(
+                        fingerprint, baseline,
+                        "immutable concurrent verdict reads must stay identical",
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn metamorphic_cancel_propagation_bump_preserves_stable_verdict() {
+        let config = ProgressConfig {
+            confidence: 0.90,
+            max_step_bound: 45.0,
+            stall_threshold: 5,
+            min_observations: 4,
+            epsilon: 1e-9,
+        };
+        let uninterrupted = certificate_from_potentials(
+            config.clone(),
+            &[150.0, 110.0, 76.0, 52.0, 24.0, 8.0, 0.0],
+        );
+        let uninterrupted_verdict = uninterrupted.verdict();
+        assert!(uninterrupted_verdict.converging);
+
+        let propagated_cancel =
+            certificate_from_potentials(config, &[150.0, 110.0, 76.0, 84.0, 52.0, 24.0, 8.0, 0.0]);
+        let propagated_verdict = propagated_cancel.verdict();
+
+        assert!(
+            propagated_verdict.converging,
+            "a bounded cancellation-propagation bump should not invalidate an otherwise converging verdict",
+        );
+        assert!(
+            propagated_cancel.increase_count() > uninterrupted.increase_count(),
+            "propagated cancellation should leave a visible monotonicity violation",
+        );
+        assert_eq!(
+            propagated_verdict.drain_phase,
+            DrainPhase::Quiescent,
+            "stable drain should still reach quiescence after the bump",
+        );
     }
 
     #[test]
