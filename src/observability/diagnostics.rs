@@ -5157,4 +5157,68 @@ mod tests {
 
         crate::test_complete!("structured_diagnostic_report_snapshot_v4_with_extended_metrics");
     }
+
+    #[test]
+    fn structured_diagnostic_report_v3_schema_golden_snapshot() {
+        // Comprehensive golden snapshot test for v3 schema validation
+        // Validates: stable field ordering, version markers, healthy/degraded/error states
+
+        // Create minimal test data for schema validation
+        let healthy_accounting = DiagnosticResourceAccounting {
+            total_regions: 1,
+            open_regions: 0,
+            total_tasks: 1,
+            live_tasks: 0,
+            total_obligations: 0,
+            leaked_obligations: 0,
+        };
+
+        let degraded_accounting = DiagnosticResourceAccounting {
+            total_regions: 3,
+            open_regions: 2,
+            total_tasks: 5,
+            live_tasks: 3,
+            total_obligations: 2,
+            leaked_obligations: 1,
+        };
+
+        let error_accounting = DiagnosticResourceAccounting {
+            total_regions: 2,
+            open_regions: 2,
+            total_tasks: 4,
+            live_tasks: 4,
+            total_obligations: 3,
+            leaked_obligations: 3,
+        };
+
+        // Create v3 sections representing healthy/degraded/error states
+        let sections = vec![
+            DiagnosticReportV3Section {
+                label: "healthy_system",
+                status: "passing",
+                accounting: healthy_accounting,
+                rendered: "scenario: healthy_system\ngenerated_at: 2026-04-21T14:30:00Z\n\n[region]\nnone\n\n[task]\nAll tasks completed successfully.\n\n[leaks]\nnone",
+            },
+            DiagnosticReportV3Section {
+                label: "degraded_performance",
+                status: "degraded",
+                accounting: degraded_accounting,
+                rendered: "scenario: degraded_performance\ngenerated_at: 2026-04-21T14:30:01Z\n\n[region]\nRegion RegionId(1:0) has slow drain (2 children pending).\n\n[task]\nTask TaskId(2:1) experiencing high latency (p99: 450ms).\n\n[leaks]\n- ObligationId(1:0) region=RegionId(1:0) holder=Some(TaskId(2:1)) type=Lease age_ms=1500",
+            },
+            DiagnosticReportV3Section {
+                label: "error_state",
+                status: "critical",
+                accounting: error_accounting,
+                rendered: "scenario: error_state\ngenerated_at: 2026-04-21T14:30:02Z\n\n[region]\nRegion RegionId(0:0) has deadlock detected (cycle length: 2).\n\n[task]\nTask TaskId(0:0) blocked: deadlock (waiting on TaskId(1:0)).\n\n[leaks]\n- ObligationId(0:0) region=RegionId(0:0) holder=Some(TaskId(0:0)) type=Ack age_ms=2000\n- ObligationId(1:0) region=RegionId(0:0) holder=Some(TaskId(1:0)) type=Lease age_ms=2100\n- ObligationId(2:0) region=RegionId(1:0) holder=Some(TaskId(2:0)) type=Ack age_ms=1800",
+            },
+        ];
+
+        let rendered = render_structured_diagnostic_report_v3(&sections);
+
+        // Assert the golden snapshot for v3 schema validation
+        assert_diagnostic_report_snapshot(
+            "observability_diagnostics_v3_schema_validation",
+            &rendered,
+        );
+    }
 }
