@@ -33,7 +33,6 @@ impl ObligationInvariantTest for BasicRegionQuiescenceTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
@@ -41,7 +40,6 @@ impl ObligationInvariantTest for BasicRegionQuiescenceTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn description(&self) -> &'static str {
@@ -49,7 +47,6 @@ impl ObligationInvariantTest for BasicRegionQuiescenceTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn run_test<'a>(
@@ -117,7 +114,6 @@ impl ObligationInvariantTest for BasicRegionQuiescenceTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
@@ -137,7 +133,6 @@ impl ObligationInvariantTest for NestedRegionQuiescenceTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
@@ -145,7 +140,6 @@ impl ObligationInvariantTest for NestedRegionQuiescenceTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn description(&self) -> &'static str {
@@ -153,7 +147,6 @@ impl ObligationInvariantTest for NestedRegionQuiescenceTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn run_test<'a>(
@@ -255,7 +248,6 @@ impl ObligationInvariantTest for NestedRegionQuiescenceTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
@@ -275,7 +267,6 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
@@ -283,7 +274,6 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn description(&self) -> &'static str {
@@ -291,7 +281,6 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn run_test<'a>(
@@ -356,7 +345,6 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
@@ -369,7 +357,6 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn expected_violations(&self) -> Vec<InvariantViolationType> {
@@ -377,7 +364,6 @@ impl ObligationInvariantTest for RegionCloseWithActiveObligationsTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn is_negative_test(&self) -> bool {
@@ -397,7 +383,6 @@ impl ObligationInvariantTest for ConcurrentRegionClosureTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
@@ -405,7 +390,6 @@ impl ObligationInvariantTest for ConcurrentRegionClosureTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn description(&self) -> &'static str {
@@ -413,7 +397,6 @@ impl ObligationInvariantTest for ConcurrentRegionClosureTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn run_test<'a>(
@@ -499,7 +482,6 @@ impl ObligationInvariantTest for ConcurrentRegionClosureTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
@@ -507,7 +489,6 @@ impl ObligationInvariantTest for ConcurrentRegionClosureTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn is_stress_test(&self) -> bool {

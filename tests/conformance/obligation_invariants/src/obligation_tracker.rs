@@ -162,7 +162,6 @@ pub enum InvariantViolationType {
 }
 
 #[allow(dead_code)]
-
 #[allow(dead_code)]
 
 impl ObligationTracker {

@@ -150,7 +150,6 @@ pub trait ObligationInvariantTest: Send + Sync {
 }
 
 #[allow(dead_code)]
-
 #[allow(dead_code)]
 
 impl ObligationInvariantHarness {
@@ -507,7 +506,6 @@ macro_rules! invariant_test {
             }
 
             #[allow(dead_code)]
-
             #[allow(dead_code)]
 
             fn run_test<'a>(
@@ -518,7 +516,6 @@ macro_rules! invariant_test {
             }
 
             #[allow(dead_code)]
-
             #[allow(dead_code)]
 
             fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
@@ -573,7 +570,6 @@ mod tests {
             }
 
             #[allow(dead_code)]
-
             #[allow(dead_code)]
 
             fn run_test<'a>(
@@ -593,7 +589,6 @@ mod tests {
             }
 
             #[allow(dead_code)]
-
             #[allow(dead_code)]
 
             fn validate_invariant(&self, _tracker: &ObligationTracker) -> bool {

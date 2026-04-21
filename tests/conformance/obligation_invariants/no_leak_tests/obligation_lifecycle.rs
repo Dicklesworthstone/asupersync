@@ -33,7 +33,6 @@ impl ObligationInvariantTest for BasicObligationLifecycleTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
@@ -41,7 +40,6 @@ impl ObligationInvariantTest for BasicObligationLifecycleTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn description(&self) -> &'static str {
@@ -49,7 +47,6 @@ impl ObligationInvariantTest for BasicObligationLifecycleTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn run_test<'a>(
@@ -109,7 +106,6 @@ impl ObligationInvariantTest for BasicObligationLifecycleTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
@@ -129,7 +125,6 @@ impl ObligationInvariantTest for NestedObligationTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
@@ -137,7 +132,6 @@ impl ObligationInvariantTest for NestedObligationTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn description(&self) -> &'static str {
@@ -145,7 +139,6 @@ impl ObligationInvariantTest for NestedObligationTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn run_test<'a>(
@@ -239,7 +232,6 @@ impl ObligationInvariantTest for NestedObligationTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
@@ -259,7 +251,6 @@ impl ObligationInvariantTest for ConcurrentObligationTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
@@ -267,7 +258,6 @@ impl ObligationInvariantTest for ConcurrentObligationTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn description(&self) -> &'static str {
@@ -275,7 +265,6 @@ impl ObligationInvariantTest for ConcurrentObligationTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn run_test<'a>(
@@ -342,7 +331,6 @@ impl ObligationInvariantTest for ConcurrentObligationTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
@@ -350,7 +338,6 @@ impl ObligationInvariantTest for ConcurrentObligationTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn is_stress_test(&self) -> bool {
@@ -370,7 +357,6 @@ impl ObligationInvariantTest for ErrorPathCleanupTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn test_category(&self) -> InvariantTestCategory {
@@ -378,7 +364,6 @@ impl ObligationInvariantTest for ErrorPathCleanupTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn description(&self) -> &'static str {
@@ -386,7 +371,6 @@ impl ObligationInvariantTest for ErrorPathCleanupTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn run_test<'a>(
@@ -449,7 +433,6 @@ impl ObligationInvariantTest for ErrorPathCleanupTest {
     }
 
     #[allow(dead_code)]
-
     #[allow(dead_code)]
 
     fn validate_invariant(&self, tracker: &ObligationTracker) -> bool {
