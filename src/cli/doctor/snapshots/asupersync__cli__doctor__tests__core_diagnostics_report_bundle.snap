@@ -1,0 +1,139 @@
+---
+source: src/cli/doctor/mod.rs
+expression: snapshot
+---
+[
+  {
+    "fixture_id": "baseline_failure_path",
+    "description": "Baseline failure fixture with critical finding and failed gate evidence.",
+    "summary": {
+      "status": "failed",
+      "overall_outcome": "failed",
+      "total_findings": 2,
+      "critical_findings": 1
+    },
+    "findings": [
+      {
+        "finding_id": "finding-001",
+        "title": "Obligation leak during shutdown path",
+        "severity": "critical",
+        "status": "open"
+      },
+      {
+        "finding_id": "finding-002",
+        "title": "Replay mismatch for cancellation timeline",
+        "severity": "high",
+        "status": "in_progress"
+      }
+    ],
+    "evidence": [
+      {
+        "evidence_id": "evidence-001",
+        "source": "structured_log",
+        "outcome_class": "failed"
+      },
+      {
+        "evidence_id": "evidence-002",
+        "source": "trace",
+        "outcome_class": "failed"
+      }
+    ],
+    "commands": [
+      {
+        "command_id": "command-001",
+        "tool": "rch",
+        "exit_code": 101,
+        "outcome_class": "failed"
+      },
+      {
+        "command_id": "command-002",
+        "tool": "asupersync",
+        "exit_code": 2,
+        "outcome_class": "failed"
+      }
+    ],
+    "provenance": {
+      "run_id": "run-doctor-failure",
+      "scenario_id": "doctor-core-report-failure",
+      "trace_id": "trace-doctor-failure",
+      "seed": "1337",
+      "generated_by": "doctor_asupersync",
+      "generated_at": "<scrubbed>"
+    }
+  },
+  {
+    "fixture_id": "happy_path",
+    "description": "Healthy baseline fixture with deterministic replay-ready artifacts.",
+    "summary": {
+      "status": "healthy",
+      "overall_outcome": "success",
+      "total_findings": 1,
+      "critical_findings": 0
+    },
+    "findings": [
+      {
+        "finding_id": "finding-010",
+        "title": "Baseline diagnostics fixture coverage verified",
+        "severity": "low",
+        "status": "resolved"
+      }
+    ],
+    "evidence": [
+      {
+        "evidence_id": "evidence-010",
+        "source": "benchmark",
+        "outcome_class": "success"
+      }
+    ],
+    "commands": [
+      {
+        "command_id": "command-010",
+        "tool": "rch",
+        "exit_code": 0,
+        "outcome_class": "success"
+      }
+    ],
+    "provenance": {
+      "run_id": "run-doctor-happy",
+      "scenario_id": "doctor-core-report-happy",
+      "trace_id": "trace-doctor-happy",
+      "seed": "2026",
+      "generated_by": "doctor_asupersync",
+      "generated_at": "<scrubbed>"
+    }
+  },
+  {
+    "fixture_id": "partial_data_path",
+    "description": "Partial-data fixture with cancelled outcome and minimal still-valid envelope.",
+    "summary": {
+      "status": "degraded",
+      "overall_outcome": "cancelled",
+      "total_findings": 0,
+      "critical_findings": 0
+    },
+    "findings": [],
+    "evidence": [
+      {
+        "evidence_id": "evidence-020",
+        "source": "structured_log",
+        "outcome_class": "cancelled"
+      }
+    ],
+    "commands": [
+      {
+        "command_id": "command-020",
+        "tool": "rch",
+        "exit_code": 130,
+        "outcome_class": "cancelled"
+      }
+    ],
+    "provenance": {
+      "run_id": "run-doctor-partial",
+      "scenario_id": "doctor-core-report-partial",
+      "trace_id": "trace-doctor-partial",
+      "seed": "777",
+      "generated_by": "doctor_asupersync",
+      "generated_at": "<scrubbed>"
+    }
+  }
+]

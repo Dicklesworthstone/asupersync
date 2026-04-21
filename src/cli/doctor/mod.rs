@@ -18030,6 +18030,52 @@ mod tests {
         fs::write(path, content).expect("write file");
     }
 
+    fn scrub_core_diagnostics_fixture(
+        fixture: &CoreDiagnosticsFixture,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "fixture_id": fixture.fixture_id,
+            "description": fixture.description,
+            "summary": {
+                "status": fixture.report.summary.status,
+                "overall_outcome": fixture.report.summary.overall_outcome,
+                "total_findings": fixture.report.summary.total_findings,
+                "critical_findings": fixture.report.summary.critical_findings,
+            },
+            "findings": fixture.report.findings.iter().map(|finding| {
+                serde_json::json!({
+                    "finding_id": finding.finding_id,
+                    "title": finding.title,
+                    "severity": finding.severity,
+                    "status": finding.status,
+                })
+            }).collect::<Vec<_>>(),
+            "evidence": fixture.report.evidence.iter().map(|evidence| {
+                serde_json::json!({
+                    "evidence_id": evidence.evidence_id,
+                    "source": evidence.source,
+                    "outcome_class": evidence.outcome_class,
+                })
+            }).collect::<Vec<_>>(),
+            "commands": fixture.report.commands.iter().map(|command| {
+                serde_json::json!({
+                    "command_id": command.command_id,
+                    "tool": command.tool,
+                    "exit_code": command.exit_code,
+                    "outcome_class": command.outcome_class,
+                })
+            }).collect::<Vec<_>>(),
+            "provenance": {
+                "run_id": fixture.report.provenance.run_id,
+                "scenario_id": fixture.report.provenance.scenario_id,
+                "trace_id": fixture.report.provenance.trace_id,
+                "seed": fixture.report.provenance.seed,
+                "generated_by": fixture.report.provenance.generated_by,
+                "generated_at": "<scrubbed>",
+            },
+        })
+    }
+
     fn make_single_member_workspace_report(source: &str) -> WorkspaceScanReport {
         let temp = tempdir().expect("temp dir");
         #[allow(deprecated)]
@@ -21546,6 +21592,18 @@ impl RuntimeState {
             validate_core_diagnostics_report(&fixture.report, &first.contract)
                 .expect("fixture report valid");
         }
+    }
+
+    #[test]
+    fn core_diagnostics_report_bundle_snapshot() {
+        let bundle = core_diagnostics_report_bundle();
+        let snapshot = bundle
+            .fixtures
+            .iter()
+            .map(scrub_core_diagnostics_fixture)
+            .collect::<Vec<_>>();
+
+        insta::assert_json_snapshot!("core_diagnostics_report_bundle", snapshot);
     }
 
     #[test]
