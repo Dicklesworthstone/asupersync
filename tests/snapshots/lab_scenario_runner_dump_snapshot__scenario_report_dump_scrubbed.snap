@@ -1,0 +1,28 @@
+---
+source: tests/lab_scenario_runner_dump_snapshot.rs
+expression: snapshot_report_dump(&run, &exploration)
+---
+scenario: snapshot-scenario-report
+seed: 7
+passed: true
+faults_injected: 2
+steps: 0
+quiescent: true
+adapter: lab.scenario_runner
+surface_contract_version: snapshot-scenario.v1
+execution_instance: snapshot-scenario-report:lab:0x7:0
+certificate: event_hash=17312468947252322567 schedule_hash=0 fingerprint=5009114726732799749 steps=0
+oracles: checked=2 passed=2 failed=0 all_passed=true
+  - task_leak: true
+  - obligation_leak: true
+exploration:
+  scenario_id: snapshot-scenario-report
+  seeds_explored: 3
+  passed: 3
+  failed: 0
+  unique_fingerprints: 1
+  first_failure_seed: none
+  runs:
+    - seed=7 passed=true steps=0 fingerprint=5009114726732799749 failures=
+    - seed=8 passed=true steps=0 fingerprint=5009114726732799749 failures=
+    - seed=9 passed=true steps=0 fingerprint=5009114726732799749 failures=
