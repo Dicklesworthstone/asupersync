@@ -1,0 +1,3 @@
+POST /api/v1/users?action=create HTTP/1.1
+Host: api.example.com
+Content-Type: application/json
