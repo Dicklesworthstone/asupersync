@@ -712,8 +712,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     use crate::cx::Cx;
     #[cfg(feature = "sqlite")]
-    use crate::database::sqlite::{SqliteConnection, SqliteValue};
-    use std::sync::Arc;
+    use crate::database::sqlite::{SqliteConnection, SqliteError, SqliteValue};
     use std::task::{Context, Poll, Waker};
 
     fn noop_waker() -> Waker {
@@ -972,5 +971,142 @@ mod tests {
             violations.is_empty(),
             "transaction helper lab-runtime test should leave runtime invariants clean: {violations:?}"
         );
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn run_sqlite_commit_abort_isolation_permutation(abort_first: bool) -> Vec<String> {
+        let config = TestConfig::new()
+            .with_seed(0x7A11_7E02)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+
+        let rows = LabRuntimeTarget::block_on(&mut runtime, async move {
+            let cx = Cx::current().expect("lab runtime should install a current Cx");
+
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+            match conn
+                .execute_batch(
+                    &cx,
+                    "CREATE TABLE tx_isolation_items (id INTEGER PRIMARY KEY, name TEXT);",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("schema setup failed: {other:?}"),
+            }
+
+            let run_commit = || {
+                with_sqlite_transaction(&conn, &cx, |tx, cx| {
+                    Box::pin(async move {
+                        match tx
+                            .execute(
+                                cx,
+                                "INSERT INTO tx_isolation_items(name) VALUES (?1)",
+                                &[SqliteValue::Text("committed".to_string())],
+                            )
+                            .await
+                        {
+                            Outcome::Ok(1) => Outcome::Ok(()),
+                            other => {
+                                panic!("commit branch insert failed: {other:?}")
+                            }
+                        }
+                    })
+                })
+            };
+
+            let run_abort = || {
+                with_sqlite_transaction(&conn, &cx, |tx, cx| {
+                    Box::pin(async move {
+                        match tx
+                            .execute(
+                                cx,
+                                "INSERT INTO tx_isolation_items(name) VALUES (?1)",
+                                &[SqliteValue::Text("rolled_back".to_string())],
+                            )
+                            .await
+                        {
+                            Outcome::Ok(1) => {}
+                            other => panic!("abort branch insert failed: {other:?}"),
+                        }
+                        Outcome::<(), SqliteError>::Err(SqliteError::Sqlite(
+                            "metamorphic rollback branch".to_string(),
+                        ))
+                    })
+                })
+            };
+
+            if abort_first {
+                match run_abort().await {
+                    Outcome::Err(SqliteError::Sqlite(message))
+                        if message == "metamorphic rollback branch" => {}
+                    other => panic!("abort-first branch should roll back: {other:?}"),
+                }
+                match run_commit().await {
+                    Outcome::Ok(()) => {}
+                    other => panic!("commit-after-abort branch failed: {other:?}"),
+                }
+            } else {
+                match run_commit().await {
+                    Outcome::Ok(()) => {}
+                    other => panic!("commit-first branch failed: {other:?}"),
+                }
+                match run_abort().await {
+                    Outcome::Err(SqliteError::Sqlite(message))
+                        if message == "metamorphic rollback branch" => {}
+                    other => panic!("abort-after-commit branch should roll back: {other:?}"),
+                }
+            }
+
+            let rows = match conn
+                .query(
+                    &cx,
+                    "SELECT name FROM tx_isolation_items ORDER BY id",
+                    &[],
+                )
+                .await
+            {
+                Outcome::Ok(rows) => rows,
+                other => panic!("final query failed: {other:?}"),
+            };
+
+            let names = rows
+                .iter()
+                .map(|row| {
+                    row.get_str("name")
+                        .expect("name column should be present")
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            conn.close().unwrap();
+            names
+        });
+
+        let violations = runtime.oracles.check_all(runtime.now());
+        assert!(
+            violations.is_empty(),
+            "sqlite transaction permutation should leave runtime invariants clean: {violations:?}"
+        );
+
+        rows
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn metamorphic_sqlite_commit_abort_isolation() {
+        init_test("metamorphic_sqlite_commit_abort_isolation");
+
+        let abort_then_commit = run_sqlite_commit_abort_isolation_permutation(true);
+        let commit_then_abort = run_sqlite_commit_abort_isolation_permutation(false);
+
+        assert_eq!(abort_then_commit, vec!["committed".to_string()]);
+        assert_eq!(commit_then_abort, vec!["committed".to_string()]);
+        assert_eq!(abort_then_commit, commit_then_abort);
+
+        crate::test_complete!("metamorphic_sqlite_commit_abort_isolation");
     }
 }
