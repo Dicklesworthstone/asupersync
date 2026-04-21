@@ -1440,6 +1440,149 @@ mod tests {
         crate::test_complete!("abort_by_id_supports_cancel_drain_without_leak_accounting");
     }
 
+    fn observable_resolution_state(
+        ledger: &ObligationLedger,
+        id: ObligationId,
+    ) -> (
+        ObligationState,
+        Option<Time>,
+        Option<ObligationAbortReason>,
+        LedgerStats,
+    ) {
+        let record = ledger.get(id).expect("record exists");
+        (
+            record.state,
+            record.resolved_at,
+            record.abort_reason,
+            ledger.stats(),
+        )
+    }
+
+    #[test]
+    fn commit_once_and_replayed_commit_attempts_preserve_observable_state() {
+        init_test("commit_once_and_replayed_commit_attempts_preserve_observable_state");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        let token = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let id = token.id();
+
+        let duration = ledger.commit(token, Time::from_nanos(25));
+        crate::assert_with_log!(duration == 25, "duration", 25, duration);
+
+        let expected = observable_resolution_state(&ledger, id);
+        for now in [
+            Time::from_nanos(26),
+            Time::from_nanos(40),
+            Time::from_nanos(100),
+        ] {
+            let replay = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ledger.commit(
+                    ObligationToken {
+                        id,
+                        kind: ObligationKind::Lease,
+                        holder: task,
+                        region,
+                    },
+                    now,
+                );
+            }));
+            crate::assert_with_log!(
+                replay.is_err(),
+                "replayed commit rejected",
+                true,
+                replay.is_err()
+            );
+            crate::assert_with_log!(
+                observable_resolution_state(&ledger, id) == expected,
+                "observable state preserved",
+                expected,
+                observable_resolution_state(&ledger, id)
+            );
+        }
+
+        crate::test_complete!("commit_once_and_replayed_commit_attempts_preserve_observable_state");
+    }
+
+    #[test]
+    fn abort_once_and_replayed_abort_attempts_preserve_observable_state() {
+        init_test("abort_once_and_replayed_abort_attempts_preserve_observable_state");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        let token = ledger.acquire(ObligationKind::Ack, task, region, Time::ZERO);
+        let id = token.id();
+
+        let duration = ledger.abort(token, Time::from_nanos(25), ObligationAbortReason::Explicit);
+        crate::assert_with_log!(duration == 25, "duration", 25, duration);
+
+        let expected = observable_resolution_state(&ledger, id);
+        for now in [
+            Time::from_nanos(26),
+            Time::from_nanos(40),
+            Time::from_nanos(100),
+        ] {
+            let replay = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ledger.abort_by_id(id, now, ObligationAbortReason::Cancel);
+            }));
+            crate::assert_with_log!(
+                replay.is_err(),
+                "replayed abort rejected",
+                true,
+                replay.is_err()
+            );
+            crate::assert_with_log!(
+                observable_resolution_state(&ledger, id) == expected,
+                "observable state preserved",
+                expected,
+                observable_resolution_state(&ledger, id)
+            );
+        }
+
+        crate::test_complete!("abort_once_and_replayed_abort_attempts_preserve_observable_state");
+    }
+
+    #[test]
+    fn abort_after_commit_replay_preserves_committed_observable_state() {
+        init_test("abort_after_commit_replay_preserves_committed_observable_state");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        let token = ledger.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
+        let id = token.id();
+
+        let duration = ledger.commit(token, Time::from_nanos(50));
+        crate::assert_with_log!(duration == 50, "duration", 50, duration);
+
+        let expected = observable_resolution_state(&ledger, id);
+        for now in [
+            Time::from_nanos(51),
+            Time::from_nanos(60),
+            Time::from_nanos(75),
+        ] {
+            let replay = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ledger.abort_by_id(id, now, ObligationAbortReason::Cancel);
+            }));
+            crate::assert_with_log!(
+                replay.is_err(),
+                "abort after commit rejected",
+                true,
+                replay.is_err()
+            );
+            crate::assert_with_log!(
+                observable_resolution_state(&ledger, id) == expected,
+                "committed state preserved",
+                expected,
+                observable_resolution_state(&ledger, id)
+            );
+        }
+
+        crate::test_complete!("abort_after_commit_replay_preserves_committed_observable_state");
+    }
+
     // =========================================================================
     // Wave 55 – pure data-type trait coverage
     // =========================================================================
