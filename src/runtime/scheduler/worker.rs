@@ -697,6 +697,7 @@ impl WorkStealingWaker {
     }
 }
 
+use std::task::Wake;
 impl Wake for WorkStealingWaker {
     #[inline]
     fn wake(self: Arc<Self>) {

@@ -2666,6 +2666,7 @@ struct CancelTaskWaker {
     scheduler: Arc<Mutex<LabScheduler>>,
 }
 
+use std::task::Wake;
 impl Wake for CancelTaskWaker {
     fn wake(self: Arc<Self>) {
         self.scheduler
@@ -2806,6 +2807,7 @@ mod tests {
     #[cfg(unix)]
     struct NoopWaker;
     #[cfg(unix)]
+    use std::task::Wake;
     impl Wake for NoopWaker {
         fn wake(self: Arc<Self>) {}
     }
@@ -2817,6 +2819,7 @@ mod tests {
 
     /// Waker that sets an `AtomicBool` when woken (for virtual time tests).
     struct FlagWaker(Arc<std::sync::atomic::AtomicBool>);
+    use std::task::Wake;
     impl Wake for FlagWaker {
         fn wake(self: Arc<Self>) {
             self.0.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2825,6 +2828,7 @@ mod tests {
 
     /// Waker that increments an `AtomicU64` counter when woken.
     struct CountWaker(Arc<std::sync::atomic::AtomicU64>);
+    use std::task::Wake;
     impl Wake for CountWaker {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

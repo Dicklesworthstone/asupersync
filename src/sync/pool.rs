@@ -2432,6 +2432,7 @@ mod tests {
         tx: mpsc::Sender<bool>,
     }
 
+    use std::task::Wake;
     impl Wake for ReentrantReturnWaker {
         fn wake(self: Arc<Self>) {
             self.wake_by_ref();
@@ -3274,6 +3275,7 @@ mod tests {
 
         struct FlagWake(Arc<std::sync::atomic::AtomicBool>);
 
+        use std::task::Wake;
         impl Wake for FlagWake {
             fn wake(self: Arc<Self>) {
                 self.0.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -5135,6 +5137,7 @@ mod tests {
     fn noop_pool_waker() -> Waker {
         struct NoopPoolWaker;
 
+        use std::task::Wake;
         impl Wake for NoopPoolWaker {
             fn wake(self: Arc<Self>) {}
             fn wake_by_ref(self: &Arc<Self>) {}

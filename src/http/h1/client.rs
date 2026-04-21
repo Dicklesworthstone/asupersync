@@ -1190,6 +1190,7 @@ mod tests {
 
     struct NoopWaker;
 
+    use std::task::Wake;
     impl Wake for NoopWaker {
         fn wake(self: std::sync::Arc<Self>) {}
     }

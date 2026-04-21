@@ -52,6 +52,7 @@ mod tests {
         wakes: AtomicUsize,
     }
 
+    use std::task::Wake;
     impl Wake for WakeCounter {
         fn wake(self: Arc<Self>) {
             self.wakes.fetch_add(1, Ordering::Relaxed);

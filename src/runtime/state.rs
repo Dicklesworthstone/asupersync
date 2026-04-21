@@ -4322,6 +4322,7 @@ mod tests {
 
     struct TestWaker(AtomicBool);
 
+    use std::task::Wake;
     impl Wake for TestWaker {
         fn wake(self: Arc<Self>) {
             self.0.store(true, Ordering::SeqCst);
@@ -7656,6 +7657,7 @@ mod tests {
         use std::time::Duration;
 
         struct FlagWaker(AtomicBool);
+        use std::task::Wake;
         impl Wake for FlagWaker {
             fn wake(self: Arc<Self>) {
                 self.0.store(true, Ordering::SeqCst);

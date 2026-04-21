@@ -109,6 +109,7 @@ mod tests {
         wake_count: AtomicUsize,
     }
 
+    use std::task::Wake;
     impl Wake for CountingWaker {
         fn wake(self: Arc<Self>) {
             self.wake_count.fetch_add(1, Ordering::SeqCst);

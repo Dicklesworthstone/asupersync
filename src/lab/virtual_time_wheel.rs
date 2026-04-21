@@ -344,7 +344,8 @@ mod tests {
     /// A waker that counts how many times it has been woken.
     struct CountingWaker(AtomicUsize);
 
-    impl Wake for CountingWaker {
+    use std::task::Wake;
+impl Wake for CountingWaker {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
@@ -366,7 +367,8 @@ mod tests {
         wake_order: Arc<Mutex<Vec<usize>>>,
     }
 
-    impl Wake for RecordingWaker {
+    use std::task::Wake;
+impl Wake for RecordingWaker {
         fn wake(self: Arc<Self>) {
             self.wake_order
                 .lock()

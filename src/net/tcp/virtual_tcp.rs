@@ -641,6 +641,7 @@ mod tests {
 
     struct CountWaker(std::sync::atomic::AtomicUsize);
 
+    use std::task::Wake;
     impl Wake for CountWaker {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, Ordering::Relaxed);

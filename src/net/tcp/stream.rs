@@ -1022,6 +1022,7 @@ mod tests {
         hits: Arc<AtomicUsize>,
     }
 
+    use std::task::Wake;
     impl Wake for CountingWaker {
         fn wake(self: Arc<Self>) {
             self.wake_by_ref();

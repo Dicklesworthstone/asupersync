@@ -1651,7 +1651,7 @@ mod tests {
             let cancelled = Message::text("cancelled");
             let delivered = Message::text("delivered");
             let mut cancelled_send = Box::pin(ws.send(&cx, cancelled));
-            let waker = std::task::std::task::Waker::noop().clone();
+            let waker = std::task::Waker::noop().clone();
             let mut poll_cx = std::task::Context::from_waker(&waker);
 
             assert!(
@@ -1695,7 +1695,7 @@ mod tests {
             let expected_delivered =
                 encode_client_frame_with_entropy(&Frame::from(delivered.clone()), entropy.as_ref());
             let mut cancelled_send = Box::pin(ws.send(&cx, cancelled));
-            let waker = std::task::std::task::Waker::noop().clone();
+            let waker = std::task::Waker::noop().clone();
             let mut poll_cx = std::task::Context::from_waker(&waker);
 
             assert!(
@@ -1738,7 +1738,7 @@ mod tests {
                 WebSocketConfig::default(),
             );
             let mut cancelled_recv = Box::pin(ws.recv(&cx));
-            let waker = std::task::std::task::Waker::noop().clone();
+            let waker = std::task::Waker::noop().clone();
             let mut poll_cx = std::task::Context::from_waker(&waker);
 
             assert!(
@@ -1788,7 +1788,7 @@ mod tests {
             let expected =
                 encode_client_frame_with_entropy(&Frame::close(Some(1000), None), entropy.as_ref());
             let mut cancelled_recv = Box::pin(ws.recv(&cx));
-            let waker = std::task::std::task::Waker::noop().clone();
+            let waker = std::task::Waker::noop().clone();
             let mut poll_cx = std::task::Context::from_waker(&waker);
 
             assert!(
@@ -1841,7 +1841,7 @@ mod tests {
             let expected =
                 encode_client_frame_with_entropy(&Frame::close(Some(1001), None), entropy.as_ref());
             let mut cancelled_close = Box::pin(ws.close(&cx, CloseReason::going_away()));
-            let waker = std::task::std::task::Waker::noop().clone();
+            let waker = std::task::Waker::noop().clone();
             let mut poll_cx = std::task::Context::from_waker(&waker);
 
             assert!(

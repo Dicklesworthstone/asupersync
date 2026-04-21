@@ -664,6 +664,7 @@ mod tests {
         }
     }
 
+    use std::task::Wake;
     impl Wake for CountWaker {
         fn wake(self: Arc<Self>) {
             self.wakes.fetch_add(1, Ordering::SeqCst);

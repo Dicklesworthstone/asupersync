@@ -815,12 +815,13 @@ mod tests {
 
     struct NoopWaker;
 
+    use std::task::Wake;
     impl Wake for NoopWaker {
         fn wake(self: std::sync::Arc<Self>) {}
     }
 
     fn noop_waker() -> std::task::Waker {
-        std::sync::std::task::Waker::noop().clone()
+        std::task::Waker::noop().clone()
     }
 
     #[allow(clippy::type_complexity)]
