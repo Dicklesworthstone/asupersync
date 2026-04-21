@@ -24,7 +24,7 @@ fn test_join_handle_does_not_hang_if_runtime_dropped() {
 
     // If we block on the handle now, it shouldn't hang forever!
     // It should panic because the task was dropped before completion.
-    let waker = std::task::std::task::Waker::noop().clone();
+    let waker = std::task::Waker::noop().clone();
     let mut cx = Context::from_waker(&waker);
     let mut handle = Box::pin(handle);
 

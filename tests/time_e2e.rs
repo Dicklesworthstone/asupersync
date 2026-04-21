@@ -72,6 +72,7 @@ impl NotifyWaker {
     }
 }
 
+use std::task::Wake;
 impl Wake for NotifyWaker {
     fn wake(self: Arc<Self>) {
         self.notified.store(true, Ordering::SeqCst);

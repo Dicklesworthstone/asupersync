@@ -123,7 +123,7 @@ fn mr2_cancel_non_poisoning_integration() {
     );
 
     let cx2 = create_test_context(2, 1);
-    let lab2 = LabRuntime::new(LabConfig::default());
+    let _lab2 = LabRuntime::new(LabConfig::default());
     let lock_result = futures_lite::future::block_on(async { mutex.lock(&cx2).await });
     assert!(
         lock_result.is_ok(),
@@ -257,4 +257,6 @@ fn comprehensive_metamorphic_integration() {
     );
 
     println!("All metamorphic relations verified successfully!");
+}
+);
 }

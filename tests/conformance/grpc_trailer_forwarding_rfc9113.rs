@@ -491,8 +491,7 @@ mod grpc_trailer_conformance_tests {
             let has_status_200 = response
                 .initial_headers
                 .get(":status")
-                .map(|v| matches!(v, MetadataValue::Ascii(s) if s == "200"))
-                .unwrap_or(false);
+                .is_some_and(|v| matches!(v, MetadataValue::Ascii(s) if s == "200"));
 
             let verdict = if has_content_type && has_status_200 && response.is_trailer_only() {
                 TestVerdict::Pass
@@ -827,13 +826,12 @@ mod grpc_trailer_conformance_tests {
             let has_error_status = response
                 .trailers
                 .get("grpc-status")
-                .map(|v| match v {
+                .is_some_and(|v| match v {
                     MetadataValue::Ascii(s) => {
                         s.parse::<i32>().unwrap_or(-1) == Code::Internal as i32
                     }
-                    _ => false,
-                })
-                .unwrap_or(false);
+                    MetadataValue::Binary(_) => false,
+                });
 
             let has_error_message = response.trailers.get("grpc-message").is_some();
 

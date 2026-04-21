@@ -569,7 +569,7 @@ impl PgLogicalReplicationHarness {
             msg.extend_from_slice(col_name.as_bytes());
             msg.push(0); // null terminator
             msg.extend_from_slice(&type_oid.to_be_bytes());
-            msg.extend_from_slice(&(attr_num as u32).to_be_bytes());
+            msg.extend_from_slice(&attr_num.to_be_bytes());
         }
         msg
     }

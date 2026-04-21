@@ -56,7 +56,7 @@ mod tests {
 
         // Poll it once to enter the "use" phase
         let mut boxed = Box::pin(bracket_fut);
-        let waker = std::task::std::task::Waker::noop().clone();
+        let waker = std::task::Waker::noop().clone();
         let mut cx = Context::from_waker(&waker);
 
         test_section!("poll_once");

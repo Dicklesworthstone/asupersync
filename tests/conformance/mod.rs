@@ -2007,9 +2007,7 @@ mod tests {
             .filter(|r| r.verdict == grpc_trailer_forwarding_rfc9113::TestVerdict::Fail)
             .collect();
 
-        if !failures.is_empty() {
-            panic!("gRPC trailer conformance tests failed: {:#?}", failures);
-        }
+        assert!(failures.is_empty(), "gRPC trailer conformance tests failed: {:#?}", failures);
 
         // Verify we have the expected number of test cases (15 as implemented)
         assert!(
@@ -2071,6 +2069,10 @@ mod tests {
         assert!(
             must_coverage["coverage_percent"].as_f64().is_some(),
             "Should calculate MUST coverage"
+        );
+    }
+}
+ calculate MUST coverage"
         );
     }
 }

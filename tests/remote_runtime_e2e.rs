@@ -166,6 +166,7 @@ fn count_sent(h: &DistributedHarness, from: &NodeId, to: &NodeId, msg_type: &str
 fn noop_waker() -> Waker {
     struct NoopWake;
 
+    use std::task::Wake;
     impl Wake for NoopWake {
         fn wake(self: Arc<Self>) {}
 

@@ -34,6 +34,7 @@ fn init_test(name: &str) {
 
 struct NoopWake;
 
+use std::task::Wake;
 impl Wake for NoopWake {
     fn wake(self: Arc<Self>) {}
 }

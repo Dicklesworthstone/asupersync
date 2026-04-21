@@ -1704,7 +1704,7 @@ mod tests {
     #[test]
     fn test_null_bitmap_calculation() {
         // Test NULL bitmap length calculation
-        assert_eq!((0 + 7) / 8, 0);
+        assert_eq!(7 / 8, 0);
         assert_eq!((1 + 7) / 8, 1);
         assert_eq!((8 + 7) / 8, 1);
         assert_eq!((9 + 7) / 8, 2);
@@ -1731,5 +1731,10 @@ mod tests {
         let long_data_packet = create_long_data_packet(stmt_id, 0, data);
         assert_eq!(long_data_packet[0], 0x18);
         assert_eq!(&long_data_packet[7..], data);
+    }
+}
+  }
+}
+ta);
     }
 }

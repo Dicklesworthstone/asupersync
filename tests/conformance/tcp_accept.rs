@@ -136,6 +136,7 @@ impl TestWaker {
     }
 }
 
+use std::task::Wake;
 impl Wake for TestWaker {
     fn wake(self: Arc<Self>) {
         self.wake_count.fetch_add(1, Ordering::SeqCst);
@@ -222,7 +223,7 @@ fn test_mr2_accept_reports_emfile_cleanly_when_fd_exhausted() {
         // Create some connections first
         let mut connections = Vec::new();
         for _ in 0..attempt_count.min(10) {
-            if let Ok(stream) = std::net::TcpStream::connect(&listener_addr) {
+            if let Ok(stream) = std::net::TcpStream::connect(listener_addr) {
                 connections.push(stream);
             }
         }
@@ -291,7 +292,7 @@ fn test_mr3_connection_reset_before_accept_tolerated() {
         let mut reset_connections = Vec::new();
 
         for i in 0..reset_count + 2 {
-            if let Ok(stream) = std::net::TcpStream::connect(&listener_addr) {
+            if let Ok(stream) = std::net::TcpStream::connect(listener_addr) {
                 if i < reset_count {
                     // Reset this connection by dropping it immediately
                     drop(stream);
@@ -454,7 +455,7 @@ fn test_mr5_accepted_socket_keepalive_can_be_enabled() {
         // Create test connections
         let mut client_connections = Vec::new();
         for _ in 0..connection_count {
-            if let Ok(stream) = std::net::TcpStream::connect(&listener_addr) {
+            if let Ok(stream) = std::net::TcpStream::connect(listener_addr) {
                 client_connections.push(stream);
             }
         }
@@ -663,7 +664,7 @@ fn test_tcp_accept_performance() {
     // Create baseline connections
     let mut connections = Vec::new();
     for _ in 0..10 {
-        if let Ok(stream) = std::net::TcpStream::connect(&listener_addr) {
+        if let Ok(stream) = std::net::TcpStream::connect(listener_addr) {
             connections.push(stream);
         }
     }
@@ -700,4 +701,6 @@ fn test_tcp_accept_performance() {
     }
 
     drop(connections);
+}
+s);
 }

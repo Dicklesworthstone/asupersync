@@ -15,6 +15,7 @@ fn noop_waker() -> Waker {
 }
 
 struct CountWaker(Arc<AtomicUsize>);
+use std::task::Wake;
 impl Wake for CountWaker {
     fn wake(self: Arc<Self>) {
         self.0.fetch_add(1, Ordering::SeqCst);

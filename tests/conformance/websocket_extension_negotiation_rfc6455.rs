@@ -184,38 +184,23 @@ impl WsExtensionConformanceHarness {
 
     /// Run all WebSocket extension negotiation conformance tests.
     pub fn run_all_tests(&self) -> Vec<WsExtensionConformanceResult> {
-        let mut results = Vec::new();
-
-        // RFC 6455 §9.1: Extension header processing
-        results.push(self.test_extension_header_ordering_preserved());
-        results.push(self.test_multiple_extension_headers_supported());
-
-        // RFC 7692: permessage-deflate parameter negotiation
-        results.push(self.test_permessage_deflate_server_max_window_bits());
-        results.push(self.test_permessage_deflate_client_max_window_bits());
-        results.push(self.test_permessage_deflate_no_server_context_takeover());
-
-        // RFC 6455 §9.2: Unknown extension handling
-        results.push(self.test_unknown_extension_graceful_rejection());
-        results.push(self.test_partial_unknown_extension_handling());
-
-        // Multiple extension composition
-        results.push(self.test_multiple_extensions_compose_correctly());
-        results.push(self.test_extension_priority_ordering());
-
-        // Parameter mismatch handling
-        results.push(self.test_client_server_parameter_mismatch());
-        results.push(self.test_invalid_parameter_values_rejected());
-
-        // Security and robustness
-        results.push(self.test_extension_header_injection_protection());
-        results.push(self.test_malformed_extension_parameters());
-
-        // Extension ordering requirements
-        results.push(self.test_extension_negotiation_order_preservation());
-        results.push(self.test_duplicate_extension_offers());
-
-        results
+        vec![
+            self.test_extension_header_ordering_preserved(),
+            self.test_multiple_extension_headers_supported(),
+            self.test_permessage_deflate_server_max_window_bits(),
+            self.test_permessage_deflate_client_max_window_bits(),
+            self.test_permessage_deflate_no_server_context_takeover(),
+            self.test_unknown_extension_graceful_rejection(),
+            self.test_partial_unknown_extension_handling(),
+            self.test_multiple_extensions_compose_correctly(),
+            self.test_extension_priority_ordering(),
+            self.test_client_server_parameter_mismatch(),
+            self.test_invalid_parameter_values_rejected(),
+            self.test_extension_header_injection_protection(),
+            self.test_malformed_extension_parameters(),
+            self.test_extension_negotiation_order_preservation(),
+            self.test_duplicate_extension_offers(),
+        ]
     }
 
     /// Test: Sec-WebSocket-Extensions header ordering MUST be preserved.
@@ -447,7 +432,7 @@ impl WsExtensionConformanceHarness {
 
         // Unknown extensions should be rejected, but handshake should succeed
         let verdict = if negotiation.negotiated_extensions.is_empty()
-            && negotiation.negotiation_successful == false
+            && !negotiation.negotiation_successful
         {
             TestVerdict::Pass
         } else {

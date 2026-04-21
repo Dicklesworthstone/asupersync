@@ -893,12 +893,10 @@ mod tests {
         // All CID tests should pass
         for result in &results {
             assert_eq!(result.category, TestCategory::ConnectionIdHandling);
-            if result.verdict == TestVerdict::Fail {
-                panic!(
-                    "Connection ID test failed: {} - {:?}",
-                    result.test_id, result.error_message
-                );
-            }
+            assert!(result.verdict != TestVerdict::Fail, 
+                "Connection ID test failed: {} - {:?}",
+                result.test_id, result.error_message
+            );
         }
     }
 
