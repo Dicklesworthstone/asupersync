@@ -1,0 +1,39 @@
+---
+source: src/conformance/mod.rs
+expression: snapshot
+---
+schema_version: conformance-manifest/v1
+module: asupersync::conformance
+components:
+  - component: config
+    target: TestConfig
+    tests:
+      - name: test_config_builder
+        invariant: builder setters preserve explicit timeout, seed, tracing, and max-step overrides
+      - name: test_config_with_budget
+        invariant: root budget overrides are preserved in the default config chain
+      - name: test_config_without_seed
+        invariant: seedless configuration is represented explicitly for nondeterministic targets
+  - component: handles
+    target: TaskHandle/RegionHandle
+    tests:
+      - name: region_handle_id
+        invariant: region handles surface the registered region id once available
+      - name: task_handle_id
+        invariant: task handles surface the registered task id once available
+  - component: reporting
+    target: ConformanceEvent
+    tests:
+      - name: report_markdown_snapshot_scrubs_generated_timestamps
+        invariant: markdown reports scrub generated timestamps while preserving summary ordering
+      - name: reporter_snapshot_scrubs_failure_messages
+        invariant: structured reports preserve pass-fail ordering while redacting failure payloads
+  - component: runtime-target
+    target: LabRuntimeTarget
+    tests:
+      - name: lab_runtime_target_create_region_and_cancel_before_registration_closes_region
+        invariant: region registration resolves before cancellation completes closure
+      - name: lab_runtime_target_spawn_registers_real_task_handle
+        invariant: spawned conformance tasks resolve from pending handles to registered task ids
+      - name: test_lab_runtime_target_create
+        invariant: runtime creation forwards the requested deterministic seed
