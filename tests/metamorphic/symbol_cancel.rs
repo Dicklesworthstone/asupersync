@@ -4,16 +4,18 @@
 //! to ensure cancel propagation, masking semantics, reason preservation, idempotency,
 //! and memory cleanup are preserved across various operation patterns.
 
-use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use proptest::prelude::*;
 
-use asupersync::cancel::symbol_cancel::{CancelListener, SymbolCancelToken};
+use asupersync::cancel::symbol_cancel::{
+    CancelBroadcaster, CancelListener, CancelMessage, CancelSink, PeerId, SymbolCancelToken,
+};
 use asupersync::cx::Cx;
 use asupersync::types::symbol::ObjectId;
-use asupersync::types::{Budget, CancelKind, CancelReason, Time, ArenaIndex, RegionId, TaskId};
+use asupersync::types::{CancelKind, CancelReason, Time};
 use asupersync::util::DetRng;
 
 /// Test listener for tracking cancellation events.
@@ -115,7 +117,9 @@ struct ListenerTracker {
 
 impl Drop for ListenerTracker {
     fn drop(&mut self) {
-        self.tracker.active_listeners.fetch_sub(1, Ordering::Relaxed);
+        self.tracker
+            .active_listeners
+            .fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -140,18 +144,42 @@ impl CancelListener for TrackingListener {
     }
 }
 
+struct PanicListener;
+
+impl CancelListener for PanicListener {
+    fn on_cancel(&self, _reason: &CancelReason, _at: Time) {
+        panic!("Intentional panic in listener");
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct NoopCancelSink;
+
+impl CancelSink for NoopCancelSink {
+    fn send_to(
+        &self,
+        _peer: &PeerId,
+        _msg: &CancelMessage,
+    ) -> impl std::future::Future<Output = asupersync::error::Result<()>> + Send {
+        std::future::ready(Ok(()))
+    }
+
+    fn broadcast(
+        &self,
+        _msg: &CancelMessage,
+    ) -> impl std::future::Future<Output = asupersync::error::Result<usize>> + Send {
+        std::future::ready(Ok(0))
+    }
+}
+
 /// Create a test context for cancellation testing.
 fn test_cx() -> Cx {
-    Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, 0)),
-        TaskId::from_arena(ArenaIndex::new(0, 0)),
-        Budget::INFINITE,
-    )
+    Cx::for_testing()
 }
 
 /// Create a test RNG for deterministic testing.
 fn test_rng() -> DetRng {
-    DetRng::from_seed(12345)
+    DetRng::new(12345)
 }
 
 /// Create a test object ID.
@@ -253,7 +281,7 @@ fn mr2_masked_scope_does_not_see_cancel() {
         let cx = test_cx();
 
         // Request cancellation on the context
-        cx.request_cancel(&reason, Time::now());
+        cx.set_cancel_reason(reason.clone());
 
         // Verify cancellation is observable outside masked scope
         let unmasked_result = cx.checkpoint();
@@ -310,7 +338,7 @@ fn mr3_cancel_reason_preserved() {
         let second_cancel = token.cancel(&second_reason, second_time);
         prop_assert!(!second_cancel, "Second cancel should return false (already cancelled)");
 
-        let final_reason = token.reason().expect("Final reason should be available");
+        let _final_reason = token.reason().expect("Final reason should be available");
 
         // The stored reason should be the strengthened version
         // For now, just verify it's not None and we got a reason
@@ -451,10 +479,11 @@ fn mr6_listener_created_child_is_drained_before_cancel_returns() {
     let token = SymbolCancelToken::new(test_object_id(7, 9), &mut rng);
     let observed_child = Arc::new(StdMutex::new(None::<SymbolCancelToken>));
     let observed_child_clone = Arc::clone(&observed_child);
+    let token_for_listener = token.clone();
 
     token.add_listener(move |_: &CancelReason, _: Time| {
-        let mut child_rng = DetRng::from_seed(777);
-        let child = token.child(&mut child_rng);
+        let mut child_rng = DetRng::new(777);
+        let child = token_for_listener.child(&mut child_rng);
         *observed_child_clone.lock().unwrap() = Some(child);
     });
 
@@ -501,9 +530,10 @@ fn mr7_listener_registered_during_cancel_is_not_requeued() {
     let late_listener_notifications_clone = Arc::clone(&late_listener_notifications);
     let late_listener_reason_clone = Arc::clone(&late_listener_reason);
     let late_listener_time_clone = Arc::clone(&late_listener_time);
+    let token_for_listener = token.clone();
 
     token.add_listener(move |_: &CancelReason, _: Time| {
-        token.add_listener({
+        token_for_listener.add_listener({
             let late_listener_notifications_clone = Arc::clone(&late_listener_notifications_clone);
             let late_listener_reason_clone = Arc::clone(&late_listener_reason_clone);
             let late_listener_time_clone = Arc::clone(&late_listener_time_clone);
@@ -549,6 +579,118 @@ fn mr7_listener_registered_during_cancel_is_not_requeued() {
     );
 }
 
+/// MR8: Duplicate broadcast delivery is observationally equivalent to a single
+/// delivery for the remote token state.
+#[test]
+fn mr8_duplicate_broadcast_delivery_is_idempotent_for_remote_tokens() {
+    let mut local_rng = DetRng::new(0xACED_0001);
+    let mut remote_rng = DetRng::new(0xACED_0002);
+    let object_id = test_object_id(55, 89);
+    let local_token = SymbolCancelToken::new(object_id, &mut local_rng);
+    let remote_token = SymbolCancelToken::new(object_id, &mut remote_rng);
+    let remote_listener = TestCancelListener::new();
+    remote_token.add_listener(remote_listener.clone());
+
+    let local_broadcaster = CancelBroadcaster::new(NoopCancelSink);
+    let remote_broadcaster = CancelBroadcaster::new(NoopCancelSink);
+    local_broadcaster.register_token(local_token.clone());
+    remote_broadcaster.register_token(remote_token.clone());
+
+    let reason = CancelReason::new(CancelKind::Timeout);
+    let initiated_at = Time::from_millis(111);
+    let received_at = Time::from_millis(222);
+
+    let msg = local_broadcaster.prepare_cancel(object_id, &reason, initiated_at);
+    assert!(
+        local_token.is_cancelled(),
+        "preparing a local cancel should cancel the registered token"
+    );
+
+    let first_forward = remote_broadcaster.receive_message(&msg, received_at);
+    assert!(
+        first_forward.is_some(),
+        "first remote delivery should be forwarded to downstream peers"
+    );
+    assert!(
+        remote_listener.was_notified(),
+        "remote listener should observe the first broadcast delivery"
+    );
+    assert_eq!(
+        remote_listener
+            .received_reason()
+            .map(|reason| reason.kind()),
+        Some(CancelKind::Timeout),
+        "remote listener should preserve the forwarded cancel kind"
+    );
+    assert_eq!(
+        remote_listener.received_at(),
+        Some(received_at),
+        "remote listener should preserve the first delivery timestamp"
+    );
+    let state_after_first = (
+        remote_token.is_cancelled(),
+        remote_token.reason().map(|reason| reason.kind()),
+        remote_token.cancelled_at(),
+        remote_broadcaster.metrics().received,
+        remote_broadcaster.metrics().duplicates,
+        remote_broadcaster.metrics().forwarded,
+    );
+
+    let second_forward = remote_broadcaster.receive_message(&msg, Time::from_millis(333));
+    let state_after_second = (
+        remote_token.is_cancelled(),
+        remote_token.reason().map(|reason| reason.kind()),
+        remote_token.cancelled_at(),
+        remote_broadcaster.metrics().received,
+        remote_broadcaster.metrics().duplicates,
+        remote_broadcaster.metrics().forwarded,
+    );
+
+    assert!(
+        second_forward.is_none(),
+        "duplicate delivery should be suppressed instead of forwarded again"
+    );
+    assert_eq!(
+        state_after_first.0, true,
+        "remote token must remain cancelled after first delivery"
+    );
+    assert_eq!(
+        state_after_first.1,
+        Some(CancelKind::Timeout),
+        "remote token should preserve the broadcast cancel kind"
+    );
+    assert_eq!(
+        state_after_first.2,
+        Some(received_at),
+        "remote token should preserve the first delivery timestamp"
+    );
+    assert_eq!(
+        state_after_second.0, state_after_first.0,
+        "duplicate delivery must not change cancellation state"
+    );
+    assert_eq!(
+        state_after_second.1, state_after_first.1,
+        "duplicate delivery must not change the stored reason"
+    );
+    assert_eq!(
+        state_after_second.2, state_after_first.2,
+        "duplicate delivery must not change the stored timestamp"
+    );
+    assert_eq!(
+        state_after_second.3, state_after_first.3,
+        "duplicate delivery must not increment received count twice"
+    );
+    assert_eq!(
+        state_after_second.5, state_after_first.5,
+        "duplicate delivery must not increment forwarded count twice"
+    );
+    assert_eq!(
+        state_after_second.4,
+        state_after_first.4 + 1,
+        "duplicate delivery should only increment duplicate metrics"
+    );
+}
+
 /// Integration test: Complex token hierarchy with propagation
 #[test]
 fn integration_complex_token_hierarchy() {
@@ -574,7 +716,7 @@ fn integration_complex_token_hierarchy() {
 
     // Cancel the root - should propagate to all children
     let reason = CancelReason::new(CancelKind::User);
-    let cancel_time = Time::now();
+    let cancel_time = Time::from_millis(1_001);
 
     let cancel_result = root_token.cancel(&reason, cancel_time);
     assert!(cancel_result, "Root cancel should succeed");
@@ -583,20 +725,44 @@ fn integration_complex_token_hierarchy() {
     assert!(root_token.is_cancelled(), "Root should be cancelled");
     assert!(child1.is_cancelled(), "Child1 should be cancelled");
     assert!(child2.is_cancelled(), "Child2 should be cancelled");
-    assert!(grandchild1.is_cancelled(), "Grandchild1 should be cancelled");
-    assert!(grandchild2.is_cancelled(), "Grandchild2 should be cancelled");
-    assert!(grandchild3.is_cancelled(), "Grandchild3 should be cancelled");
+    assert!(
+        grandchild1.is_cancelled(),
+        "Grandchild1 should be cancelled"
+    );
+    assert!(
+        grandchild2.is_cancelled(),
+        "Grandchild2 should be cancelled"
+    );
+    assert!(
+        grandchild3.is_cancelled(),
+        "Grandchild3 should be cancelled"
+    );
 
     // Verify listeners were notified
-    assert!(root_listener.was_notified(), "Root listener should be notified");
-    assert!(child1_listener.was_notified(), "Child1 listener should be notified");
-    assert!(grandchild1_listener.was_notified(), "Grandchild1 listener should be notified");
+    assert!(
+        root_listener.was_notified(),
+        "Root listener should be notified"
+    );
+    assert!(
+        child1_listener.was_notified(),
+        "Child1 listener should be notified"
+    );
+    assert!(
+        grandchild1_listener.was_notified(),
+        "Grandchild1 listener should be notified"
+    );
 
     // Verify children have ParentCancelled reason
-    assert_eq!(child1.reason().unwrap().kind(), CancelKind::ParentCancelled,
-        "Child should have ParentCancelled reason");
-    assert_eq!(grandchild1.reason().unwrap().kind(), CancelKind::ParentCancelled,
-        "Grandchild should have ParentCancelled reason");
+    assert_eq!(
+        child1.reason().unwrap().kind(),
+        CancelKind::ParentCancelled,
+        "Child should have ParentCancelled reason"
+    );
+    assert_eq!(
+        grandchild1.reason().unwrap().kind(),
+        CancelKind::ParentCancelled,
+        "Grandchild should have ParentCancelled reason"
+    );
 }
 
 /// Stress test: Concurrent token operations
@@ -616,17 +782,17 @@ fn stress_concurrent_token_operations() {
     // Launch concurrent operations
     let handle1 = thread::spawn(move || {
         let reason = CancelReason::new(CancelKind::User);
-        token1.cancel(&reason, Time::now())
+        token1.cancel(&reason, Time::from_millis(2_001))
     });
 
     let handle2 = thread::spawn(move || {
         let reason = CancelReason::new(CancelKind::Timeout);
-        token2.cancel(&reason, Time::now())
+        token2.cancel(&reason, Time::from_millis(2_002))
     });
 
     let handle3 = thread::spawn(move || {
         let reason = CancelReason::new(CancelKind::Deadline);
-        token3.cancel(&reason, Time::now())
+        token3.cancel(&reason, Time::from_millis(2_003))
     });
 
     // Collect results
@@ -636,10 +802,16 @@ fn stress_concurrent_token_operations() {
 
     // Exactly one should succeed (first-caller-wins)
     let success_count = [result1, result2, result3].iter().filter(|&&r| r).count();
-    assert_eq!(success_count, 1, "Exactly one concurrent cancel should succeed");
+    assert_eq!(
+        success_count, 1,
+        "Exactly one concurrent cancel should succeed"
+    );
 
     // Token should be cancelled
-    assert!(token.is_cancelled(), "Token should be cancelled after concurrent operations");
+    assert!(
+        token.is_cancelled(),
+        "Token should be cancelled after concurrent operations"
+    );
     assert!(token.reason().is_some(), "Cancel reason should be set");
 }
 
@@ -651,9 +823,7 @@ fn error_recovery_listener_panics() {
     let token = SymbolCancelToken::new(object_id, &mut rng);
 
     // Add a panicking listener
-    token.add_listener(|_reason, _time| {
-        panic!("Intentional panic in listener");
-    });
+    token.add_listener(PanicListener);
 
     // Add a normal listener
     let normal_listener = TestCancelListener::new();
@@ -661,17 +831,27 @@ fn error_recovery_listener_panics() {
 
     // Cancel should complete despite listener panic
     let reason = CancelReason::new(CancelKind::User);
-    let cancel_time = Time::now();
+    let cancel_time = Time::from_millis(3_001);
 
     let cancel_result = token.cancel(&reason, cancel_time);
-    assert!(cancel_result, "Cancel should succeed despite listener panic");
+    assert!(
+        cancel_result,
+        "Cancel should succeed despite listener panic"
+    );
 
     // Token should be cancelled
     assert!(token.is_cancelled(), "Token should be cancelled");
-    assert_eq!(token.reason().unwrap().kind(), CancelKind::User, "Reason should be preserved");
+    assert_eq!(
+        token.reason().unwrap().kind(),
+        CancelKind::User,
+        "Reason should be preserved"
+    );
 
     // Normal listener should have been notified
-    assert!(normal_listener.was_notified(), "Normal listener should be notified despite panic");
+    assert!(
+        normal_listener.was_notified(),
+        "Normal listener should be notified despite panic"
+    );
 }
 
 /// Wire format compatibility test
@@ -683,22 +863,47 @@ fn wire_format_round_trip() {
 
     // Test uncancelled token serialization
     let bytes = token.to_bytes();
-    let deserialized = SymbolCancelToken::from_bytes(&bytes).expect("Deserialization should succeed");
+    let deserialized =
+        SymbolCancelToken::from_bytes(&bytes).expect("Deserialization should succeed");
 
-    assert_eq!(token.token_id(), deserialized.token_id(), "Token ID should match");
-    assert_eq!(token.object_id(), deserialized.object_id(), "Object ID should match");
-    assert_eq!(token.is_cancelled(), deserialized.is_cancelled(), "Cancel state should match");
+    assert_eq!(
+        token.token_id(),
+        deserialized.token_id(),
+        "Token ID should match"
+    );
+    assert_eq!(
+        token.object_id(),
+        deserialized.object_id(),
+        "Object ID should match"
+    );
+    assert_eq!(
+        token.is_cancelled(),
+        deserialized.is_cancelled(),
+        "Cancel state should match"
+    );
 
     // Test cancelled token serialization
     let reason = CancelReason::new(CancelKind::Timeout);
-    let cancel_time = Time::now();
+    let cancel_time = Time::from_millis(4_001);
     token.cancel(&reason, cancel_time);
 
     let cancelled_bytes = token.to_bytes();
     let cancelled_deserialized = SymbolCancelToken::from_bytes(&cancelled_bytes)
         .expect("Cancelled token deserialization should succeed");
 
-    assert_eq!(token.token_id(), cancelled_deserialized.token_id(), "Cancelled token ID should match");
-    assert_eq!(token.object_id(), cancelled_deserialized.object_id(), "Cancelled object ID should match");
-    assert_eq!(token.is_cancelled(), cancelled_deserialized.is_cancelled(), "Cancelled state should match");
+    assert_eq!(
+        token.token_id(),
+        cancelled_deserialized.token_id(),
+        "Cancelled token ID should match"
+    );
+    assert_eq!(
+        token.object_id(),
+        cancelled_deserialized.object_id(),
+        "Cancelled object ID should match"
+    );
+    assert_eq!(
+        token.is_cancelled(),
+        cancelled_deserialized.is_cancelled(),
+        "Cancelled state should match"
+    );
 }
