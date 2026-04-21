@@ -467,6 +467,98 @@ impl<T: Send + Sync + 'static> HeapRef<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct DropLog(Arc<Mutex<Vec<&'static str>>>);
+
+    impl DropLog {
+        fn push(&self, label: &'static str) {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(label);
+        }
+
+        fn snapshot(&self) -> Vec<&'static str> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    struct DropProbe {
+        label: &'static str,
+        log: DropLog,
+    }
+
+    impl DropProbe {
+        fn new(label: &'static str, log: DropLog) -> Self {
+            Self { label, log }
+        }
+    }
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.log.push(self.label);
+        }
+    }
+
+    fn close_suffix_after_early_deallocs(
+        first: &'static str,
+        second: &'static str,
+    ) -> Vec<&'static str> {
+        let log = DropLog::default();
+        let mut heap = RegionHeap::new();
+
+        let a = heap.alloc(DropProbe::new("a", log.clone()));
+        let b = heap.alloc(DropProbe::new("b", log.clone()));
+        let c = heap.alloc(DropProbe::new("c", log.clone()));
+        let d = heap.alloc(DropProbe::new("d", log.clone()));
+
+        for label in [first, second] {
+            let deallocated = match label {
+                "a" => heap.dealloc(a),
+                "b" => heap.dealloc(b),
+                "c" => heap.dealloc(c),
+                "d" => heap.dealloc(d),
+                _ => panic!("unexpected label"),
+            };
+            assert!(deallocated, "{label} should deallocate successfully");
+        }
+
+        let dealloc_drops = log.snapshot();
+        assert_eq!(dealloc_drops.len(), 2, "expected two eager drops");
+
+        heap.reclaim_all();
+        log.snapshot()[dealloc_drops.len()..].to_vec()
+    }
+
+    fn independent_heap_drop_traces(
+        reclaim_order: [usize; 2],
+    ) -> (Vec<&'static str>, Vec<&'static str>) {
+        let left_log = DropLog::default();
+        let right_log = DropLog::default();
+
+        let mut left = RegionHeap::new();
+        left.alloc(DropProbe::new("left-a", left_log.clone()));
+        left.alloc(DropProbe::new("left-b", left_log.clone()));
+
+        let mut right = RegionHeap::new();
+        right.alloc(DropProbe::new("right-a", right_log.clone()));
+        right.alloc(DropProbe::new("right-b", right_log.clone()));
+
+        for which in reclaim_order {
+            match which {
+                0 => left.reclaim_all(),
+                1 => right.reclaim_all(),
+                _ => panic!("unexpected heap selector"),
+            }
+        }
+
+        (left_log.snapshot(), right_log.snapshot())
+    }
 
     #[test]
     fn alloc_and_get() {
@@ -586,6 +678,26 @@ mod tests {
         let first = run_pattern();
         let second = run_pattern();
         assert_eq!(first, second, "allocation pattern should be deterministic");
+    }
+
+    #[test]
+    fn mr_early_dealloc_permutation_preserves_close_drop_suffix() {
+        let forward = close_suffix_after_early_deallocs("b", "d");
+        let reverse = close_suffix_after_early_deallocs("d", "b");
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn mr_independent_heap_reclaim_order_preserves_per_heap_drop_traces() {
+        let forward = independent_heap_drop_traces([0, 1]);
+        let reverse = independent_heap_drop_traces([1, 0]);
+
+        assert_eq!(forward.0, reverse.0);
+        assert_eq!(forward.1, reverse.1);
+        assert_eq!(forward.0, vec!["left-a", "left-b"]);
+        assert_eq!(forward.1, vec!["right-a", "right-b"]);
     }
 
     #[test]
