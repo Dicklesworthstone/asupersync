@@ -2171,12 +2171,12 @@ mod tests {
             let compensation_states: Vec<LatticeState> = (0..cancel_after_step).map(|_| {
                 LatticeState::Unknown  // Compensation undoes the forward steps
             }).collect();
-            let mut compensation_step_exec = FixedExecutor::new(compensation_states);
+            let mut compensation_step_exec = FixedExecutor::new(compensation_states.clone());
             let compensation_result = executor.execute(&compensation_exec, &mut compensation_step_exec);
 
             // Execute direct compensation (what we expect the result to be)
             let direct_compensation_exec = SagaExecutionPlan::from_plan(&compensation_saga);
-            let mut direct_step_exec = FixedExecutor::new(compensation_states.clone());
+            let mut direct_step_exec = FixedExecutor::new(compensation_states);
             let direct_result = executor.execute(&direct_compensation_exec, &mut direct_step_exec);
 
             // MR3: (partial + compensation) should equal direct compensation

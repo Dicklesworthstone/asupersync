@@ -13,7 +13,7 @@
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::yield_now;
-use asupersync::types::Budget;
+use asupersync::types::{Budget, CancelReason};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -105,7 +105,7 @@ fn test_cancel_cascade_ordering(
 
     // Build a tree of regions with consistent ordering
     fn create_region_tree(
-        runtime: &LabRuntime,
+        runtime: &mut LabRuntime,
         parent_region: asupersync::types::RegionId,
         depth: usize,
         max_depth: usize,
@@ -130,21 +130,36 @@ fn test_cancel_cascade_ordering(
             // Record spawn order
             spawn_order.lock().unwrap().push(region_id);
 
-            // Create task in this region that detects cancellation
-            let cancel_order = Arc::clone(cancel_order);
+            // Create task in this region that detects cancellation.
+            // Use a per-task clone so the outer `cancel_order` remains available
+            // for the recursive call below.
+            let task_cancel_order = Arc::clone(cancel_order);
+            let _ = child_idx;
             let (task_id, _) = runtime
                 .state
                 .create_task(child_region, Budget::INFINITE, async move {
-                    // Task runs until cancelled
+                    // Task runs until cancelled. Poll Cx::current() each
+                    // iteration; on the first observed cancellation, record the
+                    // region's spawn-order id into the shared cancel_order.
+                    let mut recorded = false;
                     for _ in 0..100 {
                         yield_now().await;
+                        if !recorded {
+                            let cancelled = asupersync::cx::Cx::current()
+                                .map(|c| c.is_cancel_requested())
+                                .unwrap_or(false);
+                            if cancelled {
+                                task_cancel_order.lock().unwrap().push(region_id);
+                                recorded = true;
+                            }
+                        }
                     }
                 })
                 .expect("create region task");
 
             runtime.scheduler.lock().schedule(task_id, 0);
 
-            // Recursively create grandchildren
+            // Recursively create grandchildren (outer `cancel_order` intact)
             let grandchildren = create_region_tree(
                 runtime,
                 child_region,
@@ -162,7 +177,7 @@ fn test_cancel_cascade_ordering(
 
     let region_counter = Arc::new(AtomicUsize::new(0));
     let _all_regions = create_region_tree(
-        &runtime,
+        &mut runtime,
         root_region,
         0,
         tree_depth.min(MAX_DEPTH),
@@ -172,10 +187,16 @@ fn test_cancel_cascade_ordering(
         &cancel_order,
     );
 
-    // Let tasks start running, then close root to trigger cascade
+    // Let tasks start running, then trigger cancellation to exercise the
+    // cancel_cascade metamorphic relation.
     for _ in 0..10 {
         runtime.step_for_test();
     }
+
+    // Trigger cascade cancellation from the root region.
+    runtime
+        .state
+        .cancel_request(root_region, &CancelReason::user("cascade"), None);
 
     // Region will close naturally when tasks complete or are cancelled
     runtime.run_until_quiescent();
@@ -251,7 +272,7 @@ fn test_nested_region_close_ordering(seed: u64, nesting_levels: usize) -> Vec<(u
 
     // Create nested hierarchy: root -> level1 -> level2 -> level3...
     fn create_nested_regions(
-        runtime: &LabRuntime,
+        runtime: &mut LabRuntime,
         parent_region: asupersync::types::RegionId,
         level: usize,
         max_levels: usize,
@@ -265,7 +286,9 @@ fn test_nested_region_close_ordering(seed: u64, nesting_levels: usize) -> Vec<(u
             .state
             .create_child_region(parent_region, Budget::INFINITE)
             .expect("create child region");
-        let close_events = Arc::clone(close_events);
+        // Per-task clone so the outer `close_events` parameter remains
+        // available for the recursive call below.
+        let task_close_events = Arc::clone(close_events);
 
         // Create task that records when this level completes
         let (task_id, _) = runtime
@@ -275,7 +298,7 @@ fn test_nested_region_close_ordering(seed: u64, nesting_levels: usize) -> Vec<(u
                 for _ in 0..(level + 1) {
                     yield_now().await;
                 }
-                close_events
+                task_close_events
                     .lock()
                     .unwrap()
                     .push((level, format!("level-{}-complete", level)));
@@ -284,9 +307,9 @@ fn test_nested_region_close_ordering(seed: u64, nesting_levels: usize) -> Vec<(u
 
         runtime.scheduler.lock().schedule(task_id, 0);
 
-        // Recursively create child
+        // Recursively create child (outer `close_events` reference intact)
         if let Some(_grandchild) =
-            create_nested_regions(runtime, child_region, level + 1, max_levels, &close_events)
+            create_nested_regions(runtime, child_region, level + 1, max_levels, close_events)
         {
             // Child regions exist, this level should wait for them
             Some(child_region)
@@ -297,7 +320,7 @@ fn test_nested_region_close_ordering(seed: u64, nesting_levels: usize) -> Vec<(u
 
     let close_events_clone = Arc::clone(&close_events);
     let _deepest_region = create_nested_regions(
-        &runtime,
+        &mut runtime,
         root_region,
         0,
         nesting_levels.min(MAX_DEPTH),
@@ -372,7 +395,7 @@ fn metamorphic_cancel_cascade_preserves_ordering() {
     for seed in [0, 7, 99, 54321] {
         for depth in [2, 3] {
             for children in [1, 2] {
-                let (spawn_order, _cancel_order) =
+                let (spawn_order, cancel_order) =
                     test_cancel_cascade_ordering(seed, depth, children);
 
                 // Spawn order should be consistent (parent-first traversal)
@@ -383,6 +406,35 @@ fn metamorphic_cancel_cascade_preserves_ordering() {
                     depth,
                     children
                 );
+
+                // Cancel-cascade MR: every cancelled region_id must have been
+                // spawned (membership), and each region should be recorded at
+                // most once (uniqueness).
+                for region_id in &cancel_order {
+                    assert!(
+                        spawn_order.contains(region_id),
+                        "cancel_order contains region {} not present in spawn_order={:?} (cancel_order={:?}, seed={}, depth={}, children={})",
+                        region_id,
+                        spawn_order,
+                        cancel_order,
+                        seed,
+                        depth,
+                        children
+                    );
+                }
+
+                let mut seen = std::collections::HashSet::new();
+                for region_id in &cancel_order {
+                    assert!(
+                        seen.insert(*region_id),
+                        "cancel_order must be unique per region, but {} appeared twice in {:?} (seed={}, depth={}, children={})",
+                        region_id,
+                        cancel_order,
+                        seed,
+                        depth,
+                        children
+                    );
+                }
             }
         }
     }

@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use asupersync::lab::config::LabConfig;
 use asupersync::lab::runtime::LabRuntime;
-use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
+use asupersync::runtime::scheduler::three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 use asupersync::runtime::{RuntimeState, TaskTable};
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{TaskId, Time};
@@ -32,6 +32,12 @@ use asupersync::types::{TaskId, Time};
 struct BudgetTestHarness {
     lab_runtime: LabRuntime,
     scheduler: ThreeLaneScheduler,
+    /// Workers owned by the harness so phase1/phase2/phase3 simulations reuse
+    /// the same worker set. `ThreeLaneScheduler::take_workers()` is one-shot
+    /// (`std::mem::take`) with no put-back API, so calling it per simulation
+    /// would leave later phases with an empty worker vector and silently
+    /// dispatch zero tasks.
+    workers: Vec<ThreeLaneWorker>,
     state: Arc<ContendedMutex<RuntimeState>>,
     task_table: Arc<ContendedMutex<TaskTable>>,
     cancel_streak_limit: usize,
@@ -70,9 +76,15 @@ impl BudgetTestHarness {
             scheduler.set_adaptive_cancel_streak(true, 50); // 50-step epochs
         }
 
+        // Take workers once at harness construction. `take_workers()` is
+        // one-shot (std::mem::take) with no put-back API; doing it per call
+        // would leave later simulation phases empty and silently pass.
+        let workers = scheduler.take_workers();
+
         Self {
             lab_runtime,
             scheduler,
+            workers,
             state,
             task_table,
             cancel_streak_limit,
@@ -85,7 +97,7 @@ impl BudgetTestHarness {
         // Cancel tasks (highest priority)
         for i in 0..count_per_lane {
             let task_id = TaskId::new_for_test(base_id + i as u32, 0);
-            self.scheduler.schedule_cancel(task_id, 100 + i as u32);
+            self.scheduler.inject_cancel(task_id, (100 + i as u32) as u8);
         }
 
         // Timed tasks (medium priority)
@@ -93,13 +105,13 @@ impl BudgetTestHarness {
             let task_id = TaskId::new_for_test(base_id + count_per_lane as u32 + i as u32, 1);
             // Schedule for immediate deadline to make them runnable
             self.scheduler
-                .schedule_timed(task_id, 50 + i as u32, Time::ZERO);
+                .inject_timed(task_id, Time::ZERO);
         }
 
         // Ready tasks (lower priority)
         for i in 0..count_per_lane {
             let task_id = TaskId::new_for_test(base_id + 2 * count_per_lane as u32 + i as u32, 2);
-            self.scheduler.schedule(task_id, 25 + i as u32);
+            self.scheduler.inject_ready(task_id, (25 + i as u32) as u8);
         }
     }
 
@@ -107,7 +119,7 @@ impl BudgetTestHarness {
     fn inject_cancel_pressure(&mut self, count: usize, base_id: u32) {
         for i in 0..count {
             let task_id = TaskId::new_for_test(base_id + i as u32, 0);
-            self.scheduler.schedule_cancel(task_id, 200 + i as u32);
+            self.scheduler.inject_cancel(task_id, (200 + i as u32) as u8);
         }
     }
 
@@ -115,25 +127,30 @@ impl BudgetTestHarness {
     fn inject_ready_burst(&mut self, count: usize, base_id: u32) {
         for i in 0..count {
             let task_id = TaskId::new_for_test(base_id + i as u32, 2);
-            self.scheduler.schedule(task_id, 30 + i as u32);
+            self.scheduler.inject_ready(task_id, (30 + i as u32) as u8);
         }
     }
 
-    /// Run scheduler and collect budget compliance statistics
+    /// Run scheduler and collect budget compliance statistics.
+    ///
+    /// Uses the harness-owned `self.workers` so multi-phase tests see the
+    /// same worker set across every simulation pass.
     fn run_budget_simulation(&mut self, max_steps: usize) -> BudgetStats {
         let mut stats = BudgetStats::new();
-        let mut workers = self.scheduler.take_workers();
+        if self.workers.is_empty() {
+            return stats;
+        }
 
         for step in 0..max_steps {
-            let worker_idx = step % workers.len();
-            let worker = &mut workers[worker_idx];
+            let worker_idx = step % self.workers.len();
+            let worker = &mut self.workers[worker_idx];
 
             if let Some(task_id) = worker.next_task() {
-                let task_type = self.classify_task_type(task_id);
+                let task_type = Self::classify_task_type(task_id);
                 stats.record_dispatch(worker_idx, task_type, step);
 
                 // Get budget metrics from worker
-                let fairness_cert = worker.fairness_certificate();
+                let fairness_cert = worker.preemption_fairness_certificate();
                 stats.record_budget_metrics(worker_idx, &fairness_cert, task_type);
             } else {
                 stats.record_idle(worker_idx, step);
@@ -143,16 +160,13 @@ impl BudgetTestHarness {
             }
         }
 
-        // Return workers to scheduler
-        for worker in workers {
-            self.scheduler.add_worker(worker);
-        }
-
         stats
     }
 
-    fn classify_task_type(&self, task_id: TaskId) -> TaskType {
-        match task_id.generation() {
+    /// Associated (non-method) so it doesn't hold a borrow on `self` while
+    /// `self.workers[..]` is borrowed mutably inside the simulation loop.
+    fn classify_task_type(task_id: TaskId) -> TaskType {
+        match task_id.arena_index().generation() {
             0 => TaskType::Cancel,
             1 => TaskType::Timed,
             2 => TaskType::Ready,
@@ -487,18 +501,18 @@ mod test_helpers {
 
     #[test]
     fn test_task_type_classification() {
-        let harness = BudgetTestHarness::new(1, 8, 0, false);
+        let _harness = BudgetTestHarness::new(1, 8, 0, false);
 
         assert_eq!(
-            harness.classify_task_type(TaskId::new_for_test(1, 0)),
+            BudgetTestHarness::classify_task_type(TaskId::new_for_test(1, 0)),
             TaskType::Cancel
         );
         assert_eq!(
-            harness.classify_task_type(TaskId::new_for_test(1, 1)),
+            BudgetTestHarness::classify_task_type(TaskId::new_for_test(1, 1)),
             TaskType::Timed
         );
         assert_eq!(
-            harness.classify_task_type(TaskId::new_for_test(1, 2)),
+            BudgetTestHarness::classify_task_type(TaskId::new_for_test(1, 2)),
             TaskType::Ready
         );
     }

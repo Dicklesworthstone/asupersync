@@ -3,14 +3,14 @@
 //! This test captures the expected JSON output format of doctor health reports
 //! to prevent unintentional changes to the CLI output format.
 
-#![cfg(test)]
+#![cfg(all(test, feature = "cli"))]
 
 use asupersync::cli::doctor::{
-    WorkspaceScanReport, OperatorModelContract, AdvancedDiagnosticsReportBundle,
-    DoctorScenarioCoveragePackSmokeReport, DoctorStressSoakSmokeReport,
+    AdvancedDiagnosticsReportBundle, DoctorScenarioCoveragePackSmokeReport,
+    DoctorStressSoakSmokeReport, OperatorModelContract, WorkspaceScanReport,
 };
-use serde_json::json;
 use insta::assert_json_snapshot;
+use serde_json::json;
 
 /// Test the WorkspaceScanReport structure format
 #[test]
@@ -44,10 +44,12 @@ fn test_operator_model_contract_format() {
             "performance_baseline".to_string(),
         ],
         navigation_topology: asupersync::cli::doctor::NavigationTopology {
-            topology_version: "1.0.0".to_string(),
-            screen_flows: vec![],
-            navigation_edges: vec![],
-            operator_workflows: vec![],
+            version: "1.0.0".to_string(),
+            entry_points: vec![],
+            screens: vec![],
+            routes: vec![],
+            keyboard_bindings: vec![],
+            route_events: vec![],
         },
     };
 
@@ -102,14 +104,12 @@ fn test_doctor_health_report_bundle_format() {
 #[test]
 fn test_doctor_scenario_coverage_format() {
     let coverage_report = DoctorScenarioCoveragePackSmokeReport {
-        report_version: "1.0.0".to_string(),
-        coverage_packs_evaluated: 0,
-        total_scenario_count: 0,
-        executed_scenario_count: 0,
-        coverage_percentage: 0.0,
-        execution_time_ms: 0,
-        warnings: vec!["Mock coverage warning".to_string()],
-        detailed_results: vec![],
+        schema_version: "1.0.0".to_string(),
+        selection_mode: "all".to_string(),
+        requested_by: "golden-test".to_string(),
+        seed: "0".to_string(),
+        failure_clusters: vec![],
+        runs: vec![],
     };
 
     assert_json_snapshot!("doctor_scenario_coverage_format", coverage_report);
@@ -119,15 +119,13 @@ fn test_doctor_scenario_coverage_format() {
 #[test]
 fn test_doctor_stress_soak_format() {
     let soak_report = DoctorStressSoakSmokeReport {
-        report_version: "1.0.0".to_string(),
-        test_duration_ms: 1000,
-        peak_memory_mb: 100,
-        total_operations: 1000,
-        success_rate_percentage: 100.0,
-        average_latency_ms: 1.0,
-        p99_latency_ms: 5.0,
-        warnings: vec!["Mock stress test warning".to_string()],
-        performance_metrics: vec![],
+        schema_version: "1.0.0".to_string(),
+        profile_mode: "fast".to_string(),
+        requested_by: "golden-test".to_string(),
+        seed: "0".to_string(),
+        pass_criteria: "all checkpoints within budget".to_string(),
+        runs: vec![],
+        failing_scenarios: vec![],
     };
 
     assert_json_snapshot!("doctor_stress_soak_format", soak_report);
@@ -136,27 +134,8 @@ fn test_doctor_stress_soak_format() {
 /// Test the advanced diagnostics report format
 #[test]
 fn test_advanced_diagnostics_format() {
-    let diagnostics_bundle = AdvancedDiagnosticsReportBundle {
-        bundle_version: "1.0.0".to_string(),
-        base_report_id: "test-report".to_string(),
-        extension_contract_version: "1.0.0".to_string(),
-        fixtures: vec![],
-        extension: asupersync::cli::doctor::AdvancedDiagnosticsReportExtension {
-            extension_version: "1.0.0".to_string(),
-            base_report_id: "test-report".to_string(),
-            collaboration_trail: vec![],
-            remediation_deltas: vec![],
-            trust_transitions: vec![],
-            troubleshooting_playbook: asupersync::cli::doctor::AdvancedTroubleshootingPlaybook {
-                playbook_version: "1.0.0".to_string(),
-                scenario_id: "test-scenario".to_string(),
-                workflow_steps: vec![],
-                evidence_requirements: vec![],
-                success_criteria: vec![],
-                fallback_procedures: vec![],
-            },
-        },
-    };
+    let diagnostics_bundle: AdvancedDiagnosticsReportBundle =
+        asupersync::cli::doctor::advanced_diagnostics_report_bundle();
 
     assert_json_snapshot!("advanced_diagnostics_format", diagnostics_bundle);
 }

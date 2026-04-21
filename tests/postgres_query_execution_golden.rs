@@ -3,6 +3,8 @@
 //! Tests that the query execution logging output format remains stable
 //! for debugging, monitoring, and audit purposes.
 
+#![cfg(feature = "postgres")]
+
 use asupersync::database::postgres::{PgColumn, PgValue, PgError, oid};
 
 /// Simulated query execution result for testing log formatting.

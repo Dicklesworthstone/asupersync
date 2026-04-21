@@ -1494,7 +1494,7 @@ mod tests {
     }
 
     fn block_on_simple<F: Future>(future: F) -> F::Output {
-        let waker = std::task::std::task::Waker::noop().clone();
+        let waker = std::task::Waker::noop().clone();
         let mut context = Context::from_waker(&waker);
         let mut future = std::pin::pin!(future);
 

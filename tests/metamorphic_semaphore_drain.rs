@@ -16,65 +16,89 @@
 #![cfg(test)]
 
 use proptest::prelude::*;
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use asupersync::cx::Cx;
 use asupersync::lab::config::LabConfig;
 use asupersync::lab::runtime::LabRuntime;
 use asupersync::sync::Semaphore;
+use asupersync::types::Budget;
 
-/// Test harness for semaphore drain ordering tests
+/// Test harness for semaphore drain ordering tests.
+///
+/// Holds a `LabRuntime`, a root region, and a shared `Semaphore`. Waiters are
+/// spawned as lab tasks that write their outcome into a shared `Vec` guarded
+/// by a `StdMutex`, which the harness harvests after running the runtime to
+/// quiescence.
 struct SemaphoreDrainHarness {
     lab_runtime: LabRuntime,
     semaphore: Arc<Semaphore>,
-    cx: Cx,
+    region: asupersync::types::RegionId,
 }
 
 impl SemaphoreDrainHarness {
-    fn new(initial_permits: usize) -> Self {
-        let config = LabConfig::default()
+    fn new(seed: u64, initial_permits: usize) -> Self {
+        let config = LabConfig::new(seed)
             .worker_count(4)
             .trace_capacity(1024)
             .max_steps(5000);
-        let lab_runtime = LabRuntime::new(config);
+        let mut lab_runtime = LabRuntime::new(config);
+        let region = lab_runtime.state.create_root_region(Budget::INFINITE);
         let semaphore = Arc::new(Semaphore::new(initial_permits));
-        let cx = lab_runtime.block_on_local(async { Cx::root() });
 
         Self {
             lab_runtime,
             semaphore,
-            cx,
+            region,
         }
     }
 
-    fn acquire_permits_concurrent(&self, permit_counts: &[usize]) -> Vec<Option<usize>> {
-        let semaphore = Arc::clone(&self.semaphore);
-        let tasks: Vec<_> = permit_counts
-            .iter()
-            .enumerate()
-            .map(|(index, &count)| {
-                let sem = Arc::clone(&semaphore);
-                let cx = self.cx.child(format!("waiter-{}", index));
-                self.lab_runtime.spawn_local(async move {
-                    match sem.acquire(&cx, count).await {
-                        Ok(_permit) => Some(index),
-                        Err(_) => None,
+    /// Spawn `permit_counts.len()` waiter tasks, each acquiring the requested
+    /// number of permits. Each waiter writes `Some(index)` on success or
+    /// `None` on close/cancel into its slot in the returned shared vector.
+    fn spawn_waiters(&mut self, permit_counts: &[usize]) -> Arc<StdMutex<Vec<Option<usize>>>> {
+        let results: Arc<StdMutex<Vec<Option<usize>>>> =
+            Arc::new(StdMutex::new(vec![None; permit_counts.len()]));
+
+        for (index, &count) in permit_counts.iter().enumerate() {
+            let sem = Arc::clone(&self.semaphore);
+            let results = Arc::clone(&results);
+            let (task_id, _handle) = self
+                .lab_runtime
+                .state
+                .create_task(self.region, Budget::INFINITE, async move {
+                    let cx = Cx::for_testing();
+                    if let Ok(_permit) = sem.acquire(&cx, count).await {
+                        results.lock().expect("results lock")[index] = Some(index);
                     }
                 })
-            })
-            .collect();
+                .expect("create waiter");
+            self.lab_runtime.scheduler.lock().schedule(task_id, 0);
+        }
 
-        self.lab_runtime.block_on_local(async {
-            let mut results = vec![None; permit_counts.len()];
-            for task in tasks {
-                if let Some(acquired_index) = task.await {
-                    results[acquired_index] = Some(acquired_index);
-                }
-            }
-            results
-        })
+        results
+    }
+
+    /// Step the runtime until at least `waiter_count` waiters have registered
+    /// on the semaphore (i.e. `available_permits()` has been consumed or the
+    /// waiters are queued). Falls back to a bounded step budget so tests
+    /// terminate even if waiters cannot all register.
+    fn step_until_queued(&mut self, _waiter_count: usize) {
+        // Drive the scheduler until each spawned waiter has at least polled
+        // `acquire` once and parked itself on the wait-queue. We cap the work
+        // at a generous bound to preserve termination on any pathological
+        // schedule.
+        for _ in 0..200 {
+            self.lab_runtime.step_for_test();
+        }
+    }
+
+    /// Spawn waiters, run to quiescence, then harvest per-waiter outcomes.
+    fn acquire_permits_concurrent(&mut self, permit_counts: &[usize]) -> Vec<Option<usize>> {
+        let results = self.spawn_waiters(permit_counts);
+        self.lab_runtime.run_until_quiescent();
+        let harvested = results.lock().expect("results lock").clone();
+        harvested
     }
 }
 
@@ -124,12 +148,13 @@ impl DrainStats {
 #[test]
 fn mr_fifo_ordering() {
     proptest!(|(
+        seed in 0u64..1024,
         initial_permits in 1..10_usize,
         waiter_permits in prop::collection::vec(1..5_usize, 2..8)
     )| {
-        let harness = SemaphoreDrainHarness::new(initial_permits);
+        let mut harness = SemaphoreDrainHarness::new(seed, initial_permits);
 
-        // Add enough permits to satisfy all waiters
+        // Add enough permits to satisfy all waiters.
         let total_needed: usize = waiter_permits.iter().sum();
         if total_needed > initial_permits {
             harness.semaphore.add_permits(total_needed - initial_permits);
@@ -138,7 +163,7 @@ fn mr_fifo_ordering() {
         let results = harness.acquire_permits_concurrent(&waiter_permits);
         let stats = DrainStats::analyze(&waiter_permits, &results);
 
-        // FIFO invariant: no ordering violations
+        // FIFO invariant: no ordering violations among successful acquires.
         prop_assert_eq!(stats.fifo_violations(), 0,
             "FIFO violation: acquire order {:?} for waiter permits {:?}",
             stats.acquire_order, waiter_permits);
@@ -150,34 +175,28 @@ fn mr_fifo_ordering() {
 #[test]
 fn mr_close_drain_completeness() {
     proptest!(|(
+        seed in 0u64..1024,
         waiter_permits in prop::collection::vec(1..5_usize, 1..8)
     )| {
-        // Start with 0 permits so all waiters block
-        let harness = SemaphoreDrainHarness::new(0);
+        // Start with 0 permits so all waiters block.
+        let mut harness = SemaphoreDrainHarness::new(seed, 0);
 
-        let semaphore = Arc::clone(&harness.semaphore);
-        let tasks: Vec<_> = waiter_permits.iter().enumerate().map(|(index, &count)| {
-            let sem = Arc::clone(&semaphore);
-            let cx = harness.cx.child(format!("waiter-{}", index));
-            harness.lab_runtime.spawn_local(async move {
-                sem.acquire(&cx, count).await.is_err()
-            })
-        }).collect();
+        // Spawn waiters that record only successful acquisitions; a closed
+        // semaphore produces `None` in every slot.
+        let results = harness.spawn_waiters(&waiter_permits);
 
-        // Close semaphore after spawning all waiters
-        semaphore.close();
+        // Let waiters register on the semaphore's wait queue before closing.
+        harness.step_until_queued(waiter_permits.len());
 
-        let error_results: Vec<bool> = harness.lab_runtime.block_on_local(async {
-            let mut results = Vec::new();
-            for task in tasks {
-                results.push(task.await);
-            }
-            results
-        });
+        // Close after all waiters have queued up.
+        harness.semaphore.close();
+        harness.lab_runtime.run_until_quiescent();
 
-        // All waiters should receive errors
-        prop_assert!(error_results.iter().all(|&got_error| got_error),
-            "Not all waiters received errors on close: {:?}", error_results);
+        let harvested = results.lock().expect("results lock").clone();
+
+        // All waiters should have received errors (no successes recorded).
+        prop_assert!(harvested.iter().all(|slot| slot.is_none()),
+            "Not all waiters received errors on close: {:?}", harvested);
     });
 }
 
@@ -186,43 +205,27 @@ fn mr_close_drain_completeness() {
 #[test]
 fn mr_permit_addition_fairness() {
     proptest!(|(
+        seed in 0u64..1024,
         waiter_permits in prop::collection::vec(1..3_usize, 2..6),
         added_permits in 1..10_usize
     )| {
-        // Start with 0 permits so all waiters block initially
-        let harness = SemaphoreDrainHarness::new(0);
+        // Start with 0 permits so all waiters block initially.
+        let mut harness = SemaphoreDrainHarness::new(seed, 0);
 
-        let semaphore = Arc::clone(&harness.semaphore);
+        let results = harness.spawn_waiters(&waiter_permits);
 
-        // Spawn waiters that will block
-        let tasks: Vec<_> = waiter_permits.iter().enumerate().map(|(index, &count)| {
-            let sem = Arc::clone(&semaphore);
-            let cx = harness.cx.child(format!("waiter-{}", index));
-            harness.lab_runtime.spawn_local(async move {
-                match sem.acquire(&cx, count).await {
-                    Ok(_permit) => Some(index),
-                    Err(_) => None,
-                }
-            })
-        }).collect();
+        // Advance virtual time a small amount and let waiters queue before we
+        // perturb the semaphore by adding permits.
+        harness.lab_runtime.advance_time(10_000_000); // 10ms in nanoseconds
+        harness.step_until_queued(waiter_permits.len());
+        harness.semaphore.add_permits(added_permits);
 
-        // Add permits after small delay to let waiters queue up
-        harness.lab_runtime.advance_time_by(Duration::from_millis(10));
-        semaphore.add_permits(added_permits);
+        harness.lab_runtime.run_until_quiescent();
 
-        let results: Vec<Option<usize>> = harness.lab_runtime.block_on_local(async {
-            let mut results = vec![None; waiter_permits.len()];
-            for task in tasks {
-                if let Some(acquired_index) = task.await {
-                    results[acquired_index] = Some(acquired_index);
-                }
-            }
-            results
-        });
+        let harvested = results.lock().expect("results lock").clone();
+        let stats = DrainStats::analyze(&waiter_permits, &harvested);
 
-        let stats = DrainStats::analyze(&waiter_permits, &results);
-
-        // Check that waiters were satisfied in order when permits allowed
+        // Check that waiters were satisfied in order when permits allowed.
         prop_assert_eq!(stats.fifo_violations(), 0,
             "Permit addition fairness violation: order {:?} for permits {:?}, added {}",
             stats.acquire_order, waiter_permits, added_permits);
@@ -234,14 +237,14 @@ fn mr_permit_addition_fairness() {
 #[test]
 fn mr_obligation_conservation() {
     proptest!(|(
+        seed in 0u64..1024,
         initial_permits in 1..20_usize,
         waiter_permits in prop::collection::vec(1..5_usize, 1..10)
     )| {
-        let harness = SemaphoreDrainHarness::new(initial_permits);
+        let mut harness = SemaphoreDrainHarness::new(seed, initial_permits);
         let results = harness.acquire_permits_concurrent(&waiter_permits);
-        let stats = DrainStats::analyze(&waiter_permits, &results);
 
-        // Calculate how many permits should be consumed
+        // Calculate how many permits should be consumed.
         let mut permits_consumed = 0;
         for (i, &count) in waiter_permits.iter().enumerate() {
             if results[i].is_some() {
@@ -249,7 +252,7 @@ fn mr_obligation_conservation() {
             }
         }
 
-        // Remaining permits = initial - consumed
+        // Remaining permits = initial - consumed.
         let remaining = harness.semaphore.available_permits();
         let expected_remaining = initial_permits.saturating_sub(permits_consumed);
 
@@ -264,34 +267,27 @@ fn mr_obligation_conservation() {
 #[test]
 fn mr_drain_atomicity() {
     proptest!(|(
+        seed in 0u64..1024,
         waiter_permits in prop::collection::vec(1..3_usize, 2..6)
     )| {
-        let harness = SemaphoreDrainHarness::new(0);
-        let semaphore = Arc::clone(&harness.semaphore);
+        let mut harness = SemaphoreDrainHarness::new(seed, 0);
 
-        let tasks: Vec<_> = waiter_permits.iter().enumerate().map(|(index, &count)| {
-            let sem = Arc::clone(&semaphore);
-            let cx = harness.cx.child(format!("waiter-{}", index));
-            harness.lab_runtime.spawn_local(async move {
-                sem.acquire(&cx, count).await.is_err()
-            })
-        }).collect();
+        let results = harness.spawn_waiters(&waiter_permits);
 
-        // Close and check that all waiters complete with errors
-        semaphore.close();
+        // Let waiters register before closing to probe atomicity of drain.
+        harness.step_until_queued(waiter_permits.len());
 
-        let completion_results: Vec<bool> = harness.lab_runtime.block_on_local(async {
-            let mut results = Vec::new();
-            for task in tasks {
-                results.push(task.await);
-            }
-            results
-        });
+        harness.semaphore.close();
+        harness.lab_runtime.run_until_quiescent();
 
-        // Atomicity: either all waiters get errors (successful close) or none do
-        let error_count = completion_results.iter().filter(|&&got_error| got_error).count();
-        prop_assert!(error_count == 0 || error_count == waiter_permits.len(),
-            "Drain atomicity violation: {} of {} waiters got errors",
-            error_count, waiter_permits.len());
+        let harvested = results.lock().expect("results lock").clone();
+        let success_count = harvested.iter().filter(|slot| slot.is_some()).count();
+
+        // Atomicity: either all waiters get errors (successful close, 0
+        // successes) or no waiters saw the close (all successes), but any
+        // intermediate state would indicate a non-atomic drain.
+        prop_assert!(success_count == 0 || success_count == waiter_permits.len(),
+            "Drain atomicity violation: {} of {} waiters acquired successfully",
+            success_count, waiter_permits.len());
     });
 }

@@ -11,15 +11,12 @@
 //!   4. Commit with detailed explanation of format changes
 
 use asupersync::observability::diagnostics::{
-    Diagnostics, DirectionalDeadlockReport, ObligationLeak, RegionOpenExplanation,
-    TaskBlockedExplanation,
+    Diagnostics, ObligationLeak, RegionOpenExplanation, TaskBlockedExplanation,
 };
-use asupersync::observability::spectral_health::SpectralHealthReport;
 use asupersync::record::obligation::ObligationKind;
 use asupersync::record::task::TaskState;
-use asupersync::runtime::VirtualClock;
 use asupersync::runtime::state::RuntimeState;
-use asupersync::time::TimerDriverHandle;
+use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::{Budget, CancelReason, ObligationId, Outcome, RegionId, TaskId, Time};
 use insta::{Settings, assert_debug_snapshot};
 use std::sync::Arc;
@@ -65,14 +62,12 @@ pub struct ForensicDumpMetadata {
 /// Test helper to create runtime state with test data
 struct RuntimeScenarioBuilder {
     state: RuntimeState,
-    next_task_id: u32,
 }
 
 impl RuntimeScenarioBuilder {
     fn new() -> Self {
         Self {
             state: RuntimeState::new(),
-            next_task_id: 1000, // Start with deterministic base
         }
     }
 
@@ -86,7 +81,7 @@ impl RuntimeScenarioBuilder {
     fn add_region(mut self, parent: Option<RegionId>) -> (Self, RegionId) {
         let region_id = if let Some(parent_id) = parent {
             self.state
-                .create_region(Some(parent_id))
+                .create_child_region(parent_id, Budget::INFINITE)
                 .expect("Failed to create child region")
         } else {
             self.state.create_root_region(Budget::INFINITE)
@@ -95,12 +90,9 @@ impl RuntimeScenarioBuilder {
     }
 
     fn add_task(mut self, region_id: RegionId, task_state: TaskState) -> (Self, TaskId) {
-        let task_id = TaskId::new_for_test(self.next_task_id, 1);
-        self.next_task_id += 1;
-
-        let created_task_id = self
+        let (created_task_id, _handle) = self
             .state
-            .create_task(task_id, region_id)
+            .create_task(region_id, Budget::INFINITE, async {})
             .expect("Failed to create task");
 
         // Set task state
@@ -116,16 +108,16 @@ impl RuntimeScenarioBuilder {
         region_id: RegionId,
         task_id: TaskId,
         kind: ObligationKind,
-        created_at: Time,
+        reserved_at: Time,
     ) -> (Self, ObligationId) {
         let obligation_id = self
             .state
-            .create_obligation(region_id, task_id, kind)
+            .create_obligation(kind, task_id, region_id, None)
             .expect("Failed to create obligation");
 
-        // Set creation time for leak detection
+        // Set reservation time for leak detection
         if let Some(obligation_record) = self.state.obligation_mut(obligation_id) {
-            obligation_record.created_at = created_at;
+            obligation_record.reserved_at = reserved_at;
         }
 
         (self, obligation_id)
@@ -285,7 +277,7 @@ fn forensic_dump_with_leaked_obligations() {
     let (builder, _obligation2) = builder.add_obligation(
         root_id,
         task_id,
-        ObligationKind::Permit,
+        ObligationKind::SendPermit,
         Time::from_millis(2000),
     );
 
@@ -313,10 +305,10 @@ fn forensic_dump_deadlock_scenario() {
     let (builder, child2_id) = builder.add_region(Some(root_id));
 
     // Add multiple blocked tasks that could indicate deadlock
-    let (builder, _task1) = builder.add_task(child1_id, TaskState::Blocked);
-    let (builder, _task2) = builder.add_task(child1_id, TaskState::Blocked);
-    let (builder, _task3) = builder.add_task(child2_id, TaskState::Blocked);
-    let (builder, _task4) = builder.add_task(child2_id, TaskState::Blocked);
+    let (builder, _task1) = builder.add_task(child1_id, TaskState::Running);
+    let (builder, _task2) = builder.add_task(child1_id, TaskState::Running);
+    let (builder, _task3) = builder.add_task(child2_id, TaskState::Running);
+    let (builder, _task4) = builder.add_task(child2_id, TaskState::Running);
 
     let state = builder.build();
 

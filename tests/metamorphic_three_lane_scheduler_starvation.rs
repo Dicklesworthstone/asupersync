@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use asupersync::lab::config::LabConfig;
 use asupersync::lab::runtime::LabRuntime;
-use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
+use asupersync::runtime::scheduler::three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 use asupersync::runtime::{RuntimeState, TaskTable};
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{TaskId, Time};
@@ -33,6 +33,13 @@ use asupersync::types::{TaskId, Time};
 struct StarvationTestHarness {
     lab_runtime: LabRuntime,
     scheduler: ThreeLaneScheduler,
+    /// Workers owned by the harness so phase1/phase2 simulations reuse the
+    /// same worker set. `ThreeLaneScheduler::take_workers()` is one-shot
+    /// (`std::mem::take`) with no put-back API, so calling it per simulation
+    /// would leave later phases with an empty worker vector and silently
+    /// dispatch zero tasks — breaking tests like
+    /// `mr_starvation_recovery_consistency` that check phase2 dispatch counts.
+    workers: Vec<ThreeLaneWorker>,
     state: Arc<ContendedMutex<RuntimeState>>,
     task_table: Arc<ContendedMutex<TaskTable>>,
     cancel_streak_limit: usize,
@@ -48,7 +55,7 @@ impl StarvationTestHarness {
 
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let task_table = Arc::new(ContendedMutex::new("task_table", TaskTable::new()));
-        let scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+        let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
             worker_count,
             &state,
             Some(Arc::clone(&task_table)),
@@ -56,10 +63,15 @@ impl StarvationTestHarness {
             false, // disable governor for deterministic testing
             1,
         );
+        // Take workers once at harness construction. `take_workers()` is
+        // one-shot (std::mem::take) with no put-back API; doing it per call
+        // would leave later simulation phases empty and silently pass.
+        let workers = scheduler.take_workers();
 
         Self {
             lab_runtime,
             scheduler,
+            workers,
             state,
             task_table,
             cancel_streak_limit,
@@ -90,20 +102,27 @@ impl StarvationTestHarness {
         ready_tasks
     }
 
-    /// Run scheduler and collect dispatch statistics
+    /// Run scheduler and collect dispatch statistics.
+    ///
+    /// Uses the harness-owned `self.workers` (populated once in `new()`) so
+    /// multi-phase tests (`mr_starvation_recovery_consistency`) see the same
+    /// worker set across every simulation pass instead of running phase2
+    /// against an empty vector.
     fn run_scheduling_simulation(&mut self, max_steps: usize) -> SchedulerStats {
         let mut stats = SchedulerStats::new();
-        let mut workers = self.scheduler.take_workers();
+        if self.workers.is_empty() {
+            return stats;
+        }
 
         for step in 0..max_steps {
-            let worker_idx = step % workers.len();
-            let worker = &mut workers[worker_idx];
+            let worker_idx = step % self.workers.len();
+            let worker = &mut self.workers[worker_idx];
 
             if let Some(task_id) = worker.next_task() {
                 stats.record_dispatch(worker_idx, task_id, step);
 
                 // Track streaks for fairness analysis
-                if self.is_cancel_task(task_id) {
+                if Self::is_cancel_task(task_id) {
                     stats.update_cancel_streak(worker_idx);
                 } else {
                     stats.break_cancel_streak(worker_idx);
@@ -114,14 +133,14 @@ impl StarvationTestHarness {
             }
         }
 
-        // Note: Cannot return workers to scheduler - no API available
-        // Workers are consumed by take_workers() and cannot be re-added
-
         stats
     }
 
-    fn is_cancel_task(&self, task_id: TaskId) -> bool {
-        // Cancel tasks have generation 0 in our test setup
+    /// Cancel tasks have generation 0 in our test setup.
+    ///
+    /// Associated (non-method) so it doesn't hold a borrow on `self` while
+    /// `self.workers[..]` is borrowed mutably inside the simulation loop.
+    fn is_cancel_task(task_id: TaskId) -> bool {
         task_id.arena_index().generation() == 0
     }
 }

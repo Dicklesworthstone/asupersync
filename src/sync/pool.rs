@@ -4776,7 +4776,7 @@ mod tests {
         let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
 
         let held = futures_lite::future::block_on(pool.acquire(&cx)).expect("initial acquire");
-        let original_id = *held;
+        let original_id: u32 = *held;
 
         let waker = noop_pool_waker();
         let mut task_cx = std::task::Context::from_waker(&waker);

@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use asupersync::lab::config::LabConfig;
 use asupersync::lab::runtime::LabRuntime;
-use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
+use asupersync::runtime::scheduler::three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 use asupersync::runtime::{RuntimeState, TaskTable};
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{TaskId, Time};
@@ -32,6 +32,7 @@ use asupersync::types::{TaskId, Time};
 struct PromotionTestHarness {
     lab_runtime: LabRuntime,
     scheduler: ThreeLaneScheduler,
+    workers: Vec<ThreeLaneWorker>,
     state: Arc<ContendedMutex<RuntimeState>>,
     task_table: Arc<ContendedMutex<TaskTable>>,
     base_time: Time,
@@ -47,7 +48,7 @@ impl PromotionTestHarness {
 
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let task_table = Arc::new(ContendedMutex::new("task_table", TaskTable::new()));
-        let scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+        let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
             worker_count,
             &state,
             Some(Arc::clone(&task_table)),
@@ -55,10 +56,12 @@ impl PromotionTestHarness {
             false, // disable governor for deterministic testing
             1,
         );
+        let workers = scheduler.take_workers();
 
         Self {
             lab_runtime,
             scheduler,
+            workers,
             state,
             task_table,
             base_time: Time::from_nanos(1000), // Start at t=1000
@@ -73,7 +76,7 @@ impl PromotionTestHarness {
         for i in 0..count_per_lane {
             let task_id = TaskId::new_for_test(base_id + i as u32, 0);
             let priority = 50 + i as u32;
-            self.scheduler.schedule(task_id, priority as u8);
+            self.scheduler.inject_ready(task_id, priority as u8);
             task_set.ready_tasks.push((task_id, priority as u8));
         }
 
@@ -81,9 +84,9 @@ impl PromotionTestHarness {
         for i in 0..count_per_lane {
             let task_id = TaskId::new_for_test(base_id + count_per_lane as u32 + i as u32, 1);
             let priority = 75 + i as u32;
-            let deadline = self.base_time.add_nanos((i as u64 + 1) * 100); // staggered every 100ns
+            let deadline = self.base_time.saturating_add_nanos((i as u64 + 1) * 100); // staggered every 100ns
             self.scheduler
-                .schedule_timed(task_id, priority as u8, deadline);
+                .inject_timed(task_id, deadline);
             task_set
                 .timed_tasks
                 .push((task_id, priority as u8, deadline));
@@ -93,7 +96,7 @@ impl PromotionTestHarness {
         for i in 0..count_per_lane {
             let task_id = TaskId::new_for_test(base_id + 2 * count_per_lane as u32 + i as u32, 2);
             let priority = 100 + i as u32;
-            self.scheduler.schedule_cancel(task_id, priority as u8);
+            self.scheduler.inject_cancel(task_id, priority as u8);
             task_set.cancel_tasks.push((task_id, priority as u8));
         }
 
@@ -117,14 +120,17 @@ impl PromotionTestHarness {
     /// Run promotion scenario and collect fairness statistics
     fn run_promotion_simulation(&mut self, max_steps: usize) -> PromotionStats {
         let mut stats = PromotionStats::new();
-        let mut workers = self.scheduler.take_workers();
+
+        if self.workers.is_empty() {
+            return stats;
+        }
 
         for step in 0..max_steps {
-            let worker_idx = step % workers.len();
-            let worker = &mut workers[worker_idx];
+            let worker_idx = step % self.workers.len();
+            let worker = &mut self.workers[worker_idx];
 
             if let Some(task_id) = worker.next_task() {
-                let lane = self.classify_task_lane(task_id);
+                let lane = Self::classify_task_lane(task_id);
                 stats.record_dispatch(task_id, lane, step);
             } else {
                 stats.record_idle(step);
@@ -134,17 +140,12 @@ impl PromotionTestHarness {
             }
         }
 
-        // Return workers to scheduler
-        for worker in workers {
-            self.scheduler.add_worker(worker);
-        }
-
         stats
     }
 
-    fn classify_task_lane(&self, task_id: TaskId) -> TaskLane {
+    fn classify_task_lane(task_id: TaskId) -> TaskLane {
         // Use task generation to classify original lane intent
-        match task_id.generation() {
+        match task_id.arena_index().generation() {
             0 => TaskLane::Ready,  // Originally ready
             1 => TaskLane::Timed,  // Originally timed
             2 => TaskLane::Cancel, // Originally cancel
@@ -372,13 +373,13 @@ fn mr_edf_promotion_fairness() {
             let task_id = TaskId::new_for_test(base_id + i as u32, 1);
             let priority = 50;
             // Deadlines at t=1000, 1100, 1200, ... (100ns apart)
-            let deadline = base_time.add_nanos(i as u64 * 100);
-            harness.scheduler.schedule_timed(task_id, priority, deadline);
+            let deadline = base_time.saturating_add_nanos(i as u64 * 100);
+            harness.scheduler.inject_timed(task_id, deadline);
             timed_tasks.push((task_id, priority, deadline));
         }
 
         // Advance time to make all timed tasks due
-        harness.advance_time_for_timed_promotion(base_time.add_nanos(timed_task_count as u64 * 100));
+        harness.advance_time_for_timed_promotion(base_time.saturating_add_nanos(timed_task_count as u64 * 100));
 
         let stats = harness.run_promotion_simulation(timed_task_count + 10);
 
@@ -469,11 +470,11 @@ fn mr_cancel_promotion_precedence() {
         let later_ready = TaskId::new_for_test(4002, 0);
 
         // 1. Schedule existing cancel task
-        harness.scheduler.schedule_cancel(existing_cancel, 100);
+        harness.scheduler.inject_cancel(existing_cancel, 100);
 
         // 2. Schedule ready tasks
-        harness.scheduler.schedule(ready_task, 50);
-        harness.scheduler.schedule(later_ready, 50);
+        harness.scheduler.inject_ready(ready_task, 50);
+        harness.scheduler.inject_ready(later_ready, 50);
 
         // 3. Promote one ready task to cancel
         harness.scheduler.inject_cancel(ready_task, 110); // Higher priority than existing
@@ -527,14 +528,14 @@ fn mr_promotion_frequency_stability() {
         // Schedule ready tasks
         for i in 0..ready_tasks_count {
             let task_id = TaskId::new_for_test(5000 + i as u32, 0);
-            harness.scheduler.schedule(task_id, 50);
+            harness.scheduler.inject_ready(task_id, 50);
             ready_tasks.push(task_id);
         }
 
         // Schedule some existing cancel tasks
         for i in 0..cancel_tasks_count {
             let task_id = TaskId::new_for_test(6000 + i as u32, 2);
-            harness.scheduler.schedule_cancel(task_id, 100);
+            harness.scheduler.inject_cancel(task_id, 100);
             cancel_tasks.push(task_id);
         }
 

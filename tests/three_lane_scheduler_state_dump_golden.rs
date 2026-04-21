@@ -61,8 +61,8 @@ fn loaded_scheduler_state_dump() -> Value {
     let worker = &mut workers[0];
 
     // Schedule some mock tasks to create loaded state
-    worker.schedule_local_ready(TaskId::new_for_test(100, 0));
-    worker.schedule_local_ready(TaskId::new_for_test(101, 0));
+    worker.schedule_local(TaskId::new_for_test(100, 0), 128);
+    worker.schedule_local(TaskId::new_for_test(101, 0), 128);
     worker.schedule_local_timed(TaskId::new_for_test(102, 1), Time::from_nanos(5_000));
 
     worker.verify_scheduler_invariants();
@@ -120,13 +120,13 @@ fn cancel_streak_scheduler_state_dump() -> Value {
     let mut dispatch_sequence = Vec::new();
     for i in 0..3 {
         let task_id = TaskId::new_for_test(200 + i, 0);
-        worker.inject_cancel(task_id, 255);
+        worker.global.inject_cancel(task_id, 255);
         dispatch_sequence.push(task_id);
     }
 
     // Add some ready tasks to show fairness bounds
-    worker.schedule_local_ready(TaskId::new_for_test(300, 0));
-    worker.schedule_local_ready(TaskId::new_for_test(301, 0));
+    worker.schedule_local(TaskId::new_for_test(300, 0), 128);
+    worker.schedule_local(TaskId::new_for_test(301, 0), 128);
 
     worker.verify_scheduler_invariants();
 
@@ -205,16 +205,17 @@ fn test_multi_worker_scheduler_state_dump() {
 
     // Load different tasks on different workers
     let mut workers = scheduler.take_workers();
-    let worker0 = &mut workers[0];
-    let worker1 = &mut workers[1];
+    let (left, right) = workers.split_at_mut(1);
+    let worker0 = &mut left[0];
+    let worker1 = &mut right[0];
 
     // Worker 0: cancel and ready tasks
-    worker0.inject_cancel(TaskId::new_for_test(400, 0), 200);
-    worker0.schedule_local_ready(TaskId::new_for_test(401, 0));
+    worker0.global.inject_cancel(TaskId::new_for_test(400, 0), 200);
+    worker0.schedule_local(TaskId::new_for_test(401, 0), 128);
 
     // Worker 1: timed and ready tasks
     worker1.schedule_local_timed(TaskId::new_for_test(500, 0), Time::from_nanos(10_000));
-    worker1.schedule_local_ready(TaskId::new_for_test(501, 0));
+    worker1.schedule_local(TaskId::new_for_test(501, 0), 128);
 
     worker0.verify_scheduler_invariants();
     worker1.verify_scheduler_invariants();
@@ -313,14 +314,14 @@ fn test_fairness_bounds_scheduler_state_dump() {
     let mut cancel_tasks = Vec::new();
     for i in 0..6 {
         let task_id = TaskId::new_for_test(600 + i, 0);
-        worker.inject_cancel(task_id, 240);
+        worker.global.inject_cancel(task_id, 240);
         cancel_tasks.push(format!("{}:0", 600 + i));
     }
 
     // Add ready tasks that should get fairness protection
-    worker.schedule_local_ready(TaskId::new_for_test(700, 0));
-    worker.schedule_local_ready(TaskId::new_for_test(701, 0));
-    worker.schedule_local_ready(TaskId::new_for_test(702, 0));
+    worker.schedule_local(TaskId::new_for_test(700, 0), 128);
+    worker.schedule_local(TaskId::new_for_test(701, 0), 128);
+    worker.schedule_local(TaskId::new_for_test(702, 0), 128);
 
     worker.verify_scheduler_invariants();
 

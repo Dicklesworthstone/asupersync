@@ -11,8 +11,9 @@
 //! in CLI output formatting.
 
 #![cfg(test)]
+#![cfg(feature = "cli")]
 
-use asupersync::cli::output::{OutputFormat, OutputWriter, Outputtable};
+use asupersync::cli::output::{OutputFormat, Output, Outputtable};
 use insta::assert_snapshot;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -257,7 +258,7 @@ fn sample_config() -> Vec<ConfigEntry> {
 
 fn capture_output<T: Outputtable>(format: OutputFormat, items: &[T]) -> String {
     let buffer = CaptureBuffer::default();
-    let mut writer = OutputWriter::with_writer(format, buffer.clone());
+    let mut writer = Output::with_writer(format, buffer.clone());
 
     for item in items {
         writer.write(item).expect("write should succeed");
