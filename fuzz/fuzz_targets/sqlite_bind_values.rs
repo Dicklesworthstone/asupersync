@@ -21,6 +21,7 @@ use libfuzzer_sys::fuzz_target;
 const MAX_TEXT_CHARS: usize = 256;
 const MAX_BLOB_BYTES: usize = 1024;
 const MAX_PARAM_VALUES: usize = 5;
+const STRICT_TYPE_MISMATCH_PREFIX: &str = "type-mismatch-";
 
 #[derive(Arbitrary, Debug, Clone)]
 enum BindValueInput {
@@ -86,6 +87,14 @@ enum CountMismatchKind {
     InsertTwo,
 }
 
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum StrictColumn {
+    Integer,
+    Real,
+    Text,
+    Blob,
+}
+
 #[derive(Arbitrary, Debug)]
 enum Scenario {
     EchoValue {
@@ -109,6 +118,14 @@ enum Scenario {
         raw_c: BindValueInput,
         raw_d: BindValueInput,
         strict_integer: BindValueInput,
+    },
+    StrictTypedBindingValidation {
+        integer: i64,
+        real: f64,
+        text: String,
+        blob: Vec<u8>,
+        target: StrictColumn,
+        mismatch: BindValueInput,
     },
     StatementReuseAfterError {
         first: BindValueInput,
@@ -143,6 +160,13 @@ impl SqliteHarness {
                 raw_d,
                 strict_integer NOT NULL CHECK(typeof(strict_integer) = 'integer')
             );
+            CREATE TABLE strict_bind_probe (
+                id INTEGER PRIMARY KEY,
+                strict_integer INTEGER NOT NULL,
+                strict_real REAL NOT NULL,
+                strict_text TEXT NOT NULL,
+                strict_blob BLOB NOT NULL
+            ) STRICT;
         "#;
 
         match conn.execute_batch(&cx, schema).await {
@@ -182,6 +206,14 @@ impl SqliteHarness {
             .expect("COUNT(*) query should always return a row");
         row.get_i64("row_count")
     }
+
+    async fn strict_table_row_count(&self) -> Result<i64, SqliteError> {
+        let row = self
+            .query_row("SELECT COUNT(*) AS row_count FROM strict_bind_probe", &[])
+            .await?
+            .expect("COUNT(*) query should always return a row");
+        row.get_i64("row_count")
+    }
 }
 
 fn bind_error_message(message: &str) -> bool {
@@ -203,6 +235,43 @@ fn expect_type_mismatch<T>(result: Result<T, SqliteError>, expected: &'static st
             assert_eq!(actual, expected);
         }
         _ => panic!("expected type mismatch for {expected}"),
+    }
+}
+
+fn sanitize_text(value: String) -> String {
+    value.chars().take(MAX_TEXT_CHARS).collect()
+}
+
+fn sanitize_blob(value: Vec<u8>) -> Vec<u8> {
+    value.into_iter().take(MAX_BLOB_BYTES).collect()
+}
+
+fn invalid_value_for_strict_column(column: StrictColumn, mismatch: BindValueInput) -> SqliteValue {
+    match column {
+        StrictColumn::Integer => match mismatch.sanitize() {
+            BindValueInput::Blob(value) if !value.is_empty() => SqliteValue::Blob(value),
+            BindValueInput::Text(value) => {
+                SqliteValue::Text(format!("{STRICT_TYPE_MISMATCH_PREFIX}{value}"))
+            }
+            _ => SqliteValue::Text(format!("{STRICT_TYPE_MISMATCH_PREFIX}integer")),
+        },
+        StrictColumn::Real => match mismatch.sanitize() {
+            BindValueInput::Blob(value) if !value.is_empty() => SqliteValue::Blob(value),
+            BindValueInput::Text(value) => {
+                SqliteValue::Text(format!("{STRICT_TYPE_MISMATCH_PREFIX}{value}"))
+            }
+            _ => SqliteValue::Text(format!("{STRICT_TYPE_MISMATCH_PREFIX}real")),
+        },
+        StrictColumn::Text => match mismatch.sanitize() {
+            BindValueInput::Blob(value) if !value.is_empty() => SqliteValue::Blob(value),
+            _ => SqliteValue::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        },
+        StrictColumn::Blob => match mismatch.sanitize() {
+            BindValueInput::Text(value) => {
+                SqliteValue::Text(format!("{STRICT_TYPE_MISMATCH_PREFIX}{value}"))
+            }
+            _ => SqliteValue::Text(format!("{STRICT_TYPE_MISMATCH_PREFIX}blob")),
+        },
     }
 }
 
@@ -497,6 +566,124 @@ async fn run_scenario(scenario: Scenario) {
                     other => panic!("non-integer strict bind should fail cleanly, got {other:?}"),
                 }
             }
+        }
+        Scenario::StrictTypedBindingValidation {
+            integer,
+            real,
+            text,
+            blob,
+            target,
+            mismatch,
+        } => {
+            let real = if real.is_finite() { real } else { 0.0 };
+            let text = sanitize_text(text);
+            let blob = sanitize_blob(blob);
+            let integer_value = SqliteValue::Integer(integer);
+            let real_value = SqliteValue::Real(real);
+            let text_value = SqliteValue::Text(text.clone());
+            let blob_value = SqliteValue::Blob(blob.clone());
+
+            let mut invalid_params = [
+                integer_value.clone(),
+                real_value.clone(),
+                text_value.clone(),
+                blob_value.clone(),
+            ];
+            invalid_params[match target {
+                StrictColumn::Integer => 0,
+                StrictColumn::Real => 1,
+                StrictColumn::Text => 2,
+                StrictColumn::Blob => 3,
+            }] = invalid_value_for_strict_column(target, mismatch);
+
+            match harness
+                .execute(
+                    "INSERT INTO strict_bind_probe (strict_integer, strict_real, strict_text, strict_blob) VALUES (?1, ?2, ?3, ?4)",
+                    invalid_params.as_slice(),
+                )
+                .await
+            {
+                Err(SqliteError::Sqlite(message)) => {
+                    let message = message.to_ascii_lowercase();
+                    assert!(
+                        message.contains("cannot store")
+                            || message.contains("datatype mismatch")
+                            || message.contains("constraint"),
+                        "expected strict-type rejection, got: {message}"
+                    );
+                    assert_eq!(
+                        harness
+                            .strict_table_row_count()
+                            .await
+                            .expect("strict row-count query should succeed"),
+                        0,
+                        "failed strict-type inserts must not leave rows behind"
+                    );
+                }
+                other => panic!("strict typed bind mismatch should fail cleanly, got {other:?}"),
+            }
+
+            let valid_params = [integer_value, real_value, text_value, blob_value];
+            let affected = harness
+                .execute(
+                    "INSERT INTO strict_bind_probe (strict_integer, strict_real, strict_text, strict_blob) VALUES (?1, ?2, ?3, ?4)",
+                    valid_params.as_slice(),
+                )
+                .await
+                .expect("well-typed strict bind should succeed");
+            assert_eq!(affected, 1, "one strict row should be inserted");
+
+            let row = harness
+                .query_row(
+                    "SELECT strict_integer, typeof(strict_integer) AS integer_type, strict_real, typeof(strict_real) AS real_type, strict_text, typeof(strict_text) AS text_type, strict_blob, typeof(strict_blob) AS blob_type FROM strict_bind_probe ORDER BY id DESC LIMIT 1",
+                    &[],
+                )
+                .await
+                .expect("querying strict row should succeed")
+                .expect("strict row should exist");
+
+            assert_eq!(
+                row.get_i64("strict_integer")
+                    .expect("strict integer accessor should succeed"),
+                integer
+            );
+            assert_eq!(
+                row.get_str("integer_type")
+                    .expect("integer_type column should exist"),
+                "integer"
+            );
+
+            let stored_real = row
+                .get_f64("strict_real")
+                .expect("strict real accessor should succeed");
+            assert_eq!(stored_real.to_bits(), real.to_bits());
+            assert_eq!(
+                row.get_str("real_type")
+                    .expect("real_type column should exist"),
+                "real"
+            );
+
+            assert_eq!(
+                row.get_str("strict_text")
+                    .expect("strict text accessor should succeed"),
+                text
+            );
+            assert_eq!(
+                row.get_str("text_type")
+                    .expect("text_type column should exist"),
+                "text"
+            );
+
+            assert_eq!(
+                row.get_blob("strict_blob")
+                    .expect("strict blob accessor should succeed"),
+                blob.as_slice()
+            );
+            assert_eq!(
+                row.get_str("blob_type")
+                    .expect("blob_type column should exist"),
+                "blob"
+            );
         }
         Scenario::StatementReuseAfterError {
             first,
