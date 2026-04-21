@@ -607,6 +607,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_distributed_snapshot_merge"
+path = "fuzz_targets/distributed_snapshot_merge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_distributed_bridge"
 path = "fuzz_targets/distributed_bridge.rs"
 test = false

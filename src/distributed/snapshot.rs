@@ -6,6 +6,7 @@
 use crate::record::region::RegionState;
 use crate::types::{RegionId, TaskId, Time};
 use crate::util::ArenaIndex;
+use std::collections::BTreeMap;
 
 /// Magic bytes for snapshot binary format.
 const SNAP_MAGIC: &[u8; 4] = b"SNAP";
@@ -385,11 +386,154 @@ impl RegionSnapshot {
         let bytes = self.to_bytes();
         fnv1a_64(&bytes)
     }
+
+    /// Merges two snapshots for the same region using CRDT-style join semantics.
+    ///
+    /// The merged view keeps the maximum observed region and task states,
+    /// unions task and child identities, prefers the most recent cancellation
+    /// context, and deduplicates metadata bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotMergeError::RegionMismatch`] if the snapshots refer
+    /// to different regions.
+    pub fn merge_crdt(&self, other: &Self) -> Result<Self, SnapshotMergeError> {
+        if self.region_id != other.region_id {
+            return Err(SnapshotMergeError::RegionMismatch {
+                left: self.region_id,
+                right: other.region_id,
+            });
+        }
+
+        let mut tasks: BTreeMap<(u32, u32), TaskSnapshot> = BTreeMap::new();
+        for task in self.tasks.iter().chain(&other.tasks) {
+            tasks
+                .entry(task_key(task.task_id))
+                .and_modify(|current| *current = merge_task_snapshots(current, task))
+                .or_insert_with(|| task.clone());
+        }
+
+        let mut children: BTreeMap<(u32, u32), RegionId> = BTreeMap::new();
+        for child in self.children.iter().chain(&other.children) {
+            children.entry(region_key(*child)).or_insert(*child);
+        }
+
+        let mut metadata = self.metadata.clone();
+        metadata.extend_from_slice(&other.metadata);
+        metadata.sort_unstable();
+        metadata.dedup();
+
+        let preferred_cancel = if (self.sequence, self.timestamp.as_nanos(), self.state.as_u8())
+            >= (
+                other.sequence,
+                other.timestamp.as_nanos(),
+                other.state.as_u8(),
+            ) {
+            (&self.cancel_reason, &other.cancel_reason)
+        } else {
+            (&other.cancel_reason, &self.cancel_reason)
+        };
+
+        Ok(Self {
+            region_id: self.region_id,
+            state: max_region_state(self.state, other.state),
+            timestamp: self.timestamp.max(other.timestamp),
+            sequence: self.sequence.max(other.sequence),
+            tasks: tasks.into_values().collect(),
+            children: children.into_values().collect(),
+            finalizer_count: self.finalizer_count.max(other.finalizer_count),
+            budget: BudgetSnapshot {
+                deadline_nanos: self.budget.deadline_nanos.max(other.budget.deadline_nanos),
+                polls_remaining: self
+                    .budget
+                    .polls_remaining
+                    .max(other.budget.polls_remaining),
+                cost_remaining: self.budget.cost_remaining.max(other.budget.cost_remaining),
+            },
+            cancel_reason: preferred_cancel
+                .0
+                .clone()
+                .or_else(|| preferred_cancel.1.clone()),
+            parent: merge_parent_region(self.parent, other.parent),
+            metadata,
+        })
+    }
+}
+
+fn task_key(task_id: TaskId) -> (u32, u32) {
+    let arena = task_id.0;
+    (arena.index(), arena.generation())
+}
+
+fn region_key(region_id: RegionId) -> (u32, u32) {
+    let arena = region_id.0;
+    (arena.index(), arena.generation())
+}
+
+fn max_region_state(left: RegionState, right: RegionState) -> RegionState {
+    if left.as_u8() >= right.as_u8() {
+        left
+    } else {
+        right
+    }
+}
+
+fn max_task_state(left: TaskState, right: TaskState) -> TaskState {
+    if left.as_u8() >= right.as_u8() {
+        left
+    } else {
+        right
+    }
+}
+
+fn merge_task_snapshots(left: &TaskSnapshot, right: &TaskSnapshot) -> TaskSnapshot {
+    TaskSnapshot {
+        task_id: left.task_id,
+        state: max_task_state(left.state, right.state),
+        priority: left.priority.max(right.priority),
+    }
+}
+
+fn merge_parent_region(left: Option<RegionId>, right: Option<RegionId>) -> Option<RegionId> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(if region_key(left) >= region_key(right) {
+            left
+        } else {
+            right
+        }),
+        (Some(left), None) | (None, Some(left)) => Some(left),
+        (None, None) => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
+
+/// Error during snapshot merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotMergeError {
+    /// The two snapshots refer to different regions.
+    RegionMismatch {
+        /// Region identifier from the left-hand snapshot.
+        left: RegionId,
+        /// Region identifier from the right-hand snapshot.
+        right: RegionId,
+    },
+}
+
+impl std::fmt::Display for SnapshotMergeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RegionMismatch { left, right } => write!(
+                f,
+                "cannot CRDT-merge snapshots from different regions: left={left:?}, right={right:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SnapshotMergeError {}
 
 /// Error during snapshot deserialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -593,8 +737,6 @@ impl<'a> Cursor<'a> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::collections::BTreeMap;
-
     fn create_test_snapshot() -> RegionSnapshot {
         RegionSnapshot {
             region_id: RegionId::new_for_test(1, 0),
@@ -762,106 +904,6 @@ mod tests {
 
         assert_eq!(cursor, bytes.len(), "wire-layout scrubber missed bytes");
         out
-    }
-
-    fn task_key(task_id: TaskId) -> (u32, u32) {
-        let arena = task_id.0;
-        (arena.index(), arena.generation())
-    }
-
-    fn region_key(region_id: RegionId) -> (u32, u32) {
-        let arena = region_id.0;
-        (arena.index(), arena.generation())
-    }
-
-    fn max_region_state(left: RegionState, right: RegionState) -> RegionState {
-        if left.as_u8() >= right.as_u8() {
-            left
-        } else {
-            right
-        }
-    }
-
-    fn max_task_state(left: TaskState, right: TaskState) -> TaskState {
-        if left.as_u8() >= right.as_u8() {
-            left
-        } else {
-            right
-        }
-    }
-
-    fn merge_task_snapshots(left: &TaskSnapshot, right: &TaskSnapshot) -> TaskSnapshot {
-        TaskSnapshot {
-            task_id: left.task_id,
-            state: max_task_state(left.state, right.state),
-            priority: left.priority.max(right.priority),
-        }
-    }
-
-    fn merge_parent_region(left: Option<RegionId>, right: Option<RegionId>) -> Option<RegionId> {
-        match (left, right) {
-            (Some(left), Some(right)) => Some(if region_key(left) >= region_key(right) {
-                left
-            } else {
-                right
-            }),
-            (Some(left), None) | (None, Some(left)) => Some(left),
-            (None, None) => None,
-        }
-    }
-
-    fn merge_snapshot_views(left: &RegionSnapshot, right: &RegionSnapshot) -> RegionSnapshot {
-        assert_eq!(
-            left.region_id, right.region_id,
-            "CRDT merge requires snapshots for the same region"
-        );
-
-        let mut tasks: BTreeMap<(u32, u32), TaskSnapshot> = BTreeMap::new();
-        for task in left.tasks.iter().chain(&right.tasks) {
-            tasks
-                .entry(task_key(task.task_id))
-                .and_modify(|current| *current = merge_task_snapshots(current, task))
-                .or_insert_with(|| task.clone());
-        }
-
-        let mut children: BTreeMap<(u32, u32), RegionId> = BTreeMap::new();
-        for child in left.children.iter().chain(&right.children) {
-            children.entry(region_key(*child)).or_insert(*child);
-        }
-
-        let mut metadata = left.metadata.clone();
-        metadata.extend_from_slice(&right.metadata);
-        metadata.sort_unstable();
-        metadata.dedup();
-
-        let preferred_cancel = if (left.sequence, left.timestamp.as_nanos(), left.state.as_u8())
-            >= (right.sequence, right.timestamp.as_nanos(), right.state.as_u8())
-        {
-            (&left.cancel_reason, &right.cancel_reason)
-        } else {
-            (&right.cancel_reason, &left.cancel_reason)
-        };
-
-        RegionSnapshot {
-            region_id: left.region_id,
-            state: max_region_state(left.state, right.state),
-            timestamp: left.timestamp.max(right.timestamp),
-            sequence: left.sequence.max(right.sequence),
-            tasks: tasks.into_values().collect(),
-            children: children.into_values().collect(),
-            finalizer_count: left.finalizer_count.max(right.finalizer_count),
-            budget: BudgetSnapshot {
-                deadline_nanos: left.budget.deadline_nanos.max(right.budget.deadline_nanos),
-                polls_remaining: left.budget.polls_remaining.max(right.budget.polls_remaining),
-                cost_remaining: left.budget.cost_remaining.max(right.budget.cost_remaining),
-            },
-            cancel_reason: preferred_cancel
-                .0
-                .clone()
-                .or_else(|| preferred_cancel.1.clone()),
-            parent: merge_parent_region(left.parent, right.parent),
-            metadata,
-        }
     }
 
     fn scrub_snapshot_for_crdt_merge_snapshot_test(snapshot: &RegionSnapshot) -> serde_json::Value {
@@ -1122,10 +1164,7 @@ mod tests {
             RegionState::Closing,
             30,
             12,
-            &[
-                (1, 0, TaskState::Running, 2),
-                (3, 0, TaskState::Pending, 6),
-            ],
+            &[(1, 0, TaskState::Running, 2), (3, 0, TaskState::Pending, 6)],
             &[(10, 0), (12, 0)],
             2,
             BudgetSnapshot {
@@ -1156,39 +1195,36 @@ mod tests {
             &[64, 80],
         );
 
-        let concurrent_inserts = merge_snapshot_views(&inserts_left, &inserts_right);
-        let concurrent_deletes = merge_snapshot_views(&deletes_left, &deletes_right);
-        let mixed_insert_delete = merge_snapshot_views(&mixed_left, &mixed_right);
+        let concurrent_inserts = inserts_left.merge_crdt(&inserts_right).unwrap();
+        let concurrent_deletes = deletes_left.merge_crdt(&deletes_right).unwrap();
+        let mixed_insert_delete = mixed_left.merge_crdt(&mixed_right).unwrap();
 
         crate::assert_with_log!(
             concurrent_inserts.to_bytes()
-                == merge_snapshot_views(&inserts_right, &inserts_left).to_bytes(),
+                == inserts_right.merge_crdt(&inserts_left).unwrap().to_bytes(),
             "concurrent insert merge should be commutative",
             scrub_snapshot_for_crdt_merge_snapshot_test(&concurrent_inserts),
-            scrub_snapshot_for_crdt_merge_snapshot_test(&merge_snapshot_views(
-                &inserts_right,
-                &inserts_left
-            ))
+            scrub_snapshot_for_crdt_merge_snapshot_test(
+                &inserts_right.merge_crdt(&inserts_left).unwrap()
+            )
         );
         crate::assert_with_log!(
             concurrent_deletes.to_bytes()
-                == merge_snapshot_views(&deletes_right, &deletes_left).to_bytes(),
+                == deletes_right.merge_crdt(&deletes_left).unwrap().to_bytes(),
             "concurrent delete merge should be commutative",
             scrub_snapshot_for_crdt_merge_snapshot_test(&concurrent_deletes),
-            scrub_snapshot_for_crdt_merge_snapshot_test(&merge_snapshot_views(
-                &deletes_right,
-                &deletes_left
-            ))
+            scrub_snapshot_for_crdt_merge_snapshot_test(
+                &deletes_right.merge_crdt(&deletes_left).unwrap()
+            )
         );
         crate::assert_with_log!(
             mixed_insert_delete.to_bytes()
-                == merge_snapshot_views(&mixed_right, &mixed_left).to_bytes(),
+                == mixed_right.merge_crdt(&mixed_left).unwrap().to_bytes(),
             "mixed merge should be commutative",
             scrub_snapshot_for_crdt_merge_snapshot_test(&mixed_insert_delete),
-            scrub_snapshot_for_crdt_merge_snapshot_test(&merge_snapshot_views(
-                &mixed_right,
-                &mixed_left
-            ))
+            scrub_snapshot_for_crdt_merge_snapshot_test(
+                &mixed_right.merge_crdt(&mixed_left).unwrap()
+            )
         );
 
         insta::assert_json_snapshot!(
@@ -1198,6 +1234,23 @@ mod tests {
                 "concurrent_deletes": scrub_snapshot_for_crdt_merge_snapshot_test(&concurrent_deletes),
                 "mixed_insert_delete": scrub_snapshot_for_crdt_merge_snapshot_test(&mixed_insert_delete),
             })
+        );
+    }
+
+    #[test]
+    fn crdt_merge_rejects_region_mismatch() {
+        let left = RegionSnapshot::empty(RegionId::new_for_test(1, 0));
+        let right = RegionSnapshot::empty(RegionId::new_for_test(2, 0));
+
+        assert!(
+            matches!(
+                left.merge_crdt(&right),
+                Err(SnapshotMergeError::RegionMismatch {
+                    left: left_region,
+                    right: right_region,
+                }) if left_region == left.region_id && right_region == right.region_id
+            ),
+            "mismatched regions should be rejected cleanly",
         );
     }
 
