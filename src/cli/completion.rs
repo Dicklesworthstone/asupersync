@@ -638,6 +638,7 @@ fn generate_elvish_completions<W: Write, C: Completable>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -758,6 +759,86 @@ mod tests {
                 _ => vec![],
             }
         }
+    }
+
+    struct SnapshotCompletable;
+
+    impl Completable for SnapshotCompletable {
+        fn command_name(&self) -> &'static str {
+            "asupersync"
+        }
+
+        fn subcommands(&self) -> Vec<CompletionItem> {
+            vec![
+                CompletionItem::new("serve").description("Run the network runtime"),
+                CompletionItem::new("trace")
+                    .description("Inspect traces in /opt/asupersync/artifacts/traces"),
+                CompletionItem::new("doctor").description("Check runtime health"),
+                CompletionItem::new("completion").description("Generate shell completions"),
+            ]
+        }
+
+        fn global_options(&self) -> Vec<CompletionItem> {
+            vec![
+                CompletionItem::new("--config")
+                    .description("Read /home/tester/.config/asupersync/config.toml"),
+                CompletionItem::new("--profile").description("Select dev, staging, or prod"),
+                CompletionItem::new("--log-dir")
+                    .description("Write logs under /var/tmp/asupersync/runtime"),
+            ]
+        }
+
+        fn subcommand_options(&self, subcommand: &str) -> Vec<CompletionItem> {
+            match subcommand {
+                "serve" => vec![
+                    CompletionItem::new("--listen").description("Bind 127.0.0.1:7447"),
+                    CompletionItem::new("--tls-cert")
+                        .description("Use /etc/asupersync/tls/server.pem"),
+                ],
+                "trace" => vec![
+                    CompletionItem::new("--input")
+                        .description("Open /opt/asupersync/artifacts/traces/current.json"),
+                    CompletionItem::new("--format").description("Render json or markdown"),
+                ],
+                "doctor" => vec![
+                    CompletionItem::new("--json").description("Emit machine-readable output"),
+                    CompletionItem::new("--socket")
+                        .description("Probe /run/asupersync/doctor.sock"),
+                ],
+                "completion" => vec![
+                    CompletionItem::new("--shell").description("Target bash, zsh, or fish"),
+                    CompletionItem::new("--output")
+                        .description("Write /tmp/asupersync/completions/generated.sh"),
+                ],
+                _ => vec![],
+            }
+        }
+    }
+
+    fn scrub_completion_script(script: &str) -> String {
+        script
+            .replace(
+                "/home/tester/.config/asupersync/config.toml",
+                "<ABS_CONFIG_PATH>",
+            )
+            .replace(
+                "/opt/asupersync/artifacts/traces/current.json",
+                "<ABS_TRACE_FILE>",
+            )
+            .replace("/opt/asupersync/artifacts/traces", "<ABS_TRACE_DIR>")
+            .replace("/var/tmp/asupersync/runtime", "<ABS_LOG_DIR>")
+            .replace("/etc/asupersync/tls/server.pem", "<ABS_TLS_CERT>")
+            .replace("/run/asupersync/doctor.sock", "<ABS_DOCTOR_SOCKET>")
+            .replace(
+                "/tmp/asupersync/completions/generated.sh",
+                "<ABS_OUTPUT_FILE>",
+            )
+    }
+
+    fn render_scrubbed_completion(shell: Shell) -> String {
+        let mut buf = Vec::new();
+        generate_completions(shell, &SnapshotCompletable, &mut buf).unwrap();
+        scrub_completion_script(&String::from_utf8(buf).unwrap())
     }
 
     #[test]
@@ -1077,5 +1158,19 @@ mod tests {
             keeps_commands_until_subcommand
         );
         crate::test_complete!("elvish_subcommand_detection_scans_prior_args");
+    }
+
+    #[test]
+    fn completion_script_bundle_scrubbed_snapshot() {
+        init_test("completion_script_bundle_scrubbed_snapshot");
+
+        let snapshot = json!({
+            "bash": render_scrubbed_completion(Shell::Bash),
+            "zsh": render_scrubbed_completion(Shell::Zsh),
+            "fish": render_scrubbed_completion(Shell::Fish),
+        });
+
+        insta::assert_json_snapshot!("completion_script_bundle_scrubbed", snapshot);
+        crate::test_complete!("completion_script_bundle_scrubbed_snapshot");
     }
 }
