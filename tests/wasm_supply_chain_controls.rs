@@ -13,11 +13,19 @@ fn load_json(path: &Path) -> serde_json::Value {
 }
 
 fn sha256_hex(path: &Path) -> String {
+    use std::fmt::Write;
     let bytes = fs::read(path).expect("failed to read artifact bytes");
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let digest = hasher.finalize();
-    format!("{digest:x}")
+    // sha2 0.11 / digest 0.11 migrated the finalize output from
+    // `GenericArray<u8, _>` (LowerHex) to `Array<u8, _>` (no LowerHex).
+    // Format bytes manually so the hex output is identical to the old path.
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest.as_slice() {
+        write!(&mut out, "{byte:02x}").expect("write to String cannot fail");
+    }
+    out
 }
 
 fn load_package_policy() -> serde_json::Value {

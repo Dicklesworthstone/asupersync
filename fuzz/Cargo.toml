@@ -29,8 +29,8 @@ rustls-pemfile = "2.2"
 
 # For SCRAM-SHA-256 parsing
 base64 = "0.22"
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+hmac = "0.13"
 
 # For MessagePack serialization in trace streaming tests
 rmp-serde = "1.3"

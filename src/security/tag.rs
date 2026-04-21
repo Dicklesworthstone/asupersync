@@ -5,7 +5,7 @@
 
 use crate::security::key::AuthKey;
 use crate::types::{Symbol, SymbolKind};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::fmt;
 

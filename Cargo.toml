@@ -158,7 +158,7 @@ franken-kernel = { version = "0.2.9", path = "franken_kernel" }
 # Optional conformance tooling (CLI + reports)
 conformance = { package = "asupersync-conformance", version = "0.2.9", path = "conformance", optional = true }
 # Optional LZ4 compression for trace files
-lz4_flex = { version = "0.12", optional = true }
+lz4_flex = { version = "0.13", optional = true }
 # Optional visibility macro for test-internals feature
 visibility = { version = "0.1", optional = true }
 # Tempfile helper for test-internals and test logging utilities.
@@ -175,7 +175,7 @@ rustls-pemfile = { version = "2.2", optional = true }
 # Base64 encoding for WebSocket handshake and certificate pins
 base64 = "0.22.1"
 # SHA-1 hashing for WebSocket Sec-WebSocket-Accept calculation (RFC 6455)
-sha1 = "0.10"
+sha1 = "0.11"
 # signal-hook moved to [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # X.509 certificate parsing for SPKI extraction
 x509-parser = { version = "0.18", optional = true }
@@ -188,11 +188,11 @@ env_logger = { version = "0.11", optional = true }
 # YAML parsing for FrankenLab scenario files (CLI feature)
 serde_yaml = { version = "0.9", optional = true }
 # SQLite async wrapper - bundled by default for portability
-rusqlite = { version = "0.38", features = ["bundled"], optional = true }
+rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 # SHA-256 for HMAC-SHA256 (Macaroon caveat chains) and PostgreSQL SCRAM
-sha2 = "0.10"
+sha2 = "0.11"
 # HMAC for Macaroon capability token verification (bd-2lqyk.2)
-hmac = "0.12"
+hmac = "0.13"
 # CRC32 for Kafka RecordBatch v2 format validation (KIP-98)
 crc32fast = "1.4"
 # QUIC/HTTP3 deps remain disabled: current upstream stacks pull Tokio transitively.
@@ -207,7 +207,7 @@ rdkafka = { version = "0.39", default-features = false, optional = true }
 # Systematic concurrency testing for scheduler (loom-tests feature)
 loom = { version = "0.7", optional = true }
 # Reactor backends use HashMap on multiple platforms.
-hashbrown = "0.15"
+hashbrown = "0.17"
 # Lightweight async helpers used by web handler adapter shims.
 futures-lite = "2.6"
 # Optional gzip/deflate compression via pure-Rust miniz_oxide backend.
@@ -218,7 +218,7 @@ crossbeam-deque = "0.8.6"
 prost = "0.13"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-io-uring = { version = "0.7.11", optional = true }
+io-uring = { version = "0.7", optional = true }
 
 # wasm32 browser builds require JS-backed entropy wiring for getrandom.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -257,7 +257,7 @@ polling = "3.11"
 socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2"
 nix = { version = "0.31", features = ["fs", "poll", "socket", "uio", "user"] }
-signal-hook = "0.3"
+signal-hook = "0.4"
 # Rustls crypto provider - ring is the most widely used
 ring = { version = "0.17", optional = true }
 
@@ -269,12 +269,12 @@ tempfile = "3.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["metrics", "testing"] }
-lz4_flex = "0.12"
+lz4_flex = "0.13"
 toml = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 # Certificate generation for TLS/QUIC tests
 rcgen = "0.14"
-rayon = "1.11"
+rayon = "1.12"
 serde_yaml = "0.9"
 flate2 = "1.1"
 # Golden snapshot testing for encoded blocks and artifacts

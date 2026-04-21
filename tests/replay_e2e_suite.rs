@@ -165,9 +165,16 @@ fn dual_run_happy_semantics() -> asupersync::lab::NormalizedSemantics {
 }
 
 fn trace_hash_hex(trace: &ReplayTrace) -> String {
+    use std::fmt::Write;
     let payload = serde_json::to_vec(&trace.events).expect("serialize replay events");
     let digest = Sha256::digest(payload);
-    format!("{digest:x}")
+    // sha2 0.11 / digest 0.11 removed `LowerHex` on the finalize output
+    // (`Array<u8, _>` instead of `GenericArray<u8, _>`). Hex-encode manually.
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest.as_slice() {
+        write!(&mut out, "{byte:02x}").expect("write to String cannot fail");
+    }
+    out
 }
 
 fn to_u64(value: u128) -> u64 {

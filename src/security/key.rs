@@ -3,7 +3,7 @@
 //! Keys are 256-bit (32 byte) values used for HMAC-SHA256 authentication.
 
 use crate::util::DetRng;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
@@ -81,7 +81,7 @@ impl fmt::Debug for AuthKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha1::Sha1;
 
     fn hotp_dynamic_truncation(mac: &[u8], digits: u32) -> u32 {

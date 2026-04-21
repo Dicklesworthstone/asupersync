@@ -300,9 +300,16 @@ impl ValidationReport {
 #[allow(dead_code)]
 fn calculate_hash(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
+    use std::fmt::Write;
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    let digest = hasher.finalize();
+    // sha2 0.11 / digest 0.11: finalize output no longer implements LowerHex.
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest.as_slice() {
+        write!(&mut out, "{byte:02x}").expect("write to String cannot fail");
+    }
+    out
 }
 
 #[cfg(test)]

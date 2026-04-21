@@ -65,7 +65,7 @@
 //! - Alien CS Graveyard §11.8 (Capability-Based Security)
 
 use crate::security::key::{AUTH_KEY_SIZE, AuthKey};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::fmt;
 
