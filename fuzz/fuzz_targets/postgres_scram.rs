@@ -25,7 +25,6 @@
 use arbitrary::Arbitrary;
 use asupersync::cx::Cx;
 use asupersync::database::postgres::PgError;
-use base64::Engine;
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum fuzz input size to prevent timeouts
@@ -42,15 +41,6 @@ const MAX_NONCE_SIZE: usize = 512;
 enum ChannelBindingType {
     None,              // "n,,"
     TlsServerEndPoint, // "p=tls-server-end-point,,"
-}
-
-impl ChannelBindingType {
-    fn to_gs2_header(&self) -> &'static str {
-        match self {
-            Self::None => "n,,",
-            Self::TlsServerEndPoint => "p=tls-server-end-point,,",
-        }
-    }
 }
 
 /// Fuzz configuration for SCRAM-SHA-256 testing
@@ -301,7 +291,6 @@ struct FuzzInput {
 
 // Mock SCRAM auth implementation for testing (since we can't access the internal struct)
 struct MockScramAuth {
-    password: String,
     client_nonce: String,
     client_first_bare: String,
     salt: Option<Vec<u8>>,
@@ -324,7 +313,6 @@ impl MockScramAuth {
         let client_first_bare = format!("n={},r={}", username, client_nonce);
 
         Self {
-            password: password.to_string(),
             client_nonce,
             client_first_bare,
             salt: None,
@@ -379,7 +367,7 @@ impl MockScramAuth {
         // **ASSERTION 3: Iteration count bounds (min 4096) enforced**
         const MIN_PBKDF2_ITERATIONS: u32 = 4096;
         const MAX_PBKDF2_ITERATIONS: u32 = 600_000;
-        if iterations < MIN_PBKDF2_ITERATIONS || iterations > MAX_PBKDF2_ITERATIONS {
+        if !(MIN_PBKDF2_ITERATIONS..=MAX_PBKDF2_ITERATIONS).contains(&iterations) {
             return Err(PgError::AuthenticationFailed(format!(
                 "SCRAM iteration count {iterations} outside safe range {MIN_PBKDF2_ITERATIONS}..={MAX_PBKDF2_ITERATIONS}"
             )));
@@ -423,7 +411,7 @@ impl MockScramAuth {
                 })?;
 
         // Compute expected server signature (mock implementation)
-        let expected_sig = vec![0x12, 0x34, 0x56, 0x78]; // Mock signature for testing
+        let expected_sig = [0x12, 0x34, 0x56, 0x78]; // Mock signature for testing
 
         // **ASSERTION 2: Server signature verification uses constant-time comparison**
         let len_ok = server_sig.len() == expected_sig.len();
@@ -533,16 +521,14 @@ fuzz_target!(|input: FuzzInput| {
 
                     // Analyze results based on malformation type
                     match malformed_final {
-                        MalformedServerFinal::InvalidSignature { signature_b64 } => {
-                            // Should handle invalid base64 signatures
+                        MalformedServerFinal::InvalidSignature { signature_b64 }
                             if base64::Engine::decode(
                                 &base64::engine::general_purpose::STANDARD,
                                 signature_b64,
                             )
-                            .is_err()
-                            {
-                                assert!(result.is_err(), "Should reject invalid base64 signature");
-                            }
+                            .is_err() =>
+                        {
+                            assert!(result.is_err(), "Should reject invalid base64 signature");
                         }
                         MalformedServerFinal::MissingSignature { .. } => {
                             // Should reject missing signature
@@ -593,19 +579,3 @@ fuzz_target!(|input: FuzzInput| {
     // Memory safety is validated by AddressSanitizer
     // Timing attack resistance is ensured by constant-time comparisons
 });
-
-// Helper function to add the [[bin]] entry in Cargo.toml
-fn _add_cargo_toml_entry() {
-    // This is a documentation function showing the required Cargo.toml entry:
-    //
-    // [[bin]]
-    // name = "postgres_scram"
-    // path = "fuzz_targets/postgres_scram.rs"
-    // test = false
-    // doc = false
-    // bench = false
-}
-
-// Include base64 and sha2 for mock implementations
-use base64;
-use sha2;
