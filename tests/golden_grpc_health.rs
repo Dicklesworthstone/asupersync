@@ -14,7 +14,7 @@ use asupersync::grpc::health::{
 };
 use asupersync::grpc::status::Status;
 use asupersync::grpc::streaming::{Request, Response};
-use insta::{assert_debug_snapshot, Settings};
+use insta::{Settings, assert_debug_snapshot};
 
 /// Complete health service response capture for golden testing
 #[derive(Debug, Clone)]
@@ -101,7 +101,7 @@ fn capture_service_state(service: &HealthService) -> ServiceStateSnapshot {
         "test.service.Alpha",
         "test.service.Beta",
         "test.service.Gamma",
-        "",  // Empty service (overall health)
+        "", // Empty service (overall health)
     ];
 
     let mut services = Vec::new();
@@ -412,6 +412,9 @@ This ensures the health service maintains protocol compliance for production gRP
 "#;
 
     fs::create_dir_all("tests/snapshots/grpc_health")?;
-    fs::write("tests/snapshots/grpc_health/PROVENANCE.md", provenance_content)?;
+    fs::write(
+        "tests/snapshots/grpc_health/PROVENANCE.md",
+        provenance_content,
+    )?;
     Ok(())
 }
