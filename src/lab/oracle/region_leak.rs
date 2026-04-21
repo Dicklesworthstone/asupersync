@@ -892,11 +892,15 @@ mod tests {
         // Wait longer than timeout would allow
         std::thread::sleep(Duration::from_millis(50));
 
-        // Should detect stuck creation
-        let violations = oracle.check_for_violations().unwrap();
-        assert!(!violations.is_empty());
+        // `with_strict_timeouts` enables `fail_fast_mode`, which causes
+        // `check_for_violations` to return `Err` as soon as any violation is
+        // recorded. Drain the recorded violation list directly instead of
+        // unwrapping the result, which would panic in fail-fast mode.
+        let _ = oracle.check_for_violations();
+        let recorded: Vec<_> = oracle.violations().iter().cloned().collect();
+        assert!(!recorded.is_empty());
         assert!(matches!(
-            violations[0].violation_type,
+            recorded[0].violation_type,
             ViolationType::StuckCreation
         ));
     }

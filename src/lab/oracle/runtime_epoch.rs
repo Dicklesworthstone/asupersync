@@ -931,8 +931,10 @@ mod tests {
         let oracle = RuntimeEpochOracle::with_default_config();
         let now = Time::ZERO;
 
-        // Advance scheduler to epoch 3
-        oracle.notify_epoch_transition_complete(RuntimeModule::Scheduler, EpochId::new(3), now);
+        // Advance scheduler to epoch 2 (the next valid epoch). Jumping past
+        // the expected next epoch would itself record a `MissedTransition`
+        // violation and inflate the count beyond what this test targets.
+        oracle.notify_epoch_transition_complete(RuntimeModule::Scheduler, EpochId::new(2), now);
 
         // Try to update using old epoch 1 - should trigger stale update violation
         oracle.notify_epoch_update(RuntimeModule::Scheduler, EpochId::new(1), now);
