@@ -423,6 +423,8 @@ impl RegionTreeOracle {
 mod tests {
     use super::*;
     use crate::util::ArenaIndex;
+    use insta::assert_snapshot;
+    use std::collections::HashMap;
 
     fn region(n: u32) -> RegionId {
         RegionId::from_arena(ArenaIndex::new(n, 0))
@@ -435,6 +437,56 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn dump_region_tree_scrubbed(name: &str, oracle: &RegionTreeOracle) -> String {
+        let ids = oracle.sorted_region_ids();
+        let aliases: HashMap<RegionId, String> = ids
+            .iter()
+            .enumerate()
+            .map(|(index, region_id)| (*region_id, format!("[REGION_{index}]")))
+            .collect();
+
+        let root = oracle
+            .root()
+            .map(|region_id| aliases[&region_id].clone())
+            .unwrap_or_else(|| "none".to_owned());
+
+        let mut lines = vec![
+            format!("scenario: {name}"),
+            format!("root: {root}"),
+            format!("region_count: {}", oracle.region_count()),
+            "regions:".to_owned(),
+        ];
+
+        for region_id in ids {
+            let entry = oracle
+                .regions
+                .get(&region_id)
+                .expect("snapshot region should exist");
+            let parent = entry
+                .parent
+                .map(|parent_id| aliases[&parent_id].clone())
+                .unwrap_or_else(|| "none".to_owned());
+            let depth = oracle
+                .depth(region_id)
+                .map_or_else(|| "cycle".to_owned(), |depth| depth.to_string());
+            let mut children: Vec<String> = entry
+                .subregions
+                .iter()
+                .copied()
+                .map(|child_id| aliases[&child_id].clone())
+                .collect();
+            children.sort();
+
+            lines.push(format!("- id: {}", aliases[&region_id]));
+            lines.push(format!("  parent: {parent}"));
+            lines.push(format!("  depth: {depth}"));
+            lines.push(format!("  created_at: {:?}", entry.created_at));
+            lines.push(format!("  children: [{}]", children.join(", ")));
+        }
+
+        lines.join("\n")
     }
 
     // === Valid Tree Tests ===
@@ -816,6 +868,43 @@ mod tests {
         let root = oracle.root();
         crate::assert_with_log!(root.is_none(), "root none", None::<RegionId>, root);
         crate::test_complete!("root_returns_none_for_multiple_roots");
+    }
+
+    #[test]
+    fn region_tree_structured_dump_scrubbed_snapshot() {
+        init_test("region_tree_structured_dump_scrubbed_snapshot");
+
+        let mut branching = RegionTreeOracle::new();
+        branching.on_region_create(region(10), None, t(10));
+        branching.on_region_create(region(20), Some(region(10)), t(20));
+        branching.on_region_create(region(30), Some(region(10)), t(30));
+        branching.on_region_create(region(40), Some(region(20)), t(40));
+        branching.on_region_create(region(50), Some(region(20)), t(50));
+
+        let mut nested = RegionTreeOracle::new();
+        nested.on_region_create(region(100), None, t(100));
+        nested.on_region_create(region(110), Some(region(100)), t(110));
+        nested.on_region_create(region(120), Some(region(110)), t(120));
+        nested.on_region_create(region(130), Some(region(120)), t(130));
+        nested.on_region_create(region(140), Some(region(130)), t(140));
+
+        let mut reparented = RegionTreeOracle::new();
+        reparented.on_region_create(region(200), None, t(200));
+        reparented.on_region_create(region(210), Some(region(200)), t(210));
+        reparented.on_region_create(region(220), Some(region(200)), t(220));
+        reparented.on_region_create(region(230), Some(region(210)), t(230));
+        reparented.on_region_create(region(240), Some(region(230)), t(240));
+        reparented.on_region_create(region(230), Some(region(220)), t(250));
+
+        let snapshot = [
+            dump_region_tree_scrubbed("branching", &branching),
+            dump_region_tree_scrubbed("nested_chain", &nested),
+            dump_region_tree_scrubbed("reparented_subtree", &reparented),
+        ]
+        .join("\n\n");
+
+        assert_snapshot!("region_tree_structured_dump_scrubbed", snapshot);
+        crate::test_complete!("region_tree_structured_dump_scrubbed_snapshot");
     }
 
     #[test]
