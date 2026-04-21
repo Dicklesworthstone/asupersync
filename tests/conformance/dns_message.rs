@@ -5,6 +5,8 @@
 //! - QR/OPCODE/AA/TC/RD/RA/Z/RCODE bit positions and semantics
 //! - QDCOUNT/ANCOUNT/NSCOUNT/ARCOUNT message section counters
 //! - Domain name compression pointers correctly expanded
+//! - Question type encodings for A/AAAA/MX/TXT/CNAME/PTR queries
+//! - EDNS0 OPT additional-record framing for replayable packet vectors
 //! - UDP 512-byte limit triggers TC (truncated) flag
 //! - DNS class values: IN (Internet), CH (Chaos), ANY (wildcard)
 //! - Common RCODE values: NOERROR, FORMERR, SERVFAIL, NXDOMAIN, NOTIMP, REFUSED
@@ -43,11 +45,8 @@
 //!     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
 //! ```
 
-use asupersync::net::dns::{DnsError, Resolver, ResolverConfig};
-use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 /// RFC 2119 requirement level for conformance testing
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,7 +69,7 @@ pub struct DnsConformanceResult {
 }
 
 /// DNS conformance test categories per RFC 1035 Section 4.1
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DnsTestCategory {
     /// Header ID field echo validation
     HeaderIdEcho,
@@ -80,6 +79,12 @@ pub enum DnsTestCategory {
     SectionCounters,
     /// Domain name compression pointer handling
     NameCompression,
+    /// DNS question type encoding and extraction
+    QuestionTypes,
+    /// Additional record framing (for example EDNS0 OPT)
+    AdditionalRecords,
+    /// Replayable golden packet vectors
+    GoldenVectors,
     /// UDP message size limits and TC flag
     MessageSizeLimits,
     /// DNS class field validation (IN/CH/ANY)
@@ -101,15 +106,12 @@ pub enum DnsTestVerdict {
 pub struct DnsMessageConformanceHarness {
     /// Test execution timeout
     timeout: Duration,
-    /// Mock DNS server for controlled testing
-    mock_server: Option<MockDnsServer>,
 }
 
 impl Default for DnsMessageConformanceHarness {
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(30),
-            mock_server: None,
         }
     }
 }
@@ -118,11 +120,6 @@ impl DnsMessageConformanceHarness {
     /// Create new DNS message format conformance harness
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Create harness with custom timeout
-    pub fn with_timeout(timeout: Duration) -> Self {
-        Self { timeout, mock_server: None }
     }
 
     /// Run all DNS message format conformance tests
@@ -140,6 +137,15 @@ impl DnsMessageConformanceHarness {
 
         // Test name compression
         results.extend(self.test_name_compression());
+
+        // Test question type encodings
+        results.extend(self.test_question_types());
+
+        // Test additional records
+        results.extend(self.test_additional_records());
+
+        // Test replayable golden vectors
+        results.extend(self.test_golden_vectors());
 
         // Test message size limits
         results.extend(self.test_message_size_limits());
@@ -331,6 +337,101 @@ impl DnsMessageConformanceHarness {
         ]
     }
 
+    /// Test DNS question types.
+    fn test_question_types(&self) -> Vec<DnsConformanceResult> {
+        vec![
+            self.run_test(
+                "QTP001",
+                "Question type A encodes as 1",
+                DnsTestCategory::QuestionTypes,
+                RequirementLevel::Must,
+                || self.test_question_type_encoding("example.com", TYPE_A, "A"),
+            ),
+            self.run_test(
+                "QTP002",
+                "Question type AAAA encodes as 28",
+                DnsTestCategory::QuestionTypes,
+                RequirementLevel::Must,
+                || self.test_question_type_encoding("example.com", TYPE_AAAA, "AAAA"),
+            ),
+            self.run_test(
+                "QTP003",
+                "Question type MX encodes as 15",
+                DnsTestCategory::QuestionTypes,
+                RequirementLevel::Must,
+                || self.test_question_type_encoding("example.com", TYPE_MX, "MX"),
+            ),
+            self.run_test(
+                "QTP004",
+                "Question type TXT encodes as 16",
+                DnsTestCategory::QuestionTypes,
+                RequirementLevel::Must,
+                || self.test_question_type_encoding("example.com", TYPE_TXT, "TXT"),
+            ),
+            self.run_test(
+                "QTP005",
+                "Question type CNAME encodes as 5",
+                DnsTestCategory::QuestionTypes,
+                RequirementLevel::Must,
+                || self.test_question_type_encoding("example.com", TYPE_CNAME, "CNAME"),
+            ),
+            self.run_test(
+                "QTP006",
+                "Question type PTR encodes as 12",
+                DnsTestCategory::QuestionTypes,
+                RequirementLevel::Must,
+                || self.test_question_type_encoding("ptr.example.com", TYPE_PTR, "PTR"),
+            ),
+        ]
+    }
+
+    /// Test additional-record framing.
+    fn test_additional_records(&self) -> Vec<DnsConformanceResult> {
+        vec![
+            self.run_test(
+                "ADR001",
+                "EDNS0 OPT additional record encodes type 41 and payload size",
+                DnsTestCategory::AdditionalRecords,
+                RequirementLevel::Must,
+                || self.test_edns0_opt_record_encoding(),
+            ),
+            self.run_test(
+                "ADR002",
+                "ARCOUNT matches presence of a single OPT additional record",
+                DnsTestCategory::AdditionalRecords,
+                RequirementLevel::Must,
+                || self.test_edns0_opt_record_count(),
+            ),
+        ]
+    }
+
+    /// Test replayable golden vectors.
+    fn test_golden_vectors(&self) -> Vec<DnsConformanceResult> {
+        vec![
+            self.run_test(
+                "GLD001",
+                "A query golden vector remains stable for replay",
+                DnsTestCategory::GoldenVectors,
+                RequirementLevel::Must,
+                || self.test_a_query_golden_vector(),
+            ),
+            self.run_test(
+                "GLD002",
+                "PTR query golden vector remains stable for replay",
+                DnsTestCategory::GoldenVectors,
+                RequirementLevel::Must,
+                || self.test_ptr_query_golden_vector(),
+            ),
+            self.run_test(
+                "GLD003",
+                "OPT additional-record golden vector remains stable for replay",
+                DnsTestCategory::GoldenVectors,
+                RequirementLevel::Must,
+                || self.test_opt_record_golden_vector(),
+            ),
+        ]
+    }
+
     /// Test UDP message size limits (RFC 1035 Section 4.2.1)
     fn test_message_size_limits(&self) -> Vec<DnsConformanceResult> {
         vec![
@@ -467,11 +568,19 @@ impl DnsMessageConformanceHarness {
         F: FnOnce() -> Result<(), String>,
     {
         let start = Instant::now();
-        let (verdict, error_message) = match test_fn() {
+        let (mut verdict, mut error_message) = match test_fn() {
             Ok(()) => (DnsTestVerdict::Pass, None),
             Err(err) => (DnsTestVerdict::Fail, Some(err)),
         };
-        let execution_time_ms = start.elapsed().as_millis() as u64;
+        let elapsed = start.elapsed();
+        let execution_time_ms = elapsed.as_millis() as u64;
+
+        if elapsed > self.timeout {
+            verdict = DnsTestVerdict::Fail;
+            error_message.get_or_insert_with(|| {
+                format!("test exceeded timeout of {}ms", self.timeout.as_millis())
+            });
+        }
 
         DnsConformanceResult {
             test_id: test_id.to_string(),
@@ -492,9 +601,9 @@ impl DnsMessageConformanceHarness {
     fn test_id_echo_validation(&self) -> Result<(), String> {
         // Test that response ID matches query ID
         let test_packet = create_dns_response_packet(
-            0x1234,    // ID
-            0x8000,    // Flags (QR=1, response)
-            0, 0, 0, 0 // Counters
+            0x1234, // ID
+            0x8000, // Flags (QR=1, response)
+            0, 0, 0, 0, // Counters
         );
 
         let id = parse_dns_id(&test_packet)?;
@@ -508,9 +617,9 @@ impl DnsMessageConformanceHarness {
     /// Test ID mismatch rejection
     fn test_id_mismatch_rejection(&self) -> Result<(), String> {
         let response_packet = create_dns_response_packet(
-            0x5678,    // Different ID
-            0x8000,    // Flags
-            0, 0, 0, 0
+            0x5678, // Different ID
+            0x8000, // Flags
+            0, 0, 0, 0,
         );
 
         // Simulate parsing with expected ID 0x1234
@@ -539,7 +648,10 @@ impl DnsMessageConformanceHarness {
         if id == 0xFFFF {
             Ok(())
         } else {
-            Err(format!("Max ID not supported: expected 0xFFFF, got 0x{:04x}", id))
+            Err(format!(
+                "Max ID not supported: expected 0xFFFF, got 0x{:04x}",
+                id
+            ))
         }
     }
 
@@ -577,8 +689,10 @@ impl DnsMessageConformanceHarness {
             let packet = create_dns_response_packet(0x1234, 0x8000 | flags, 0, 0, 0, 0);
             let opcode = parse_dns_opcode(&packet)?;
             if opcode != expected_opcode {
-                return Err(format!("{} opcode parsing failed: expected {}, got {}",
-                    name, expected_opcode, opcode));
+                return Err(format!(
+                    "{} opcode parsing failed: expected {}, got {}",
+                    name, expected_opcode, opcode
+                ));
             }
         }
         Ok(())
@@ -681,8 +795,10 @@ impl DnsMessageConformanceHarness {
             let packet = create_dns_response_packet(0x1234, 0x8000 | rcode, 0, 0, 0, 0);
             let parsed_rcode = parse_rcode(&packet)?;
             if parsed_rcode != rcode as u8 {
-                return Err(format!("{} RCODE parsing failed: expected {}, got {}",
-                    name, rcode, parsed_rcode));
+                return Err(format!(
+                    "{} RCODE parsing failed: expected {}, got {}",
+                    name, rcode, parsed_rcode
+                ));
             }
         }
         Ok(())
@@ -694,14 +810,20 @@ impl DnsMessageConformanceHarness {
 
     /// Test QDCOUNT (question count)
     fn test_qdcount_questions(&self) -> Result<(), String> {
-        let test_cases = [(0, "no questions"), (1, "single question"), (5, "multiple questions")];
+        let test_cases = [
+            (0, "no questions"),
+            (1, "single question"),
+            (5, "multiple questions"),
+        ];
 
         for (count, description) in test_cases {
             let packet = create_dns_response_packet(0x1234, 0x8000, count, 0, 0, 0);
             let qdcount = parse_qdcount(&packet)?;
             if qdcount != count {
-                return Err(format!("QDCOUNT {} failed: expected {}, got {}",
-                    description, count, qdcount));
+                return Err(format!(
+                    "QDCOUNT {} failed: expected {}, got {}",
+                    description, count, qdcount
+                ));
             }
         }
         Ok(())
@@ -709,14 +831,20 @@ impl DnsMessageConformanceHarness {
 
     /// Test ANCOUNT (answer count)
     fn test_ancount_answers(&self) -> Result<(), String> {
-        let test_cases = [(0, "no answers"), (1, "single answer"), (10, "multiple answers")];
+        let test_cases = [
+            (0, "no answers"),
+            (1, "single answer"),
+            (10, "multiple answers"),
+        ];
 
         for (count, description) in test_cases {
             let packet = create_dns_response_packet(0x1234, 0x8000, 0, count, 0, 0);
             let ancount = parse_ancount(&packet)?;
             if ancount != count {
-                return Err(format!("ANCOUNT {} failed: expected {}, got {}",
-                    description, count, ancount));
+                return Err(format!(
+                    "ANCOUNT {} failed: expected {}, got {}",
+                    description, count, ancount
+                ));
             }
         }
         Ok(())
@@ -724,14 +852,20 @@ impl DnsMessageConformanceHarness {
 
     /// Test NSCOUNT (authority record count)
     fn test_nscount_authority(&self) -> Result<(), String> {
-        let test_cases = [(0, "no authority"), (1, "single authority"), (3, "multiple authority")];
+        let test_cases = [
+            (0, "no authority"),
+            (1, "single authority"),
+            (3, "multiple authority"),
+        ];
 
         for (count, description) in test_cases {
             let packet = create_dns_response_packet(0x1234, 0x8000, 0, 0, count, 0);
             let nscount = parse_nscount(&packet)?;
             if nscount != count {
-                return Err(format!("NSCOUNT {} failed: expected {}, got {}",
-                    description, count, nscount));
+                return Err(format!(
+                    "NSCOUNT {} failed: expected {}, got {}",
+                    description, count, nscount
+                ));
             }
         }
         Ok(())
@@ -739,14 +873,20 @@ impl DnsMessageConformanceHarness {
 
     /// Test ARCOUNT (additional record count)
     fn test_arcount_additional(&self) -> Result<(), String> {
-        let test_cases = [(0, "no additional"), (1, "single additional"), (7, "multiple additional")];
+        let test_cases = [
+            (0, "no additional"),
+            (1, "single additional"),
+            (7, "multiple additional"),
+        ];
 
         for (count, description) in test_cases {
             let packet = create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, count);
             let arcount = parse_arcount(&packet)?;
             if arcount != count {
-                return Err(format!("ARCOUNT {} failed: expected {}, got {}",
-                    description, count, arcount));
+                return Err(format!(
+                    "ARCOUNT {} failed: expected {}, got {}",
+                    description, count, arcount
+                ));
             }
         }
         Ok(())
@@ -781,31 +921,37 @@ impl DnsMessageConformanceHarness {
         // Header
         packet.extend_from_slice(&0x1234u16.to_be_bytes()); // ID
         packet.extend_from_slice(&0x8000u16.to_be_bytes()); // Flags
-        packet.extend_from_slice(&1u16.to_be_bytes());      // QDCOUNT
-        packet.extend_from_slice(&1u16.to_be_bytes());      // ANCOUNT
-        packet.extend_from_slice(&0u16.to_be_bytes());      // NSCOUNT
-        packet.extend_from_slice(&0u16.to_be_bytes());      // ARCOUNT
+        packet.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
+        packet.extend_from_slice(&1u16.to_be_bytes()); // ANCOUNT
+        packet.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
+        packet.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
 
         // Question: example.com (at offset 12)
-        packet.push(7); packet.extend_from_slice(b"example");
-        packet.push(3); packet.extend_from_slice(b"com");
+        packet.push(7);
+        packet.extend_from_slice(b"example");
+        packet.push(3);
+        packet.extend_from_slice(b"com");
         packet.push(0);
-        packet.extend_from_slice(&1u16.to_be_bytes());      // Type A
-        packet.extend_from_slice(&1u16.to_be_bytes());      // Class IN
+        packet.extend_from_slice(&1u16.to_be_bytes()); // Type A
+        packet.extend_from_slice(&1u16.to_be_bytes()); // Class IN
 
         // Answer with compression pointer to "example.com"
+        let answer_offset = packet.len();
         let example_com_offset = 12;
         packet.extend_from_slice(&(0xC000u16 | example_com_offset).to_be_bytes()); // Name pointer
-        packet.extend_from_slice(&1u16.to_be_bytes());      // Type A
-        packet.extend_from_slice(&1u16.to_be_bytes());      // Class IN
-        packet.extend_from_slice(&300u32.to_be_bytes());    // TTL
-        packet.extend_from_slice(&4u16.to_be_bytes());      // RDLENGTH
-        packet.extend_from_slice(&[192, 0, 2, 1]);          // 192.0.2.1
+        packet.extend_from_slice(&1u16.to_be_bytes()); // Type A
+        packet.extend_from_slice(&1u16.to_be_bytes()); // Class IN
+        packet.extend_from_slice(&300u32.to_be_bytes()); // TTL
+        packet.extend_from_slice(&4u16.to_be_bytes()); // RDLENGTH
+        packet.extend_from_slice(&[192, 0, 2, 1]); // 192.0.2.1
 
         // Test that compression pointer is correctly expanded
-        let name = extract_compressed_name(&packet, 12 + 11 + 4)?; // After question
+        let name = extract_compressed_name(&packet, answer_offset)?;
         if name != "example.com" {
-            return Err(format!("Name compression failed: expected 'example.com', got '{}'", name));
+            return Err(format!(
+                "Name compression failed: expected 'example.com', got '{}'",
+                name
+            ));
         }
 
         Ok(())
@@ -817,7 +963,7 @@ impl DnsMessageConformanceHarness {
 
         // Create a compression pointer loop: pointer at offset 12 points to offset 14,
         // and pointer at offset 14 points back to offset 12
-        packet.truncate(12);  // Remove existing data after header
+        packet.truncate(12); // Remove existing data after header
         packet.extend_from_slice(&0xC00Eu16.to_be_bytes()); // Points to offset 14
         packet.extend_from_slice(&0xC00Cu16.to_be_bytes()); // Points to offset 12
 
@@ -869,23 +1015,162 @@ impl DnsMessageConformanceHarness {
         packet.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 0]); // Counters
 
         // First name: "com" at offset 12
-        packet.push(3); packet.extend_from_slice(b"com"); packet.push(0);
+        let com_offset = packet.len();
+        packet.push(3);
+        packet.extend_from_slice(b"com");
+        packet.push(0);
 
         // Second name: pointer to "com" at offset 16
-        let com_offset = 12;
-        packet.extend_from_slice(&(0xC000u16 | com_offset).to_be_bytes());
+        let second_name_offset = packet.len();
+        packet.extend_from_slice(&(0xC000u16 | (com_offset as u16)).to_be_bytes());
 
         // Question pointing to second name
-        packet.extend_from_slice(&(0xC000u16 | 16u16).to_be_bytes()); // Points to pointer at offset 16
+        let question_name_offset = packet.len();
+        packet.extend_from_slice(&(0xC000u16 | (second_name_offset as u16)).to_be_bytes());
         packet.extend_from_slice(&[0, 1, 0, 1]); // Type A, Class IN
 
         // Test multilevel expansion
-        let name = extract_compressed_name(&packet, 18)?;
+        let name = extract_compressed_name(&packet, question_name_offset)?;
         if name != "com" {
-            return Err(format!("Multilevel compression failed: expected 'com', got '{}'", name));
+            return Err(format!(
+                "Multilevel compression failed: expected 'com', got '{}'",
+                name
+            ));
         }
 
         Ok(())
+    }
+
+    // =========================================================================
+    // Question Type Tests
+    // =========================================================================
+
+    fn test_question_type_encoding(
+        &self,
+        name: &str,
+        qtype: u16,
+        display_name: &str,
+    ) -> Result<(), String> {
+        let packet = create_dns_query_with_class(0x1234, name, qtype, CLASS_IN);
+        let actual_type = extract_question_type(&packet)?;
+
+        if actual_type != qtype {
+            return Err(format!(
+                "{display_name} question type mismatch: expected {}, got {}",
+                qtype, actual_type
+            ));
+        }
+
+        if extract_question_class(&packet)? != CLASS_IN {
+            return Err(format!(
+                "{display_name} question class was not encoded as IN"
+            ));
+        }
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Additional Record Tests
+    // =========================================================================
+
+    fn test_edns0_opt_record_encoding(&self) -> Result<(), String> {
+        let opt_record = create_opt_record(4096, 0, 0, 0x8000, &[0xde, 0xad, 0xbe, 0xef]);
+        let packet =
+            create_dns_query_with_additional(0x1234, "example.com", TYPE_A, CLASS_IN, &opt_record);
+        let opt = extract_additional_record(&packet)?;
+
+        if opt.record_type != TYPE_OPT {
+            return Err(format!(
+                "OPT record type mismatch: expected {}, got {}",
+                TYPE_OPT, opt.record_type
+            ));
+        }
+
+        if opt.class != 4096 {
+            return Err(format!(
+                "OPT UDP payload size mismatch: expected 4096, got {}",
+                opt.class
+            ));
+        }
+
+        if opt.ttl != 0x0000_8000 {
+            return Err(format!(
+                "OPT TTL field mismatch: expected 0x00008000, got 0x{:08x}",
+                opt.ttl
+            ));
+        }
+
+        if opt.rdata != [0xde, 0xad, 0xbe, 0xef] {
+            return Err(format!("OPT RDATA mismatch: got {:02x?}", opt.rdata));
+        }
+
+        Ok(())
+    }
+
+    fn test_edns0_opt_record_count(&self) -> Result<(), String> {
+        let opt_record = create_opt_record(1232, 0, 0, 0, &[]);
+        let packet = create_dns_query_with_additional(
+            0x1234,
+            "example.com",
+            TYPE_AAAA,
+            CLASS_IN,
+            &opt_record,
+        );
+
+        if parse_arcount(&packet)? != 1 {
+            return Err("Expected ARCOUNT=1 for a single OPT record".to_string());
+        }
+
+        let opt = extract_additional_record(&packet)?;
+        if opt.name_len != 1 {
+            return Err(format!(
+                "OPT owner name must be the root label terminator, got {} bytes",
+                opt.name_len
+            ));
+        }
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Golden Vector Tests
+    // =========================================================================
+
+    fn test_a_query_golden_vector(&self) -> Result<(), String> {
+        let packet = create_dns_query_with_class(0x1234, "example.com", TYPE_A, CLASS_IN);
+        let expected = vec![
+            0x12, 0x34, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'e',
+            b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, 0x00, 0x01, 0x00,
+            0x01,
+        ];
+
+        assert_packet_matches_golden("A query", &packet, &expected)
+    }
+
+    fn test_ptr_query_golden_vector(&self) -> Result<(), String> {
+        let packet = create_dns_query_with_class(0x1234, "ptr.example.com", TYPE_PTR, CLASS_IN);
+        let expected = vec![
+            0x12, 0x34, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, b'p',
+            b't', b'r', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm',
+            0x00, 0x00, 0x0c, 0x00, 0x01,
+        ];
+
+        assert_packet_matches_golden("PTR query", &packet, &expected)
+    }
+
+    fn test_opt_record_golden_vector(&self) -> Result<(), String> {
+        let opt_record = create_opt_record(4096, 0, 0, 0x8000, &[0xde, 0xad, 0xbe, 0xef]);
+        let packet =
+            create_dns_query_with_additional(0x1234, "example.com", TYPE_A, CLASS_IN, &opt_record);
+        let expected = vec![
+            0x12, 0x34, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x07, b'e',
+            b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, 0x00, 0x01, 0x00,
+            0x01, 0x00, 0x00, 0x29, 0x10, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x04, 0xde, 0xad,
+            0xbe, 0xef,
+        ];
+
+        assert_packet_matches_golden("OPT record", &packet, &expected)
     }
 
     // =========================================================================
@@ -940,7 +1225,7 @@ impl DnsMessageConformanceHarness {
         // Should either parse with TC set or reject gracefully
         let result = parse_dns_id(&oversized_packet);
         match result {
-            Ok(_) => Ok(()), // Large packets can be parsed (up to implementation)
+            Ok(_) => Ok(()),  // Large packets can be parsed (up to implementation)
             Err(_) => Ok(()), // Or rejected - both are acceptable
         }
     }
@@ -955,7 +1240,10 @@ impl DnsMessageConformanceHarness {
         let class = extract_question_class(&packet_with_class_in)?;
 
         if class != 1 {
-            return Err(format!("Class IN not processed correctly: expected 1, got {}", class));
+            return Err(format!(
+                "Class IN not processed correctly: expected 1, got {}",
+                class
+            ));
         }
         Ok(())
     }
@@ -966,7 +1254,10 @@ impl DnsMessageConformanceHarness {
         let class = extract_question_class(&packet_with_class_ch)?;
 
         if class != 3 {
-            return Err(format!("Class CH not processed correctly: expected 3, got {}", class));
+            return Err(format!(
+                "Class CH not processed correctly: expected 3, got {}",
+                class
+            ));
         }
         Ok(())
     }
@@ -977,7 +1268,10 @@ impl DnsMessageConformanceHarness {
         let class = extract_question_class(&packet_with_class_any)?;
 
         if class != 255 {
-            return Err(format!("Class ANY not processed correctly: expected 255, got {}", class));
+            return Err(format!(
+                "Class ANY not processed correctly: expected 255, got {}",
+                class
+            ));
         }
         Ok(())
     }
@@ -990,7 +1284,7 @@ impl DnsMessageConformanceHarness {
 
         // Parser should handle reserved classes gracefully
         if class == 0 {
-            Ok(())) // Acceptable - parser extracted the value
+            Ok(()) // Acceptable - parser extracted the value
         } else {
             Err("Invalid class handling unexpected".to_string())
         }
@@ -1074,8 +1368,10 @@ impl DnsMessageConformanceHarness {
             let parsed_rcode = parse_rcode(&packet)?;
 
             if parsed_rcode != (rcode as u8) {
-                return Err(format!("Reserved RCODE {} parsing failed: expected {}, got {}",
-                    rcode, rcode, parsed_rcode));
+                return Err(format!(
+                    "Reserved RCODE {} parsing failed: expected {}, got {}",
+                    rcode, rcode, parsed_rcode
+                ));
             }
         }
         Ok(())
@@ -1086,21 +1382,21 @@ impl DnsMessageConformanceHarness {
 // Helper Functions for DNS Message Construction and Parsing
 // =============================================================================
 
-/// Mock DNS server for controlled testing
-struct MockDnsServer {
-    responses: HashMap<String, Vec<u8>>,
-}
+const TYPE_A: u16 = 1;
+const TYPE_CNAME: u16 = 5;
+const TYPE_PTR: u16 = 12;
+const TYPE_MX: u16 = 15;
+const TYPE_TXT: u16 = 16;
+const TYPE_AAAA: u16 = 28;
+const TYPE_OPT: u16 = 41;
+const CLASS_IN: u16 = 1;
 
-impl MockDnsServer {
-    fn new() -> Self {
-        Self {
-            responses: HashMap::new(),
-        }
-    }
-
-    fn add_response(&mut self, query: String, response: Vec<u8>) {
-        self.responses.insert(query, response);
-    }
+struct AdditionalRecord {
+    name_len: usize,
+    record_type: u16,
+    class: u16,
+    ttl: u32,
+    rdata: Vec<u8>,
 }
 
 /// Create a basic DNS response packet
@@ -1134,8 +1430,8 @@ fn create_dns_query_with_class(id: u16, name: &str, qtype: u16, qclass: u16) -> 
     // Header
     packet.extend_from_slice(&id.to_be_bytes());
     packet.extend_from_slice(&0x0000u16.to_be_bytes()); // Query flags
-    packet.extend_from_slice(&1u16.to_be_bytes());      // QDCOUNT=1
-    packet.extend_from_slice(&[0, 0, 0, 0, 0, 0]);      // Other counts=0
+    packet.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT=1
+    packet.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // Other counts=0
 
     // Question
     encode_domain_name(name, &mut packet);
@@ -1143,6 +1439,52 @@ fn create_dns_query_with_class(id: u16, name: &str, qtype: u16, qclass: u16) -> 
     packet.extend_from_slice(&qclass.to_be_bytes());
 
     packet
+}
+
+/// Create DNS query packet with a single additional record.
+fn create_dns_query_with_additional(
+    id: u16,
+    name: &str,
+    qtype: u16,
+    qclass: u16,
+    additional_record: &[u8],
+) -> Vec<u8> {
+    let mut packet = Vec::new();
+
+    packet.extend_from_slice(&id.to_be_bytes());
+    packet.extend_from_slice(&0x0000u16.to_be_bytes());
+    packet.extend_from_slice(&1u16.to_be_bytes());
+    packet.extend_from_slice(&0u16.to_be_bytes());
+    packet.extend_from_slice(&0u16.to_be_bytes());
+    packet.extend_from_slice(&1u16.to_be_bytes());
+
+    encode_domain_name(name, &mut packet);
+    packet.extend_from_slice(&qtype.to_be_bytes());
+    packet.extend_from_slice(&qclass.to_be_bytes());
+    packet.extend_from_slice(additional_record);
+
+    packet
+}
+
+/// Create an EDNS0 OPT additional record.
+fn create_opt_record(
+    udp_payload_size: u16,
+    extended_rcode: u8,
+    version: u8,
+    flags: u16,
+    rdata: &[u8],
+) -> Vec<u8> {
+    let mut record = Vec::new();
+    let ttl = (u32::from(extended_rcode) << 24) | (u32::from(version) << 16) | u32::from(flags);
+
+    record.push(0);
+    record.extend_from_slice(&TYPE_OPT.to_be_bytes());
+    record.extend_from_slice(&udp_payload_size.to_be_bytes());
+    record.extend_from_slice(&ttl.to_be_bytes());
+    record.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+    record.extend_from_slice(rdata);
+
+    record
 }
 
 /// Encode domain name in DNS format
@@ -1173,7 +1515,10 @@ fn parse_dns_id(packet: &[u8]) -> Result<u16, String> {
 fn validate_response_id(packet: &[u8], expected_id: u16) -> Result<(), String> {
     let actual_id = parse_dns_id(packet)?;
     if actual_id != expected_id {
-        Err(format!("mismatched DNS response id: expected {}, got {}", expected_id, actual_id))
+        Err(format!(
+            "mismatched DNS response id: expected {}, got {}",
+            expected_id, actual_id
+        ))
     } else {
         Ok(())
     }
@@ -1286,7 +1631,11 @@ fn extract_compressed_name(packet: &[u8], offset: usize) -> Result<String, Strin
 }
 
 /// Decode DNS name with compression support
-fn decode_dns_name_from_offset(packet: &[u8], start_offset: usize, depth: usize) -> Result<String, String> {
+fn decode_dns_name_from_offset(
+    packet: &[u8],
+    start_offset: usize,
+    depth: usize,
+) -> Result<String, String> {
     if depth > 16 {
         return Err("DNS compression pointer loop detected".to_string());
     }
@@ -1350,61 +1699,173 @@ fn extract_question_class(packet: &[u8]) -> Result<u16, String> {
         return Err("Packet too short to contain question".to_string());
     }
 
-    let mut offset = 12; // Skip header
+    let offset = question_end_offset(packet)?;
 
-    // Skip question name
-    loop {
-        if offset >= packet.len() {
-            return Err("Unexpected end while parsing question name".to_string());
-        }
-        let len = packet[offset];
-        if len == 0 {
-            offset += 1;
-            break;
-        }
-        if len & 0xC0 == 0xC0 {
-            // Compression pointer
-            offset += 2;
-            break;
-        }
-        offset += 1 + (len as usize);
-    }
-
-    // Skip question type (2 bytes)
     if offset + 4 > packet.len() {
         return Err("Question section truncated".to_string());
     }
-    offset += 2;
 
-    // Extract question class
-    let class = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
-    Ok(class)
+    Ok(u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]))
+}
+
+/// Extract question type from DNS query packet.
+fn extract_question_type(packet: &[u8]) -> Result<u16, String> {
+    if packet.len() < 12 {
+        return Err("Packet too short to contain question".to_string());
+    }
+
+    let offset = question_end_offset(packet)?;
+    if offset + 2 > packet.len() {
+        return Err("Question type truncated".to_string());
+    }
+
+    Ok(u16::from_be_bytes([packet[offset], packet[offset + 1]]))
+}
+
+/// Extract a single additional record after the first question.
+fn extract_additional_record(packet: &[u8]) -> Result<AdditionalRecord, String> {
+    let mut offset = question_end_offset(packet)?;
+    if offset + 4 > packet.len() {
+        return Err("Question section truncated".to_string());
+    }
+    offset += 4;
+
+    let name_start = offset;
+    offset = skip_dns_name(packet, offset)?;
+    let name_len = offset - name_start;
+
+    if offset + 10 > packet.len() {
+        return Err("Additional record header truncated".to_string());
+    }
+
+    let record_type = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
+    let class = u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]);
+    let ttl = u32::from_be_bytes([
+        packet[offset + 4],
+        packet[offset + 5],
+        packet[offset + 6],
+        packet[offset + 7],
+    ]);
+    let rdlen = usize::from(u16::from_be_bytes([packet[offset + 8], packet[offset + 9]]));
+    offset += 10;
+
+    if offset + rdlen > packet.len() {
+        return Err("Additional record RDATA truncated".to_string());
+    }
+
+    Ok(AdditionalRecord {
+        name_len,
+        record_type,
+        class,
+        ttl,
+        rdata: packet[offset..offset + rdlen].to_vec(),
+    })
+}
+
+fn question_end_offset(packet: &[u8]) -> Result<usize, String> {
+    let offset = skip_dns_name(packet, 12)?;
+    if offset + 4 > packet.len() {
+        return Err("Question section truncated".to_string());
+    }
+
+    Ok(offset)
+}
+
+fn skip_dns_name(packet: &[u8], start_offset: usize) -> Result<usize, String> {
+    let mut offset = start_offset;
+
+    loop {
+        if offset >= packet.len() {
+            return Err("Unexpected end while parsing DNS name".to_string());
+        }
+
+        let len = packet[offset];
+        if len == 0 {
+            return Ok(offset + 1);
+        }
+
+        if len & 0xC0 == 0xC0 {
+            if offset + 1 >= packet.len() {
+                return Err("Truncated compression pointer".to_string());
+            }
+            return Ok(offset + 2);
+        }
+
+        if len & 0xC0 != 0 {
+            return Err("Invalid DNS label encoding".to_string());
+        }
+
+        offset += 1 + usize::from(len);
+    }
+}
+
+fn assert_packet_matches_golden(label: &str, actual: &[u8], expected: &[u8]) -> Result<(), String> {
+    if actual != expected {
+        return Err(format!(
+            "{label} golden mismatch:\nexpected {:02x?}\nactual   {:02x?}",
+            expected, actual
+        ));
+    }
+
+    Ok(())
 }
 
 /// Generate conformance report for DNS message format tests
 pub fn generate_dns_conformance_report(results: &[DnsConformanceResult]) -> String {
     let total = results.len();
-    let passed = results.iter().filter(|r| r.verdict == DnsTestVerdict::Pass).count();
-    let failed = results.iter().filter(|r| r.verdict == DnsTestVerdict::Fail).count();
-    let skipped = results.iter().filter(|r| r.verdict == DnsTestVerdict::Skipped).count();
+    let passed = results
+        .iter()
+        .filter(|r| r.verdict == DnsTestVerdict::Pass)
+        .count();
+    let failed = results
+        .iter()
+        .filter(|r| r.verdict == DnsTestVerdict::Fail)
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|r| r.verdict == DnsTestVerdict::Skipped)
+        .count();
 
     let mut report = String::new();
-    report.push_str(&format!("# DNS Message Format Conformance Report (RFC 1035 Section 4.1)\n\n"));
+    report.push_str(&format!(
+        "# DNS Message Format Conformance Report (RFC 1035 Section 4.1)\n\n"
+    ));
     report.push_str(&format!("**Total Tests:** {}\n", total));
-    report.push_str(&format!("**Passed:** {} ({:.1}%)\n", passed, (passed as f64 / total as f64) * 100.0));
-    report.push_str(&format!("**Failed:** {} ({:.1}%)\n", failed, (failed as f64 / total as f64) * 100.0));
-    report.push_str(&format!("**Skipped:** {} ({:.1}%)\n\n", skipped, (skipped as f64 / total as f64) * 100.0));
+    report.push_str(&format!(
+        "**Passed:** {} ({:.1}%)\n",
+        passed,
+        (passed as f64 / total as f64) * 100.0
+    ));
+    report.push_str(&format!(
+        "**Failed:** {} ({:.1}%)\n",
+        failed,
+        (failed as f64 / total as f64) * 100.0
+    ));
+    report.push_str(&format!(
+        "**Skipped:** {} ({:.1}%)\n\n",
+        skipped,
+        (skipped as f64 / total as f64) * 100.0
+    ));
 
     // Group by category
     let mut by_category = std::collections::HashMap::new();
     for result in results {
-        by_category.entry(&result.category).or_insert(Vec::new()).push(result);
+        by_category
+            .entry(&result.category)
+            .or_insert(Vec::new())
+            .push(result);
     }
 
     for (category, tests) in by_category {
-        let cat_passed = tests.iter().filter(|r| r.verdict == DnsTestVerdict::Pass).count();
+        let cat_passed = tests
+            .iter()
+            .filter(|r| r.verdict == DnsTestVerdict::Pass)
+            .count();
         let cat_total = tests.len();
-        report.push_str(&format!("## {:?} ({}/{})\n\n", category, cat_passed, cat_total));
+        report.push_str(&format!(
+            "## {:?} ({}/{})\n\n",
+            category, cat_passed, cat_total
+        ));
 
         for test in tests {
             let status = match test.verdict {
@@ -1413,8 +1874,10 @@ pub fn generate_dns_conformance_report(results: &[DnsConformanceResult]) -> Stri
                 DnsTestVerdict::Skipped => "⏭️",
                 DnsTestVerdict::ExpectedFailure => "⚠️",
             };
-            report.push_str(&format!("- {} **{}** ({}ms): {}\n",
-                status, test.test_id, test.execution_time_ms, test.description));
+            report.push_str(&format!(
+                "- {} **{}** ({}ms): {}\n",
+                status, test.test_id, test.execution_time_ms, test.description
+            ));
 
             if let Some(error) = &test.error_message {
                 report.push_str(&format!("  *Error: {}*\n", error));
@@ -1436,12 +1899,15 @@ mod tests {
         let results = harness.run_all_tests();
 
         // Should have test results
-        assert!(!results.is_empty(), "Should have DNS conformance test results");
+        assert!(
+            !results.is_empty(),
+            "Should have DNS conformance test results"
+        );
 
         // Count test categories
         let mut categories = std::collections::HashSet::new();
         for result in &results {
-            categories.insert(&result.category);
+            categories.insert(result.category.clone());
         }
 
         // Should cover all required categories
@@ -1449,6 +1915,9 @@ mod tests {
         assert!(categories.contains(&DnsTestCategory::HeaderFlags));
         assert!(categories.contains(&DnsTestCategory::SectionCounters));
         assert!(categories.contains(&DnsTestCategory::NameCompression));
+        assert!(categories.contains(&DnsTestCategory::QuestionTypes));
+        assert!(categories.contains(&DnsTestCategory::AdditionalRecords));
+        assert!(categories.contains(&DnsTestCategory::GoldenVectors));
         assert!(categories.contains(&DnsTestCategory::MessageSizeLimits));
         assert!(categories.contains(&DnsTestCategory::DnsClasses));
         assert!(categories.contains(&DnsTestCategory::ResponseCodes));
@@ -1458,8 +1927,16 @@ mod tests {
         println!("{}", report);
 
         // Expect reasonable pass rate for RFC 1035 compliance
-        let pass_rate = results.iter().filter(|r| r.verdict == DnsTestVerdict::Pass).count() as f64 / results.len() as f64;
-        assert!(pass_rate >= 0.80, "Expected >80% pass rate for RFC 1035 conformance, got {:.1}%", pass_rate * 100.0);
+        let pass_rate = results
+            .iter()
+            .filter(|r| r.verdict == DnsTestVerdict::Pass)
+            .count() as f64
+            / results.len() as f64;
+        assert!(
+            pass_rate >= 0.80,
+            "Expected >80% pass rate for RFC 1035 conformance, got {:.1}%",
+            pass_rate * 100.0
+        );
     }
 
     #[test]
@@ -1482,8 +1959,14 @@ mod tests {
         assert!(is_dns_response(&create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0)).unwrap());
         assert!(!is_dns_response(&create_dns_response_packet(0x1234, 0x0000, 0, 0, 0, 0)).unwrap());
 
-        assert!(is_authoritative_answer(&create_dns_response_packet(0x1234, 0x8400, 0, 0, 0, 0)).unwrap());
-        assert!(!is_authoritative_answer(&create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0)).unwrap());
+        assert!(
+            is_authoritative_answer(&create_dns_response_packet(0x1234, 0x8400, 0, 0, 0, 0))
+                .unwrap()
+        );
+        assert!(
+            !is_authoritative_answer(&create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0))
+                .unwrap()
+        );
 
         assert!(is_truncated(&create_dns_response_packet(0x1234, 0x8200, 0, 0, 0, 0)).unwrap());
         assert!(!is_truncated(&create_dns_response_packet(0x1234, 0x8000, 0, 0, 0, 0)).unwrap());

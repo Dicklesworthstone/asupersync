@@ -14,6 +14,7 @@ pub mod hpack_table_size;
 // pub mod h3_rfc9114;
 // pub mod hpack_metamorphic;
 pub mod cancel_dag_determinism;
+pub mod dns_message;
 pub mod hpack_rfc7541;
 pub mod kafka_offsets;
 pub mod kafka_record_batch_v2;
@@ -2007,7 +2008,11 @@ mod tests {
             .filter(|r| r.verdict == grpc_trailer_forwarding_rfc9113::TestVerdict::Fail)
             .collect();
 
-        assert!(failures.is_empty(), "gRPC trailer conformance tests failed: {:#?}", failures);
+        assert!(
+            failures.is_empty(),
+            "gRPC trailer conformance tests failed: {:#?}",
+            failures
+        );
 
         // Verify we have the expected number of test cases (15 as implemented)
         assert!(
