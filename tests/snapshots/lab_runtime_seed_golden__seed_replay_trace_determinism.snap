@@ -1,0 +1,311 @@
+---
+source: tests/lab_runtime_seed_golden.rs
+expression: golden
+---
+[
+  {
+    "name": "single_worker_yield_fanout",
+    "seed": 1369567392,
+    "worker_count": 1,
+    "report": {
+      "quiescent": true,
+      "steps_delta": 9,
+      "steps_total": 9,
+      "invariant_violations": [],
+      "temporal_failures": [],
+      "oracle_total": 24,
+      "oracle_passed": 24,
+      "oracle_failed": 0
+    },
+    "trace": {
+      "len": 10,
+      "fingerprint": 1678856424573481139,
+      "certificate": {
+        "event_hash": 3321498192921007439,
+        "event_count": 10,
+        "schedule_hash": 10025681510532821793
+      },
+      "canonical_depth": 3,
+      "canonical_layers": [
+        [
+          {
+            "kind": 10,
+            "primary": 0,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 29,
+            "primary": 17841621336708427690,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 29,
+            "primary": 17841621336708427690,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 29,
+            "primary": 17841621336708427690,
+            "secondary": 0,
+            "tertiary": 0
+          }
+        ],
+        [
+          {
+            "kind": 0,
+            "primary": 0,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 0,
+            "primary": 4294967296,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 0,
+            "primary": 8589934592,
+            "secondary": 0,
+            "tertiary": 0
+          }
+        ],
+        [
+          {
+            "kind": 5,
+            "primary": 0,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 5,
+            "primary": 4294967296,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 5,
+            "primary": 8589934592,
+            "secondary": 0,
+            "tertiary": 0
+          }
+        ]
+      ]
+    }
+  },
+  {
+    "name": "multi_worker_priority_mix",
+    "seed": 1909362701,
+    "worker_count": 4,
+    "report": {
+      "quiescent": true,
+      "steps_delta": 10,
+      "steps_total": 10,
+      "invariant_violations": [],
+      "temporal_failures": [],
+      "oracle_total": 24,
+      "oracle_passed": 24,
+      "oracle_failed": 0
+    },
+    "trace": {
+      "len": 13,
+      "fingerprint": 15406494897016089422,
+      "certificate": {
+        "event_hash": 11759208335282007061,
+        "event_count": 13,
+        "schedule_hash": 4266418979062626092
+      },
+      "canonical_depth": 3,
+      "canonical_layers": [
+        [
+          {
+            "kind": 10,
+            "primary": 0,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 29,
+            "primary": 17841621336708427690,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 29,
+            "primary": 17841621336708427690,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 29,
+            "primary": 17841621336708427690,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 29,
+            "primary": 17841621336708427690,
+            "secondary": 0,
+            "tertiary": 0
+          }
+        ],
+        [
+          {
+            "kind": 0,
+            "primary": 0,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 0,
+            "primary": 4294967296,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 0,
+            "primary": 8589934592,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 0,
+            "primary": 12884901888,
+            "secondary": 0,
+            "tertiary": 0
+          }
+        ],
+        [
+          {
+            "kind": 5,
+            "primary": 0,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 5,
+            "primary": 4294967296,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 5,
+            "primary": 8589934592,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 5,
+            "primary": 12884901888,
+            "secondary": 0,
+            "tertiary": 0
+          }
+        ]
+      ]
+    }
+  },
+  {
+    "name": "nested_region_yield_mix",
+    "seed": 2419953389,
+    "worker_count": 2,
+    "report": {
+      "quiescent": true,
+      "steps_delta": 9,
+      "steps_total": 9,
+      "invariant_violations": [],
+      "temporal_failures": [],
+      "oracle_total": 24,
+      "oracle_passed": 24,
+      "oracle_failed": 0
+    },
+    "trace": {
+      "len": 11,
+      "fingerprint": 9286869527578958911,
+      "certificate": {
+        "event_hash": 2031298199334779543,
+        "event_count": 11,
+        "schedule_hash": 14350528043032498298
+      },
+      "canonical_depth": 4,
+      "canonical_layers": [
+        [
+          {
+            "kind": 10,
+            "primary": 0,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 29,
+            "primary": 17841621336708427690,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 29,
+            "primary": 17841621336708427690,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 29,
+            "primary": 17841621336708427690,
+            "secondary": 0,
+            "tertiary": 0
+          }
+        ],
+        [
+          {
+            "kind": 0,
+            "primary": 0,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          {
+            "kind": 10,
+            "primary": 4294967296,
+            "secondary": 0,
+            "tertiary": 0
+          }
+        ],
+        [
+          {
+            "kind": 0,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          {
+            "kind": 0,
+            "primary": 8589934592,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          {
+            "kind": 5,
+            "primary": 0,
+            "secondary": 0,
+            "tertiary": 0
+          }
+        ],
+        [
+          {
+            "kind": 5,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          {
+            "kind": 5,
+            "primary": 8589934592,
+            "secondary": 4294967296,
+            "tertiary": 0
+          }
+        ]
+      ]
+    }
+  }
+]
