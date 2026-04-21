@@ -1232,6 +1232,124 @@ mod tests {
         lock_order::unlock_n(2);
     }
 
+    #[cfg(debug_assertions)]
+    fn lock_rank(shard: LockShard) -> usize {
+        match shard {
+            LockShard::Regions => 0,
+            LockShard::Tasks => 1,
+            LockShard::Obligations => 2,
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn canonicalize_labels(mut labels: Vec<&'static str>) -> Vec<&'static str> {
+        labels.sort_by_key(|label| match *label {
+            "B:Regions" => 0,
+            "A:Tasks" => 1,
+            "C:Obligations" => 2,
+            other => panic!("unexpected shard label: {other}"),
+        });
+        labels.dedup();
+        labels
+    }
+
+    #[cfg(debug_assertions)]
+    fn capture_labels(guard: ShardGuard<'_>) -> Vec<&'static str> {
+        let labels = lock_order::held_labels();
+        drop(guard);
+        assert_eq!(lock_order::held_count(), 0);
+        labels
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn metamorphic_lock_order_accepts_only_canonical_permutations() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let sequences = [
+            vec![LockShard::Regions],
+            vec![LockShard::Tasks],
+            vec![LockShard::Obligations],
+            vec![LockShard::Regions, LockShard::Tasks],
+            vec![LockShard::Tasks, LockShard::Regions],
+            vec![LockShard::Regions, LockShard::Obligations],
+            vec![LockShard::Obligations, LockShard::Regions],
+            vec![LockShard::Tasks, LockShard::Obligations],
+            vec![LockShard::Obligations, LockShard::Tasks],
+            vec![LockShard::Regions, LockShard::Tasks, LockShard::Obligations],
+            vec![LockShard::Regions, LockShard::Obligations, LockShard::Tasks],
+            vec![LockShard::Tasks, LockShard::Regions, LockShard::Obligations],
+            vec![LockShard::Tasks, LockShard::Obligations, LockShard::Regions],
+            vec![LockShard::Obligations, LockShard::Regions, LockShard::Tasks],
+            vec![LockShard::Obligations, LockShard::Tasks, LockShard::Regions],
+        ];
+
+        for sequence in sequences {
+            let expected_ok = sequence
+                .windows(2)
+                .all(|pair| lock_rank(pair[0]) < lock_rank(pair[1]));
+            let expected_labels: Vec<_> = sequence.iter().map(|shard| shard.label()).collect();
+
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                for shard in &sequence {
+                    lock_order::before_lock(*shard);
+                    lock_order::after_lock(*shard);
+                }
+                let labels = lock_order::held_labels();
+                lock_order::unlock_n(sequence.len());
+                labels
+            }));
+
+            assert_eq!(
+                result.is_ok(),
+                expected_ok,
+                "canonical lock-order expectation disagreed for {:?}",
+                expected_labels
+            );
+
+            if let Ok(labels) = result {
+                assert_eq!(labels, expected_labels);
+            }
+
+            let leaked = lock_order::held_count();
+            if leaked > 0 {
+                lock_order::unlock_n(leaked);
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn metamorphic_guard_unions_match_canonical_supersets() {
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        let regions = capture_labels(ShardGuard::regions_only(&state));
+        let tasks = capture_labels(ShardGuard::tasks_only(&state));
+        let obligations = capture_labels(ShardGuard::obligations_only(&state));
+
+        let spawn_union = canonicalize_labels([regions.clone(), tasks.clone()].concat());
+        let obligation_union = canonicalize_labels([regions.clone(), obligations.clone()].concat());
+        let full_union = canonicalize_labels([regions, tasks, obligations].concat());
+
+        assert_eq!(capture_labels(ShardGuard::for_spawn(&state)), spawn_union);
+        assert_eq!(
+            capture_labels(ShardGuard::for_obligation(&state)),
+            obligation_union
+        );
+        assert_eq!(capture_labels(ShardGuard::for_cancel(&state)), full_union);
+        assert_eq!(
+            capture_labels(ShardGuard::for_task_completed(&state)),
+            full_union
+        );
+        assert_eq!(
+            capture_labels(ShardGuard::for_obligation_resolve(&state)),
+            full_union
+        );
+        assert_eq!(capture_labels(ShardGuard::all(&state)), full_union);
+    }
+
     // ── Concurrent guard tests ───────────────────────────────────────────
 
     #[test]
