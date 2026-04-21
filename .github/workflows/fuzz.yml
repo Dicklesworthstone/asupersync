@@ -36,6 +36,7 @@ on:
           - h3_native_frames
           - kafka_protocol
           - key_derivation_context
+          - otel_span_attributes
           - quic_stream_flow
           - symbol_auth
           - postgres_scram
@@ -86,6 +87,7 @@ jobs:
           - h3_native_frames
           - kafka_protocol
           - key_derivation_context
+          - otel_span_attributes
           - quic_stream_flow
           - symbol_auth
           - postgres_scram

@@ -11,10 +11,11 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = "..", features = ["compression", "tls", "postgres", "mysql", "kafka", "sqlite", "test-internals", "trace-compression", "io-uring"] }
+asupersync = { path = "..", features = ["compression", "tls", "postgres", "mysql", "kafka", "sqlite", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 libc = "0.2"
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
 
 # Optional: for structured fuzzing
 bytes = "1"
@@ -1399,6 +1400,13 @@ bench = false
 [[bin]]
 name = "det_rng"
 path = "fuzz_targets/det_rng.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otel_span_attributes"
+path = "fuzz_targets/otel_span_attributes.rs"
 test = false
 doc = false
 bench = false

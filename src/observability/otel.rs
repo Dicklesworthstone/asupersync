@@ -187,6 +187,7 @@ impl CardinalityTracker {
     }
 
     /// Check if recording this label combination would exceed the limit.
+    #[cfg(test)]
     fn would_exceed(&self, metric: &str, labels: &[KeyValue], max_cardinality: usize) -> bool {
         let hash = Self::hash_labels(labels);
         let seen = self.seen.read();
