@@ -451,6 +451,14 @@ fn normalized_edge_case_config(base: &FuzzConfig, payload_len: usize) -> FuzzCon
     config
 }
 
+fn prefixed_buffer(prefix_seed: u8, prefix_len: usize) -> BytesMut {
+    let mut prefix = BytesMut::with_capacity(prefix_len);
+    for index in 0..prefix_len {
+        prefix.put_u8(prefix_seed.wrapping_add(index as u8));
+    }
+    prefix
+}
+
 fuzz_target!(|input: FuzzInput| {
     let frame_bytes = input.construct_frame_bytes();
     if frame_bytes.len() > MAX_FUZZ_INPUT_SIZE {
@@ -616,6 +624,118 @@ fuzz_target!(|input: FuzzInput| {
     assert!(
         partial_stream.is_empty(),
         "bytewise partial decode left unread bytes behind"
+    );
+
+    let writer_len = edge_source.len().clamp(1, 48);
+    let second_writer_len = edge_source.len().saturating_add(header_len(&roundtrip_config));
+    let second_writer_len = second_writer_len.clamp(1, 64);
+    let max_writer_len = writer_len.max(second_writer_len);
+    let writer_config = normalized_edge_case_config(&roundtrip_config, max_writer_len);
+    let writer_payload = bounded_payload(edge_source, writer_len);
+    let second_writer_payload = bounded_payload(edge_source, second_writer_len);
+    let prefix_len = (header_len(&writer_config)
+        .saturating_add(edge_source.len())
+        .saturating_add(writer_len))
+        % 11
+        + 1;
+    let prefix_seed = input.config.length_field_offset ^ input.config.num_skip;
+    let prefix = prefixed_buffer(prefix_seed, prefix_len);
+    let first_wire = encode_frame(&writer_config, &writer_payload);
+    let first_expected = visible_frame_bytes(&writer_config, &first_wire);
+    let second_wire = encode_frame(&writer_config, &second_writer_payload);
+    let second_expected = visible_frame_bytes(&writer_config, &second_wire);
+
+    let mut unaligned_encoder = writer_config
+        .build_codec()
+        .expect("writer config should build");
+    let mut unaligned_dst = BytesMut::with_capacity(prefix_len.saturating_add(1));
+    unaligned_dst.extend_from_slice(&prefix);
+    unaligned_encoder
+        .encode(writer_payload.clone(), &mut unaligned_dst)
+        .expect("unaligned writer encode should succeed");
+    assert_eq!(
+        &unaligned_dst[..prefix_len],
+        &prefix[..],
+        "writer encode modified the prefilled prefix"
+    );
+    assert_eq!(
+        &unaligned_dst[prefix_len..],
+        &first_wire[..],
+        "writer encode appended unexpected bytes into the destination buffer"
+    );
+
+    let mut unaligned_tail = BytesMut::from(&unaligned_dst[prefix_len..]);
+    let mut unaligned_decoder = writer_config
+        .build_codec()
+        .expect("writer config should build");
+    let unaligned_decoded = unaligned_decoder
+        .decode(&mut unaligned_tail)
+        .expect("unaligned writer output must decode")
+        .expect("unaligned writer output should contain one frame");
+    assert_eq!(
+        unaligned_decoded, first_expected,
+        "unaligned writer output decoded to the wrong visible bytes"
+    );
+    assert!(
+        unaligned_tail.is_empty(),
+        "unaligned writer output left unread bytes behind"
+    );
+
+    let mut chained_encoder = writer_config
+        .build_codec()
+        .expect("writer config should build");
+    let mut chained_dst = BytesMut::with_capacity(prefix_len.saturating_add(first_wire.len() / 2));
+    chained_dst.extend_from_slice(&prefix);
+    chained_encoder
+        .encode(writer_payload.clone(), &mut chained_dst)
+        .expect("first chained encode should succeed");
+    let first_len = chained_dst.len();
+    chained_encoder
+        .encode(second_writer_payload.clone(), &mut chained_dst)
+        .expect("second chained encode should succeed");
+    assert_eq!(
+        first_len,
+        prefix_len.saturating_add(first_wire.len()),
+        "first chained encode appended the wrong number of bytes"
+    );
+    assert_eq!(
+        &chained_dst[..prefix_len],
+        &prefix[..],
+        "chained writer encode modified the prefilled prefix"
+    );
+
+    let mut expected_chained = BytesMut::with_capacity(first_wire.len() + second_wire.len());
+    expected_chained.extend_from_slice(&first_wire);
+    expected_chained.extend_from_slice(&second_wire);
+    assert_eq!(
+        &chained_dst[prefix_len..],
+        &expected_chained[..],
+        "chained writer encode duplicated or corrupted frame bytes"
+    );
+
+    let mut chained_tail = BytesMut::from(&chained_dst[prefix_len..]);
+    let mut chained_decoder = writer_config
+        .build_codec()
+        .expect("writer config should build");
+    let first_decoded = chained_decoder
+        .decode(&mut chained_tail)
+        .expect("first chained frame must decode")
+        .expect("first chained frame should be present");
+    assert_eq!(
+        first_decoded, first_expected,
+        "first chained frame decoded to the wrong visible bytes"
+    );
+    let second_decoded = chained_decoder
+        .decode(&mut chained_tail)
+        .expect("second chained frame must decode")
+        .expect("second chained frame should be present");
+    assert_eq!(
+        second_decoded, second_expected,
+        "second chained frame decoded to the wrong visible bytes"
+    );
+    assert!(
+        chained_tail.is_empty(),
+        "chained writer output left unread bytes behind"
     );
 
     let mut max_config = input.config.clone();
