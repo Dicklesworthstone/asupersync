@@ -1230,6 +1230,174 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_batch_partitioning_preserves_symbol_count_and_order() {
+        init_test("metamorphic_batch_partitioning_preserves_symbol_count_and_order");
+
+        let symbols = vec![
+            create_symbol(31),
+            create_symbol(32),
+            create_symbol(33),
+            create_symbol(34),
+            create_symbol(35),
+            create_symbol(36),
+        ];
+
+        let mut baseline_sink = TrackingSink::new(TrackingSinkState::new());
+        let baseline_count =
+            future::block_on(async { baseline_sink.send_all(symbols.clone()).await.unwrap() });
+        let baseline_ids = {
+            let state = baseline_sink.state.lock();
+            state
+                .sent
+                .iter()
+                .map(|symbol| symbol.symbol().id().esi())
+                .collect::<Vec<_>>()
+        };
+
+        let partitions = [2usize, 1usize, 3usize];
+        let mut transformed_sink = TrackingSink::new(TrackingSinkState::new());
+        let mut transformed_count = 0usize;
+        let mut offset = 0usize;
+        for width in partitions {
+            let upper = offset + width;
+            transformed_count += future::block_on(async {
+                transformed_sink
+                    .send_all(symbols[offset..upper].iter().cloned())
+                    .await
+                    .unwrap()
+            });
+            offset = upper;
+        }
+        let (transformed_ids, transformed_flushes) = {
+            let state = transformed_sink.state.lock();
+            (
+                state
+                    .sent
+                    .iter()
+                    .map(|symbol| symbol.symbol().id().esi())
+                    .collect::<Vec<_>>(),
+                state.flush_count,
+            )
+        };
+
+        crate::assert_with_log!(
+            transformed_ids == baseline_ids,
+            "partitioning one batch into smaller batches must preserve emitted order",
+            baseline_ids,
+            transformed_ids
+        );
+        crate::assert_with_log!(
+            transformed_count == baseline_count,
+            "partitioning must preserve the total number of emitted symbols",
+            baseline_count,
+            transformed_count
+        );
+        crate::assert_with_log!(
+            transformed_flushes == partitions.len(),
+            "each partition still flushes exactly once",
+            partitions.len(),
+            transformed_flushes
+        );
+        crate::test_complete!("metamorphic_batch_partitioning_preserves_symbol_count_and_order");
+    }
+
+    #[test]
+    fn metamorphic_cancelled_batch_preserves_committed_prefix() {
+        init_test("metamorphic_cancelled_batch_preserves_committed_prefix");
+
+        let symbols = vec![
+            create_symbol(41),
+            create_symbol(42),
+            create_symbol(43),
+            create_symbol(44),
+        ];
+
+        let mut baseline_sink = TrackingSink::new(TrackingSinkState::new());
+        future::block_on(async {
+            baseline_sink.send(symbols[0].clone()).await.unwrap();
+            baseline_sink.send(symbols[1].clone()).await.unwrap();
+        });
+        let baseline_prefix_ids = {
+            let state = baseline_sink.state.lock();
+            state
+                .sent
+                .iter()
+                .map(|symbol| symbol.symbol().id().esi())
+                .collect::<Vec<_>>()
+        };
+
+        let cx = crate::cx::Cx::for_testing();
+        let _current_guard = crate::cx::Cx::set_current(Some(cx.clone()));
+        let mut sink = SequencedSendSink::new(3);
+        let state = sink.state();
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = sink.send_all(symbols);
+        let mut future = Pin::new(&mut future);
+
+        let first = future.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "partial batch reaches backpressure before cancellation",
+            true,
+            matches!(first, Poll::Pending)
+        );
+
+        let committed_prefix_ids = {
+            let state = state.lock();
+            state
+                .sent
+                .iter()
+                .map(|symbol| symbol.symbol().id().esi())
+                .collect::<Vec<_>>()
+        };
+        crate::assert_with_log!(
+            committed_prefix_ids == baseline_prefix_ids,
+            "partial progress before cancellation preserves the committed prefix",
+            baseline_prefix_ids.clone(),
+            committed_prefix_ids
+        );
+
+        cx.set_cancel_requested(true);
+        let cancelled = future.as_mut().poll(&mut context);
+        let cancel_kind = match cancelled {
+            Poll::Ready(Err(SinkError::Io { source })) => Some(source.kind()),
+            _ => None,
+        };
+        crate::assert_with_log!(
+            cancel_kind == Some(std::io::ErrorKind::Interrupted),
+            "cancellation converts the in-flight batch into an interrupted sink error",
+            Some(std::io::ErrorKind::Interrupted),
+            cancel_kind
+        );
+
+        let (cancelled_ids, flush_count) = {
+            let state = state.lock();
+            (
+                state
+                    .sent
+                    .iter()
+                    .map(|symbol| symbol.symbol().id().esi())
+                    .collect::<Vec<_>>(),
+                state.flush_count,
+            )
+        };
+        crate::assert_with_log!(
+            cancelled_ids == baseline_prefix_ids,
+            "cancellation must not duplicate or reorder the already-committed prefix",
+            baseline_prefix_ids,
+            cancelled_ids
+        );
+        crate::assert_with_log!(
+            flush_count == 0,
+            "cancelled partial batches must not flush a not-yet-exhausted iterator",
+            0usize,
+            flush_count
+        );
+        crate::test_complete!("metamorphic_cancelled_batch_preserves_committed_prefix");
+    }
+
+    #[test]
     fn test_flush_future_repoll_after_completion_fails_closed() {
         init_test("test_flush_future_repoll_after_completion_fails_closed");
         let mut sink = TrackingSink::new(TrackingSinkState::new());
