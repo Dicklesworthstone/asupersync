@@ -10,6 +10,8 @@ use asupersync::bytes::Bytes;
 use asupersync::grpc::server::Interceptor;
 use asupersync::grpc::service::{NamedService, ServiceDescriptor, ServiceHandler};
 use asupersync::grpc::{
+    format_grpc_timeout,
+    parse_grpc_timeout,
     BearerAuthInterceptor,
     BearerAuthValidator,
     // Server
@@ -36,8 +38,11 @@ use asupersync::grpc::{
     MetadataPropagator,
     RateLimitInterceptor,
     ReflectedMethod,
+    ReflectedService,
     ReflectionDescribeServiceRequest,
+    ReflectionDescribeServiceResponse,
     ReflectionListServicesRequest,
+    ReflectionListServicesResponse,
     // Reflection
     ReflectionService,
     Request,
@@ -46,11 +51,12 @@ use asupersync::grpc::{
     ServerBuilder,
     ServerConfig,
     ServingStatus,
+    Status,
     TimeoutInterceptor,
     TracingInterceptor,
-    format_grpc_timeout,
-    parse_grpc_timeout,
 };
+use insta::assert_json_snapshot;
+use serde::Serialize;
 
 // ---------------------------------------------------------------------------
 // Test service stubs
@@ -112,6 +118,115 @@ impl ServiceHandler for RouteGuideService {
 
     fn method_names(&self) -> Vec<&str> {
         vec!["GetFeature", "RecordRoute", "RouteChat"]
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ReflectionRegistrySnapshot {
+    list_response: ReflectionListSnapshot,
+    describe_responses: Vec<ReflectionDescribeSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReflectionListSnapshot {
+    services: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReflectionDescribeSnapshot {
+    service: ReflectionServiceSnapshot,
+}
+
+#[derive(Debug, Serialize)]
+struct ReflectionServiceSnapshot {
+    name: String,
+    methods: Vec<ReflectionMethodSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReflectionMethodSnapshot {
+    name: String,
+    path: String,
+    client_streaming: bool,
+    server_streaming: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ReflectionErrorSnapshot {
+    code: String,
+    message: String,
+    details_len: usize,
+}
+
+fn reflection_registry_snapshot(reflection: &ReflectionService) -> ReflectionRegistrySnapshot {
+    let list_response = futures_lite::future::block_on(
+        reflection.list_services_async(&Request::new(ReflectionListServicesRequest)),
+    )
+    .expect("list should succeed");
+    let services = list_response.get_ref().services.clone();
+
+    let describe_responses = services
+        .iter()
+        .map(|service| {
+            futures_lite::future::block_on(reflection.describe_service_async(&Request::new(
+                ReflectionDescribeServiceRequest::new(service.clone()),
+            )))
+            .unwrap_or_else(|_| panic!("describe should succeed for {service}"))
+        })
+        .map(|response| ReflectionDescribeSnapshot::from(response.get_ref()))
+        .collect();
+
+    ReflectionRegistrySnapshot {
+        list_response: ReflectionListSnapshot::from(list_response.get_ref()),
+        describe_responses,
+    }
+}
+
+fn reflection_error_snapshot(status: &Status) -> ReflectionErrorSnapshot {
+    ReflectionErrorSnapshot {
+        code: status.code().to_string(),
+        message: status.message().to_string(),
+        details_len: status.details().map_or(0, Bytes::len),
+    }
+}
+
+impl From<&ReflectionListServicesResponse> for ReflectionListSnapshot {
+    fn from(response: &ReflectionListServicesResponse) -> Self {
+        Self {
+            services: response.services.clone(),
+        }
+    }
+}
+
+impl From<&ReflectionDescribeServiceResponse> for ReflectionDescribeSnapshot {
+    fn from(response: &ReflectionDescribeServiceResponse) -> Self {
+        Self {
+            service: ReflectionServiceSnapshot::from(&response.service),
+        }
+    }
+}
+
+impl From<&ReflectedService> for ReflectionServiceSnapshot {
+    fn from(service: &ReflectedService) -> Self {
+        Self {
+            name: service.name.clone(),
+            methods: service
+                .methods
+                .iter()
+                .map(ReflectionMethodSnapshot::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<&ReflectedMethod> for ReflectionMethodSnapshot {
+    fn from(method: &ReflectedMethod) -> Self {
+        Self {
+            name: method.name.clone(),
+            path: method.path.clone(),
+            client_streaming: method.client_streaming,
+            server_streaming: method.server_streaming,
+        }
     }
 }
 
@@ -516,6 +631,34 @@ fn reflection_method_streaming_flags() {
     assert!(chat.server_streaming);
 }
 
+#[test]
+fn reflection_descriptor_output_happy_path_snapshot() {
+    let reflection = ReflectionService::new();
+    let health = HealthService::new();
+    let builtin_reflection = ReflectionService::new();
+    reflection.register_handler(&health);
+    reflection.register_handler(&builtin_reflection);
+
+    assert_json_snapshot!(
+        "reflection_descriptor_output_happy_path",
+        reflection_registry_snapshot(&reflection)
+    );
+}
+
+#[test]
+fn reflection_descriptor_output_missing_service_snapshot() {
+    let reflection = ReflectionService::new();
+    let status = futures_lite::future::block_on(reflection.describe_service_async(&Request::new(
+        ReflectionDescribeServiceRequest::new("missing.Service"),
+    )))
+    .expect_err("missing service should fail");
+
+    assert_json_snapshot!(
+        "reflection_descriptor_output_missing_service",
+        reflection_error_snapshot(&status)
+    );
+}
+
 // ===========================================================================
 // 6. Interceptor chain and composition
 // ===========================================================================
@@ -689,12 +832,10 @@ fn server_builder_compression_config() {
         server.config().send_compression,
         Some(CompressionEncoding::Gzip)
     );
-    assert!(
-        server
-            .config()
-            .accept_compression
-            .contains(&CompressionEncoding::Gzip)
-    );
+    assert!(server
+        .config()
+        .accept_compression
+        .contains(&CompressionEncoding::Gzip));
 }
 
 #[test]
@@ -743,11 +884,9 @@ fn server_builder_reflection_captures_all_services() {
         .build();
 
     // Reflection service is registered
-    assert!(
-        server
-            .get_service("grpc.reflection.v1alpha.ServerReflection")
-            .is_some()
-    );
+    assert!(server
+        .get_service("grpc.reflection.v1alpha.ServerReflection")
+        .is_some());
     // All three services present
     assert_eq!(server.service_names().len(), 3);
 }
