@@ -1,0 +1,46 @@
+---
+source: tests/distributed_consistent_hash_golden.rs
+expression: placeholder
+---
+{
+  "after_add": {
+    "changed_from_baseline": 9,
+    "node_count": 4,
+    "partition_sizes": {
+      "node-a": 6,
+      "node-b": 5,
+      "node-c": 4,
+      "node-d": 9
+    },
+    "vnode_count": 128
+  },
+  "after_remove": {
+    "changed_from_after_add": 5,
+    "node_count": 3,
+    "partition_sizes": {
+      "node-a": 6,
+      "node-c": 9,
+      "node-d": 9
+    },
+    "vnode_count": 96
+  },
+  "after_replace": {
+    "changed_from_baseline": 10,
+    "node_count": 3,
+    "partition_sizes": {
+      "node-a": 9,
+      "node-b": 7,
+      "node-e": 8
+    },
+    "vnode_count": 96
+  },
+  "baseline": {
+    "node_count": 3,
+    "partition_sizes": {
+      "node-a": 12,
+      "node-b": 6,
+      "node-c": 6
+    },
+    "vnode_count": 96
+  }
+}
