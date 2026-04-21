@@ -2078,13 +2078,15 @@ mod tests {
         rendered
             .lines()
             .map(|line| {
+                let trimmed = line.trim_start();
+                let detail = trimmed.strip_prefix("- ").unwrap_or(trimmed);
                 if line.starts_with("generated_at: ") {
                     "generated_at: <scrubbed>".to_string()
-                } else if line.trim_start().starts_with("next_retry_at: ") {
+                } else if detail.starts_with("next_retry_at: ") {
                     "  - next_retry_at: <scrubbed>".to_string()
-                } else if line.trim_start().starts_with("observed_at: ") {
+                } else if detail.starts_with("observed_at: ") {
                     "  - observed_at: <scrubbed>".to_string()
-                } else if line.trim_start().starts_with("deadline_at: ") {
+                } else if detail.starts_with("deadline_at: ") {
                     "  - deadline_at: <scrubbed>".to_string()
                 } else {
                     line.to_string()
@@ -2928,6 +2930,63 @@ mod tests {
 
         let scrubbed = scrub_diagnostic_report_timestamps(&rendered);
         assert_diagnostic_report_snapshot("observability_diagnostics_deadline_exceeded", &scrubbed);
+    }
+
+    #[test]
+    fn structured_diagnostic_report_snapshot_shutdown_drain() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = insert_child_region(&mut state, root);
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(5_000)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)));
+
+        let root_task = insert_task(&mut state, root, TaskState::Running);
+        state
+            .task_mut(root_task)
+            .expect("root task missing")
+            .total_polls = 9;
+        let child_task = insert_task(
+            &mut state,
+            child,
+            TaskState::CancelRequested {
+                reason: CancelReason::shutdown().with_message("node draining"),
+                cleanup_budget: Budget::new().with_poll_quota(16),
+            },
+        );
+
+        let _root_obligation = insert_obligation(
+            &mut state,
+            root,
+            root_task,
+            ObligationKind::Ack,
+            Time::from_millis(500),
+        );
+        let _child_obligation = insert_obligation(
+            &mut state,
+            child,
+            child_task,
+            ObligationKind::Lease,
+            Time::from_millis(750),
+        );
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        let mut task = diagnostics.explain_task_blocked(child_task);
+        task.details
+            .insert(0, "observed_at: 2026-04-20T22:00:05Z".to_string());
+        task.recommendations
+            .push("Continue draining child region tasks before sealing shutdown.".to_string());
+        let leaks = diagnostics.find_leaked_obligations();
+
+        let rendered = render_structured_diagnostic_report(
+            "shutdown_drain",
+            "2026-04-20T22:00:05Z",
+            Some(&diagnostics.explain_region_open(root)),
+            Some(&task),
+            &leaks,
+        );
+
+        let scrubbed = scrub_diagnostic_report_timestamps(&rendered);
+        assert_diagnostic_report_snapshot("observability_diagnostics_shutdown_drain", &scrubbed);
     }
 
     #[test]

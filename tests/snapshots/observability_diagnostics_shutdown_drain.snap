@@ -1,0 +1,28 @@
+---
+source: src/observability/diagnostics.rs
+expression: rendered
+---
+scenario: shutdown_drain
+generated_at: <scrubbed>
+
+[region]
+Region RegionId(0:0) is still open.
+  state: Open
+  - child region RegionId(1:0) still open (Open)
+  - task TaskId(0:0) still running (state=Running, polls=9)
+  - obligation ObligationId(0:0) held by task TaskId(0:0) (type=Ack)
+  -> Wait for child regions to close, or cancel them.
+  -> Wait for live tasks to complete, or cancel the region.
+  -> Ensure obligations are committed/aborted before closing.
+
+[task]
+Task TaskId(1:0) blocked: cancel requested (shutdown (node draining))
+  - observed_at: <scrubbed>
+  - cancel kind: shutdown
+  - message: node draining
+  -> Task is cancelling; wait for drain/finalizers.
+  -> Continue draining child region tasks before sealing shutdown.
+
+[leaks]
+- ObligationId(0:0) region=RegionId(0:0) holder=Some(TaskId(0:0)) type=Ack age_ms=4500
+- ObligationId(1:0) region=RegionId(1:0) holder=Some(TaskId(1:0)) type=Lease age_ms=4250
