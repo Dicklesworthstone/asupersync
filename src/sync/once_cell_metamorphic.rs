@@ -221,7 +221,7 @@ where
     Fut: Future<Output = ()>,
 {
     let lab_config = LabConfig::new(config.seed);
-    let lab = LabRuntime::new(lab_config);
+    let _lab = LabRuntime::new(lab_config);
 
     futures_lite::future::block_on(async {
         let global_state = Arc::new(GlobalOnceCellState::new());

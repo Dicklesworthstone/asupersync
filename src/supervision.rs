@@ -5045,7 +5045,7 @@ mod tests {
         let history = RestartHistory::new(config);
 
         // Budget with insufficient cost
-        let mut budget = Budget::new().with_cost_quota(50);
+        let budget = Budget::new().with_cost_quota(50);
 
         let result = history.can_restart_with_budget(0, &budget);
         assert!(matches!(
@@ -9580,7 +9580,7 @@ mod tests {
         // MR: Under OneForAll policy, the restart plan should be identical regardless
         // of which child fails (all children are restarted anyway)
 
-        let config = SupervisionMetamorphicConfig {
+        let _config = SupervisionMetamorphicConfig {
             child_count: 4,
             ..SupervisionMetamorphicConfig::default()
         };

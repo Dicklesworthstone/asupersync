@@ -1670,7 +1670,7 @@ mod tests {
 
         // Start multiple concurrent workers that should trigger the same resolution
         let workers: Vec<_> = (0..5)
-            .map(|i| {
+            .map(|_i| {
                 let discovery_clone = Arc::clone(&discovery);
                 let worker_count_clone = Arc::clone(&worker_count);
                 thread::spawn(move || {

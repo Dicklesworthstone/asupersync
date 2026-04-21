@@ -32,6 +32,7 @@ on:
           - grpc_prost_codec_decode
           - tls_stream_record_framing
           - fuzz_hpack_decode
+          - hpack_indexed
           - fuzz_http2_frame
           - fuzz_interest_flags
       duration:
@@ -68,6 +69,7 @@ jobs:
           - grpc_prost_codec_decode
           - tls_stream_record_framing
           - fuzz_hpack_decode
+          - hpack_indexed
           - fuzz_http2_frame
           - fuzz_interest_flags
         include:

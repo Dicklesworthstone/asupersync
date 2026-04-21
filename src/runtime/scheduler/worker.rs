@@ -1761,7 +1761,7 @@ mod tests {
 
         // For each worker, simulate their stealing perspective
         for stealer_worker in 0..NUM_WORKERS {
-            let mut stealers: Vec<_> = queues
+            let stealers: Vec<_> = queues
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i != stealer_worker) // Don't steal from self

@@ -14,7 +14,7 @@ use arbitrary::Arbitrary;
 
 use asupersync::{
     bytes::Bytes,
-    http::h2::hpack::{Decoder, Header},
+    http::h2::hpack::Decoder,
 };
 
 /// Fuzzing input structure for HPACK indexed header testing
@@ -182,7 +182,7 @@ fn test_no_panic_on_indexed_bytes(decoder: &mut Decoder, data: &[u8]) {
     if data.len() >= 2 {
         for chunk in data.chunks(2).take(128) {
             if chunk.len() == 2 {
-                let mut indexed_seq = vec![chunk[0] | 0x80, chunk[1]];
+                let indexed_seq = vec![chunk[0] | 0x80, chunk[1]];
                 let mut bytes = Bytes::from(indexed_seq);
                 let _ = decoder.decode(&mut bytes); // Should not panic
             }
@@ -207,16 +207,16 @@ fn test_static_table_correctness() {
         encode_integer(&mut header_block, index, 7);
 
         let mut bytes = Bytes::from(header_block);
-        if let Ok(headers) = decoder.decode(&mut bytes) {
-            if let Some(header) = headers.first() {
-                // Verify name and value match static table entry exactly
-                assert_eq!(header.name, expected_name,
-                    "Static table index {} name mismatch: expected '{}', got '{}'",
-                    index, expected_name, header.name);
-                assert_eq!(header.value, expected_value,
-                    "Static table index {} value mismatch: expected '{}', got '{}'",
-                    index, expected_value, header.value);
-            }
+        if let Ok(headers) = decoder.decode(&mut bytes)
+            && let Some(header) = headers.first()
+        {
+            // Verify name and value match static table entry exactly
+            assert_eq!(header.name, expected_name,
+                "Static table index {} name mismatch: expected '{}', got '{}'",
+                index, expected_name, header.name);
+            assert_eq!(header.value, expected_value,
+                "Static table index {} value mismatch: expected '{}', got '{}'",
+                index, expected_value, header.value);
         }
     }
 }
@@ -245,7 +245,7 @@ fn test_index_zero_rejection() {
     let mut decoder = Decoder::new();
 
     // Encode indexed header field with index 0 (invalid per RFC)
-    let mut header_block = vec![0x80]; // 10000000 - indexed pattern, index 0
+    let header_block = vec![0x80]; // 10000000 - indexed pattern, index 0
 
     let mut bytes = Bytes::from(header_block);
     let result = decoder.decode(&mut bytes);
@@ -284,13 +284,13 @@ fn test_huffman_round_trip(data: &[u8]) {
         encode_string(&mut header_block, "test-value", false); // Plain value
 
         let mut bytes = Bytes::from(header_block);
-        if let Ok(headers) = decoder.decode(&mut bytes) {
-            if let Some(header) = headers.first() {
-                // The decoded name should equal the original input (round-trip preservation)
-                assert_eq!(header.name.as_bytes(), ascii_data,
-                    "Huffman round-trip failed: original {:?} != decoded {:?}",
-                    ascii_data, header.name.as_bytes());
-            }
+        if let Ok(headers) = decoder.decode(&mut bytes)
+            && let Some(header) = headers.first()
+        {
+            // The decoded name should equal the original input (round-trip preservation)
+            assert_eq!(header.name.as_bytes(), ascii_data,
+                "Huffman round-trip failed: original {:?} != decoded {:?}",
+                ascii_data, header.name.as_bytes());
         }
     }
 }

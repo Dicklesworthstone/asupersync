@@ -2873,7 +2873,7 @@ mod tests {
 
         // Spawn multiple short-lived processes
         for i in 0..3 {
-            let mut child = Command::new("sh")
+            let child = Command::new("sh")
                 .arg("-c")
                 .arg(format!("exit {}", i))
                 .spawn()
