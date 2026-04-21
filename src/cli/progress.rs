@@ -423,6 +423,7 @@ impl ProgressReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insta::assert_json_snapshot;
     use parking_lot::Mutex;
     use std::io::{self, Cursor, Write};
     use std::sync::Arc;
@@ -433,6 +434,10 @@ mod tests {
     impl SharedBuffer {
         fn snapshot(&self) -> Vec<u8> {
             self.0.lock().clone()
+        }
+
+        fn snapshot_string(&self) -> String {
+            String::from_utf8(self.snapshot()).expect("shared buffer should contain UTF-8")
         }
     }
 
@@ -450,6 +455,24 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[derive(Serialize)]
+    struct ProgressRenderSnapshot {
+        indeterminate: String,
+        zero_percent: String,
+        fifty_percent: String,
+        one_hundred_percent: String,
+    }
+
+    fn capture_human_progress(event: ProgressEvent) -> String {
+        let shared = SharedBuffer::default();
+        let inspector = shared.clone();
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::Human, shared);
+        reporter
+            .report(event)
+            .expect("human progress event should render");
+        inspector.snapshot_string()
     }
 
     #[test]
@@ -875,5 +898,24 @@ mod tests {
             output
         );
         crate::test_complete!("progress_reporter_auto_color_avoids_redirected_target");
+    }
+
+    #[test]
+    fn progress_bar_render_snapshot() {
+        init_test("progress_bar_render_snapshot");
+
+        let snapshot = ProgressRenderSnapshot {
+            indeterminate: capture_human_progress(ProgressEvent::started("Connecting to cluster")),
+            zero_percent: capture_human_progress(ProgressEvent::update(0, 100, "Queued")),
+            fifty_percent: capture_human_progress(ProgressEvent::update(50, 100, "Syncing")),
+            one_hundred_percent: capture_human_progress(ProgressEvent::update(
+                100,
+                100,
+                "Finalize verification",
+            )),
+        };
+
+        assert_json_snapshot!("progress_bar_render_states", snapshot);
+        crate::test_complete!("progress_bar_render_snapshot");
     }
 }
