@@ -2558,6 +2558,107 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_concurrent_register_drop_returns_to_zero_bookkeeping() {
+        init_test("metamorphic_concurrent_register_drop_returns_to_zero_bookkeeping");
+        let registrations = 8usize;
+        let source = TestFdSource;
+
+        let control_reactor = Arc::new(LabReactor::new());
+        let control_handle: Arc<dyn Reactor> = control_reactor.clone();
+        let control_driver = IoDriverHandle::new(control_handle);
+        for _ in 0..registrations {
+            let (waker, _) = create_test_waker();
+            let registration = control_driver
+                .register(&source, Interest::READABLE, waker)
+                .expect("sequential register should succeed");
+            drop(registration);
+        }
+        let control_stats = control_driver.stats();
+
+        let concurrent_reactor = Arc::new(LabReactor::new());
+        let concurrent_handle: Arc<dyn Reactor> = concurrent_reactor.clone();
+        let concurrent_driver = Arc::new(IoDriverHandle::new(concurrent_handle));
+        let start = Arc::new(Barrier::new(registrations + 1));
+        let release = Arc::new(Barrier::new(registrations + 1));
+
+        let handles: Vec<_> = (0..registrations)
+            .map(|_| {
+                let driver = Arc::clone(&concurrent_driver);
+                let start = Arc::clone(&start);
+                let release = Arc::clone(&release);
+                std::thread::spawn(move || {
+                    let source = TestFdSource;
+                    let (waker, _) = create_test_waker();
+                    start.wait();
+                    let registration = driver
+                        .register(&source, Interest::READABLE, waker)
+                        .expect("concurrent register should succeed");
+                    release.wait();
+                    drop(registration);
+                })
+            })
+            .collect();
+
+        start.wait();
+        release.wait();
+
+        for handle in handles {
+            handle.join().expect("registration thread should join");
+        }
+
+        let concurrent_stats = concurrent_driver.stats();
+        crate::assert_with_log!(
+            control_driver.is_empty(),
+            "sequential control returns to zero live registrations",
+            true,
+            control_driver.is_empty()
+        );
+        crate::assert_with_log!(
+            concurrent_driver.is_empty(),
+            "concurrent register/drop returns to zero live registrations",
+            true,
+            concurrent_driver.is_empty()
+        );
+        crate::assert_with_log!(
+            control_reactor.registration_count() == 0,
+            "sequential control returns reactor bookkeeping to zero",
+            0usize,
+            control_reactor.registration_count()
+        );
+        crate::assert_with_log!(
+            concurrent_reactor.registration_count() == 0,
+            "concurrent register/drop returns reactor bookkeeping to zero",
+            0usize,
+            concurrent_reactor.registration_count()
+        );
+        crate::assert_with_log!(
+            concurrent_stats.registrations == control_stats.registrations,
+            "concurrent register/drop preserves total registration count",
+            control_stats.registrations,
+            concurrent_stats.registrations
+        );
+        crate::assert_with_log!(
+            concurrent_stats.deregistrations == control_stats.deregistrations,
+            "concurrent register/drop preserves total deregistration count",
+            control_stats.deregistrations,
+            concurrent_stats.deregistrations
+        );
+        crate::assert_with_log!(
+            concurrent_stats.registrations == registrations as u64,
+            "all concurrent registrations are tracked",
+            registrations as u64,
+            concurrent_stats.registrations
+        );
+        crate::assert_with_log!(
+            concurrent_stats.deregistrations == registrations as u64,
+            "all concurrent drops are tracked",
+            registrations as u64,
+            concurrent_stats.deregistrations
+        );
+        crate::test_complete!("metamorphic_concurrent_register_drop_returns_to_zero_bookkeeping");
+    }
+
+    #[test]
     fn io_driver_debug() {
         init_test("io_driver_debug");
         let reactor = Arc::new(LabReactor::new());
