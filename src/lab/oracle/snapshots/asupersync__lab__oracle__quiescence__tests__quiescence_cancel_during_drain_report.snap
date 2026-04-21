@@ -1,0 +1,13 @@
+---
+source: src/lab/oracle/quiescence.rs
+expression: snapshot_report(&oracle)
+---
+{
+  "invariant": "quiescence",
+  "passed": false,
+  "violation": "Quiescence violation: Region RegionId(0:0) closed at Time(75ns) without quiescence: 0 live children, 1 live tasks",
+  "stats": {
+    "entities_tracked": 1,
+    "events_recorded": 2
+  }
+}

@@ -1,0 +1,12 @@
+---
+source: src/lab/oracle/quiescence.rs
+expression: snapshot_report(&oracle)
+---
+{
+  "invariant": "quiescence",
+  "passed": true,
+  "stats": {
+    "entities_tracked": 1,
+    "events_recorded": 2
+  }
+}

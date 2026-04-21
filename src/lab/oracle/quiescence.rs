@@ -25,6 +25,7 @@
 //! oracle.check()?;
 //! ```
 
+use super::{Oracle, OracleStats, OracleViolation};
 use crate::types::{RegionId, TaskId, Time};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -201,9 +202,27 @@ impl QuiescenceOracle {
     }
 }
 
+impl Oracle for QuiescenceOracle {
+    fn invariant_name(&self) -> &'static str {
+        "quiescence"
+    }
+
+    fn violation(&self) -> Option<OracleViolation> {
+        self.check().err().map(OracleViolation::Quiescence)
+    }
+
+    fn stats(&self) -> OracleStats {
+        OracleStats {
+            entities_tracked: self.region_count(),
+            events_recorded: self.region_count() + self.closed_count(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lab::oracle::Oracle;
     use crate::util::ArenaIndex;
 
     fn task(n: u32) -> TaskId {
@@ -221,6 +240,11 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn snapshot_report(oracle: &QuiescenceOracle) -> String {
+        serde_json::to_string_pretty(&oracle.report_entry())
+            .expect("quiescence report should serialize")
     }
 
     #[test]
@@ -462,6 +486,42 @@ mod tests {
         let has_tasks = s.contains("2 live tasks");
         crate::assert_with_log!(has_tasks, "tasks text", true, has_tasks);
         crate::test_complete!("violation_display");
+    }
+
+    #[test]
+    fn quiescence_clean_close_report_snapshot() {
+        let mut oracle = QuiescenceOracle::new();
+        oracle.on_region_create(region(0), None);
+        oracle.on_spawn(task(1), region(0));
+        oracle.on_task_complete(task(1));
+        oracle.on_region_close(region(0), t(100));
+
+        insta::assert_snapshot!("quiescence_clean_close_report", snapshot_report(&oracle));
+    }
+
+    #[test]
+    fn quiescence_leak_detected_report_snapshot() {
+        let mut oracle = QuiescenceOracle::new();
+        oracle.on_region_create(region(0), None);
+        oracle.on_region_create(region(1), Some(region(0)));
+        oracle.on_spawn(task(1), region(0));
+        oracle.on_region_close(region(0), t(50));
+
+        insta::assert_snapshot!("quiescence_leak_detected_report", snapshot_report(&oracle));
+    }
+
+    #[test]
+    fn quiescence_cancel_during_drain_report_snapshot() {
+        let mut oracle = QuiescenceOracle::new();
+        oracle.on_region_create(region(0), None);
+        oracle.on_spawn(task(1), region(0));
+        oracle.on_region_close(region(0), t(75));
+        oracle.on_task_complete(task(1));
+
+        insta::assert_snapshot!(
+            "quiescence_cancel_during_drain_report",
+            snapshot_report(&oracle)
+        );
     }
 
     #[test]
