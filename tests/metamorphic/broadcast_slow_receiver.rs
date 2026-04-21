@@ -5,16 +5,12 @@
 //! The tests ensure that lag detection, capacity bounds, recovery behavior, and
 //! isolation work correctly under various scenarios.
 
-use asupersync::channel::broadcast::{self, RecvError, Sender, TryRecvError};
+use asupersync::channel::broadcast::{self, RecvError, TryRecvError};
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::{Cx, RegionId, TaskId};
 use asupersync::types::Budget;
 use asupersync::util::ArenaIndex;
 use proptest::prelude::*;
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 /// Test scenario for broadcast slow receiver lag bound testing
 #[derive(Debug, Clone)]
@@ -117,7 +113,7 @@ async fn consume_all_messages<T: Clone>(
 #[test]
 fn mr1_capacity_bound_honored_per_receiver() {
     proptest!(|(scenario in slow_receiver_scenarios())| {
-        let lab = LabRuntime::new(LabConfig::default());
+        let _lab = LabRuntime::new(LabConfig::default());
 
         futures_lite::future::block_on(async {
             let cx = create_test_context();
@@ -191,7 +187,7 @@ fn mr1_capacity_bound_honored_per_receiver() {
 #[test]
 fn mr2_slow_receiver_triggers_lagged_error_after_bound() {
     proptest!(|(scenario in slow_receiver_scenarios())| {
-        let lab = LabRuntime::new(LabConfig::default());
+        let _lab = LabRuntime::new(LabConfig::default());
 
         futures_lite::future::block_on(async {
             let cx = create_test_context();
@@ -267,7 +263,7 @@ fn mr3_recovery_after_lagged_resumes_from_latest() {
         "Need lag to test recovery",
         |s| s.expected_lag_count() > 0 && s.recovery_messages > 0
     ))| {
-        let lab = LabRuntime::new(LabConfig::default());
+        let _lab = LabRuntime::new(LabConfig::default());
 
         futures_lite::future::block_on(async {
             let cx = create_test_context();
@@ -344,7 +340,7 @@ fn mr4_other_receivers_unaffected_by_slow_subscriber() {
         "Need multiple receivers",
         |s| s.fast_receiver_count > 0
     ))| {
-        let lab = LabRuntime::new(LabConfig::default());
+        let _lab = LabRuntime::new(LabConfig::default());
 
         futures_lite::future::block_on(async {
             let cx = create_test_context();
@@ -388,7 +384,7 @@ fn mr4_other_receivers_unaffected_by_slow_subscriber() {
 
                 // Sequence should be complete and in order
                 let expected: Vec<usize> = (0..total_messages).collect();
-                prop_assert_eq!(*first_sequence, expected,
+                prop_assert_eq!(first_sequence, &expected,
                     "Fast receivers should see complete sequence in order");
             }
 
@@ -437,7 +433,7 @@ fn mr4_other_receivers_unaffected_by_slow_subscriber() {
 #[test]
 fn mr5_drop_slow_receiver_cleans_backpressure_state() {
     proptest!(|(scenario in slow_receiver_scenarios())| {
-        let lab = LabRuntime::new(LabConfig::default());
+        let _lab = LabRuntime::new(LabConfig::default());
 
         futures_lite::future::block_on(async {
             let cx = create_test_context();
@@ -509,7 +505,7 @@ fn mr5_drop_slow_receiver_cleans_backpressure_state() {
 /// Tests the complete slow receiver workflow from creation through lag to cleanup
 #[test]
 fn integration_slow_receiver_complete_workflow() {
-    let lab = LabRuntime::new(LabConfig::default());
+    let _lab = LabRuntime::new(LabConfig::default());
 
     futures_lite::future::block_on(async {
         let cx = create_test_context();
@@ -585,7 +581,7 @@ fn integration_slow_receiver_complete_workflow() {
 /// **Edge Case Test: Single Capacity Channel**
 #[test]
 fn edge_case_single_capacity_channel() {
-    let lab = LabRuntime::new(LabConfig::default());
+    let _lab = LabRuntime::new(LabConfig::default());
 
     futures_lite::future::block_on(async {
         let cx = create_test_context();
@@ -619,7 +615,7 @@ fn edge_case_single_capacity_channel() {
 /// **Boundary Condition Test: Zero Lag Scenarios**
 #[test]
 fn boundary_zero_lag_scenarios() {
-    let lab = LabRuntime::new(LabConfig::default());
+    let _lab = LabRuntime::new(LabConfig::default());
 
     futures_lite::future::block_on(async {
         let cx = create_test_context();
