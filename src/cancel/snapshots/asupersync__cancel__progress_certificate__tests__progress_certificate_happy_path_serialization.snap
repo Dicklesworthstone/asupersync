@@ -1,0 +1,93 @@
+---
+source: src/cancel/progress_certificate.rs
+expression: certificate_snapshot(&cert)
+---
+{
+  "config": {
+    "confidence": "0.970000",
+    "max_step_bound": "40.000000",
+    "stall_threshold": 6,
+    "min_observations": 4,
+    "epsilon": "0.000000"
+  },
+  "observations": [
+    {
+      "step": 0,
+      "potential": "120.000000",
+      "delta": "0.000000",
+      "credit": "0.000000"
+    },
+    {
+      "step": 1,
+      "potential": "92.000000",
+      "delta": "-28.000000",
+      "credit": "28.000000"
+    },
+    {
+      "step": 2,
+      "potential": "64.000000",
+      "delta": "-28.000000",
+      "credit": "28.000000"
+    },
+    {
+      "step": 3,
+      "potential": "39.000000",
+      "delta": "-25.000000",
+      "credit": "25.000000"
+    },
+    {
+      "step": 4,
+      "potential": "18.000000",
+      "delta": "-21.000000",
+      "credit": "21.000000"
+    },
+    {
+      "step": 5,
+      "potential": "6.000000",
+      "delta": "-12.000000",
+      "credit": "12.000000"
+    },
+    {
+      "step": 6,
+      "potential": "0.000000",
+      "delta": "-6.000000",
+      "credit": "6.000000"
+    }
+  ],
+  "verdict": {
+    "converging": true,
+    "estimated_remaining_steps": "0.000000",
+    "confidence_bound": "1.000000",
+    "stall_detected": false,
+    "azuma_bound": "1.000000",
+    "total_steps": 7,
+    "current_potential": "0.000000",
+    "initial_potential": "120.000000",
+    "mean_credit": "20.000000",
+    "max_observed_step": "28.000000",
+    "freedman_bound": "1.000000",
+    "drain_phase": "quiescent",
+    "empirical_variance": "69.000000",
+    "evidence": [
+      {
+        "step": 6,
+        "potential": "0.000000",
+        "bound": "0.000000",
+        "description": "quiescence reached (V ≈ 0)"
+      },
+      {
+        "step": 6,
+        "potential": "0.000000",
+        "bound": "0.666667",
+        "description": "Ville bound: P(potential ever exceeds 1.5·V₀) ≤ 0.6667"
+      },
+      {
+        "step": 6,
+        "potential": "0.000000",
+        "bound": "1.000000",
+        "description": "total progress 120.0000 over 6 steps, mean credit 20.0000/step, Azuma tail P ≤ 1.000000"
+      }
+    ]
+  },
+  "verdict_display": "Progress Certificate Verdict\n============================\nConverging:         true\nStall detected:     false\nSteps:              7\nV(Σ₀):              120.0000\nV(Σₜ):              0.0000\nMean credit/step:   20.0000\nMax |Δ|:            28.0000\nDrain phase:        quiescent\nConfidence bound:   1.000000\nAzuma bound:        1.000000\nFreedman bound:     1.000000\nDelta variance:     69.000000\nEst. remaining:     0.0 steps\nEvidence (3 entries):\n  step=6: V=0.0000, bound=0.000000 — quiescence reached (V ≈ 0)\n  step=6: V=0.0000, bound=0.666667 — Ville bound: P(potential ever exceeds 1.5·V₀) ≤ 0.6667\n  step=6: V=0.0000, bound=1.000000 — total progress 120.0000 over 6 steps, mean credit 20.0000/step, Azuma tail P ≤ 1.000000\n"
+}

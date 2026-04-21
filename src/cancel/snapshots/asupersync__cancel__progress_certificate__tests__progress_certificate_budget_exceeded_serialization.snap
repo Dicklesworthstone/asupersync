@@ -1,0 +1,105 @@
+---
+source: src/cancel/progress_certificate.rs
+expression: certificate_snapshot(&cert)
+---
+{
+  "config": {
+    "confidence": "0.990000",
+    "max_step_bound": "20.000000",
+    "stall_threshold": 4,
+    "min_observations": 4,
+    "epsilon": "0.000000"
+  },
+  "observations": [
+    {
+      "step": 0,
+      "potential": "80.000000",
+      "delta": "0.000000",
+      "credit": "0.000000"
+    },
+    {
+      "step": 1,
+      "potential": "72.000000",
+      "delta": "-8.000000",
+      "credit": "8.000000"
+    },
+    {
+      "step": 2,
+      "potential": "69.000000",
+      "delta": "-3.000000",
+      "credit": "3.000000"
+    },
+    {
+      "step": 3,
+      "potential": "69.000000",
+      "delta": "0.000000",
+      "credit": "0.000000"
+    },
+    {
+      "step": 4,
+      "potential": "70.000000",
+      "delta": "1.000000",
+      "credit": "0.000000"
+    },
+    {
+      "step": 5,
+      "potential": "70.000000",
+      "delta": "0.000000",
+      "credit": "0.000000"
+    },
+    {
+      "step": 6,
+      "potential": "70.000000",
+      "delta": "0.000000",
+      "credit": "0.000000"
+    },
+    {
+      "step": 7,
+      "potential": "70.000000",
+      "delta": "0.000000",
+      "credit": "0.000000"
+    }
+  ],
+  "verdict": {
+    "converging": false,
+    "estimated_remaining_steps": "44.545455",
+    "confidence_bound": "0.864902",
+    "stall_detected": true,
+    "azuma_bound": "1.000000",
+    "total_steps": 8,
+    "current_potential": "70.000000",
+    "initial_potential": "80.000000",
+    "mean_credit": "1.571429",
+    "max_observed_step": "8.000000",
+    "freedman_bound": "1.000000",
+    "drain_phase": "stalled",
+    "empirical_variance": "8.530612",
+    "evidence": [
+      {
+        "step": 7,
+        "potential": "70.000000",
+        "bound": "5.000000",
+        "description": "stall: 5 consecutive non-decreasing steps (threshold: 4)"
+      },
+      {
+        "step": 7,
+        "potential": "70.000000",
+        "bound": "0.142857",
+        "description": "1 monotonicity violations out of 7 steps (rate: 0.1429)"
+      },
+      {
+        "step": 7,
+        "potential": "70.000000",
+        "bound": "0.666667",
+        "description": "Ville bound: P(potential ever exceeds 1.5·V₀) ≤ 0.6667"
+      },
+      {
+        "step": 7,
+        "potential": "70.000000",
+        "bound": "1.000000",
+        "description": "total progress 10.0000 over 7 steps, mean credit 1.5714/step, Azuma tail P ≤ 1.000000"
+      }
+    ]
+  },
+  "verdict_display": "Progress Certificate Verdict\n============================\nConverging:         false\nStall detected:     true\nSteps:              8\nV(Σ₀):              80.0000\nV(Σₜ):              70.0000\nMean credit/step:   1.5714\nMax |Δ|:            8.0000\nDrain phase:        stalled\nConfidence bound:   0.864902\nAzuma bound:        1.000000\nFreedman bound:     1.000000\nDelta variance:     8.530612\nEst. remaining:     44.5 steps\nEvidence (4 entries):\n  step=7: V=70.0000, bound=5.000000 — stall: 5 consecutive non-decreasing steps (threshold: 4)\n  step=7: V=70.0000, bound=0.142857 — 1 monotonicity violations out of 7 steps (rate: 0.1429)\n  step=7: V=70.0000, bound=0.666667 — Ville bound: P(potential ever exceeds 1.5·V₀) ≤ 0.6667\n  step=7: V=70.0000, bound=1.000000 — total progress 10.0000 over 7 steps, mean credit 1.5714/step, Azuma tail P ≤ 1.000000\n"
+}
