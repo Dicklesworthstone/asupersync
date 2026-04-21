@@ -38,14 +38,16 @@ use libfuzzer_sys::fuzz_target;
 // Import required traits and types
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
-use asupersync::grpc::ProstCodec;
 use asupersync::grpc::codec::{Codec as GrpcCodec_, GrpcCodec, GrpcMessage, MESSAGE_HEADER_SIZE};
+use asupersync::grpc::{Code, GrpcError, ProstCodec};
 
 /// Maximum message size for fuzzing (16MB to stay within reasonable limits).
 const MAX_FUZZ_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
 /// Maximum nesting depth to prevent infinite recursion.
 const MAX_NESTING_DEPTH: usize = 32;
+/// Small upper bound used for explicit codec limit probes.
+const MAX_STATUS_PROBE_SIZE: usize = 256;
 
 /// protobuf wire types for structured fuzzing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Arbitrary)]
@@ -207,6 +209,8 @@ fn fuzz_structured_message(msg: StructuredGrpcMessage) {
     let data_ref = grpc_message.data.clone();
     test_grpc_codec_roundtrip(grpc_message);
     test_protobuf_parsing(&data_ref);
+    test_frame_limit_status_mapping(data_ref.as_ref());
+    test_invalid_compression_flag_status(data_ref.as_ref());
 
     // Additional coverage for bead requirements
     test_unknown_field_preservation(&msg.raw_suffix);
@@ -230,6 +234,8 @@ fn fuzz_raw_data(data: &[u8]) {
     test_varint_field_number_overflow(data);
     test_unknown_field_preservation(data);
     test_malformed_message_scenarios(data);
+    test_frame_limit_status_mapping(data);
+    test_invalid_compression_flag_status(data);
 }
 
 /// Test gRPC framing edge cases with custom headers.
@@ -242,6 +248,7 @@ fn fuzz_grpc_framing(compression_flag: u8, declared_length: u32, actual_payload:
     frame_data.extend_from_slice(&actual_payload);
 
     test_grpc_frame_parsing(&frame_data);
+    test_explicit_framing_statuses(compression_flag, declared_length, &actual_payload);
 
     // Test length mismatch scenarios (declared vs actual)
     let actual_len = actual_payload.len() as u32;
@@ -251,6 +258,86 @@ fn fuzz_grpc_framing(compression_flag: u8, declared_length: u32, actual_payload:
         let mut codec = GrpcCodec::new();
         let _ = codec.decode(&mut buf); // Should handle length mismatches gracefully
     }
+}
+
+fn assert_protocol_status(result: Result<Option<GrpcMessage>, GrpcError>, expected_code: Code) {
+    let err = result.expect_err("framing edge case should fail");
+    assert!(matches!(err, GrpcError::Protocol(_)));
+    let status = err.into_status();
+    assert_eq!(status.code(), expected_code);
+}
+
+fn test_invalid_compression_flag_status(data: &[u8]) {
+    let invalid_flag = data.first().copied().filter(|flag| *flag > 1).unwrap_or(2);
+    let payload = &data[..data.len().min(MAX_STATUS_PROBE_SIZE)];
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(&[invalid_flag]);
+    buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    buf.extend_from_slice(payload);
+    let original = buf.clone();
+
+    let mut codec = GrpcCodec::new();
+    let result = codec.decode(&mut buf);
+    assert_protocol_status(result, Code::Internal);
+    assert_eq!(buf, original);
+}
+
+fn test_frame_limit_status_mapping(data: &[u8]) {
+    let limit = data
+        .len()
+        .clamp(1, MAX_STATUS_PROBE_SIZE.saturating_sub(1))
+        .max(1);
+    let oversized_len = limit.saturating_add(1);
+    let fill = data.first().copied().unwrap_or(0xAB);
+    let payload = Bytes::from(vec![fill; oversized_len]);
+
+    let mut encode_codec = GrpcCodec::with_max_size(limit);
+    let mut encode_buf = BytesMut::new();
+    let encode_result = encode_codec.encode(GrpcMessage::new(payload.clone()), &mut encode_buf);
+    let encode_err = encode_result.expect_err("oversized encode should fail");
+    assert!(matches!(encode_err, GrpcError::MessageTooLarge));
+    assert_eq!(encode_err.into_status().code(), Code::ResourceExhausted);
+
+    let mut decode_codec = GrpcCodec::with_max_size(limit);
+    let mut decode_buf = BytesMut::new();
+    decode_buf.extend_from_slice(&[0]);
+    decode_buf.extend_from_slice(&(oversized_len as u32).to_be_bytes());
+    let decode_result = decode_codec.decode(&mut decode_buf);
+    let decode_err = decode_result.expect_err("oversized decode should fail");
+    assert!(matches!(decode_err, GrpcError::MessageTooLarge));
+    assert_eq!(decode_err.into_status().code(), Code::ResourceExhausted);
+}
+
+fn test_explicit_framing_statuses(
+    compression_flag: u8,
+    declared_length: u32,
+    actual_payload: &[u8],
+) {
+    if compression_flag > 1 {
+        let mut invalid_flag_frame = BytesMut::new();
+        invalid_flag_frame.extend_from_slice(&compression_flag.to_be_bytes());
+        invalid_flag_frame.extend_from_slice(&declared_length.to_be_bytes());
+        invalid_flag_frame.extend_from_slice(actual_payload);
+        let original = invalid_flag_frame.clone();
+        let mut codec = GrpcCodec::new();
+        let result = codec.decode(&mut invalid_flag_frame);
+        assert_protocol_status(result, Code::Internal);
+        assert_eq!(invalid_flag_frame, original);
+    }
+
+    let status_probe_limit = actual_payload
+        .len()
+        .clamp(1, MAX_STATUS_PROBE_SIZE.saturating_sub(1))
+        .max(1);
+    let oversized_length = declared_length.max((status_probe_limit + 1) as u32);
+    let mut limited_codec = GrpcCodec::with_max_size(status_probe_limit);
+    let mut oversized_frame = BytesMut::new();
+    oversized_frame.extend_from_slice(&[compression_flag & 0x01]);
+    oversized_frame.extend_from_slice(&oversized_length.to_be_bytes());
+    let result = limited_codec.decode(&mut oversized_frame);
+    let err = result.expect_err("oversized declared frame should fail");
+    assert!(matches!(err, GrpcError::MessageTooLarge));
+    assert_eq!(err.into_status().code(), Code::ResourceExhausted);
 }
 
 /// Test gRPC codec encode/decode roundtrip.
