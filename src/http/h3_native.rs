@@ -380,6 +380,33 @@ impl H3Frame {
             .try_into()
             .map_err(|_| H3NativeError::InvalidFrame("frame length exceeds addressable range"))?;
         let payload_start = type_len + len_len;
+
+        // DATAGRAM frames (RFC 9297) are bounded: their declared length
+        // fully describes the payload. A truncated input is a malformed
+        // frame from the peer rather than a streaming short read. We also
+        // need to distinguish "quarter_stream_id varint truncated inside
+        // the payload window" from "declared length exceeds what arrived".
+        if frame_type == H3_FRAME_DATAGRAM {
+            let available = input.len().saturating_sub(payload_start);
+            let bounded_payload = &input[payload_start..payload_start + available.min(len)];
+            let (quarter_stream_id, n) =
+                decode_varint(bounded_payload).map_err(|_| {
+                    H3NativeError::InvalidFrame("quarter stream id varint")
+                })?;
+            if available < len {
+                return Err(H3NativeError::InvalidFrame("insufficient frame payload"));
+            }
+            let payload = &input[payload_start..payload_start + len];
+            let consumed = payload_start + len;
+            return Ok((
+                Self::Datagram {
+                    quarter_stream_id,
+                    payload: payload[n..].to_vec(),
+                },
+                consumed,
+            ));
+        }
+
         if input.len().saturating_sub(payload_start) < len {
             return Err(H3NativeError::UnexpectedEof);
         }
@@ -421,18 +448,6 @@ impl H3Frame {
                     return Err(H3NativeError::InvalidFrame("max_push_id trailing bytes"));
                 }
                 Self::MaxPushId(id)
-            }
-            H3_FRAME_DATAGRAM => {
-                let (quarter_stream_id, n) = decode_varint(payload).map_err(|e| match e {
-                    crate::net::quic_core::QuicCoreError::UnexpectedEof => {
-                        H3NativeError::UnexpectedEof
-                    }
-                    _ => H3NativeError::InvalidFrame("datagram quarter_stream_id"),
-                })?;
-                Self::Datagram {
-                    quarter_stream_id,
-                    payload: payload[n..].to_vec(),
-                }
             }
             _ => Self::Unknown {
                 frame_type,
@@ -4398,9 +4413,18 @@ mod tests {
         }
 
         /// Check if we can send more early data.
+        ///
+        /// Uses `checked_add` so that overflow past `u64::MAX` is treated as
+        /// exceeding the 0-RTT budget rather than saturating and silently
+        /// re-permitting a byte that is not actually available.
         pub fn can_send_early_data(&self, additional_bytes: u64) -> bool {
-            self.is_early_data_allowed()
-                && self.early_data_sent.saturating_add(additional_bytes) <= self.max_early_data
+            if !self.is_early_data_allowed() {
+                return false;
+            }
+            match self.early_data_sent.checked_add(additional_bytes) {
+                Some(total) => total <= self.max_early_data,
+                None => false,
+            }
         }
 
         /// Record early data sent.

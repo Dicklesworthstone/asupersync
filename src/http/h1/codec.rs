@@ -246,7 +246,27 @@ fn collect_crlf_positions(buf: &[u8], out: &mut smallvec::SmallVec<[usize; 32]>)
     }
 }
 
+/// Valid bytes for the HTTP/1.x request-target (RFC 3986 URI + reserved/sub-delims).
+///
+/// Rejects control characters (including `\x00`, `\x01`, …, `\x1f`), `DEL`
+/// (`0x7F`), any non-ASCII byte, and whitespace — all of which can enable
+/// smuggling or header injection if silently accepted inside a path.
+#[inline]
+fn is_valid_request_target_byte(b: u8) -> bool {
+    // RFC 3986 permits all printable ASCII except space in a URI; anything
+    // outside `0x21..=0x7E` is invalid in a request-target. Space is the
+    // delimiter between tokens and is already consumed by the caller, so a
+    // stray space here also represents a malformed request-line.
+    (0x21..=0x7E).contains(&b)
+}
+
 fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), HttpError> {
+    // Reject bare CR embedded in the request line — only the terminating
+    // CRLF may contain \r, and that has already been stripped. A bare \r
+    // in the middle is a framing error / smuggling vector.
+    if line.contains(&b'\r') {
+        return Err(HttpError::BadRequestLine);
+    }
     // Fast path for the overwhelmingly common HTTP/1.x wire form:
     // `METHOD SP URI SP VERSION` with no extra whitespace tokens.
     if let Some(first_sp) = memchr(b' ', line) {
@@ -263,6 +283,9 @@ fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), Ht
                     {
                         let method =
                             Method::from_bytes(method_bytes).ok_or(HttpError::BadMethod)?;
+                        if !uri_bytes.iter().copied().all(is_valid_request_target_byte) {
+                            return Err(HttpError::BadRequestLine);
+                        }
                         let version = Version::from_bytes(version_bytes)
                             .ok_or(HttpError::UnsupportedVersion)?;
                         let uri = std::str::from_utf8(uri_bytes)
@@ -299,10 +322,13 @@ fn parse_request_line_bytes_slow(line: &[u8]) -> Result<(Method, String, Version
 
     let method =
         Method::from_bytes(&line[method_bounds.0..method_bounds.1]).ok_or(HttpError::BadMethod)?;
+    let uri_bytes = &line[uri_bounds.0..uri_bounds.1];
+    if !uri_bytes.iter().copied().all(is_valid_request_target_byte) {
+        return Err(HttpError::BadRequestLine);
+    }
     let version = Version::from_bytes(&line[version_bounds.0..version_bounds.1])
         .ok_or(HttpError::UnsupportedVersion)?;
-    let uri = std::str::from_utf8(&line[uri_bounds.0..uri_bounds.1])
-        .map_err(|_| HttpError::BadRequestLine)?;
+    let uri = std::str::from_utf8(uri_bytes).map_err(|_| HttpError::BadRequestLine)?;
 
     Ok((method, uri.to_owned(), version))
 }
@@ -710,6 +736,18 @@ fn decode_head_parts(
     )>,
     HttpError,
 > {
+    // Reject bare CRs in the buffered head: HTTP/1.x line terminators MUST be
+    // CRLF (RFC 9112 §2.2). A `\r` followed by anything other than `\n` is a
+    // framing violation (request-smuggling vector), so fail fast instead of
+    // waiting for a CRLF that will never arrive. A trailing single `\r` with
+    // no successor byte yet may still be completed, so we only fire when the
+    // next byte is already buffered.
+    for idx in memchr_iter(b'\r', src) {
+        if idx + 1 < src.len() && src[idx + 1] != b'\n' {
+            return Err(HttpError::BadRequestLine);
+        }
+    }
+
     let Some(end) = find_headers_end(src) else {
         if src.len() > max_headers_size {
             return Err(HttpError::HeadersTooLarge);
