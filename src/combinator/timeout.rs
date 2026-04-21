@@ -816,4 +816,395 @@ mod tests {
             1_000_000u64.saturating_mul(1_000_000_000)
         );
     }
+
+    // =========================================================================
+    // Metamorphic Relations for Timeout Race Invariants (asupersync-uj8gl0)
+    // =========================================================================
+
+    use proptest::prelude::*;
+
+    #[derive(Debug, Clone)]
+    enum MockOperationOutcome {
+        Complete(i32),
+        Error(&'static str),
+        Cancel,
+        Panic,
+    }
+
+    impl MockOperationOutcome {
+        fn into_outcome(self) -> Outcome<i32, &'static str> {
+            match self {
+                Self::Complete(val) => Outcome::Ok(val),
+                Self::Error(msg) => Outcome::Err(msg),
+                Self::Cancel => Outcome::Cancelled(CancelReason::shutdown()),
+                Self::Panic => Outcome::Panicked(crate::types::outcome::PanicPayload::new("test panic")),
+            }
+        }
+    }
+
+    fn mock_operation_strategy() -> impl Strategy<Value = MockOperationOutcome> {
+        prop_oneof![
+            any::<i16>().prop_map(|v| MockOperationOutcome::Complete(i32::from(v))),
+            Just(MockOperationOutcome::Error("mock error")),
+            Just(MockOperationOutcome::Cancel),
+            Just(MockOperationOutcome::Panic),
+        ]
+    }
+
+    /// MR1: Timeout idempotence - timeout fires exactly once, never double
+    ///
+    /// When a timeout deadline is reached, the timeout mechanism should fire
+    /// exactly once. Repeated queries about expiration should be consistent.
+    #[test]
+    fn metamorphic_timeout_single_fire_idempotence() {
+        proptest!(|(
+            base_time in 0u64..1_000_000_000,
+            timeout_duration in 1u64..10_000_000,
+            elapsed_time in 10_000_000u64..20_000_000,
+        )| {
+            let now = Time::from_nanos(base_time);
+            let timeout = Timeout::<()>::after_nanos(now, timeout_duration);
+            let future_time = Time::from_nanos(base_time + elapsed_time);
+
+            // Check expired multiple times - should be stable
+            let expired_1 = timeout.is_expired(future_time);
+            let expired_2 = timeout.is_expired(future_time);
+            let expired_3 = timeout.is_expired(future_time);
+
+            prop_assert_eq!(expired_1, expired_2);
+            prop_assert_eq!(expired_2, expired_3);
+
+            // Remaining time should also be stable
+            let remaining_1 = timeout.remaining(future_time);
+            let remaining_2 = timeout.remaining(future_time);
+            prop_assert_eq!(remaining_1, remaining_2);
+
+            // If elapsed > timeout_duration, should be expired
+            if elapsed_time > timeout_duration {
+                prop_assert!(expired_1);
+                prop_assert_eq!(remaining_1, Duration::ZERO);
+            }
+        });
+    }
+
+    /// MR2: Cancel-before-timeout consistency
+    ///
+    /// If an operation is cancelled before the timeout fires, the result should
+    /// be Completed(Cancelled), not TimedOut. The timing determines the outcome type.
+    #[test]
+    fn metamorphic_cancel_before_timeout_consistency() {
+        proptest!(|(
+            base_time in 0u64..1_000_000_000,
+            timeout_duration in 10_000_000u64..50_000_000,
+            completion_time in 1_000_000u64..9_999_999,
+        )| {
+            let now = Time::from_nanos(base_time);
+            let deadline = now.saturating_add_nanos(timeout_duration);
+            let completion_offset = Time::from_nanos(base_time + completion_time);
+
+            // Operation completes (via cancellation) before timeout
+            let cancelled_outcome: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::shutdown());
+            let completed_in_time = completion_offset < deadline;
+
+            prop_assert!(completed_in_time); // Test setup verification
+
+            let result = make_timed_result(cancelled_outcome, deadline, completed_in_time);
+
+            // Should be Completed(Cancelled), not TimedOut
+            prop_assert!(result.is_completed());
+            prop_assert!(!result.is_timed_out());
+
+            match result {
+                TimedResult::Completed(outcome) => {
+                    prop_assert!(outcome.is_cancelled());
+                }
+                TimedResult::TimedOut(_) => {
+                    prop_assert!(false, "Early cancellation should not be TimedOut");
+                }
+            }
+        });
+    }
+
+    /// MR3: Concurrent timeout race determinism
+    ///
+    /// When multiple timeouts race, the earliest deadline should always win.
+    /// The effective_deadline function implements this min() semantics.
+    #[test]
+    fn metamorphic_concurrent_timeout_race_determinism() {
+        proptest!(|(
+            timeout_durations in prop::collection::vec(1_000_000u64..100_000_000, 2..8),
+            base_time in 0u64..1_000_000_000,
+        )| {
+            let now = Time::from_nanos(base_time);
+
+            // Create multiple timeout deadlines
+            let deadlines: Vec<Time> = timeout_durations.iter()
+                .map(|&duration| now.saturating_add_nanos(duration))
+                .collect();
+
+            // Find the earliest deadline manually
+            let min_deadline = deadlines.iter().min().copied().unwrap();
+
+            // Apply effective_deadline reduction sequentially
+            let mut effective = deadlines[0];
+            for &deadline in deadlines.iter().skip(1) {
+                effective = effective_deadline(deadline, Some(effective));
+            }
+
+            prop_assert_eq!(effective, min_deadline);
+
+            // Apply in different orders - should be commutative/associative
+            let mut reverse_effective = deadlines[deadlines.len() - 1];
+            for &deadline in deadlines.iter().rev().skip(1) {
+                reverse_effective = effective_deadline(deadline, Some(reverse_effective));
+            }
+
+            prop_assert_eq!(effective, reverse_effective);
+
+            // The minimum deadline should be <= all original deadlines
+            for &deadline in &deadlines {
+                prop_assert!(effective.as_nanos() <= deadline.as_nanos());
+            }
+        });
+    }
+
+    /// MR4: Nested timeout composition law (LAW-TIMEOUT-MIN)
+    ///
+    /// timeout(d1, timeout(d2, f)) ≃ timeout(min(d1, d2), f)
+    /// This should hold regardless of which timeout is outer/inner.
+    #[test]
+    fn metamorphic_nested_timeout_composition_law() {
+        proptest!(|(
+            d1 in 1_000_000u64..50_000_000,
+            d2 in 1_000_000u64..50_000_000,
+            d3 in 1_000_000u64..50_000_000,
+            base_time in 0u64..1_000_000_000,
+        )| {
+            let now = Time::from_nanos(base_time);
+            let deadline1 = now.saturating_add_nanos(d1);
+            let deadline2 = now.saturating_add_nanos(d2);
+            let deadline3 = now.saturating_add_nanos(d3);
+
+            // timeout(d1, timeout(d2, f)) = effective_deadline(d1, Some(d2))
+            let nested_12 = effective_deadline(deadline1, Some(deadline2));
+
+            // timeout(d2, timeout(d1, f)) = effective_deadline(d2, Some(d1))
+            let nested_21 = effective_deadline(deadline2, Some(deadline1));
+
+            // Both should equal min(d1, d2)
+            let min_12 = if deadline1.as_nanos() <= deadline2.as_nanos() {
+                deadline1
+            } else {
+                deadline2
+            };
+
+            prop_assert_eq!(nested_12, min_12);
+            prop_assert_eq!(nested_21, min_12);
+            prop_assert_eq!(nested_12, nested_21);
+
+            // Triple nesting: timeout(d1, timeout(d2, timeout(d3, f)))
+            let triple_nested = effective_deadline(deadline1,
+                Some(effective_deadline(deadline2, Some(deadline3))));
+            let min_123 = [deadline1, deadline2, deadline3].iter().min().copied().unwrap();
+
+            prop_assert_eq!(triple_nested, min_123);
+        });
+    }
+
+    /// MR5: Operation completion vs timeout race correctness
+    ///
+    /// When operation and timeout race, the first to complete should win.
+    /// Make_timed_result should preserve this race outcome correctly.
+    #[test]
+    fn metamorphic_operation_timeout_race_correctness() {
+        proptest!(|(
+            operation_outcome in mock_operation_strategy(),
+            timeout_duration in 10_000_000u64..100_000_000,
+            completion_duration in 1_000_000u64..150_000_000,
+            base_time in 0u64..1_000_000_000,
+        )| {
+            let now = Time::from_nanos(base_time);
+            let deadline = now.saturating_add_nanos(timeout_duration);
+            let completion_time = now.saturating_add_nanos(completion_duration);
+
+            let outcome = operation_outcome.into_outcome();
+            let completed_in_time = completion_time < deadline;
+
+            let result = make_timed_result(outcome.clone(), deadline, completed_in_time);
+
+            if completed_in_time {
+                // Operation won the race - should be Completed regardless of outcome type
+                prop_assert!(result.is_completed());
+                prop_assert!(!result.is_timed_out());
+
+                match result {
+                    TimedResult::Completed(completed_outcome) => {
+                        // Should preserve the original outcome
+                        prop_assert_eq!(format!("{:?}", completed_outcome), format!("{:?}", outcome));
+                    }
+                    TimedResult::TimedOut(_) => {
+                        prop_assert!(false, "Operation that completed in time should not be TimedOut");
+                    }
+                }
+            } else {
+                // Timeout won the race
+                match &outcome {
+                    Outcome::Ok(_) | Outcome::Err(_) | Outcome::Panicked(_) => {
+                        // Even if deadline passed, preserve non-cancellation terminal states
+                        prop_assert!(result.is_completed());
+                        prop_assert!(!result.is_timed_out());
+                    }
+                    Outcome::Cancelled(_) => {
+                        // Cancellation + deadline passed = timeout
+                        prop_assert!(result.is_timed_out());
+                        prop_assert!(!result.is_completed());
+                    }
+                }
+            }
+        });
+    }
+
+    /// MR6: Timeout drain invariant preservation
+    ///
+    /// TimedOut results always convert to Cancelled outcomes, preserving
+    /// the timeout→cancellation semantic mapping for downstream drain logic.
+    #[test]
+    fn metamorphic_timeout_drain_invariant_preservation() {
+        proptest!(|(
+            timeout_duration in 1_000_000u64..100_000_000,
+            base_time in 0u64..1_000_000_000,
+            message_present in any::<bool>(),
+        )| {
+            let now = Time::from_nanos(base_time);
+            let deadline = now.saturating_add_nanos(timeout_duration);
+
+            let timeout_error = if message_present {
+                TimeoutError::with_message(deadline, "operation timed out")
+            } else {
+                TimeoutError::new(deadline)
+            };
+
+            let timed_result: TimedResult<i32, &str> = TimedResult::TimedOut(timeout_error.clone());
+
+            prop_assert!(timed_result.is_timed_out());
+            prop_assert!(!timed_result.is_completed());
+
+            // Convert to outcome - should be Cancelled with timeout reason
+            let outcome = timed_result.clone().into_outcome();
+            prop_assert!(outcome.is_cancelled());
+
+            if let Outcome::Cancelled(reason) = outcome {
+                prop_assert!(matches!(reason.kind(), crate::types::cancel::CancelKind::Timeout));
+            } else {
+                prop_assert!(false, "TimedOut should convert to Cancelled outcome");
+            }
+
+            // Convert to Result - should be TimedOut error
+            let result = timed_result.into_result();
+            prop_assert!(result.is_err());
+
+            if let Err(err) = result {
+                prop_assert!(matches!(err, TimedError::TimedOut(_)));
+
+                if let TimedError::TimedOut(timeout_err) = err {
+                    prop_assert_eq!(timeout_err.deadline, deadline);
+                    prop_assert_eq!(timeout_err.message.is_some(), message_present);
+                }
+            }
+        });
+    }
+
+    /// MR7: Timeout expiration boundary consistency
+    ///
+    /// The transition from not-expired to expired should be deterministic
+    /// and happen exactly at the deadline boundary.
+    #[test]
+    fn metamorphic_timeout_boundary_consistency() {
+        proptest!(|(
+            base_time in 1_000_000u64..1_000_000_000,
+            timeout_duration in 1_000_000u64..100_000_000,
+        )| {
+            let now = Time::from_nanos(base_time);
+            let timeout = Timeout::<()>::after_nanos(now, timeout_duration);
+            let deadline = now.saturating_add_nanos(timeout_duration);
+
+            prop_assert_eq!(timeout.deadline, deadline);
+
+            // Just before deadline: not expired
+            let before = Time::from_nanos(deadline.as_nanos().saturating_sub(1));
+            prop_assert!(!timeout.is_expired(before));
+            prop_assert!(timeout.remaining(before) > Duration::ZERO);
+
+            // At deadline: expired
+            prop_assert!(timeout.is_expired(deadline));
+            prop_assert_eq!(timeout.remaining(deadline), Duration::ZERO);
+
+            // After deadline: still expired
+            let after = Time::from_nanos(deadline.as_nanos().saturating_add(1));
+            prop_assert!(timeout.is_expired(after));
+            prop_assert_eq!(timeout.remaining(after), Duration::ZERO);
+
+            // Remaining time should decrease monotonically before deadline
+            if before < deadline {
+                let remaining_before = timeout.remaining(before);
+                let remaining_at = timeout.remaining(deadline);
+                prop_assert!(remaining_before >= remaining_at);
+            }
+        });
+    }
+
+    /// MR8: TimeoutConfig resolution invariants
+    ///
+    /// TimeoutConfig resolution should respect the use_effective flag consistently
+    /// and always return deadlines that make logical sense.
+    #[test]
+    fn metamorphic_timeout_config_resolution_invariants() {
+        proptest!(|(
+            requested_time in 1_000_000u64..100_000_000,
+            existing_time in 1_000_000u64..100_000_000,
+            base_time in 0u64..1_000_000_000,
+            use_effective in any::<bool>(),
+        )| {
+            let now = Time::from_nanos(base_time);
+            let requested = now.saturating_add_nanos(requested_time);
+            let existing = now.saturating_add_nanos(existing_time);
+
+            let config = if use_effective {
+                TimeoutConfig::new(requested)
+            } else {
+                TimeoutConfig::absolute(requested)
+            };
+
+            let resolved_with_existing = config.resolve(Some(existing));
+            let resolved_without_existing = config.resolve(None);
+
+            // Without existing deadline, should always return requested
+            prop_assert_eq!(resolved_without_existing, requested);
+
+            if use_effective {
+                // Effective mode: should return tighter deadline
+                let expected = if requested.as_nanos() <= existing.as_nanos() {
+                    requested
+                } else {
+                    existing
+                };
+                prop_assert_eq!(resolved_with_existing, expected);
+
+                // Resolved should be <= both inputs
+                prop_assert!(resolved_with_existing.as_nanos() <= requested.as_nanos());
+                prop_assert!(resolved_with_existing.as_nanos() <= existing.as_nanos());
+            } else {
+                // Absolute mode: should always return requested, ignoring existing
+                prop_assert_eq!(resolved_with_existing, requested);
+            }
+
+            // Applying the same config multiple times should be idempotent
+            let resolved_twice = if use_effective {
+                TimeoutConfig::new(resolved_with_existing).resolve(Some(existing))
+            } else {
+                TimeoutConfig::absolute(resolved_with_existing).resolve(Some(existing))
+            };
+            prop_assert_eq!(resolved_twice, resolved_with_existing);
+        });
+    }
 }

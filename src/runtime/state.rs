@@ -9802,6 +9802,54 @@ mod tests {
         }
 
         #[test]
+        fn mr_cancel_depth_profile_is_reason_invariant() {
+            proptest!(|(
+                child_count in 1..5usize,
+                grandchildren_per_child in 1..4usize,
+                lhs_reason_variant in 0..4u8,
+                rhs_reason_variant in 0..4u8
+            )| {
+                let build_depth_profile = |reason_variant: u8| {
+                    let mut state = RuntimeState::new();
+                    let root = state.create_root_region(Budget::INFINITE);
+                    let root_task = insert_task(&mut state, root);
+                    let mut depth_by_task = HashMap::from([(root_task, 0usize)]);
+
+                    for _ in 0..child_count {
+                        let child = create_child_region(&mut state, root);
+                        let child_task = insert_task(&mut state, child);
+                        depth_by_task.insert(child_task, 1);
+
+                        for _ in 0..grandchildren_per_child {
+                            let grandchild = create_child_region(&mut state, child);
+                            let grandchild_task = insert_task(&mut state, grandchild);
+                            depth_by_task.insert(grandchild_task, 2);
+                        }
+                    }
+
+                    state
+                        .cancel_request(root, &reason_from_variant(reason_variant), None)
+                        .into_iter()
+                        .map(|(task_id, _priority)| {
+                            *depth_by_task
+                                .get(&task_id)
+                                .expect("scheduled task missing from depth map")
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+                let lhs_profile = build_depth_profile(lhs_reason_variant);
+                let rhs_profile = build_depth_profile(rhs_reason_variant);
+
+                prop_assert_eq!(
+                    lhs_profile,
+                    rhs_profile,
+                    "cancel reason variants should not perturb ancestor-before-descendant scheduling"
+                );
+            });
+        }
+
+        #[test]
         fn mr_cancel_cause_chain_is_stable_under_sibling_noise() {
             proptest!(|(sibling_count in 1..5usize, reason_variant in 0..4u8)| {
                 let reason = reason_from_variant(reason_variant);
