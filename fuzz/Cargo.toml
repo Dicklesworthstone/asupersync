@@ -1089,6 +1089,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_connection_frame_decoder"
+path = "fuzz_targets/h2_connection_frame_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h3_body"
 path = "fuzz_targets/h3_body.rs"
 test = false
@@ -1546,6 +1553,13 @@ bench = false
 [[bin]]
 name = "h2_connection_window_update"
 path = "fuzz_targets/h2_connection_window_update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_frame_decoder"
+path = "fuzz_targets/h2_frame_decoder.rs"
 test = false
 doc = false
 bench = false
