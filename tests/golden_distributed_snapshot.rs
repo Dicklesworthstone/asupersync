@@ -15,7 +15,7 @@ use asupersync::distributed::snapshot::{
 };
 use asupersync::record::region::RegionState;
 use asupersync::types::{RegionId, TaskId, Time};
-use insta::{assert_debug_snapshot, Settings};
+use insta::{Settings, assert_debug_snapshot};
 
 /// Complete snapshot format capture for golden testing
 #[derive(Debug, Clone)]
@@ -207,13 +207,13 @@ fn snapshot_finalized_region() {
         state: RegionState::Closed,
         timestamp: Time::from_nanos(9_876_543_210_123), // Large timestamp
         sequence: 999,
-        tasks: vec![], // No tasks in finalized region
+        tasks: vec![],    // No tasks in finalized region
         children: vec![], // No children in finalized region
         finalizer_count: 0,
         budget: BudgetSnapshot {
-            deadline_nanos: None, // No deadline in finalized
+            deadline_nanos: None,  // No deadline in finalized
             polls_remaining: None, // No polls remaining
-            cost_remaining: None, // No cost remaining
+            cost_remaining: None,  // No cost remaining
         },
         cancel_reason: Some("region_completed".to_string()),
         parent: Some(RegionId::new_for_test(199, 14)),
@@ -241,13 +241,11 @@ fn snapshot_draining_region() {
         state: RegionState::Draining,
         timestamp: Time::from_secs(7200), // 2 hours
         sequence: 128,
-        tasks: vec![
-            TaskSnapshot {
-                task_id: TaskId::new_for_test(1000, 10),
-                state: TaskState::Pending,
-                priority: 1,
-            },
-        ],
+        tasks: vec![TaskSnapshot {
+            task_id: TaskId::new_for_test(1000, 10),
+            state: TaskState::Pending,
+            priority: 1,
+        }],
         children: vec![
             RegionId::new_for_test(301, 0),
             RegionId::new_for_test(302, 0),
@@ -256,7 +254,7 @@ fn snapshot_draining_region() {
         finalizer_count: 15,
         budget: BudgetSnapshot {
             deadline_nanos: Some(1_000_000_000), // 1 second deadline
-            polls_remaining: Some(5), // Low poll count
+            polls_remaining: Some(5),            // Low poll count
             cost_remaining: Some(100),
         },
         cancel_reason: Some("user_cancel_request".to_string()),

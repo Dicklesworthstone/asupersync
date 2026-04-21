@@ -1664,8 +1664,8 @@ mod tests {
             branch_count in 2usize..8,
             raw_winner_index in 0usize..16,
             winner_case in race_winner_case_strategy(),
-            seed_a in any::<u64>(),
-            seed_b in any::<u64>(),
+            _seed_a in any::<u64>(),
+            _seed_b in any::<u64>(),
         )| {
             let winner_index = raw_winner_index % branch_count;
 
