@@ -371,6 +371,14 @@ mod tests {
         arena
     }
 
+    fn pop_all(heap: &mut IntrusivePriorityHeap, arena: &mut Arena<TaskRecord>) -> Vec<TaskId> {
+        let mut popped = Vec::new();
+        while let Some(task) = heap.pop(arena) {
+            popped.push(task);
+        }
+        popped
+    }
+
     #[test]
     fn empty_heap() {
         let heap = IntrusivePriorityHeap::new();
@@ -566,6 +574,90 @@ mod tests {
         assert_eq!(heap.pop(&mut arena), Some(task(2))); // priority 5
         assert_eq!(heap.pop(&mut arena), Some(task(0))); // priority 3
         assert!(heap.is_empty());
+    }
+
+    #[test]
+    fn metamorphic_priority_permutation_preserves_descending_pop_order() {
+        let fixtures = [(0, 10), (1, 40), (2, 20), (3, 60), (4, 30), (5, 50)];
+        let canonical_order = [0, 1, 2, 3, 4, 5];
+        let permuted_order = [2, 5, 1, 4, 0, 3];
+
+        let mut canonical_arena = setup_arena(fixtures.len() as u32);
+        let mut canonical_heap = IntrusivePriorityHeap::new();
+        for index in canonical_order {
+            let (task_id, priority) = fixtures[index];
+            canonical_heap.push(task(task_id), priority, &mut canonical_arena);
+        }
+
+        let mut permuted_arena = setup_arena(fixtures.len() as u32);
+        let mut permuted_heap = IntrusivePriorityHeap::new();
+        for index in permuted_order {
+            let (task_id, priority) = fixtures[index];
+            permuted_heap.push(task(task_id), priority, &mut permuted_arena);
+        }
+
+        let canonical_popped = pop_all(&mut canonical_heap, &mut canonical_arena);
+        let permuted_popped = pop_all(&mut permuted_heap, &mut permuted_arena);
+        let expected = vec![task(3), task(5), task(1), task(4), task(2), task(0)];
+
+        assert_eq!(
+            canonical_popped, expected,
+            "canonical insertion should pop in descending priority order"
+        );
+        assert_eq!(
+            permuted_popped, expected,
+            "permuting distinct-priority insertions must preserve pop order"
+        );
+    }
+
+    #[test]
+    fn metamorphic_low_priority_noise_preserves_fifo_within_urgent_band() {
+        let urgent_band = [task(0), task(1), task(2)];
+
+        let mut baseline_arena = setup_arena(6);
+        let mut baseline_heap = IntrusivePriorityHeap::new();
+        for urgent in urgent_band {
+            baseline_heap.push(urgent, 9, &mut baseline_arena);
+        }
+        let baseline_prefix: Vec<_> = pop_all(&mut baseline_heap, &mut baseline_arena)
+            .into_iter()
+            .take(urgent_band.len())
+            .collect();
+
+        let mut noisy_arena = setup_arena(6);
+        let mut noisy_heap = IntrusivePriorityHeap::new();
+        noisy_heap.push(task(0), 9, &mut noisy_arena);
+        noisy_heap.push(task(3), 1, &mut noisy_arena);
+        noisy_heap.push(task(1), 9, &mut noisy_arena);
+        noisy_heap.push(task(4), 2, &mut noisy_arena);
+        noisy_heap.push(task(2), 9, &mut noisy_arena);
+        noisy_heap.push(task(5), 0, &mut noisy_arena);
+
+        let noisy_popped = pop_all(&mut noisy_heap, &mut noisy_arena);
+        let noisy_prefix: Vec<_> = noisy_popped
+            .iter()
+            .copied()
+            .take(urgent_band.len())
+            .collect();
+
+        assert_eq!(
+            baseline_prefix,
+            urgent_band,
+            "equal-priority urgent tasks should pop FIFO without background noise"
+        );
+        assert_eq!(
+            noisy_prefix,
+            urgent_band,
+            "lower-priority noise must not perturb FIFO ordering within the urgent band"
+        );
+        assert!(
+            noisy_popped
+                .iter()
+                .copied()
+                .skip(urgent_band.len())
+                .eq([task(4), task(3), task(5)]),
+            "noise should still drain by descending priority after the urgent band"
+        );
     }
 
     #[test]
