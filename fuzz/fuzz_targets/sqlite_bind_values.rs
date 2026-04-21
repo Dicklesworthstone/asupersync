@@ -16,7 +16,7 @@ use asupersync::{
     types::{Outcome, RegionId, TaskId},
     util::ArenaIndex,
 };
-use futures_lite::future::block_on;
+use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_TEXT_CHARS: usize = 256;

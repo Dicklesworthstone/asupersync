@@ -11,7 +11,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = "..", features = ["tls", "postgres", "mysql", "kafka", "test-internals", "trace-compression", "io-uring"] }
+asupersync = { path = "..", features = ["tls", "postgres", "mysql", "kafka", "sqlite", "test-internals", "trace-compression", "io-uring"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 libc = "0.2"
