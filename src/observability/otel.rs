@@ -2954,6 +2954,85 @@ pub mod span_semantics {
                 })
             );
         }
+
+        #[test]
+        fn span_export_format_snapshot_scrubs_ids_and_timestamps() {
+            let config = SpanConformanceConfig {
+                max_attributes: 6,
+                max_events: 3,
+                max_attribute_length: Some(20),
+                test_sampling: true,
+                test_context_propagation: true,
+            };
+
+            let mut happy_path =
+                TestSpan::new_with_config("http.request", SpanKind::Server, &config);
+            happy_path.set_attribute("service.name", "checkout");
+            happy_path.set_attribute("http.method", "POST");
+            happy_path.add_event(
+                "response.sent",
+                HashMap::from([("status_code".to_string(), "200".to_string())]),
+            );
+            happy_path.set_status(Status::Ok);
+            happy_path.end();
+
+            let mut error_path = TestSpan::new_with_config("db.query", SpanKind::Client, &config);
+            error_path.set_attribute("db.system", "postgresql");
+            error_path.set_attribute("db.operation", "select");
+            error_path.add_event(
+                "db.error",
+                HashMap::from([
+                    ("error.kind".to_string(), "timeout".to_string()),
+                    ("statement".to_string(), "select * from orders".to_string()),
+                ]),
+            );
+            error_path.set_status(Status::Error {
+                description: "deadline exceeded".into(),
+            });
+            error_path.end();
+
+            let mut root = TestSpan::new_with_config("batch.import", SpanKind::Producer, &config);
+            root.set_attribute("job.name", "nightly-import");
+            root.set_baggage_item("tenant", "alpha");
+
+            let mut decode_child = root.new_child("decode.payload", SpanKind::Internal);
+            decode_child.set_attribute("stage", "decode");
+            decode_child.add_event(
+                "payload.decoded",
+                HashMap::from([("records".to_string(), "42".to_string())]),
+            );
+            decode_child.set_status(Status::Ok);
+            decode_child.end();
+
+            let mut publish_child = root.new_child("publish.kafka", SpanKind::Producer);
+            publish_child.set_attribute("messaging.system", "kafka");
+            publish_child.add_event(
+                "broker.ack",
+                HashMap::from([("partition".to_string(), "7".to_string())]),
+            );
+            publish_child.set_status(Status::Ok);
+            publish_child.end();
+
+            root.add_event(
+                "pipeline.completed",
+                HashMap::from([("children".to_string(), "2".to_string())]),
+            );
+            root.set_status(Status::Ok);
+            root.end();
+
+            insta::assert_json_snapshot!(
+                "span_export_format_scrubbed",
+                json!({
+                    "happy_path": test_span_snapshot(&happy_path),
+                    "error_path": test_span_snapshot(&error_path),
+                    "multi_span_trace": [
+                        test_span_snapshot(&root),
+                        test_span_snapshot(&decode_child),
+                        test_span_snapshot(&publish_child),
+                    ],
+                })
+            );
+        }
     }
 }
 

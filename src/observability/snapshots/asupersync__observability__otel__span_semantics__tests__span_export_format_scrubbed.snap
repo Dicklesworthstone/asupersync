@@ -1,0 +1,165 @@
+---
+source: src/observability/otel.rs
+expression: |-
+  json!({
+      "happy_path": test_span_snapshot(&happy_path), "error_path":
+      test_span_snapshot(&error_path), "multi_span_trace": [
+          test_span_snapshot(&root), test_span_snapshot(&decode_child),
+          test_span_snapshot(&publish_child),
+      ],
+  })
+---
+{
+  "error_path": {
+    "attributes": {
+      "db.operation": "select",
+      "db.system": "postgresql"
+    },
+    "baggage": {},
+    "end_time": "[TIMESTAMP]",
+    "events": [
+      {
+        "attributes": {
+          "error.kind": "timeout",
+          "statement": "select * from orders"
+        },
+        "name": "db.error",
+        "timestamp": "[TIMESTAMP]"
+      }
+    ],
+    "is_remote": false,
+    "kind": "Client",
+    "name": "db.query",
+    "parent_span_id": null,
+    "sampled": true,
+    "span_id": "[ID]",
+    "start_time": "[TIMESTAMP]",
+    "status": {
+      "description": "deadline exceeded",
+      "kind": "error"
+    },
+    "trace_id": "[ID]",
+    "trace_state_vendor": null
+  },
+  "happy_path": {
+    "attributes": {
+      "http.method": "POST",
+      "service.name": "checkout"
+    },
+    "baggage": {},
+    "end_time": "[TIMESTAMP]",
+    "events": [
+      {
+        "attributes": {
+          "status_code": "200"
+        },
+        "name": "response.sent",
+        "timestamp": "[TIMESTAMP]"
+      }
+    ],
+    "is_remote": false,
+    "kind": "Server",
+    "name": "http.request",
+    "parent_span_id": null,
+    "sampled": true,
+    "span_id": "[ID]",
+    "start_time": "[TIMESTAMP]",
+    "status": {
+      "kind": "ok"
+    },
+    "trace_id": "[ID]",
+    "trace_state_vendor": null
+  },
+  "multi_span_trace": [
+    {
+      "attributes": {
+        "job.name": "nightly-import"
+      },
+      "baggage": {
+        "tenant": "alpha"
+      },
+      "end_time": "[TIMESTAMP]",
+      "events": [
+        {
+          "attributes": {
+            "children": "2"
+          },
+          "name": "pipeline.completed",
+          "timestamp": "[TIMESTAMP]"
+        }
+      ],
+      "is_remote": false,
+      "kind": "Producer",
+      "name": "batch.import",
+      "parent_span_id": null,
+      "sampled": true,
+      "span_id": "[ID]",
+      "start_time": "[TIMESTAMP]",
+      "status": {
+        "kind": "ok"
+      },
+      "trace_id": "[ID]",
+      "trace_state_vendor": null
+    },
+    {
+      "attributes": {
+        "stage": "decode"
+      },
+      "baggage": {
+        "tenant": "alpha"
+      },
+      "end_time": "[TIMESTAMP]",
+      "events": [
+        {
+          "attributes": {
+            "records": "42"
+          },
+          "name": "payload.decoded",
+          "timestamp": "[TIMESTAMP]"
+        }
+      ],
+      "is_remote": false,
+      "kind": "Internal",
+      "name": "decode.payload",
+      "parent_span_id": "[ID]",
+      "sampled": true,
+      "span_id": "[ID]",
+      "start_time": "[TIMESTAMP]",
+      "status": {
+        "kind": "ok"
+      },
+      "trace_id": "[ID]",
+      "trace_state_vendor": null
+    },
+    {
+      "attributes": {
+        "messaging.system": "kafka"
+      },
+      "baggage": {
+        "tenant": "alpha"
+      },
+      "end_time": "[TIMESTAMP]",
+      "events": [
+        {
+          "attributes": {
+            "partition": "7"
+          },
+          "name": "broker.ack",
+          "timestamp": "[TIMESTAMP]"
+        }
+      ],
+      "is_remote": false,
+      "kind": "Producer",
+      "name": "publish.kafka",
+      "parent_span_id": "[ID]",
+      "sampled": true,
+      "span_id": "[ID]",
+      "start_time": "[TIMESTAMP]",
+      "status": {
+        "kind": "ok"
+      },
+      "trace_id": "[ID]",
+      "trace_state_vendor": null
+    }
+  ]
+}
