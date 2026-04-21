@@ -1,0 +1,267 @@
+---
+source: tests/lab_explorer_golden.rs
+expression: golden
+---
+[
+  {
+    "name": "single_task_seed_sweep",
+    "mode": "schedule",
+    "report": {
+      "total_runs": 3,
+      "unique_classes": 1,
+      "violation_seeds": [],
+      "coverage": {
+        "equivalence_classes": 1,
+        "total_runs": 3,
+        "new_class_discoveries": 1,
+        "class_run_counts": [
+          [
+            "fp-0",
+            3
+          ]
+        ],
+        "novelty_histogram": {
+          "0": 2,
+          "1": 1
+        },
+        "saturation_window": 10,
+        "saturation_flag": false,
+        "existing_class_hits": 2,
+        "runs_since_last_new_class": 2
+      },
+      "top_unexplored": [],
+      "runs": [
+        {
+          "seed": "seed-0",
+          "steps": 1,
+          "fingerprint": "fp-0",
+          "is_new_class": true,
+          "violation_count": 0,
+          "certificate_hash": "cert-0"
+        },
+        {
+          "seed": "seed-1",
+          "steps": 1,
+          "fingerprint": "fp-0",
+          "is_new_class": false,
+          "violation_count": 0,
+          "certificate_hash": "cert-1"
+        },
+        {
+          "seed": "seed-2",
+          "steps": 1,
+          "fingerprint": "fp-0",
+          "is_new_class": false,
+          "violation_count": 0,
+          "certificate_hash": "cert-1"
+        }
+      ],
+      "certificate_divergences": [
+        [
+          "seed-0",
+          "seed-1"
+        ],
+        [
+          "seed-0",
+          "seed-2"
+        ]
+      ]
+    },
+    "dpor_coverage": null
+  },
+  {
+    "name": "two_task_dpor",
+    "mode": "dpor",
+    "report": {
+      "total_runs": 4,
+      "unique_classes": 1,
+      "violation_seeds": [],
+      "coverage": {
+        "equivalence_classes": 1,
+        "total_runs": 4,
+        "new_class_discoveries": 1,
+        "class_run_counts": [
+          [
+            "fp-0",
+            4
+          ]
+        ],
+        "novelty_histogram": {
+          "0": 3,
+          "1": 1
+        },
+        "saturation_window": 10,
+        "saturation_flag": false,
+        "existing_class_hits": 3,
+        "runs_since_last_new_class": 3
+      },
+      "top_unexplored": [
+        {
+          "seed": "seed-4",
+          "score_novelty": null,
+          "score_persistence_sum": null,
+          "score_fingerprint": null
+        },
+        {
+          "seed": "seed-5",
+          "score_novelty": null,
+          "score_persistence_sum": null,
+          "score_fingerprint": null
+        },
+        {
+          "seed": "seed-6",
+          "score_novelty": null,
+          "score_persistence_sum": null,
+          "score_fingerprint": null
+        }
+      ],
+      "runs": [
+        {
+          "seed": "seed-0",
+          "steps": 2,
+          "fingerprint": "fp-0",
+          "is_new_class": true,
+          "violation_count": 0,
+          "certificate_hash": "cert-0"
+        },
+        {
+          "seed": "seed-1",
+          "steps": 2,
+          "fingerprint": "fp-0",
+          "is_new_class": false,
+          "violation_count": 0,
+          "certificate_hash": "cert-1"
+        },
+        {
+          "seed": "seed-2",
+          "steps": 2,
+          "fingerprint": "fp-0",
+          "is_new_class": false,
+          "violation_count": 0,
+          "certificate_hash": "cert-1"
+        },
+        {
+          "seed": "seed-3",
+          "steps": 2,
+          "fingerprint": "fp-0",
+          "is_new_class": false,
+          "violation_count": 0,
+          "certificate_hash": "cert-2"
+        }
+      ],
+      "certificate_divergences": [
+        [
+          "seed-0",
+          "seed-1"
+        ],
+        [
+          "seed-0",
+          "seed-2"
+        ],
+        [
+          "seed-0",
+          "seed-3"
+        ]
+      ]
+    },
+    "dpor_coverage": {
+      "total_races": 16,
+      "total_hb_races": 0,
+      "total_backtrack_points": 16,
+      "pruned_backtrack_points": 0,
+      "sleep_pruned": 10,
+      "efficiency": 0.25,
+      "estimated_class_trend": [
+        2,
+        2,
+        2,
+        2
+      ]
+    }
+  },
+  {
+    "name": "three_task_topology_frontier",
+    "mode": "topology",
+    "report": {
+      "total_runs": 3,
+      "unique_classes": 1,
+      "violation_seeds": [],
+      "coverage": {
+        "equivalence_classes": 1,
+        "total_runs": 3,
+        "new_class_discoveries": 1,
+        "class_run_counts": [
+          [
+            "fp-0",
+            3
+          ]
+        ],
+        "novelty_histogram": {
+          "0": 2,
+          "3": 1
+        },
+        "saturation_window": 10,
+        "saturation_flag": false,
+        "existing_class_hits": 2,
+        "runs_since_last_new_class": 2
+      },
+      "top_unexplored": [
+        {
+          "seed": "seed-3",
+          "score_novelty": 3,
+          "score_persistence_sum": 0,
+          "score_fingerprint": "fp-1"
+        },
+        {
+          "seed": "seed-4",
+          "score_novelty": 0,
+          "score_persistence_sum": 0,
+          "score_fingerprint": "fp-2"
+        },
+        {
+          "seed": "seed-5",
+          "score_novelty": 0,
+          "score_persistence_sum": 0,
+          "score_fingerprint": "fp-3"
+        }
+      ],
+      "runs": [
+        {
+          "seed": "seed-0",
+          "steps": 3,
+          "fingerprint": "fp-0",
+          "is_new_class": true,
+          "violation_count": 0,
+          "certificate_hash": "cert-0"
+        },
+        {
+          "seed": "seed-1",
+          "steps": 3,
+          "fingerprint": "fp-0",
+          "is_new_class": false,
+          "violation_count": 0,
+          "certificate_hash": "cert-1"
+        },
+        {
+          "seed": "seed-2",
+          "steps": 3,
+          "fingerprint": "fp-0",
+          "is_new_class": false,
+          "violation_count": 0,
+          "certificate_hash": "cert-2"
+        }
+      ],
+      "certificate_divergences": [
+        [
+          "seed-0",
+          "seed-1"
+        ],
+        [
+          "seed-0",
+          "seed-2"
+        ]
+      ]
+    },
+    "dpor_coverage": null
+  }
+]
