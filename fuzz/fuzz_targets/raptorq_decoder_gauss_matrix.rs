@@ -9,6 +9,8 @@
 //! Coverage goals:
 //! - duplicate-source and duplicate-repair rank-deficient systems return
 //!   deterministic recoverable errors instead of panicking
+//! - source-only decodes succeed across RFC 6330 systematic-table rollover
+//!   boundaries
 //! - malformed symbol equations map to the expected structural `DecodeError`
 //! - corrupted source payloads disagreeing with valid repair rows are rejected
 //!   as `CorruptDecodedOutput`
@@ -18,7 +20,7 @@
 use arbitrary::Arbitrary;
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::Gf256;
-use asupersync::raptorq::systematic::SystematicEncoder;
+use asupersync::raptorq::systematic::{SystematicEncoder, SystematicParams};
 use asupersync::types::ObjectId;
 use libfuzzer_sys::fuzz_target;
 
@@ -30,6 +32,7 @@ const MAX_PAYLOAD_BYTES: usize = MAX_K * MAX_SYMBOL_SIZE;
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum Scenario {
     ValidRoundTrip,
+    SystematicBoundaryRoundTrip,
     DuplicateSourceRankDeficient,
     DuplicateRepairRankDeficient,
     NearRankDeficientMixedSet,
@@ -115,6 +118,23 @@ fn execute(input: FuzzInput) {
                 &source,
                 effective_wavefront_batch(&input, received.len()),
             );
+        }
+        Scenario::SystematicBoundaryRoundTrip => {
+            let (left_k, right_k) = select_systematic_boundary_pair(input.target_index);
+            for (offset, boundary_k) in [left_k, right_k].into_iter().enumerate() {
+                let boundary_seed = input.seed.wrapping_add(offset as u64);
+                let boundary_source =
+                    build_source_block(&input.payload, boundary_k, symbol_size, boundary_seed);
+                let boundary_decoder = InactivationDecoder::new(boundary_k, symbol_size, boundary_seed);
+                let mut received = boundary_decoder.constraint_symbols();
+                received.extend(build_valid_source_symbols(&boundary_source));
+                assert_success_consensus(
+                    &boundary_decoder,
+                    &received,
+                    &boundary_source,
+                    effective_wavefront_batch(&input, received.len()),
+                );
+            }
         }
         Scenario::DuplicateSourceRankDeficient => {
             let basis = 1 + (usize::from(input.duplicate_basis) % (k - 1));
@@ -238,6 +258,20 @@ fn build_source_block(raw: &[u8], k: usize, symbol_size: usize, seed: u64) -> Ve
         source.push(symbol);
     }
     source
+}
+
+fn select_systematic_boundary_pair(selector: u8) -> (usize, usize) {
+    let mut pairs = Vec::new();
+    let mut previous_k_prime = SystematicParams::for_source_block(1, 1).k_prime;
+    for k in 2..=MAX_K {
+        let current_k_prime = SystematicParams::for_source_block(k, 1).k_prime;
+        if current_k_prime != previous_k_prime {
+            pairs.push((k - 1, k));
+        }
+        previous_k_prime = current_k_prime;
+    }
+    let idx = usize::from(selector) % pairs.len();
+    pairs[idx]
 }
 
 fn build_valid_source_symbols(source: &[Vec<u8>]) -> Vec<ReceivedSymbol> {
