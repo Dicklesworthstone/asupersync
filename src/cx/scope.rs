@@ -2850,6 +2850,216 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_nested_scope_cancellation_closes_descendants_without_spawn_leaks() {
+        use std::task::{Context, Poll};
+
+        struct YieldOnce(bool);
+
+        impl std::future::Future for YieldOnce {
+            type Output = ();
+
+            fn poll(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> Poll<()> {
+                if self.0 {
+                    Poll::Ready(())
+                } else {
+                    self.0 = true;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        let grandchild = state
+            .create_child_region(child, Budget::INFINITE)
+            .expect("grandchild region");
+        let child_scope = test_scope(child, Budget::INFINITE);
+        let grandchild_scope = test_scope(grandchild, Budget::INFINITE);
+        let finalizer_log = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let child_log = Arc::clone(&finalizer_log);
+        assert!(
+            child_scope.defer_sync(&mut state, move || {
+                child_log
+                    .lock()
+                    .expect("child finalizer log poisoned")
+                    .push("child");
+            }),
+            "child finalizer should register before cancellation"
+        );
+
+        let grandchild_log = Arc::clone(&finalizer_log);
+        assert!(
+            grandchild_scope.defer_sync(&mut state, move || {
+                grandchild_log
+                    .lock()
+                    .expect("grandchild finalizer log poisoned")
+                    .push("grandchild");
+            }),
+            "grandchild finalizer should register before cancellation"
+        );
+
+        let mut child_handle = child_scope
+            .spawn_registered(&mut state, &cx, |task_cx| async move {
+                YieldOnce(false).await;
+                if task_cx.checkpoint().is_err() {
+                    "child_cancelled"
+                } else {
+                    "child_completed"
+                }
+            })
+            .expect("spawn child task");
+        let child_task_id = child_handle.task_id();
+
+        let mut grandchild_handle = grandchild_scope
+            .spawn_registered(&mut state, &cx, |task_cx| async move {
+                YieldOnce(false).await;
+                if task_cx.checkpoint().is_err() {
+                    "grandchild_cancelled"
+                } else {
+                    "grandchild_completed"
+                }
+            })
+            .expect("spawn grandchild task");
+        let grandchild_task_id = grandchild_handle.task_id();
+
+        let cancel_reason = CancelReason::shutdown().with_region(root);
+        let cancelled = state.cancel_request(root, &cancel_reason, None);
+        assert!(
+            cancelled
+                .iter()
+                .any(|(task_id, _)| *task_id == child_task_id),
+            "parent cancellation must reach child task"
+        );
+        assert!(
+            cancelled
+                .iter()
+                .any(|(task_id, _)| *task_id == grandchild_task_id),
+            "parent cancellation must reach grandchild task"
+        );
+
+        let grandchild_tasks_before_failed_spawn = state
+            .region(grandchild)
+            .expect("grandchild region missing")
+            .task_count();
+        let live_tasks_before_failed_spawn = state.live_task_count();
+        let failed_spawn = grandchild_scope.spawn(&mut state, &cx, |_| async { 99_u8 });
+        let grandchild_tasks_after_failed_spawn = state
+            .region(grandchild)
+            .expect("grandchild region missing after failed spawn")
+            .task_count();
+        let live_tasks_after_failed_spawn = state.live_task_count();
+
+        let waker = std::task::Waker::noop().clone();
+        let mut poll_cx = Context::from_waker(&waker);
+        {
+            let stored = state
+                .get_stored_future(grandchild_task_id)
+                .expect("grandchild stored task");
+            let poll_result = stored.poll(&mut poll_cx);
+            assert!(
+                poll_result.is_pending(),
+                "grandchild task should yield once before observing cancellation"
+            );
+        }
+        {
+            let stored = state
+                .get_stored_future(grandchild_task_id)
+                .expect("grandchild stored task");
+            let poll_result = stored.poll(&mut poll_cx);
+            let task_outcome = match poll_result {
+                Poll::Ready(Outcome::Ok(())) => Outcome::Ok(()),
+                Poll::Ready(Outcome::Panicked(payload)) => Outcome::Panicked(payload),
+                other => panic!(
+                    "grandchild task should complete once cancellation is observed: {other:?}"
+                ),
+            };
+            if let Some(task_record) = state.task_mut(grandchild_task_id) {
+                task_record.complete(task_outcome);
+            }
+        }
+        let _ = state.task_completed(grandchild_task_id);
+        state.advance_region_state(grandchild);
+
+        let mut grandchild_join_fut = std::pin::pin!(grandchild_handle.join(&cx));
+        let grandchild_result = match grandchild_join_fut.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Ok(result)) => result,
+            other => panic!("grandchild cancellation join should succeed: {other:?}"),
+        };
+
+        {
+            let stored = state
+                .get_stored_future(child_task_id)
+                .expect("child stored task");
+            let poll_result = stored.poll(&mut poll_cx);
+            assert!(
+                poll_result.is_pending(),
+                "child task should yield once before observing cancellation"
+            );
+        }
+        {
+            let stored = state
+                .get_stored_future(child_task_id)
+                .expect("child stored task");
+            let poll_result = stored.poll(&mut poll_cx);
+            let task_outcome = match poll_result {
+                Poll::Ready(Outcome::Ok(())) => Outcome::Ok(()),
+                Poll::Ready(Outcome::Panicked(payload)) => Outcome::Panicked(payload),
+                other => {
+                    panic!("child task should complete once cancellation is observed: {other:?}")
+                }
+            };
+            if let Some(task_record) = state.task_mut(child_task_id) {
+                task_record.complete(task_outcome);
+            }
+        }
+        let _ = state.task_completed(child_task_id);
+        state.advance_region_state(child);
+
+        let mut child_join_fut = std::pin::pin!(child_handle.join(&cx));
+        let child_result = match child_join_fut.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Ok(result)) => result,
+            other => panic!("child cancellation join should succeed: {other:?}"),
+        };
+
+        assert_eq!(child_result, "child_cancelled");
+        assert_eq!(grandchild_result, "grandchild_cancelled");
+        assert!(
+            matches!(failed_spawn, Err(SpawnError::RegionClosed(id)) if id == grandchild),
+            "nested spawn after parent cancellation must fail against the closing grandchild region"
+        );
+        assert_eq!(
+            grandchild_tasks_before_failed_spawn, grandchild_tasks_after_failed_spawn,
+            "failed spawn after cancellation must not leak task membership into the grandchild region"
+        );
+        assert_eq!(
+            live_tasks_before_failed_spawn, live_tasks_after_failed_spawn,
+            "failed spawn after cancellation must not inflate runtime task count"
+        );
+        assert_eq!(
+            *finalizer_log.lock().expect("finalizer log poisoned"),
+            vec!["grandchild", "child"],
+            "nested scope finalizers must run in reverse scope creation order"
+        );
+        assert!(
+            state.region(grandchild).is_none(),
+            "grandchild region should be reclaimed after close"
+        );
+        assert!(
+            state.region(child).is_none(),
+            "child region should be reclaimed after close"
+        );
+    }
+
+    #[test]
     fn conformance_race_loser_drain_invariant() {
         // INVARIANT: In race operations, losers are cancelled and fully drained
 
