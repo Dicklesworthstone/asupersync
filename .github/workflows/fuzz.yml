@@ -58,6 +58,7 @@ on:
           - hpack_indexed
           - fuzz_http2_frame
           - h2_connection_window_update
+          - h2_frame_decoder
           - fuzz_interest_flags
       duration:
         description: 'Fuzz duration in seconds'
@@ -119,6 +120,7 @@ jobs:
           - hpack_indexed
           - fuzz_http2_frame
           - h2_connection_window_update
+          - h2_frame_decoder
           - fuzz_interest_flags
         include:
           # Critical targets get more time
