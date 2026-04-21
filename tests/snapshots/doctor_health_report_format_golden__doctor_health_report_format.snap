@@ -1,0 +1,55 @@
+---
+source: tests/doctor_health_report_format_golden.rs
+expression: rendered
+---
+fixture: baseline_failure_path
+description: Baseline failure fixture with critical finding and failed gate evidence.
+report_id: doctor-report-failure-v1
+scenario_id: doctor-core-report-failure
+health_status: critical
+next_action: block_and_remediate
+summary: status=failed outcome=failed findings=2 critical=1
+findings:
+  - Obligation leak during shutdown path [critical / open] evidence=evidence-001 commands=command-001
+  - Replay mismatch for cancellation timeline [high / in_progress] evidence=evidence-002 commands=command-002
+evidence:
+  - evidence-001 source=structured_log outcome=failed replay=rch exec -- cargo test -p asupersync -- obligation_leak artifact=artifacts/run-doctor-failure/doctor/core-report/finding-001.json
+  - evidence-002 source=trace outcome=failed replay=asupersync trace verify artifacts/run-doctor-failure/trace-002.bin artifact=artifacts/run-doctor-failure/doctor/core-report/trace-002.json
+commands:
+  - command-001 tool=rch exit=101 outcome=failed cmd=rch exec -- cargo test -p asupersync obligation_leak -- --nocapture
+  - command-002 tool=asupersync exit=2 outcome=failed cmd=asupersync trace verify artifacts/run-doctor-failure/trace-002.bin
+provenance: run=run-doctor-failure trace=trace-doctor-failure seed=1337 generated_by=doctor_asupersync generated_at=<scrubbed>
+
+===
+
+fixture: happy_path
+description: Healthy baseline fixture with deterministic replay-ready artifacts.
+report_id: doctor-report-happy-v1
+scenario_id: doctor-core-report-happy
+health_status: passing
+next_action: monitor
+summary: status=healthy outcome=success findings=1 critical=0
+findings:
+  - Baseline diagnostics fixture coverage verified [low / resolved] evidence=evidence-010 commands=command-010
+evidence:
+  - evidence-010 source=benchmark outcome=success replay=rch exec -- cargo test -p asupersync doctor_core_report_smoke artifact=artifacts/run-doctor-happy/doctor/core-report/benchmark-010.json
+commands:
+  - command-010 tool=rch exit=0 outcome=success cmd=rch exec -- cargo test -p asupersync doctor_core_report_smoke -- --nocapture
+provenance: run=run-doctor-happy trace=trace-doctor-happy seed=2026 generated_by=doctor_asupersync generated_at=<scrubbed>
+
+===
+
+fixture: partial_data_path
+description: Partial-data fixture with cancelled outcome and minimal still-valid envelope.
+report_id: doctor-report-partial-v1
+scenario_id: doctor-core-report-partial
+health_status: degraded
+next_action: investigate_and_replay
+summary: status=degraded outcome=cancelled findings=0 critical=0
+findings:
+  - none
+evidence:
+  - evidence-020 source=structured_log outcome=cancelled replay=rch exec -- cargo test -p asupersync doctor_partial_report -- --nocapture artifact=artifacts/run-doctor-partial/doctor/core-report/structured-log-020.json
+commands:
+  - command-020 tool=rch exit=130 outcome=cancelled cmd=rch exec -- cargo test -p asupersync doctor_partial_report -- --nocapture
+provenance: run=run-doctor-partial trace=trace-doctor-partial seed=777 generated_by=doctor_asupersync generated_at=<scrubbed>
