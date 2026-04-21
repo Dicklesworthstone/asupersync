@@ -1894,6 +1894,149 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_recycled_tokens_preserve_live_registration_bookkeeping() {
+        init_test("metamorphic_recycled_tokens_preserve_live_registration_bookkeeping");
+        let source = TestFdSource;
+
+        let control_reactor = Arc::new(LabReactor::new());
+        let mut control_driver = IoDriver::new(control_reactor.clone());
+        let (control_waker, control_state) = create_test_waker();
+        let control_token = control_driver
+            .register(&source, Interest::READABLE, control_waker)
+            .expect("control register should succeed");
+        control_reactor.inject_event(
+            control_token,
+            Event::readable(control_token),
+            Duration::ZERO,
+        );
+        let control_count = control_driver
+            .turn(Some(Duration::ZERO))
+            .expect("control turn should succeed");
+
+        let recycled_reactor = Arc::new(LabReactor::new());
+        let mut recycled_driver = IoDriver::new(recycled_reactor.clone());
+        let mut stale_tokens = Vec::new();
+        for cycle in 0..3 {
+            let (stale_waker, stale_state) = create_test_waker();
+            let stale_token = recycled_driver
+                .register(&source, Interest::READABLE, stale_waker)
+                .expect("stale register should succeed");
+            recycled_driver
+                .deregister(stale_token)
+                .expect("stale deregister should succeed");
+            crate::assert_with_log!(
+                stale_state.count.load(Ordering::SeqCst) == 0,
+                "recycled registration never wakes before removal",
+                0usize,
+                stale_state.count.load(Ordering::SeqCst)
+            );
+            crate::assert_with_log!(
+                recycled_driver.is_empty(),
+                "recycled driver empties after each deregister",
+                true,
+                recycled_driver.is_empty()
+            );
+            crate::assert_with_log!(
+                recycled_reactor.registration_count() == 0,
+                "reactor registrations return to baseline after recycle",
+                0usize,
+                recycled_reactor.registration_count()
+            );
+            crate::assert_with_log!(
+                !stale_tokens.contains(&stale_token),
+                "recycled token generation stays unique",
+                true,
+                !stale_tokens.contains(&stale_token)
+            );
+            stale_tokens.push(stale_token);
+            crate::assert_with_log!(
+                stale_tokens.len() == cycle + 1,
+                "recycled token tracked",
+                cycle + 1,
+                stale_tokens.len()
+            );
+        }
+
+        let (recycled_waker, recycled_state) = create_test_waker();
+        let recycled_live_token = recycled_driver
+            .register(&source, Interest::READABLE, recycled_waker)
+            .expect("recycled live register should succeed");
+        for stale_token in &stale_tokens {
+            recycled_reactor.inject_event(
+                *stale_token,
+                Event::readable(*stale_token),
+                Duration::ZERO,
+            );
+        }
+        recycled_reactor.inject_event(
+            recycled_live_token,
+            Event::readable(recycled_live_token),
+            Duration::ZERO,
+        );
+        let recycled_count = recycled_driver
+            .turn(Some(Duration::ZERO))
+            .expect("recycled turn should succeed");
+
+        let control_wakes = control_state.count.load(Ordering::SeqCst);
+        let recycled_wakes = recycled_state.count.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            control_count == 1,
+            "control event count",
+            1usize,
+            control_count
+        );
+        crate::assert_with_log!(
+            recycled_count == stale_tokens.len() + 1,
+            "recycled turn sees stale tokens plus the live one",
+            stale_tokens.len() + 1,
+            recycled_count
+        );
+        crate::assert_with_log!(
+            recycled_live_token != control_token,
+            "recycled live token differs from the fresh control token",
+            true,
+            recycled_live_token != control_token
+        );
+        crate::assert_with_log!(
+            control_wakes == recycled_wakes,
+            "recycled stale history preserves live wake count",
+            control_wakes,
+            recycled_wakes
+        );
+        crate::assert_with_log!(
+            control_wakes == 1,
+            "live registration still wakes exactly once",
+            1usize,
+            control_wakes
+        );
+        crate::assert_with_log!(
+            recycled_driver.waker_count() == control_driver.waker_count(),
+            "recycled bookkeeping preserves live waker count",
+            control_driver.waker_count(),
+            recycled_driver.waker_count()
+        );
+        crate::assert_with_log!(
+            recycled_reactor.registration_count() == control_reactor.registration_count(),
+            "reactor bookkeeping matches a fresh live registration",
+            control_reactor.registration_count(),
+            recycled_reactor.registration_count()
+        );
+        crate::assert_with_log!(
+            recycled_driver.stats().wakers_dispatched == control_driver.stats().wakers_dispatched,
+            "recycled bookkeeping preserves live dispatch count",
+            control_driver.stats().wakers_dispatched,
+            recycled_driver.stats().wakers_dispatched
+        );
+        crate::assert_with_log!(
+            recycled_driver.stats().unknown_tokens == stale_tokens.len() as u64,
+            "recycled stale tokens degrade to unknown events only",
+            stale_tokens.len() as u64,
+            recycled_driver.stats().unknown_tokens
+        );
+        crate::test_complete!("metamorphic_recycled_tokens_preserve_live_registration_bookkeeping");
+    }
+
+    #[test]
     fn io_driver_wake() {
         init_test("io_driver_wake");
         let reactor = Arc::new(LabReactor::new());
