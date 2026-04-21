@@ -146,7 +146,16 @@ impl CancellationTracerIntegration {
     /// This should be called from TaskRecord::complete() when the task
     /// reaches terminal state with Cancelled outcome.
     pub fn on_task_cancel_completed(&self, task_id: TaskId) {
-        if let Some(trace_id) = self.task_traces.write().remove(&task_id) {
+        // Extract the removal into a `let` binding so the `RwLockWriteGuard`
+        // produced by `task_traces.write()` drops at the end of THIS
+        // statement. If we inline the `remove(...)` into the `if let`
+        // scrutinee below, the write-guard's lifetime is extended to the
+        // end of the `if let` block, and the subsequent
+        // `self.task_traces.read()` tries to re-acquire the same
+        // non-reentrant `parking_lot::RwLock` — hard self-deadlock
+        // (observed as `test_task_cancel_flow` hanging indefinitely).
+        let removed_trace_id = self.task_traces.write().remove(&task_id);
+        if let Some(trace_id) = removed_trace_id {
             // Check if this was the root task of the trace
             let should_complete_trace = {
                 let task_traces = self.task_traces.read();
@@ -249,7 +258,12 @@ impl CancellationTracerIntegration {
     ///
     /// This should be called when RegionState reaches Closed.
     pub fn on_region_closed(&self, region_id: RegionId) {
-        if let Some(trace_id) = self.region_traces.write().remove(&region_id) {
+        // Same non-reentrant RwLock self-deadlock pattern as
+        // `on_task_cancel_completed` above — extract the `remove(...)`
+        // into a `let` binding so the write guard drops before the
+        // subsequent read acquisitions inside the `if let` body.
+        let removed_trace_id = self.region_traces.write().remove(&region_id);
+        if let Some(trace_id) = removed_trace_id {
             // Check if this was the root region of the trace
             let should_complete_trace = {
                 let task_traces = self.task_traces.read();

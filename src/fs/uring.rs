@@ -837,7 +837,6 @@ mod tests {
     use std::os::fd::IntoRawFd;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
-    use std::sync::Arc;
     use tempfile::tempdir;
 
     fn init_test(name: &str) {
@@ -845,7 +844,6 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    #[derive(Debug)]
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }

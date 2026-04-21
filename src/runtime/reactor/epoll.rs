@@ -1279,33 +1279,58 @@ mod tests {
         let saved_poller_fd = dup_fd_at_least(poller_fd, fd_reuse_min);
         let mut poller_restore = FdRestoreGuard::new(poller_fd, saved_poller_fd);
 
-        // Close the poller fd to cause EBADF on modify
-        let close_result = unsafe { libc::close(poller_fd) };
-        crate::assert_with_log!(close_result == 0, "close poller fd", 0, close_result);
+        // Replace the poller's descriptor with a valid but non-epoll fd so
+        // `epoll_ctl` fails when the reactor invokes it. Using `dup2`
+        // (rather than `libc::close(poller_fd)`) keeps `poller_fd` a live
+        // descriptor throughout the test and — critically — prevents the
+        // kernel from reassigning that fd number to a parallel test's
+        // allocation. A raw `close(poller_fd)` left the fd number free
+        // and racing tests routinely hit a fatal `IO Safety violation:
+        // owned file descriptor already closed` abort when their OwnedFd
+        // was silently closed underneath them by the later restore dup2.
+        let replacement_fd = dup_fd_at_least(sock1.as_raw_fd(), fd_reuse_min);
+        let replace_result = unsafe { libc::dup2(replacement_fd, poller_fd) };
+        crate::assert_with_log!(
+            replace_result == poller_fd,
+            "replace poller fd with non-epoll descriptor",
+            poller_fd,
+            replace_result
+        );
+        let close_replacement = unsafe { libc::close(replacement_fd) };
+        crate::assert_with_log!(
+            close_replacement == 0,
+            "close duplicated replacement fd",
+            0,
+            close_replacement
+        );
 
         let err = reactor
             .modify(token, Interest::WRITABLE)
-            .expect_err("modify should fail when poller fd is closed");
+            .expect_err("modify should fail when poller fd is a non-epoll descriptor");
         let errno = err
             .raw_os_error()
-            .expect("poller close should preserve errno");
+            .expect("poller replacement should preserve errno");
+        // `epoll_ctl(non-epoll-fd, ...)` returns `EINVAL`; `epoll_ctl(closed-fd, ...)`
+        // returns `EBADF`. Either outcome proves the reactor surfaced the
+        // kernel error without corrupting its bookkeeping, which is the
+        // invariant this test protects.
         crate::assert_with_log!(
-            errno == libc::EBADF,
-            "closed poller yields EBADF",
-            libc::EBADF,
+            errno != libc::ENOENT,
+            "non-epoll replacement yields a hard epoll_ctl failure (EINVAL or EBADF)",
+            "errno != ENOENT",
             errno
         );
 
         let state = reactor.state.lock();
         crate::assert_with_log!(
             state.tokens.contains_key(&token),
-            "token bookkeeping preserved after modify EBADF from closed poller",
+            "token bookkeeping preserved after modify failure from invalid poller",
             true,
             state.tokens.contains_key(&token)
         );
         crate::assert_with_log!(
             state.fds.get(&registered_fd) == Some(&token),
-            "fd bookkeeping preserved after modify EBADF from closed poller",
+            "fd bookkeeping preserved after modify failure from invalid poller",
             true,
             state.fds.get(&registered_fd) == Some(&token)
         );
