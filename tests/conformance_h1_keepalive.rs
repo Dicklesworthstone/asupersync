@@ -193,6 +193,57 @@ fn test_connection_close_terminates_pipeline() {
     });
 }
 
+/// Test that a chunked request with Connection: close terminates the pipeline.
+#[test]
+fn test_chunked_connection_close_terminates_pipeline() {
+    let rt = RuntimeBuilder::new().build().unwrap();
+
+    rt.block_on(async {
+        let req1 = concat!(
+            "POST /chunked-close HTTP/1.1\r\n",
+            "Host: example.com\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "Connection: close\r\n",
+            "\r\n",
+            "5\r\nhello\r\n",
+            "0\r\n\r\n"
+        )
+        .to_string();
+        let req2 = make_http_request(
+            "GET",
+            "/never-reached",
+            "HTTP/1.1",
+            &[("Host", "example.com")],
+        );
+
+        let (transport, written) = TestTransport::with_multiple_requests(vec![&req1, &req2]);
+
+        let server = Http1Server::new(|req: Request| async move {
+            Response::new(200, "OK", format!("Response for {}", req.uri).into_bytes())
+        });
+
+        let result = server.serve(transport).await;
+        assert!(result.is_ok());
+
+        let state = result.unwrap();
+        assert_eq!(state.requests_served, 1);
+
+        let written_data = written.lock().unwrap();
+        assert_eq!(parse_response_count(&written_data), 1);
+        assert!(response_has_header(&written_data, "Connection", "close"));
+
+        let response_str = String::from_utf8_lossy(&written_data);
+        assert!(
+            response_str.contains("/chunked-close"),
+            "chunked close request should be served"
+        );
+        assert!(
+            !response_str.contains("/never-reached"),
+            "pipelined follow-up must not be served after Connection: close"
+        );
+    });
+}
+
 /// Test 100-Continue interaction with keep-alive.
 #[test]
 fn test_100_continue_with_keepalive() {

@@ -73,6 +73,7 @@ pub struct DecodedRequest {
     pub version: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    pub trailers: Vec<(String, String)>,
 }
 
 /// HTTP/1.1 conformance test harness.
@@ -90,18 +91,31 @@ impl H1ConformanceHarness {
 
     /// Decode a chunked HTTP/1.1 request.
     pub fn decode_chunked_request(&self, data: &[u8]) -> Result<DecodedRequest, HttpError> {
+        self.decode_chunked_request_with_remainder(data)
+            .map(|(request, _remaining)| request)
+    }
+
+    /// Decode a chunked HTTP/1.1 request and preserve any pipelined remainder.
+    pub fn decode_chunked_request_with_remainder(
+        &self,
+        data: &[u8],
+    ) -> Result<(DecodedRequest, Vec<u8>), HttpError> {
         // Create a mutable copy for decoding
         let mut codec = Http1Codec::new();
         let mut buf = BytesMut::from(data);
 
         match codec.decode(&mut buf) {
-            Ok(Some(req)) => Ok(DecodedRequest {
-                method: req.method.to_string(),
-                uri: req.uri,
-                version: req.version.to_string(),
-                headers: req.headers,
-                body: req.body,
-            }),
+            Ok(Some(req)) => Ok((
+                DecodedRequest {
+                    method: req.method.to_string(),
+                    uri: req.uri,
+                    version: req.version.to_string(),
+                    headers: req.headers,
+                    body: req.body,
+                    trailers: req.trailers,
+                },
+                buf.to_vec(),
+            )),
             Ok(None) => Err(HttpError::BadChunkedEncoding), // Incomplete
             Err(e) => Err(e),
         }
@@ -113,6 +127,7 @@ impl H1ConformanceHarness {
 
         // Chunked encoding basic compliance
         results.extend(self.test_chunked_encoding_basic());
+        results.extend(self.test_chunked_encoding_boundaries());
 
         // Chunk extensions (RFC 9112 §7.1.1)
         results.extend(self.test_chunk_extensions());
@@ -199,6 +214,54 @@ impl H1ConformanceHarness {
             requirement_level: RequirementLevel::Must,
             verdict: match result {
                 Ok(req) if req.body.is_empty() => TestVerdict::Pass,
+                Ok(_) => TestVerdict::Fail,
+                Err(_) => TestVerdict::Fail,
+            },
+            error_message,
+            execution_time_ms: elapsed.as_millis() as u64,
+        });
+
+        results
+    }
+
+    /// Test chunked decoding boundaries and pipelined follow-up preservation.
+    fn test_chunked_encoding_boundaries(&self) -> Vec<H1ConformanceResult> {
+        let mut results = Vec::new();
+
+        let start = Instant::now();
+        let test_data = concat!(
+            "POST /upload HTTP/1.1\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "\r\n",
+            "5\r\nhello\r\n",
+            "0\r\n\r\n",
+            "GET /next HTTP/1.1\r\n",
+            "Host: example.com\r\n",
+            "\r\n"
+        )
+        .as_bytes();
+
+        let result = self.decode_chunked_request_with_remainder(test_data);
+        let elapsed = start.elapsed();
+        let error_message = match &result {
+            Err(e) => Some(format!("Decode error: {e:?}")),
+            _ => None,
+        };
+
+        results.push(H1ConformanceResult {
+            test_id: "rfc9112_chunked_pipelined_followup".to_string(),
+            description: "Chunked decoder must preserve the next pipelined request boundary"
+                .to_string(),
+            category: H1TestCategory::ChunkedEncoding,
+            requirement_level: RequirementLevel::Must,
+            verdict: match result {
+                Ok((req, remaining))
+                    if req.body == b"hello"
+                        && req.trailers.is_empty()
+                        && remaining.starts_with(b"GET /next HTTP/1.1\r\n") =>
+                {
+                    TestVerdict::Pass
+                }
                 Ok(_) => TestVerdict::Fail,
                 Err(_) => TestVerdict::Fail,
             },
@@ -311,7 +374,49 @@ impl H1ConformanceHarness {
             category: H1TestCategory::TrailerFields,
             requirement_level: RequirementLevel::Must,
             verdict: match result {
-                Ok(req) if req.body == b"hello" => TestVerdict::Pass,
+                Ok(req)
+                    if req.body == b"hello"
+                        && req.trailers
+                            == vec![
+                                ("X-Trailer".to_string(), "value1".to_string()),
+                                ("Y-Trailer".to_string(), "value2".to_string()),
+                            ] =>
+                {
+                    TestVerdict::Pass
+                }
+                Ok(_) => TestVerdict::Fail,
+                Err(_) => TestVerdict::Fail,
+            },
+            error_message,
+            execution_time_ms: elapsed.as_millis() as u64,
+        });
+
+        // Test: Empty trailer section is accepted and leaves no phantom trailers.
+        let start = Instant::now();
+        let test_data = concat!(
+            "POST /test HTTP/1.1\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "\r\n",
+            "5\r\nhello\r\n",
+            "0\r\n",
+            "\r\n"
+        )
+        .as_bytes();
+
+        let result = self.decode_chunked_request(test_data);
+        let elapsed = start.elapsed();
+        let error_message = match &result {
+            Err(e) => Some(format!("Decode error: {e:?}")),
+            _ => None,
+        };
+
+        results.push(H1ConformanceResult {
+            test_id: "rfc9112_trailers_empty_section".to_string(),
+            description: "Empty trailer section after final chunk is valid".to_string(),
+            category: H1TestCategory::TrailerFields,
+            requirement_level: RequirementLevel::Must,
+            verdict: match result {
+                Ok(req) if req.body == b"hello" && req.trailers.is_empty() => TestVerdict::Pass,
                 Ok(_) => TestVerdict::Fail,
                 Err(_) => TestVerdict::Fail,
             },

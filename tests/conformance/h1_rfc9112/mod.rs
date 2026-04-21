@@ -134,6 +134,12 @@ mod tests {
 
         let result = harness.decode_chunked_request(trailer_request);
         assert!(result.is_ok(), "Trailer fields should be handled correctly");
+        let trailer_request = result.unwrap();
+        assert_eq!(trailer_request.body, b"hello");
+        assert_eq!(
+            trailer_request.trailers,
+            vec![("X-Trailer".to_string(), "test".to_string())]
+        );
 
         // Test hex case variants (lowercase/uppercase)
         let hex_case_request = concat!(
@@ -177,5 +183,37 @@ mod tests {
 
         let result = harness.decode_chunked_request(invalid_hex_request);
         assert!(result.is_err(), "Invalid hex should be rejected");
+    }
+
+    /// Test that chunked decoding preserves the next pipelined request boundary.
+    #[test]
+    fn rfc9112_chunked_preserves_pipelined_followup() {
+        let harness = H1ConformanceHarness::new();
+
+        let pipelined_request = concat!(
+            "POST /upload HTTP/1.1\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "\r\n",
+            "5\r\nhello\r\n",
+            "0\r\n\r\n",
+            "GET /next HTTP/1.1\r\n",
+            "Host: example.com\r\n",
+            "\r\n"
+        )
+        .as_bytes();
+
+        let result = harness.decode_chunked_request_with_remainder(pipelined_request);
+        assert!(
+            result.is_ok(),
+            "Chunked request with a pipelined follow-up should decode"
+        );
+
+        let (decoded, remaining) = result.unwrap();
+        assert_eq!(decoded.body, b"hello");
+        assert!(decoded.trailers.is_empty());
+        assert!(
+            remaining.starts_with(b"GET /next HTTP/1.1\r\n"),
+            "Pipelined follow-up request must remain available after chunk decode"
+        );
     }
 }
