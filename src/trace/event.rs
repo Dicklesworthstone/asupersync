@@ -793,6 +793,228 @@ fn cap_browser_trace_attribute(value: &str) -> String {
     capped
 }
 
+fn obligation_state_name(state: ObligationState) -> &'static str {
+    match state {
+        ObligationState::Reserved => "reserved",
+        ObligationState::Committed => "committed",
+        ObligationState::Aborted => "aborted",
+        ObligationState::Leaked => "leaked",
+    }
+}
+
+fn optional_time_field(value: Option<Time>) -> String {
+    value.map_or_else(|| "none".to_string(), |time| time.as_nanos().to_string())
+}
+
+fn optional_display_field<T: fmt::Display>(value: Option<T>) -> String {
+    value.map_or_else(|| "none".to_string(), |value| value.to_string())
+}
+
+fn futurelock_held_field(held: &[(ObligationId, ObligationKind)]) -> String {
+    let held = held
+        .iter()
+        .map(|(obligation, kind)| format!("{obligation}:{kind}"))
+        .collect::<Vec<_>>();
+    serde_json::to_string(&held).expect("futurelock held obligations serialize")
+}
+
+fn insert_browser_trace_payload_fields(fields: &mut BTreeMap<String, String>, event: &TraceEvent) {
+    match &event.data {
+        TraceData::None => {}
+        TraceData::Task { task, region } => {
+            fields.insert("task".to_string(), task.to_string());
+            fields.insert("region".to_string(), region.to_string());
+        }
+        TraceData::Region { region, parent } => {
+            fields.insert("region".to_string(), region.to_string());
+            fields.insert("parent".to_string(), optional_display_field(*parent));
+        }
+        TraceData::Obligation {
+            obligation,
+            task,
+            region,
+            kind,
+            state,
+            duration_ns,
+            abort_reason,
+        } => {
+            fields.insert("obligation".to_string(), obligation.to_string());
+            fields.insert("task".to_string(), task.to_string());
+            fields.insert("region".to_string(), region.to_string());
+            fields.insert("kind".to_string(), kind.to_string());
+            fields.insert(
+                "state".to_string(),
+                obligation_state_name(*state).to_string(),
+            );
+
+            if matches!(
+                event.kind,
+                TraceEventKind::ObligationCommit
+                    | TraceEventKind::ObligationAbort
+                    | TraceEventKind::ObligationLeak
+            ) {
+                fields.insert(
+                    "duration_ns".to_string(),
+                    duration_ns.map_or_else(|| "none".to_string(), |value| value.to_string()),
+                );
+            }
+
+            if matches!(event.kind, TraceEventKind::ObligationAbort) {
+                fields.insert(
+                    "abort_reason".to_string(),
+                    abort_reason.map_or_else(|| "none".to_string(), |reason| reason.to_string()),
+                );
+            }
+        }
+        TraceData::Cancel {
+            task,
+            region,
+            reason,
+        } => {
+            fields.insert("task".to_string(), task.to_string());
+            fields.insert("region".to_string(), region.to_string());
+            fields.insert("reason".to_string(), reason.to_string());
+        }
+        TraceData::Worker {
+            worker_id,
+            job_id,
+            decision_seq,
+            replay_hash,
+            task,
+            region,
+            obligation,
+        } => {
+            fields.insert("decision_seq".to_string(), decision_seq.to_string());
+            fields.insert("job_id".to_string(), job_id.to_string());
+            fields.insert("obligation".to_string(), obligation.to_string());
+            fields.insert("region".to_string(), region.to_string());
+            fields.insert("replay_hash".to_string(), replay_hash.to_string());
+            fields.insert("task".to_string(), task.to_string());
+            fields.insert(
+                "worker_id".to_string(),
+                cap_browser_trace_attribute(worker_id),
+            );
+        }
+        TraceData::RegionCancel { region, reason } => {
+            fields.insert("region".to_string(), region.to_string());
+            fields.insert("reason".to_string(), reason.to_string());
+        }
+        TraceData::Time { old, new } => {
+            fields.insert("old".to_string(), old.as_nanos().to_string());
+            fields.insert("new".to_string(), new.as_nanos().to_string());
+        }
+        TraceData::Timer { timer_id, deadline } => {
+            fields.insert("timer_id".to_string(), timer_id.to_string());
+            if matches!(event.kind, TraceEventKind::TimerScheduled) || deadline.is_some() {
+                fields.insert("deadline".to_string(), optional_time_field(*deadline));
+            }
+        }
+        TraceData::IoRequested { token, interest } => {
+            fields.insert("token".to_string(), token.to_string());
+            fields.insert("interest".to_string(), interest.to_string());
+        }
+        TraceData::IoReady { token, readiness } => {
+            fields.insert("token".to_string(), token.to_string());
+            fields.insert("readiness".to_string(), readiness.to_string());
+        }
+        TraceData::IoResult { token, bytes } => {
+            fields.insert("token".to_string(), token.to_string());
+            fields.insert("bytes".to_string(), bytes.to_string());
+        }
+        TraceData::IoError { token, kind } => {
+            fields.insert("token".to_string(), token.to_string());
+            fields.insert("kind".to_string(), kind.to_string());
+        }
+        TraceData::RngSeed { seed } => {
+            fields.insert("seed".to_string(), seed.to_string());
+        }
+        TraceData::RngValue { value } => {
+            fields.insert("value".to_string(), value.to_string());
+        }
+        TraceData::Checkpoint {
+            sequence,
+            active_tasks,
+            active_regions,
+        } => {
+            fields.insert("sequence".to_string(), sequence.to_string());
+            fields.insert("active_tasks".to_string(), active_tasks.to_string());
+            fields.insert("active_regions".to_string(), active_regions.to_string());
+        }
+        TraceData::Futurelock {
+            task,
+            region,
+            idle_steps,
+            held,
+        } => {
+            fields.insert("task".to_string(), task.to_string());
+            fields.insert("region".to_string(), region.to_string());
+            fields.insert("idle_steps".to_string(), idle_steps.to_string());
+            fields.insert("held".to_string(), futurelock_held_field(held));
+        }
+        TraceData::Monitor {
+            monitor_ref,
+            watcher,
+            watcher_region,
+            monitored,
+        } => {
+            fields.insert("monitor_ref".to_string(), monitor_ref.to_string());
+            fields.insert("watcher".to_string(), watcher.to_string());
+            fields.insert("watcher_region".to_string(), watcher_region.to_string());
+            fields.insert("monitored".to_string(), monitored.to_string());
+        }
+        TraceData::Down {
+            monitor_ref,
+            watcher,
+            monitored,
+            completion_vt,
+            reason,
+        } => {
+            fields.insert("monitor_ref".to_string(), monitor_ref.to_string());
+            fields.insert("watcher".to_string(), watcher.to_string());
+            fields.insert("monitored".to_string(), monitored.to_string());
+            fields.insert(
+                "completion_vt".to_string(),
+                completion_vt.as_nanos().to_string(),
+            );
+            fields.insert("reason".to_string(), reason.to_string());
+        }
+        TraceData::Link {
+            link_ref,
+            task_a,
+            region_a,
+            task_b,
+            region_b,
+        } => {
+            fields.insert("link_ref".to_string(), link_ref.to_string());
+            fields.insert("task_a".to_string(), task_a.to_string());
+            fields.insert("region_a".to_string(), region_a.to_string());
+            fields.insert("task_b".to_string(), task_b.to_string());
+            fields.insert("region_b".to_string(), region_b.to_string());
+        }
+        TraceData::Exit {
+            link_ref,
+            from,
+            to,
+            failure_vt,
+            reason,
+        } => {
+            fields.insert("link_ref".to_string(), link_ref.to_string());
+            fields.insert("from".to_string(), from.to_string());
+            fields.insert("to".to_string(), to.to_string());
+            fields.insert("failure_vt".to_string(), failure_vt.as_nanos().to_string());
+            fields.insert("reason".to_string(), reason.to_string());
+        }
+        TraceData::Message(message) => {
+            fields.insert("message".to_string(), message.clone());
+        }
+        TraceData::Chaos { kind, task, detail } => {
+            fields.insert("kind".to_string(), kind.clone());
+            fields.insert("task".to_string(), optional_display_field(*task));
+            fields.insert("detail".to_string(), detail.clone());
+        }
+    }
+}
+
 fn browser_trace_sequence_group(event: &TraceEvent) -> String {
     // Sequence groups must identify the causal or relationship domain for
     // ordering checks; category labels are too coarse and collapse independent
@@ -917,27 +1139,7 @@ pub fn browser_trace_log_fields_with_capture(
             "invalid".to_string()
         },
     );
-    if let TraceData::Worker {
-        worker_id,
-        job_id,
-        decision_seq,
-        replay_hash,
-        task,
-        region,
-        obligation,
-    } = &event.data
-    {
-        fields.insert("decision_seq".to_string(), decision_seq.to_string());
-        fields.insert("job_id".to_string(), job_id.to_string());
-        fields.insert("obligation".to_string(), obligation.to_string());
-        fields.insert("region".to_string(), region.to_string());
-        fields.insert("replay_hash".to_string(), replay_hash.to_string());
-        fields.insert("task".to_string(), task.to_string());
-        fields.insert(
-            "worker_id".to_string(),
-            cap_browser_trace_attribute(worker_id),
-        );
-    }
+    insert_browser_trace_payload_fields(&mut fields, event);
     fields
 }
 
@@ -2081,13 +2283,28 @@ mod tests {
         for key in [
             "capture_host_time_ns",
             "capture_replay_key",
+            "completion_vt",
+            "deadline",
+            "failure_vt",
+            "from",
+            "monitored",
+            "new",
+            "old",
+            "parent",
+            "region_a",
+            "region_b",
             "seq",
+            "task_a",
+            "task_b",
+            "to",
             "time_ns",
             "trace_id",
             "task",
             "region",
             "obligation",
             "sequence_group",
+            "watcher",
+            "watcher_region",
         ] {
             if obj.contains_key(key) {
                 obj.insert(key.to_string(), Value::String(format!("[{key}]")));
@@ -3574,6 +3791,7 @@ mod tests {
             Some(&"none".to_string())
         );
         assert_eq!(fields.get("sequence_group"), Some(&"timer:10".to_string()));
+        assert_eq!(fields.get("timer_id"), Some(&"10".to_string()));
     }
 
     #[test]
@@ -3746,6 +3964,57 @@ mod tests {
 
         insta::assert_json_snapshot!(
             "browser_trace_log_fields_worker_scrubbed",
+            scrub_browser_trace_fields(&fields)
+        );
+    }
+
+    #[test]
+    fn browser_trace_log_fields_timer_snapshot_scrubs_ids_and_timestamps() {
+        let event =
+            TraceEvent::timer_scheduled(14, Time::from_nanos(333), 42, Time::from_nanos(999));
+        let fields = browser_trace_log_fields(&event, "trace-browser-timer-1", None);
+
+        insta::assert_json_snapshot!(
+            "browser_trace_log_fields_timer_scrubbed",
+            scrub_browser_trace_fields(&fields)
+        );
+    }
+
+    #[test]
+    fn browser_trace_log_fields_obligation_abort_snapshot_scrubs_ids_and_timestamps() {
+        let event = TraceEvent::obligation_abort(
+            52,
+            Time::from_nanos(7_777),
+            obligation(4),
+            task(8),
+            region(9),
+            ObligationKind::Lease,
+            5_000,
+            ObligationAbortReason::Error,
+        );
+        let fields = browser_trace_log_fields(&event, "trace-browser-obligation-1", None);
+
+        insta::assert_json_snapshot!(
+            "browser_trace_log_fields_obligation_abort_scrubbed",
+            scrub_browser_trace_fields(&fields)
+        );
+    }
+
+    #[test]
+    fn browser_trace_log_fields_exit_snapshot_scrubs_ids_and_timestamps() {
+        let event = TraceEvent::exit_delivered(
+            61,
+            Time::from_nanos(8_001),
+            77,
+            task(2),
+            task(3),
+            Time::from_nanos(4_444),
+            DownReason::Normal,
+        );
+        let fields = browser_trace_log_fields(&event, "trace-browser-exit-1", None);
+
+        insta::assert_json_snapshot!(
+            "browser_trace_log_fields_exit_scrubbed",
             scrub_browser_trace_fields(&fields)
         );
     }

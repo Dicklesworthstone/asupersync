@@ -1,0 +1,21 @@
+---
+source: src/trace/event.rs
+expression: scrub_browser_trace_fields(&fields)
+---
+{
+  "capture_host_time_ns": "[capture_host_time_ns]",
+  "capture_host_turn_seq": "14",
+  "capture_replay_key": "[capture_replay_key]",
+  "capture_source": "runtime",
+  "capture_source_seq": "14",
+  "deadline": "[deadline]",
+  "event_kind": "timer_scheduled",
+  "schema_version": "browser-trace-schema-v1",
+  "seq": "[seq]",
+  "sequence_group": "[sequence_group]",
+  "time_ns": "[time_ns]",
+  "timer_id": "42",
+  "trace_id": "[trace_id]",
+  "validation_failure_category": "none",
+  "validation_status": "valid"
+}
