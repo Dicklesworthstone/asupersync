@@ -1,0 +1,24 @@
+---
+source: src/observability/diagnostics.rs
+expression: rendered
+---
+scenario: deadline_exceeded
+generated_at: <scrubbed>
+
+[region]
+Region RegionId(0:0) is still open.
+  state: Open
+  - task TaskId(0:0) still running (state=Finalizing, polls=0)
+  - obligation ObligationId(0:0) held by task TaskId(0:0) (type=Lease)
+  -> Wait for live tasks to complete, or cancel the region.
+  -> Ensure obligations are committed/aborted before closing.
+
+[task]
+Task TaskId(0:0) blocked: finalizing (deadline (deadline exceeded), polls_remaining=42)
+  - deadline_at: <scrubbed>
+  - cancel kind: deadline
+  - cleanup polls remaining: 42
+  -> Inspect cleanup latency and tighten downstream budgets.
+
+[leaks]
+- ObligationId(0:0) region=RegionId(0:0) holder=Some(TaskId(0:0)) type=Lease age_ms=1250

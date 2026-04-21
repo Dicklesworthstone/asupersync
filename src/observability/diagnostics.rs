@@ -1963,6 +1963,7 @@ mod tests {
     use crate::time::{TimerDriverHandle, VirtualClock};
     use crate::types::{Budget, CancelReason, Outcome};
     use crate::util::ArenaIndex;
+    use std::fmt::Write as _;
     use std::sync::Arc;
 
     fn init_test(name: &str) {
@@ -2025,6 +2026,81 @@ mod tests {
         let record = state.obligations.get_mut(idx).expect("obligation missing");
         record.id = id;
         id
+    }
+
+    fn render_structured_diagnostic_report(
+        scenario: &str,
+        generated_at: &str,
+        region: Option<&RegionOpenExplanation>,
+        task: Option<&TaskBlockedExplanation>,
+        leaks: &[ObligationLeak],
+    ) -> String {
+        let mut rendered = String::new();
+        writeln!(&mut rendered, "scenario: {scenario}").expect("write scenario");
+        writeln!(&mut rendered, "generated_at: {generated_at}").expect("write timestamp");
+
+        rendered.push_str("\n[region]\n");
+        if let Some(region) = region {
+            rendered.push_str(&region.to_string());
+        } else {
+            rendered.push_str("none\n");
+        }
+
+        rendered.push_str("\n[task]\n");
+        if let Some(task) = task {
+            rendered.push_str(&task.to_string());
+        } else {
+            rendered.push_str("none\n");
+        }
+
+        rendered.push_str("\n[leaks]\n");
+        if leaks.is_empty() {
+            rendered.push_str("none\n");
+        } else {
+            for leak in leaks {
+                writeln!(
+                    &mut rendered,
+                    "- {:?} region={:?} holder={:?} type={} age_ms={}",
+                    leak.obligation_id,
+                    leak.region_id,
+                    leak.holder_task,
+                    leak.obligation_type,
+                    leak.age.as_millis()
+                )
+                .expect("write leak");
+            }
+        }
+
+        rendered.trim_end().to_string()
+    }
+
+    fn scrub_diagnostic_report_timestamps(rendered: &str) -> String {
+        rendered
+            .lines()
+            .map(|line| {
+                if line.starts_with("generated_at: ") {
+                    "generated_at: <scrubbed>".to_string()
+                } else if line.trim_start().starts_with("next_retry_at: ") {
+                    "  - next_retry_at: <scrubbed>".to_string()
+                } else if line.trim_start().starts_with("observed_at: ") {
+                    "  - observed_at: <scrubbed>".to_string()
+                } else if line.trim_start().starts_with("deadline_at: ") {
+                    "  - deadline_at: <scrubbed>".to_string()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn assert_diagnostic_report_snapshot(snapshot_name: &str, rendered: &str) {
+        insta::with_settings!({
+            snapshot_path => "../../tests/snapshots",
+            prepend_module_to_snapshot => false,
+        }, {
+            insta::assert_snapshot!(snapshot_name, rendered);
+        });
     }
 
     #[test]
@@ -2729,6 +2805,129 @@ mod tests {
         })
         .expect_err("unknown flow must be rejected");
         assert!(err.contains("unknown flow_id"));
+    }
+
+    #[test]
+    fn structured_diagnostic_report_snapshot_happy_path() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let task_id = insert_task(&mut state, root, TaskState::Completed(Outcome::Ok(())));
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        let rendered = render_structured_diagnostic_report(
+            "happy_path",
+            "2026-04-20T22:00:00Z",
+            None,
+            Some(&diagnostics.explain_task_blocked(task_id)),
+            &[],
+        );
+
+        let scrubbed = scrub_diagnostic_report_timestamps(&rendered);
+        assert_diagnostic_report_snapshot("observability_diagnostics_happy_path", &scrubbed);
+    }
+
+    #[test]
+    fn structured_diagnostic_report_snapshot_rate_limited() {
+        let task = TaskBlockedExplanation {
+            task_id: TaskId::new_for_test(11, 0),
+            block_reason: BlockReason::AwaitingFuture {
+                description: "rate-limited by token bucket".to_string(),
+            },
+            details: vec![
+                "next_retry_at: 2026-04-20T22:00:02Z".to_string(),
+                "queue_depth: 3".to_string(),
+                "limiter: outbound_http".to_string(),
+            ],
+            recommendations: vec!["Wait for the limiter budget to replenish.".to_string()],
+        };
+
+        let rendered = render_structured_diagnostic_report(
+            "rate_limited",
+            "2026-04-20T22:00:01Z",
+            None,
+            Some(&task),
+            &[],
+        );
+
+        let scrubbed = scrub_diagnostic_report_timestamps(&rendered);
+        assert_diagnostic_report_snapshot("observability_diagnostics_rate_limited", &scrubbed);
+    }
+
+    #[test]
+    fn structured_diagnostic_report_snapshot_oom() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let task_id = insert_task(
+            &mut state,
+            root,
+            TaskState::CancelRequested {
+                reason: CancelReason::resource_unavailable().with_message("oom"),
+                cleanup_budget: Budget::new().with_poll_quota(64),
+            },
+        );
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        let mut task = diagnostics.explain_task_blocked(task_id);
+        task.details
+            .insert(0, "observed_at: 2026-04-20T22:00:03Z".to_string());
+        task.details.push("headroom: 0.00".to_string());
+        task.details.push("allocator_lane: region_heap".to_string());
+        task.recommendations
+            .push("Relieve memory pressure before retrying.".to_string());
+
+        let rendered = render_structured_diagnostic_report(
+            "oom",
+            "2026-04-20T22:00:03Z",
+            Some(&diagnostics.explain_region_open(root)),
+            Some(&task),
+            &[],
+        );
+
+        let scrubbed = scrub_diagnostic_report_timestamps(&rendered);
+        assert_diagnostic_report_snapshot("observability_diagnostics_oom", &scrubbed);
+    }
+
+    #[test]
+    fn structured_diagnostic_report_snapshot_deadline_exceeded() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(1_500)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)));
+
+        let task_id = insert_task(
+            &mut state,
+            root,
+            TaskState::Finalizing {
+                reason: CancelReason::deadline().with_message("deadline exceeded"),
+                cleanup_budget: Budget::new().with_poll_quota(42),
+            },
+        );
+        let _obligation_id = insert_obligation(
+            &mut state,
+            root,
+            task_id,
+            ObligationKind::Lease,
+            Time::from_millis(250),
+        );
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        let mut task = diagnostics.explain_task_blocked(task_id);
+        task.details
+            .insert(0, "deadline_at: 2026-04-20T22:00:04Z".to_string());
+        task.recommendations
+            .push("Inspect cleanup latency and tighten downstream budgets.".to_string());
+        let leaks = diagnostics.find_leaked_obligations();
+
+        let rendered = render_structured_diagnostic_report(
+            "deadline_exceeded",
+            "2026-04-20T22:00:04Z",
+            Some(&diagnostics.explain_region_open(root)),
+            Some(&task),
+            &leaks,
+        );
+
+        let scrubbed = scrub_diagnostic_report_timestamps(&rendered);
+        assert_diagnostic_report_snapshot("observability_diagnostics_deadline_exceeded", &scrubbed);
     }
 
     #[test]

@@ -1,0 +1,19 @@
+---
+source: src/observability/diagnostics.rs
+expression: rendered
+---
+scenario: rate_limited
+generated_at: <scrubbed>
+
+[region]
+none
+
+[task]
+Task TaskId(11:0) blocked: awaiting future (rate-limited by token bucket)
+  - next_retry_at: <scrubbed>
+  - queue_depth: 3
+  - limiter: outbound_http
+  -> Wait for the limiter budget to replenish.
+
+[leaks]
+none

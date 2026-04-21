@@ -1,0 +1,25 @@
+---
+source: src/observability/diagnostics.rs
+expression: rendered
+---
+scenario: oom
+generated_at: <scrubbed>
+
+[region]
+Region RegionId(0:0) is still open.
+  state: Open
+  - task TaskId(0:0) still running (state=CancelRequested, polls=0)
+  -> Wait for live tasks to complete, or cancel the region.
+
+[task]
+Task TaskId(0:0) blocked: cancel requested (resource unavailable (oom))
+  - observed_at: <scrubbed>
+  - cancel kind: resource unavailable
+  - message: oom
+  - headroom: 0.00
+  - allocator_lane: region_heap
+  -> Task is cancelling; wait for drain/finalizers.
+  -> Relieve memory pressure before retrying.
+
+[leaks]
+none
