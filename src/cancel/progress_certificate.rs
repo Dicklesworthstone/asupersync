@@ -1080,6 +1080,112 @@ impl ProgressCertificate {
 )]
 mod tests {
     use super::*;
+    use insta::assert_json_snapshot;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct ProgressCertificateSnapshot {
+        config: ProgressConfigSnapshot,
+        observations: Vec<ProgressObservationSnapshot>,
+        verdict: CertificateVerdictSnapshot,
+        verdict_display: String,
+    }
+
+    #[derive(Serialize)]
+    struct ProgressConfigSnapshot {
+        confidence: String,
+        max_step_bound: String,
+        stall_threshold: usize,
+        min_observations: usize,
+        epsilon: String,
+    }
+
+    #[derive(Serialize)]
+    struct ProgressObservationSnapshot {
+        step: usize,
+        potential: String,
+        delta: String,
+        credit: String,
+    }
+
+    #[derive(Serialize)]
+    struct EvidenceEntrySnapshot {
+        step: usize,
+        potential: String,
+        bound: String,
+        description: String,
+    }
+
+    #[derive(Serialize)]
+    struct CertificateVerdictSnapshot {
+        converging: bool,
+        estimated_remaining_steps: Option<String>,
+        confidence_bound: String,
+        stall_detected: bool,
+        azuma_bound: String,
+        total_steps: usize,
+        current_potential: String,
+        initial_potential: String,
+        mean_credit: String,
+        max_observed_step: String,
+        freedman_bound: String,
+        drain_phase: String,
+        empirical_variance: Option<String>,
+        evidence: Vec<EvidenceEntrySnapshot>,
+    }
+
+    fn fmt_f64(value: f64) -> String {
+        format!("{value:.6}")
+    }
+
+    fn certificate_snapshot(cert: &ProgressCertificate) -> ProgressCertificateSnapshot {
+        let verdict = cert.verdict();
+        ProgressCertificateSnapshot {
+            config: ProgressConfigSnapshot {
+                confidence: fmt_f64(cert.config.confidence),
+                max_step_bound: fmt_f64(cert.config.max_step_bound),
+                stall_threshold: cert.config.stall_threshold,
+                min_observations: cert.config.min_observations,
+                epsilon: fmt_f64(cert.config.epsilon),
+            },
+            observations: cert
+                .observations()
+                .iter()
+                .map(|observation| ProgressObservationSnapshot {
+                    step: observation.step,
+                    potential: fmt_f64(observation.potential),
+                    delta: fmt_f64(observation.delta),
+                    credit: fmt_f64(observation.credit),
+                })
+                .collect(),
+            verdict: CertificateVerdictSnapshot {
+                converging: verdict.converging,
+                estimated_remaining_steps: verdict.estimated_remaining_steps.map(fmt_f64),
+                confidence_bound: fmt_f64(verdict.confidence_bound),
+                stall_detected: verdict.stall_detected,
+                azuma_bound: fmt_f64(verdict.azuma_bound),
+                total_steps: verdict.total_steps,
+                current_potential: fmt_f64(verdict.current_potential),
+                initial_potential: fmt_f64(verdict.initial_potential),
+                mean_credit: fmt_f64(verdict.mean_credit),
+                max_observed_step: fmt_f64(verdict.max_observed_step),
+                freedman_bound: fmt_f64(verdict.freedman_bound),
+                drain_phase: verdict.drain_phase.to_string(),
+                empirical_variance: verdict.empirical_variance.map(fmt_f64),
+                evidence: verdict
+                    .evidence
+                    .iter()
+                    .map(|entry| EvidenceEntrySnapshot {
+                        step: entry.step,
+                        potential: fmt_f64(entry.potential),
+                        bound: fmt_f64(entry.bound),
+                        description: entry.description.clone(),
+                    })
+                    .collect(),
+            },
+            verdict_display: verdict.to_string(),
+        }
+    }
 
     // -- ProgressConfig --
 
@@ -3114,5 +3220,83 @@ mod tests {
         assert!(verdict3.azuma_bound <= 1.0 && verdict3.azuma_bound >= 0.0);
         assert!(verdict3.freedman_bound <= 1.0 && verdict3.freedman_bound >= 0.0);
         assert!(verdict3.freedman_bound <= verdict3.azuma_bound + 1e-10); // Allow tiny numerical error
+    }
+
+    #[test]
+    fn progress_certificate_happy_path_serialization_snapshot() {
+        let config = ProgressConfig {
+            confidence: 0.97,
+            max_step_bound: 40.0,
+            stall_threshold: 6,
+            min_observations: 4,
+            epsilon: 1e-9,
+        };
+        let mut cert = ProgressCertificate::new(config);
+
+        for potential in [120.0, 92.0, 64.0, 39.0, 18.0, 6.0, 0.0] {
+            cert.observe(potential);
+        }
+
+        let verdict = cert.verdict();
+        assert!(verdict.converging, "happy path should converge");
+        assert_eq!(verdict.drain_phase, DrainPhase::Quiescent);
+
+        assert_json_snapshot!(
+            "progress_certificate_happy_path_serialization",
+            certificate_snapshot(&cert)
+        );
+    }
+
+    #[test]
+    fn progress_certificate_cancellation_during_drain_serialization_snapshot() {
+        let config = ProgressConfig {
+            confidence: 0.95,
+            max_step_bound: 45.0,
+            stall_threshold: 5,
+            min_observations: 4,
+            epsilon: 1e-9,
+        };
+        let mut cert = ProgressCertificate::new(config);
+
+        for potential in [150.0, 110.0, 76.0, 84.0, 52.0, 24.0, 8.0, 0.0] {
+            cert.observe(potential);
+        }
+
+        let verdict = cert.verdict();
+        assert!(verdict.converging, "drain should still converge after a mid-drain bump");
+        assert!(
+            cert.increase_count() > 0,
+            "cancellation-during-drain scenario should record a transient increase",
+        );
+
+        assert_json_snapshot!(
+            "progress_certificate_cancellation_during_drain_serialization",
+            certificate_snapshot(&cert)
+        );
+    }
+
+    #[test]
+    fn progress_certificate_budget_exceeded_serialization_snapshot() {
+        let config = ProgressConfig {
+            confidence: 0.99,
+            max_step_bound: 20.0,
+            stall_threshold: 4,
+            min_observations: 4,
+            epsilon: 1e-9,
+        };
+        let mut cert = ProgressCertificate::new(config);
+
+        for potential in [80.0, 72.0, 69.0, 69.0, 70.0, 70.0, 70.0, 70.0] {
+            cert.observe(potential);
+        }
+
+        let verdict = cert.verdict();
+        assert!(verdict.stall_detected, "budget-exceeded scenario should detect a stall");
+        assert_ne!(verdict.drain_phase, DrainPhase::Quiescent);
+
+        assert_json_snapshot!(
+            "progress_certificate_budget_exceeded_serialization",
+            certificate_snapshot(&cert)
+        );
     }
 }
