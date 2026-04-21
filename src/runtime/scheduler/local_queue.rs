@@ -387,6 +387,7 @@ impl Stealer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use crate::types::TaskId;
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -466,6 +467,23 @@ mod tests {
             .into_iter()
             .map(|round| normalize_task_ids(round, layout))
             .collect()
+    }
+
+    fn drain_owner(queue: &LocalQueue) -> Vec<TaskId> {
+        let mut drained = Vec::new();
+        while let Some(task_id) = queue.pop() {
+            drained.push(task_id);
+        }
+        drained
+    }
+
+    fn drain_thief(queue: &LocalQueue) -> Vec<TaskId> {
+        let stealer = queue.stealer();
+        let mut drained = Vec::new();
+        while let Some(task_id) = stealer.steal() {
+            drained.push(task_id);
+        }
+        drained
     }
 
     #[test]
@@ -962,6 +980,131 @@ mod tests {
             normalize_task_ids(relabeled_owner_remaining, &relabeled_layout),
             "relabeling task IDs must not perturb owner-visible remaining order"
         );
+    }
+
+    proptest! {
+        #[test]
+        fn mr_chunked_push_equivalent_for_owner_lifo_mode(
+            total in 1usize..64,
+            split in 0usize..64,
+        ) {
+            let split = split.min(total);
+            let max_task_id = total as u32;
+            let individual = queue(max_task_id);
+            let chunked = queue(max_task_id);
+
+            for id in 0..total {
+                individual.push(task(id as u32));
+            }
+
+            let prefix: Vec<_> = (0..split).map(|id| task(id as u32)).collect();
+            let suffix: Vec<_> = (split..total).map(|id| task(id as u32)).collect();
+            chunked.push_many(&prefix);
+            chunked.push_many(&suffix);
+
+            let baseline = drain_owner(&individual);
+            let variant = drain_owner(&chunked);
+            let expected: Vec<_> = (0..total).rev().map(|id| task(id as u32)).collect();
+
+            prop_assert_eq!(
+                baseline,
+                expected,
+                "owner LIFO drain should match reverse arrival order",
+            );
+            prop_assert_eq!(
+                variant,
+                expected,
+                "chunking pushes must not perturb owner-visible LIFO order",
+            );
+        }
+
+        #[test]
+        fn mr_chunked_push_equivalent_for_thief_fifo_mode(
+            total in 1usize..64,
+            split in 0usize..64,
+        ) {
+            let split = split.min(total);
+            let max_task_id = total as u32;
+            let individual = queue(max_task_id);
+            let chunked = queue(max_task_id);
+
+            for id in 0..total {
+                individual.push(task(id as u32));
+            }
+
+            let prefix: Vec<_> = (0..split).map(|id| task(id as u32)).collect();
+            let suffix: Vec<_> = (split..total).map(|id| task(id as u32)).collect();
+            chunked.push_many(&prefix);
+            chunked.push_many(&suffix);
+
+            let baseline = drain_thief(&individual);
+            let variant = drain_thief(&chunked);
+            let expected: Vec<_> = (0..total).map(|id| task(id as u32)).collect();
+
+            prop_assert_eq!(
+                baseline,
+                expected,
+                "thief FIFO drain should match arrival order",
+            );
+            prop_assert_eq!(
+                variant,
+                expected,
+                "chunking pushes must not perturb thief-visible FIFO order",
+            );
+        }
+
+        #[test]
+        fn mr_owner_thief_mode_switch_is_atomic_without_loss_or_duplication(
+            total in 1usize..64,
+            schedule in prop::collection::vec(any::<bool>(), 1..32),
+        ) {
+            let queue = queue(total as u32);
+            for id in 0..total {
+                queue.push(task(id as u32));
+            }
+
+            let stealer = queue.stealer();
+            let mut owner_seen = Vec::new();
+            let mut thief_seen = Vec::new();
+            let mut all_seen = HashSet::new();
+            let mut step = 0usize;
+
+            while !queue.is_empty() {
+                let owner_turn = schedule[step % schedule.len()];
+                let next = if owner_turn { queue.pop() } else { stealer.steal() };
+                let next = next.expect("non-local task should be available to the selected mode");
+
+                prop_assert!(
+                    all_seen.insert(next),
+                    "mode switches must not duplicate tasks across owner/thief drains",
+                );
+
+                if owner_turn {
+                    owner_seen.push(next.0.index());
+                } else {
+                    thief_seen.push(next.0.index());
+                }
+                step += 1;
+            }
+
+            let mut normalized_all: Vec<_> = all_seen.into_iter().map(|task_id| task_id.0.index()).collect();
+            normalized_all.sort_unstable();
+            let expected_all: Vec<_> = (0..total as u32).collect();
+
+            prop_assert_eq!(
+                normalized_all,
+                expected_all,
+                "mode switches must preserve the exact task set",
+            );
+            prop_assert!(
+                owner_seen.windows(2).all(|pair| pair[0] > pair[1]),
+                "owner observations must remain strictly LIFO across switches",
+            );
+            prop_assert!(
+                thief_seen.windows(2).all(|pair| pair[0] < pair[1]),
+                "thief observations must remain strictly FIFO across switches",
+            );
+        }
     }
 
     #[test]
