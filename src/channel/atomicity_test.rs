@@ -244,13 +244,18 @@ impl CancellationInjector {
         if self.probability <= 0.0 {
             return false;
         }
+        if self.probability >= 1.0 {
+            return true;
+        }
 
-        // Simple LCG for deterministic randomness
+        // Simple LCG for deterministic randomness. Keep the 32-bit
+        // window after shifting so the resulting `random` always lands
+        // in [0, 1) regardless of u64 wrap-around state.
         let mut state = self.rng_state.load(Ordering::Relaxed);
         state = state.wrapping_mul(1_103_515_245).wrapping_add(12345);
         self.rng_state.store(state, Ordering::Relaxed);
 
-        let random = (state >> 16) as f64 / u32::MAX as f64;
+        let random = ((state >> 16) as u32) as f64 / u32::MAX as f64;
         random < self.probability
     }
 }

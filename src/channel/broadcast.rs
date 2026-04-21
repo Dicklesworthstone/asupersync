@@ -2056,10 +2056,10 @@ mod tests {
                 };
                 sender.send(&cx, next_value).expect("send burst value");
                 next_value += 1;
-            }
-
-            if let Some(rx) = fast_rx.as_mut() {
-                for _ in 0..chunk_len {
+                // Interleave drain with send so the fast receiver never
+                // falls behind the ring buffer's capacity window when a
+                // single chunk exceeds `capacity`.
+                if let Some(rx) = fast_rx.as_mut() {
                     fast_sequence.push(block_on(rx.recv(&cx)).expect("fast receiver keeps up"));
                 }
             }
@@ -2225,9 +2225,13 @@ mod tests {
                     other => panic!("Expected Lagged({}) but got: {:?}", overrun, other),
                 }
 
-                // After lag, should receive remaining messages in buffer
-                let remaining_count = std::cmp::min(capacity, overrun);
-                let start_msg = capacity + overrun - remaining_count;
+                // After lag, the slow receiver resumes at the oldest
+                // message still retained in the ring buffer. The buffer
+                // holds the last `capacity` messages out of
+                // `capacity + overrun` total sends, so the first visible
+                // message is `overrun` (0-indexed).
+                let remaining_count = capacity;
+                let start_msg = overrun;
                 for i in 0..remaining_count {
                     let received = block_on(rx_slow.recv(&cx)).expect("post-lag recv");
                     let expected = (start_msg + i) as i32;
@@ -2600,10 +2604,14 @@ mod tests {
         let got_lag = matches!(slow_lag_result, Err(RecvError::Lagged(_)));
         crate::assert_with_log!(got_lag, "composite: slow receiver lagged", true, got_lag);
 
-        // 3. Close propagation: All receivers eventually get closed
+        // 3. Close propagation: All receivers eventually get closed.
+        // Mid receiver may surface `Lagged(_)` before `Closed` because
+        // it was behind when the sender was dropped; we keep recv'ing
+        // until the terminal `Closed` signal is observed.
         let mid_close_result = loop {
             match block_on(rx_mid.recv(&cx)) {
-                Ok(_) => continue, // Consume any buffered messages
+                Ok(_) => continue,               // Consume any buffered messages
+                Err(RecvError::Lagged(_)) => continue, // Acknowledge lag and retry
                 Err(e) => break e,
             }
         };

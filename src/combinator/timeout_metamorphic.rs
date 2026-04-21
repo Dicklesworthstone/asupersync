@@ -23,8 +23,8 @@
 
 use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
-use crate::time::timeout;
-use crate::types::{CancelReason, Time};
+use crate::time::{TimerDriverHandle, VirtualClock, timeout};
+use crate::types::{Budget, CancelReason, RegionId, TaskId, Time};
 use futures::future;
 use std::future::Future;
 use std::pin::Pin;
@@ -282,7 +282,42 @@ where
     global_state.reset();
 
     let _lab_runtime = LabRuntime::new(lab_config);
-    let _result = futures_lite::future::block_on(test_fn(Arc::clone(&global_state)));
+
+    // Install a Cx with a virtual clock so that `Cx::current()` and the
+    // timeout combinator have a time source. The clock is advanced
+    // manually between polls below so that deterministic time progression
+    // is observable without needing a real executor.
+    let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+    let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+    let cx = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 0),
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE,
+        None,
+        None,
+        None,
+        Some(timer.clone()),
+        None,
+    );
+    let _guard = Cx::set_current(Some(cx));
+
+    // Custom step-based driver: advance virtual time by a fixed step
+    // between polls so that timeout-ful operations observe progress even
+    // though we're not running an actual async runtime.
+    let waker = std::task::Waker::noop().clone();
+    let mut ctx = Context::from_waker(&waker);
+    let mut fut = Box::pin(test_fn(Arc::clone(&global_state)));
+    // Cap the number of iterations to avoid runaway loops in case of a
+    // buggy operation; 10_000 steps × 1ms = 10s of virtual time.
+    const STEP_NS: u64 = 1_000_000; // 1ms virtual step
+    for _ in 0..10_000 {
+        match fut.as_mut().poll(&mut ctx) {
+            Poll::Ready(()) => break,
+            Poll::Pending => {
+                clock.advance(STEP_NS);
+            }
+        }
+    }
 
     global_state.summary()
 }

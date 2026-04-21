@@ -1239,6 +1239,12 @@ mod tests {
             "error"
         );
 
+        // Explicitly abort the successful reserve so the tracked permit
+        // token is consumed rather than leaked at scope exit.
+        if let Ok(permit) = reserve2_before_close {
+            let _ = permit.abort();
+        }
+
         crate::test_complete!("meta_error_recovery_consistency");
     }
 
