@@ -1123,6 +1123,59 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_body_extractors_preserve_body_semantics_and_limits() {
+        let json_body = Bytes::from_static(br#"{"user":"alice","admin":true}"#);
+        let json_req = Request::new("POST", "/json")
+            .with_header("content-type", "application/json")
+            .with_body(json_body.clone());
+        let RawBody(raw_json) = RawBody::from_request(json_req.clone()).unwrap();
+        assert_eq!(raw_json.as_ref(), json_body.as_ref());
+        let Json(parsed_json) = Json::<serde_json::Value>::from_request(json_req).unwrap();
+        assert_eq!(
+            parsed_json,
+            serde_json::from_slice::<serde_json::Value>(raw_json.as_ref()).unwrap()
+        );
+
+        let form_body = Bytes::from_static(b"user=alice&admin=true");
+        let form_req = Request::new("POST", "/form")
+            .with_header("content-type", "application/x-www-form-urlencoded")
+            .with_body(form_body.clone());
+        let RawBody(raw_form) = RawBody::from_request(form_req.clone()).unwrap();
+        assert_eq!(raw_form.as_ref(), form_body.as_ref());
+        let Form(parsed_form) = Form::<HashMap<String, String>>::from_request(form_req).unwrap();
+        assert_eq!(
+            parsed_form,
+            parse_urlencoded(std::str::from_utf8(raw_form.as_ref()).unwrap())
+        );
+
+        let limit = 8;
+        let limits = BodyLimits::new()
+            .max_json_body_size(limit)
+            .max_form_body_size(limit);
+
+        let mut oversized_json_req = Request::new("POST", "/json")
+            .with_header("content-type", "application/json")
+            .with_body(Bytes::from_static(br#"{"k":"123456789"}"#));
+        oversized_json_req.extensions.insert_typed(limits);
+        let json_err = Json::<serde_json::Value>::from_request(oversized_json_req).unwrap_err();
+        assert_eq!(
+            json_err.status,
+            crate::web::response::StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        let mut oversized_form_req = Request::new("POST", "/form")
+            .with_header("content-type", "application/x-www-form-urlencoded")
+            .with_body(Bytes::from_static(b"k=123456789"));
+        oversized_form_req.extensions.insert_typed(limits);
+        let form_err = Form::<HashMap<String, String>>::from_request(oversized_form_req)
+            .unwrap_err();
+        assert_eq!(
+            form_err.status,
+            crate::web::response::StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[test]
     fn form_wrong_content_type() {
         let req = Request::new("POST", "/form")
             .with_header("content-type", "text/plain")
