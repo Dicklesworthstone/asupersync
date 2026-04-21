@@ -664,6 +664,12 @@ impl<M: ConnectionManager> DbPool<M> {
     }
 }
 
+impl<M: ConnectionManager> Drop for DbPool<M> {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 impl<M: ConnectionManager> fmt::Debug for DbPool<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let inner = self.inner.lock();
@@ -891,7 +897,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             duration = duration.saturating_sub(chunk);
         }
 
-        !cx.checkpoint().is_err()
+        cx.checkpoint().is_ok()
     }
 
     /// Acquire a connection from the pool.
@@ -1118,6 +1124,12 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
     }
 }
 
+impl<M: AsyncConnectionManager> Drop for AsyncDbPool<M> {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 impl<M: AsyncConnectionManager> fmt::Debug for AsyncDbPool<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let inner = self.inner.lock();
@@ -1231,6 +1243,15 @@ mod tests {
         })
     }
 
+    fn db_pool_inventory_snapshot(stats: &DbPoolStats) -> serde_json::Value {
+        json!({
+            "idle": stats.idle,
+            "active": stats.active,
+            "total": stats.total,
+            "max_size": stats.max_size,
+        })
+    }
+
     // ================================================================
     // Test connection manager
     // ================================================================
@@ -1242,22 +1263,23 @@ mod tests {
         valid: Arc<AtomicBool>,
     }
 
+    #[derive(Clone)]
     struct TestManager {
-        next_id: AtomicUsize,
+        next_id: Arc<AtomicUsize>,
         valid: Arc<AtomicBool>,
-        creates: AtomicUsize,
-        disconnects: AtomicUsize,
-        fail_connect: AtomicBool,
+        creates: Arc<AtomicUsize>,
+        disconnects: Arc<AtomicUsize>,
+        fail_connect: Arc<AtomicBool>,
     }
 
     impl TestManager {
         fn new() -> Self {
             Self {
-                next_id: AtomicUsize::new(1),
+                next_id: Arc::new(AtomicUsize::new(1)),
                 valid: Arc::new(AtomicBool::new(true)),
-                creates: AtomicUsize::new(0),
-                disconnects: AtomicUsize::new(0),
-                fail_connect: AtomicBool::new(false),
+                creates: Arc::new(AtomicUsize::new(0)),
+                disconnects: Arc::new(AtomicUsize::new(0)),
+                fail_connect: Arc::new(AtomicBool::new(false)),
             }
         }
 
@@ -1601,6 +1623,95 @@ mod tests {
     }
 
     #[test]
+    fn mr_cancelled_async_acquire_releases_slot_across_cancellation_points() {
+        init_test("mr_cancelled_async_acquire_releases_slot_across_cancellation_points");
+        let mut recovered_inventory = Vec::new();
+
+        for (name, connect_delay, validate_delay, needs_warm_idle) in [
+            (
+                "after_connect",
+                Duration::from_millis(40),
+                Duration::ZERO,
+                false,
+            ),
+            (
+                "during_validation",
+                Duration::ZERO,
+                Duration::from_millis(40),
+                true,
+            ),
+        ] {
+            let pool = AsyncDbPool::new(
+                SlowAsyncTestManager::with_delays(connect_delay, validate_delay),
+                DbPoolConfig::with_max_size(1).validate_on_checkout(!validate_delay.is_zero()),
+            );
+
+            if needs_warm_idle {
+                let warm_cx = Cx::for_testing();
+                let lease = block_on(pool.get(&warm_cx)).expect("warmup acquire should succeed");
+                lease.return_to_pool();
+                assert_eq!(
+                    pool.stats().idle,
+                    1,
+                    "{name} should start from an idle lease"
+                );
+            }
+
+            let cx = Cx::for_testing();
+            let cancel_cx = cx.clone();
+            let canceller = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                cancel_cx.set_cancel_requested(true);
+            });
+
+            let result = block_on(pool.get(&cx));
+
+            canceller
+                .join()
+                .expect("cancel thread should finish cleanly");
+
+            assert!(
+                matches!(result, Err(DbPoolError::Timeout)),
+                "{name} cancellation point should time out the acquire"
+            );
+
+            let post_cancel = pool.stats();
+            assert_eq!(post_cancel.total, 0, "{name} must release total capacity");
+            assert_eq!(post_cancel.active, 0, "{name} must release active capacity");
+            assert_eq!(post_cancel.idle, 0, "{name} must leave no stale idle lease");
+
+            let recovery_cx = Cx::for_testing();
+            let recovery = block_on(pool.get(&recovery_cx))
+                .expect("fresh acquire should succeed after cancelled attempt");
+            recovery.return_to_pool();
+            let final_stats = pool.stats();
+            assert_eq!(
+                final_stats.idle, 1,
+                "{name} should recover one reusable idle lease"
+            );
+            assert_eq!(
+                final_stats.active, 0,
+                "{name} should not retain active leases"
+            );
+            assert_eq!(
+                final_stats.total, 1,
+                "{name} should recover exactly one slot"
+            );
+            recovered_inventory.push(db_pool_inventory_snapshot(&final_stats));
+        }
+
+        assert!(
+            recovered_inventory
+                .windows(2)
+                .all(|pair| pair[0] == pair[1]),
+            "cancellation point should not change recovered pool inventory"
+        );
+        crate::test_complete!(
+            "mr_cancelled_async_acquire_releases_slot_across_cancellation_points"
+        );
+    }
+
+    #[test]
     fn async_pool_contention_retries_under_lab_runtime() {
         init_test("async_pool_contention_retries_under_lab_runtime");
         let config = TestConfig::new()
@@ -1851,6 +1962,50 @@ mod tests {
         crate::test_complete!("reuse_idle_connection");
     }
 
+    #[test]
+    fn mr_idle_return_order_preserves_capacity_bounds() {
+        init_test("mr_idle_return_order_preserves_capacity_bounds");
+        const MAX_SIZE: usize = 3;
+        let config = DbPoolConfig::with_max_size(MAX_SIZE).validate_on_checkout(false);
+        let return_orders = [
+            [0usize, 1usize, 2usize],
+            [2usize, 1usize, 0usize],
+            [1usize, 2usize, 0usize],
+        ];
+        let mut final_snapshots = Vec::new();
+
+        for order in return_orders {
+            let pool = DbPool::new(TestManager::new(), config.clone());
+            let mut leases = (0..MAX_SIZE)
+                .map(|_| Some(pool.get().expect("acquire within pool capacity")))
+                .collect::<Vec<_>>();
+
+            for (step, index) in order.into_iter().enumerate() {
+                leases[index]
+                    .take()
+                    .expect("lease should still be checked out")
+                    .return_to_pool();
+
+                let stats = pool.stats();
+                assert_eq!(stats.idle, step + 1);
+                assert_eq!(stats.total, MAX_SIZE);
+                assert_eq!(stats.active + stats.idle, stats.total);
+                assert!(
+                    stats.idle <= stats.max_size,
+                    "idle connections must remain bounded by capacity"
+                );
+            }
+
+            final_snapshots.push(db_pool_inventory_snapshot(&pool.stats()));
+        }
+
+        assert!(
+            final_snapshots.windows(2).all(|pair| pair[0] == pair[1]),
+            "return order should not change the final idle inventory snapshot"
+        );
+        crate::test_complete!("mr_idle_return_order_preserves_capacity_bounds");
+    }
+
     // ================================================================
     // Capacity limits
     // ================================================================
@@ -2018,6 +2173,54 @@ mod tests {
         assert_eq!(pool.manager.disconnects(), 1);
         assert_eq!(pool.stats().total_discards, 1);
         crate::test_complete!("close_drains_idle");
+    }
+
+    #[test]
+    fn mr_drop_matches_close_for_idle_cleanup() {
+        init_test("mr_drop_matches_close_for_idle_cleanup");
+        let config = DbPoolConfig::with_max_size(2).validate_on_checkout(false);
+
+        let close_manager = TestManager::new();
+        let close_observer = close_manager.clone();
+        let close_snapshot = {
+            let pool = DbPool::new(close_manager, config.clone());
+            let first = pool.get().expect("first checkout should succeed");
+            let second = pool.get().expect("second checkout should succeed");
+            first.return_to_pool();
+            second.return_to_pool();
+            assert_eq!(pool.stats().idle, 2, "two returned connections go idle");
+            pool.close();
+            db_pool_inventory_snapshot(&pool.stats())
+        };
+
+        let drop_manager = TestManager::new();
+        let drop_observer = drop_manager.clone();
+        {
+            let pool = DbPool::new(drop_manager, config.clone());
+            let first = pool.get().expect("first checkout should succeed");
+            let second = pool.get().expect("second checkout should succeed");
+            first.return_to_pool();
+            second.return_to_pool();
+            assert_eq!(pool.stats().idle, 2, "two returned connections go idle");
+        }
+
+        assert_eq!(
+            close_snapshot,
+            json!({
+                "idle": 0,
+                "active": 0,
+                "total": 0,
+                "max_size": 2,
+            }),
+            "close must synchronously drain idle inventory"
+        );
+        assert_eq!(close_observer.disconnects(), 2);
+        assert_eq!(
+            drop_observer.disconnects(),
+            close_observer.disconnects(),
+            "dropping a pool with only idle connections should match explicit close cleanup"
+        );
+        crate::test_complete!("mr_drop_matches_close_for_idle_cleanup");
     }
 
     #[test]
