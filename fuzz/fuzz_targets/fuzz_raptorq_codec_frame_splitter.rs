@@ -124,7 +124,7 @@ fn fuzz_basic_encoding(
     object_id_raw: u64,
 ) {
     let config = sanitize_config(symbol_size, max_block_size, repair_overhead);
-    let mut pipeline = create_pipeline(config.clone());
+    let mut pipeline = create_pipeline(config);
     let payload = sanitize_payload(payload);
     let object_id = ObjectId::new_for_test(object_id_raw);
 
@@ -143,14 +143,14 @@ fn fuzz_basic_encoding(
                 assert!(symbol_data.len() <= config.symbol_size as usize);
 
                 // Symbol should have valid kind
-                let kind = symbol.symbol().kind();
+                let kind = symbol.symbol().id().kind();
                 assert!(matches!(kind, SymbolKind::Source | SymbolKind::Repair));
             }
 
             // If payload was not empty, we should have at least one source symbol
             if !payload.is_empty() {
                 let source_count = symbols.iter()
-                    .filter(|s| s.symbol().kind() == SymbolKind::Source)
+                    .filter(|s| s.symbol().id().kind() == SymbolKind::Source)
                     .count();
                 assert!(source_count > 0, "Non-empty payload should generate at least one source symbol");
             }
@@ -168,7 +168,7 @@ fn fuzz_empty_payload(
     object_id_raw: u64,
 ) {
     let config = sanitize_config(symbol_size, max_block_size, repair_overhead);
-    let mut pipeline = create_pipeline(config.clone());
+    let mut pipeline = create_pipeline(config);
     let object_id = ObjectId::new_for_test(object_id_raw);
 
     // Empty payload encoding should not crash
@@ -194,7 +194,7 @@ fn fuzz_oversized_payload(
     object_id_raw: u64,
 ) {
     let config = sanitize_config(symbol_size, max_block_size, repair_overhead);
-    let mut pipeline = create_pipeline(config.clone());
+    let mut pipeline = create_pipeline(config);
     let object_id = ObjectId::new_for_test(object_id_raw);
 
     // Create payload that exceeds reasonable limits
@@ -230,7 +230,7 @@ fn fuzz_edge_case_symbol_sizes(
     // Test very small symbol sizes (which should fail)
     let symbol_size = symbol_size.clamp(0, 16) as u16;
     let config = sanitize_config(symbol_size, max_block_size, repair_overhead);
-    let mut pipeline = create_pipeline(config.clone());
+    let mut pipeline = create_pipeline(config);
     let payload = sanitize_payload(payload);
     let object_id = ObjectId::new_for_test(object_id_raw);
 
@@ -260,7 +260,7 @@ fn fuzz_repair_symbol_count(
     object_id_raw: u64,
 ) {
     let config = sanitize_config(symbol_size, max_block_size, repair_overhead);
-    let mut pipeline = create_pipeline(config.clone());
+    let mut pipeline = create_pipeline(config);
     let payload = sanitize_payload(payload);
     let object_id = ObjectId::new_for_test(object_id_raw);
     let repair_count = explicit_repair_count.clamp(0, 32) as usize;
@@ -272,10 +272,10 @@ fn fuzz_repair_symbol_count(
     match symbols {
         Ok(symbols) => {
             let source_count = symbols.iter()
-                .filter(|s| s.symbol().kind() == SymbolKind::Source)
+                .filter(|s| s.symbol().id().kind() == SymbolKind::Source)
                 .count();
             let _repair_count_actual = symbols.iter()
-                .filter(|s| s.symbol().kind() == SymbolKind::Repair)
+                .filter(|s| s.symbol().id().kind() == SymbolKind::Repair)
                 .count();
 
             // Basic sanity checks
