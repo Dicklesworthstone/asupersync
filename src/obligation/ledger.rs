@@ -1784,6 +1784,213 @@ mod tests {
         crate::test_complete!("abort_after_commit_replay_preserves_committed_observable_state");
     }
 
+    fn replay_commit_attempt(
+        ledger: &mut ObligationLedger,
+        id: ObligationId,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        now: Time,
+    ) -> bool {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ledger.commit(
+                ObligationToken {
+                    id,
+                    kind,
+                    holder,
+                    region,
+                },
+                now,
+            );
+        }))
+        .is_err()
+    }
+
+    fn replay_abort_attempt(
+        ledger: &mut ObligationLedger,
+        id: ObligationId,
+        now: Time,
+        reason: ObligationAbortReason,
+    ) -> bool {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ledger.abort_by_id(id, now, reason);
+        }))
+        .is_err()
+    }
+
+    #[test]
+    fn metamorphic_commit_and_abort_replay_schedules_converge_on_same_terminal_observables() {
+        init_test(
+            "metamorphic_commit_and_abort_replay_schedules_converge_on_same_terminal_observables",
+        );
+        let task = make_task();
+        let region = make_region();
+
+        let mut commit_then_abort = ObligationLedger::new();
+        let token = commit_then_abort.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let id = token.id();
+        commit_then_abort.commit(token, Time::from_nanos(10));
+        let committed_expected = observable_resolution_state(&commit_then_abort, id);
+        for (idx, rejected) in [
+            replay_commit_attempt(
+                &mut commit_then_abort,
+                id,
+                ObligationKind::Lease,
+                task,
+                region,
+                Time::from_nanos(11),
+            ),
+            replay_abort_attempt(
+                &mut commit_then_abort,
+                id,
+                Time::from_nanos(12),
+                ObligationAbortReason::Cancel,
+            ),
+            replay_commit_attempt(
+                &mut commit_then_abort,
+                id,
+                ObligationKind::Lease,
+                task,
+                region,
+                Time::from_nanos(13),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            crate::assert_with_log!(rejected, "commit-first replay rejected", idx, rejected);
+            crate::assert_with_log!(
+                observable_resolution_state(&commit_then_abort, id) == committed_expected,
+                "commit-first observable state preserved",
+                committed_expected,
+                observable_resolution_state(&commit_then_abort, id)
+            );
+        }
+
+        let mut abort_then_commit = ObligationLedger::new();
+        let token = abort_then_commit.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let id = token.id();
+        abort_then_commit.commit(token, Time::from_nanos(10));
+        for (idx, rejected) in [
+            replay_abort_attempt(
+                &mut abort_then_commit,
+                id,
+                Time::from_nanos(11),
+                ObligationAbortReason::Cancel,
+            ),
+            replay_commit_attempt(
+                &mut abort_then_commit,
+                id,
+                ObligationKind::Lease,
+                task,
+                region,
+                Time::from_nanos(12),
+            ),
+            replay_abort_attempt(
+                &mut abort_then_commit,
+                id,
+                Time::from_nanos(13),
+                ObligationAbortReason::Explicit,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            crate::assert_with_log!(rejected, "abort-first replay rejected", idx, rejected);
+            crate::assert_with_log!(
+                observable_resolution_state(&abort_then_commit, id) == committed_expected,
+                "abort-first observable state preserved",
+                committed_expected,
+                observable_resolution_state(&abort_then_commit, id)
+            );
+        }
+
+        crate::assert_with_log!(
+            observable_resolution_state(&commit_then_abort, id)
+                == observable_resolution_state(&abort_then_commit, id),
+            "committed replay schedules converge",
+            observable_resolution_state(&commit_then_abort, id),
+            observable_resolution_state(&abort_then_commit, id)
+        );
+
+        let mut abort_only_then_commit = ObligationLedger::new();
+        let token = abort_only_then_commit.acquire(ObligationKind::Ack, task, region, Time::ZERO);
+        let id = token.id();
+        abort_only_then_commit.abort(token, Time::from_nanos(20), ObligationAbortReason::Explicit);
+        let aborted_expected = observable_resolution_state(&abort_only_then_commit, id);
+        for (idx, rejected) in [
+            replay_abort_attempt(
+                &mut abort_only_then_commit,
+                id,
+                Time::from_nanos(21),
+                ObligationAbortReason::Cancel,
+            ),
+            replay_commit_attempt(
+                &mut abort_only_then_commit,
+                id,
+                ObligationKind::Ack,
+                task,
+                region,
+                Time::from_nanos(22),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            crate::assert_with_log!(rejected, "abort terminal replay rejected", idx, rejected);
+            crate::assert_with_log!(
+                observable_resolution_state(&abort_only_then_commit, id) == aborted_expected,
+                "abort terminal state preserved",
+                aborted_expected,
+                observable_resolution_state(&abort_only_then_commit, id)
+            );
+        }
+
+        let mut commit_only_then_abort = ObligationLedger::new();
+        let token = commit_only_then_abort.acquire(ObligationKind::Ack, task, region, Time::ZERO);
+        let id = token.id();
+        commit_only_then_abort.abort(token, Time::from_nanos(20), ObligationAbortReason::Explicit);
+        for (idx, rejected) in [
+            replay_commit_attempt(
+                &mut commit_only_then_abort,
+                id,
+                ObligationKind::Ack,
+                task,
+                region,
+                Time::from_nanos(21),
+            ),
+            replay_abort_attempt(
+                &mut commit_only_then_abort,
+                id,
+                Time::from_nanos(22),
+                ObligationAbortReason::Error,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            crate::assert_with_log!(rejected, "commit terminal replay rejected", idx, rejected);
+            crate::assert_with_log!(
+                observable_resolution_state(&commit_only_then_abort, id) == aborted_expected,
+                "commit terminal state preserved",
+                aborted_expected,
+                observable_resolution_state(&commit_only_then_abort, id)
+            );
+        }
+
+        crate::assert_with_log!(
+            observable_resolution_state(&abort_only_then_commit, id)
+                == observable_resolution_state(&commit_only_then_abort, id),
+            "aborted replay schedules converge",
+            observable_resolution_state(&abort_only_then_commit, id),
+            observable_resolution_state(&commit_only_then_abort, id)
+        );
+
+        crate::test_complete!(
+            "metamorphic_commit_and_abort_replay_schedules_converge_on_same_terminal_observables"
+        );
+    }
+
     // =========================================================================
     // Wave 55 – pure data-type trait coverage
     // =========================================================================
