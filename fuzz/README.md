@@ -25,6 +25,7 @@ cargo +nightly install cargo-fuzz
 | `bytes_cursor_reader` | BytesCursor and reader() position, chunk, and copy invariants | High |
 | `grpc_prost_codec_decode` | Direct ProstCodec decode limits, malformed-wire, and unknown-field invariants | High |
 | `grpc_gzip_message_decode` | Gzip-compressed gRPC frame decode, malformed-gzip rejection, bomb guards, and max-message enforcement | High |
+| `raptorq_decoder_gauss_matrix` | RaptorQ decoder Gaussian-elimination rank-deficient, malformed-equation, and corrupt-RHS invariants | High |
 | `tls_stream_record_framing` | TlsStream handshake/read/write behavior under fragmented and malformed TLS records | High |
 | `transport_router` | RoutingTable add/remove/lookup, TTL pruning, fallback routing, and dispatcher strategy invariants | High |
 | `fuzz_websocket_frame_parsing` | RFC 6455 frame parser invariants for control, continuation, masking, RSV bits, and extended lengths | High |
@@ -77,6 +78,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
   including empty views, clone-heavy cursor churn, and position-reset cases
 - `corpus/grpc_prost_codec_decode/` - Direct ProstCodec decode boundary and malformed-wire scenarios
 - `corpus/grpc_gzip_message_decode/` - Gzip-compressed gRPC frame decode, malformed-gzip rejection, and bomb-guard scenarios
+- `corpus/raptorq_decoder_gauss_matrix/` - Rank-deficient duplicate-source/repair systems plus malformed-equation and corrupt-RHS decoder scenarios
 - `corpus/tls_stream_record_framing/` - TlsStream record fragmentation, truncation, and close-notify scenarios
 - `corpus/transport_router/` - RoutingTable insert/remove/reinsert, lookup-miss fallback, TTL expiry, and dispatch-strategy scenarios
 - `corpus/fuzz_websocket_frame_parsing/` - RFC 6455 control, continuation, mask-role, RSV-bit, and extended-length frame scenarios

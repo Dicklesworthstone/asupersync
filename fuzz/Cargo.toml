@@ -494,6 +494,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_decoder_gauss_matrix"
+path = "fuzz_targets/raptorq_decoder_gauss_matrix.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_local_queue"
 path = "fuzz_targets/local_queue.rs"
 test = false
