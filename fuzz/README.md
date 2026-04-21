@@ -33,6 +33,7 @@ cargo +nightly install cargo-fuzz
 | `h3_native_frames` | HTTP/3 frame-header varint bounds, malformed-frame rejection, unknown-frame preservation, and GREASE tolerance | High |
 | `qpack_field_section` | QPACK encoded field section parsing for static-indexed fields, static-name literals, dynamic-reference rejection, and prefixed-integer overflow | High |
 | `kafka_protocol` | Kafka request-header ApiKey/ApiVersion, correlation echo, tagged-field varint, and size-bound invariants | High |
+| `nats_parser` | NATS client/server line protocol parsing for CONNECT/PUB/SUB/MSG/INFO framing, CRLF enforcement, SID collision rejection, and max-payload bounds | High |
 | `key_derivation_context` | AuthKey seed/raw/RNG derivation, chained purpose isolation, and mutated-tag/symbol verification invariants | High |
 | `region_heap_allocator` | RegionHeap mixed-size/high-alignment allocation, stale-handle reuse, and reclaim-all invariants | High |
 | `otel_span_attributes` | OpenTelemetry span attribute/event limit, overwrite, truncation, and mixed value-shape encoding invariants | High |
@@ -104,6 +105,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `corpus/h3_native_frames/` - HTTP/3 DATA/HEADERS header varint, GREASE unknown-frame, reserved-type, and truncated-payload scenarios
 - `corpus/qpack_field_section/` - QPACK field section seeds covering static indexed fields, static-name literals, dynamic references without table state, and prefixed-integer overflow
 - `corpus/kafka_protocol/` - Kafka request-header scenarios covering ApiKey/version mismatches, tagged-field varints, correlation echo, and oversized frames
+- `corpus/nats_parser/` - NATS protocol scenarios covering CONNECT/INFO JSON lines, PUB payload framing, subscription SID collisions, and malformed CRLF handling
 - `corpus/key_derivation_context/` - AuthKey seed/raw/RNG derivation, chained purpose isolation, and mutated-tag/symbol scenarios
 - `corpus/region_heap_allocator/` - RegionHeap allocation, stale-handle, reclaim-all, and high-alignment slot-reuse scenarios
 - `corpus/otel_span_attributes/` - Span attribute overwrite, mixed value-shape, event truncation, and max-event cap scenarios

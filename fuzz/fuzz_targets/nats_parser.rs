@@ -24,7 +24,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::messaging::nats::{NatsConfig, NatsError};
+use asupersync::messaging::nats::NatsError;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
 
@@ -269,7 +269,7 @@ enum CorruptionStrategy {
     /// SID collision (reuse subscription IDs)
     SidCollision { duplicate_sid: u64 },
     /// Malformed reply-to field
-    MalformedReplyTo { reply_to: String },
+    MalformedReplyTo,
     /// Exceed max payload setting
     ExceedMaxPayload { size: usize },
     /// Invalid UTF-8 in text fields
@@ -592,7 +592,7 @@ impl MockNatsParser {
             ));
         }
 
-        let sid: u64 = parts[2]
+        let _sid: u64 = parts[2]
             .parse()
             .map_err(|_| NatsError::Protocol("Invalid SID".to_string()))?;
 
@@ -635,10 +635,10 @@ impl MockNatsParser {
             // Simplified extraction for fuzzing
             if let Some(start) = json_part.find("\"max_payload\":") {
                 let rest = &json_part[start + 15..];
-                if let Some(end) = rest.find([',', '}']) {
-                    if let Ok(max_payload) = rest[..end].parse::<usize>() {
-                        self.server_max_payload = Some(max_payload);
-                    }
+                if let Some(end) = rest.find([',', '}'])
+                    && let Ok(max_payload) = rest[..end].parse::<usize>()
+                {
+                    self.server_max_payload = Some(max_payload);
                 }
             }
         }
@@ -720,21 +720,19 @@ fuzz_target!(|input: FuzzInput| {
                 // NOTE: This might be acceptable depending on implementation
             }
         }
-        CorruptionStrategy::ExceedMaxPayload { size } => {
+        CorruptionStrategy::ExceedMaxPayload { size } if *size > input.max_payload_config => {
             // Ensure oversized payloads are properly rejected
-            if *size > input.max_payload_config {
-                let pub_line = format!("PUB test.subject {}\r\n", size);
-                let result = parser.parse_line(pub_line.as_bytes());
-                match result {
-                    Err(NatsError::Protocol(msg)) if msg.contains("exceeds maximum") => {
-                        // Correct rejection of oversized payload
-                    }
-                    Ok(()) => {
-                        panic!("Parser accepted oversized payload: {}", size);
-                    }
-                    _ => {
-                        // Other errors are acceptable
-                    }
+            let pub_line = format!("PUB test.subject {}\r\n", size);
+            let result = parser.parse_line(pub_line.as_bytes());
+            match result {
+                Err(NatsError::Protocol(msg)) if msg.contains("exceeds maximum") => {
+                    // Correct rejection of oversized payload
+                }
+                Ok(()) => {
+                    panic!("Parser accepted oversized payload: {}", size);
+                }
+                _ => {
+                    // Other errors are acceptable
                 }
             }
         }
