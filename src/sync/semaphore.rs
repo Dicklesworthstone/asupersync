@@ -2812,6 +2812,113 @@ mod tests {
         (vec![1, 3], after_first_drop, final_available)
     }
 
+    fn observe_head_cancelled_drain_schedule(
+        cancel_before_partial_permit: bool,
+        seed_offset: u32,
+    ) -> (Vec<usize>, usize, usize) {
+        let sem = Semaphore::new(0);
+
+        let cx1 = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 40 + seed_offset)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 40 + seed_offset)),
+            crate::types::Budget::INFINITE,
+        );
+        let cx2 = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 41 + seed_offset)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 41 + seed_offset)),
+            crate::types::Budget::INFINITE,
+        );
+        let cx3 = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 42 + seed_offset)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 42 + seed_offset)),
+            crate::types::Budget::INFINITE,
+        );
+
+        let mut fut1 = sem.acquire(&cx1, 2);
+        let mut fut2 = sem.acquire(&cx2, 1);
+        let mut fut3 = sem.acquire(&cx3, 1);
+
+        assert!(poll_once(&mut fut1).is_none(), "head waiter should queue");
+        assert!(poll_once(&mut fut2).is_none(), "second waiter should queue");
+        assert!(poll_once(&mut fut3).is_none(), "third waiter should queue");
+
+        if cancel_before_partial_permit {
+            cx1.set_cancel_requested(true);
+            assert!(
+                poll_once(&mut fut1).is_some(),
+                "head waiter cancellation should complete before permit injection"
+            );
+        }
+
+        sem.add_permits(1);
+
+        if cancel_before_partial_permit {
+            let permit2 = poll_once(&mut fut2)
+                .expect("second waiter should wake after head cancellation")
+                .expect("second waiter should acquire permit");
+            assert!(
+                poll_once(&mut fut3).is_none(),
+                "third waiter should remain queued until another permit arrives"
+            );
+
+            sem.add_permits(1);
+            let permit3 = poll_once(&mut fut3)
+                .expect("third waiter should wake after second permit")
+                .expect("third waiter should acquire permit");
+
+            let while_held = sem.available_permits();
+            assert_eq!(while_held, 0, "both injected permits should be consumed");
+
+            drop(permit2);
+            let after_first_drop = sem.available_permits();
+            drop(permit3);
+            let final_available = sem.available_permits();
+            (vec![2, 3], after_first_drop, final_available)
+        } else {
+            assert!(
+                poll_once(&mut fut2).is_none(),
+                "second waiter must stay blocked behind large head waiter"
+            );
+            assert!(
+                poll_once(&mut fut3).is_none(),
+                "third waiter must stay blocked behind large head waiter"
+            );
+            assert_eq!(
+                sem.available_permits(),
+                1,
+                "partial permit remains available until head waiter cancels"
+            );
+
+            cx1.set_cancel_requested(true);
+            assert!(
+                poll_once(&mut fut1).is_some(),
+                "head waiter cancellation should complete after partial permit injection"
+            );
+
+            let permit2 = poll_once(&mut fut2)
+                .expect("second waiter should wake once head waiter cancels")
+                .expect("second waiter should acquire queued permit");
+            assert!(
+                poll_once(&mut fut3).is_none(),
+                "third waiter should remain queued until another permit arrives"
+            );
+
+            sem.add_permits(1);
+            let permit3 = poll_once(&mut fut3)
+                .expect("third waiter should wake after second permit")
+                .expect("third waiter should acquire permit");
+
+            let while_held = sem.available_permits();
+            assert_eq!(while_held, 0, "both injected permits should be consumed");
+
+            drop(permit2);
+            let after_first_drop = sem.available_permits();
+            drop(permit3);
+            let final_available = sem.available_permits();
+            (vec![2, 3], after_first_drop, final_available)
+        }
+    }
+
     #[test]
     fn metamorphic_middle_cancellation_timing_preserves_wake_order_and_capacity() {
         init_test("metamorphic_middle_cancellation_timing_preserves_wake_order_and_capacity");
@@ -2858,6 +2965,55 @@ mod tests {
 
         crate::test_complete!(
             "metamorphic_middle_cancellation_timing_preserves_wake_order_and_capacity"
+        );
+    }
+
+    #[test]
+    fn metamorphic_head_cancellation_releases_blocked_followers_in_fifo_order() {
+        init_test("metamorphic_head_cancellation_releases_blocked_followers_in_fifo_order");
+
+        let cancel_before = observe_head_cancelled_drain_schedule(true, 0);
+        let cancel_after = observe_head_cancelled_drain_schedule(false, 10);
+
+        crate::assert_with_log!(
+            cancel_before.0 == cancel_after.0,
+            "survivor wake order preserved across head cancellation timing",
+            &cancel_before.0,
+            &cancel_after.0
+        );
+        crate::assert_with_log!(
+            cancel_before.0 == vec![2, 3],
+            "smaller followers drain in FIFO order after head cancellation",
+            vec![2, 3],
+            cancel_before.0.clone()
+        );
+        crate::assert_with_log!(
+            cancel_before.1 == cancel_after.1,
+            "first drop restores one permit regardless of cancellation timing",
+            cancel_before.1,
+            cancel_after.1
+        );
+        crate::assert_with_log!(
+            cancel_before.1 == 1,
+            "dropping the first surviving waiter releases exactly one permit",
+            1usize,
+            cancel_before.1
+        );
+        crate::assert_with_log!(
+            cancel_before.2 == cancel_after.2,
+            "final permit count preserved across head cancellation timing",
+            cancel_before.2,
+            cancel_after.2
+        );
+        crate::assert_with_log!(
+            cancel_before.2 == 2,
+            "cancelled large waiter does not consume injected permits",
+            2usize,
+            cancel_before.2
+        );
+
+        crate::test_complete!(
+            "metamorphic_head_cancellation_releases_blocked_followers_in_fifo_order"
         );
     }
 
