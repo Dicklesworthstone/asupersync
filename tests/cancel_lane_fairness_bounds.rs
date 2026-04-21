@@ -294,6 +294,129 @@ fn timed_task_dispatches_within_bound() {
     );
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct DeadlineDispatchProjection {
+    timed_subsequence: Vec<TaskId>,
+    first_ready_position: Option<usize>,
+    last_timed_position: Option<usize>,
+}
+
+fn drain_due_timed_projection(
+    timed_schedule: &[(TaskId, Time)],
+    inject_reversed: bool,
+    front_cancel: usize,
+    tail_cancel: usize,
+    ready_noise: usize,
+) -> DeadlineDispatchProjection {
+    let (state, clock) = setup_state_with_clock();
+    let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 3);
+
+    let expected_timed: Vec<TaskId> = timed_schedule.iter().map(|(id, _)| *id).collect();
+    let injection_order: Vec<(TaskId, Time)> = if inject_reversed {
+        timed_schedule.iter().rev().copied().collect()
+    } else {
+        timed_schedule.to_vec()
+    };
+
+    for i in 0..front_cancel {
+        scheduler.inject_cancel(TaskId::new_for_test(70, i as u32), 100);
+    }
+
+    for (id, deadline) in injection_order {
+        scheduler.inject_timed(id, deadline);
+    }
+
+    let ready_ids: Vec<TaskId> = (0..ready_noise)
+        .map(|i| {
+            let id = TaskId::new_for_test(80, i as u32);
+            scheduler.inject_ready(id, 10);
+            id
+        })
+        .collect();
+
+    for i in 0..tail_cancel {
+        scheduler.inject_cancel(TaskId::new_for_test(90, i as u32), 100);
+    }
+
+    clock.advance(10_000);
+
+    let mut workers = scheduler.take_workers().into_iter();
+    let mut worker = workers.next().expect("worker");
+    let mut timed_subsequence = Vec::new();
+    let mut first_ready_position = None;
+    let mut last_timed_position = None;
+
+    for position in 0..(front_cancel + tail_cancel + ready_noise + expected_timed.len() + 8) {
+        let Some(id) = worker.next_task() else {
+            break;
+        };
+
+        if expected_timed.contains(&id) {
+            timed_subsequence.push(id);
+            last_timed_position = Some(position);
+        } else if first_ready_position.is_none() && ready_ids.contains(&id) {
+            first_ready_position = Some(position);
+        }
+    }
+
+    DeadlineDispatchProjection {
+        timed_subsequence,
+        first_ready_position,
+        last_timed_position,
+    }
+}
+
+#[test]
+fn mr_due_timed_order_survives_cancel_permutation_and_ready_noise() {
+    init_test_logging();
+
+    let timed_schedule = [
+        (TaskId::new_for_test(60, 0), Time::from_nanos(100)),
+        (TaskId::new_for_test(60, 1), Time::from_nanos(200)),
+        (TaskId::new_for_test(60, 2), Time::from_nanos(300)),
+        (TaskId::new_for_test(60, 3), Time::from_nanos(400)),
+    ];
+    let expected_timed: Vec<TaskId> = timed_schedule.iter().map(|(id, _)| *id).collect();
+
+    let baseline = drain_due_timed_projection(&timed_schedule, false, 6, 0, 3);
+    let permuted = drain_due_timed_projection(&timed_schedule, true, 2, 4, 3);
+
+    assert_eq!(
+        baseline.timed_subsequence, expected_timed,
+        "baseline due timed tasks should dispatch in EDF order"
+    );
+    assert_eq!(
+        permuted.timed_subsequence, expected_timed,
+        "permuted arrival should preserve the same EDF timed subsequence"
+    );
+    assert_eq!(
+        baseline.timed_subsequence, permuted.timed_subsequence,
+        "deadline-lane ordering should be invariant to timed arrival order and cancel burst placement"
+    );
+
+    let baseline_first_ready = baseline
+        .first_ready_position
+        .expect("ready noise should eventually dispatch in baseline");
+    let baseline_last_timed = baseline
+        .last_timed_position
+        .expect("timed tasks should dispatch in baseline");
+    assert!(
+        baseline_first_ready > baseline_last_timed,
+        "all due timed tasks should beat ready noise in baseline: ready at {baseline_first_ready}, last timed at {baseline_last_timed}"
+    );
+
+    let permuted_first_ready = permuted
+        .first_ready_position
+        .expect("ready noise should eventually dispatch in permuted scenario");
+    let permuted_last_timed = permuted
+        .last_timed_position
+        .expect("timed tasks should dispatch in permuted scenario");
+    assert!(
+        permuted_first_ready > permuted_last_timed,
+        "all due timed tasks should beat ready noise in permuted scenario: ready at {permuted_first_ready}, last timed at {permuted_last_timed}"
+    );
+}
+
 // ===========================================================================
 // STREAK RESET BEHAVIOR
 // ===========================================================================
