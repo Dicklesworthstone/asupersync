@@ -27,6 +27,7 @@ cargo +nightly install cargo-fuzz
 | `grpc_prost_codec_decode` | Direct ProstCodec decode limits, malformed-wire, and unknown-field invariants | High |
 | `grpc_gzip_message_decode` | Gzip-compressed gRPC frame decode, malformed-gzip rejection, bomb guards, and max-message enforcement | High |
 | `grpc_streaming` | Bidirectional gRPC stream interleaving, half-close/cancel propagation, deadline, and backpressure invariants | High |
+| `kafka_protocol` | Kafka request-header ApiKey/ApiVersion, correlation echo, tagged-field varint, and size-bound invariants | High |
 | `key_derivation_context` | AuthKey seed/raw/RNG derivation, chained purpose isolation, and mutated-tag/symbol verification invariants | High |
 | `symbol_auth` | AuthenticatedSymbol MAC verification, forged-tag rejection, replay-window, and field-tampering invariants | High |
 | `postgres_scram` | PostgreSQL SCRAM-SHA-256 server-first/server-final parsing, iteration-bound enforcement, and malformed-signature rejection | High |
@@ -86,6 +87,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `corpus/grpc_prost_codec_decode/` - Direct ProstCodec decode boundary and malformed-wire scenarios
 - `corpus/grpc_gzip_message_decode/` - Gzip-compressed gRPC frame decode, malformed-gzip rejection, and bomb-guard scenarios
 - `corpus/grpc_streaming/` - Bidirectional stream seeds covering interleaving, half-close/cancel, and deadline/backpressure scenarios
+- `corpus/kafka_protocol/` - Kafka request-header scenarios covering ApiKey/version mismatches, tagged-field varints, correlation echo, and oversized frames
 - `corpus/key_derivation_context/` - AuthKey seed/raw/RNG derivation, chained purpose isolation, and mutated-tag/symbol scenarios
 - `corpus/symbol_auth/` - AuthenticatedSymbol forged-tag, wrong-key, replay-window, and payload/context-tampering scenarios
 - `corpus/postgres_scram/` - SCRAM server-first/server-final seeds covering valid nonces, low-iteration rejects, and malformed signatures

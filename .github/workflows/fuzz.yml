@@ -33,6 +33,7 @@ on:
           - grpc_prost_codec_decode
           - grpc_gzip_message_decode
           - grpc_streaming
+          - kafka_protocol
           - key_derivation_context
           - symbol_auth
           - postgres_scram
@@ -80,6 +81,7 @@ jobs:
           - grpc_prost_codec_decode
           - grpc_gzip_message_decode
           - grpc_streaming
+          - kafka_protocol
           - key_derivation_context
           - symbol_auth
           - postgres_scram
