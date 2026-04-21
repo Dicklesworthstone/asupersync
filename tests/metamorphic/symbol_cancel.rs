@@ -543,17 +543,40 @@ fn mr7_listener_registered_during_cancel_is_not_requeued() {
     let late_listener_time_clone = Arc::clone(&late_listener_time);
     let token_for_listener = token.clone();
 
-    token.add_listener(move |_, _| {
-        token_for_listener.add_listener({
-            let late_listener_notifications_clone = Arc::clone(&late_listener_notifications_clone);
-            let late_listener_reason_clone = Arc::clone(&late_listener_reason_clone);
-            let late_listener_time_clone = Arc::clone(&late_listener_time_clone);
-            move |reason: &CancelReason, at: Time| {
-                late_listener_notifications_clone.fetch_add(1, Ordering::SeqCst);
-                *late_listener_reason_clone.lock().unwrap() = Some(reason.kind());
-                *late_listener_time_clone.lock().unwrap() = Some(at);
-            }
-        });
+    struct Mr7InnerListener {
+        notifications: Arc<AtomicUsize>,
+        reason: Arc<StdMutex<Option<CancelKind>>>,
+        time: Arc<StdMutex<Option<Time>>>,
+    }
+    impl CancelListener for Mr7InnerListener {
+        fn on_cancel(&self, reason: &CancelReason, at: Time) {
+            self.notifications.fetch_add(1, Ordering::SeqCst);
+            *self.reason.lock().unwrap() = Some(reason.kind());
+            *self.time.lock().unwrap() = Some(at);
+        }
+    }
+
+    struct Mr7OuterListener {
+        token: SymbolCancelToken,
+        inner_notifications: Arc<AtomicUsize>,
+        inner_reason: Arc<StdMutex<Option<CancelKind>>>,
+        inner_time: Arc<StdMutex<Option<Time>>>,
+    }
+    impl CancelListener for Mr7OuterListener {
+        fn on_cancel(&self, _reason: &CancelReason, _at: Time) {
+            self.token.add_listener(Mr7InnerListener {
+                notifications: Arc::clone(&self.inner_notifications),
+                reason: Arc::clone(&self.inner_reason),
+                time: Arc::clone(&self.inner_time),
+            });
+        }
+    }
+
+    token.add_listener(Mr7OuterListener {
+        token: token_for_listener,
+        inner_notifications: late_listener_notifications_clone,
+        inner_reason: late_listener_reason_clone,
+        inner_time: late_listener_time_clone,
     });
 
     let first_reason = CancelReason::new(CancelKind::Timeout);

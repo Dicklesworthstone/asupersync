@@ -938,10 +938,6 @@ mod tests {
     }
 
     fn block_on<F: Future>(f: F) -> F::Output {
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: std::sync::Arc<Self>) {}
-        }
         let waker = std::task::Waker::noop().clone();
         let mut cx = Context::from_waker(&waker);
         let mut pinned = Box::pin(f);
