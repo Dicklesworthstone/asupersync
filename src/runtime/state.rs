@@ -2199,7 +2199,7 @@ impl RuntimeState {
                             },
                         )
                     });
-                } else {
+                } else if region.state() != crate::record::region::RegionState::Closed {
                     region.strengthen_cancel_reason(region_reason);
                 }
             }
@@ -9589,6 +9589,7 @@ mod tests {
     mod metamorphic_cancel_cause_chain_tests {
         use super::*;
         use proptest::prelude::*;
+        use std::collections::HashMap;
 
         fn reason_from_variant(variant: u8) -> CancelReason {
             match variant {
@@ -9596,6 +9597,73 @@ mod tests {
                 1 => CancelReason::timeout().with_message("rpc timeout"),
                 2 => CancelReason::resource_unavailable().with_message("peer unavailable"),
                 _ => CancelReason::user("operator stop"),
+            }
+        }
+
+        #[derive(Debug, Clone, PartialEq)]
+        struct BranchCancelSnapshot {
+            branch_region_reason: CancelReason,
+            leaf_region_reason: CancelReason,
+            branch_task_reason: CancelReason,
+            leaf_task_reason: CancelReason,
+        }
+
+        fn branch_cancel_snapshot_with_sibling_noise(
+            sibling_count: usize,
+            reason: &CancelReason,
+        ) -> BranchCancelSnapshot {
+            let mut state = RuntimeState::new();
+            state.set_cancel_attribution_config(CancelAttributionConfig::new(8, usize::MAX));
+
+            let root = state.create_root_region(Budget::INFINITE);
+            let branch = create_child_region(&mut state, root);
+            let leaf = create_child_region(&mut state, branch);
+            let branch_task = insert_task(&mut state, branch);
+            let leaf_task = insert_task(&mut state, leaf);
+
+            for _ in 0..sibling_count {
+                let sibling = create_child_region(&mut state, root);
+                let _ = insert_task(&mut state, sibling);
+                let niece = create_child_region(&mut state, sibling);
+                let _ = insert_task(&mut state, niece);
+            }
+
+            let _ = state.cancel_request(branch, reason, None);
+
+            let branch_region_reason = state
+                .regions
+                .get(branch.arena_index())
+                .and_then(RegionRecord::cancel_reason)
+                .expect("branch cancel reason missing");
+            let leaf_region_reason = state
+                .regions
+                .get(leaf.arena_index())
+                .and_then(RegionRecord::cancel_reason)
+                .expect("leaf cancel reason missing");
+            let branch_task_reason = match &state
+                .tasks
+                .get(branch_task.arena_index())
+                .expect("branch task missing")
+                .state
+            {
+                TaskState::CancelRequested { reason, .. } => reason.clone(),
+                other => panic!("expected branch task to be cancelling, got {other:?}"),
+            };
+            let leaf_task_reason = match &state
+                .tasks
+                .get(leaf_task.arena_index())
+                .expect("leaf task missing")
+                .state
+            {
+                TaskState::CancelRequested { reason, .. } => reason.clone(),
+                other => panic!("expected leaf task to be cancelling, got {other:?}"),
+            };
+
+            BranchCancelSnapshot {
+                branch_region_reason,
+                leaf_region_reason,
+                branch_task_reason,
+                leaf_task_reason,
             }
         }
 
@@ -9683,6 +9751,97 @@ mod tests {
                         prop_assert!(false, "expected CancelRequested task state, got {other:?}");
                     }
                 }
+            });
+        }
+
+        #[test]
+        fn mr_parent_cancel_schedules_ancestors_before_descendants() {
+            proptest!(|(
+                child_count in 1..5usize,
+                grandchildren_per_child in 1..4usize,
+                reason_variant in 0..4u8
+            )| {
+                let mut state = RuntimeState::new();
+                let root = state.create_root_region(Budget::INFINITE);
+                let root_task = insert_task(&mut state, root);
+                let mut depth_by_task = HashMap::from([(root_task, 0usize)]);
+
+                for _ in 0..child_count {
+                    let child = create_child_region(&mut state, root);
+                    let child_task = insert_task(&mut state, child);
+                    depth_by_task.insert(child_task, 1);
+
+                    for _ in 0..grandchildren_per_child {
+                        let grandchild = create_child_region(&mut state, child);
+                        let grandchild_task = insert_task(&mut state, grandchild);
+                        depth_by_task.insert(grandchild_task, 2);
+                    }
+                }
+
+                let scheduled = state.cancel_request(root, &reason_from_variant(reason_variant), None);
+                prop_assert_eq!(
+                    scheduled.len(),
+                    depth_by_task.len(),
+                    "initial cancel cascade should schedule each task exactly once"
+                );
+
+                let scheduled_depths: Vec<_> = scheduled
+                    .iter()
+                    .map(|(task_id, _priority)| {
+                        *depth_by_task
+                            .get(task_id)
+                            .expect("scheduled task missing from depth map")
+                    })
+                    .collect();
+                prop_assert_eq!(scheduled_depths.first().copied(), Some(0));
+                prop_assert!(
+                    scheduled_depths.windows(2).all(|pair| pair[0] <= pair[1]),
+                    "cancel scheduling should not visit descendants before ancestors: {scheduled_depths:?}"
+                );
+            });
+        }
+
+        #[test]
+        fn mr_cancel_cause_chain_is_stable_under_sibling_noise() {
+            proptest!(|(sibling_count in 1..5usize, reason_variant in 0..4u8)| {
+                let reason = reason_from_variant(reason_variant);
+                let baseline = branch_cancel_snapshot_with_sibling_noise(0, &reason);
+                let noisy = branch_cancel_snapshot_with_sibling_noise(sibling_count, &reason);
+                prop_assert_eq!(
+                    noisy,
+                    baseline,
+                    "sibling regions outside the cancelled branch should not perturb cause chains"
+                );
+            });
+        }
+
+        #[test]
+        fn mr_cancel_request_after_close_preserves_terminal_reason() {
+            proptest!(|(initial_variant in 0..4u8, followup_variant in 0..4u8)| {
+                let mut state = RuntimeState::new();
+                let region_id = state.create_root_region(Budget::INFINITE);
+                let initial_reason = reason_from_variant(initial_variant);
+                let followup_reason = reason_from_variant(followup_variant);
+
+                {
+                    let region = state
+                        .regions
+                        .get_mut(region_id.arena_index())
+                        .expect("region missing");
+                    prop_assert!(region.begin_close(Some(initial_reason.clone())));
+                    prop_assert!(region.begin_finalize());
+                    prop_assert!(region.complete_close());
+                }
+
+                let tasks_to_cancel = state.cancel_request(region_id, &followup_reason, None);
+                let region = state
+                    .regions
+                    .get(region_id.arena_index())
+                    .expect("region missing");
+
+                prop_assert!(tasks_to_cancel.is_empty());
+                prop_assert_eq!(region.state(), crate::record::region::RegionState::Closed);
+                prop_assert_eq!(region.cancel_reason(), Some(initial_reason));
             });
         }
     }
