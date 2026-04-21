@@ -4957,7 +4957,7 @@ mod tests {
     fn test_run_once_processes_timers() {
         use crate::time::{TimerDriverHandle, VirtualClock};
         use std::sync::atomic::AtomicBool;
-        use std::task::{Waker};
+        use std::task::Waker;
 
         // Waker that sets a flag when woken
         struct TestWaker(AtomicBool);
@@ -9196,6 +9196,103 @@ mod tests {
                 e_process
             );
         }
+    }
+
+    fn test_adaptive_epoch_snapshot(
+        potential: f64,
+        deadline_pressure: f64,
+        base_limit_exceedances: u64,
+        effective_limit_exceedances: u64,
+        fallback_cancel_dispatches: u64,
+    ) -> AdaptiveEpochSnapshot {
+        AdaptiveEpochSnapshot {
+            potential,
+            deadline_pressure,
+            base_limit_exceedances,
+            effective_limit_exceedances,
+            fallback_cancel_dispatches,
+        }
+    }
+
+    fn replay_adaptive_limit_trace(seed: u64, epochs: usize) -> Vec<usize> {
+        let mut policy = AdaptiveCancelStreakPolicy::new(4);
+        let mut rng = crate::util::DetRng::new(seed);
+        let start = test_adaptive_epoch_snapshot(100.0, 0.25, 0, 0, 0);
+        let relaxed = test_adaptive_epoch_snapshot(72.0, 0.10, 0, 0, 0);
+        let pressured = test_adaptive_epoch_snapshot(128.0, 0.70, 2, 4, 2);
+        let mut trace = Vec::with_capacity(epochs);
+
+        for epoch in 0..epochs {
+            policy.selected_arm = 2; // Keep the reward stream comparable across epochs.
+            policy.begin_epoch(start);
+            let sample = rng.next_u64();
+            let end = if epoch % 2 == 0 { relaxed } else { pressured };
+            let reward = policy
+                .complete_epoch(end, sample)
+                .expect("epoch start snapshot should be present");
+            assert!(
+                reward.is_finite(),
+                "adaptive reward should stay finite across replay"
+            );
+            trace.push(policy.current_limit());
+        }
+
+        trace
+    }
+
+    #[test]
+    fn golden_test_cancel_streak_adaptivity_same_seed_replays_limit_trace() {
+        let trace_a = replay_adaptive_limit_trace(0xC0DE_CAFE_BEEF_0001, 24);
+        let trace_b = replay_adaptive_limit_trace(0xC0DE_CAFE_BEEF_0001, 24);
+
+        assert_eq!(
+            trace_a, trace_b,
+            "same-seed adaptive replay should produce the same limit trace"
+        );
+        let distinct_limits = trace_a
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        assert!(
+            distinct_limits >= 2,
+            "deterministic replay should still explore multiple cancel-streak limits: {:?}",
+            trace_a
+        );
+    }
+
+    #[test]
+    fn golden_test_cancel_streak_adaptivity_penalty_reduces_prob_mass() {
+        fn favored_arm_prob(end: AdaptiveEpochSnapshot) -> f64 {
+            let mut policy = AdaptiveCancelStreakPolicy::new(4);
+            let start = test_adaptive_epoch_snapshot(100.0, 0.25, 0, 0, 0);
+
+            for _ in 0..12 {
+                policy.selected_arm = 2;
+                policy.begin_epoch(start);
+                let _reward = policy
+                    .complete_epoch(end, 0)
+                    .expect("epoch start snapshot should be present");
+            }
+
+            policy.refresh_probs();
+            policy.probs[2]
+        }
+
+        let relaxed = test_adaptive_epoch_snapshot(70.0, 0.10, 0, 0, 0);
+        let pressured = test_adaptive_epoch_snapshot(130.0, 0.85, 4, 8, 4);
+
+        let relaxed_prob = favored_arm_prob(relaxed);
+        let pressured_prob = favored_arm_prob(pressured);
+
+        assert!(
+            relaxed_prob > pressured_prob,
+            "heavier cancel/fairness penalties should reduce EXP3 mass for the repeatedly selected arm: relaxed={relaxed_prob:.4}, pressured={pressured_prob:.4}"
+        );
+        assert!(
+            relaxed_prob - pressured_prob > 0.05,
+            "penalty-driven probability shift should be material: relaxed={relaxed_prob:.4}, pressured={pressured_prob:.4}"
+        );
     }
 
     #[test]
