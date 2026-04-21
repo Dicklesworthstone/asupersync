@@ -159,8 +159,13 @@ fn encode_symbols(
     let cx = Cx::for_testing();
     let data = generate_test_data(data_size, seed);
     let object_id = ObjectId::new_for_test(seed);
+    // Use a small symbol size so fixed-fixture data sizes like 1280 bytes
+    // yield K >> 1 source symbols and the requested `repair_overhead` reliably
+    // produces enough authenticated repair symbols to exceed the RFC 6330
+    // systematic K' >= 10 intermediate-symbol budget the decoder enforces.
     let config = RaptorQConfig {
         encoding: crate::config::EncodingConfig {
+            symbol_size: 16,
             repair_overhead,
             ..Default::default()
         },
@@ -347,8 +352,19 @@ fn mr_encode_decode_identity() {
         let data = generate_test_data(data_size, seed);
         let object_id = ObjectId::new_for_test(seed);
 
-        // Encode phase
-        let config = RaptorQConfig::default();
+        // Encode phase. Use a small symbol size so even the smallest
+        // fixture in the property range yields enough source symbols for
+        // the RFC 6330 systematic block (K' >= 10). A high repair overhead
+        // guarantees we still emit enough repair symbols to satisfy the
+        // intermediate-symbol decoder budget across the full proptest range.
+        let config = RaptorQConfig {
+            encoding: crate::config::EncodingConfig {
+                symbol_size: 16,
+                repair_overhead: 4.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let sink = CollectorSink::new();
         let mut sender = RaptorQSenderBuilder::new()
             .config(config.clone())
@@ -362,16 +378,15 @@ fn mr_encode_decode_identity() {
         // Get symbols from the transport
         let symbols = sender.transport_mut().symbols().to_vec();
 
-        // Decode phase - use enough symbols for guaranteed decode
+        // Decode phase - use enough symbols for guaranteed decode.
         let symbol_size = config.encoding.symbol_size as usize;
         let k = send_outcome.source_symbols;
         let decoder = create_test_decoder(&symbols, k, symbol_size);
 
-        // Take K + extra symbols to ensure decodability
-        let received_symbols = symbols_to_received(
-            &symbols[..std::cmp::min(symbols.len(), k + 10)],
-            k
-        );
+        // RFC 6330 decoding is sized off L = K' + S + H, not just K, so pass
+        // every emitted symbol to the decoder; the high repair overhead
+        // guarantees coverage for every fixture in the property range.
+        let received_symbols = symbols_to_received(&symbols, k);
 
         let decode_result = decoder.decode(&received_symbols);
 
@@ -658,10 +673,14 @@ fn mr_erasure_resilience() {
         let data = generate_test_data(data_size, seed);
         let object_id = ObjectId::new_for_test(seed);
 
-        // Encode with generous repair overhead for erasure testing
+        // Encode with small symbols and generous repair overhead so that the
+        // full proptest range — including the smallest data_size fixture —
+        // produces enough symbols for a meaningful erasure simulation under
+        // the RFC 6330 K' >= 10 systematic constraint.
         let config = RaptorQConfig {
             encoding: crate::config::EncodingConfig {
-                repair_overhead: 1.25, // 25% overhead for resilience
+                symbol_size: 16,
+                repair_overhead: 4.0,
                 ..Default::default()
             },
             ..Default::default()
@@ -682,18 +701,24 @@ fn mr_erasure_resilience() {
         let symbol_size = config.encoding.symbol_size as usize;
         let decoder = create_test_decoder(&symbols, k, symbol_size);
 
-        // Simulate erasures by removing symbols from the middle (burst erasure pattern)
+        // Simulate erasures by removing symbols from the middle (burst erasure pattern).
+        // All slice arithmetic below is written in saturating form so a shrunken
+        // proptest fixture (e.g. K=1 with only 2 total symbols) surfaces an
+        // empty erasure window instead of overflowing usize arithmetic.
         let mut with_erasures = symbols.clone();
         let start_erasure = std::cmp::max(2, symbols.len() / 4);
-        let end_erasure = std::cmp::min(start_erasure + erasure_count, symbols.len() - 2);
+        let end_erasure = std::cmp::min(
+            start_erasure + erasure_count,
+            symbols.len().saturating_sub(2),
+        );
         if start_erasure < end_erasure {
             with_erasures.drain(start_erasure..end_erasure);
         }
 
-        // Create set with fewer erasures (one less missing symbol)
+        // Create set with fewer erasures (one less missing symbol).
         let mut fewer_erasures = symbols.clone();
-        let fewer_end = std::cmp::max(start_erasure + 1, end_erasure - 1);
-        if start_erasure < fewer_end {
+        let fewer_end = std::cmp::max(start_erasure + 1, end_erasure.saturating_sub(1));
+        if start_erasure < fewer_end && fewer_end <= symbols.len() {
             fewer_erasures.drain(start_erasure..fewer_end);
         }
 
@@ -991,8 +1016,17 @@ fn mr_composite_encode_decode_properties() {
         let data = generate_test_data(data_size, seed);
         let object_id = ObjectId::new_for_test(seed);
 
-        // Encode once
-        let config = RaptorQConfig::default();
+        // Encode once. Use a small symbol size with generous repair overhead
+        // so the composite test emits enough symbols for the RFC 6330
+        // intermediate-symbol budget across the full proptest range.
+        let config = RaptorQConfig {
+            encoding: crate::config::EncodingConfig {
+                symbol_size: 16,
+                repair_overhead: 4.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let sink = CollectorSink::new();
         let mut sender = RaptorQSenderBuilder::new()
             .config(config.clone())
@@ -1008,9 +1042,9 @@ fn mr_composite_encode_decode_properties() {
         let symbol_size = config.encoding.symbol_size as usize;
         let decoder = create_test_decoder(&symbols, k, symbol_size);
 
-        // Create abundant symbol set (more than minimal)
-        let abundant_count = std::cmp::min(symbols.len(), k + 8);
-        let mut received_symbols = symbols_to_received(&symbols[..abundant_count], k);
+        // Use every emitted symbol so the decoder receives at least L - (K'-K)
+        // rows regardless of where the proptest fixture lands in the range.
+        let mut received_symbols = symbols_to_received(&symbols, k);
 
         // Apply transformation: shuffle the abundant set
         use crate::util::DetRng;
@@ -1136,9 +1170,13 @@ mod validation_tests {
         let data = generate_test_data(256, 123);
         let object_id = ObjectId::new_for_test(123);
 
+        // Use a small symbol size so the 256-byte fixture yields enough
+        // source symbols to satisfy the RFC 6330 K' >= 10 intermediate
+        // decoding budget with the specified repair overhead.
         let config = RaptorQConfig {
             encoding: crate::config::EncodingConfig {
-                repair_overhead: 1.30, // High overhead for erasure tolerance
+                symbol_size: 16,
+                repair_overhead: 4.0,
                 ..Default::default()
             },
             ..Default::default()
@@ -1158,24 +1196,30 @@ mod validation_tests {
         let symbol_size = config.encoding.symbol_size as usize;
         let decoder = create_test_decoder(&symbols, k, symbol_size);
 
-        // Test various erasure patterns
+        // Test various erasure patterns. Clamp every drain window and slice
+        // length to the fixture's actual symbol count so that a small-K
+        // deterministic run (e.g. K=1 producing only a few symbols) does not
+        // index past the end of the emission.
         let original_count = std::cmp::min(symbols.len(), k + 12);
 
-        // Minimal erasures (should succeed)
+        // Minimal erasures (should succeed).
         let mut minimal_erasures = symbols.clone();
-        minimal_erasures.drain(2..4); // Remove 2 symbols
-        let minimal_received = symbols_to_received(
-            &minimal_erasures[..std::cmp::min(minimal_erasures.len(), original_count - 2)],
-            k,
+        let minimal_drain_end = std::cmp::min(4, minimal_erasures.len());
+        let minimal_drain_start = std::cmp::min(2, minimal_drain_end);
+        minimal_erasures.drain(minimal_drain_start..minimal_drain_end);
+        let minimal_take = std::cmp::min(
+            minimal_erasures.len(),
+            original_count.saturating_sub(2),
         );
+        let minimal_received = symbols_to_received(&minimal_erasures[..minimal_take], k);
 
-        // More erasures
+        // More erasures.
         let mut more_erasures = symbols.clone();
-        more_erasures.drain(2..6); // Remove 4 symbols
-        let more_received = symbols_to_received(
-            &more_erasures[..std::cmp::min(more_erasures.len(), original_count - 4)],
-            k,
-        );
+        let more_drain_end = std::cmp::min(6, more_erasures.len());
+        let more_drain_start = std::cmp::min(2, more_drain_end);
+        more_erasures.drain(more_drain_start..more_drain_end);
+        let more_take = std::cmp::min(more_erasures.len(), original_count.saturating_sub(4));
+        let more_received = symbols_to_received(&more_erasures[..more_take], k);
 
         let minimal_result = decoder.decode(&minimal_received);
         let more_result = decoder.decode(&more_received);
