@@ -1,0 +1,144 @@
+---
+source: src/distributed/bridge.rs
+expression: "json!({ \"normal\": normal, \"reordered\": reordered, \"duplicate\": duplicate, })"
+---
+{
+  "duplicate": [
+    {
+      "applied_sequence": 1,
+      "bridge_sequence": 1,
+      "cancel_reason": null,
+      "child_count": 0,
+      "last_sync_time_nanos": "[timestamp_nanos]",
+      "last_synced_sequence": 1,
+      "local_state": "Open",
+      "pending_ops": 0,
+      "sync_pending": false,
+      "task_count": 1
+    },
+    {
+      "applied_sequence": 1,
+      "bridge_sequence": 1,
+      "cancel_reason": null,
+      "child_count": 0,
+      "last_sync_time_nanos": "[timestamp_nanos]",
+      "last_synced_sequence": 1,
+      "local_state": "Open",
+      "pending_ops": 0,
+      "sync_pending": false,
+      "task_count": 1
+    },
+    {
+      "applied_sequence": 2,
+      "bridge_sequence": 2,
+      "cancel_reason": null,
+      "child_count": 1,
+      "last_sync_time_nanos": "[timestamp_nanos]",
+      "last_synced_sequence": 2,
+      "local_state": "Open",
+      "pending_ops": 0,
+      "sync_pending": false,
+      "task_count": 2
+    },
+    {
+      "applied_sequence": 2,
+      "bridge_sequence": 2,
+      "cancel_reason": null,
+      "child_count": 1,
+      "last_sync_time_nanos": "[timestamp_nanos]",
+      "last_synced_sequence": 2,
+      "local_state": "Open",
+      "pending_ops": 0,
+      "sync_pending": false,
+      "task_count": 2
+    },
+    {
+      "applied_sequence": 3,
+      "bridge_sequence": 3,
+      "cancel_reason": "Timeout",
+      "child_count": 1,
+      "last_sync_time_nanos": "[timestamp_nanos]",
+      "last_synced_sequence": 3,
+      "local_state": "Closing",
+      "pending_ops": 0,
+      "sync_pending": false,
+      "task_count": 1
+    }
+  ],
+  "normal": [
+    {
+      "applied_sequence": 1,
+      "bridge_sequence": 1,
+      "cancel_reason": null,
+      "child_count": 0,
+      "last_sync_time_nanos": "[timestamp_nanos]",
+      "last_synced_sequence": 1,
+      "local_state": "Open",
+      "pending_ops": 0,
+      "sync_pending": false,
+      "task_count": 1
+    },
+    {
+      "applied_sequence": 2,
+      "bridge_sequence": 2,
+      "cancel_reason": null,
+      "child_count": 1,
+      "last_sync_time_nanos": "[timestamp_nanos]",
+      "last_synced_sequence": 2,
+      "local_state": "Open",
+      "pending_ops": 0,
+      "sync_pending": false,
+      "task_count": 2
+    },
+    {
+      "applied_sequence": 3,
+      "bridge_sequence": 3,
+      "cancel_reason": "Timeout",
+      "child_count": 1,
+      "last_sync_time_nanos": "[timestamp_nanos]",
+      "last_synced_sequence": 3,
+      "local_state": "Closing",
+      "pending_ops": 0,
+      "sync_pending": false,
+      "task_count": 1
+    }
+  ],
+  "reordered": [
+    {
+      "applied_sequence": 2,
+      "bridge_sequence": 2,
+      "cancel_reason": null,
+      "child_count": 1,
+      "last_sync_time_nanos": "[timestamp_nanos]",
+      "last_synced_sequence": 2,
+      "local_state": "Open",
+      "pending_ops": 0,
+      "sync_pending": false,
+      "task_count": 2
+    },
+    {
+      "applied_sequence": 1,
+      "bridge_sequence": 2,
+      "cancel_reason": null,
+      "child_count": 1,
+      "last_sync_time_nanos": "[timestamp_nanos]",
+      "last_synced_sequence": 2,
+      "local_state": "Open",
+      "pending_ops": 0,
+      "sync_pending": false,
+      "task_count": 2
+    },
+    {
+      "applied_sequence": 3,
+      "bridge_sequence": 3,
+      "cancel_reason": "Timeout",
+      "child_count": 1,
+      "last_sync_time_nanos": "[timestamp_nanos]",
+      "last_synced_sequence": 3,
+      "local_state": "Closing",
+      "pending_ops": 0,
+      "sync_pending": false,
+      "task_count": 1
+    }
+  ]
+}

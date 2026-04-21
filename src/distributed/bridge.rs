@@ -802,6 +802,14 @@ impl RegionBridge {
                 .with_message("snapshot region ID does not match bridge"));
         }
 
+        // Cross-cluster delivery can reorder or duplicate snapshots. Once this
+        // bridge has observed a sequence, older or duplicate deliveries must
+        // not rewind local state or sync metadata.
+        let current_sequence = self.sequence.max(self.sync_state.last_synced_sequence);
+        if snapshot.sequence <= current_sequence {
+            return Ok(());
+        }
+
         // Reconstruct Budget
         let budget = Budget {
             deadline: snapshot.budget.deadline_nanos.map(Time::from_nanos),
@@ -1551,6 +1559,53 @@ mod tests {
         })
     }
 
+    fn scrub_bridge_sequence_advancement_step(
+        applied_sequence: u64,
+        bridge: &RegionBridge,
+    ) -> serde_json::Value {
+        json!({
+            "applied_sequence": applied_sequence,
+            "bridge_sequence": bridge.sequence,
+            "last_synced_sequence": bridge.sync_state.last_synced_sequence,
+            "last_sync_time_nanos": bridge.sync_state.last_sync_time.map(|_| "[timestamp_nanos]"),
+            "sync_pending": bridge.sync_state.sync_pending,
+            "pending_ops": bridge.sync_state.pending_ops,
+            "local_state": format!("{:?}", bridge.local.state()),
+            "task_count": bridge.local.task_ids().len(),
+            "child_count": bridge.local.child_ids().len(),
+            "cancel_reason": bridge
+                .local
+                .cancel_reason()
+                .map(|reason| reason.kind.as_str().to_owned()),
+        })
+    }
+
+    fn run_bridge_sequence_advancement_scenario(
+        snapshots: &[&RegionSnapshot],
+    ) -> Vec<serde_json::Value> {
+        let mut bridge = create_local_bridge();
+        let mut steps = Vec::with_capacity(snapshots.len());
+
+        for &snapshot in snapshots {
+            bridge.apply_snapshot(snapshot).unwrap();
+            steps.push(scrub_bridge_sequence_advancement_step(
+                snapshot.sequence,
+                &bridge,
+            ));
+        }
+
+        steps
+    }
+
+    fn strip_applied_sequence(step: &serde_json::Value) -> serde_json::Value {
+        let mut object = step
+            .as_object()
+            .expect("bridge sequence snapshot step should be an object")
+            .clone();
+        object.remove("applied_sequence");
+        serde_json::Value::Object(object)
+    }
+
     // =====================================================================
     // Lifecycle Race / Edge Case Tests (bd-fgs0)
     // =====================================================================
@@ -1905,6 +1960,64 @@ mod tests {
         insta::assert_json_snapshot!(
             "region_snapshot_scrubbed",
             scrub_region_snapshot_for_snapshot_test(&snapshot)
+        );
+    }
+
+    #[test]
+    fn bridge_sequence_advancement_scrubbed() {
+        let mut source = create_local_bridge();
+
+        source.add_task(TaskId::new_for_test(11, 0)).unwrap();
+        let snap1 = source.create_snapshot(Time::from_secs(10));
+
+        source.add_child(RegionId::new_for_test(2, 0)).unwrap();
+        source.add_task(TaskId::new_for_test(12, 0)).unwrap();
+        let snap2 = source.create_snapshot(Time::from_secs(11));
+
+        source
+            .begin_close(Some(CancelReason::timeout()), Time::from_secs(12))
+            .unwrap();
+        source.remove_task(TaskId::new_for_test(11, 0));
+        let snap3 = source.create_snapshot(Time::from_secs(13));
+
+        let normal = run_bridge_sequence_advancement_scenario(&[&snap1, &snap2, &snap3]);
+        let reordered = run_bridge_sequence_advancement_scenario(&[&snap2, &snap1, &snap3]);
+        let duplicate =
+            run_bridge_sequence_advancement_scenario(&[&snap1, &snap1, &snap2, &snap2, &snap3]);
+
+        assert_eq!(
+            normal.last(),
+            reordered.last(),
+            "reordered delivery should converge to the same final state"
+        );
+        assert_eq!(
+            normal.last(),
+            duplicate.last(),
+            "duplicate delivery should converge to the same final state"
+        );
+        assert_eq!(
+            strip_applied_sequence(&reordered[0]),
+            strip_applied_sequence(&reordered[1]),
+            "older snapshots must be ignored after a newer sequence lands"
+        );
+        assert_eq!(
+            strip_applied_sequence(&duplicate[0]),
+            strip_applied_sequence(&duplicate[1]),
+            "duplicate sequence 1 delivery must be idempotent"
+        );
+        assert_eq!(
+            strip_applied_sequence(&duplicate[2]),
+            strip_applied_sequence(&duplicate[3]),
+            "duplicate sequence 2 delivery must be idempotent"
+        );
+
+        insta::assert_json_snapshot!(
+            "bridge_sequence_advancement_scrubbed",
+            json!({
+                "normal": normal,
+                "reordered": reordered,
+                "duplicate": duplicate,
+            })
         );
     }
 
