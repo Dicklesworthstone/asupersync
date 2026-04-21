@@ -168,6 +168,14 @@ impl SqliteHarness {
             Outcome::Panicked(_) => panic!("sqlite query_row panicked"),
         }
     }
+
+    async fn table_row_count(&self) -> Result<i64, SqliteError> {
+        let row = self
+            .query_row("SELECT COUNT(*) AS row_count FROM bind_probe", &[])
+            .await?
+            .expect("COUNT(*) query should always return a row");
+        row.get_i64("row_count")
+    }
 }
 
 fn bind_error_message(message: &str) -> bool {
@@ -181,7 +189,9 @@ fn bind_error_message(message: &str) -> bool {
 fn expect_type_mismatch<T>(result: Result<T, SqliteError>, expected: &'static str) {
     match result {
         Err(SqliteError::TypeMismatch {
-            column, expected: actual, ..
+            column,
+            expected: actual,
+            ..
         }) => {
             assert_eq!(column, "value");
             assert_eq!(actual, expected);
@@ -202,7 +212,8 @@ fn assert_round_trip_value(row: &SqliteRow, column: &str, expected: &BindValueIn
                 &SqliteValue::Integer(*expected)
             );
             assert_eq!(
-                row.get_i64(column).expect("integer accessor should succeed"),
+                row.get_i64(column)
+                    .expect("integer accessor should succeed"),
                 *expected
             );
             assert!(
@@ -294,7 +305,8 @@ async fn run_scenario(scenario: Scenario) {
 
             assert_round_trip_value(&row, "value", &value);
             assert_eq!(
-                row.get_str("value_type").expect("typeof column should exist"),
+                row.get_str("value_type")
+                    .expect("typeof column should exist"),
                 value.storage_class()
             );
         }
@@ -395,6 +407,14 @@ async fn run_scenario(scenario: Scenario) {
                             bind_error_message(&message),
                             "expected bind-count error, got: {message}"
                         );
+                        assert_eq!(
+                            harness
+                                .table_row_count()
+                                .await
+                                .expect("row-count query should succeed"),
+                            0,
+                            "failed bind-count inserts must not leave partial rows behind"
+                        );
                     }
                     other => panic!("expected sqlite bind-count error, got {other:?}"),
                 }
@@ -458,7 +478,16 @@ async fn run_scenario(scenario: Scenario) {
                 assert_round_trip_value(&row, "strict_integer", &strict_integer);
             } else {
                 match insert {
-                    Err(SqliteError::Sqlite(_)) => {}
+                    Err(SqliteError::Sqlite(_)) => {
+                        assert_eq!(
+                            harness
+                                .table_row_count()
+                                .await
+                                .expect("row-count query should succeed"),
+                            0,
+                            "failed strict-type inserts must not leave rows behind"
+                        );
+                    }
                     other => panic!("non-integer strict bind should fail cleanly, got {other:?}"),
                 }
             }
