@@ -11,20 +11,19 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::{
+    types::Budget,
     Cx,
     security::authenticated::AuthenticatedSymbol,
     security::tag::AuthenticationTag,
-    sync::Mutex,
     transport::router::{
         DispatchConfig, DispatchError, DispatchStrategy, Endpoint, EndpointId, EndpointState,
-        LoadBalanceStrategy, LoadBalancer, RouteKey, RoutingEntry, RoutingTable, SymbolDispatcher,
-        SymbolRouter,
+        LoadBalancer, RouteKey, RoutingEntry, RoutingTable, SymbolDispatcher, SymbolRouter,
     },
     transport::sink::SymbolSink,
     types::{ObjectId, RegionId, Symbol, SymbolId, SymbolKind, Time},
+    TaskId,
 };
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -179,9 +178,9 @@ impl From<RouteKeyWrapper> for RouteKey {
     fn from(wrapper: RouteKeyWrapper) -> Self {
         match wrapper {
             RouteKeyWrapper::Object(oid) => Self::Object(oid.into()),
-            RouteKeyWrapper::Region(rid) => Self::Region(RegionId::from(rid)),
+            RouteKeyWrapper::Region(rid) => Self::Region(region_id_from_u64(rid)),
             RouteKeyWrapper::ObjectAndRegion(oid, rid) => {
-                Self::ObjectAndRegion(oid.into(), RegionId::from(rid))
+                Self::ObjectAndRegion(oid.into(), region_id_from_u64(rid))
             }
             RouteKeyWrapper::Default => Self::Default,
         }
@@ -208,10 +207,22 @@ impl From<SymbolKindWrapper> for SymbolKind {
         match wrapper {
             SymbolKindWrapper::Source => Self::Source,
             SymbolKindWrapper::Repair => Self::Repair,
-            SymbolKindWrapper::Authenticated => Self::Authenticated,
-            SymbolKindWrapper::Heartbeat => Self::Heartbeat,
+            SymbolKindWrapper::Authenticated => Self::Repair,
+            SymbolKindWrapper::Heartbeat => Self::Source,
         }
     }
+}
+
+fn region_id_from_u64(value: u64) -> RegionId {
+    RegionId::new_for_test(value as u32, (value >> 32) as u32)
+}
+
+fn fuzz_test_cx() -> Cx {
+    Cx::new(
+        RegionId::new_for_test(0, 0),
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE,
+    )
 }
 
 #[derive(Arbitrary, Debug)]
@@ -413,7 +424,7 @@ fn fuzz_load_balancer_strategies(
             .with_state(config.state.into());
 
             if let Some(region_id) = config.region {
-                endpoint = endpoint.with_region(RegionId::from(region_id));
+                endpoint = endpoint.with_region(region_id_from_u64(region_id));
             }
 
             // Set connection count for least-connections testing
@@ -552,7 +563,7 @@ fn fuzz_routing_table_ttl(
     let current_time = creation_time.saturating_add_nanos(current_time_offset_nanos);
 
     let mut added_routes = 0;
-    let mut expired_routes = 0;
+    let mut _expired_routes = 0;
 
     for route_config in route_configs {
         if route_config.endpoints.is_empty() {
@@ -589,7 +600,7 @@ fn fuzz_routing_table_ttl(
             // Check if this route should be expired
             let expiry_time = creation_time.saturating_add_nanos(ttl.as_nanos());
             if current_time >= expiry_time {
-                expired_routes += 1;
+                _expired_routes += 1;
             }
         }
 
@@ -650,7 +661,7 @@ fn fuzz_symbol_dispatcher(
         .enumerate()
         .take(10) // Limit endpoints to prevent memory issues
         .map(|(i, config)| {
-            Arc::new(
+            table.register_endpoint(
                 Endpoint::new(EndpointId::new(i as u64), format!("node-{}:8080", i))
                     .with_state(config.state.into()),
             )
@@ -659,11 +670,6 @@ fn fuzz_symbol_dispatcher(
 
     if endpoints.is_empty() {
         return;
-    }
-
-    // Register endpoints in table
-    for endpoint in &endpoints {
-        table.register_endpoint((**endpoint).clone());
     }
 
     // Add a default route
@@ -688,18 +694,18 @@ fn fuzz_symbol_dispatcher(
 
     // Create test symbol
     let object_id: ObjectId = symbol_config.object_id.into();
-    let symbol_id = SymbolId::new_for_test(object_id.as_u128() as u64, 0, symbol_config.esi);
+    let symbol_id = SymbolId::new(object_id, 0, symbol_config.esi);
     let symbol = Symbol::new(symbol_id, vec![42u8; 10], symbol_config.kind.into());
     let auth_symbol = AuthenticatedSymbol::new_verified(symbol, AuthenticationTag::zero());
 
     // Create test context (we'll use a mock for fuzzing)
-    let cx = Cx::new_test();
+    let cx = fuzz_test_cx();
 
     // Test the specific dispatch strategy
     let strategy: DispatchStrategy = strategy.into();
 
     // Block on the async dispatch (in a real fuzz test, we'd use a simple executor)
-    let result = futures_lite::future::block_on(async {
+    let result = futures::executor::block_on(async {
         dispatcher
             .dispatch_with_strategy(&cx, auth_symbol, strategy)
             .await
@@ -884,8 +890,7 @@ fn fuzz_fallback_routing(
 
     // Create symbol that won't match specific routes
     let unknown_object_id: ObjectId = symbol_config.object_id.into();
-    let symbol_id =
-        SymbolId::new_for_test(unknown_object_id.as_u128() as u64, 0, symbol_config.esi);
+    let symbol_id = SymbolId::new(unknown_object_id, 0, symbol_config.esi);
     let symbol = Symbol::new(symbol_id, vec![42u8; 10], symbol_config.kind.into());
 
     // Test routing
@@ -1058,7 +1063,7 @@ fn fuzz_edge_cases(edge_case: EdgeCaseScenario) {
         }
 
         EdgeCaseScenario::TTLBoundary(offset) => {
-            let table = RoutingTable::new();
+            let _table = RoutingTable::new();
             let base_time = Time::from_secs(1000);
             let test_time = if offset < 0 {
                 base_time.saturating_sub_nanos((-offset) as u64)

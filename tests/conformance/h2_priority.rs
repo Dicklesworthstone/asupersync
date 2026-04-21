@@ -38,7 +38,7 @@
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::{
     error::{ErrorCode, H2Error},
-    frame::{FrameHeader, FrameType, PriorityFrame, PrioritySpec},
+    frame::{Frame, FrameHeader, FrameType, PriorityFrame, PrioritySpec, parse_frame},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -348,6 +348,42 @@ impl H2PriorityConformanceHarness {
                 assert_eq!(parsed.priority.weight, original.priority.weight);
                 assert_eq!(parsed.priority.exclusive, original.priority.exclusive);
                 Ok(())
+            },
+        ));
+
+        // Test 4: generic frame dispatch must preserve PRIORITY semantics
+        results.push(self.run_test(
+            "priority_frame_generic_dispatch",
+            "Generic HTTP/2 frame dispatch MUST decode PRIORITY frames without loss",
+            TestCategory::PriorityFormat,
+            RequirementLevel::Must,
+            || {
+                let original = PriorityFrame {
+                    stream_id: 11,
+                    priority: PrioritySpec {
+                        exclusive: true,
+                        dependency: 3,
+                        weight: 31,
+                    },
+                };
+
+                let mut buf = BytesMut::new();
+                original.encode(&mut buf);
+
+                let header = FrameHeader::parse(&mut buf).map_err(h2error_to_string)?;
+                let payload = buf.split_to(header.length as usize).freeze();
+                let frame = parse_frame(&header, payload).map_err(h2error_to_string)?;
+
+                match frame {
+                    Frame::Priority(parsed) => {
+                        assert_eq!(parsed.stream_id, original.stream_id);
+                        assert_eq!(parsed.priority.dependency, original.priority.dependency);
+                        assert_eq!(parsed.priority.weight, original.priority.weight);
+                        assert_eq!(parsed.priority.exclusive, original.priority.exclusive);
+                        Ok(())
+                    }
+                    other => Err(format!("Expected PRIORITY frame, got {other:?}")),
+                }
             },
         ));
 
