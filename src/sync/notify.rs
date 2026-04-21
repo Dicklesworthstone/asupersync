@@ -620,6 +620,71 @@ mod tests {
         )
     }
 
+    fn repoll_then_notify_one_signature(extra_repolls: usize) -> ([bool; 3], usize) {
+        let notify = Notify::new();
+
+        let mut fut1 = notify.notified();
+        let mut fut2 = notify.notified();
+        let mut fut3 = notify.notified();
+        assert!(poll_once(&mut fut1).is_pending());
+        for _ in 0..extra_repolls {
+            assert!(poll_once(&mut fut1).is_pending());
+        }
+        assert!(poll_once(&mut fut2).is_pending());
+        assert!(poll_once(&mut fut3).is_pending());
+
+        notify.notify_one();
+
+        let ready = [
+            poll_once(&mut fut1).is_ready(),
+            poll_once(&mut fut2).is_ready(),
+            poll_once(&mut fut3).is_ready(),
+        ];
+        drop(fut1);
+        drop(fut2);
+        drop(fut3);
+
+        let stored = notify.stored_notifications.load(Ordering::Acquire);
+        (ready, stored)
+    }
+
+    fn notify_one_with_middle_cancel_signature(
+        cancel_before_first_notify: bool,
+    ) -> ([bool; 2], usize, bool) {
+        let notify = Notify::new();
+
+        let mut fut1 = notify.notified();
+        let mut fut2 = notify.notified();
+        let mut fut3 = notify.notified();
+        assert!(poll_once(&mut fut1).is_pending());
+        assert!(poll_once(&mut fut2).is_pending());
+        assert!(poll_once(&mut fut3).is_pending());
+
+        if cancel_before_first_notify {
+            drop(fut2);
+            notify.notify_one();
+            notify.notify_one();
+        } else {
+            notify.notify_one();
+            drop(fut2);
+            notify.notify_one();
+        }
+
+        let ready_pair = [
+            poll_once(&mut fut1).is_ready(),
+            poll_once(&mut fut3).is_ready(),
+        ];
+        drop(fut1);
+        drop(fut3);
+
+        let stored = notify.stored_notifications.load(Ordering::Acquire);
+        let mut late = notify.notified();
+        let late_pending = poll_once(&mut late).is_pending();
+        drop(late);
+
+        (ready_pair, stored, late_pending)
+    }
+
     #[test]
     fn notify_one_wakes_waiter() {
         init_test("notify_one_wakes_waiter");
@@ -1387,6 +1452,70 @@ mod tests {
         crate::test_complete!(
             "metamorphic_redundant_broadcasts_preserve_single_followup_notify_one_token"
         );
+    }
+
+    #[test]
+    fn metamorphic_extra_repolls_preserve_single_notify_one_consumer() {
+        init_test("metamorphic_extra_repolls_preserve_single_notify_one_consumer");
+
+        let single = repoll_then_notify_one_signature(0);
+        let repolled = repoll_then_notify_one_signature(5);
+
+        crate::assert_with_log!(
+            repolled == single,
+            "re-polling the front waiter with the same waker does not change single notify_one delivery",
+            format!("{single:?}"),
+            format!("{repolled:?}")
+        );
+        crate::assert_with_log!(
+            single.0 == [true, false, false],
+            "single notify_one still wakes only the first registered waiter",
+            [true, false, false],
+            single.0
+        );
+        crate::assert_with_log!(
+            single.1 == 0,
+            "single notify_one does not leak a stored token when a waiter consumes it",
+            0usize,
+            single.1
+        );
+
+        crate::test_complete!("metamorphic_extra_repolls_preserve_single_notify_one_consumer");
+    }
+
+    #[test]
+    fn metamorphic_middle_cancel_timing_preserves_notify_one_ready_prefix() {
+        init_test("metamorphic_middle_cancel_timing_preserves_notify_one_ready_prefix");
+
+        let cancelled_before = notify_one_with_middle_cancel_signature(true);
+        let cancelled_between = notify_one_with_middle_cancel_signature(false);
+
+        crate::assert_with_log!(
+            cancelled_between == cancelled_before,
+            "cancelling the middle waiter before or between notify_one calls preserves the ready prefix",
+            format!("{cancelled_before:?}"),
+            format!("{cancelled_between:?}")
+        );
+        crate::assert_with_log!(
+            cancelled_before.0 == [true, true],
+            "two notify_one calls still wake the surviving front and tail waiters in order",
+            [true, true],
+            cancelled_before.0
+        );
+        crate::assert_with_log!(
+            cancelled_before.1 == 0,
+            "no stored token remains after the surviving waiters consume both notify_one calls",
+            0usize,
+            cancelled_before.1
+        );
+        crate::assert_with_log!(
+            cancelled_before.2,
+            "a late waiter remains pending because cancellation timing did not mint an extra token",
+            true,
+            cancelled_before.2
+        );
+
+        crate::test_complete!("metamorphic_middle_cancel_timing_preserves_notify_one_ready_prefix");
     }
 
     #[test]
