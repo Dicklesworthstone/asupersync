@@ -509,6 +509,37 @@ mod tests {
         RegionId::from_arena(ArenaIndex::new(0, 0))
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct LedgerObservation {
+        stats: LedgerStats,
+        len: usize,
+        pending_count: u64,
+        pending_for_region: usize,
+        pending_for_task: usize,
+        pending_ids_for_region: usize,
+        region_clean: bool,
+        leak_count: usize,
+        region_leak_count: usize,
+    }
+
+    fn observe_ledger(
+        ledger: &ObligationLedger,
+        task: TaskId,
+        region: RegionId,
+    ) -> LedgerObservation {
+        LedgerObservation {
+            stats: ledger.stats(),
+            len: ledger.len(),
+            pending_count: ledger.pending_count(),
+            pending_for_region: ledger.pending_for_region(region),
+            pending_for_task: ledger.pending_for_task(task),
+            pending_ids_for_region: ledger.pending_ids_for_region(region).len(),
+            region_clean: ledger.is_region_clean(region),
+            leak_count: ledger.check_leaks().leaked.len(),
+            region_leak_count: ledger.check_region_leaks(region).leaked.len(),
+        }
+    }
+
     // ---- Basic lifecycle ---------------------------------------------------
 
     #[test]
@@ -989,6 +1020,176 @@ mod tests {
         crate::test_complete!(
             "stale_id_from_previous_generation_cannot_touch_post_reset_obligation"
         );
+    }
+
+    #[test]
+    fn metamorphic_reset_advances_generation_monotonically() {
+        init_test("metamorphic_reset_advances_generation_monotonically");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        let first = ledger.acquire(
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::from_nanos(1),
+        );
+        let first_idx = first.id().arena_index();
+        ledger.commit(first, Time::from_nanos(2));
+        ledger.reset();
+
+        let second = ledger.acquire(
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::from_nanos(3),
+        );
+        let second_idx = second.id().arena_index();
+        ledger.commit(second, Time::from_nanos(4));
+        ledger.reset();
+
+        let third = ledger.acquire(
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::from_nanos(5),
+        );
+        let third_idx = third.id().arena_index();
+        ledger.commit(third, Time::from_nanos(6));
+
+        crate::assert_with_log!(
+            first_idx.index() == second_idx.index(),
+            "reset reuses slot after first epoch",
+            first_idx.index(),
+            second_idx.index()
+        );
+        crate::assert_with_log!(
+            second_idx.index() == third_idx.index(),
+            "reset reuses slot after second epoch",
+            second_idx.index(),
+            third_idx.index()
+        );
+        crate::assert_with_log!(
+            second_idx.generation() == first_idx.generation().saturating_add(1),
+            "first reset bumps generation by one",
+            first_idx.generation().saturating_add(1),
+            second_idx.generation()
+        );
+        crate::assert_with_log!(
+            third_idx.generation() == second_idx.generation().saturating_add(1),
+            "second reset bumps generation by one",
+            second_idx.generation().saturating_add(1),
+            third_idx.generation()
+        );
+
+        crate::test_complete!("metamorphic_reset_advances_generation_monotonically");
+    }
+
+    #[test]
+    fn metamorphic_post_reset_commit_matches_fresh_epoch_observables() {
+        init_test("metamorphic_post_reset_commit_matches_fresh_epoch_observables");
+        let task = make_task();
+        let region = make_region();
+
+        let mut fresh = ObligationLedger::new();
+        let fresh_token = fresh.acquire(ObligationKind::Ack, task, region, Time::from_nanos(10));
+        let fresh_idx = fresh_token.id().arena_index();
+        fresh.commit(fresh_token, Time::from_nanos(20));
+        let fresh_observation = observe_ledger(&fresh, task, region);
+
+        let mut recycled = ObligationLedger::new();
+        let old = recycled.acquire(ObligationKind::Lease, task, region, Time::from_nanos(1));
+        recycled.abort(old, Time::from_nanos(2), ObligationAbortReason::Cancel);
+        recycled.reset();
+
+        let recycled_token =
+            recycled.acquire(ObligationKind::Ack, task, region, Time::from_nanos(10));
+        let recycled_idx = recycled_token.id().arena_index();
+        recycled.commit(recycled_token, Time::from_nanos(20));
+        let recycled_observation = observe_ledger(&recycled, task, region);
+
+        crate::assert_with_log!(
+            fresh_observation == recycled_observation,
+            "post-reset epoch observables match fresh epoch",
+            fresh_observation,
+            recycled_observation
+        );
+        crate::assert_with_log!(
+            recycled_idx.index() == fresh_idx.index(),
+            "post-reset epoch rewinds slot allocation",
+            fresh_idx.index(),
+            recycled_idx.index()
+        );
+        crate::assert_with_log!(
+            recycled_idx.generation() == fresh_idx.generation().saturating_add(1),
+            "post-reset epoch bumps generation",
+            fresh_idx.generation().saturating_add(1),
+            recycled_idx.generation()
+        );
+
+        crate::test_complete!("metamorphic_post_reset_commit_matches_fresh_epoch_observables");
+    }
+
+    #[test]
+    fn metamorphic_failed_reset_then_commit_matches_commit_then_reset() {
+        init_test("metamorphic_failed_reset_then_commit_matches_commit_then_reset");
+        let task = make_task();
+        let region = make_region();
+
+        let mut raced = ObligationLedger::new();
+        let raced_token = raced.acquire(
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::from_nanos(100),
+        );
+
+        let early_reset = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| raced.reset()));
+        crate::assert_with_log!(
+            early_reset.is_err(),
+            "early reset rejected",
+            true,
+            early_reset.is_err()
+        );
+
+        raced.commit(raced_token, Time::from_nanos(110));
+        raced.reset();
+        let raced_post_reset =
+            raced.acquire(ObligationKind::Ack, task, region, Time::from_nanos(120));
+        let raced_idx = raced_post_reset.id().arena_index();
+        raced.commit(raced_post_reset, Time::from_nanos(130));
+        let raced_observation = observe_ledger(&raced, task, region);
+
+        let mut canonical = ObligationLedger::new();
+        let canonical_token = canonical.acquire(
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::from_nanos(100),
+        );
+        canonical.commit(canonical_token, Time::from_nanos(110));
+        canonical.reset();
+        let canonical_post_reset =
+            canonical.acquire(ObligationKind::Ack, task, region, Time::from_nanos(120));
+        let canonical_idx = canonical_post_reset.id().arena_index();
+        canonical.commit(canonical_post_reset, Time::from_nanos(130));
+        let canonical_observation = observe_ledger(&canonical, task, region);
+
+        crate::assert_with_log!(
+            raced_observation == canonical_observation,
+            "failed reset leaves eventual epoch observables unchanged",
+            canonical_observation,
+            raced_observation
+        );
+        crate::assert_with_log!(
+            raced_idx == canonical_idx,
+            "failed reset does not advance generation or slot allocation",
+            canonical_idx,
+            raced_idx
+        );
+
+        crate::test_complete!("metamorphic_failed_reset_then_commit_matches_commit_then_reset");
     }
 
     // ---- Deterministic iteration -----------------------------------------
