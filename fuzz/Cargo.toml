@@ -1209,6 +1209,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_framed_read_partial_buffering"
+path = "fuzz_targets/fuzz_framed_read_partial_buffering.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_goaway"
 path = "fuzz_targets/h2_goaway.rs"
 test = false
