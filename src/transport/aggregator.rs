@@ -3954,12 +3954,11 @@ mod tests {
         init_test("transport_aggregator_comprehensive_report_format_golden_snapshot");
 
         // Create a comprehensive aggregator scenario for golden snapshot testing
-        let path_set = PathSet::new(PathSelectionPolicy::UseAll);
         let aggregator_config = AggregatorConfig::default();
-        let aggregator = MultipathAggregator::new(aggregator_config, path_set);
+        let aggregator = MultipathAggregator::new(aggregator_config);
 
         // Setup realistic paths with varying characteristics
-        let primary_path = aggregator.path_set().create_path(
+        let primary_path = aggregator.paths().create_path(
             "primary_fiber",
             "fiber-endpoint-1",
             PathCharacteristics {
@@ -3972,7 +3971,7 @@ mod tests {
             },
         );
 
-        let backup_path = aggregator.path_set().create_path(
+        let backup_path = aggregator.paths().create_path(
             "backup_wireless",
             "wireless-endpoint-2",
             PathCharacteristics {
@@ -3985,7 +3984,7 @@ mod tests {
             },
         );
 
-        let degraded_path = aggregator.path_set().create_path(
+        let degraded_path = aggregator.paths().create_path(
             "degraded_satellite",
             "satellite-endpoint-3",
             PathCharacteristics {
@@ -3999,21 +3998,21 @@ mod tests {
         );
 
         // Simulate some activity on the paths
-        if let Some(path) = aggregator.path_set().get(primary_path) {
+        if let Some(path) = aggregator.paths().get(primary_path) {
             path.symbols_received.store(15420, Ordering::Relaxed);
             path.symbols_lost.store(18, Ordering::Relaxed);
             path.duplicates_received.store(23, Ordering::Relaxed);
             path.state.store(PathState::Active as u8, Ordering::Relaxed);
         }
 
-        if let Some(path) = aggregator.path_set().get(backup_path) {
+        if let Some(path) = aggregator.paths().get(backup_path) {
             path.symbols_received.store(8765, Ordering::Relaxed);
             path.symbols_lost.store(134, Ordering::Relaxed);
             path.duplicates_received.store(67, Ordering::Relaxed);
             path.state.store(PathState::Active as u8, Ordering::Relaxed);
         }
 
-        if let Some(path) = aggregator.path_set().get(degraded_path) {
+        if let Some(path) = aggregator.paths().get(degraded_path) {
             path.symbols_received.store(2341, Ordering::Relaxed);
             path.symbols_lost.store(892, Ordering::Relaxed);
             path.duplicates_received.store(12, Ordering::Relaxed);
@@ -4094,7 +4093,7 @@ mod tests {
         report.push_str("=== Transport Aggregator Report ===\n\n");
 
         // Path Set Statistics
-        let path_stats = aggregator.path_set().stats();
+        let path_stats = aggregator.paths().stats();
         report.push_str("[path_set_summary]\n");
         report.push_str(&format!("path_count: {}\n", path_stats.path_count));
         report.push_str(&format!("usable_count: {}\n", path_stats.usable_count));
@@ -4123,7 +4122,7 @@ mod tests {
         report.push_str("[individual_paths]\n");
         for path_id in 0..path_stats.path_count {
             let pid = PathId::new(path_id as u64);
-            if let Some(path) = aggregator.path_set().get(pid) {
+            if let Some(path) = aggregator.paths().get(pid) {
                 let state = PathState::from_u8(path.state.load(Ordering::Relaxed));
                 let received = path.symbols_received.load(Ordering::Relaxed);
                 let lost = path.symbols_lost.load(Ordering::Relaxed);
