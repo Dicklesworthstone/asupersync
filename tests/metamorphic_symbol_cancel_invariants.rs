@@ -24,11 +24,11 @@ const MAX_TOKENS: usize = 12;
 
 /// Test cancellation idempotency invariant.
 fn test_cancel_idempotency(seed: u64, num_cancellers: usize) -> (bool, usize, u64) {
-    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS));
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS as u64));
     let region = runtime.state.create_root_region(Budget::INFINITE);
-    let mut rng = DetRng::from_seed(seed);
+    let mut rng = DetRng::new(seed);
 
-    let object_id = ObjectId::new_for_test(42);
+    let object_id = ObjectId::new_for_test(42u64);
     let token = SymbolCancelToken::new(object_id, &mut rng);
     let token = Arc::new(token);
 
@@ -41,7 +41,7 @@ fn test_cancel_idempotency(seed: u64, num_cancellers: usize) -> (bool, usize, u6
         listen_count.fetch_add(1, Ordering::SeqCst);
     });
 
-    let reason = CancelReason::new(CancelKind::User, "test cancel".to_string());
+    let reason = CancelReason::new(CancelKind::User);
     let cancel_time = Time::from_nanos(1000);
 
     // Spawn multiple concurrent cancellers
@@ -66,7 +66,10 @@ fn test_cancel_idempotency(seed: u64, num_cancellers: usize) -> (bool, usize, u6
     runtime.run_until_quiescent();
 
     let violations = runtime.check_invariants();
-    assert!(violations.is_empty(), "cancel idempotency violated invariants: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "cancel idempotency violated invariants: {violations:?}"
+    );
 
     let is_cancelled = token.is_cancelled();
     let notifications = notification_count.load(Ordering::SeqCst);
@@ -74,7 +77,10 @@ fn test_cancel_idempotency(seed: u64, num_cancellers: usize) -> (bool, usize, u6
 
     // Metamorphic invariant: exactly one successful cancel, exactly one notification
     assert_eq!(successful, 1, "exactly one cancel call should succeed");
-    assert_eq!(notifications, 1, "exactly one listener notification should occur");
+    assert_eq!(
+        notifications, 1,
+        "exactly one listener notification should occur"
+    );
     assert!(is_cancelled, "token should be marked as cancelled");
 
     (is_cancelled, notifications, successful as u64)
@@ -82,18 +88,18 @@ fn test_cancel_idempotency(seed: u64, num_cancellers: usize) -> (bool, usize, u6
 
 /// Test state consistency across cancellation operations.
 fn test_state_consistency(seed: u64, num_operations: usize) -> Vec<bool> {
-    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS));
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS as u64));
     let region = runtime.state.create_root_region(Budget::INFINITE);
-    let mut rng = DetRng::from_seed(seed);
+    let mut rng = DetRng::new(seed);
 
     let mut consistency_results = Vec::new();
 
     for i in 0..num_operations.min(MAX_TOKENS) {
-        let object_id = ObjectId::new_for_test(i as u32);
+        let object_id = ObjectId::new_for_test(i as u64);
         let token = Arc::new(SymbolCancelToken::new(object_id, &mut rng));
 
         // Cancel and immediately check state consistency
-        let reason = CancelReason::new(CancelKind::Timeout, format!("test {i}"));
+        let reason = CancelReason::new(CancelKind::Timeout);
         let cancel_time = Time::from_nanos((i as u64 + 1) * 1000);
 
         let cancel_result = token.cancel(&reason, cancel_time);
@@ -102,7 +108,8 @@ fn test_state_consistency(seed: u64, num_operations: usize) -> Vec<bool> {
         let stored_time = token.cancelled_at();
 
         // State consistency invariants
-        let consistent = cancel_result && is_cancelled
+        let consistent = cancel_result
+            && is_cancelled
             && stored_reason.is_some()
             && stored_time.is_some()
             && stored_reason.as_ref().unwrap().kind() == CancelKind::Timeout;
@@ -115,11 +122,11 @@ fn test_state_consistency(seed: u64, num_operations: usize) -> Vec<bool> {
 
 /// Test listener notification ordering and exactness.
 fn test_listener_notification_invariants(seed: u64, num_listeners: usize) -> (usize, bool) {
-    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS));
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS as u64));
     let region = runtime.state.create_root_region(Budget::INFINITE);
-    let mut rng = DetRng::from_seed(seed);
+    let mut rng = DetRng::new(seed);
 
-    let object_id = ObjectId::new_for_test(200);
+    let object_id = ObjectId::new_for_test(200u64);
     let token = Arc::new(SymbolCancelToken::new(object_id, &mut rng));
 
     let notification_order = Arc::new(StdMutex::new(Vec::new()));
@@ -141,7 +148,7 @@ fn test_listener_notification_invariants(seed: u64, num_listeners: usize) -> (us
     let (task_id, _) = runtime
         .state
         .create_task(region, Budget::INFINITE, async move {
-            let reason = CancelReason::new(CancelKind::User, "listener test".to_string());
+            let reason = CancelReason::new(CancelKind::User);
             let cancel_time = Time::from_nanos(3000);
             token_clone.cancel(&reason, cancel_time);
             yield_now().await;
@@ -152,15 +159,25 @@ fn test_listener_notification_invariants(seed: u64, num_listeners: usize) -> (us
     runtime.run_until_quiescent();
 
     let violations = runtime.check_invariants();
-    assert!(violations.is_empty(), "listener notification violated invariants: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "listener notification violated invariants: {violations:?}"
+    );
 
     let total_notifications = notification_count.load(Ordering::SeqCst);
     let order = notification_order.lock().unwrap();
 
     // Metamorphic invariant: each listener called exactly once
     let expected = num_listeners.min(MAX_LISTENERS);
-    assert_eq!(total_notifications, expected, "each listener should be called exactly once");
-    assert_eq!(order.len(), expected, "notification order should match listener count");
+    assert_eq!(
+        total_notifications, expected,
+        "each listener should be called exactly once"
+    );
+    assert_eq!(
+        order.len(),
+        expected,
+        "notification order should match listener count"
+    );
 
     // All listeners should have been called (no duplicates counted separately)
     let unique_listeners: std::collections::HashSet<_> = order.iter().collect();
@@ -173,12 +190,25 @@ fn test_listener_notification_invariants(seed: u64, num_listeners: usize) -> (us
 fn metamorphic_cancel_idempotency() {
     for seed in [0, 1, 42, 12345] {
         for num_cancellers in [1, 2, 4, 8] {
-            let (cancelled, notifications, successful) = test_cancel_idempotency(seed, num_cancellers);
+            let (cancelled, notifications, successful) =
+                test_cancel_idempotency(seed, num_cancellers);
 
             // Metamorphic property: regardless of concurrency level, exactly one success
-            assert!(cancelled, "token should be cancelled with seed={}, cancellers={}", seed, num_cancellers);
-            assert_eq!(notifications, 1, "exactly one notification with seed={}, cancellers={}", seed, num_cancellers);
-            assert_eq!(successful, 1, "exactly one successful cancel with seed={}, cancellers={}", seed, num_cancellers);
+            assert!(
+                cancelled,
+                "token should be cancelled with seed={}, cancellers={}",
+                seed, num_cancellers
+            );
+            assert_eq!(
+                notifications, 1,
+                "exactly one notification with seed={}, cancellers={}",
+                seed, num_cancellers
+            );
+            assert_eq!(
+                successful, 1,
+                "exactly one successful cancel with seed={}, cancellers={}",
+                seed, num_cancellers
+            );
         }
     }
 }
@@ -191,12 +221,18 @@ fn metamorphic_state_consistency() {
 
             // Metamorphic property: all cancellation states should be consistent
             let all_consistent = consistency_results.iter().all(|&c| c);
-            assert!(all_consistent,
+            assert!(
+                all_consistent,
                 "all cancellation states should be consistent with seed={}, ops={}",
-                seed, num_ops);
-            assert_eq!(consistency_results.len(), num_ops.min(MAX_TOKENS),
+                seed, num_ops
+            );
+            assert_eq!(
+                consistency_results.len(),
+                num_ops.min(MAX_TOKENS),
                 "should have results for all operations with seed={}, ops={}",
-                seed, num_ops);
+                seed,
+                num_ops
+            );
         }
     }
 }
@@ -205,16 +241,21 @@ fn metamorphic_state_consistency() {
 fn metamorphic_listener_notification_invariants() {
     for seed in [0, 5, 123, 9876] {
         for num_listeners in [1, 2, 4, 6] {
-            let (notifications, all_called) = test_listener_notification_invariants(seed, num_listeners);
+            let (notifications, all_called) =
+                test_listener_notification_invariants(seed, num_listeners);
 
             // Metamorphic property: each listener called exactly once
             let expected = num_listeners.min(MAX_LISTENERS);
-            assert_eq!(notifications, expected,
+            assert_eq!(
+                notifications, expected,
                 "should have exactly {} notifications with seed={}, listeners={}",
-                expected, seed, num_listeners);
-            assert!(all_called,
+                expected, seed, num_listeners
+            );
+            assert!(
+                all_called,
                 "all listeners should be called with seed={}, listeners={}",
-                seed, num_listeners);
+                seed, num_listeners
+            );
         }
     }
 }
