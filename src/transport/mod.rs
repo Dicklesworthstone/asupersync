@@ -144,7 +144,7 @@ mod inline_tests {
         flag: Arc<AtomicBool>,
     }
 
-    impl Wake for SpyWaker {
+    impl Wake for FlagWake {
         fn wake(self: Arc<Self>) {
             self.flag.store(true, Ordering::SeqCst);
         }

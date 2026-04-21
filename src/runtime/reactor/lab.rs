@@ -1911,7 +1911,7 @@ mod tests {
             count: AtomicUsize,
         }
 
-        impl Wake for CountWaker {
+        impl Wake for FlagWaker {
             fn wake(self: Arc<Self>) {
                 self.flag.store(true, Ordering::SeqCst);
                 self.count.fetch_add(1, Ordering::SeqCst);
