@@ -481,7 +481,7 @@ fn mr6_listener_created_child_is_drained_before_cancel_returns() {
     let observed_child_clone = Arc::clone(&observed_child);
     let token_for_listener = token.clone();
 
-    token.add_listener(move |_: &CancelReason, _: Time| {
+    token.add_listener(move |_, _| {
         let mut child_rng = DetRng::new(777);
         let child = token_for_listener.child(&mut child_rng);
         *observed_child_clone.lock().unwrap() = Some(child);
@@ -532,7 +532,7 @@ fn mr7_listener_registered_during_cancel_is_not_requeued() {
     let late_listener_time_clone = Arc::clone(&late_listener_time);
     let token_for_listener = token.clone();
 
-    token.add_listener(move |_: &CancelReason, _: Time| {
+    token.add_listener(move |_, _| {
         token_for_listener.add_listener({
             let late_listener_notifications_clone = Arc::clone(&late_listener_notifications_clone);
             let late_listener_reason_clone = Arc::clone(&late_listener_reason_clone);
