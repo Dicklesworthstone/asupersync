@@ -401,6 +401,45 @@ pub fn run_conformance_tests(tests: &[ConformanceTestFn], config: &TestConfig) -
     run_conformance_tests_with_reporter(tests, config, |_| {})
 }
 
+/// Render a deterministic markdown report from conformance execution events.
+#[must_use]
+pub fn render_conformance_report_markdown(
+    passed: usize,
+    failed: usize,
+    events: &[ConformanceEvent],
+    generated_at_epoch_secs: u64,
+) -> String {
+    let total = passed + failed;
+    let mut report = format!(
+        "# Conformance Report\n\nGenerated At: {generated_at_epoch_secs}\n\n## Summary\n- Total Completed: {total}\n- Passed: {passed}\n- Failed: {failed}\n\n## Results\n"
+    );
+    let mut completed = false;
+
+    for event in events {
+        match event {
+            ConformanceEvent::TestStart { .. } => {}
+            ConformanceEvent::TestPassed { name } => {
+                completed = true;
+                report.push_str(&format!("- `{name}`: PASS\n"));
+            }
+            ConformanceEvent::TestFailed { name, message } => {
+                completed = true;
+                report.push_str(&format!("- `{name}`: FAIL"));
+                if let Some(message) = message {
+                    report.push_str(&format!(" ({message})"));
+                }
+                report.push('\n');
+            }
+        }
+    }
+
+    if !completed {
+        report.push_str("_No completed tests recorded._\n");
+    }
+
+    report
+}
+
 /// Macro for defining conformance tests.
 ///
 /// This macro defines a test that will be run against conformance targets.
@@ -726,6 +765,20 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn scrub_conformance_markdown(markdown: &str) -> String {
+        markdown
+            .lines()
+            .map(|line| {
+                if line.starts_with("Generated At: ") {
+                    "Generated At: [TIMESTAMP]".to_string()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn scrub_conformance_report(events: &[ConformanceEvent]) -> serde_json::Value {
         json!(
             events
@@ -956,5 +1009,71 @@ mod tests {
                 "events": scrub_conformance_report(&events),
             })
         );
+    }
+
+    #[test]
+    fn report_markdown_snapshot_scrubs_generated_timestamps() {
+        fn passing_test(_config: &TestConfig) {}
+
+        fn failing_test(_config: &TestConfig) {
+            std::panic::resume_unwind(Box::new(String::from("deterministic markdown failure")));
+        }
+
+        fn render_scenario_markdown(
+            tests: &[ConformanceTestFn],
+            generated_at_epoch_secs: u64,
+        ) -> String {
+            let mut events = Vec::new();
+            let (passed, failed) =
+                run_conformance_tests_with_reporter(tests, &TestConfig::default(), |event| {
+                    events.push(event);
+                });
+            scrub_conformance_markdown(&render_conformance_report_markdown(
+                passed,
+                failed,
+                &events,
+                generated_at_epoch_secs,
+            ))
+        }
+
+        let snapshot = [
+            "## passing".to_string(),
+            render_scenario_markdown(
+                &[ConformanceTestFn {
+                    name: "pass_only",
+                    test_fn: passing_test,
+                }],
+                1_700_000_001,
+            ),
+            "## failing".to_string(),
+            render_scenario_markdown(
+                &[ConformanceTestFn {
+                    name: "fail_only",
+                    test_fn: failing_test,
+                }],
+                1_800_000_002,
+            ),
+            "## mixed".to_string(),
+            render_scenario_markdown(
+                &[
+                    ConformanceTestFn {
+                        name: "pass_first",
+                        test_fn: passing_test,
+                    },
+                    ConformanceTestFn {
+                        name: "fail_second",
+                        test_fn: failing_test,
+                    },
+                    ConformanceTestFn {
+                        name: "pass_third",
+                        test_fn: passing_test,
+                    },
+                ],
+                1_900_000_003,
+            ),
+        ]
+        .join("\n\n");
+
+        insta::assert_snapshot!("conformance_report_markdown_scrubbed", snapshot);
     }
 }
