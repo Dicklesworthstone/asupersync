@@ -546,6 +546,80 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn broadcast_with_middle_hole_signature(
+        broadcasts: usize,
+    ) -> ([bool; 2], usize, usize, usize, bool) {
+        let notify = Notify::new();
+
+        let mut fut1 = notify.notified();
+        let mut fut2 = notify.notified();
+        let mut fut3 = notify.notified();
+        assert!(poll_once(&mut fut1).is_pending());
+        assert!(poll_once(&mut fut2).is_pending());
+        assert!(poll_once(&mut fut3).is_pending());
+
+        drop(fut2);
+
+        for _ in 0..broadcasts {
+            notify.notify_waiters();
+        }
+
+        let ready_pair = [
+            poll_once(&mut fut1).is_ready(),
+            poll_once(&mut fut3).is_ready(),
+        ];
+        drop(fut1);
+        drop(fut3);
+
+        let waiter_count = notify.waiter_count();
+        let entries_len = notify.waiters.lock().entries.len();
+        let stored = notify.stored_notifications.load(Ordering::Acquire);
+
+        let mut late = notify.notified();
+        let late_pending = poll_once(&mut late).is_pending();
+        drop(late);
+
+        (ready_pair, waiter_count, entries_len, stored, late_pending)
+    }
+
+    fn broadcast_then_notify_one_signature(broadcasts: usize) -> ([bool; 2], usize, bool, bool) {
+        let notify = Notify::new();
+
+        let mut fut1 = notify.notified();
+        let mut fut2 = notify.notified();
+        assert!(poll_once(&mut fut1).is_pending());
+        assert!(poll_once(&mut fut2).is_pending());
+
+        for _ in 0..broadcasts {
+            notify.notify_waiters();
+        }
+
+        let ready_pair = [
+            poll_once(&mut fut1).is_ready(),
+            poll_once(&mut fut2).is_ready(),
+        ];
+        drop(fut1);
+        drop(fut2);
+
+        notify.notify_one();
+        let stored_before_consume = notify.stored_notifications.load(Ordering::Acquire);
+
+        let mut stored_consumer = notify.notified();
+        let stored_consumer_ready = poll_once(&mut stored_consumer).is_ready();
+        drop(stored_consumer);
+
+        let mut trailing_waiter = notify.notified();
+        let trailing_waiter_pending = poll_once(&mut trailing_waiter).is_pending();
+        drop(trailing_waiter);
+
+        (
+            ready_pair,
+            stored_before_consume,
+            stored_consumer_ready,
+            trailing_waiter_pending,
+        )
+    }
+
     #[test]
     fn notify_one_wakes_waiter() {
         init_test("notify_one_wakes_waiter");
@@ -1222,6 +1296,96 @@ mod tests {
 
         crate::test_complete!(
             "notify_waiters_does_not_wake_unpolled_future_created_before_broadcast"
+        );
+    }
+
+    #[test]
+    fn metamorphic_redundant_notify_waiters_preserves_middle_hole_cleanup() {
+        init_test("metamorphic_redundant_notify_waiters_preserves_middle_hole_cleanup");
+
+        let single = broadcast_with_middle_hole_signature(1);
+        let redundant = broadcast_with_middle_hole_signature(3);
+
+        crate::assert_with_log!(
+            redundant == single,
+            "repeating notify_waiters over the same waiter set preserves cleanup and late-waiter behavior",
+            format!("{single:?}"),
+            format!("{redundant:?}")
+        );
+        crate::assert_with_log!(
+            single.0 == [true, true],
+            "remaining waiters are both readied after broadcast",
+            [true, true],
+            single.0
+        );
+        crate::assert_with_log!(
+            single.1 == 0,
+            "no active waiters remain after draining the broadcasted set",
+            0usize,
+            single.1
+        );
+        crate::assert_with_log!(
+            single.2 == 0,
+            "slab shrinks fully after draining broadcasted waiters",
+            0usize,
+            single.2
+        );
+        crate::assert_with_log!(
+            single.3 == 0,
+            "redundant broadcasts do not mint stored tokens",
+            0usize,
+            single.3
+        );
+        crate::assert_with_log!(
+            single.4,
+            "a late waiter still remains pending after repeated broadcasts",
+            true,
+            single.4
+        );
+
+        crate::test_complete!("metamorphic_redundant_notify_waiters_preserves_middle_hole_cleanup");
+    }
+
+    #[test]
+    fn metamorphic_redundant_broadcasts_preserve_single_followup_notify_one_token() {
+        init_test("metamorphic_redundant_broadcasts_preserve_single_followup_notify_one_token");
+
+        let single = broadcast_then_notify_one_signature(1);
+        let redundant = broadcast_then_notify_one_signature(4);
+
+        crate::assert_with_log!(
+            redundant == single,
+            "redundant broadcasts do not amplify a later stored notify_one token",
+            format!("{single:?}"),
+            format!("{redundant:?}")
+        );
+        crate::assert_with_log!(
+            single.0 == [true, true],
+            "both original waiters are readied by the broadcast",
+            [true, true],
+            single.0
+        );
+        crate::assert_with_log!(
+            single.1 == 1,
+            "exactly one stored token remains for the follow-up notify_one",
+            1usize,
+            single.1
+        );
+        crate::assert_with_log!(
+            single.2,
+            "the next waiter consumes the single stored token immediately",
+            true,
+            single.2
+        );
+        crate::assert_with_log!(
+            single.3,
+            "the waiter after that remains pending because no extra token leaked",
+            true,
+            single.3
+        );
+
+        crate::test_complete!(
+            "metamorphic_redundant_broadcasts_preserve_single_followup_notify_one_token"
         );
     }
 
