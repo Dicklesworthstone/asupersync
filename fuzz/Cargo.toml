@@ -907,6 +907,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "tls_client_hello_sni"
+path = "fuzz_targets/tls_client_hello_sni.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_hpack"
 path = "fuzz_targets/h2_hpack.rs"
 test = false
