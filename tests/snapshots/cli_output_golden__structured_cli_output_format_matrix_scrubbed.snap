@@ -1,0 +1,157 @@
+---
+source: tests/cli_output_golden.rs
+expression: snapshot
+---
+{
+  "status": {
+    "human_raw": "Warn: using cached plan for status (cache_warm)\n",
+    "json_raw": "{\"code\":\"cache_warm\",\"generated_at\":\"<scrubbed-timestamp>\",\"message\":\"using cached plan for status\",\"state\":\"warn\"}\n",
+    "json_value": {
+      "code": "cache_warm",
+      "generated_at": "<scrubbed-timestamp>",
+      "message": "using cached plan for status",
+      "state": "warn"
+    },
+    "json_pretty_raw": "{\n  \"code\": \"cache_warm\",\n  \"generated_at\": \"<scrubbed-timestamp>\",\n  \"message\": \"using cached plan for status\",\n  \"state\": \"warn\"\n}\n",
+    "json_pretty_value": {
+      "code": "cache_warm",
+      "generated_at": "<scrubbed-timestamp>",
+      "message": "using cached plan for status",
+      "state": "warn"
+    },
+    "stream_json_raw": "{\"code\":\"cache_warm\",\"generated_at\":\"<scrubbed-timestamp>\",\"message\":\"using cached plan for status\",\"state\":\"warn\"}\n",
+    "stream_json_values": [
+      {
+        "code": "cache_warm",
+        "generated_at": "<scrubbed-timestamp>",
+        "message": "using cached plan for status",
+        "state": "warn"
+      }
+    ],
+    "tsv_raw": "Warn: using cached plan for status (cache_warm)\n"
+  },
+  "list": {
+    "human_raw": "Item 41: alpha\nItem 42: beta\nItem 43: gamma\n",
+    "json_raw": "[{\"id\":41,\"name\":\"alpha\"},{\"id\":42,\"name\":\"beta\"},{\"id\":43,\"name\":\"gamma\"}]\n",
+    "json_value": [
+      {
+        "id": 41,
+        "name": "alpha"
+      },
+      {
+        "id": 42,
+        "name": "beta"
+      },
+      {
+        "id": 43,
+        "name": "gamma"
+      }
+    ],
+    "json_pretty_raw": "[\n  {\n    \"id\": 41,\n    \"name\": \"alpha\"\n  },\n  {\n    \"id\": 42,\n    \"name\": \"beta\"\n  },\n  {\n    \"id\": 43,\n    \"name\": \"gamma\"\n  }\n]\n",
+    "json_pretty_value": [
+      {
+        "id": 41,
+        "name": "alpha"
+      },
+      {
+        "id": 42,
+        "name": "beta"
+      },
+      {
+        "id": 43,
+        "name": "gamma"
+      }
+    ],
+    "stream_json_raw": "{\"id\":41,\"name\":\"alpha\"}\n{\"id\":42,\"name\":\"beta\"}\n{\"id\":43,\"name\":\"gamma\"}\n",
+    "stream_json_values": [
+      {
+        "id": 41,
+        "name": "alpha"
+      },
+      {
+        "id": 42,
+        "name": "beta"
+      },
+      {
+        "id": 43,
+        "name": "gamma"
+      }
+    ],
+    "tsv_raw": "41\talpha\n42\tbeta\n43\tgamma\n"
+  },
+  "show": {
+    "human_raw": "Record 91: scheduler\nState: Normal\nRetries: 2\nDetails:\n  - queue depth stable\n  - backpressure inactive\n  - trace export healthy\n",
+    "json_raw": "{\"details\":[\"queue depth stable\",\"backpressure inactive\",\"trace export healthy\"],\"generated_at\":\"<scrubbed-timestamp>\",\"id\":91,\"name\":\"scheduler\",\"retries\":2,\"state\":\"normal\"}\n",
+    "json_value": {
+      "details": [
+        "queue depth stable",
+        "backpressure inactive",
+        "trace export healthy"
+      ],
+      "generated_at": "<scrubbed-timestamp>",
+      "id": 91,
+      "name": "scheduler",
+      "retries": 2,
+      "state": "normal"
+    },
+    "json_pretty_raw": "{\n  \"details\": [\n    \"queue depth stable\",\n    \"backpressure inactive\",\n    \"trace export healthy\"\n  ],\n  \"generated_at\": \"<scrubbed-timestamp>\",\n  \"id\": 91,\n  \"name\": \"scheduler\",\n  \"retries\": 2,\n  \"state\": \"normal\"\n}\n",
+    "json_pretty_value": {
+      "details": [
+        "queue depth stable",
+        "backpressure inactive",
+        "trace export healthy"
+      ],
+      "generated_at": "<scrubbed-timestamp>",
+      "id": 91,
+      "name": "scheduler",
+      "retries": 2,
+      "state": "normal"
+    },
+    "stream_json_raw": "{\"details\":[\"queue depth stable\",\"backpressure inactive\",\"trace export healthy\"],\"generated_at\":\"<scrubbed-timestamp>\",\"id\":91,\"name\":\"scheduler\",\"retries\":2,\"state\":\"normal\"}\n",
+    "stream_json_values": [
+      {
+        "details": [
+          "queue depth stable",
+          "backpressure inactive",
+          "trace export healthy"
+        ],
+        "generated_at": "<scrubbed-timestamp>",
+        "id": 91,
+        "name": "scheduler",
+        "retries": 2,
+        "state": "normal"
+      }
+    ],
+    "tsv_raw": "91\tscheduler\tNormal\t2\tqueue depth stable|backpressure inactive|trace export healthy\n"
+  },
+  "error": {
+    "human_raw": "ERROR [not_found] br show: bead asupersync-missing was not found (retryable: false)\n",
+    "json_raw": "{\"code\":\"not_found\",\"generated_at\":\"<scrubbed-timestamp>\",\"message\":\"bead asupersync-missing was not found\",\"operation\":\"br show\",\"retryable\":false}\n",
+    "json_value": {
+      "code": "not_found",
+      "generated_at": "<scrubbed-timestamp>",
+      "message": "bead asupersync-missing was not found",
+      "operation": "br show",
+      "retryable": false
+    },
+    "json_pretty_raw": "{\n  \"code\": \"not_found\",\n  \"generated_at\": \"<scrubbed-timestamp>\",\n  \"message\": \"bead asupersync-missing was not found\",\n  \"operation\": \"br show\",\n  \"retryable\": false\n}\n",
+    "json_pretty_value": {
+      "code": "not_found",
+      "generated_at": "<scrubbed-timestamp>",
+      "message": "bead asupersync-missing was not found",
+      "operation": "br show",
+      "retryable": false
+    },
+    "stream_json_raw": "{\"code\":\"not_found\",\"generated_at\":\"<scrubbed-timestamp>\",\"message\":\"bead asupersync-missing was not found\",\"operation\":\"br show\",\"retryable\":false}\n",
+    "stream_json_values": [
+      {
+        "code": "not_found",
+        "generated_at": "<scrubbed-timestamp>",
+        "message": "bead asupersync-missing was not found",
+        "operation": "br show",
+        "retryable": false
+      }
+    ],
+    "tsv_raw": "br show\tnot_found\tbead asupersync-missing was not found\tfalse\n"
+  }
+}
