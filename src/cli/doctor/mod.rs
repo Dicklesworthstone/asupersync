@@ -18030,9 +18030,7 @@ mod tests {
         fs::write(path, content).expect("write file");
     }
 
-    fn scrub_core_diagnostics_fixture(
-        fixture: &CoreDiagnosticsFixture,
-    ) -> serde_json::Value {
+    fn scrub_core_diagnostics_fixture(fixture: &CoreDiagnosticsFixture) -> serde_json::Value {
         serde_json::json!({
             "fixture_id": fixture.fixture_id,
             "description": fixture.description,
@@ -18068,6 +18066,62 @@ mod tests {
             "provenance": {
                 "run_id": fixture.report.provenance.run_id,
                 "scenario_id": fixture.report.provenance.scenario_id,
+                "trace_id": fixture.report.provenance.trace_id,
+                "seed": fixture.report.provenance.seed,
+                "generated_by": fixture.report.provenance.generated_by,
+                "generated_at": "<scrubbed>",
+            },
+        })
+    }
+
+    fn scrub_core_diagnostics_health_fixture(
+        fixture: &CoreDiagnosticsFixture,
+    ) -> serde_json::Value {
+        let health_status = if fixture.report.summary.critical_findings > 0
+            || fixture.report.summary.status == "failed"
+        {
+            "critical"
+        } else if fixture.report.summary.status == "degraded" {
+            "degraded"
+        } else {
+            "passing"
+        };
+
+        serde_json::json!({
+            "fixture_id": fixture.fixture_id,
+            "report_id": fixture.report.report_id,
+            "scenario_id": fixture.report.provenance.scenario_id,
+            "health_status": health_status,
+            "summary": {
+                "status": fixture.report.summary.status,
+                "overall_outcome": fixture.report.summary.overall_outcome,
+                "total_findings": fixture.report.summary.total_findings,
+                "critical_findings": fixture.report.summary.critical_findings,
+            },
+            "findings": fixture.report.findings.iter().map(|finding| {
+                serde_json::json!({
+                    "finding_id": finding.finding_id,
+                    "severity": finding.severity,
+                    "status": finding.status,
+                })
+            }).collect::<Vec<_>>(),
+            "evidence": fixture.report.evidence.iter().map(|evidence| {
+                serde_json::json!({
+                    "evidence_id": evidence.evidence_id,
+                    "source": evidence.source,
+                    "outcome_class": evidence.outcome_class,
+                })
+            }).collect::<Vec<_>>(),
+            "commands": fixture.report.commands.iter().map(|command| {
+                serde_json::json!({
+                    "command_id": command.command_id,
+                    "tool": command.tool,
+                    "exit_code": command.exit_code,
+                    "outcome_class": command.outcome_class,
+                })
+            }).collect::<Vec<_>>(),
+            "provenance": {
+                "run_id": fixture.report.provenance.run_id,
                 "trace_id": fixture.report.provenance.trace_id,
                 "seed": fixture.report.provenance.seed,
                 "generated_by": fixture.report.provenance.generated_by,
@@ -21604,6 +21658,28 @@ impl RuntimeState {
             .collect::<Vec<_>>();
 
         insta::assert_json_snapshot!("core_diagnostics_report_bundle", snapshot);
+    }
+
+    #[test]
+    fn core_diagnostics_structured_health_report_snapshot() {
+        let bundle = core_diagnostics_report_bundle();
+        let snapshot = bundle
+            .fixtures
+            .iter()
+            .map(scrub_core_diagnostics_health_fixture)
+            .collect::<Vec<_>>();
+
+        let health_statuses = snapshot
+            .iter()
+            .filter_map(|fixture| {
+                fixture
+                    .get("health_status")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(health_statuses, vec!["critical", "passing", "degraded"]);
+
+        insta::assert_json_snapshot!("core_diagnostics_structured_health_report", snapshot);
     }
 
     #[test]
