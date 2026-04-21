@@ -160,7 +160,7 @@ mod tests {
                 let ok = count == 5;
                 crate::assert_with_log!(ok, "count", 5, count);
             }
-            Poll::Pending => panic!("expected Ready"),
+            Poll::Pending => panic!("expected Ready"), // ubs:ignore - test logic
         }
         crate::test_complete!("count_items");
     }
@@ -177,7 +177,7 @@ mod tests {
                 let ok = count == 0;
                 crate::assert_with_log!(ok, "count", 0, count);
             }
-            Poll::Pending => panic!("expected Ready"),
+            Poll::Pending => panic!("expected Ready"), // ubs:ignore - test logic
         }
         crate::test_complete!("count_empty");
     }
@@ -194,7 +194,7 @@ mod tests {
                 let ok = count == 1;
                 crate::assert_with_log!(ok, "count", 1, count);
             }
-            Poll::Pending => panic!("expected Ready"),
+            Poll::Pending => panic!("expected Ready"), // ubs:ignore - test logic
         }
         crate::test_complete!("count_single");
     }

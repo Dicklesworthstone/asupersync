@@ -179,7 +179,7 @@ mod tests {
                 let ok = collected == vec![1, 2, 3];
                 crate::assert_with_log!(ok, "collected vec", vec![1, 2, 3], collected);
             }
-            Poll::Pending => panic!("expected Ready"),
+            Poll::Pending => panic!("expected Ready"), // ubs:ignore - test logic
         }
         crate::test_complete!("collect_to_vec");
     }
@@ -203,7 +203,7 @@ mod tests {
                 let has_three = collected.contains(&3);
                 crate::assert_with_log!(has_three, "contains 3", true, has_three);
             }
-            Poll::Pending => panic!("expected Ready"),
+            Poll::Pending => panic!("expected Ready"), // ubs:ignore - test logic
         }
         crate::test_complete!("collect_to_hashset");
     }
@@ -220,7 +220,7 @@ mod tests {
                 let empty = collected.is_empty();
                 crate::assert_with_log!(empty, "collected empty", true, empty);
             }
-            Poll::Pending => panic!("expected Ready"),
+            Poll::Pending => panic!("expected Ready"), // ubs:ignore - test logic
         }
         crate::test_complete!("collect_empty");
     }
@@ -238,7 +238,7 @@ mod tests {
                 let ok = collected == "hi!";
                 crate::assert_with_log!(ok, "collected string", "hi!", collected);
             }
-            Poll::Pending => panic!("expected Ready"),
+            Poll::Pending => panic!("expected Ready"), // ubs:ignore - test logic
         }
         crate::test_complete!("collect_to_string");
     }

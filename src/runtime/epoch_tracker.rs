@@ -1213,7 +1213,7 @@ mod tests {
         if let Some(EpochConsistencyViolation::ModuleDesync { max_skew, .. }) = violation {
             crate::assert_with_log!(max_skew == 1, "skew is 1", 1, max_skew);
         } else {
-            panic!("Expected ModuleDesync violation");
+            panic!("Expected ModuleDesync violation"); // ubs:ignore - test logic
         }
 
         crate::test_complete!("tracker_detects_module_desync");

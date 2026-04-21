@@ -1155,7 +1155,7 @@ mod tests {
                 assert_eq!(queue_name, "ready_queue");
                 assert_eq!(*time_since_cancel_ms, 0);
             }
-            other => panic!("Expected CancelledTaskLeak, got {other:?}"),
+            other => panic!("Expected CancelledTaskLeak, got {other:?}"), // ubs:ignore - test logic
         }
     }
 }
