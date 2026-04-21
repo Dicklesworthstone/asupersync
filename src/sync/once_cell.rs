@@ -606,9 +606,9 @@ mod tests {
     use crate::test_utils::init_test_logging;
     use futures_lite::future::{block_on, pending};
     use proptest::prelude::*;
-    use std::future::Future;
+    use std::future::{Future, poll_fn};
     use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::task::{Context, Poll, Waker};
     use std::thread;
 
@@ -853,6 +853,139 @@ mod tests {
                 prop_assert!(cloned.is_initialized());
                 prop_assert_eq!(cloned.get(), Some(&value));
             }
+        }
+    }
+
+    #[test]
+    fn metamorphic_async_waiters_converge_on_winner_without_running_fallbacks() {
+        init_test("metamorphic_async_waiters_converge_on_winner_without_running_fallbacks");
+        let cell: OnceCell<u32> = OnceCell::new();
+        let release_winner = Arc::new(AtomicBool::new(false));
+        let fallback_runs = Arc::new(AtomicUsize::new(0));
+        let winner_value = 41u32;
+
+        let release_for_init = Arc::clone(&release_winner);
+        let mut init_fut = Box::pin(cell.get_or_init(move || {
+            let release_for_init = Arc::clone(&release_for_init);
+            async move {
+                poll_fn(move |_| {
+                    if release_for_init.load(Ordering::SeqCst) {
+                        Poll::Ready(winner_value)
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await
+            }
+        }));
+
+        let noop = noop_waker();
+        let mut cx = Context::from_waker(&noop);
+        assert!(Future::poll(init_fut.as_mut(), &mut cx).is_pending());
+
+        let mut waiters = Vec::new();
+        for fallback in [7u32, 13, 21, 34] {
+            let fallback_runs = Arc::clone(&fallback_runs);
+            waiters.push(Box::pin(cell.get_or_init(move || {
+                let fallback_runs = Arc::clone(&fallback_runs);
+                async move {
+                    fallback_runs.fetch_add(1, Ordering::SeqCst);
+                    fallback
+                }
+            })));
+        }
+
+        for waiter in &mut waiters {
+            assert!(Future::poll(waiter.as_mut(), &mut cx).is_pending());
+        }
+
+        release_winner.store(true, Ordering::SeqCst);
+
+        match Future::poll(init_fut.as_mut(), &mut cx) {
+            Poll::Ready(value) => assert_eq!(*value, winner_value),
+            Poll::Pending => panic!("winner should complete after release"),
+        }
+
+        for waiter in &mut waiters {
+            match Future::poll(waiter.as_mut(), &mut cx) {
+                Poll::Ready(value) => assert_eq!(*value, winner_value),
+                Poll::Pending => panic!("waiter should observe the winner once initialized"),
+            }
+        }
+
+        assert_eq!(fallback_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(cell.get(), Some(&winner_value));
+        crate::test_complete!(
+            "metamorphic_async_waiters_converge_on_winner_without_running_fallbacks"
+        );
+    }
+
+    #[test]
+    fn metamorphic_blocking_panic_recovery_matches_fresh_success_surface() {
+        init_test("metamorphic_blocking_panic_recovery_matches_fresh_success_surface");
+        let _lock = acquire_blocking_test_lock();
+        let recovered = Arc::new(OnceCell::<u32>::new());
+        let fresh = OnceCell::<u32>::new();
+        let expected = 55u32;
+
+        let recovered_for_panic = Arc::clone(&recovered);
+        let panic_handle = thread::spawn(move || {
+            let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = recovered_for_panic.get_or_init_blocking(|| -> u32 { panic!("boom") });
+            }));
+            assert!(
+                panic_result.is_err(),
+                "initializer panic should be captured"
+            );
+        });
+        panic_handle.join().expect("panic thread panicked");
+
+        let recovered_value = *recovered.get_or_init_blocking(|| expected);
+        let fresh_value = *fresh.get_or_init_blocking(|| expected);
+
+        assert_eq!(recovered_value, fresh_value);
+        assert_eq!(recovered.get(), fresh.get());
+        assert_eq!(recovered.is_initialized(), fresh.is_initialized());
+        crate::test_complete!("metamorphic_blocking_panic_recovery_matches_fresh_success_surface");
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_try_init_error_recovery_matches_direct_success(
+            value in any::<u32>(),
+            fallback in any::<u32>(),
+        ) {
+            let recovered = OnceCell::new();
+            let fresh = OnceCell::new();
+
+            prop_assert_eq!(
+                block_on(recovered.get_or_try_init(|| async { Err::<u32, &'static str>("boom") })),
+                Err("boom")
+            );
+            prop_assert!(!recovered.is_initialized());
+
+            let recovered_value = block_on(recovered.get_or_try_init(|| async move {
+                Ok::<u32, &'static str>(value)
+            }))
+            .expect("recovery init should succeed");
+            let fresh_value = block_on(fresh.get_or_try_init(|| async move {
+                Ok::<u32, &'static str>(value)
+            }))
+            .expect("fresh init should succeed");
+
+            let ignored_probe_runs = Arc::new(AtomicUsize::new(0));
+            let ignored_probe_counter = Arc::clone(&ignored_probe_runs);
+            let recovered_again = block_on(recovered.get_or_try_init(|| async move {
+                ignored_probe_counter.fetch_add(1, Ordering::SeqCst);
+                Ok::<u32, &'static str>(fallback)
+            }))
+            .expect("subsequent reads should observe the recovered value");
+
+            prop_assert_eq!(*recovered_value, *fresh_value);
+            prop_assert_eq!(*recovered_again, value);
+            prop_assert_eq!(ignored_probe_runs.load(Ordering::SeqCst), 0);
+            prop_assert_eq!(recovered.get(), fresh.get());
+            prop_assert!(recovered.is_initialized());
         }
     }
 
