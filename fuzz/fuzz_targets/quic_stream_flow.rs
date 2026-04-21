@@ -308,8 +308,43 @@ fn execute_flow_control_operation(
             final_size,
         } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
+                let requested_final_size = final_size as u64;
+                let prior_reset = table.stream(id).ok().and_then(|stream| stream.send_reset);
+                let sent_bytes = table
+                    .stream(id)
+                    .map(|stream| stream.send_offset)
+                    .unwrap_or(0);
                 if let Ok(stream) = table.stream_mut(id) {
-                    let _ = stream.reset_send(error_code as u64, final_size as u64);
+                    let result = stream.reset_send(error_code as u64, requested_final_size);
+                    if requested_final_size < sent_bytes {
+                        assert!(matches!(
+                            result,
+                            Err(asupersync::net::quic_native::streams::QuicStreamError::InvalidFinalSize {
+                                final_size,
+                                received,
+                            }) if final_size == requested_final_size && received == sent_bytes
+                        ));
+                        assert_eq!(stream.send_reset, prior_reset);
+                    } else if let Some((_, previous_final_size)) = prior_reset {
+                        if previous_final_size != requested_final_size {
+                            assert!(matches!(
+                                result,
+                                Err(asupersync::net::quic_native::streams::QuicStreamError::InconsistentReset {
+                                    previous_final_size: seen_previous,
+                                    new_final_size,
+                                }) if seen_previous == previous_final_size
+                                    && new_final_size == requested_final_size
+                            ));
+                            assert_eq!(stream.send_reset, prior_reset);
+                        }
+                    }
+                }
+                if let Some((reset_code, reset_final_size)) =
+                    table.stream(id).ok().and_then(|stream| stream.send_reset)
+                {
+                    let stream = table.stream(id).expect("stream must remain present");
+                    assert!(reset_final_size >= stream.send_offset);
+                    assert_reset_is_fail_closed(table, id, reset_code);
                 }
             }
         }
@@ -472,10 +507,17 @@ fn execute_window_update_test(
         } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 if let Ok(stream) = table.stream_mut(id) {
-                    let _ = stream.reset_send(error_code as u64, stream.send_offset);
+                    let reset_final_size = stream
+                        .send_reset
+                        .map(|(_, final_size)| final_size)
+                        .unwrap_or(stream.send_offset);
+                    stream
+                        .reset_send(error_code as u64, reset_final_size)
+                        .expect("reset at the current send offset must succeed");
                     // Window update after reset should be handled correctly
                     let _ = stream.send_credit.increase_limit(new_limit as u64);
                 }
+                assert_reset_is_fail_closed(table, id, error_code as u64);
             }
         }
         WindowUpdateTest::ConflictingUpdates {
@@ -539,9 +581,42 @@ fn execute_flow_control_edge_case(
                 if let Ok(stream) = table.stream_mut(id) {
                     // Reset final size should be >= actually sent bytes
                     let actual_sent = stream.send_offset;
-                    let final_size = reset_final_size.max(actual_sent as u32) as u64;
-                    let _ = stream.reset_send(42, final_size);
+                    let prior_reset = stream.send_reset;
+                    if actual_sent > 0 {
+                        let err = stream
+                            .reset_send(42, actual_sent - 1)
+                            .expect_err("reset final size must cover sent bytes");
+                        assert!(matches!(
+                            err,
+                            asupersync::net::quic_native::streams::QuicStreamError::InvalidFinalSize {
+                                final_size,
+                                received,
+                            } if final_size == actual_sent - 1 && received == actual_sent
+                        ));
+                        assert_eq!(stream.send_reset, prior_reset);
+                    }
+                    let final_size = prior_reset
+                        .map(|(_, final_size)| final_size)
+                        .unwrap_or(reset_final_size.max(actual_sent as u32) as u64);
+                    stream
+                        .reset_send(42, final_size)
+                        .expect("clamped reset final size must succeed");
+                    assert_eq!(stream.send_reset, Some((42, final_size)));
+                    if let Some(conflicting_final_size) = final_size.checked_add(1) {
+                        let err = stream
+                            .reset_send(42, conflicting_final_size)
+                            .expect_err("conflicting reset final size must fail");
+                        assert!(matches!(
+                            err,
+                            asupersync::net::quic_native::streams::QuicStreamError::InconsistentReset {
+                                previous_final_size,
+                                new_final_size,
+                            } if previous_final_size == final_size
+                                && new_final_size == conflicting_final_size
+                        ));
+                    }
                 }
+                assert_reset_is_fail_closed(table, id, 42);
             }
         }
         FlowControlEdgeCase::ReceiveBeyondFinalSize {
@@ -630,8 +705,43 @@ fn verify_flow_control_invariants(
             if let Some(final_size) = stream.final_size {
                 assert!(stream.recv_credit.used() <= final_size);
             }
+
+            if let Some((_, final_size)) = stream.send_reset {
+                assert!(final_size >= stream.send_offset);
+            }
         }
     }
+}
+
+fn assert_reset_is_fail_closed(
+    table: &mut asupersync::net::quic_native::streams::StreamTable,
+    id: asupersync::net::quic_native::streams::StreamId,
+    error_code: u64,
+) {
+    let connection_send_remaining = table.connection_send_remaining();
+    let stream_send_used = table
+        .stream(id)
+        .expect("stream must be present")
+        .send_credit
+        .used();
+    let err = table
+        .write_stream(id, 1)
+        .expect_err("reset stream must stay unwritable");
+    assert!(matches!(
+        err,
+        asupersync::net::quic_native::streams::StreamTableError::Stream(
+            asupersync::net::quic_native::streams::QuicStreamError::SendStopped { code }
+        ) if code == error_code
+    ));
+    assert_eq!(table.connection_send_remaining(), connection_send_remaining);
+    assert_eq!(
+        table
+            .stream(id)
+            .expect("stream must remain present")
+            .send_credit
+            .used(),
+        stream_send_used
+    );
 }
 
 fuzz_target!(|input: QuicStreamFlowFuzz| {
