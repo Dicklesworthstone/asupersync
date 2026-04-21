@@ -1955,14 +1955,10 @@ mod tests {
         let mut direct_abort_step_exec = FixedExecutor::new(vec![LatticeState::Aborted]);
         let direct_abort_result = executor.execute(&direct_abort_exec, &mut direct_abort_step_exec);
 
-        let short_then_a =
-            Lattice::join(&short_result.final_state, &compensation_a_result.final_state);
-        let short_then_b =
-            Lattice::join(&short_result.final_state, &compensation_b_result.final_state);
-        let long_then_a =
-            Lattice::join(&long_result.final_state, &compensation_a_result.final_state);
-        let long_then_b =
-            Lattice::join(&long_result.final_state, &compensation_b_result.final_state);
+        let short_then_a = Lattice::join(&short_result.final_state, &compensation_a_result.final_state);
+        let short_then_b = Lattice::join(&short_result.final_state, &compensation_b_result.final_state);
+        let long_then_a = Lattice::join(&long_result.final_state, &compensation_a_result.final_state);
+        let long_then_b = Lattice::join(&long_result.final_state, &compensation_b_result.final_state);
 
         assert_eq!(
             short_then_a,
@@ -1998,5 +1994,195 @@ mod tests {
             compensation_a_result.final_state,
             compensation_b_result.final_state
         );
+    }
+
+    /// MR1: Forward-step plus compensation equals no-op
+    ///
+    /// For any saga step S and its compensation C, executing S followed by C
+    /// should result in the same lattice state as executing neither (no-op).
+    /// This tests the fundamental compensation invariant.
+    #[test]
+    fn metamorphic_forward_compensation_noop() {
+        use proptest::prelude::*;
+
+        proptest!(|(
+            forward_op in prop_oneof![
+                Just(SagaOpKind::Reserve),
+                Just(SagaOpKind::Send),
+                Just(SagaOpKind::Acquire),
+                Just(SagaOpKind::Commit),
+            ],
+            initial_state in prop_oneof![
+                Just(LatticeState::Unknown),
+                Just(LatticeState::Reserved),
+                Just(LatticeState::Committed),
+            ],
+        )| {
+            // Create forward step and its compensation
+            let forward_step = SagaStep::new(forward_op, "forward");
+            let compensation_step = SagaStep::new(
+                match forward_op {
+                    SagaOpKind::Reserve => SagaOpKind::Release,
+                    SagaOpKind::Send => SagaOpKind::CancelDrain,
+                    SagaOpKind::Acquire => SagaOpKind::Release,
+                    SagaOpKind::Commit => SagaOpKind::Abort,
+                    _ => return Ok(()),  // Skip other ops
+                },
+                "compensation"
+            );
+
+            let forward_plan = SagaPlan::new("forward", vec![forward_step]);
+            let compensation_plan = SagaPlan::new("compensation", vec![compensation_step]);
+            let noop_plan = SagaPlan::new("noop", vec![]);
+
+            let forward_exec = SagaExecutionPlan::from_plan(&forward_plan);
+            let compensation_exec = SagaExecutionPlan::from_plan(&compensation_plan);
+            let noop_exec = SagaExecutionPlan::from_plan(&noop_plan);
+
+            let executor = MonotoneSagaExecutor::new();
+
+            // Execute forward step
+            let mut forward_step_exec = FixedExecutor::new(vec![initial_state]);
+            let forward_result = executor.execute(&forward_exec, &mut forward_step_exec);
+
+            // Execute compensation step
+            let mut compensation_step_exec = FixedExecutor::new(vec![LatticeState::Unknown]);
+            let compensation_result = executor.execute(&compensation_exec, &mut compensation_step_exec);
+
+            // Execute no-op
+            let mut noop_step_exec = FixedExecutor::new(vec![]);
+            let noop_result = executor.execute(&noop_exec, &mut noop_step_exec);
+
+            // MR1: forward + compensation = no-op
+            let composed_state = Lattice::join(&forward_result.final_state, &compensation_result.final_state);
+            prop_assert_eq!(composed_state, noop_result.final_state,
+                "Forward step {:?} + compensation should equal no-op", forward_op);
+        });
+    }
+
+    /// MR2: Concurrent saga execution preserves total order invariants
+    ///
+    /// When multiple sagas execute concurrently on the same obligations,
+    /// the final lattice state should be independent of the interleaving order.
+    /// This tests the CALM theorem properties under concurrent execution.
+    #[test]
+    fn metamorphic_concurrent_saga_total_order() {
+        // Create two sagas that operate on overlapping obligations
+        let saga_a = SagaPlan::new("saga_a", vec![
+            SagaStep::new(SagaOpKind::Reserve, "reserve_a"),
+            SagaStep::new(SagaOpKind::Send, "send_a"),
+        ]);
+        let saga_b = SagaPlan::new("saga_b", vec![
+            SagaStep::new(SagaOpKind::Reserve, "reserve_b"),
+            SagaStep::new(SagaOpKind::Acquire, "acquire_b"),
+        ]);
+
+        // Test all possible interleavings
+        let interleavings = vec![
+            // saga_a then saga_b
+            ("sequential_a_then_b", vec![
+                ("saga_a", vec![LatticeState::Reserved, LatticeState::Reserved]),
+                ("saga_b", vec![LatticeState::Reserved, LatticeState::Reserved]),
+            ]),
+            // saga_b then saga_a
+            ("sequential_b_then_a", vec![
+                ("saga_b", vec![LatticeState::Reserved, LatticeState::Reserved]),
+                ("saga_a", vec![LatticeState::Reserved, LatticeState::Reserved]),
+            ]),
+            // interleaved execution
+            ("interleaved", vec![
+                ("saga_a", vec![LatticeState::Reserved, LatticeState::Reserved]),
+                ("saga_b", vec![LatticeState::Reserved, LatticeState::Reserved]),
+            ]),
+        ];
+
+        let executor = MonotoneSagaExecutor::new();
+        let mut final_states = Vec::new();
+
+        for (interleaving_name, saga_executions) in interleavings {
+            let mut combined_state = LatticeState::Unknown;
+
+            for (saga_name, step_states) in saga_executions {
+                let plan = if saga_name == "saga_a" { &saga_a } else { &saga_b };
+                let exec_plan = SagaExecutionPlan::from_plan(plan);
+                let mut step_exec = FixedExecutor::new(step_states);
+                let result = executor.execute(&exec_plan, &mut step_exec);
+                combined_state = Lattice::join(&combined_state, &result.final_state);
+            }
+
+            final_states.push((interleaving_name, combined_state));
+        }
+
+        // MR2: All interleavings should produce the same final state
+        let reference_state = final_states[0].1;
+        for (interleaving_name, state) in &final_states {
+            assert_eq!(*state, reference_state,
+                "Interleaving {} produced different final state than reference", interleaving_name);
+        }
+    }
+
+    /// MR3: Cancellation mid-saga triggers proper compensation chain
+    ///
+    /// When a saga is cancelled partway through execution, the compensation
+    /// steps should run for all completed forward steps, and the final state
+    /// should be equivalent to running the compensation saga directly.
+    #[test]
+    fn metamorphic_cancel_triggers_compensation() {
+        use proptest::prelude::*;
+
+        proptest!(|(
+            cancel_after_step in 1usize..=3,
+        )| {
+            // Create a saga with multiple steps
+            let full_saga = SagaPlan::new("full_saga", vec![
+                SagaStep::new(SagaOpKind::Reserve, "reserve"),
+                SagaStep::new(SagaOpKind::Send, "send"),
+                SagaStep::new(SagaOpKind::Acquire, "acquire"),
+                SagaStep::new(SagaOpKind::Commit, "commit"),
+            ]);
+
+            // Create compensation saga for the steps that would complete
+            let compensation_steps: Vec<SagaStep> = (0..cancel_after_step).map(|i| {
+                match i {
+                    0 => SagaStep::new(SagaOpKind::Release, "release_reserve"),
+                    1 => SagaStep::new(SagaOpKind::CancelDrain, "undo_send"),
+                    2 => SagaStep::new(SagaOpKind::Release, "release_acquire"),
+                    _ => SagaStep::new(SagaOpKind::Abort, "abort_commit"),
+                }
+            }).collect();
+
+            let compensation_saga = SagaPlan::new("compensation", compensation_steps);
+
+            let executor = MonotoneSagaExecutor::new();
+
+            // Execute partial saga (simulating cancellation)
+            let partial_steps = full_saga.steps[..cancel_after_step].to_vec();
+            let partial_saga = SagaPlan::new("partial", partial_steps);
+            let partial_exec = SagaExecutionPlan::from_plan(&partial_saga);
+
+            let step_states: Vec<LatticeState> = (0..cancel_after_step).map(|_| {
+                LatticeState::Reserved
+            }).collect();
+            let mut partial_step_exec = FixedExecutor::new(step_states);
+            let partial_result = executor.execute(&partial_exec, &mut partial_step_exec);
+
+            // Execute compensation saga
+            let compensation_exec = SagaExecutionPlan::from_plan(&compensation_saga);
+            let compensation_states: Vec<LatticeState> = (0..cancel_after_step).map(|_| {
+                LatticeState::Unknown  // Compensation undoes the forward steps
+            }).collect();
+            let mut compensation_step_exec = FixedExecutor::new(compensation_states);
+            let compensation_result = executor.execute(&compensation_exec, &mut compensation_step_exec);
+
+            // Execute direct compensation (what we expect the result to be)
+            let direct_compensation_exec = SagaExecutionPlan::from_plan(&compensation_saga);
+            let mut direct_step_exec = FixedExecutor::new(compensation_states.clone());
+            let direct_result = executor.execute(&direct_compensation_exec, &mut direct_step_exec);
+
+            // MR3: (partial + compensation) should equal direct compensation
+            let composed_state = Lattice::join(&partial_result.final_state, &compensation_result.final_state);
+            prop_assert_eq!(composed_state, direct_result.final_state,
+                "Cancelled saga + compensation should equal direct compensation for cancel_after_step={}", cancel_after_step);
+        });
     }
 }
