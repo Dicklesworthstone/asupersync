@@ -96,6 +96,107 @@ fn test_load_balance_strategy_configuration() {
     let _router = SymbolRouter::new(Arc::new(table));
 }
 
+#[test]
+fn mr_round_robin_non_receivable_gaps_preserve_healthy_fairness_cycle() {
+    let lb = asupersync::transport::router::LoadBalancer::new(LoadBalanceStrategy::RoundRobin);
+    let transformed_lb =
+        asupersync::transport::router::LoadBalancer::new(LoadBalanceStrategy::RoundRobin);
+
+    let base_endpoints = vec![
+        Arc::new(test_endpoint(1).with_state(EndpointState::Healthy)),
+        Arc::new(test_endpoint(2).with_state(EndpointState::Degraded)),
+        Arc::new(test_endpoint(3).with_state(EndpointState::Healthy)),
+    ];
+    let transformed_endpoints = vec![
+        Arc::new(test_endpoint(10).with_state(EndpointState::Draining)),
+        Arc::new(test_endpoint(1).with_state(EndpointState::Healthy)),
+        Arc::new(test_endpoint(11).with_state(EndpointState::Unhealthy)),
+        Arc::new(test_endpoint(2).with_state(EndpointState::Degraded)),
+        Arc::new(test_endpoint(12).with_state(EndpointState::Removed)),
+        Arc::new(test_endpoint(3).with_state(EndpointState::Healthy)),
+    ];
+
+    let base_sequence: Vec<_> = (0..12)
+        .map(|_| {
+            lb.select(&base_endpoints, None)
+                .expect("base round robin should select a receiver")
+                .id
+        })
+        .collect();
+    let transformed_sequence: Vec<_> = (0..12)
+        .map(|_| {
+            transformed_lb
+                .select(&transformed_endpoints, None)
+                .expect("transformed round robin should select a receiver")
+                .id
+        })
+        .collect();
+
+    assert_eq!(transformed_sequence, base_sequence);
+
+    for expected_id in [EndpointId::new(1), EndpointId::new(2), EndpointId::new(3)] {
+        let count = base_sequence
+            .iter()
+            .filter(|&&selected| selected == expected_id)
+            .count();
+        assert_eq!(count, 4, "expected evenly shared traffic for {expected_id}");
+    }
+}
+
+#[test]
+fn mr_weighted_round_robin_common_factor_scaling_preserves_traffic_share() {
+    let lb =
+        asupersync::transport::router::LoadBalancer::new(LoadBalanceStrategy::WeightedRoundRobin);
+    let scaled_lb =
+        asupersync::transport::router::LoadBalancer::new(LoadBalanceStrategy::WeightedRoundRobin);
+
+    let base_endpoints = vec![
+        Arc::new(test_endpoint(1).with_weight(1)),
+        Arc::new(test_endpoint(2).with_weight(3)),
+        Arc::new(test_endpoint(3).with_weight(2)),
+    ];
+    let scaled_endpoints = vec![
+        Arc::new(test_endpoint(1).with_weight(5)),
+        Arc::new(test_endpoint(2).with_weight(15)),
+        Arc::new(test_endpoint(3).with_weight(10)),
+    ];
+
+    let mut base_counts = [0usize; 3];
+    for _ in 0..6 {
+        let selected = lb
+            .select(&base_endpoints, None)
+            .expect("weighted round robin should select a receiver")
+            .id;
+        match selected {
+            EndpointId(1) => base_counts[0] += 1,
+            EndpointId(2) => base_counts[1] += 1,
+            EndpointId(3) => base_counts[2] += 1,
+            other => panic!("unexpected base endpoint: {other}"), // ubs:ignore - test logic
+        }
+    }
+
+    let mut scaled_counts = [0usize; 3];
+    for _ in 0..30 {
+        let selected = scaled_lb
+            .select(&scaled_endpoints, None)
+            .expect("scaled weighted round robin should select a receiver")
+            .id;
+        match selected {
+            EndpointId(1) => scaled_counts[0] += 1,
+            EndpointId(2) => scaled_counts[1] += 1,
+            EndpointId(3) => scaled_counts[2] += 1,
+            other => panic!("unexpected scaled endpoint: {other}"), // ubs:ignore - test logic
+        }
+    }
+
+    assert_eq!(base_counts, [1, 3, 2]);
+    assert_eq!(scaled_counts, [5, 15, 10]);
+
+    for idx in 0..base_counts.len() {
+        assert_eq!(scaled_counts[idx], base_counts[idx] * 5);
+    }
+}
+
 /// Test dispatch strategy enumeration.
 #[test]
 fn test_dispatch_strategy_types() {
