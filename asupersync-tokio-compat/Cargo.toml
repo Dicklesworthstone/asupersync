@@ -1,6 +1,6 @@
 [package]
 name = "asupersync-tokio-compat"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license-file = "../LICENSE"
 description = "Compatibility bridge for running Tokio-locked crates within the Asupersync async runtime."
@@ -17,7 +17,7 @@ exception_review = "threaded-agent-mail"
 
 [dependencies]
 # Core Asupersync runtime (no Tokio in core paths).
-asupersync = { version = "0.3.0", path = ".." }
+asupersync = { version = "0.3.1", path = ".." }
 
 # Tokio sync primitives and I/O traits — does NOT require a running Tokio runtime.
 # Used for trait implementations and type bridging.
@@ -64,5 +64,5 @@ must_use_candidate = "allow"
 missing_panics_doc = "allow"
 
 [dev-dependencies]
-asupersync = { version = "0.3.0", path = "..", features = ["test-internals"] }
+asupersync = { version = "0.3.1", path = "..", features = ["test-internals"] }
 futures-lite = "2"
