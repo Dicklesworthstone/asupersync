@@ -404,5 +404,127 @@ mod tests {
                 "both heaps should be drained after popping at their latest respective frontier",
             );
         }
+
+        #[test]
+        fn metamorphic_parent_deadline_cascade_rearming_siblings_preserves_wake_order(
+            parent_ms in 0u16..256u16,
+            early_sibling_deltas in prop::collection::vec(0u8..32u8, 0..8),
+            future_sibling_offsets in prop::collection::vec(1u8..32u8, 0..8),
+            child_offsets in prop::collection::vec(1u8..32u8, 1..8),
+        ) {
+            let parent_deadline = Time::from_millis(u64::from(parent_ms));
+            let mut direct_heap = TimerHeap::new();
+            let mut cascade_heap = TimerHeap::new();
+            let parent = task(1);
+            let mut sibling_deadlines = Vec::with_capacity(
+                early_sibling_deltas.len() + future_sibling_offsets.len(),
+            );
+            let mut future_siblings = Vec::with_capacity(future_sibling_offsets.len());
+            let mut next_task = 2u32;
+
+            cascade_heap.insert(parent, parent_deadline);
+
+            for delta in early_sibling_deltas {
+                let sibling = task(next_task);
+                next_task += 1;
+                let deadline_ms = parent_ms.saturating_sub(u16::from(delta));
+                let deadline = Time::from_millis(u64::from(deadline_ms));
+                direct_heap.insert(sibling, deadline);
+                cascade_heap.insert(sibling, deadline);
+                sibling_deadlines.push(deadline);
+            }
+
+            for offset in future_sibling_offsets {
+                let sibling = task(next_task);
+                next_task += 1;
+                let deadline_ms = parent_ms + u16::from(offset);
+                let deadline = Time::from_millis(u64::from(deadline_ms));
+                direct_heap.insert(sibling, deadline);
+                cascade_heap.insert(sibling, deadline);
+                sibling_deadlines.push(deadline);
+                future_siblings.push((sibling, deadline));
+            }
+
+            for offset in child_offsets {
+                let child = task(next_task);
+                next_task += 1;
+                let deadline = Time::from_millis(u64::from(parent_ms + u16::from(offset)));
+                cascade_heap.insert(child, deadline);
+            }
+
+            let mut cascade_result = cascade_heap
+                .pop_expired(parent_deadline)
+                .into_iter()
+                .filter(|task| *task != parent)
+                .collect::<Vec<_>>();
+
+            cascade_heap.clear();
+            for (sibling, deadline) in future_siblings.iter().copied() {
+                cascade_heap.insert(sibling, deadline);
+            }
+
+            let latest_sibling_deadline =
+                sibling_deadlines.iter().copied().max().unwrap_or(parent_deadline);
+            cascade_result.extend(cascade_heap.pop_expired(latest_sibling_deadline));
+
+            let direct_result = direct_heap.pop_expired(latest_sibling_deadline);
+
+            prop_assert_eq!(
+                cascade_result,
+                direct_result,
+                "cancelling a parent deadline cascade and re-arming only surviving siblings must preserve sibling wake ordering",
+            );
+            prop_assert!(
+                cascade_heap.is_empty() && direct_heap.is_empty(),
+                "both heaps should be drained after replaying sibling deadlines to their shared latest frontier",
+            );
+        }
+
+        #[test]
+        fn metamorphic_late_deadline_cancellation_noise_preserves_earlier_wake_order(
+            base_deadlines in prop::collection::vec(0u16..512u16, 1..24),
+            late_offsets in prop::collection::vec(1u16..128u16, 1..16),
+        ) {
+            let mut direct_heap = TimerHeap::new();
+            let mut noisy_heap = TimerHeap::new();
+
+            for (index, deadline_ms) in base_deadlines.iter().copied().enumerate() {
+                let task = task(index as u32 + 1);
+                let deadline = Time::from_millis(u64::from(deadline_ms));
+                direct_heap.insert(task, deadline);
+                noisy_heap.insert(task, deadline);
+            }
+
+            let frontier_ms = base_deadlines.iter().copied().max().unwrap_or(0);
+            let frontier = Time::from_millis(u64::from(frontier_ms));
+            let mut next_task = base_deadlines.len() as u32 + 1;
+
+            for offset in late_offsets {
+                let task = task(next_task);
+                next_task += 1;
+                let deadline = Time::from_millis(u64::from(frontier_ms) + u64::from(offset));
+                noisy_heap.insert(task, deadline);
+            }
+
+            let direct_result = direct_heap.pop_expired(frontier);
+            let noisy_result = noisy_heap.pop_expired(frontier);
+
+            prop_assert_eq!(
+                noisy_result,
+                direct_result,
+                "late deadlines that are later cancelled must not perturb the earlier wake frontier",
+            );
+            prop_assert!(
+                direct_heap.is_empty(),
+                "the direct heap should drain at the latest base deadline frontier",
+            );
+            prop_assert!(
+                noisy_heap
+                    .peek_deadline()
+                    .map(|deadline| deadline > frontier)
+                    .unwrap_or(true),
+                "late-only noise should remain strictly after the earlier frontier",
+            );
+        }
     }
 }
