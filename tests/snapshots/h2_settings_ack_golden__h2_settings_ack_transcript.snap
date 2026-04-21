@@ -1,0 +1,240 @@
+---
+source: tests/h2_settings_ack_golden.rs
+expression: golden
+---
+{
+  "scenarios": [
+    {
+      "name": "client_initial_settings",
+      "frames": [
+        {
+          "direction": "out",
+          "frame_type": "SETTINGS",
+          "ack": false,
+          "stream_id": "<connection>",
+          "settings": [
+            "EnablePush(false)",
+            "MaxConcurrentStreams(256)",
+            "MaxHeaderListSize(65536)"
+          ],
+          "encoded_bytes": [
+            0,
+            0,
+            18,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            3,
+            0,
+            0,
+            1,
+            0,
+            0,
+            6,
+            0,
+            1,
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "name": "server_acks_peer_settings",
+      "frames": [
+        {
+          "direction": "in",
+          "frame_type": "SETTINGS",
+          "ack": false,
+          "stream_id": "<connection>",
+          "settings": [
+            "MaxConcurrentStreams(50)",
+            "InitialWindowSize(32768)"
+          ],
+          "encoded_bytes": [
+            0,
+            0,
+            12,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            3,
+            0,
+            0,
+            0,
+            50,
+            0,
+            4,
+            0,
+            0,
+            128,
+            0
+          ]
+        },
+        {
+          "direction": "out",
+          "frame_type": "SETTINGS",
+          "ack": true,
+          "stream_id": "<connection>",
+          "settings": [],
+          "encoded_bytes": [
+            0,
+            0,
+            0,
+            4,
+            1,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "name": "client_requeues_settings_after_ack",
+      "frames": [
+        {
+          "direction": "out",
+          "frame_type": "SETTINGS",
+          "ack": false,
+          "stream_id": "<connection>",
+          "settings": [
+            "HeaderTableSize(8192)",
+            "EnablePush(false)",
+            "MaxConcurrentStreams(256)",
+            "MaxFrameSize(32768)",
+            "MaxHeaderListSize(131072)"
+          ],
+          "encoded_bytes": [
+            0,
+            0,
+            30,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            32,
+            0,
+            0,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            3,
+            0,
+            0,
+            1,
+            0,
+            0,
+            5,
+            0,
+            0,
+            128,
+            0,
+            0,
+            6,
+            0,
+            2,
+            0,
+            0
+          ]
+        },
+        {
+          "direction": "in",
+          "frame_type": "SETTINGS",
+          "ack": true,
+          "stream_id": "<connection>",
+          "settings": [],
+          "encoded_bytes": [
+            0,
+            0,
+            0,
+            4,
+            1,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "direction": "out",
+          "frame_type": "SETTINGS",
+          "ack": false,
+          "stream_id": "<connection>",
+          "settings": [
+            "HeaderTableSize(8192)",
+            "EnablePush(false)",
+            "MaxConcurrentStreams(256)",
+            "MaxFrameSize(32768)",
+            "MaxHeaderListSize(131072)"
+          ],
+          "encoded_bytes": [
+            0,
+            0,
+            30,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            32,
+            0,
+            0,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            3,
+            0,
+            0,
+            1,
+            0,
+            0,
+            5,
+            0,
+            0,
+            128,
+            0,
+            0,
+            6,
+            0,
+            2,
+            0,
+            0
+          ]
+        }
+      ]
+    }
+  ]
+}
