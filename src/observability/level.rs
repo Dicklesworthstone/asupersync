@@ -106,6 +106,8 @@ impl FromStr for LogLevel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn level_table() -> String {
         [
@@ -119,6 +121,57 @@ mod tests {
         .map(|level| format!("{level}|{}|{}", level.as_char(), level.as_str_lower()))
         .collect::<Vec<_>>()
         .join("\n")
+    }
+
+    fn structured_filter_snapshot() -> (String, u32, u128) {
+        let timestamp_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after unix epoch")
+            .as_nanos();
+        let pid = process::id();
+        let records = [
+            (LogLevel::Trace, "trace-path"),
+            (LogLevel::Debug, "debug-path"),
+            (LogLevel::Info, "info-path"),
+            (LogLevel::Warn, "warn-path"),
+            (LogLevel::Error, "error-path"),
+        ];
+
+        let rendered = [
+            LogLevel::Trace,
+            LogLevel::Debug,
+            LogLevel::Info,
+            LogLevel::Warn,
+            LogLevel::Error,
+        ]
+        .into_iter()
+        .map(|threshold| {
+            let rendered = records
+                .iter()
+                .filter(|(level, _)| level.is_enabled_at(threshold))
+                .map(|(level, message)| {
+                    format!(
+                        "{{\"pid\":{pid},\"threshold\":\"{threshold}\",\"timestamp\":\"ts-{timestamp_nanos}\",\"level\":\"{level}\",\"message\":\"{message}\"}}",
+                        threshold = threshold.as_str_lower(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("[threshold={}]\n{rendered}", threshold.as_str_lower())
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+        (rendered, pid, timestamp_nanos)
+    }
+
+    fn scrub_structured_filter_snapshot(rendered: &str, pid: u32, timestamp_nanos: u128) -> String {
+        rendered
+            .replace(&format!("\"pid\":{pid}"), "\"pid\":[PID]")
+            .replace(
+                &format!("\"timestamp\":\"ts-{timestamp_nanos}\""),
+                "\"timestamp\":\"[TIMESTAMP]\"",
+            )
     }
 
     #[test]
@@ -182,5 +235,14 @@ mod tests {
     #[test]
     fn log_level_table_snapshot() {
         insta::assert_snapshot!("log_level_table", level_table());
+    }
+
+    #[test]
+    fn log_level_structured_filter_snapshot_scrubs_timestamp_and_pid() {
+        let (rendered, pid, timestamp_nanos) = structured_filter_snapshot();
+        insta::assert_snapshot!(
+            "log_level_structured_filter_scrubbed",
+            scrub_structured_filter_snapshot(&rendered, pid, timestamp_nanos)
+        );
     }
 }
