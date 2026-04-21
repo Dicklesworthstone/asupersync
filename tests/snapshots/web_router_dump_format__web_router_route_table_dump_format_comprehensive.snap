@@ -1,0 +1,79 @@
+---
+source: tests/web_router_dump_format.rs
+expression: dump
+---
+=== Web Router Route Table Dump ===
+
+Summary:
+  Total routes: 40
+  Direct routes: 26
+  Nested routers: 3
+  Parameter routes: 13
+  Wildcard routes: 1
+  Has fallback: true
+
+Routes by HTTP Method:
+  DELETE: 3 routes
+  GET: 22 routes
+  POST: 9 routes
+  PUT: 2 routes
+
+Route Patterns (stable sort):
+[1] / -> [GET]
+[17] /assets/css/:file -> [GET]
+[16] /assets/js/:file -> [GET]
+[5] /blog -> [GET]
+[11] /blog/:slug -> [GET]
+[29] /blog/:year/:month/:day/:slug -> [GET]
+[21] /categories/:category -> [GET]
+[8] /contact -> [GET, POST]
+[18] /download/:file_id -> [GET]
+[12] /favicon.ico -> [GET]
+[19] /files/:bucket/:key -> [GET, DELETE]
+[6] /login -> [GET, POST]
+[7] /logout -> [POST]
+[21] /newsletter/subscribe -> [POST]
+[23] /newsletter/unsubscribe -> [POST]
+[6] /posts -> [GET, POST]
+[10] /posts/:id -> [GET, PUT, DELETE]
+[19] /posts/:id/comments -> [GET, POST]
+[31] /posts/:id/comments/:comment_id -> [GET, PUT, DELETE]
+[9] /register -> [GET, POST]
+[9] /static/* -> [GET]
+[10] /tags/:tag -> [GET]
+[7] /upload -> [POST]
+[3] /ws -> [GET]
+[14] /ws/chat/:room -> [GET]
+[26] /ws/notifications/:user_id -> [GET]
+
+Parameter Extraction Patterns:
+  params[1]: :category
+  params[1]: :file
+  params[1]: :file_id
+  params[1]: :id
+  params[1]: :room
+  params[1]: :slug
+  params[1]: :tag
+  params[1]: :user_id
+  params[2]: :bucket, :key
+  params[2]: :id, :comment_id
+  params[4]: :year, :month, :day, :slug
+
+Nested Router Structure:
+/api/v1 -> 6 routes
+  /api/v1/users
+  /api/v1/users/:id
+  /api/v1/users/:id/posts
+  /api/v1/users/:id/posts/:post_id
+  /api/v1/users/:id/profile
+  /api/v1/search
+/admin -> 5 routes
+  /admin/dashboard
+  /admin/users
+  /admin/users/:id/ban
+  /admin/config
+  /admin/config/:section
+/health -> 3 routes
+  /health/ping
+  /health/ready
+  /health/metrics

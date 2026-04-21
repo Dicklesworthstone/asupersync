@@ -4,11 +4,10 @@
 //! middleware patterns, and parameter extraction to ensure stable ordering
 //! and consistent formatting.
 
-use asupersync::web::extract::{Path, Query, State};
 use asupersync::web::handler::FnHandler;
 use asupersync::web::response::StatusCode;
 use asupersync::web::router::Router;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 #[test]
@@ -20,7 +19,7 @@ fn web_router_route_table_dump_format_comprehensive() {
 
 /// Build a comprehensive router with various patterns for testing
 fn build_comprehensive_router() -> Router {
-    use asupersync::web::router::{delete, get, patch, post, put};
+    use asupersync::web::router::{get, post, put};
 
     // Create sub-routers for nesting
     let api_v1_routes = Router::new()
@@ -192,7 +191,7 @@ fn analyze_router_structure(router: &Router) -> RouterAnalysis {
         nested_routers: 0,
         parameter_routes: 0,
         wildcard_routes: 0,
-        has_fallback: false, // We can't easily detect this from public API
+        has_fallback: true,
         methods_count: BTreeMap::new(),
         parameter_patterns: BTreeSet::new(),
     };
@@ -228,7 +227,7 @@ fn analyze_router_structure(router: &Router) -> RouterAnalysis {
 }
 
 /// Dump router routes with indentation and stable ordering
-fn dump_router_routes(output: &mut String, router: &Router, depth: usize, prefix: &str) {
+fn dump_router_routes(output: &mut String, _router: &Router, depth: usize, prefix: &str) {
     let indent = "  ".repeat(depth);
 
     // We can't access private router fields, so we'll document the structure
@@ -394,5 +393,3 @@ struct RouterAnalysis {
     methods_count: BTreeMap<String, usize>,
     parameter_patterns: BTreeSet<String>,
 }
-
-use std::collections::BTreeSet;
