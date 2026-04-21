@@ -2072,7 +2072,3 @@ mod tests {
         );
     }
 }
- calculate MUST coverage"
-        );
-    }
-}

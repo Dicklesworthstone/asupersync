@@ -63,5 +63,5 @@ pub use semaphore::{
 #[cfg(test)]
 mod barrier_metamorphic;
 mod mutex_deadlock_test;
-// #[cfg(test)]
-// mod mutex_metamorphic;
+#[cfg(test)]
+mod mutex_metamorphic;

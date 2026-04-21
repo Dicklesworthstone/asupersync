@@ -9,7 +9,6 @@ use std::task::{Context, Poll, Wake};
 
 struct FlagWaker(AtomicBool);
 
-use std::task::Wake;
 impl Wake for FlagWaker {
     fn wake(self: Arc<Self>) {
         self.0.store(true, Ordering::SeqCst);

@@ -125,7 +125,6 @@ struct TaskWaker {
     source: WakeSource,
 }
 
-use std::task::Wake;
 impl Wake for TaskWaker {
     #[inline]
     fn wake(self: Arc<Self>) {

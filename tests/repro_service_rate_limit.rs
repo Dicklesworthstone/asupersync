@@ -9,8 +9,6 @@ use std::task::{Context, Poll, Wake};
 use std::time::Duration;
 
 struct NoopWaker(Arc<AtomicUsize>);
-use std::task::Wake;
-impl Wake for NoopWaker {
     fn wake(self: Arc<Self>) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }

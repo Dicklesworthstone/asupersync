@@ -7117,6 +7117,7 @@ mod tests {
     use asupersync::observability::{TaskRegionCountWire, TaskStateInfo};
     use asupersync::trace::{TraceMetadata, TraceWriter};
     use clap::Parser;
+    use insta::{assert_json_snapshot, assert_snapshot};
     use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
 
@@ -7206,6 +7207,14 @@ mod tests {
             .expect("write event");
         writer.finish().expect("finish");
         file
+    }
+
+    fn parse_jsonl_values(payload: &str) -> Vec<serde_json::Value> {
+        payload
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).expect("parse jsonl entry"))
+            .collect()
     }
 
     #[test]
@@ -9115,6 +9124,232 @@ lab:
     }
 
     #[test]
+    fn report_export_document_snapshot_is_stable() {
+        let bundle = advanced_diagnostics_report_bundle();
+        let fixture = bundle
+            .fixtures
+            .iter()
+            .find(|entry| entry.fixture_id == "advanced_failure_path")
+            .expect("fixture exists");
+        let document = build_report_export_document(&bundle, fixture).expect("document");
+        assert_json_snapshot!(
+            document,
+            @r###"
+        {
+          "schema_version": "doctor-report-export-v1",
+          "fixture_id": "advanced_failure_path",
+          "report_id": "doctor-report-failure-v1",
+          "core_contract_version": "doctor-core-report-v1",
+          "extension_contract_version": "doctor-advanced-report-v1",
+          "summary": {
+            "status": "failed",
+            "overall_outcome": "failed",
+            "total_findings": 2,
+            "critical_findings": 1
+          },
+          "findings": [
+            {
+              "finding_id": "finding-001",
+              "title": "Obligation leak during shutdown path",
+              "severity": "critical",
+              "status": "open",
+              "evidence_refs": [
+                "evidence-001"
+              ],
+              "command_refs": [
+                "command-001"
+              ]
+            },
+            {
+              "finding_id": "finding-002",
+              "title": "Replay mismatch for cancellation timeline",
+              "severity": "high",
+              "status": "in_progress",
+              "evidence_refs": [
+                "evidence-002"
+              ],
+              "command_refs": [
+                "command-002"
+              ]
+            }
+          ],
+          "evidence_links": [
+            {
+              "evidence_id": "evidence-001",
+              "source": "structured_log",
+              "artifact_pointer": "artifacts/run-doctor-failure/doctor/core-report/finding-001.json",
+              "replay_pointer": "rch exec -- cargo test -p asupersync -- obligation_leak",
+              "outcome_class": "failed",
+              "franken_trace_id": "trace-franken-failure-001"
+            },
+            {
+              "evidence_id": "evidence-002",
+              "source": "trace",
+              "artifact_pointer": "artifacts/run-doctor-failure/doctor/core-report/trace-002.json",
+              "replay_pointer": "asupersync trace verify artifacts/run-doctor-failure/trace-002.bin",
+              "outcome_class": "failed",
+              "franken_trace_id": "trace-franken-failure-002"
+            }
+          ],
+          "command_provenance": [
+            {
+              "command_id": "command-001",
+              "command": "rch exec -- cargo test -p asupersync obligation_leak -- --nocapture",
+              "tool": "rch",
+              "exit_code": 101,
+              "outcome_class": "failed"
+            },
+            {
+              "command_id": "command-002",
+              "command": "asupersync trace verify artifacts/run-doctor-failure/trace-002.bin",
+              "tool": "asupersync",
+              "exit_code": 2,
+              "outcome_class": "failed"
+            }
+          ],
+          "remediation_outcomes": [
+            {
+              "delta_id": "delta-001",
+              "finding_id": "finding-001",
+              "previous_status": "open",
+              "next_status": "in_progress",
+              "delta_outcome": "failed",
+              "mapped_taxonomy_class": "remediation_safety",
+              "mapped_taxonomy_dimension": "recovery_planning",
+              "verification_evidence_refs": [
+                "evidence-001"
+              ]
+            }
+          ],
+          "trust_transitions": [
+            {
+              "transition_id": "trust-001",
+              "stage": "post-remediation-attempt",
+              "previous_score": 82,
+              "next_score": 44,
+              "outcome_class": "failed",
+              "mapped_taxonomy_severity": "error",
+              "rationale": "Critical finding persisted after first remediation pass."
+            }
+          ],
+          "collaboration_trail": [
+            {
+              "entry_id": "collab-001",
+              "channel": "agent_mail",
+              "actor": "ChartreuseBrook",
+              "action": "requested remediation follow-up",
+              "thread_id": "br-2b4jj.5.9",
+              "message_ref": "mail-advanced-001",
+              "bead_ref": "asupersync-2b4jj.5.9",
+              "mapped_taxonomy_narrative": "Remediation safety remained degraded after failed verification."
+            }
+          ],
+          "troubleshooting_playbooks": [
+            {
+              "playbook_id": "playbook-001",
+              "title": "Critical remediation retry loop",
+              "trigger_taxonomy_class": "remediation_safety",
+              "trigger_taxonomy_severity": "error",
+              "ordered_steps": [
+                "capture_fresh_evidence",
+                "reproduce_failure_with_rch",
+                "stage_patch_and_verify"
+              ],
+              "command_refs": [
+                "command-001"
+              ],
+              "evidence_refs": [
+                "evidence-001"
+              ]
+            }
+          ],
+          "provenance": {
+            "run_id": "run-doctor-failure",
+            "scenario_id": "doctor-core-report-failure",
+            "trace_id": "trace-doctor-failure",
+            "seed": "1337",
+            "generated_by": "doctor_asupersync",
+            "generated_at": "2026-02-26T06:00:00Z"
+          }
+        }
+        "###
+        );
+    }
+
+    #[test]
+    fn report_export_markdown_snapshot_is_stable() {
+        let bundle = advanced_diagnostics_report_bundle();
+        let fixture = bundle
+            .fixtures
+            .iter()
+            .find(|entry| entry.fixture_id == "advanced_failure_path")
+            .expect("fixture exists");
+        let document = build_report_export_document(&bundle, fixture).expect("document");
+        let markdown = render_doctor_report_markdown(&document);
+        assert_snapshot!(
+            markdown,
+            @r###"
+        # Doctor Diagnostics Export: advanced_failure_path
+
+        - Schema: doctor-report-export-v1
+        - Core contract: doctor-core-report-v1
+        - Extension contract: doctor-advanced-report-v1
+        - Report ID: doctor-report-failure-v1
+        - Run ID: run-doctor-failure
+        - Scenario ID: doctor-core-report-failure
+        - Trace ID: trace-doctor-failure
+        - Seed: 1337
+
+        ## Summary
+
+        - Status: failed
+        - Outcome: failed
+        - Total findings: 2
+        - Critical findings: 1
+
+        ## Findings
+
+        - `finding-001` Obligation leak during shutdown path (severity=critical, status=open)
+          - evidence_refs: evidence-001
+          - command_refs: command-001
+        - `finding-002` Replay mismatch for cancellation timeline (severity=high, status=in_progress)
+          - evidence_refs: evidence-002
+          - command_refs: command-002
+
+        ## Evidence Links
+
+        - `evidence-001` source=structured_log outcome=failed artifact=artifacts/run-doctor-failure/doctor/core-report/finding-001.json replay=rch exec -- cargo test -p asupersync -- obligation_leak
+        - `evidence-002` source=trace outcome=failed artifact=artifacts/run-doctor-failure/doctor/core-report/trace-002.json replay=asupersync trace verify artifacts/run-doctor-failure/trace-002.bin
+
+        ## Command Provenance
+
+        - `command-001` [rch] exit=101 outcome=failed command=`rch exec -- cargo test -p asupersync obligation_leak -- --nocapture`
+        - `command-002` [asupersync] exit=2 outcome=failed command=`asupersync trace verify artifacts/run-doctor-failure/trace-002.bin`
+
+        ## Remediation Outcomes
+
+        - `delta-001` finding=finding-001 open -> in_progress outcome=failed class=remediation_safety dimension=recovery_planning
+          - verification_evidence_refs: evidence-001
+
+        ## Trust Transitions
+
+        - `trust-001` stage=post-remediation-attempt 82 -> 44 outcome=failed severity=error rationale=Critical finding persisted after first remediation pass.
+
+        ## Collaboration Trail
+
+        - `collab-001` channel=agent_mail actor=ChartreuseBrook action=requested remediation follow-up thread=br-2b4jj.5.9 message=mail-advanced-001 bead=asupersync-2b4jj.5.9
+
+        ## Troubleshooting Playbooks
+
+        - `playbook-001` Critical remediation retry loop (class=remediation_safety, severity=error)
+          - ordered_steps: capture_fresh_evidence -> reproduce_failure_with_rch -> stage_patch_and_verify
+          - command_refs: command-001
+          - evidence_refs: evidence-001
+        "###
+        );
+    }
+
+    #[test]
     fn render_doctor_report_markdown_includes_required_sections() {
         let bundle = advanced_diagnostics_report_bundle();
         let fixture = bundle
@@ -9198,6 +9433,133 @@ lab:
         let first_decision = fs::read_to_string(&first.decision_json).expect("first decision");
         let second_decision = fs::read_to_string(&second.decision_json).expect("second decision");
         assert_eq!(first_decision, second_decision);
+    }
+
+    #[test]
+    fn franken_export_snapshot_is_stable() {
+        let fixture = core_diagnostics_report_bundle()
+            .fixtures
+            .into_iter()
+            .find(|candidate| candidate.fixture_id == "baseline_failure_path")
+            .expect("fixture exists");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact = export_core_report_to_franken_artifacts(
+            fixture.fixture_id.as_str(),
+            &fixture.report,
+            temp.path(),
+        )
+        .expect("export");
+
+        let evidence = fs::read_to_string(&artifact.evidence_jsonl).expect("read evidence");
+        let decision = fs::read_to_string(&artifact.decision_json).expect("read decision");
+        let evidence_entries = parse_jsonl_values(&evidence);
+        let decision_entries: serde_json::Value =
+            serde_json::from_str(&decision).expect("parse decision payload");
+
+        assert_json_snapshot!(
+            serde_json::json!({
+                "evidence": evidence_entries,
+                "decision": decision_entries,
+            }),
+            @r###"
+        {
+          "evidence": [
+            {
+              "a": "hold",
+              "c": "structured_log",
+              "cal": 0.68,
+              "cel": 0.3,
+              "el": {
+                "hold": 0.3,
+                "promote": 0.45
+              },
+              "fb": true,
+              "p": [
+                0.55,
+                0.45
+              ],
+              "tf": [
+                [
+                  "evidence_id",
+                  1.0
+                ],
+                [
+                  "outcome_class",
+                  0.8
+                ]
+              ],
+              "ts": 16358360581643888801
+            },
+            {
+              "a": "hold",
+              "c": "trace",
+              "cal": 0.68,
+              "cel": 0.3,
+              "el": {
+                "hold": 0.3,
+                "promote": 0.45
+              },
+              "fb": true,
+              "p": [
+                0.55,
+                0.45
+              ],
+              "tf": [
+                [
+                  "evidence_id",
+                  1.0
+                ],
+                [
+                  "outcome_class",
+                  0.8
+                ]
+              ],
+              "ts": 16358360581664031791
+            }
+          ],
+          "decision": [
+            {
+              "action_chosen": "hold_release",
+              "calibration_score": 0.55,
+              "contract_name": "doctor-core-diagnostics",
+              "decision_id": "d4ab0c92e4bf980b88fb7b1d73e79239",
+              "expected_loss": 0.17,
+              "expected_loss_by_action": {
+                "continue_investigation": 0.2975,
+                "hold_release": 0.17,
+                "promote_fix": 0.4675
+              },
+              "fallback_active": true,
+              "posterior_snapshot": [
+                0.35,
+                0.65
+              ],
+              "trace_id": "1548473d85174633375fbb6754396275",
+              "ts_unix_ms": 8649082491939616561
+            },
+            {
+              "action_chosen": "continue_investigation",
+              "calibration_score": 0.55,
+              "contract_name": "doctor-core-diagnostics",
+              "decision_id": "d4ab0c92e1bf980b88fb7b1d73e78e88",
+              "expected_loss": 0.22749999999999998,
+              "expected_loss_by_action": {
+                "continue_investigation": 0.22749999999999998,
+                "hold_release": 0.13,
+                "promote_fix": 0.35750000000000004
+              },
+              "fallback_active": true,
+              "posterior_snapshot": [
+                0.35,
+                0.65
+              ],
+              "trace_id": "1548473d82174633375fbb6754395ec4",
+              "ts_unix_ms": 8649082491972460351
+            }
+          ]
+        }
+        "###
+        );
     }
 
     #[test]

@@ -1733,8 +1733,3 @@ mod tests {
         assert_eq!(&long_data_packet[7..], data);
     }
 }
-  }
-}
-ta);
-    }
-}
