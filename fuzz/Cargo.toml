@@ -159,6 +159,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_length_delimited_frame_splitter"
+path = "fuzz_targets/fuzz_length_delimited_frame_splitter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_lines_codec"
 path = "fuzz_targets/lines_codec.rs"
 test = false
@@ -987,6 +994,13 @@ bench = false
 [[bin]]
 name = "length_delimited_decoder_boundary"
 path = "fuzz_targets/length_delimited_decoder_boundary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_length_delimited_frame_splitter"
+path = "fuzz_targets/fuzz_length_delimited_frame_splitter.rs"
 test = false
 doc = false
 bench = false
