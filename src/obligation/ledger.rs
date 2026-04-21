@@ -1645,6 +1645,11 @@ mod tests {
         ledger: &ObligationLedger,
         id: ObligationId,
     ) -> (
+        ObligationId,
+        ObligationKind,
+        TaskId,
+        RegionId,
+        Time,
         ObligationState,
         Option<Time>,
         Option<ObligationAbortReason>,
@@ -1652,6 +1657,11 @@ mod tests {
     ) {
         let record = ledger.get(id).expect("record exists");
         (
+            record.id,
+            record.kind,
+            record.holder,
+            record.region,
+            record.reserved_at,
             record.state,
             record.resolved_at,
             record.abort_reason,

@@ -1563,3 +1563,10 @@ path = "fuzz_targets/router_table_updates.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_security_mac_verifier"
+path = "fuzz_targets/fuzz_security_mac_verifier.rs"
+test = false
+doc = false
+bench = false
