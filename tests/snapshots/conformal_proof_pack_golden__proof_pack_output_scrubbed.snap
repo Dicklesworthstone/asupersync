@@ -1,0 +1,214 @@
+---
+source: tests/conformal_proof_pack_golden.rs
+expression: snapshot
+---
+[
+  {
+    "scenario": "passing_clean_observation",
+    "config": {
+      "alpha": 0.05,
+      "min_calibration_samples": 5
+    },
+    "source_report": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "check_time_nanos": "[check_time_nanos]",
+      "entries": [
+        {
+          "invariant": "task_leak",
+          "passed": true,
+          "violation": null,
+          "entities_tracked": 8,
+          "events_recorded": 49
+        },
+        {
+          "invariant": "quiescence",
+          "passed": true,
+          "violation": null,
+          "entities_tracked": 7,
+          "events_recorded": 51
+        }
+      ]
+    },
+    "calibration_samples_before_attempt": 8,
+    "proof": {
+      "text": "CONFORMAL CALIBRATION REPORT\ntarget coverage: 95.0% (alpha=0.050)\ncalibration samples: 9\noverall empirical coverage: 100.0% (2/2)\n\n  task_leak: score=0.0107 threshold=0.0146 [OK] (n=8)\n  quiescence: score=0.0113 threshold=0.0163 [OK] (n=8)\n\ncalibration: WELL-CALIBRATED\n",
+      "json": {
+        "alpha": 0.05,
+        "calibration_samples": 9.0,
+        "coverage_target": 0.95,
+        "overall_coverage": {
+          "covered": 2.0,
+          "rate": 1.0,
+          "total": 2.0
+        },
+        "per_invariant_coverage": [
+          {
+            "covered": 1.0,
+            "invariant": "quiescence",
+            "rate": 1.0,
+            "total": 1.0
+          },
+          {
+            "covered": 1.0,
+            "invariant": "task_leak",
+            "rate": 1.0,
+            "total": 1.0
+          }
+        ],
+        "prediction_sets": [
+          {
+            "calibration_n": 8.0,
+            "conforming": true,
+            "coverage_target": 0.95,
+            "invariant": "task_leak",
+            "score": 0.010737,
+            "threshold": 0.014623
+          },
+          {
+            "calibration_n": 8.0,
+            "conforming": true,
+            "coverage_target": 0.95,
+            "invariant": "quiescence",
+            "score": 0.01134,
+            "threshold": 0.016286
+          }
+        ],
+        "well_calibrated": true
+      },
+      "well_calibrated": true,
+      "miscalibrated_invariants": [],
+      "anomalous_invariants": [],
+      "conforming_invariants": [
+        "task_leak",
+        "quiescence"
+      ]
+    },
+    "boundary": null
+  },
+  {
+    "scenario": "failing_repeated_violation",
+    "config": {
+      "alpha": 0.05,
+      "min_calibration_samples": 5
+    },
+    "source_report": {
+      "total": 2,
+      "passed": 0,
+      "failed": 2,
+      "check_time_nanos": "[check_time_nanos]",
+      "entries": [
+        {
+          "invariant": "task_leak",
+          "passed": false,
+          "violation": "task leaked past region close",
+          "entities_tracked": 24,
+          "events_recorded": 180
+        },
+        {
+          "invariant": "quiescence",
+          "passed": false,
+          "violation": "region failed to quiesce before deadline",
+          "entities_tracked": 19,
+          "events_recorded": 144
+        }
+      ]
+    },
+    "calibration_samples_before_attempt": 8,
+    "proof": {
+      "text": "CONFORMAL CALIBRATION REPORT\ntarget coverage: 95.0% (alpha=0.050)\ncalibration samples: 11\noverall empirical coverage: 66.7% (4/6)\n\n  task_leak: score=1.2595 threshold=1.4837 [OK] (n=10)\n  quiescence: score=1.2148 threshold=1.3673 [OK] (n=10)\n\ncalibration: MISCALIBRATED on: quiescence, task_leak\n",
+      "json": {
+        "alpha": 0.05,
+        "calibration_samples": 11.0,
+        "coverage_target": 0.95,
+        "overall_coverage": {
+          "covered": 4.0,
+          "rate": 0.666667,
+          "total": 6.0
+        },
+        "per_invariant_coverage": [
+          {
+            "covered": 2.0,
+            "invariant": "quiescence",
+            "rate": 0.666667,
+            "total": 3.0
+          },
+          {
+            "covered": 2.0,
+            "invariant": "task_leak",
+            "rate": 0.666667,
+            "total": 3.0
+          }
+        ],
+        "prediction_sets": [
+          {
+            "calibration_n": 10.0,
+            "conforming": true,
+            "coverage_target": 0.95,
+            "invariant": "task_leak",
+            "score": 1.259459,
+            "threshold": 1.483709
+          },
+          {
+            "calibration_n": 10.0,
+            "conforming": true,
+            "coverage_target": 0.95,
+            "invariant": "quiescence",
+            "score": 1.214827,
+            "threshold": 1.367273
+          }
+        ],
+        "well_calibrated": false
+      },
+      "well_calibrated": false,
+      "miscalibrated_invariants": [
+        "quiescence",
+        "task_leak"
+      ],
+      "anomalous_invariants": [],
+      "conforming_invariants": [
+        "task_leak",
+        "quiescence"
+      ]
+    },
+    "boundary": null
+  },
+  {
+    "scenario": "edge_calibration_boundary_skip",
+    "config": {
+      "alpha": 0.1,
+      "min_calibration_samples": 5
+    },
+    "source_report": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "check_time_nanos": "[check_time_nanos]",
+      "entries": [
+        {
+          "invariant": "task_leak",
+          "passed": true,
+          "violation": null,
+          "entities_tracked": 9,
+          "events_recorded": 47
+        },
+        {
+          "invariant": "quiescence",
+          "passed": true,
+          "violation": null,
+          "entities_tracked": 8,
+          "events_recorded": 49
+        }
+      ]
+    },
+    "calibration_samples_before_attempt": 4,
+    "proof": null,
+    "boundary": {
+      "prediction_available": false,
+      "calibration_samples_after_attempt": 5,
+      "calibrated_after_attempt": true,
+      "reason": "observation consumed by calibration boundary transition"
+    }
+  }
+]
