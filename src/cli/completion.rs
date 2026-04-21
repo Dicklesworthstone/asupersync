@@ -1173,4 +1173,92 @@ mod tests {
         insta::assert_json_snapshot!("completion_script_bundle_scrubbed", snapshot);
         crate::test_complete!("completion_script_bundle_scrubbed_snapshot");
     }
+
+    #[test]
+    fn completion_script_comprehensive_format_golden_snapshot() {
+        init_test("completion_script_comprehensive_format_golden_snapshot");
+
+        // Generate comprehensive completion scripts for all supported shells
+        let shells_and_scripts = vec![
+            ("bash", Shell::Bash),
+            ("zsh", Shell::Zsh),
+            ("fish", Shell::Fish),
+            ("powershell", Shell::PowerShell),
+            ("elvish", Shell::Elvish),
+        ];
+
+        let mut comprehensive_report = String::new();
+        comprehensive_report.push_str("=== CLI Completion Scripts Comprehensive Report ===\n\n");
+
+        for (shell_name, shell) in shells_and_scripts {
+            comprehensive_report.push_str(&format!("[{}]\n", shell_name));
+
+            // Generate raw completion script
+            let mut buf = Vec::new();
+            generate_completions(shell, &SnapshotCompletable, &mut buf).unwrap();
+            let script = String::from_utf8(buf).unwrap();
+
+            // Analyze script characteristics
+            let line_count = script.lines().count();
+            let char_count = script.len();
+            let has_subcommands = script.contains("run") && script.contains("help");
+            let has_options = script.contains("--help") && script.contains("--dry-run");
+
+            comprehensive_report.push_str(&format!("line_count: {}\n", line_count));
+            comprehensive_report.push_str(&format!("char_count: {}\n", char_count));
+            comprehensive_report.push_str(&format!("has_subcommands: {}\n", has_subcommands));
+            comprehensive_report.push_str(&format!("has_options: {}\n", has_options));
+
+            // Shell-specific analysis
+            match shell {
+                Shell::Bash => {
+                    let has_complete = script.contains("complete -F");
+                    let has_compgen = script.contains("compgen");
+                    let has_bash_completion_func = script.contains("_asupersync_completions");
+                    comprehensive_report.push_str(&format!("has_complete_function: {}\n", has_complete));
+                    comprehensive_report.push_str(&format!("has_compgen: {}\n", has_compgen));
+                    comprehensive_report.push_str(&format!("has_completion_function: {}\n", has_bash_completion_func));
+                }
+                Shell::Zsh => {
+                    let has_compdef = script.contains("compdef");
+                    let has_zsh_function = script.contains("_asupersync");
+                    let has_complete_options = script.contains("_arguments");
+                    comprehensive_report.push_str(&format!("has_compdef: {}\n", has_compdef));
+                    comprehensive_report.push_str(&format!("has_zsh_function: {}\n", has_zsh_function));
+                    comprehensive_report.push_str(&format!("has_arguments: {}\n", has_complete_options));
+                }
+                Shell::Fish => {
+                    let has_complete_cmd = script.contains("complete --command");
+                    let has_fish_conditions = script.contains("__fish_use_subcommand");
+                    comprehensive_report.push_str(&format!("has_complete_command: {}\n", has_complete_cmd));
+                    comprehensive_report.push_str(&format!("has_fish_conditions: {}\n", has_fish_conditions));
+                }
+                Shell::PowerShell => {
+                    let has_register = script.contains("Register-ArgumentCompleter");
+                    let has_scriptblock = script.contains("scriptblock");
+                    comprehensive_report.push_str(&format!("has_register_completer: {}\n", has_register));
+                    comprehensive_report.push_str(&format!("has_scriptblock: {}\n", has_scriptblock));
+                }
+                Shell::Elvish => {
+                    let has_edit_completion = script.contains("edit:completion");
+                    let has_elvish_arg_completer = script.contains("arg-completer");
+                    comprehensive_report.push_str(&format!("has_edit_completion: {}\n", has_edit_completion));
+                    comprehensive_report.push_str(&format!("has_arg_completer: {}\n", has_elvish_arg_completer));
+                }
+                _ => {}
+            }
+
+            comprehensive_report.push_str("\n");
+        }
+
+        // Create golden snapshot for completion format validation
+        insta::with_settings!({
+            snapshot_path => "../tests/snapshots",
+            prepend_module_to_snapshot => false,
+        }, {
+            insta::assert_snapshot!("cli_completion_comprehensive_format", comprehensive_report.trim_end());
+        });
+
+        crate::test_complete!("completion_script_comprehensive_format_golden_snapshot");
+    }
 }
