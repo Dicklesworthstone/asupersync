@@ -300,7 +300,14 @@ impl Output {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use insta::assert_json_snapshot;
+    use parking_lot::Mutex;
+    use serde::Serializer;
+    use serde::ser::Error as _;
+    use serde_json::Value;
+    use std::io::{self, Cursor, Write};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Serialize)]
     struct TestItem {
@@ -318,9 +325,130 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedBuffer {
+        fn snapshot(&self) -> Vec<u8> {
+            self.0.lock().clone()
+        }
+
+        fn snapshot_string(&self) -> String {
+            String::from_utf8(self.snapshot()).expect("snapshot should be utf-8")
+        }
+    }
+
+    impl Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct FlushFailWriter {
+        buffer: SharedBuffer,
+        flush_calls: Arc<AtomicUsize>,
+        fail_on_flush_call: usize,
+    }
+
+    impl FlushFailWriter {
+        fn new(fail_on_flush_call: usize) -> Self {
+            Self {
+                buffer: SharedBuffer::default(),
+                flush_calls: Arc::new(AtomicUsize::new(0)),
+                fail_on_flush_call,
+            }
+        }
+
+        fn snapshot_string(&self) -> String {
+            self.buffer.snapshot_string()
+        }
+
+        fn flush_count(&self) -> usize {
+            self.flush_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Write for FlushFailWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            let call = self.flush_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == self.fail_on_flush_call {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    format!("synthetic flush failure on call {call}"),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct FailingItem;
+
+    impl Serialize for FailingItem {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            Err(S::Error::custom("synthetic serialize failure"))
+        }
+    }
+
+    impl Outputtable for FailingItem {
+        fn human_format(&self) -> String {
+            "failing-item".to_string()
+        }
+    }
+
+    #[derive(Serialize)]
+    struct JsonRendererSuccessSnapshot {
+        json_raw: String,
+        json_value: Value,
+        json_pretty_raw: String,
+        json_pretty_value: Value,
+        stream_json_raw: String,
+        stream_json_values: Vec<Value>,
+    }
+
+    #[derive(Serialize)]
+    struct JsonRendererFailureSnapshot {
+        error_kind: String,
+        error_message: String,
+        flush_calls: usize,
+        written_raw: String,
+        written_values: Vec<Value>,
+    }
+
+    #[derive(Serialize)]
+    struct JsonRendererFullFailureSnapshot {
+        error_kind: String,
+        error_message: String,
+        written_raw: String,
+        written_bytes: usize,
+    }
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn parse_json_document(raw: &str) -> Value {
+        serde_json::from_str(raw.trim_end()).expect("snapshot json should parse")
+    }
+
+    fn parse_json_lines(raw: &str) -> Vec<Value> {
+        raw.lines()
+            .map(|line| serde_json::from_str(line).expect("streamed json line should parse"))
+            .collect()
     }
 
     #[test]
@@ -459,6 +587,104 @@ mod tests {
         ];
         output.write_list(&items).unwrap();
         crate::test_complete!("output_writer_list_json_is_array");
+    }
+
+    #[test]
+    fn json_renderer_success_snapshot() {
+        init_test("json_renderer_success_snapshot");
+
+        let items = vec![
+            TestItem {
+                id: 7,
+                name: "alpha".into(),
+            },
+            TestItem {
+                id: 8,
+                name: "beta".into(),
+            },
+        ];
+
+        let compact_buffer = SharedBuffer::default();
+        let mut compact = Output::with_writer(OutputFormat::Json, compact_buffer.clone());
+        compact.write_list(&items).unwrap();
+        let compact_raw = compact_buffer.snapshot_string();
+
+        let pretty_buffer = SharedBuffer::default();
+        let mut pretty = Output::with_writer(OutputFormat::JsonPretty, pretty_buffer.clone());
+        pretty.write_list(&items).unwrap();
+        let pretty_raw = pretty_buffer.snapshot_string();
+
+        let stream_buffer = SharedBuffer::default();
+        let mut stream = Output::with_writer(OutputFormat::StreamJson, stream_buffer.clone());
+        stream.write_list(&items).unwrap();
+        let stream_raw = stream_buffer.snapshot_string();
+
+        let snapshot = JsonRendererSuccessSnapshot {
+            json_raw: compact_raw,
+            json_value: parse_json_document(&compact_buffer.snapshot_string()),
+            json_pretty_raw: pretty_raw,
+            json_pretty_value: parse_json_document(&pretty_buffer.snapshot_string()),
+            stream_json_raw: stream_raw,
+            stream_json_values: parse_json_lines(&stream_buffer.snapshot_string()),
+        };
+
+        assert_json_snapshot!("json_renderer_success", snapshot);
+        crate::test_complete!("json_renderer_success_snapshot");
+    }
+
+    #[test]
+    fn json_renderer_partial_failure_snapshot() {
+        init_test("json_renderer_partial_failure_snapshot");
+
+        let items = vec![
+            TestItem {
+                id: 9,
+                name: "partial-alpha".into(),
+            },
+            TestItem {
+                id: 10,
+                name: "partial-beta".into(),
+            },
+        ];
+        let writer = FlushFailWriter::new(1);
+        let inspector = writer.clone();
+        let mut output = Output::with_writer(OutputFormat::StreamJson, writer);
+
+        let err = output
+            .write_list(&items)
+            .expect_err("stream flush should fail");
+        let written = inspector.snapshot_string();
+        let snapshot = JsonRendererFailureSnapshot {
+            error_kind: format!("{:?}", err.kind()),
+            error_message: err.to_string(),
+            flush_calls: inspector.flush_count(),
+            written_raw: written,
+            written_values: parse_json_lines(&inspector.snapshot_string()),
+        };
+
+        assert_json_snapshot!("json_renderer_partial_failure", snapshot);
+        crate::test_complete!("json_renderer_partial_failure_snapshot");
+    }
+
+    #[test]
+    fn json_renderer_full_failure_snapshot() {
+        init_test("json_renderer_full_failure_snapshot");
+
+        let buffer = SharedBuffer::default();
+        let mut output = Output::with_writer(OutputFormat::Json, buffer.clone());
+        let err = output
+            .write(&FailingItem)
+            .expect_err("serialization should fail");
+
+        let snapshot = JsonRendererFullFailureSnapshot {
+            error_kind: format!("{:?}", err.kind()),
+            error_message: err.to_string(),
+            written_raw: buffer.snapshot_string(),
+            written_bytes: buffer.snapshot().len(),
+        };
+
+        assert_json_snapshot!("json_renderer_full_failure", snapshot);
+        crate::test_complete!("json_renderer_full_failure_snapshot");
     }
 
     #[test]

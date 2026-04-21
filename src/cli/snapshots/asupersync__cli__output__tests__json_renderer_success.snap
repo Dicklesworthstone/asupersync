@@ -1,0 +1,39 @@
+---
+source: src/cli/output.rs
+expression: snapshot
+---
+{
+  "json_raw": "[{\"id\":7,\"name\":\"alpha\"},{\"id\":8,\"name\":\"beta\"}]\n",
+  "json_value": [
+    {
+      "id": 7,
+      "name": "alpha"
+    },
+    {
+      "id": 8,
+      "name": "beta"
+    }
+  ],
+  "json_pretty_raw": "[\n  {\n    \"id\": 7,\n    \"name\": \"alpha\"\n  },\n  {\n    \"id\": 8,\n    \"name\": \"beta\"\n  }\n]\n",
+  "json_pretty_value": [
+    {
+      "id": 7,
+      "name": "alpha"
+    },
+    {
+      "id": 8,
+      "name": "beta"
+    }
+  ],
+  "stream_json_raw": "{\"id\":7,\"name\":\"alpha\"}\n{\"id\":8,\"name\":\"beta\"}\n",
+  "stream_json_values": [
+    {
+      "id": 7,
+      "name": "alpha"
+    },
+    {
+      "id": 8,
+      "name": "beta"
+    }
+  ]
+}
