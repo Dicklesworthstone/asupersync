@@ -110,6 +110,12 @@ enum Scenario {
         raw_d: BindValueInput,
         strict_integer: BindValueInput,
     },
+    StatementReuseAfterError {
+        first: BindValueInput,
+        second: BindValueInput,
+        raw_a: BindValueInput,
+        strict_integer: i64,
+    },
 }
 
 struct SqliteHarness {
@@ -491,6 +497,83 @@ async fn run_scenario(scenario: Scenario) {
                     other => panic!("non-integer strict bind should fail cleanly, got {other:?}"),
                 }
             }
+        }
+        Scenario::StatementReuseAfterError {
+            first,
+            second,
+            raw_a,
+            strict_integer,
+        } => {
+            let first = first.sanitize();
+            let second = second.sanitize();
+            let raw_a = raw_a.sanitize();
+
+            let query_sql = "SELECT ?1 AS value, ?2 AS other";
+            let bad_params = [first.to_sqlite_value()];
+            match harness.query_row(query_sql, bad_params.as_slice()).await {
+                Err(SqliteError::Sqlite(message)) => {
+                    assert!(
+                        bind_error_message(&message),
+                        "expected bind-count error, got: {message}"
+                    );
+                }
+                other => panic!("expected bind-count error before statement reuse, got {other:?}"),
+            }
+
+            let ok_params = [first.to_sqlite_value(), second.to_sqlite_value()];
+            let row = harness
+                .query_row(query_sql, ok_params.as_slice())
+                .await
+                .expect("statement should be reusable after bind-count error")
+                .expect("reused statement should return a row");
+            assert_round_trip_value(&row, "value", &first);
+            assert_round_trip_value(&row, "other", &second);
+
+            let insert_sql = "INSERT INTO bind_probe (raw_a, strict_integer) VALUES (?1, ?2)";
+            let rejected_params = [raw_a.to_sqlite_value(), SqliteValue::Text("oops".into())];
+            match harness
+                .execute(insert_sql, rejected_params.as_slice())
+                .await
+            {
+                Err(SqliteError::Sqlite(_)) => {
+                    assert_eq!(
+                        harness
+                            .table_row_count()
+                            .await
+                            .expect("row-count query should succeed"),
+                        0,
+                        "rejected strict-type inserts must not leak partial rows"
+                    );
+                }
+                other => {
+                    panic!("expected strict-type rejection before statement reuse, got {other:?}")
+                }
+            }
+
+            let ok_insert_params = [
+                raw_a.to_sqlite_value(),
+                SqliteValue::Integer(strict_integer),
+            ];
+            let affected = harness
+                .execute(insert_sql, ok_insert_params.as_slice())
+                .await
+                .expect("statement should be reusable after strict-type error");
+            assert_eq!(affected, 1, "reused insert statement should affect one row");
+
+            let row = harness
+                .query_row(
+                    "SELECT raw_a, strict_integer FROM bind_probe ORDER BY id DESC LIMIT 1",
+                    &[],
+                )
+                .await
+                .expect("querying reused insert should succeed")
+                .expect("inserted row should exist");
+            assert_round_trip_value(&row, "raw_a", &raw_a);
+            assert_eq!(
+                row.get_i64("strict_integer")
+                    .expect("strict_integer accessor should succeed"),
+                strict_integer
+            );
         }
     }
 }
