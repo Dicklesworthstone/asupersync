@@ -94,6 +94,8 @@ enum LiteralFuzzScenario {
         /// Huffman flag
         huffman_flag: bool,
     },
+    /// Test literal parsing around dynamic table size updates
+    DynamicTableUpdateInteraction(DynamicTableUpdateCase),
 }
 
 /// Name encoding strategies for literal headers
@@ -114,6 +116,27 @@ struct StringEncoding {
     content: Vec<u8>,
     /// Length field override (for testing length mismatches)
     declared_length_override: Option<u32>,
+}
+
+#[derive(Arbitrary, Debug, Clone)]
+struct DynamicTableUpdateCase {
+    /// Peer-advertised maximum dynamic table size
+    allowed_table_size: u16,
+    /// First size update emitted at block start
+    first_update: u16,
+    /// Optional second block-start size update
+    second_update: Option<u16>,
+    /// Emit an invalid size update after the literal header field
+    update_after_literal: bool,
+    /// Make the leading size update exceed peer SETTINGS
+    exceed_allowed: bool,
+    /// Use an indexed static-table name vs a new literal name
+    use_indexed_name: bool,
+    /// Literal representation kind
+    literal_pattern: LiteralPattern,
+    /// Seeds for safe header name/value generation
+    name_seed: Vec<u8>,
+    value_seed: Vec<u8>,
 }
 
 /// Literal header field pattern types
@@ -186,6 +209,9 @@ fn test_literal_scenario(scenario: LiteralFuzzScenario) {
             huffman_flag,
         } => {
             test_oversized_literal_rejection(declared_length, actual_data_size, huffman_flag);
+        }
+        LiteralFuzzScenario::DynamicTableUpdateInteraction(case) => {
+            test_dynamic_table_update_interaction(case);
         }
     }
 }
@@ -307,14 +333,14 @@ fn test_length_limits_enforcement(name_length: u32, value_length: u32, use_huffm
     encode_string_with_length(&mut wire_data, name_length, use_huffman);
 
     // Add minimal actual data (to test length field validation)
-    let actual_name_data = vec![b'x'; (name_length.min(1024) as usize)];
+    let actual_name_data = vec![b'x'; name_length.min(1024) as usize];
     wire_data.extend_from_slice(&actual_name_data);
 
     // Encode value with potentially oversized length
     encode_string_with_length(&mut wire_data, value_length, use_huffman);
 
     // Add minimal actual data
-    let actual_value_data = vec![b'y'; (value_length.min(1024) as usize)];
+    let actual_value_data = vec![b'y'; value_length.min(1024) as usize];
     wire_data.extend_from_slice(&actual_value_data);
 
     // Test decoding - should reject if lengths exceed MAX_STRING_LENGTH
@@ -352,6 +378,70 @@ fn test_oversized_literal_rejection(
 
     // This should trigger DECOMPRESSION_FAILED due to length mismatch
     test_hpack_decode_raw_string(&wire_data, ExpectedResult::ShouldFail);
+}
+
+/// Test dynamic-table-size update interactions with literal header parsing.
+fn test_dynamic_table_update_interaction(case: DynamicTableUpdateCase) {
+    use asupersync::bytes::Bytes;
+    use asupersync::http::h2::hpack::Decoder;
+
+    let allowed = (usize::from(case.allowed_table_size) % 4096).max(64);
+    let leading_update = if case.exceed_allowed {
+        allowed + 1 + usize::from(case.first_update % 32)
+    } else {
+        usize::from(case.first_update) % (allowed + 1)
+    };
+    let trailing_update = case
+        .second_update
+        .map(|raw| usize::from(raw) % (allowed + 1));
+
+    let mut wire_data = Vec::new();
+    encode_dynamic_table_size_update(&mut wire_data, leading_update);
+    if let Some(update) = trailing_update {
+        encode_dynamic_table_size_update(&mut wire_data, update);
+    }
+
+    let (expected_name, expected_value) = append_safe_literal_header(
+        &mut wire_data,
+        case.literal_pattern,
+        case.use_indexed_name,
+        &case.name_seed,
+        &case.value_seed,
+    );
+
+    if case.update_after_literal {
+        encode_dynamic_table_size_update(&mut wire_data, allowed / 2);
+    }
+
+    let mut decoder = Decoder::new();
+    decoder.set_allowed_table_size(allowed);
+    let mut src = Bytes::copy_from_slice(&wire_data);
+    let result = decoder.decode(&mut src);
+
+    if case.exceed_allowed || case.update_after_literal {
+        assert!(
+            result.is_err(),
+            "invalid dynamic table update placement/size must be rejected"
+        );
+        return;
+    }
+
+    let headers = result.expect("safe literal with valid leading size updates should decode");
+    assert_eq!(
+        headers.len(),
+        1,
+        "expected exactly one decoded literal header"
+    );
+    assert_eq!(
+        headers[0].value, expected_value,
+        "literal value should survive size-update prelude"
+    );
+    if !case.use_indexed_name {
+        assert_eq!(
+            headers[0].name, expected_name,
+            "literal name should survive size-update prelude"
+        );
+    }
 }
 
 /// Test raw literal data for edge cases
@@ -410,6 +500,76 @@ fn encode_string_with_length(wire_data: &mut Vec<u8>, length: u32, use_huffman: 
 fn encode_raw_string(wire_data: &mut Vec<u8>, content: &[u8]) {
     encode_hpack_integer(wire_data, content.len() as u64, 7, RAW_OCTET_FLAG);
     wire_data.extend_from_slice(content);
+}
+
+fn encode_dynamic_table_size_update(dst: &mut Vec<u8>, size: usize) {
+    encode_hpack_integer(dst, size as u64, 5, 0x20);
+}
+
+fn append_safe_literal_header(
+    dst: &mut Vec<u8>,
+    literal_pattern: LiteralPattern,
+    use_indexed_name: bool,
+    name_seed: &[u8],
+    value_seed: &[u8],
+) -> (String, String) {
+    let (pattern_byte, prefix_bits) = match literal_pattern {
+        LiteralPattern::IncrementalIndexing => (LITERAL_INCREMENTAL_INDEXING, 6),
+        LiteralPattern::NeverIndexed => (LITERAL_NEVER_INDEXED, 4),
+        LiteralPattern::WithoutIndexing => (LITERAL_WITHOUT_INDEXING, 4),
+    };
+
+    let value = sanitize_header_value(value_seed);
+    if use_indexed_name {
+        let index = pick_static_name_index(name_seed);
+        encode_hpack_integer(dst, index as u64, prefix_bits, pattern_byte);
+        encode_raw_string(dst, value.as_bytes());
+        (String::new(), value)
+    } else {
+        let name = sanitize_header_name(name_seed);
+        encode_hpack_integer(dst, 0, prefix_bits, pattern_byte);
+        encode_raw_string(dst, name.as_bytes());
+        encode_raw_string(dst, value.as_bytes());
+        (name, value)
+    }
+}
+
+fn pick_static_name_index(seed: &[u8]) -> usize {
+    const SAFE_STATIC_NAME_INDICES: &[usize] = &[2, 4, 16, 28, 31, 32, 58];
+    let selector = seed.first().copied().unwrap_or(0) as usize;
+    SAFE_STATIC_NAME_INDICES[selector % SAFE_STATIC_NAME_INDICES.len()]
+}
+
+fn sanitize_header_name(seed: &[u8]) -> String {
+    let mut out = String::from("x");
+    for byte in seed.iter().copied().take(24) {
+        let ch = match byte {
+            b'a'..=b'z' | b'0'..=b'9' | b'-' => byte as char,
+            b'A'..=b'Z' => (byte as char).to_ascii_lowercase(),
+            _ => continue,
+        };
+        out.push(ch);
+    }
+    if out.len() == 1 {
+        out.push_str("-literal");
+    }
+    out
+}
+
+fn sanitize_header_value(seed: &[u8]) -> String {
+    let mut out = String::new();
+    for byte in seed.iter().copied().take(32) {
+        let ch = match byte {
+            0x20..=0x7e if byte != b'\r' && byte != b'\n' => byte as char,
+            _ => continue,
+        };
+        out.push(ch);
+    }
+    if out.is_empty() {
+        "value".to_string()
+    } else {
+        out
+    }
 }
 
 /// Simplified HPACK integer encoding for test data generation
