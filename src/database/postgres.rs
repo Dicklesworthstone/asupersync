@@ -4430,6 +4430,18 @@ mod tests {
         backend_message(b'A', &body)
     }
 
+    fn error_response_message(code: &str, message: &str) -> Vec<u8> {
+        let mut body = Vec::with_capacity(code.len() + message.len() + 5);
+        body.push(b'C');
+        body.extend_from_slice(code.as_bytes());
+        body.push(0);
+        body.push(b'M');
+        body.extend_from_slice(message.as_bytes());
+        body.push(0);
+        body.push(0);
+        backend_message(b'E', &body)
+    }
+
     #[test]
     fn cancelled_commit_marks_connection_for_rollback() {
         let mut conn = make_test_connection();
@@ -6596,6 +6608,59 @@ mod tests {
         }
         assert!(!conn.inner.closed);
         assert_eq!(conn.inner.transaction_status, b'I');
+    }
+
+    #[test]
+    fn extended_execute_type_mismatch_errors_preserve_session_recovery() {
+        let cx = crate::cx::Cx::for_testing();
+        let mismatch_cases = [
+            ("22P02", "invalid input syntax for type integer: \"abc\"", b'I'),
+            ("42804", "column \"id\" is of type integer but expression is of type text", b'T'),
+        ];
+
+        for (code, message, status) in mismatch_cases {
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            conn.inner.closed = true;
+
+            std::io::Write::write_all(&mut peer, &error_response_message(code, message)).unwrap();
+            std::io::Write::write_all(&mut peer, &ready_for_query(status)).unwrap();
+
+            match run(conn.read_extended_execute_results(&cx)) {
+                Outcome::Err(PgError::Server {
+                    code: actual_code,
+                    message: actual_message,
+                    ..
+                }) => {
+                    assert_eq!(actual_code, code);
+                    assert_eq!(actual_message, message);
+                }
+                other => panic!("expected server error, got {other:?}"),
+            }
+
+            assert!(
+                !conn.inner.closed,
+                "Bind/Execute type mismatch must drain back to ReadyForQuery"
+            );
+            assert_eq!(
+                conn.inner.transaction_status, status,
+                "server ReadyForQuery status should survive type mismatch recovery"
+            );
+
+            conn.inner.closed = true;
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"UPDATE 3\0")).unwrap();
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+            match run(conn.read_extended_execute_results(&cx)) {
+                Outcome::Ok(affected_rows) => assert_eq!(affected_rows, 3),
+                other => panic!("expected clean follow-up execute, got {other:?}"),
+            }
+
+            assert!(
+                !conn.inner.closed,
+                "follow-up execute should still complete on the recovered session"
+            );
+            assert_eq!(conn.inner.transaction_status, b'I');
+        }
     }
 
     // ================================================================
