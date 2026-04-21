@@ -1,7 +1,7 @@
 //! Golden snapshots for canonical gRPC status codes on the HTTP/2 wire.
 
-use base64::Engine as _;
 use asupersync::grpc::status::{Code, Status};
+use base64::Engine as _;
 use insta::assert_json_snapshot;
 use serde_json::{Value, json};
 

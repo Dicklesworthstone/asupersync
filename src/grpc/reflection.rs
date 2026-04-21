@@ -231,8 +231,7 @@ mod tests {
                 MethodDescriptor::client_streaming("ClientStream", "/pkg.EnumShape/ClientStream"),
                 MethodDescriptor::bidi_streaming("BidiStream", "/pkg.EnumShape/BidiStream"),
             ];
-            static DESC: ServiceDescriptor =
-                ServiceDescriptor::new("EnumShape", "pkg", METHODS);
+            static DESC: ServiceDescriptor = ServiceDescriptor::new("EnumShape", "pkg", METHODS);
             &DESC
         }
 

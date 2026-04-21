@@ -47,8 +47,13 @@ fn fixture_entries(pid: u32) -> [LogEntry; 5] {
 fn scrub_formatted_entry(entry: &LogEntry) -> Value {
     let mut value: Value =
         serde_json::from_str(&entry.format_json()).expect("formatted log entry must be valid JSON");
-    let object = value.as_object_mut().expect("log entry should serialize as object");
-    object.insert("timestamp_ns".into(), Value::String("[timestamp_ns]".into()));
+    let object = value
+        .as_object_mut()
+        .expect("log entry should serialize as object");
+    object.insert(
+        "timestamp_ns".into(),
+        Value::String("[timestamp_ns]".into()),
+    );
     if object.contains_key("pid") {
         object.insert("pid".into(), Value::String("[pid]".into()));
     }
@@ -91,7 +96,12 @@ fn structured_log_level_filter_output() {
         LogLevel::Error,
     ]
     .into_iter()
-    .map(|threshold| (threshold.as_str_lower().to_string(), filtered_snapshot_for_threshold(threshold)))
+    .map(|threshold| {
+        (
+            threshold.as_str_lower().to_string(),
+            filtered_snapshot_for_threshold(threshold),
+        )
+    })
     .collect::<Map<String, Value>>();
 
     assert_json_snapshot!("structured_log_level_filter_output", snapshot);

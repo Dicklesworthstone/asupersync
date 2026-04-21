@@ -1247,8 +1247,7 @@ mod tests {
         for (obligation_id, label) in obligations {
             scrubbed = scrubbed.replace(&format!("{obligation_id:?}"), label);
             scrubbed = scrubbed.replace(
-                &serde_json::to_string_pretty(obligation_id)
-                    .expect("obligation id should encode"),
+                &serde_json::to_string_pretty(obligation_id).expect("obligation id should encode"),
                 &format!("\"{label}\""),
             );
         }
@@ -1363,10 +1362,7 @@ mod tests {
             &[(pending_obligation, "<obligation-pending>")],
         );
 
-        insta::assert_snapshot!(
-            "task_inspector_introspection_output_mixed_states",
-            scrubbed
-        );
+        insta::assert_snapshot!("task_inspector_introspection_output_mixed_states", scrubbed);
     }
 
     #[test]

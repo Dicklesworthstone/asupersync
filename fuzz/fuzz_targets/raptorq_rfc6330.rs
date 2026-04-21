@@ -69,6 +69,60 @@ struct SourceSymbolPartition {
     small_block_count: usize,
 }
 
+fn gcd_usize(mut left: usize, mut right: usize) -> usize {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
+}
+
+fn lcm_usize(left: usize, right: usize) -> usize {
+    if left == 0 || right == 0 {
+        0
+    } else {
+        left / gcd_usize(left, right) * right
+    }
+}
+
+fn nearest_power_of_two(value: usize, max: usize) -> usize {
+    let clamped = value.clamp(1, max);
+    let floor = 1usize << (usize::BITS as usize - 1 - clamped.leading_zeros() as usize);
+    let ceil = floor.checked_mul(2).unwrap_or(floor).min(max);
+    if clamped.saturating_sub(floor) <= ceil.saturating_sub(clamped) {
+        floor
+    } else {
+        ceil
+    }
+}
+
+fn power_of_two_boundary_triplet(value: usize, max: usize) -> [usize; 3] {
+    let pivot = nearest_power_of_two(value, max);
+    [
+        pivot.saturating_sub(1).max(1),
+        pivot,
+        pivot.saturating_add(1).min(max),
+    ]
+}
+
+fn make_alignment_edge_symbol_size(
+    sub_blocks: usize,
+    alignment: usize,
+    selector: usize,
+) -> Result<u16, String> {
+    let alignment_bytes = 1usize << alignment.min(8);
+    let base = lcm_usize(sub_blocks.max(1), alignment_bytes).max(1);
+    let multiplier = selector % 8 + 1;
+    let candidate = base.saturating_mul(multiplier);
+    if candidate > u16::MAX as usize {
+        return Err(format!(
+            "alignment edge symbol size overflow: base={base} multiplier={multiplier}"
+        ));
+    }
+    Ok(candidate as u16)
+}
+
 /// Validate OTI according to RFC 6330 constraints
 fn validate_oti(oti: &ObjectTransmissionInfo) -> Result<(), String> {
     // RFC 6330 Section 4.3: Transfer length validation
@@ -289,6 +343,39 @@ fn test_sub_block_partitioning_rfc6330(oti: &ObjectTransmissionInfo) -> Result<(
                 "Partition rollover should create exactly one large block after exact multiple: K={k}, Z={z}, ZL={}",
                 next_partition.large_block_count
             ));
+        }
+    }
+
+    Ok(())
+}
+
+fn test_power_of_two_alignment_boundaries_rfc6330(
+    oti: &ObjectTransmissionInfo,
+) -> Result<(), String> {
+    let k_cases = power_of_two_boundary_triplet(oti.source_symbols as usize, 1000);
+    let z_cases = power_of_two_boundary_triplet(oti.sub_blocks.max(1) as usize, 16);
+
+    for (k_index, source_symbols) in k_cases.into_iter().enumerate() {
+        for (z_index, sub_blocks) in z_cases.into_iter().enumerate() {
+            let alignment = ((oti.alignment as usize) + k_index + z_index) % 5;
+            let symbol_size = make_alignment_edge_symbol_size(
+                sub_blocks,
+                alignment,
+                source_symbols + sub_blocks + k_index + z_index,
+            )?;
+            let scenario = ObjectTransmissionInfo {
+                transfer_length: oti.transfer_length,
+                symbol_size,
+                source_symbols: source_symbols as u16,
+                sub_blocks: sub_blocks as u8,
+                alignment: alignment as u8,
+                encoding_id: 6,
+                instance_id: oti.instance_id,
+                checksum: 0,
+            };
+
+            test_symbol_size_sub_block_relationships(&scenario)?;
+            test_sub_block_partitioning_rfc6330(&scenario)?;
         }
     }
 
@@ -527,6 +614,9 @@ fn fuzz_rfc6330_oti(mut input: Rfc6330FuzzInput) -> Result<(), String> {
     // balanced and boundary-stable, including Z > K and exact-multiple rollover.
     test_sub_block_partitioning_rfc6330(&input.oti)?;
 
+    // Assertion 2c: power-of-two K/Z boundaries preserve alignment and partition invariants.
+    test_power_of_two_alignment_boundaries_rfc6330(&input.oti)?;
+
     // Assertion 3: Invalid K' > K rejected (verify K' >= K invariant)
     test_invalid_k_prime_rejection(&input.oti, input.test_invalid_k_prime)?;
 
@@ -570,7 +660,10 @@ fuzz_target!(|data: &[u8]| {
 
 #[cfg(test)]
 mod tests {
-    use super::{partition_source_symbols_rfc6330, test_sub_block_partitioning_rfc6330};
+    use super::{
+        make_alignment_edge_symbol_size, partition_source_symbols_rfc6330,
+        test_power_of_two_alignment_boundaries_rfc6330, test_sub_block_partitioning_rfc6330,
+    };
 
     fn make_oti(source_symbols: u16, sub_blocks: u8) -> super::ObjectTransmissionInfo {
         super::ObjectTransmissionInfo {
@@ -608,5 +701,19 @@ mod tests {
         assert_eq!(next.large_block_count, 1);
         test_sub_block_partitioning_rfc6330(&make_oti(8, 4)).expect("exact multiple");
         test_sub_block_partitioning_rfc6330(&make_oti(9, 4)).expect("post-rollover");
+    }
+
+    #[test]
+    fn alignment_edge_symbol_size_is_divisible_by_alignment_and_sub_blocks() {
+        let symbol_size = make_alignment_edge_symbol_size(8, 4, 5).expect("symbol size");
+        assert_eq!(usize::from(symbol_size) % 8, 0);
+        assert_eq!(usize::from(symbol_size) % 16, 0);
+    }
+
+    #[test]
+    fn power_of_two_boundary_sweep_accepts_representative_edges() {
+        let mut oti = make_oti(33, 8);
+        oti.alignment = 4;
+        test_power_of_two_alignment_boundaries_rfc6330(&oti).expect("power-of-two sweep");
     }
 }

@@ -11,9 +11,7 @@ use std::convert::Infallible;
 use std::task::{Context, Poll, Wake, Waker};
 use std::future::Future;
 
-struct NoopWaker;
-impl Wake for NoopWaker { fn wake(self: Arc<Self>) {} }
-fn noop_waker() -> Waker { Waker::from(Arc::new(NoopWaker)) }
+fn noop_waker() -> Waker { std::task::Waker::noop().clone() }
 
 #[derive(Clone)]
 struct CounterService { counter: Arc<AtomicU64> }

@@ -288,6 +288,10 @@ fn edge_proof_pack() -> ScenarioProofPack {
 
 #[test]
 fn proof_pack_output_scrubbed() {
-    let snapshot = vec![passing_proof_pack(), failing_proof_pack(), edge_proof_pack()];
+    let snapshot = vec![
+        passing_proof_pack(),
+        failing_proof_pack(),
+        edge_proof_pack(),
+    ];
     assert_json_snapshot!("proof_pack_output_scrubbed", snapshot);
 }

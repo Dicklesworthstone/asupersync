@@ -1,111 +1,2946 @@
-  [2m2026-04-20T22:40:13.913807Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ts2 at ubuntu@100.96.111.98 (24 slots, speed 50.0)[0m
+  [2m2026-04-21T04:45:51.128847Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ts2 at ubuntu@100.96.111.98 (30 slots, speed 50.0)[0m
     [2;3mat[0m rch/src/hook.rs:289 [2;3mon[0m ThreadId(1)
 
-[*] Job j-29806699757961968 submitted to ts2 (slots 24, speed 50.0)
-  [2m2026-04-20T22:40:14.277503Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for asupersync (hash: df548de923f627f7)[0m
+[*] Job j-29806699757962253 submitted to ts2 (slots 30, speed 50.0)
+  [2m2026-04-21T04:45:51.597869Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for asupersync (hash: df548de923f627f7)[0m
     [2;3mat[0m rch/src/hook.rs:4645 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:14.277544Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 10 roots[0m
+  [2m2026-04-21T04:45:51.597935Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 10 roots[0m
     [2;3mat[0m rch/src/hook.rs:4667 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:15.097168Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker ts2...[0m
+  [2m2026-04-21T04:45:52.469802Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker ts2...[0m
     [2;3mat[0m rch/src/hook.rs:4691 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:15.097245Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 2 pattern(s) from .rchignore (total: 33)[0m
+  [2m2026-04-21T04:45:52.469880Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 2 pattern(s) from .rchignore (total: 33)[0m
     [2;3mat[0m rch/src/transfer.rs:575 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:15.097256Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync -> /data/projects/asupersync on ts2[0m
+  [2m2026-04-21T04:45:52.469891Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync -> /data/projects/asupersync on ts2[0m
     [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:16.181423Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1084ms[0m
+  [2m2026-04-21T04:45:56.520951Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 4051ms[0m
     [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:16.181505Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/asupersync-browser-core -> /data/projects/asupersync/asupersync-browser-core on ts2[0m
+  [2m2026-04-21T04:45:56.521037Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/asupersync-browser-core -> /data/projects/asupersync/asupersync-browser-core on ts2[0m
     [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:16.904113Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 722ms[0m
+  [2m2026-04-21T04:45:57.244327Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 723ms[0m
     [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:16.904186Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/asupersync-macros -> /data/projects/asupersync/asupersync-macros on ts2[0m
+  [2m2026-04-21T04:45:57.244416Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/asupersync-macros -> /data/projects/asupersync/asupersync-macros on ts2[0m
     [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:17.638690Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 734ms[0m
+  [2m2026-04-21T04:45:57.973606Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 729ms[0m
     [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:17.638784Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/asupersync-tokio-compat -> /data/projects/asupersync/asupersync-tokio-compat on ts2[0m
+  [2m2026-04-21T04:45:57.973688Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/asupersync-tokio-compat -> /data/projects/asupersync/asupersync-tokio-compat on ts2[0m
     [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:18.373141Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 734ms[0m
+  [2m2026-04-21T04:45:58.707673Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 733ms[0m
     [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:18.373254Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/conformance -> /data/projects/asupersync/conformance on ts2[0m
+  [2m2026-04-21T04:45:58.707780Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/conformance -> /data/projects/asupersync/conformance on ts2[0m
     [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:19.163721Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 790ms[0m
+  [2m2026-04-21T04:45:59.430831Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 723ms[0m
     [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:19.163817Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/drop_unwrap_finder -> /data/projects/asupersync/drop_unwrap_finder on ts2[0m
+  [2m2026-04-21T04:45:59.430989Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/drop_unwrap_finder -> /data/projects/asupersync/drop_unwrap_finder on ts2[0m
     [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:19.911287Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 747ms[0m
+  [2m2026-04-21T04:46:00.219046Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 788ms[0m
     [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:19.911385Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/franken_decision -> /data/projects/asupersync/franken_decision on ts2[0m
+  [2m2026-04-21T04:46:00.219176Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/franken_decision -> /data/projects/asupersync/franken_decision on ts2[0m
     [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:20.641517Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 730ms[0m
+  [2m2026-04-21T04:46:01.099553Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 880ms[0m
     [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:20.641671Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/franken_evidence -> /data/projects/asupersync/franken_evidence on ts2[0m
+  [2m2026-04-21T04:46:01.099675Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/franken_evidence -> /data/projects/asupersync/franken_evidence on ts2[0m
     [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:21.370941Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 729ms[0m
+  [2m2026-04-21T04:46:01.846144Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 746ms[0m
     [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:21.371043Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/franken_kernel -> /data/projects/asupersync/franken_kernel on ts2[0m
+  [2m2026-04-21T04:46:01.846250Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/franken_kernel -> /data/projects/asupersync/franken_kernel on ts2[0m
     [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:22.164037Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 792ms[0m
+  [2m2026-04-21T04:46:02.560194Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 713ms[0m
     [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:22.164173Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/frankenlab -> /data/projects/asupersync/frankenlab on ts2[0m
+  [2m2026-04-21T04:46:02.560327Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync/frankenlab -> /data/projects/asupersync/frankenlab on ts2[0m
     [2;3mat[0m rch/src/transfer.rs:1032 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:22.898601Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 734ms[0m
+  [2m2026-04-21T04:46:03.298408Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 738ms[0m
     [2;3mat[0m rch/src/transfer.rs:1101 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:22.898661Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 7883 files, 368109 bytes in 7796ms[0m
+  [2m2026-04-21T04:46:03.298458Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 7995 files, 111992088 bytes in 10824ms[0m
     [2;3mat[0m rch/src/hook.rs:4848 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:23.465413Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo test --all-targets[0m
+  [2m2026-04-21T04:46:03.863070Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo clippy --all-targets -- -D warnings[0m
     [2;3mat[0m rch/src/hook.rs:4875 [2;3mon[0m ThreadId(1)
 
-  [2m2026-04-20T22:40:23.465454Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mWrapping command with external timeout protection, [1;32mkind[0m[32m: cargo test, [1;32mtimeout_secs[0m[32m: 1800[0m
+  [2m2026-04-21T04:46:03.863105Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mWrapping command with external timeout protection, [1;32mkind[0m[32m: cargo clippy, [1;32mtimeout_secs[0m[32m: 1200[0m
     [2;3mat[0m rch/src/transfer.rs:782 [2;3mon[0m ThreadId(1)
 
-   Compiling asupersync v0.2.9 (/data/projects/asupersync)
-error: unexpected closing delimiter: `)`
-   --> src/lab/oracle/cancel_debt.rs:973:9
-    |
-702 | mod tests {
-    |           - this opening brace...
-...
-971 | }
-    | - ...matches this closing brace
-972 | tes()
-973 |         );
-    |         ^ unexpected closing delimiter
+    Checking asupersync v0.2.9 (/data/projects/asupersync)
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:1728:13
+     |
+1728 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+     |
+     = note: `-D unused-imports` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(unused_imports)]`
 
-error: could not compile `asupersync` (lib) due to 1 previous error
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:1917:13
+     |
+1917 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:1952:13
+     |
+1952 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `Waker`
+    --> src/cx/scope.rs:1953:40
+     |
+1953 |         use std::task::{Context, Poll, Waker};
+     |                                        ^^^^^
+
+error: unused import: `Waker`
+    --> src/cx/scope.rs:2119:40
+     |
+2119 |         use std::task::{Context, Poll, Waker};
+     |                                        ^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:2184:13
+     |
+2184 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `Waker`
+    --> src/cx/scope.rs:2185:40
+     |
+2185 |         use std::task::{Context, Poll, Waker};
+     |                                        ^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:2220:13
+     |
+2220 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `Waker`
+    --> src/cx/scope.rs:2221:40
+     |
+2221 |         use std::task::{Context, Poll, Waker};
+     |                                        ^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:2252:13
+     |
+2252 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `Waker`
+    --> src/cx/scope.rs:2253:40
+     |
+2253 |         use std::task::{Context, Poll, Waker};
+     |                                        ^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:2343:13
+     |
+2343 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:2372:13
+     |
+2372 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `Waker`
+    --> src/cx/scope.rs:2373:40
+     |
+2373 |         use std::task::{Context, Poll, Waker};
+     |                                        ^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:2416:13
+     |
+2416 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:2447:13
+     |
+2447 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `Waker`
+    --> src/cx/scope.rs:2448:40
+     |
+2448 |         use std::task::{Context, Poll, Waker};
+     |                                        ^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:2569:13
+     |
+2569 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:2607:13
+     |
+2607 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:2820:13
+     |
+2820 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:2867:13
+     |
+2867 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `Waker`
+    --> src/cx/scope.rs:2868:40
+     |
+2868 |         use std::task::{Context, Poll, Waker};
+     |                                        ^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:3020:13
+     |
+3020 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `Waker`
+    --> src/cx/scope.rs:3021:40
+     |
+3021 |         use std::task::{Context, Poll, Waker};
+     |                                        ^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/cx/scope.rs:3073:13
+     |
+3073 |         use std::sync::Arc;
+     |             ^^^^^^^^^^^^^^
+
+error: unused import: `Waker`
+    --> src/cx/scope.rs:3074:40
+     |
+3074 |         use std::task::{Context, Poll, Waker};
+     |                                        ^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/io/buf_reader.rs:184:9
+    |
+184 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/io/buf_writer.rs:267:9
+    |
+267 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/io/copy.rs:834:9
+    |
+834 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/io/ext/read_ext.rs:609:9
+    |
+609 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+  --> src/io/ext/seek_ext.rs:71:9
+   |
+71 |     use std::sync::Arc;
+   |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/io/ext/write_ext.rs:631:9
+    |
+631 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/io/read.rs:313:9
+    |
+313 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/io/read_line.rs:282:9
+    |
+282 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/io/split.rs:188:9
+    |
+188 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/io/stream_adapters.rs:230:9
+    |
+230 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/io/write.rs:310:9
+    |
+310 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/io/write_permit.rs:134:9
+    |
+134 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/net/unix/split.rs:701:9
+    |
+701 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/net/websocket/server.rs:768:9
+    |
+768 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/runtime/reactor/token.rs:456:9
+    |
+456 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+    --> src/service/service.rs:1019:9
+     |
+1019 |     use std::sync::Arc;
+     |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+  --> src/stream/fuse.rs:73:9
+   |
+73 |     use std::sync::Arc;
+   |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+  --> src/stream/iter.rs:67:9
+   |
+67 |     use std::sync::Arc;
+   |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+  --> src/stream/next.rs:56:9
+   |
+56 |     use std::sync::Arc;
+   |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/stream/peekable.rs:137:9
+    |
+137 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+  --> tests/io_e2e.rs:21:5
+   |
+21 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused import: `std::sync::Arc`
+  --> src/stream/scan.rs:95:9
+   |
+95 |     use std::sync::Arc;
+   |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/stream/skip.rs:180:9
+    |
+180 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/stream/stream.rs:113:9
+    |
+113 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/stream/then.rs:110:9
+    |
+110 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/stream/zip.rs:140:9
+    |
+140 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+   --> src/stream/mod.rs:459:9
+    |
+459 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+ --> tests/notify_order_test.rs:7:5
+  |
+7 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+  |
+  = note: `-D unused-imports` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused import: `std::collections::HashMap`
+ --> tests/conformance/kafka_record_batch_v2/format.rs:7:5
+  |
+7 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `-D unused-imports` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused import: `Write`
+ --> tests/conformance/kafka_record_batch_v2/format.rs:8:29
+  |
+8 | use std::io::{Cursor, Read, Write};
+  |                             ^^^^^
+
+error: unused import: `super::test_vectors::*`
+  --> tests/conformance/kafka_record_batch_v2/golden_tests.rs:10:5
+   |
+10 | use super::test_vectors::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+error: could not compile `asupersync` (test "notify_order_test") due to 1 previous error
 warning: build failed, waiting for other jobs to finish...
-error: could not compile `asupersync` (lib test) due to 1 previous error
-  [2m2026-04-20T22:40:25.165585Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=101 in 1700ms[0m
+error: unused imports: `RecordAttribute`, `RecordV2`, and `TimestampType`
+  --> tests/conformance/kafka_record_batch_v2/mod.rs:29:18
+   |
+29 | pub use format::{RecordAttribute, RecordBatchV2, RecordV2, TimestampType};
+   |                  ^^^^^^^^^^^^^^^                 ^^^^^^^^  ^^^^^^^^^^^^^
+
+error: unused imports: `LongPacketType` and `QuicCoreError`
+  --> tests/conformance/quic_retry_rfc9000.rs:43:19
+   |
+43 |     ConnectionId, LongPacketType, PacketHeader, QuicCoreError, RetryHeader,
+   |                   ^^^^^^^^^^^^^^                ^^^^^^^^^^^^^
+
+error: unused import: `std::collections::BTreeMap`
+  --> tests/conformance/mysql_stmt_prepare_execute.rs:38:5
+   |
+38 | use std::collections::BTreeMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+ --> tests/conformance/obligation_invariants/no_leak_tests/obligation_lifecycle.rs:9:5
+  |
+9 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+ --> tests/conformance/obligation_invariants/region_quiescence/basic_quiescence.rs:9:5
+  |
+9 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+  --> tests/conformance/obligation_invariants/src/invariant_harness.rs:11:5
+   |
+11 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+error: unused imports: `ObligationId` and `RegionId`
+  --> tests/conformance/obligation_invariants/src/invariant_harness.rs:16:25
+   |
+16 | use asupersync::types::{ObligationId, RegionId};
+   |                         ^^^^^^^^^^^^  ^^^^^^^^
+
+error: unused import: `Weak`
+ --> tests/conformance/obligation_invariants/src/obligation_tracker.rs:8:29
+  |
+8 | use std::sync::{Arc, Mutex, Weak};
+  |                             ^^^^
+
+error: unused imports: `ObligationTestContext`, `StressTestResult`, `TestMetrics`, and `TestSuiteResult`
+  --> tests/conformance/obligation_invariants/src/mod.rs:13:30
+   |
+13 |     ObligationInvariantTest, ObligationTestContext, StressTestResult, TestMetrics, TestOutcome,
+   |                              ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+14 |     TestSuiteResult,
+   |     ^^^^^^^^^^^^^^^
+
+error: unused imports: `InvariantViolation`, `ObligationMetadata`, and `ResourceTracker`
+  --> tests/conformance/obligation_invariants/src/mod.rs:17:5
+   |
+17 |     InvariantViolation, InvariantViolationType, ObligationMetadata, ObligationTracker,
+   |     ^^^^^^^^^^^^^^^^^^                          ^^^^^^^^^^^^^^^^^^
+18 |     ResourceHandle, ResourceTracker, WakerHandle,
+   |                     ^^^^^^^^^^^^^^^
+
+error: unused imports: `InvariantTestCategory`, `InvariantTestConfig`, `InvariantTestResult`, `ObligationInvariantHarness`, `ObligationInvariantTest`, and `TestOutcome`
+  --> tests/conformance/obligation_invariants/mod.rs:37:5
+   |
+37 |     InvariantTestCategory, InvariantTestConfig, InvariantTestResult, InvariantViolationType,
+   |     ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+38 |     ObligationInvariantHarness, ObligationInvariantTest, ObligationTracker, ResourceHandle,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+39 |     TestOutcome, WakerHandle,
+   |     ^^^^^^^^^^^
+
+error: unused imports: `BasicObligationLifecycleTest`, `ConcurrentObligationTest`, `ErrorPathCleanupTest`, and `NestedObligationTest`
+  --> tests/conformance/obligation_invariants/mod.rs:44:5
+   |
+44 |     BasicObligationLifecycleTest, ConcurrentObligationTest, ErrorPathCleanupTest,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+45 |     NestedObligationTest,
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+error: unused imports: `BasicRegionQuiescenceTest`, `ConcurrentRegionClosureTest`, `NestedRegionQuiescenceTest`, and `RegionCloseWithActiveObligationsTest`
+  --> tests/conformance/obligation_invariants/mod.rs:49:5
+   |
+49 |     BasicRegionQuiescenceTest, ConcurrentRegionClosureTest, NestedRegionQuiescenceTest,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+50 |     RegionCloseWithActiveObligationsTest,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused import: `std::collections::BTreeMap`
+  --> tests/conformance/postgres_logical_replication.rs:39:5
+   |
+39 | use std::collections::BTreeMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused import: `RecvError`
+ --> tests/conformance/broadcast.rs:8:44
+  |
+8 | use asupersync::channel::broadcast::{self, RecvError, SendError, TryRecvError};
+  |                                            ^^^^^^^^^
+
+error: unused import: `std::sync::Arc`
+  --> tests/conformance/broadcast.rs:15:5
+   |
+15 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+error: unused imports: `AtomicUsize` and `Ordering`
+  --> tests/conformance/broadcast.rs:16:25
+   |
+16 | use std::sync::atomic::{AtomicUsize, Ordering};
+   |                         ^^^^^^^^^^^  ^^^^^^^^
+
+error: unused import: `std::thread`
+  --> tests/conformance/broadcast.rs:17:5
+   |
+17 | use std::thread;
+   |     ^^^^^^^^^^^
+
+error: unused import: `std::time::Duration`
+  --> tests/conformance/broadcast.rs:18:5
+   |
+18 | use std::time::Duration;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+error: unnecessary parentheses around function argument
+   --> tests/conformance/broadcast.rs:295:53
+    |
+295 |     proptest!(|(operations in prop::collection::vec((0u8..3), 10..50))| {
+    |                                                     ^      ^
+    |
+    = note: `-D unused-parens` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_parens)]`
+help: remove these parentheses
+    |
+295 -     proptest!(|(operations in prop::collection::vec((0u8..3), 10..50))| {
+295 +     proptest!(|(operations in prop::collection::vec(0u8..3, 10..50))| {
+    |
+
+error: unused import: `BytesMut`
+  --> tests/conformance/grpc_trailer_forwarding_rfc9113.rs:52:36
+   |
+52 |     use asupersync::bytes::{Bytes, BytesMut};
+   |                                    ^^^^^^^^
+
+error: unused imports: `TrailerFrame`, `decode_trailers`, and `encode_trailers`
+  --> tests/conformance/grpc_trailer_forwarding_rfc9113.rs:57:15
+   |
+57 |         web::{TrailerFrame, decode_trailers, encode_trailers},
+   |               ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+
+error: unused imports: `FrameHeader`, `FrameType`, and `Frame`
+  --> tests/conformance/grpc_trailer_forwarding_rfc9113.rs:59:39
+   |
+59 |     use asupersync::http::h2::frame::{Frame, FrameHeader, FrameType};
+   |                                       ^^^^^  ^^^^^^^^^^^  ^^^^^^^^^
+
+error: unused import: `std::collections::HashMap`
+  --> tests/conformance/grpc_trailer_forwarding_rfc9113.rs:61:9
+   |
+61 |     use std::collections::HashMap;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused import: `WsExtensionConformanceResult as WsConformanceResult`
+   --> tests/conformance/websocket_extension_negotiation_rfc6455.rs:908:9
+    |
+908 | pub use WsExtensionConformanceResult as WsConformanceResult;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused imports: `AggregatorFlushConformanceResult` and `TestCategory as AggregatorFlushTestCategory`
+  --> tests/conformance/mod.rs:46:40
+   |
+46 |     AggregatorFlushConformanceHarness, AggregatorFlushConformanceResult,
+   |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+47 |     TestCategory as AggregatorFlushTestCategory,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused import: `H1ConformanceResult`
+  --> tests/conformance/mod.rs:49:44
+   |
+49 | pub use h1_rfc9112::{H1ConformanceHarness, H1ConformanceResult, RequirementLevel, TestVerdict};
+   |                                            ^^^^^^^^^^^^^^^^^^^
+
+error: unused imports: `H2PriorityConformanceHarness`, `H2PriorityConformanceResult`, and `TestCategory as H2PriorityTestCategory`
+  --> tests/conformance/mod.rs:56:5
+   |
+56 |     H2PriorityConformanceHarness, H2PriorityConformanceResult,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+57 |     TestCategory as H2PriorityTestCategory,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused imports: `H2ConformanceResult` and `TestCategory as H2TestCategory`
+  --> tests/conformance/mod.rs:60:27
+   |
+60 |     H2ConformanceHarness, H2ConformanceResult, TestCategory as H2TestCategory,
+   |                           ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused imports: `HpackTableSizeConformanceResult` and `TestCategory as HpackTableSizeTestCategory`
+  --> tests/conformance/mod.rs:63:5
+   |
+63 |     HpackTableSizeConformanceResult, TestCategory as HpackTableSizeTestCategory,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused imports: `ConformanceTestResult as KafkaConformanceTestResult`, `KafkaConformanceHarness`, and `TestCategory as KafkaTestCategory`
+  --> tests/conformance/mod.rs:68:5
+   |
+68 |     ConformanceTestResult as KafkaConformanceTestResult, KafkaConformanceHarness,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+69 |     TestCategory as KafkaTestCategory,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused imports: `MySqlStmtConformanceHarness`, `MySqlStmtConformanceResult`, and `TestCategory as MySqlTestCategory`
+  --> tests/conformance/mod.rs:77:5
+   |
+77 |     MySqlStmtConformanceHarness, MySqlStmtConformanceResult, TestCategory as MySqlTestCategory,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused imports: `PgLogicalReplicationHarness`, `PgLogicalReplicationResult`, and `TestCategory as PgLogicalTestCategory`
+  --> tests/conformance/mod.rs:85:5
+   |
+85 |     PgLogicalReplicationHarness, PgLogicalReplicationResult, TestCategory as PgLogicalTestCategory,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused imports: `QuicRetryConformanceResult` and `TestCategory as QuicTestCategory`
+  --> tests/conformance/mod.rs:88:34
+   |
+88 |     QuicRetryConformanceHarness, QuicRetryConformanceResult, TestCategory as QuicTestCategory,
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused imports: `GrpcConformanceResult as GrpcTrailerConformanceResult` and `TestCategory as GrpcTrailerTestCategory`
+   --> tests/conformance/mod.rs:106:5
+    |
+106 |     GrpcConformanceResult as GrpcTrailerConformanceResult, GrpcTrailerConformanceHarness,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+107 |     TestCategory as GrpcTrailerTestCategory,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused imports: `TestCategory as WsExtensionTestCategory` and `WsExtensionConformanceResult`
+   --> tests/conformance/mod.rs:115:5
+    |
+115 |     TestCategory as WsExtensionTestCategory, WsExtensionConformanceHarness,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+116 |     WsExtensionConformanceResult,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: could not compile `asupersync` (test "io_e2e") due to 1 previous error
+error: missing documentation for the crate
+   --> tests/conformance_dns_cache.rs:1:1
+    |
+  1 | / #![allow(clippy::all)]
+  2 | | #![cfg(any())]
+  3 | | //! Conformance tests for DNS cache TTL eviction and NXDOMAIN negative caching.
+  4 | | //!
+...   |
+588 | |     assert_eq!(evictions, 1); // Expired entry evicted
+589 | | }
+    | |_^
+    |
+    = note: `-D missing-docs` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(missing_docs)]`
+
+error: could not compile `asupersync` (test "conformance_dns_cache") due to 1 previous error
+error: unused attribute `allow`
+    --> tests/raptorq_perf_invariants.rs:6849:5
+     |
+6849 |     #[allow(clippy::literal_string_with_formatting_args)]
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+note: the built-in attribute `allow` will be ignored, since it's applied to the macro invocation `assert`
+    --> tests/raptorq_perf_invariants.rs:6850:5
+     |
+6850 |     assert!(
+     |     ^^^^^^
+     = note: `-D unused-attributes` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(unused_attributes)]`
+
+error: unused import: `std::sync::Arc`
+  --> tests/net_verification.rs:82:5
+   |
+82 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused import: `std::sync::Arc`
+ --> tests/notify_bug.rs:8:5
+  |
+8 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+  |
+  = note: `-D unused-imports` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused import: `std::sync::Arc`
+  --> tests/tokio_fs_process_signal_conformance.rs:68:9
+   |
+68 |     use std::sync::Arc;
+   |         ^^^^^^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused import: `std::sync::Arc`
+  --> tests/stream_e2e.rs:29:5
+   |
+29 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: could not compile `asupersync` (test "notify_bug") due to 1 previous error
+error: could not compile `asupersync` (test "tokio_fs_process_signal_conformance") due to 1 previous error
+error: unused import: `std::sync::Arc`
+    --> src/messaging/redis.rs:2067:9
+     |
+2067 |     use std::sync::Arc;
+     |         ^^^^^^^^^^^^^^
+
+error: unused variable: `ping`
+   --> tests/conformance/h2_rst_stream_ping_rfc9113.rs:547:21
+    |
+547 |                 let ping = PingFrame::new([0; 8]);
+    |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_ping`
+    |
+    = note: `-D unused-variables` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_variables)]`
+
+error: unused variable: `rst_stream`
+   --> tests/conformance/h2_rst_stream_ping_rfc9113.rs:632:21
+    |
+632 |                 let rst_stream = RstStreamFrame::new(0, ErrorCode::Cancel);
+    |                     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rst_stream`
+
+error: unused variable: `encoded2`
+   --> tests/conformance/hpack_rfc7541/harness.rs:326:13
+    |
+326 |         let encoded2 = harness.encode_headers(&large_headers[2..], false);
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_encoded2`
+
+error: unused variable: `value`
+   --> tests/conformance/hpack_rfc7541/test_vectors.rs:406:24
+    |
+406 |             for (name, value) in vector.headers {
+    |                        ^^^^^ help: if this is intentional, prefix it with an underscore: `_value`
+
+error: this looks like a formatting argument but it is not part of a formatting macro
+    --> tests/raptorq_perf_invariants.rs:6851:54
+     |
+6851 |         RAPTORQ_PERF_GATES_SCRIPT.contains(r#"mode="${1:-full}""#),
+     |                                                      ^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#literal_string_with_formatting_args
+     = note: `-D clippy::literal-string-with-formatting-args` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::literal_string_with_formatting_args)]`
+
+error: could not compile `asupersync` (test "raptorq_perf_invariants") due to 2 previous errors
+error: unused variable: `client_initial_dcid`
+   --> tests/conformance/quic_retry_rfc9000.rs:639:21
+    |
+639 |                 let client_initial_dcid = ConnectionId::new(&[0x11, 0x22]).map_err(to_string)?;
+    |                     ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_client_initial_dcid`
+
+error: could not compile `asupersync` (test "net_verification") due to 1 previous error
+error: unused variable: `null_bitmap_len`
+   --> tests/conformance/mysql_stmt_prepare_execute.rs:346:17
+    |
+346 |             let null_bitmap_len = (param_count + 7) / 8;
+    |                 ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_null_bitmap_len`
+
+error: could not compile `asupersync` (test "stream_e2e") due to 1 previous error
+error: unused variable: `data`
+   --> tests/conformance/postgres_logical_replication.rs:828:32
+    |
+828 |     fn parse_tuple_data(&self, data: &[u8]) -> Result<Vec<TupleData>, String> {
+    |                                ^^^^ help: if this is intentional, prefix it with an underscore: `_data`
+
+error: unused variable: `receiver`
+   --> tests/conformance/broadcast.rs:171:22
+    |
+171 |         let (sender, receiver) = broadcast::channel::<TestMessage>(10);
+    |                      ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_receiver`
+
+error: unused variable: `initial_receiver_id`
+   --> tests/conformance/broadcast.rs:420:13
+    |
+420 |         let initial_receiver_id = state.subscribe();
+    |             ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_initial_receiver_id`
+
+error: constant `CHUNKED_LARGE_HEX_VARIANTS` is never used
+  --> tests/conformance/h1_rfc9112/golden_test_vectors.rs:95:11
+   |
+95 | pub const CHUNKED_LARGE_HEX_VARIANTS: &[u8] = concat!(
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: only a `panic!` in `if`-then statement
+    --> tests/conformance/h2_priority.rs:1217:13
+     |
+1217 | /             if result.verdict == TestVerdict::Fail {
+1218 | |                 panic!(
+1219 | |                     "PRIORITY format test failed: {} - {:?}",
+1220 | |                     result.test_id, result.error_message
+1221 | |                 );
+1222 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_assert
+     = note: `-D clippy::manual-assert` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::manual_assert)]`
+help: replace `if`-then-`panic!` with `assert!`
+     |
+1217 ~             assert!(result.verdict != TestVerdict::Fail, 
+1218 +                 "PRIORITY format test failed: {} - {:?}",
+1219 +                 result.test_id, result.error_message
+1220 +             )
+     |
+
+error: only a `panic!` in `if`-then statement
+   --> tests/conformance/h2_rst_stream_ping_rfc9113.rs:807:13
+    |
+807 | /             if result.verdict == TestVerdict::Fail {
+808 | |                 panic!(
+809 | |                     "RST_STREAM format test failed: {} - {:?}",
+810 | |                     result.test_id, result.error_message
+811 | |                 );
+812 | |             }
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_assert
+help: replace `if`-then-`panic!` with `assert!`
+    |
+807 ~             assert!(result.verdict != TestVerdict::Fail, 
+808 +                 "RST_STREAM format test failed: {} - {:?}",
+809 +                 result.test_id, result.error_message
+810 +             )
+    |
+
+error: only a `panic!` in `if`-then statement
+   --> tests/conformance/h2_rst_stream_ping_rfc9113.rs:827:13
+    |
+827 | /             if result.verdict == TestVerdict::Fail {
+828 | |                 panic!(
+829 | |                     "PING format test failed: {} - {:?}",
+830 | |                     result.test_id, result.error_message
+831 | |                 );
+832 | |             }
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_assert
+help: replace `if`-then-`panic!` with `assert!`
+    |
+827 ~             assert!(result.verdict != TestVerdict::Fail, 
+828 +                 "PING format test failed: {} - {:?}",
+829 +                 result.test_id, result.error_message
+830 +             )
+    |
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:216:21
+    |
+216 |     fn id(&self) -> &str {
+    |                     ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+    = note: `-D clippy::unnecessary-literal-bound` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_literal_bound)]`
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:222:30
+    |
+222 |     fn description(&self) -> &str {
+    |                              ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:286:21
+    |
+286 |     fn id(&self) -> &str {
+    |                     ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:292:30
+    |
+292 |     fn description(&self) -> &str {
+    |                              ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:348:21
+    |
+348 |     fn id(&self) -> &str {
+    |                     ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:354:30
+    |
+354 |     fn description(&self) -> &str {
+    |                              ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:424:21
+    |
+424 |     fn id(&self) -> &str {
+    |                     ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:430:30
+    |
+430 |     fn description(&self) -> &str {
+    |                              ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:518:21
+    |
+518 |     fn id(&self) -> &str {
+    |                     ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:524:30
+    |
+524 |     fn description(&self) -> &str {
+    |                              ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:590:21
+    |
+590 |     fn id(&self) -> &str {
+    |                     ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:596:30
+    |
+596 |     fn description(&self) -> &str {
+    |                              ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:665:21
+    |
+665 |     fn id(&self) -> &str {
+    |                     ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:669:30
+    |
+669 |     fn description(&self) -> &str {
+    |                              ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:752:21
+    |
+752 |     fn id(&self) -> &str {
+    |                     ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:756:30
+    |
+756 |     fn description(&self) -> &str {
+    |                              ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:814:21
+    |
+814 |     fn id(&self) -> &str {
+    |                     ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: returning a `str` unnecessarily tied to the lifetime of arguments
+   --> tests/conformance/hpack_rfc7541/harness.rs:818:30
+    |
+818 |     fn description(&self) -> &str {
+    |                              ^^^^ help: try: `&'static str`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_literal_bound
+
+error: this `continue` expression is redundant
+   --> tests/conformance/hpack_rfc7541/harness.rs:847:54
+    |
+847 |                 Ok(decoded) if decoded == headers => continue,
+    |                                                      ^^^^^^^^
+    |
+    = help: consider dropping the `continue` expression
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_continue
+    = note: `-D clippy::needless-continue` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_continue)]`
+
+error: casting `usize` to `i64` may wrap around the value on targets with 64-bit wide pointers
+  --> tests/conformance/kafka_offsets.rs:79:36
+   |
+79 |             offset: base_offset + (i as i64 * 100),
+   |                                    ^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+   = note: `-D clippy::cast-possible-wrap` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::cast_possible_wrap)]`
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> tests/conformance/kafka_record_batch_v2/format.rs:166:54
+    |
+166 |         let key_length = key.as_ref().map_or(-1, |k| k.len() as i32);
+    |                                                      ^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> tests/conformance/kafka_record_batch_v2/format.rs:167:58
+    |
+167 |         let value_length = value.as_ref().map_or(-1, |v| v.len() as i32);
+    |                                                          ^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> tests/conformance/kafka_record_batch_v2/format.rs:185:58
+    |
+185 |         let value_length = value.as_ref().map_or(-1, |v| v.len() as i32);
+    |                                                          ^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> tests/conformance/kafka_record_batch_v2/format.rs:187:25
+    |
+187 |             key_length: key.len() as i32,
+    |                         ^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> tests/conformance/kafka_record_batch_v2/format.rs:302:31
+    |
+302 |         record.offset_delta = self.records.len() as i32;
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> tests/conformance/kafka_record_batch_v2/format.rs:304:29
+    |
+304 |         self.record_count = self.records.len() as i32;
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> tests/conformance/kafka_record_batch_v2/format.rs:307:38
+    |
+307 |             self.last_offset_delta = (self.records.len() - 1) as i32;
+    |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> tests/conformance/kafka_record_batch_v2/format.rs:362:28
+    |
+362 |         let batch_length = (buffer.len() - 12) as i32;
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> tests/conformance/kafka_record_batch_v2/format.rs:462:19
+    |
+462 |     encode_varint(record.headers.len() as i32, buffer);
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> tests/conformance/kafka_record_batch_v2/format.rs:473:25
+    |
+473 |     let record_length = (buffer.len() - record_start - varint_size(0)) as i32;
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `u32` to `i32` may wrap around the value
+   --> tests/conformance/kafka_record_batch_v2/format.rs:609:8
+    |
+609 |     Ok(((unsigned >> 1) as i32) ^ (-((unsigned & 1) as i32)))
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `(unsigned >> 1).cast_signed()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `u32` to `i32` may wrap around the value
+   --> tests/conformance/kafka_record_batch_v2/format.rs:609:37
+    |
+609 |     Ok(((unsigned >> 1) as i32) ^ (-((unsigned & 1) as i32)))
+    |                                     ^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `(unsigned & 1).cast_signed()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `u64` to `i64` may wrap around the value
+   --> tests/conformance/kafka_record_batch_v2/format.rs:616:8
+    |
+616 |     Ok(((unsigned >> 1) as i64) ^ (-((unsigned & 1) as i64)))
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `(unsigned >> 1).cast_signed()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `u64` to `i64` may wrap around the value
+   --> tests/conformance/kafka_record_batch_v2/format.rs:616:37
+    |
+616 |     Ok(((unsigned >> 1) as i64) ^ (-((unsigned & 1) as i64)))
+    |                                     ^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `(unsigned & 1).cast_signed()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `u8` to `i8` may wrap around the value
+   --> tests/conformance/kafka_record_batch_v2/format.rs:668:8
+    |
+668 |     Ok(read_u8(cursor)? as i8)
+    |        ^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `read_u8(cursor)?.cast_signed()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> tests/conformance/kafka_record_batch_v2/golden_tests.rs:110:32
+    |
+110 |             .with_offset_delta(i as i32);
+    |                                ^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> tests/conformance/kafka_record_batch_v2/golden_tests.rs:253:38
+    |
+253 |                 record.offset_delta, i as i32,
+    |                                      ^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> tests/conformance/kafka_record_batch_v2/test_vectors.rs:178:28
+    |
+178 |         .with_offset_delta(i as i32);
+    |                            ^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: only a `panic!` in `if`-then statement
+   --> tests/conformance/quic_retry_rfc9000.rs:900:13
+    |
+900 | /             if result.verdict == TestVerdict::Fail {
+901 | |                 panic!(
+902 | |                     "Packet format test failed: {} - {:?}",
+903 | |                     result.test_id, result.error_message
+904 | |                 );
+905 | |             }
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_assert
+help: replace `if`-then-`panic!` with `assert!`
+    |
+900 ~             assert!(result.verdict != TestVerdict::Fail, 
+901 +                 "Packet format test failed: {} - {:?}",
+902 +                 result.test_id, result.error_message
+903 +             )
+    |
+
+error: only a `panic!` in `if`-then statement
+    --> tests/conformance/mysql_stmt_prepare_execute.rs:1737:9
+     |
+1737 | /         if !must_failures.is_empty() {
+1738 | |             panic!("MUST requirements failed: {:#?}", must_failures);
+1739 | |         }
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_assert
+help: replace `if`-then-`panic!` with `assert!`
+     |
+1737 -         if !must_failures.is_empty() {
+1738 -             panic!("MUST requirements failed: {:#?}", must_failures);
+1739 -         }
+1737 +         assert!(must_failures.is_empty(), "MUST requirements failed: {:#?}", must_failures);
+     |
+
+error: this `continue` expression is redundant
+   --> tests/conformance/broadcast.rs:385:25
+    |
+385 |                         continue;
+    |                         ^^^^^^^^
+    |
+    = help: consider dropping the `continue` expression
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_continue
+
+error: this `continue` expression is redundant
+   --> tests/conformance/broadcast.rs:389:25
+    |
+389 |                         continue;
+    |                         ^^^^^^^^
+    |
+    = help: consider dropping the `continue` expression
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_continue
+
+error: called `map(<f>).unwrap_or(false)` on an `Option` value
+   --> tests/conformance/grpc_trailer_forwarding_rfc9113.rs:516:36
+    |
+516 |               let has_content_type = response
+    |  ____________________________________^
+517 | |                 .initial_headers
+518 | |                 .get("content-type")
+519 | |                 .map(|v| matches!(v, MetadataValue::Ascii(s) if s.contains("application/grpc")))
+520 | |                 .unwrap_or(false);
+    | |_________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+    = note: `-D clippy::map-unwrap-or` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::map_unwrap_or)]`
+help: use `is_some_and(<f>)` instead
+    |
+519 -                 .map(|v| matches!(v, MetadataValue::Ascii(s) if s.contains("application/grpc")))
+520 -                 .unwrap_or(false);
+519 +                 .is_some_and(|v| matches!(v, MetadataValue::Ascii(s) if s.contains("application/grpc")));
+    |
+
+error: this `continue` expression is redundant
+   --> tests/conformance/tcp_accept.rs:504:21
+    |
+504 |                     continue;
+    |                     ^^^^^^^^
+    |
+    = help: consider dropping the `continue` expression
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_continue
+
+error: wildcard matches only a single variant and will also match any future added variants
+    --> tests/conformance/mod.rs:1032:13
+     |
+1032 |             _ => {}
+     |             ^ help: try: `TestVerdict::Skipped`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#match_wildcard_for_single_variants
+     = note: `-D clippy::match-wildcard-for-single-variants` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::match_wildcard_for_single_variants)]`
+
+error: only a `panic!` in `if`-then statement
+    --> tests/conformance/mod.rs:1234:9
+     |
+1234 | /         if !failures.is_empty() {
+1235 | |             panic!("H2 conformance tests failed: {:#?}", failures);
+1236 | |         }
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_assert
+help: replace `if`-then-`panic!` with `assert!`
+     |
+1234 -         if !failures.is_empty() {
+1235 -             panic!("H2 conformance tests failed: {:#?}", failures);
+1236 -         }
+1234 +         assert!(failures.is_empty(), "H2 conformance tests failed: {:#?}", failures)
+     |
+
+error: only a `panic!` in `if`-then statement
+    --> tests/conformance/mod.rs:1372:9
+     |
+1372 | /         if !failures.is_empty() {
+1373 | |             panic!("QUIC conformance tests failed: {:#?}", failures);
+1374 | |         }
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_assert
+help: replace `if`-then-`panic!` with `assert!`
+     |
+1372 -         if !failures.is_empty() {
+1373 -             panic!("QUIC conformance tests failed: {:#?}", failures);
+1374 -         }
+1372 +         assert!(failures.is_empty(), "QUIC conformance tests failed: {:#?}", failures)
+     |
+
+error: only a `panic!` in `if`-then statement
+    --> tests/conformance/mod.rs:1931:9
+     |
+1931 | /         if !failures.is_empty() {
+1932 | |             panic!(
+1933 | |                 "WebSocket extension conformance tests failed: {:#?}",
+1934 | |                 failures
+1935 | |             );
+1936 | |         }
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_assert
+help: replace `if`-then-`panic!` with `assert!`
+     |
+1931 ~         assert!(failures.is_empty(), 
+1932 +             "WebSocket extension conformance tests failed: {:#?}",
+1933 +             failures
+1934 +         );
+     |
+
+error: could not compile `asupersync` (test "obligation_invariant_conformance") due to 100 previous errors
+error: unused variable: `work_id`
+   --> src/combinator/bulkhead_metamorphic.rs:463:9
+    |
+463 |     for work_id in 0..worker_count {
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_work_id`
+    |
+    = note: `-D unused-variables` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_variables)]`
+
+error: unused variable: `initial_active`
+   --> src/combinator/bulkhead_metamorphic.rs:485:9
+    |
+485 |     let initial_active = initial_metrics.active_permits;
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_initial_active`
+
+error: unused variable: `processed_after_cancel`
+   --> src/combinator/bulkhead_metamorphic.rs:498:9
+    |
+498 |     let processed_after_cancel = bulkhead.process_queue(now);
+    |         ^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_processed_after_cancel`
+
+error: unused variable: `lab_runtime`
+   --> src/combinator/timeout_metamorphic.rs:283:9
+    |
+283 |     let lab_runtime = LabRuntime::new(lab_config);
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_lab_runtime`
+
+error: variable does not need to be mutable
+    --> src/obligation/dialectica.rs:1609:13
+     |
+1609 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `-D unused-mut` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(unused_mut)]`
+
+error: unused variable: `rng`
+    --> src/obligation/dialectica.rs:1609:13
+     |
+1609 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rng`
+
+error: variable does not need to be mutable
+    --> src/obligation/dialectica.rs:1701:13
+     |
+1701 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+error: unused variable: `rng`
+    --> src/obligation/dialectica.rs:1701:13
+     |
+1701 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rng`
+
+error: variable does not need to be mutable
+    --> src/obligation/dialectica.rs:2141:13
+     |
+2141 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+error: unused variable: `rng`
+    --> src/obligation/dialectica.rs:2141:13
+     |
+2141 |         let mut rng = crate::util::det_rng::DetRng::new(seed);
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rng`
+
+error: unused variable: `ob1`
+    --> src/observability/diagnostics.rs:3102:13
+     |
+3102 |         let ob1 = insert_obligation(
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_ob1`
+
+error: unused variable: `ob3`
+    --> src/observability/diagnostics.rs:3109:13
+     |
+3109 |         let ob3 = insert_obligation(
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_ob3`
+
+error: unused variable: `ob2`
+    --> src/observability/diagnostics.rs:3116:13
+     |
+3116 |         let ob2 = insert_obligation(
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_ob2`
+
+error: unused variable: `ob1`
+    --> src/observability/diagnostics.rs:3886:13
+     |
+3886 |         let ob1 = insert_obligation(
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_ob1`
+
+error: unused variable: `ob2`
+    --> src/observability/diagnostics.rs:3893:13
+     |
+3893 |         let ob2 = insert_obligation(
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_ob2`
+
+error: variable does not need to be mutable
+    --> src/runtime/scheduler/three_lane.rs:4679:13
+     |
+4679 |         let mut workers = scheduler.take_workers();
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+error: variable does not need to be mutable
+    --> src/runtime/scheduler/three_lane.rs:4948:13
+     |
+4948 |         let mut workers = scheduler.take_workers();
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+error: variable does not need to be mutable
+    --> src/runtime/scheduler/three_lane.rs:8875:21
+     |
+8875 |                 let mut workers = scheduler.take_workers();
+     |                     ----^^^^^^^
+     |                     |
+     |                     help: remove this `mut`
+
+error: unused variable: `suggestion`
+    --> src/runtime/scheduler/three_lane.rs:8892:25
+     |
+8892 |                     let suggestion = governor.suggest(&state_snapshot);
+     |                         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_suggestion`
+
+error: unused variable: `reward`
+    --> src/runtime/scheduler/three_lane.rs:8959:17
+     |
+8959 |             let reward = if selected == 2 { 0.6 } else { 0.4 };
+     |                 ^^^^^^ help: if this is intentional, prefix it with an underscore: `_reward`
+
+error: unused variable: `i`
+   --> src/sync/once_cell_metamorphic.rs:299:26
+    |
+299 |                     for (i, &value) in values.iter().enumerate() {
+    |                          ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+error: unused variable: `lab`
+   --> src/sync/mutex_metamorphic.rs:173:13
+    |
+173 |         let lab = LabRuntime::new(LabConfig::default());
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_lab`
+
+error: unused variable: `lab2`
+   --> src/sync/mutex_metamorphic.rs:229:13
+    |
+229 |         let lab2 = LabRuntime::new(LabConfig::default());
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_lab2`
+
+error: unused variable: `expected_state`
+   --> src/sync/mutex_metamorphic.rs:264:13
+    |
+264 |         let expected_state = {
+    |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected_state`
+
+error: unused variable: `lab`
+   --> src/sync/mutex_metamorphic.rs:352:13
+    |
+352 |         let lab = LabRuntime::new(LabConfig::default());
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_lab`
+
+error: unused variable: `timer_id`
+    --> src/time/driver.rs:2037:13
+     |
+2037 |         let timer_id = handle.register(
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_timer_id`
+
+error: unused variable: `timer_id`
+    --> src/time/driver.rs:2301:13
+     |
+2301 |         let timer_id = handle.register(
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_timer_id`
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+    --> src/channel/broadcast.rs:2054:68
+     |
+2054 |                 let messages: Vec<i32> = (0..num_messages).map(|x| x as i32).collect();
+     |                                                                    ^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+     = note: `-D clippy::cast-possible-wrap` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::cast_possible_wrap)]`
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+    --> src/channel/broadcast.rs:2119:34
+     |
+2119 |                     tx.send(&cx, i as i32).expect("send");
+     |                                  ^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+    --> src/channel/broadcast.rs:2129:34
+     |
+2129 |                     tx.send(&cx, (capacity + i) as i32).expect("send overrun");
+     |                                  ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+    --> src/channel/broadcast.rs:2151:36
+     |
+2151 |                     let expected = (start_msg + i) as i32;
+     |                                    ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+    --> src/channel/broadcast.rs:2183:34
+     |
+2183 |                     tx.send(&cx, i as i32).expect("send pre");
+     |                                  ^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+    --> src/channel/broadcast.rs:2191:34
+     |
+2191 |                     tx.send(&cx, i as i32).expect("send post");
+     |                                  ^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+    --> src/channel/broadcast.rs:2207:48
+     |
+2207 |                 let expected_late: Vec<i32> = (split_point as i32..total_messages as i32).collect();
+     |                                                ^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+    --> src/channel/broadcast.rs:2207:68
+     |
+2207 |                 let expected_late: Vec<i32> = (split_point as i32..total_messages as i32).collect();
+     |                                                                    ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+    --> src/channel/broadcast.rs:2208:52
+     |
+2208 |                 let expected_early: Vec<i32> = (0..total_messages as i32).collect();
+     |                                                    ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+    --> src/channel/broadcast.rs:2275:56
+     |
+2275 |                     senders[i % num_senders].send(&cx, i as i32).expect("send");
+     |                                                        ^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting to the same type is unnecessary (`i32` -> `i32`)
+    --> src/channel/broadcast.rs:2357:26
+     |
+2357 |             tx.send(&cx, scenario as i32).expect("send");
+     |                          ^^^^^^^^^^^^^^^ help: try: `scenario`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_cast
+     = note: `-D clippy::unnecessary-cast` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::unnecessary_cast)]`
+
+error: this `continue` expression is redundant
+    --> src/channel/broadcast.rs:2426:26
+     |
+2426 |                 Ok(_) => continue, // Consume any buffered messages
+     |                          ^^^^^^^^
+     |
+     = help: consider dropping the `continue` expression
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_continue
+     = note: `-D clippy::needless-continue` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::needless_continue)]`
+
+error: use of `or_insert_with` to construct default value
+    --> src/channel/mpsc.rs:3033:34
+     |
+3033 | ...                   .or_insert_with(Vec::new)
+     |                        ^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `or_default()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_or_default
+     = note: `-D clippy::unwrap-or-default` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::unwrap_or_default)]`
+
+error: manual implementation of a no-op waker
+   --> src/channel/oneshot.rs:758:10
+    |
+758 |     impl std::task::Wake for TestNoopWaker {
+    |          ^^^^^^^^^^^^^^^
+    |
+    = help: use `std::task::Waker::noop()` instead
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_noop_waker
+    = note: `-D clippy::manual-noop-waker` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::manual_noop_waker)]`
+
+error: used `sort` on primitive type `i32`
+   --> src/channel/session.rs:927:9
+    |
+927 |         received.sort(); // Order may vary
+    |         ^^^^^^^^^^^^^^^ help: try: `received.sort_unstable()`
+    |
+    = note: an unstable sort typically performs faster without any observable difference for this data type
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#stable_sort_primitive
+    = note: `-D clippy::stable-sort-primitive` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::stable_sort_primitive)]`
+
+error: function call inside of `expect`
+    --> src/channel/session.rs:1016:43
+     |
+1016 |                 block_on(tx.reserve(&cx)).expect(&format!("reserve {i}"))
+     |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `unwrap_or_else(|_| panic!("reserve {i}"))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_fun_call
+     = note: `-D clippy::expect-fun-call` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::expect_fun_call)]`
+
+error: function call inside of `expect`
+    --> src/channel/session.rs:1023:52
+     |
+1023 |                 let _proof = permit.send(i as i32).expect(&format!("send {i}"));
+     |                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `unwrap_or_else(|_| panic!("send {i}"))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_fun_call
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+    --> src/channel/session.rs:1023:42
+     |
+1023 |                 let _proof = permit.send(i as i32).expect(&format!("send {i}"));
+     |                                          ^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: this `continue` expression is redundant
+  --> src/channel/broadcast_metamorphic.rs:40:30
+   |
+40 |             Poll::Pending => continue,
+   |                              ^^^^^^^^
+   |
+   = help: consider dropping the `continue` expression
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_continue
+
+error: future cannot be sent between threads safely
+  --> src/channel/broadcast_metamorphic.rs:82:67
+   |
+82 |     async fn send_messages(&mut self, cx: &Cx, messages: &[T]) -> Result<(), SendError<T>> {
+   |                                                                   ^^^^^^^^^^^^^^^^^^^^^^^^ future returned by `send_messages` is not `Send`
+   |
+note: future is not `Send` as this value is used across an await
+  --> src/channel/broadcast_metamorphic.rs:84:48
+   |
+83 |         for msg in messages {
+   |                    -------- has type `std::slice::Iter<'_, T>` which is not `Send`
+84 |             self.send_message(cx, msg.clone()).await?;
+   |                                                ^^^^^ await occurs here, with `messages` maybe used later
+   = note: `T` doesn't implement `std::marker::Sync`
+note: captured value is not `Send`
+  --> src/channel/broadcast_metamorphic.rs:72:47
+   |
+72 |     async fn send_message(&mut self, cx: &Cx, message: T) -> Result<(), SendError<T>> {
+   |                                               ^^^^^^^ has type `T` which is not `Send`
+   = note: `T` doesn't implement `std::marker::Send`
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#future_not_send
+   = note: `-D clippy::future-not-send` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::future_not_send)]`
+
+error: casting `u64` to `isize` may wrap around the value on targets with 64-bit wide pointers
+   --> src/codec/length_delimited.rs:798:36
+    |
+798 |                 length_adjustment: (rng.next_u64() % 21) as isize - 10,
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: manual arithmetic check found
+    --> src/codec/length_delimited.rs:1085:29
+     |
+1085 |           let payload_start = if base_config.num_skip >= header_len {
+     |  _____________________________^
+1086 | |             0
+1087 | |         } else {
+1088 | |             header_len - base_config.num_skip
+1089 | |         };
+     | |_________^ help: replace it with: `header_len.saturating_sub(base_config.num_skip)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#implicit_saturating_sub
+     = note: `-D clippy::implicit-saturating-sub` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::implicit_saturating_sub)]`
+
+error: manual arithmetic check found
+    --> src/codec/length_delimited.rs:1190:37
+     |
+1190 |                   let payload_start = if config.num_skip >= header_len {
+     |  _____________________________________^
+1191 | |                     0
+1192 | |                 } else {
+1193 | |                     header_len - config.num_skip
+1194 | |                 };
+     | |_________________^ help: replace it with: `header_len.saturating_sub(config.num_skip)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#implicit_saturating_sub
+
+error: manual arithmetic check found
+    --> src/codec/length_delimited.rs:1250:33
+     |
+1250 |               let payload_start = if config.num_skip >= header_len {
+     |  _________________________________^
+1251 | |                 0
+1252 | |             } else {
+1253 | |                 header_len - config.num_skip
+1254 | |             };
+     | |_____________^ help: replace it with: `header_len.saturating_sub(config.num_skip)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#implicit_saturating_sub
+
+error: called `map(<f>).unwrap_or(<a>)` on an `Option` value
+   --> src/combinator/bulkhead_metamorphic.rs:194:25
+    |
+194 |           let processed = self
+    |  _________________________^
+195 | |             .processed_per_bulkhead
+196 | |             .lock()
+197 | |             .get(name)
+198 | |             .map(|v| v.len())
+199 | |             .unwrap_or(0);
+    | |_________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+    = note: `-D clippy::map-unwrap-or` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::map_unwrap_or)]`
+help: use `map_or(<a>, <f>)` instead
+    |
+198 -             .map(|v| v.len())
+199 -             .unwrap_or(0);
+198 +             .map_or(0, |v| v.len());
+    |
+
+error: called `map(<f>).unwrap_or(<a>)` on an `Option` value
+   --> src/combinator/bulkhead_metamorphic.rs:200:24
+    |
+200 |           let rejected = self
+    |  ________________________^
+201 | |             .rejected_per_bulkhead
+202 | |             .lock()
+203 | |             .get(name)
+204 | |             .map(|v| v.len())
+205 | |             .unwrap_or(0);
+    | |_________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+help: use `map_or(<a>, <f>)` instead
+    |
+204 -             .map(|v| v.len())
+205 -             .unwrap_or(0);
+204 +             .map_or(0, |v| v.len());
+    |
+
+error: called `map(<f>).unwrap_or(<a>)` on an `Option` value
+   --> src/combinator/bulkhead_metamorphic.rs:206:25
+    |
+206 |           let cancelled = self
+    |  _________________________^
+207 | |             .cancelled_per_bulkhead
+208 | |             .lock()
+209 | |             .get(name)
+210 | |             .map(|v| v.len())
+211 | |             .unwrap_or(0);
+    | |_________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+help: use `map_or(<a>, <f>)` instead
+    |
+210 -             .map(|v| v.len())
+211 -             .unwrap_or(0);
+210 +             .map_or(0, |v| v.len());
+    |
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> src/combinator/race_metamorphic.rs:336:13
+    |
+336 |             (i * 10) as i32,
+    |             ^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> src/combinator/race_metamorphic.rs:436:13
+    |
+436 |             (i * 10) as i32,
+    |             ^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> src/combinator/race_metamorphic.rs:509:13
+    |
+509 |             (i * 10) as i32,
+    |             ^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> src/combinator/race_metamorphic.rs:582:48
+    |
+582 |         let future = TestFuture::new(i as u32, (i * 10) as i32, 20, global_state.clone()); // All take 20 polls
+    |                                                ^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+   --> src/combinator/race_metamorphic.rs:809:43
+    |
+809 |                 TestFuture::new(i as u32, (i * 100) as i32, polls, global_state.clone());
+    |                                           ^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: manual absolute difference pattern without using `abs_diff`
+    --> src/combinator/retry.rs:1543:24
+     |
+1543 |               let diff = if actual > expected {
+     |  ________________________^
+1544 | |                 actual - expected
+1545 | |             } else {
+1546 | |                 expected - actual
+1547 | |             };
+     | |_____________^ help: replace with `abs_diff`: `actual.abs_diff(expected)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_abs_diff
+     = note: `-D clippy::manual-abs-diff` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::manual_abs_diff)]`
+
+error: unchecked subtraction of a `Duration`
+    --> src/combinator/retry.rs:1544:17
+     |
+1544 |                 actual - expected
+     |                 ^^^^^^^^^^^^^^^^^ help: try: `actual.checked_sub(expected).unwrap()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unchecked_time_subtraction
+     = note: `-D clippy::unchecked-time-subtraction` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::unchecked_time_subtraction)]`
+
+error: unchecked subtraction of a `Duration`
+    --> src/combinator/retry.rs:1546:17
+     |
+1546 |                 expected - actual
+     |                 ^^^^^^^^^^^^^^^^^ help: try: `expected.checked_sub(actual).unwrap()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unchecked_time_subtraction
+
+error: called `map(<f>).unwrap_or(<a>)` on an `Option` value
+   --> src/combinator/timeout_metamorphic.rs:182:36
+    |
+182 |                 *start_time = Some(Cx::current().map(|cx| cx.now()).unwrap_or(Time::ZERO));
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+help: use `map_or(<a>, <f>)` instead
+    |
+182 -                 *start_time = Some(Cx::current().map(|cx| cx.now()).unwrap_or(Time::ZERO));
+182 +                 *start_time = Some(Cx::current().map_or(Time::ZERO, |cx| cx.now()));
+    |
+
+error: casting `u32` to `i32` may wrap around the value
+   --> src/combinator/timeout_metamorphic.rs:206:39
+    |
+206 |                 return Poll::Ready(Ok(this.id as i32));
+    |                                       ^^^^^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `this.id.cast_signed()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: called `map(<f>).unwrap_or(<a>)` on an `Option` value
+   --> src/combinator/timeout_metamorphic.rs:319:27
+    |
+319 |                 let now = Cx::current().map(|cx| cx.now()).unwrap_or(Time::ZERO);
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+help: use `map_or(<a>, <f>)` instead
+    |
+319 -                 let now = Cx::current().map(|cx| cx.now()).unwrap_or(Time::ZERO);
+319 +                 let now = Cx::current().map_or(Time::ZERO, |cx| cx.now());
+    |
+
+error: called `map(<f>).unwrap_or(<a>)` on an `Option` value
+   --> src/combinator/timeout_metamorphic.rs:347:27
+    |
+347 |                 let now = Cx::current().map(|cx| cx.now()).unwrap_or(Time::ZERO);
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+help: use `map_or(<a>, <f>)` instead
+    |
+347 -                 let now = Cx::current().map(|cx| cx.now()).unwrap_or(Time::ZERO);
+347 +                 let now = Cx::current().map_or(Time::ZERO, |cx| cx.now());
+    |
+
+error: unnecessary semicolon
+   --> src/combinator/timeout_metamorphic.rs:515:22
+    |
+515 |                     };
+    |                      ^ help: remove
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_semicolon
+    = note: `-D clippy::unnecessary-semicolon` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_semicolon)]`
+
+error: avoid using `collect()` when not needed
+    --> src/cx/cx.rs:4125:14
+     |
+4125 |             .collect();
+     |              ^^^^^^^
+4126 |         assert_eq!(
+4127 |             branch_traces.len(),
+     |             ------------------- the iterator could be used here instead
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_collect
+     = note: `-D clippy::needless-collect` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::needless_collect)]`
+help: take the original Iterator's count instead of collecting it and finding the length
+     |
+4122 ~         
+4123 |         assert_eq!(
+4124 ~             events
+4125 +             .iter()
+4126 ~             .filter(|e| trace_message(e).contains("_branch_")).count(),
+     |
+
+error: called `map(<f>).unwrap_or(false)` on an `Option` value
+    --> src/cx/scope.rs:2635:37
+     |
+2635 |                   let parent_tracks = state
+     |  _____________________________________^
+2636 | |                     .region(parent_region)
+2637 | |                     .map(|r| r.task_ids().contains(&handle.task_id()))
+2638 | |                     .unwrap_or(false);
+     | |_____________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+help: use `is_some_and(<f>)` instead
+     |
+2637 -                     .map(|r| r.task_ids().contains(&handle.task_id()))
+2638 -                     .unwrap_or(false);
+2637 +                     .is_some_and(|r| r.task_ids().contains(&handle.task_id()));
+     |
+
+error: called `map(<f>).unwrap_or(false)` on an `Option` value
+    --> src/cx/scope.rs:2639:36
+     |
+2639 |                   let child_tracks = state
+     |  ____________________________________^
+2640 | |                     .region(child_region)
+2641 | |                     .map(|r| r.task_ids().contains(&handle.task_id()))
+2642 | |                     .unwrap_or(false);
+     | |_____________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+help: use `is_some_and(<f>)` instead
+     |
+2641 -                     .map(|r| r.task_ids().contains(&handle.task_id()))
+2642 -                     .unwrap_or(false);
+2641 +                     .is_some_and(|r| r.task_ids().contains(&handle.task_id()));
+     |
+
+error: called `map(<f>).unwrap_or(<a>)` on an `Option` value
+    --> src/cx/scope.rs:3009:20
+     |
+3009 |                   || state
+     |  ____________________^
+3010 | |                     .region(region)
+3011 | |                     .map(|r| r.task_ids().is_empty())
+3012 | |                     .unwrap_or(true),
+     | |____________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+help: use `map_or(<a>, <f>)` instead
+     |
+3011 -                     .map(|r| r.task_ids().is_empty())
+3012 -                     .unwrap_or(true),
+3011 +                     .map_or(true, |r| r.task_ids().is_empty()),
+     |
+
+error: wildcard matches only a single variant and will also match any future added variants
+    --> src/cx/scope.rs:3066:13
+     |
+3066 |             other => panic!("join_all must complete with all results: {other:?}"),
+     |             ^^^^^ help: try: `other @ Poll::Pending`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#match_wildcard_for_single_variants
+     = note: `-D clippy::match-wildcard-for-single-variants` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::match_wildcard_for_single_variants)]`
+
+error: this call to `clone` can be replaced with `std::slice::from_ref`
+    --> src/http/h2/hpack.rs:2931:28
+     |
+2931 |             encoder.encode(&[header.clone()], &mut encoded);
+     |                            ^^^^^^^^^^^^^^^^^ help: try: `std::slice::from_ref(&header)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cloned_ref_to_slice_refs
+     = note: `-D clippy::cloned-ref-to-slice-refs` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::cloned_ref_to_slice_refs)]`
+
+error: function call inside of `expect`
+    --> src/http/h2/hpack.rs:2952:52
+     |
+2952 |               let decoded = decoder.decode(&mut src).expect(&format!(
+     |  ____________________________________________________^
+2953 | |                 "Failed to decode static table entry {}",
+2954 | |                 expected_index
+2955 | |             ));
+     | |______________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_fun_call
+help: try
+     |
+2952 ~             let decoded = decoder.decode(&mut src).unwrap_or_else(|_| panic!("Failed to decode static table entry {}",
+2953 ~                 expected_index));
+     |
+
+error: function call inside of `expect`
+    --> src/http/h2/hpack.rs:3047:18
+     |
+3047 |                 .expect(&format!("Should find static index for {}", normalized_name));
+     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `unwrap_or_else(|| panic!("Should find static index for {}", normalized_name))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_fun_call
+
+error: this call to `clone` can be replaced with `std::slice::from_ref`
+    --> src/http/h2/hpack.rs:3091:24
+     |
+3091 |         encoder.encode(&[evicting_header.clone()], &mut encoded);
+     |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `std::slice::from_ref(&evicting_header)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cloned_ref_to_slice_refs
+
+error: avoid using `collect()` when not needed
+    --> src/http/h3_native.rs:5062:75
+     |
+5062 |         let ids: Vec<_> = table.entries.iter().map(|e| e.insertion_order).collect();
+     |                                                                           ^^^^^^^
+5063 |         ids.into_iter().for_each(|id| {
+     |         --------------- the iterator could be used here instead
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_collect
+help: use the original Iterator instead of collecting it and then producing a new one
+     |
+5062 ~         
+5063 ~         table.entries.iter().map(|e| e.insertion_order).for_each(|id| {
+     |
+
+error: needless use of `for_each`
+    --> src/http/h3_native.rs:5063:9
+     |
+5063 | /         ids.into_iter().for_each(|id| {
+5064 | |             // Try to reference all remaining entries
+5065 | |             let _ = table.reference_entry(id);
+5066 | |         });
+     | |___________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_for_each
+     = note: `-D clippy::needless-for-each` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::needless_for_each)]`
+help: try
+     |
+5063 ~         for id in ids.into_iter() { {
+5064 +             // Try to reference all remaining entries
+5065 +             let _ = table.reference_entry(id);
+5066 +         } }
+     |
+
+error: only a `panic!` in `if`-then statement
+    --> src/lab/runtime.rs:5737:25
+     |
+5737 | /                         if i == 2 {
+5738 | |                             panic!("deterministic panic in task {}", i);
+5739 | |                         }
+     | |_________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_assert
+     = note: `-D clippy::manual-assert` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::manual_assert)]`
+help: replace `if`-then-`panic!` with `assert!`
+     |
+5737 -                         if i == 2 {
+5738 -                             panic!("deterministic panic in task {}", i);
+5739 -                         }
+5737 +                         assert!(i != 2, "deterministic panic in task {}", i);
+     |
+
+error: unnecessary semicolon
+    --> src/lab/runtime.rs:5825:30
+     |
+5825 | ...                   };
+     |                        ^ help: remove
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_semicolon
+
+error: it looks like you're trying to convert a tuple to an array
+    --> src/net/dns/resolver.rs:3457:35
+     |
+3457 |         let async_success_count = [ok1, ok2, ok3].iter().filter(|&&x| x).count();
+     |                                   ^^^^^^^^^^^^^^^
+     |
+     = help: use `.into()` instead, or `<[T; N]>::from` if type annotations are needed
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#tuple_array_conversions
+     = note: `-D clippy::tuple-array-conversions` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::tuple_array_conversions)]`
+
+error: called `map(<f>).unwrap_or(false)` on an `Option` value
+    --> src/net/dns/resolver.rs:3503:37
+     |
+3503 |                 let first_is_ipv6 = addrs.first().map(|ip| ip.is_ipv6()).unwrap_or(false);
+     |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+help: use `is_some_and(<f>)` instead
+     |
+3503 -                 let first_is_ipv6 = addrs.first().map(|ip| ip.is_ipv6()).unwrap_or(false);
+3503 +                 let first_is_ipv6 = addrs.first().is_some_and(|ip| ip.is_ipv6());
+     |
+
+error: this `continue` expression is redundant
+    --> src/net/tcp/stream.rs:1742:34
+     |
+1742 |                         Ok(_) => continue,
+     |                                  ^^^^^^^^
+     |
+     = help: consider dropping the `continue` expression
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_continue
+
+error: written amount is not handled
+    --> src/net/tcp/stream.rs:1730:27
+     |
+1730 |                     match (&client).write(&large_data) {
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: use `Write::write_all` instead, or handle partial writes
+note: the result is consumed here, but the amount of I/O bytes remains unhandled
+    --> src/net/tcp/stream.rs:1742:25
+     |
+1742 |                         Ok(_) => continue,
+     |                         ^^^^^
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_io_amount
+     = note: `#[deny(clippy::unused_io_amount)]` on by default
+
+error: reference as raw pointer
+    --> src/net/tcp/stream.rs:2032:17
+     |
+2032 |                 &mut nodelay_val as *mut _ as *mut libc::c_void,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `std::ptr::from_mut(&mut nodelay_val)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#ref_as_ptr
+     = note: `-D clippy::ref-as-ptr` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::ref_as_ptr)]`
+
+error: reference as raw pointer
+    --> src/net/tcp/stream.rs:2049:17
+     |
+2049 |                 &mut nodelay_val as *mut _ as *mut libc::c_void,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `std::ptr::from_mut(&mut nodelay_val)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#ref_as_ptr
+
+error: reference as raw pointer
+    --> src/net/tcp/stream.rs:2083:17
+     |
+2083 |                 &mut keepalive_val as *mut _ as *mut libc::c_void,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `std::ptr::from_mut(&mut keepalive_val)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#ref_as_ptr
+
+error: reference as raw pointer
+    --> src/net/tcp/stream.rs:2100:17
+     |
+2100 |                 &mut keepalive_val as *mut _ as *mut libc::c_void,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `std::ptr::from_mut(&mut keepalive_val)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#ref_as_ptr
+
+error: reference as raw pointer
+    --> src/net/tcp/stream.rs:2135:17
+     |
+2135 |                 &mut keepidle_val as *mut _ as *mut libc::c_void,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `std::ptr::from_mut(&mut keepidle_val)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#ref_as_ptr
+
+error: reference as raw pointer
+    --> src/net/tcp/stream.rs:2173:17
+     |
+2173 |                 &mut nodelay_val as *mut _ as *mut libc::c_void,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `std::ptr::from_mut(&mut nodelay_val)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#ref_as_ptr
+
+error: reference as raw pointer
+    --> src/net/tcp/stream.rs:2215:17
+     |
+2215 |                 &mut keepalive_val as *mut _ as *mut libc::c_void,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `std::ptr::from_mut(&mut keepalive_val)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#ref_as_ptr
+
+error: reference as raw pointer
+    --> src/net/tcp/stream.rs:2260:17
+     |
+2260 |                 &mut nodelay_val as *mut _ as *mut libc::c_void,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `std::ptr::from_mut(&mut nodelay_val)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#ref_as_ptr
+
+error: reference as raw pointer
+    --> src/net/tcp/stream.rs:2274:17
+     |
+2274 |                 &mut keepalive_val as *mut _ as *mut libc::c_void,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `std::ptr::from_mut(&mut keepalive_val)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#ref_as_ptr
+
+error: function call inside of `expect`
+    --> src/net/websocket/handshake.rs:1525:18
+     |
+1525 |                 .expect(&format!("Failed to parse request {}", i));
+     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `unwrap_or_else(|_| panic!("Failed to parse request {}", i))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_fun_call
+
+error: function call inside of `expect`
+    --> src/net/websocket/handshake.rs:1575:18
+     |
+1575 |                 .expect(&format!("Failed to parse request for {}", description));
+     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `unwrap_or_else(|_| panic!("Failed to parse request for {}", description))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_fun_call
+
+error: function call inside of `expect`
+    --> src/net/websocket/handshake.rs:1737:18
+     |
+1737 |                 .expect(&format!("Request {} should parse", i));
+     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `unwrap_or_else(|_| panic!("Request {} should parse", i))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_fun_call
+
+error: function call inside of `expect`
+    --> src/net/websocket/handshake.rs:1741:18
+     |
+1741 |                 .expect(&format!("Connection {} should be accepted", i));
+     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `unwrap_or_else(|_| panic!("Connection {} should be accepted", i))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_fun_call
+
+error: function call inside of `expect`
+    --> src/net/websocket/handshake.rs:1770:18
+     |
+1770 |                 .expect(&format!("Request for key {} should parse", i));
+     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `unwrap_or_else(|_| panic!("Request for key {} should parse", i))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_fun_call
+
+error: function call inside of `expect`
+    --> src/net/websocket/handshake.rs:1774:18
+     |
+1774 |                 .expect(&format!("Connection for key {} should be accepted", i));
+     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `unwrap_or_else(|_| panic!("Connection for key {} should be accepted", i))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_fun_call
+
+error: function call inside of `expect`
+    --> src/net/websocket/handshake.rs:1917:71
+     |
+1917 |               let request = HttpRequest::parse(request_data.as_bytes()).expect(&format!(
+     |  _______________________________________________________________________^
+1918 | |                 "Protocol header '{}' should parse",
+1919 | |                 protocol_header
+1920 | |             ));
+     | |______________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_fun_call
+help: try
+     |
+1917 ~             let request = HttpRequest::parse(request_data.as_bytes()).unwrap_or_else(|_| panic!("Protocol header '{}' should parse",
+1918 ~                 protocol_header));
+     |
+
+error: function call inside of `expect`
+    --> src/net/websocket/handshake.rs:1922:55
+     |
+1922 |               let accept = server_chat.accept(&request).expect(&format!(
+     |  _______________________________________________________^
+1923 | |                 "Protocol negotiation should succeed for '{}'",
+1924 | |                 protocol_header
+1925 | |             ));
+     | |______________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_fun_call
+help: try
+     |
+1922 ~             let accept = server_chat.accept(&request).unwrap_or_else(|_| panic!("Protocol negotiation should succeed for '{}'",
+1923 ~                 protocol_header));
+     |
+
+error: function call inside of `expect`
+    --> src/net/websocket/handshake.rs:2014:18
+     |
+2014 |                 .expect(&format!("Request should parse: {}", description));
+     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `unwrap_or_else(|_| panic!("Request should parse: {}", description))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_fun_call
+
+error: function call inside of `expect`
+    --> src/net/websocket/handshake.rs:2079:74
+     |
+2079 |               let response = HttpResponse::parse(response_data.as_bytes()).expect(&format!(
+     |  __________________________________________________________________________^
+2080 | |                 "Response with status {} should parse",
+2081 | |                 status_code
+2082 | |             ));
+     | |______________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#expect_fun_call
+help: try
+     |
+2079 ~             let response = HttpResponse::parse(response_data.as_bytes()).unwrap_or_else(|_| panic!("Response with status {} should parse",
+2080 ~                 status_code));
+     |
+
+error: empty String is being created manually
+   --> src/net/websocket/masking_conformance_tests.rs:514:14
+    |
+514 |             ("".to_string(), Opcode::Text),
+    |              ^^^^^^^^^^^^^^ help: consider using: `String::new()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_string_new
+    = note: `-D clippy::manual-string-new` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::manual_string_new)]`
+
+error: empty String is being created manually
+   --> src/net/websocket/masking_conformance_tests.rs:522:14
+    |
+522 |             ("".to_string(), Opcode::Binary),
+    |              ^^^^^^^^^^^^^^ help: consider using: `String::new()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_string_new
+
+error: avoid using `collect()` when not needed
+    --> src/obligation/dialectica.rs:1751:14
+     |
+1751 |             .collect();
+     |              ^^^^^^^
+...
+1755 |             region0_violations2.len(),
+     |             ------------------------- the iterator could be used here instead
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_collect
+help: take the original Iterator's count instead of collecting it and finding the length
+     |
+1747 ~         
+1748 |
+1749 |         assert_eq!(
+1750 |             region0_violations1.len(),
+1751 ~             result2
+1752 +             .violations
+1753 +             .iter()
+1754 ~             .filter(|v| v.region == Some(r(0))).count(),
+     |
+
+error: avoid using `collect()` when not needed
+    --> src/obligation/dialectica.rs:1803:18
+     |
+1803 |                 .collect();
+     |                  ^^^^^^^
+...
+1807 |                 region0_violations3.len(),
+     |                 ------------------------- the iterator could be used here instead
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_collect
+help: take the original Iterator's count instead of collecting it and finding the length
+     |
+1799 ~             
+1800 |
+1801 |             assert_eq!(
+1802 |                 region0_violations1.len(),
+1803 ~                 result3
+1804 +                 .violations
+1805 +                 .iter()
+1806 ~                 .filter(|v| v.region == Some(r(0))).count(),
+     |
+
+error: avoid using `collect()` when not needed
+    --> src/observability/obligation_tracker.rs:1156:74
+     |
+1156 |         let active_ids: Vec<_> = active_obligations.iter().map(|o| o.id).collect();
+     |                                                                          ^^^^^^^
+1157 |         assert!(
+1158 |             !active_ids.contains(&obligation_id),
+     |              ----------------------------------- the iterator could be used here instead
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_collect
+help: check if the original Iterator contains an element instead of collecting then checking
+     |
+1156 ~         
+1157 |         assert!(
+1158 ~             !active_obligations.iter().map(|o| o.id).any(|x| x == obligation_id),
+     |
+
+error: used `sort` on primitive type `i32`
+  --> src/runtime/blocking_pool/metamorphic.rs:88:13
+   |
+88 |             result.sort();
+   |             ^^^^^^^^^^^^^ help: try: `result.sort_unstable()`
+   |
+   = note: an unstable sort typically performs faster without any observable difference for this data type
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#stable_sort_primitive
+
+error: used `sort` on primitive type `i32`
+   --> src/runtime/blocking_pool/metamorphic.rs:113:13
+    |
+113 |             result.sort();
+    |             ^^^^^^^^^^^^^ help: try: `result.sort_unstable()`
+    |
+    = note: an unstable sort typically performs faster without any observable difference for this data type
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#stable_sort_primitive
+
+error: used `sort` on primitive type `i32`
+   --> src/runtime/blocking_pool/metamorphic.rs:157:13
+    |
+157 |             result.sort();
+    |             ^^^^^^^^^^^^^ help: try: `result.sort_unstable()`
+    |
+    = note: an unstable sort typically performs faster without any observable difference for this data type
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#stable_sort_primitive
+
+error: used `sort` on primitive type `i32`
+   --> src/runtime/blocking_pool/metamorphic.rs:181:13
+    |
+181 |             result.sort();
+    |             ^^^^^^^^^^^^^ help: try: `result.sort_unstable()`
+    |
+    = note: an unstable sort typically performs faster without any observable difference for this data type
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#stable_sort_primitive
+
+error: used `cloned` where `copied` could be used instead
+   --> src/runtime/blocking_pool/metamorphic.rs:299:60
+    |
+299 |         let task_counts: Vec<usize> = assignments.values().cloned().collect();
+    |                                                            ^^^^^^ help: try: `copied`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cloned_instead_of_copied
+    = note: `-D clippy::cloned-instead-of-copied` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::cloned_instead_of_copied)]`
+
+error: used `sort` on primitive type `usize`
+   --> src/runtime/blocking_pool/metamorphic.rs:361:13
+    |
+361 |             result.sort();
+    |             ^^^^^^^^^^^^^ help: try: `result.sort_unstable()`
+    |
+    = note: an unstable sort typically performs faster without any observable difference for this data type
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#stable_sort_primitive
+
+error: used `sort` on primitive type `usize`
+   --> src/runtime/blocking_pool/metamorphic.rs:387:13
+    |
+387 |             result.sort();
+    |             ^^^^^^^^^^^^^ help: try: `result.sort_unstable()`
+    |
+    = note: an unstable sort typically performs faster without any observable difference for this data type
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#stable_sort_primitive
+
+error: only a `panic!` in `if`-then statement
+    --> src/runtime/scheduler/three_lane.rs:8823:17
+     |
+8823 | /                 if cancel_dispatches >= cancel_limit * 2 {
+8824 | |                     panic!(
+8825 | |                         "Cancel fairness violated: {} cancel dispatches without ready dispatch",
+8826 | |                         cancel_dispatches
+8827 | |                     );
+8828 | |                 }
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_assert
+help: replace `if`-then-`panic!` with `assert!`
+     |
+8823 ~                 assert!(cancel_dispatches < cancel_limit * 2, 
+8824 +                     "Cancel fairness violated: {} cancel dispatches without ready dispatch",
+8825 +                     cancel_dispatches
+8826 +                 )
+     |
+
+error: manual `RangeInclusive::contains` implementation
+    --> src/runtime/scheduler/three_lane.rs:9052:17
+     |
+9052 |                 penalty >= 0.0 && penalty <= 2.0,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use: `(0.0..=2.0).contains(&penalty)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_range_contains
+     = note: `-D clippy::manual-range-contains` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::manual_range_contains)]`
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+    --> src/runtime/scheduler/three_lane.rs:9107:29
+     |
+9107 |                 let diff = (window[1] as i32 - window[0] as i32).abs();
+     |                             ^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `usize` to `i32` may wrap around the value on targets with 32-bit wide pointers
+    --> src/runtime/scheduler/three_lane.rs:9107:48
+     |
+9107 |                 let diff = (window[1] as i32 - window[0] as i32).abs();
+     |                                                ^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: manual `RangeInclusive::contains` implementation
+    --> src/runtime/scheduler/three_lane.rs:9167:21
+     |
+9167 |                     weight >= 1e-30 && weight <= 1e30,
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use: `(1e-30..=1e30).contains(&weight)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_range_contains
+
+error: manual absolute difference pattern without using `abs_diff`
+    --> src/runtime/scheduler/worker.rs:1607:29
+     |
+1607 |               let deviation = if *actual > expected_per_worker {
+     |  _____________________________^
+1608 | |                 *actual - expected_per_worker
+1609 | |             } else {
+1610 | |                 expected_per_worker - *actual
+1611 | |             };
+     | |_____________^ help: replace with `abs_diff`: `(*actual).abs_diff(expected_per_worker)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_abs_diff
+
+error: manual absolute difference pattern without using `abs_diff`
+    --> src/runtime/scheduler/worker.rs:1803:33
+     |
+1803 |                   let deviation = if *actual > expected_per_target {
+     |  _________________________________^
+1804 | |                     *actual - expected_per_target
+1805 | |                 } else {
+1806 | |                     expected_per_target - *actual
+1807 | |                 };
+     | |_________________^ help: replace with `abs_diff`: `(*actual).abs_diff(expected_per_target)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_abs_diff
+
+error: taken reference of right operand
+    --> src/runtime/state.rs:4703:13
+     |
+4703 | /             state.finalizer_history()
+4704 | |                 == &[
+4705 | |                     FinalizerHistoryEvent::Registered {
+4706 | |                         id: 0,
+...    |
+4717 | |                     },
+4718 | |                 ],
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#op_ref
+     = note: `-D clippy::op-ref` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::op_ref)]`
+help: use the right value directly
+     |
+4704 ~                 == [
+4705 +                     FinalizerHistoryEvent::Registered {
+4706 +                         id: 0,
+4707 +                         region,
+4708 +                         time: Time::from_nanos(100),
+4709 +                     },
+4710 +                     FinalizerHistoryEvent::Ran {
+4711 +                         id: 0,
+4712 +                         time: Time::from_nanos(137),
+4713 +                     },
+4714 +                     FinalizerHistoryEvent::RegionClosed {
+4715 +                         region,
+4716 +                         time: Time::from_nanos(137),
+4717 +                     },
+4718 ~                 ],
+     |
+
+error: manual implementation of `Option::map`
+    --> src/runtime/state.rs:9082:17
+     |
+9082 | /                 if let Some(region) = regions.get(region_id.arena_index()) {
+9083 | |                     Some(Self {
+9084 | |                         region_id,
+9085 | |                         close_successful: region.state()
+...    |
+9093 | |                     None
+9094 | |                 }
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_map
+     = note: `-D clippy::manual-map` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::manual_map)]`
+help: try
+     |
+9082 ~                 regions.get(region_id.arena_index()).map(|region| Self {
+9083 +                         region_id,
+9084 +                         close_successful: region.state()
+9085 +                             == crate::record::region::RegionState::Closed,
+9086 +                         final_state: region.state(),
+9087 +                         task_count: region.task_count(),
+9088 +                         child_count: region.child_count(),
+9089 +                         pending_obligations: region.pending_obligations(),
+9090 +                     })
+     |
+
+error: this operation has no effect
+    --> src/service/layer.rs:1095:28
+     |
+1095 |             let expected = ((((test_value + 1) * 2) + 3) + 4) * 1 + 0;
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider reducing it to: `((((test_value + 1) * 2) + 3) + 4) * 1`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#identity_op
+     = note: `-D clippy::identity-op` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::identity_op)]`
+
+error: this operation has no effect
+    --> src/service/layer.rs:1095:28
+     |
+1095 |             let expected = ((((test_value + 1) * 2) + 3) + 4) * 1 + 0;
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider reducing it to: `(((((test_value + 1) * 2) + 3) + 4))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#identity_op
+
+error: this operation has no effect
+    --> src/service/layer.rs:1118:39
+     |
+1118 |             let reversed_expected = ((((test_value + 0) * 1) + 4) + 3) * 2 + 1;
+     |                                       ^^^^^^^^^^^^^^^^^^^^^^ help: consider reducing it to: `((test_value + 0))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#identity_op
+
+error: this operation has no effect
+    --> src/service/layer.rs:1118:40
+     |
+1118 |             let reversed_expected = ((((test_value + 0) * 1) + 4) + 3) * 2 + 1;
+     |                                        ^^^^^^^^^^^^^^^^ help: consider reducing it to: `test_value`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#identity_op
+
+error: manual implementation of a no-op waker
+    --> src/sync/pool.rs:5139:14
+     |
+5139 |         impl Wake for NoopPoolWaker {
+     |              ^^^^
+     |
+     = help: use `std::task::Waker::noop()` instead
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_noop_waker
+
+error: this `continue` expression is redundant
+    --> src/sync/rwlock.rs:2593:34
+     |
+2593 |                 Poll::Pending => continue,
+     |                                  ^^^^^^^^
+     |
+     = help: consider dropping the `continue` expression
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_continue
+
+error: usage of an `Arc` that is not `Send` and `Sync`
+    --> src/sync/rwlock.rs:2653:28
+     |
+2653 |             let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `Arc<LabRuntime>` is not `Send` and `Sync` as `LabRuntime` is not `Sync`
+     = help: if the `Arc` will not be used across threads replace it with an `Rc`
+     = help: otherwise make `LabRuntime` `Send` and `Sync` or consider a wrapper type such as `Mutex`
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#arc_with_non_send_sync
+     = note: `-D clippy::arc-with-non-send-sync` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::arc_with_non_send_sync)]`
+
+error: usage of an `Arc` that is not `Send` and `Sync`
+    --> src/sync/rwlock.rs:2730:28
+     |
+2730 |             let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `Arc<LabRuntime>` is not `Send` and `Sync` as `LabRuntime` is not `Sync`
+     = help: if the `Arc` will not be used across threads replace it with an `Rc`
+     = help: otherwise make `LabRuntime` `Send` and `Sync` or consider a wrapper type such as `Mutex`
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#arc_with_non_send_sync
+
+error: usage of an `Arc` that is not `Send` and `Sync`
+    --> src/sync/rwlock.rs:2803:28
+     |
+2803 |             let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `Arc<LabRuntime>` is not `Send` and `Sync` as `LabRuntime` is not `Sync`
+     = help: if the `Arc` will not be used across threads replace it with an `Rc`
+     = help: otherwise make `LabRuntime` `Send` and `Sync` or consider a wrapper type such as `Mutex`
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#arc_with_non_send_sync
+
+error: usage of an `Arc` that is not `Send` and `Sync`
+    --> src/sync/rwlock.rs:2895:28
+     |
+2895 |             let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `Arc<LabRuntime>` is not `Send` and `Sync` as `LabRuntime` is not `Sync`
+     = help: if the `Arc` will not be used across threads replace it with an `Rc`
+     = help: otherwise make `LabRuntime` `Send` and `Sync` or consider a wrapper type such as `Mutex`
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#arc_with_non_send_sync
+
+error: usage of an `Arc` that is not `Send` and `Sync`
+    --> src/sync/rwlock.rs:2964:28
+     |
+2964 |             let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `Arc<LabRuntime>` is not `Send` and `Sync` as `LabRuntime` is not `Sync`
+     = help: if the `Arc` will not be used across threads replace it with an `Rc`
+     = help: otherwise make `LabRuntime` `Send` and `Sync` or consider a wrapper type such as `Mutex`
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#arc_with_non_send_sync
+
+error: called `map(<f>).unwrap_or_else(<g>)` on an `Option` value
+   --> src/trace/canonicalize.rs:690:17
+    |
+690 | /                 parent
+691 | |                     .map(|region| region.as_u64().to_string())
+692 | |                     .unwrap_or_else(|| "none".to_string())
+    | |__________________________________________________________^ help: try: `parent.map_or_else(|| "none".to_string(), |region| region.as_u64().to_string())`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+
+error: called `map(<f>).unwrap_or_else(<g>)` on an `Option` value
+   --> src/trace/canonicalize.rs:708:17
+    |
+708 | /                 duration_ns
+709 | |                     .map(|value| value.to_string())
+710 | |                     .unwrap_or_else(|| "none".to_string()),
+    | |__________________________________________________________^ help: try: `duration_ns.map_or_else(|| "none".to_string(), |value| value.to_string())`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+
+error: called `map(<f>).unwrap_or_else(<g>)` on an `Option` value
+   --> src/trace/canonicalize.rs:711:17
+    |
+711 | /                 abort_reason
+712 | |                     .map(|reason| reason.as_str().to_string())
+713 | |                     .unwrap_or_else(|| "none".to_string())
+    | |__________________________________________________________^ help: try: `abort_reason.map_or_else(|| "none".to_string(), |reason| reason.as_str().to_string())`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+
+error: called `map(<f>).unwrap_or_else(<g>)` on an `Option` value
+   --> src/trace/canonicalize.rs:732:17
+    |
+732 | /                 deadline
+733 | |                     .map(|time| time.as_nanos().to_string())
+734 | |                     .unwrap_or_else(|| "none".to_string())
+    | |__________________________________________________________^ help: try: `deadline.map_or_else(|| "none".to_string(), |time| time.as_nanos().to_string())`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#map_unwrap_or
+
+error: casting `u32` to `i32` may wrap around the value
+    --> src/process.rs:2810:50
+     |
+2810 |         let sigterm_result = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+     |                                                  ^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `pid.cast_signed()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `u32` to `i32` may wrap around the value
+    --> src/process.rs:2823:24
+     |
+2823 |             libc::kill(pid as i32, 0) == 0 // Signal 0 checks existence
+     |                        ^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `pid.cast_signed()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `u32` to `i32` may wrap around the value
+    --> src/process.rs:2833:50
+     |
+2833 |         let sigkill_result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+     |                                                  ^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `pid.cast_signed()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `u32` to `i32` may wrap around the value
+    --> src/process.rs:2902:28
+     |
+2902 |                 libc::kill(pid as i32, 0) == -1 && *libc::__errno_location() == libc::ESRCH
+     |                            ^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `pid.cast_signed()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `u32` to `i32` may wrap around the value
+    --> src/process.rs:2981:49
+     |
+2981 |         let child_pgid = unsafe { libc::getpgid(child_pid as i32) };
+     |                                                 ^^^^^^^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `child_pid.cast_signed()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: casting `u32` to `i32` may wrap around the value
+    --> src/process.rs:3005:47
+     |
+3005 |         let child_alive = unsafe { libc::kill(child_pid as i32, 0) == 0 };
+     |                                               ^^^^^^^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `child_pid.cast_signed()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: comparison is useless due to type limits
+   --> src/channel/broadcast_metamorphic.rs:302:25
+    |
+302 |                         after_msg >= 0, // Should receive valid message
+    |                         ^^^^^^^^^^^^^^
+    |
+    = note: `-D unused-comparisons` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_comparisons)]`
+
+error: missing documentation for an associated function
+   --> src/combinator/timeout_metamorphic.rs:234:5
+    |
+234 |     pub fn new() -> Arc<Self> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `-D missing-docs` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(missing_docs)]`
+
+error: missing documentation for a struct field
+   --> src/combinator/timeout_metamorphic.rs:264:5
+    |
+264 |     pub total_polls: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+error: missing documentation for a struct field
+   --> src/combinator/timeout_metamorphic.rs:265:5
+    |
+265 |     pub operation_completed: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: missing documentation for a struct field
+   --> src/combinator/timeout_metamorphic.rs:266:5
+    |
+266 |     pub operation_cancelled: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: missing documentation for a struct field
+   --> src/combinator/timeout_metamorphic.rs:267:5
+    |
+267 |     pub timeouts_detected: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: missing documentation for a struct field
+   --> src/combinator/timeout_metamorphic.rs:268:5
+    |
+268 |     pub external_cancels_detected: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: missing documentation for a struct field
+   --> src/combinator/timeout_metamorphic.rs:269:5
+    |
+269 |     pub double_cancel_detected: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: could not compile `asupersync` (lib test) due to 206 previous errors
+  [2m2026-04-21T04:49:31.310400Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=101 in 207447ms[0m
     [2;3mat[0m rch/src/hook.rs:4996 [2;3mon[0m ThreadId(1)
 
-[W] Worker: ts2 | Job: j-29806699757961968
-[T] Total: 9.5s (sync 7.8s, build 1.7s, artifacts --)
-^ Sync: 359.5 KB in 7.8s (46.1 KB/s)
-[C] Compile: 1.7s
+[W] Worker: ts2 | Job: j-29806699757962253
+[T] Total: 218.3s (sync 10.8s, build 207.4s, artifacts --)
+^ Sync: 106.8 MB in 10.8s (9.9 MB/s)
+[C] Compile: 207.4s
 Artifacts: skipped
 [T] Cache: MISS
 [RCH] remote ts2 failed (exit 101)

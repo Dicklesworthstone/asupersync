@@ -71,16 +71,9 @@ impl Future for YieldingFuture {
 }
 
 /// A noop waker for polling futures in tests.
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-    fn wake_by_ref(self: &Arc<Self>) {}
-}
-
 /// Polls a future to completion using a noop waker.
 fn poll_to_completion<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWaker));
+    let waker = std::task::Waker::noop().clone();
     let mut cx = Context::from_waker(&waker);
     let mut pinned = Box::pin(future);
 

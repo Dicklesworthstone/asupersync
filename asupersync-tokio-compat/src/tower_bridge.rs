@@ -293,12 +293,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Wake, Waker};
 
-    struct NoopWaker;
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
     fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWaker))
+        std::task::Waker::noop().clone()
     }
 
     /// Minimal `block_on` for tests.

@@ -387,8 +387,8 @@ impl Stealer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
     use crate::types::TaskId;
+    use proptest::prelude::*;
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
@@ -450,9 +450,7 @@ mod tests {
         (steal_rounds, owner_remaining)
     }
 
-    fn run_repeated_steal_batch_from_push_chunks(
-        chunks: &[Vec<u32>],
-    ) -> (Vec<Vec<u32>>, Vec<u32>) {
+    fn run_repeated_steal_batch_from_push_chunks(chunks: &[Vec<u32>]) -> (Vec<Vec<u32>>, Vec<u32>) {
         let max_task_id = chunks
             .iter()
             .flat_map(|chunk| chunk.iter().copied())

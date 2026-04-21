@@ -2398,6 +2398,104 @@ mod tests {
         });
     }
 
+    #[derive(Clone, Copy)]
+    struct DiagnosticCrashpack<'a> {
+        incident: &'a str,
+        bundle_path: &'a str,
+        replay_trace: &'a str,
+        replay_command: &'a str,
+        captured_at: &'a str,
+    }
+
+    fn region_explanation_json(explanation: &RegionOpenExplanation) -> Value {
+        json!({
+            "id": format!("{:?}", explanation.region_id),
+            "state": explanation.region_state.map(|state| format!("{state:?}")),
+            "reasons": explanation
+                .reasons
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            "recommendations": explanation.recommendations.clone(),
+        })
+    }
+
+    fn task_blocked_explanation_json(explanation: &TaskBlockedExplanation) -> Value {
+        json!({
+            "task_id": format!("{:?}", explanation.task_id),
+            "block_reason": explanation.block_reason.to_string(),
+            "details": explanation.details.clone(),
+            "recommendations": explanation.recommendations.clone(),
+        })
+    }
+
+    fn crashpack_json(crashpack: DiagnosticCrashpack<'_>) -> Value {
+        json!({
+            "incident": crashpack.incident,
+            "bundle_path": crashpack.bundle_path,
+            "replay_trace": crashpack.replay_trace,
+            "replay_command": crashpack.replay_command,
+            "captured_at": crashpack.captured_at,
+        })
+    }
+
+    fn render_diagnostic_forensic_dump_json(
+        diagnostics: &Diagnostics,
+        region_id: RegionId,
+        task_id: Option<TaskId>,
+        generated_at: &str,
+        pid: u32,
+        crashpack: Option<DiagnosticCrashpack<'_>>,
+    ) -> Value {
+        let mut dump =
+            render_diagnostic_healthcheck_json(diagnostics, region_id, generated_at, pid);
+        let region = diagnostics.explain_region_open(region_id);
+        let task = task_id.map(|task_id| diagnostics.explain_task_blocked(task_id));
+
+        let object = dump
+            .as_object_mut()
+            .expect("diagnostic forensic dump should be an object");
+        object.insert(
+            "region_details".to_string(),
+            region_explanation_json(&region),
+        );
+        object.insert(
+            "task_details".to_string(),
+            task.as_ref()
+                .map_or(Value::Null, task_blocked_explanation_json),
+        );
+        object.insert(
+            "crashpack".to_string(),
+            crashpack.map_or(Value::Null, crashpack_json),
+        );
+        dump
+    }
+
+    fn scrub_diagnostic_forensic_dump_json(mut value: Value) -> Value {
+        fn scrub_value(value: &mut Value) {
+            match value {
+                Value::Array(items) => {
+                    for item in items {
+                        scrub_value(item);
+                    }
+                }
+                Value::Object(object) => {
+                    for (key, entry) in object.iter_mut() {
+                        if matches!(key.as_str(), "generated_at" | "captured_at" | "pid") {
+                            *entry = Value::String("<scrubbed>".to_string());
+                        } else {
+                            scrub_value(entry);
+                        }
+                    }
+                }
+                Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+            }
+        }
+
+        scrub_value(&mut value);
+        value
+    }
+
     #[test]
     fn test_explain_region_open_unknown_region_returns_reason() {
         init_test("test_explain_region_open_unknown_region_returns_reason");
@@ -3611,6 +3709,101 @@ mod tests {
                 "passing": passing,
                 "degraded": degraded,
                 "critical": critical,
+            }),
+        );
+    }
+
+    #[test]
+    fn diagnostics_forensic_dump_json_snapshot_scrubbed() {
+        init_test("diagnostics_forensic_dump_json_snapshot_scrubbed");
+
+        let mut happy_state = RuntimeState::new();
+        let happy_root = happy_state.create_root_region(Budget::INFINITE);
+        let happy_region = happy_state.region(happy_root).expect("happy root missing");
+        let did_close = happy_region.begin_close(None)
+            && happy_region.begin_finalize()
+            && happy_region.complete_close();
+        assert!(did_close, "happy root should close cleanly");
+        let happy = scrub_diagnostic_forensic_dump_json(render_diagnostic_forensic_dump_json(
+            &Diagnostics::new(Arc::new(happy_state)),
+            happy_root,
+            None,
+            "2026-04-21T09:40:00Z",
+            5101,
+            None,
+        ));
+        assert_eq!(happy.get("status").and_then(Value::as_str), Some("passing"));
+        assert_eq!(happy.get("crashpack"), Some(&Value::Null));
+
+        let mut crashpack_state = RuntimeState::new();
+        let crashpack_root = crashpack_state.create_root_region(Budget::INFINITE);
+        let crashpack_child = insert_child_region(&mut crashpack_state, crashpack_root);
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(5_000)));
+        crashpack_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+        let root_task = insert_task(&mut crashpack_state, crashpack_root, TaskState::Running);
+        crashpack_state
+            .task_mut(root_task)
+            .expect("crashpack root task missing")
+            .total_polls = 12;
+        let stuck_task = insert_task(
+            &mut crashpack_state,
+            crashpack_child,
+            TaskState::Cancelling {
+                reason: CancelReason::shutdown().with_message("capture crashpack before restart"),
+                cleanup_budget: Budget::new().with_poll_quota(8),
+            },
+        );
+        crashpack_state
+            .task_mut(stuck_task)
+            .expect("crashpack stuck task missing")
+            .total_polls = 5;
+        let _root_obligation = insert_obligation(
+            &mut crashpack_state,
+            crashpack_root,
+            root_task,
+            ObligationKind::Ack,
+            Time::from_millis(2_000),
+        );
+        let _stuck_obligation = insert_obligation(
+            &mut crashpack_state,
+            crashpack_child,
+            stuck_task,
+            ObligationKind::Lease,
+            Time::from_millis(1_500),
+        );
+        let crashpack_diagnostics = Diagnostics::new(Arc::new(crashpack_state));
+        let crashpack = scrub_diagnostic_forensic_dump_json(render_diagnostic_forensic_dump_json(
+            &crashpack_diagnostics,
+            crashpack_root,
+            Some(stuck_task),
+            "2026-04-21T09:40:02Z",
+            5102,
+            Some(DiagnosticCrashpack {
+                incident: "runtime-freeze",
+                bundle_path: "artifacts/crashpacks/runtime-freeze-20260421.tar.zst",
+                replay_trace: "artifacts/replays/runtime-freeze.trace",
+                replay_command: "rch exec -- cargo test -p asupersync diagnostics_forensic_dump_json_snapshot_scrubbed --lib -- --nocapture",
+                captured_at: "2026-04-21T09:40:01Z",
+            }),
+        ));
+        assert_eq!(
+            crashpack.get("status").and_then(Value::as_str),
+            Some("degraded")
+        );
+        assert_eq!(
+            crashpack
+                .get("crashpack")
+                .and_then(Value::as_object)
+                .and_then(|object| object.get("incident"))
+                .and_then(Value::as_str),
+            Some("runtime-freeze")
+        );
+
+        assert_diagnostic_healthcheck_snapshot(
+            "observability_diagnostics_forensic_dump_json",
+            &json!({
+                "happy": happy,
+                "crashpack": crashpack,
             }),
         );
     }

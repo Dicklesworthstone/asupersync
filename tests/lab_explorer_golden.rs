@@ -158,7 +158,10 @@ fn scrub_report(report: &ExplorationReport) -> ScrubbedReport {
     scrub_report_with_context(report, &mut scrub)
 }
 
-fn scrub_report_with_context(report: &ExplorationReport, scrub: &mut ScrubContext) -> ScrubbedReport {
+fn scrub_report_with_context(
+    report: &ExplorationReport,
+    scrub: &mut ScrubContext,
+) -> ScrubbedReport {
     let class_run_counts = report
         .coverage
         .class_run_counts
@@ -473,7 +476,10 @@ fn run_topology_scenario_v2() -> ScenarioGoldenV2 {
             root_tasks_scheduled: 3,
             scheduled_priorities: vec![0, 0, 0],
             shape: "three-task topology frontier",
-            notes: &["topology-prioritized seed frontier", "homology score on unexplored seeds"],
+            notes: &[
+                "topology-prioritized seed frontier",
+                "homology score on unexplored seeds",
+            ],
         },
         report,
         None,

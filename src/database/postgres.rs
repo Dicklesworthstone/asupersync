@@ -6614,8 +6614,16 @@ mod tests {
     fn extended_execute_type_mismatch_errors_preserve_session_recovery() {
         let cx = crate::cx::Cx::for_testing();
         let mismatch_cases = [
-            ("22P02", "invalid input syntax for type integer: \"abc\"", b'I'),
-            ("42804", "column \"id\" is of type integer but expression is of type text", b'T'),
+            (
+                "22P02",
+                "invalid input syntax for type integer: \"abc\"",
+                b'I',
+            ),
+            (
+                "42804",
+                "column \"id\" is of type integer but expression is of type text",
+                b'T',
+            ),
         ];
 
         for (code, message, status) in mismatch_cases {
