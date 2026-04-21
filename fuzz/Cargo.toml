@@ -536,13 +536,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "web_multipart_parser"
-path = "fuzz_targets/web_multipart_parser.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "source_payload_hash_verification"
 path = "fuzz_targets/source_payload_hash_verification.rs"
 test = false
@@ -1581,6 +1574,13 @@ bench = false
 [[bin]]
 name = "fuzz_security_mac_verifier"
 path = "fuzz_targets/fuzz_security_mac_verifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quic_datagram_ack_parser"
+path = "fuzz_targets/quic_datagram_ack_parser.rs"
 test = false
 doc = false
 bench = false
