@@ -32,6 +32,7 @@ enum Scenario {
     ValidRoundTrip,
     DuplicateSourceRankDeficient,
     DuplicateRepairRankDeficient,
+    NearRankDeficientMixedSet,
     MalformedStructural,
     CorruptedSourcePayload,
 }
@@ -140,6 +141,31 @@ fn execute(input: FuzzInput) {
             for i in 0..k {
                 received.push(base_repairs[i % basis].clone());
             }
+            assert_failure_consensus(
+                &decoder,
+                &received,
+                effective_wavefront_batch(&input, received.len()),
+                FailureKind::SingularMatrix,
+                true,
+            );
+        }
+        Scenario::NearRankDeficientMixedSet => {
+            let missing = 1 + (usize::from(input.missing_sources) % (k - 1));
+            let source_payload =
+                build_mixed_payload(&decoder, &encoder, &source, missing, 0);
+            let source_symbols = k - missing;
+            let repair_symbols = source_payload.len() - source_symbols;
+            let duplicate_repairs = repair_symbols.max(2);
+            let repair_basis = duplicate_repairs - 1;
+            let base_repairs = build_repairs(&decoder, &encoder, repair_basis);
+
+            let mut received = decoder.constraint_symbols();
+            received.extend(source_payload.into_iter().take(source_symbols));
+            for i in 0..duplicate_repairs {
+                received.push(base_repairs[i % repair_basis].clone());
+            }
+
+            debug_assert_eq!(received.len(), decoder.constraint_symbols().len() + k);
             assert_failure_consensus(
                 &decoder,
                 &received,
