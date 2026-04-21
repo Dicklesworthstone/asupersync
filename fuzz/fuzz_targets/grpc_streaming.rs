@@ -1,18 +1,23 @@
 //! Comprehensive gRPC streaming fuzz target.
 //!
-//! Fuzzes bidirectional gRPC streaming plus explicit server-streaming demand patterns
+//! Fuzzes bidirectional gRPC streaming plus explicit server-streaming and
+//! client-streaming flow-control demand patterns
 //! to verify critical streaming invariants:
 //! 1. Message order preserved per direction
 //! 2. Half-close correctly signaled
 //! 3. Cancel from either direction drains the other
 //! 4. Deadline propagates into both streams
 //! 5. Server-streaming response buffers apply and relieve backpressure
+//! 6. Client-streaming request buffers apply and relieve backpressure without
+//!    panicking on premature server cancel
 //!
 //! # Streaming Patterns Tested
 //! - Interleaved client→server and server→client messages
 //! - Various close/cancel scenarios (client closes first, server closes first, both)
 //! - Deadline/timeout propagation and enforcement
 //! - Server-streaming demand gaps that saturate and later drain response buffers
+//! - Client-streaming demand gaps that saturate request buffers and then inject
+//!   a premature server cancel
 //! - Metadata and status code handling
 //! - Concurrent send/receive operations
 //!
@@ -25,15 +30,15 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::collections::VecDeque;
 use std::time::Duration;
 
 use asupersync::grpc::{
     client::{Channel, GrpcClient},
-    streaming::{ResponseStream, ServerStreaming, Streaming},
     status::{Code, Status},
+    streaming::{ResponseStream, ServerStreaming, Streaming, StreamingRequest},
 };
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
@@ -44,6 +49,9 @@ const MAX_STREAM_MESSAGES: usize = 100;
 
 /// Upper bound for explicit server-streaming demand/backpressure exercises.
 const MAX_SERVER_STREAM_BUFFER_ATTEMPTS: usize = 1400;
+
+/// Upper bound for explicit client-streaming demand/backpressure exercises.
+const MAX_CLIENT_STREAM_BUFFER_ATTEMPTS: usize = 1400;
 
 /// Fuzz-local duration wrapper.
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -114,6 +122,8 @@ struct StreamingScenario {
     operations: Vec<StreamOperation>,
     /// Explicit server-streaming demand patterns that can saturate the response buffer.
     server_streaming_patterns: Vec<ServerStreamingDemandPattern>,
+    /// Explicit client-streaming demand patterns that can saturate the request buffer.
+    client_streaming_patterns: Vec<ClientStreamingDemandPattern>,
     /// Global timeout for the streaming session
     timeout: Option<FuzzDuration>,
     /// Whether to enable flow-control backpressure testing
@@ -131,6 +141,21 @@ struct ServerStreamingDemandPattern {
     client_drain: u16,
     /// Additional messages pushed after draining to verify pressure relief.
     refill_burst: u16,
+    /// Whether to close the stream after the refill burst.
+    close_after_refill: bool,
+}
+
+/// Client-streaming demand patterns focused on request-buffer backpressure.
+#[derive(Arbitrary, Debug, Clone)]
+struct ClientStreamingDemandPattern {
+    /// Messages pushed before the server drains the stream.
+    initial_burst: u16,
+    /// Messages the server drains after the initial burst.
+    server_drain: u16,
+    /// Additional messages pushed after draining to verify pressure relief.
+    refill_burst: u16,
+    /// Whether the server injects a cancel after draining.
+    cancel_after_drain: bool,
     /// Whether to close the stream after the refill burst.
     close_after_refill: bool,
 }
@@ -190,15 +215,22 @@ struct StreamState {
     server_sent: VecDeque<TestMessage>,
     client_received: VecDeque<TestMessage>,
     server_received: VecDeque<TestMessage>,
+    client_stream_sent: VecDeque<TestMessage>,
+    client_stream_received: VecDeque<TestMessage>,
     client_closed: bool,
     server_closed: bool,
     client_cancelled: bool,
     server_cancelled: bool,
     deadline_exceeded: bool,
     backpressure_triggered: bool,
+    client_backpressure_events: usize,
+    client_stream_drains: usize,
+    client_backpressure_relieved: bool,
     server_backpressure_events: usize,
     server_stream_drains: usize,
     backpressure_relieved: bool,
+    premature_server_cancel_observed: bool,
+    post_cancel_send_rejected: bool,
 }
 
 impl StreamState {
@@ -208,15 +240,22 @@ impl StreamState {
             server_sent: VecDeque::new(),
             client_received: VecDeque::new(),
             server_received: VecDeque::new(),
+            client_stream_sent: VecDeque::new(),
+            client_stream_received: VecDeque::new(),
             client_closed: false,
             server_closed: false,
             client_cancelled: false,
             server_cancelled: false,
             deadline_exceeded: false,
             backpressure_triggered: false,
+            client_backpressure_events: 0,
+            client_stream_drains: 0,
+            client_backpressure_relieved: false,
             server_backpressure_events: 0,
             server_stream_drains: 0,
             backpressure_relieved: false,
+            premature_server_cancel_observed: false,
+            post_cancel_send_rejected: false,
         }
     }
 
@@ -231,6 +270,17 @@ impl StreamState {
 
         // Server→Client order preserved
         for (sent, received) in self.server_sent.iter().zip(self.client_received.iter()) {
+            if sent.id != received.id {
+                return false;
+            }
+        }
+
+        // Client-streaming order preserved across direct request-buffer exercises
+        for (sent, received) in self
+            .client_stream_sent
+            .iter()
+            .zip(self.client_stream_received.iter())
+        {
             if sent.id != received.id {
                 return false;
             }
@@ -265,6 +315,10 @@ impl StreamState {
             // For this fuzz test, we assume correct if no crashes/hangs occur
         }
 
+        if self.premature_server_cancel_observed && !self.post_cancel_send_rejected {
+            return false;
+        }
+
         true
     }
 
@@ -290,6 +344,14 @@ impl StreamState {
         if self.server_backpressure_events > 0
             && self.server_stream_drains > 0
             && !self.backpressure_relieved
+        {
+            return false;
+        }
+
+        if self.client_backpressure_events > 0
+            && self.client_stream_drains > 0
+            && !self.client_backpressure_relieved
+            && !self.premature_server_cancel_observed
         {
             return false;
         }
@@ -371,6 +433,107 @@ fn exercise_server_streaming_backpressure(
     }
 }
 
+fn exercise_client_streaming_backpressure(
+    pattern: &ClientStreamingDemandPattern,
+    state: &mut StreamState,
+) {
+    let mut request_stream = StreamingRequest::<TestMessage>::open();
+    let waker = std::task::Waker::noop().clone();
+    let mut cx = Context::from_waker(&waker);
+
+    let initial_burst = usize::from(pattern.initial_burst).min(MAX_CLIENT_STREAM_BUFFER_ATTEMPTS);
+    for idx in 0..initial_burst {
+        let message = TestMessage::new_simple(30_000 + idx as u32);
+        match request_stream.push(message.clone()) {
+            Ok(()) => state.client_stream_sent.push_back(message),
+            Err(status) => {
+                if status.code() == Code::ResourceExhausted {
+                    state.backpressure_triggered = true;
+                    state.client_backpressure_events += 1;
+                }
+                break;
+            }
+        }
+    }
+
+    let drain_count = usize::from(pattern.server_drain).min(MAX_CLIENT_STREAM_BUFFER_ATTEMPTS);
+    for _ in 0..drain_count {
+        match Pin::new(&mut request_stream).poll_next(&mut cx) {
+            Poll::Ready(Some(Ok(message))) => {
+                state.client_stream_received.push_back(message);
+                state.client_stream_drains += 1;
+            }
+            Poll::Ready(Some(Err(status))) => {
+                if status.code() == Code::Cancelled {
+                    state.server_cancelled = true;
+                    state.premature_server_cancel_observed = true;
+                }
+                break;
+            }
+            Poll::Ready(None) | Poll::Pending => break,
+        }
+    }
+
+    if pattern.cancel_after_drain {
+        let cancel_status =
+            Status::cancelled("premature server cancel during client streaming flow control");
+        if let Err(status) = request_stream.push_result(Err(cancel_status)) {
+            if status.code() == Code::ResourceExhausted {
+                state.backpressure_triggered = true;
+                state.client_backpressure_events += 1;
+            }
+            return;
+        }
+
+        request_stream.close();
+        if let Poll::Ready(Some(Err(status))) = Pin::new(&mut request_stream).poll_next(&mut cx)
+            && status.code() == Code::Cancelled
+        {
+            state.server_cancelled = true;
+            state.premature_server_cancel_observed = true;
+        }
+
+        if let Err(status) = request_stream.push(TestMessage::new_simple(39_999))
+            && status.code() == Code::FailedPrecondition
+        {
+            state.post_cancel_send_rejected = true;
+        }
+        return;
+    }
+
+    let refill_burst = usize::from(pattern.refill_burst).min(MAX_CLIENT_STREAM_BUFFER_ATTEMPTS);
+    let mut refill_succeeded = false;
+    for idx in 0..refill_burst {
+        let message = TestMessage::new_simple(40_000 + idx as u32);
+        match request_stream.push(message.clone()) {
+            Ok(()) => {
+                refill_succeeded = true;
+                state.client_stream_sent.push_back(message);
+            }
+            Err(status) => {
+                if status.code() == Code::ResourceExhausted {
+                    state.backpressure_triggered = true;
+                    state.client_backpressure_events += 1;
+                }
+                break;
+            }
+        }
+    }
+
+    if state.client_backpressure_events > 0 && state.client_stream_drains > 0 && refill_succeeded {
+        state.client_backpressure_relieved = true;
+    }
+
+    if pattern.close_after_refill {
+        request_stream.close();
+        while let Poll::Ready(Some(Ok(message))) = Pin::new(&mut request_stream).poll_next(&mut cx)
+        {
+            state.client_stream_received.push_back(message);
+            state.client_stream_drains += 1;
+        }
+    }
+}
+
 /// Create a test channel with appropriate timeouts.
 async fn create_test_channel(timeout: Option<Duration>) -> Result<Channel, Status> {
     let builder = if let Some(timeout) = timeout {
@@ -391,6 +554,9 @@ async fn simulate_streaming(
 ) -> Result<(), Status> {
     for pattern in &scenario.server_streaming_patterns {
         exercise_server_streaming_backpressure(pattern, state);
+    }
+    for pattern in &scenario.client_streaming_patterns {
+        exercise_client_streaming_backpressure(pattern, state);
     }
 
     // Create test channel
@@ -569,6 +735,7 @@ async fn simulate_streaming(
 fuzz_target!(|scenario: StreamingScenario| {
     if scenario.operations.len() > MAX_STREAM_MESSAGES
         || scenario.server_streaming_patterns.len() > MAX_STREAM_MESSAGES
+        || scenario.client_streaming_patterns.len() > MAX_STREAM_MESSAGES
     {
         return;
     }
@@ -589,10 +756,9 @@ fuzz_target!(|scenario: StreamingScenario| {
     }
 
     // Create runtime for async execution
-    let runtime = asupersync::runtime::Runtime::with_config(
-        asupersync::runtime::RuntimeConfig::default(),
-    )
-    .expect("fuzz runtime");
+    let runtime =
+        asupersync::runtime::Runtime::with_config(asupersync::runtime::RuntimeConfig::default())
+            .expect("fuzz runtime");
 
     runtime.block_on(async {
         let mut state = StreamState::new();
