@@ -834,6 +834,27 @@ mod tests {
         }
     }
 
+    fn race_error_signature(error: &RaceError<&'static str>) -> (&'static str, usize, Option<u8>) {
+        match error {
+            RaceError::First(_) => ("err", 0, None),
+            RaceError::Second(_) => ("err", 1, None),
+            RaceError::Cancelled(reason) => ("cancelled", 0, Some(reason.severity())),
+            RaceError::Panicked(_) => ("panic", 0, None),
+        }
+    }
+
+    fn race2_result_signature(
+        result: &Result<i32, RaceError<&'static str>>,
+    ) -> (&'static str, Option<i32>, usize, Option<u8>) {
+        match result {
+            Ok(value) => ("ok", Some(*value), 0, None),
+            Err(error) => {
+                let (kind, winner_index, severity) = race_error_signature(error);
+                (kind, None, winner_index, severity)
+            }
+        }
+    }
+
     fn race_all_error_signature(
         error: &RaceAllError<&'static str>,
     ) -> (&'static str, usize, Option<u8>) {
@@ -1356,6 +1377,47 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn metamorphic_race2_drained_loser_substitution_preserves_fail_fast_result(
+            first_wins in any::<bool>(),
+            winner_case in race_winner_case_strategy(),
+            mutated_loser_case in race_loser_case_strategy(),
+        ) {
+            let winner = if first_wins {
+                RaceWinner::First
+            } else {
+                RaceWinner::Second
+            };
+
+            let winner_outcome = winner_case.clone().into_outcome();
+            let baseline_loser = Outcome::Cancelled(CancelReason::race_loser());
+            let substituted_loser = mutated_loser_case.into_outcome();
+
+            let baseline_result = match winner {
+                RaceWinner::First => {
+                    race2_to_result(winner, winner_outcome.clone(), baseline_loser)
+                }
+                RaceWinner::Second => {
+                    race2_to_result(winner, baseline_loser, winner_outcome.clone())
+                }
+            };
+
+            let substituted_result = match winner {
+                RaceWinner::First => {
+                    race2_to_result(winner, winner_outcome.clone(), substituted_loser)
+                }
+                RaceWinner::Second => {
+                    race2_to_result(winner, substituted_loser, winner_outcome.clone())
+                }
+            };
+
+            prop_assert_eq!(
+                race2_result_signature(&baseline_result),
+                race2_result_signature(&substituted_result),
+                "non-panicking drained loser substitution must not perturb the race2 fail-fast result"
+            );
+        }
+
         #[test]
         fn metamorphic_race_all_rotation_preserves_winner_and_loser_projection(
             branch_count in 1usize..12,
