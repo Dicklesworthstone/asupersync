@@ -1584,3 +1584,10 @@ path = "fuzz_targets/quic_datagram_ack_parser.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "raptorq_codec_frame_splitter"
+path = "fuzz_targets/raptorq_codec_frame_splitter.rs"
+test = false
+doc = false
+bench = false
