@@ -1391,6 +1391,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_grpc_client_streaming_flow_control"
+path = "fuzz_targets/fuzz_grpc_client_streaming_flow_control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "hpack_huffman_decode"
 path = "fuzz_targets/hpack_huffman_decode.rs"
 test = false
