@@ -3,7 +3,8 @@
 //! This target focuses on `src/grpc/protobuf.rs` rather than the outer gRPC
 //! framing layer. It builds raw protobuf wire bytes from structured field
 //! descriptions, then exercises decode behavior across valid messages,
-//! malformed wire fragments, unknown fields, and size-limit transitions.
+//! malformed wire fragments, varint/zigzag boundaries, group framing, unknown
+//! fields, and size-limit transitions.
 
 #![no_main]
 
@@ -38,6 +39,10 @@ struct FuzzMessage {
     nested: Option<InnerMessage>,
     #[prost(string, repeated, tag = "5")]
     labels: Vec<String>,
+    #[prost(uint64, tag = "6")]
+    wide_count: u64,
+    #[prost(sint64, tag = "7")]
+    zigzag_value: i64,
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -64,11 +69,16 @@ enum FieldSpec {
     Title(String),
     Count(i32),
     Payload(Vec<u8>),
+    EmptyTitle,
+    EmptyPayload,
     Nested {
         name: String,
         value: i32,
     },
     Label(String),
+    WideCount(u64),
+    MaxWideCount,
+    ZigZag(i64),
     UnknownVarint {
         tag: u16,
         value: u64,
@@ -91,6 +101,11 @@ enum FieldSpec {
         prefix: Vec<u8>,
         suffix: Vec<u8>,
     },
+    UnknownGroup {
+        tag: u16,
+        depth: u8,
+        terminate: bool,
+    },
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -109,6 +124,7 @@ fn exercise_structured(input: &StructuredInput) {
     let mut wire = Vec::new();
     let mut expected = FuzzMessage::default();
     let mut well_formed = true;
+    let mut must_fail = false;
 
     for field in input.fields.iter().take(MAX_FIELDS) {
         match field {
@@ -128,6 +144,16 @@ fn exercise_structured(input: &StructuredInput) {
                 encode_key(3, 2, &mut wire);
                 encode_length_delimited(&payload, &mut wire);
                 expected.payload = payload;
+            }
+            FieldSpec::EmptyTitle => {
+                encode_key(1, 2, &mut wire);
+                encode_length_delimited(&[], &mut wire);
+                expected.title.clear();
+            }
+            FieldSpec::EmptyPayload => {
+                encode_key(3, 2, &mut wire);
+                encode_length_delimited(&[], &mut wire);
+                expected.payload.clear();
             }
             FieldSpec::Nested { name, value } => {
                 let nested = InnerMessage {
@@ -149,6 +175,21 @@ fn exercise_structured(input: &StructuredInput) {
                 encode_key(5, 2, &mut wire);
                 encode_length_delimited(label.as_bytes(), &mut wire);
                 expected.labels.push(label);
+            }
+            FieldSpec::WideCount(value) => {
+                encode_key(6, 0, &mut wire);
+                encode_varint(*value, &mut wire);
+                expected.wide_count = *value;
+            }
+            FieldSpec::MaxWideCount => {
+                encode_key(6, 0, &mut wire);
+                encode_varint(u64::MAX, &mut wire);
+                expected.wide_count = u64::MAX;
+            }
+            FieldSpec::ZigZag(value) => {
+                encode_key(7, 0, &mut wire);
+                encode_zigzag_i64(*value, &mut wire);
+                expected.zigzag_value = *value;
             }
             FieldSpec::UnknownVarint { tag, value } => {
                 let tag = sanitize_unknown_tag(*tag);
@@ -172,6 +213,7 @@ fn exercise_structured(input: &StructuredInput) {
                 encode_varint((*declared_len as usize + actual.len()) as u64, &mut wire);
                 wire.extend_from_slice(&actual);
                 well_formed = false;
+                must_fail = true;
             }
             FieldSpec::InvalidWireType {
                 tag,
@@ -183,11 +225,24 @@ fn exercise_structured(input: &StructuredInput) {
                 encode_key(tag, invalid_wire_type, &mut wire);
                 wire.extend_from_slice(&truncate_bytes(bytes, 8));
                 well_formed = false;
+                must_fail = true;
             }
             FieldSpec::MalformedTag { prefix, suffix } => {
                 wire.extend_from_slice(&truncate_bytes(prefix, 12));
                 wire.extend_from_slice(&truncate_bytes(suffix, 32));
                 well_formed = false;
+                must_fail = true;
+            }
+            FieldSpec::UnknownGroup {
+                tag,
+                depth,
+                terminate,
+            } => {
+                encode_unknown_group(*tag, *depth, *terminate, &mut wire);
+                if !terminate {
+                    well_formed = false;
+                    must_fail = true;
+                }
             }
         }
     }
@@ -195,9 +250,16 @@ fn exercise_structured(input: &StructuredInput) {
     wire.extend_from_slice(&truncate_bytes(&input.trailing, 64));
     if !input.trailing.is_empty() {
         well_formed = false;
+        must_fail = true;
     }
 
-    exercise_decode(input.config.clone(), wire, Some(expected), well_formed);
+    exercise_decode(
+        input.config.clone(),
+        wire,
+        Some(expected),
+        well_formed,
+        must_fail,
+    );
 }
 
 fn exercise_raw(data: &[u8]) {
@@ -213,7 +275,7 @@ fn exercise_raw(data: &[u8]) {
     ];
 
     for config in configs {
-        exercise_decode(config, data.to_vec(), None, false);
+        exercise_decode(config, data.to_vec(), None, false, false);
     }
 }
 
@@ -222,6 +284,7 @@ fn exercise_decode(
     wire: Vec<u8>,
     expected: Option<FuzzMessage>,
     well_formed: bool,
+    must_fail: bool,
 ) {
     let bytes = Bytes::from(wire.clone());
     let max_size = compute_max_size(&wire, config.max_size_hint);
@@ -232,23 +295,30 @@ fn exercise_decode(
             let result = codec.decode(&bytes);
             assert_decode_contract(&result, bytes.len(), max_size);
 
-            if well_formed && bytes.len() <= max_size {
-                if let (Ok(decoded), Some(expected)) = (result.as_ref(), expected.as_ref()) {
-                    assert_eq!(decoded, expected, "well-formed structured decode drifted");
+            if must_fail && bytes.len() <= max_size {
+                assert!(
+                    result.is_err(),
+                    "malformed protobuf wire should fail decode rather than succeed"
+                );
+            }
 
-                    let mut reencode =
-                        ProstCodec::<FuzzMessage, FuzzMessage>::with_max_size(max_size);
-                    let encoded = reencode
-                        .encode(decoded)
-                        .expect("decoded message should re-encode");
-                    let decoded_again = reencode
-                        .decode(&encoded)
-                        .expect("re-encoded message should decode");
-                    assert_eq!(
-                        &decoded_again, decoded,
-                        "decode/re-encode/decode should be stable"
-                    );
-                }
+            if well_formed
+                && bytes.len() <= max_size
+                && let (Ok(decoded), Some(expected)) = (result.as_ref(), expected.as_ref())
+            {
+                assert_eq!(decoded, expected, "well-formed structured decode drifted");
+
+                let mut reencode = ProstCodec::<FuzzMessage, FuzzMessage>::with_max_size(max_size);
+                let encoded = reencode
+                    .encode(decoded)
+                    .expect("decoded message should re-encode");
+                let decoded_again = reencode
+                    .decode(&encoded)
+                    .expect("re-encoded message should decode");
+                assert_eq!(
+                    &decoded_again, decoded,
+                    "decode/re-encode/decode should be stable"
+                );
             }
         }
         DecodeMode::InnerMessage => {
@@ -334,6 +404,29 @@ fn encode_length_delimited(bytes: &[u8], out: &mut Vec<u8>) {
 
 fn encode_signed_int32(value: i32, out: &mut Vec<u8>) {
     encode_varint(value as i64 as u64, out);
+}
+
+fn encode_zigzag_i64(value: i64, out: &mut Vec<u8>) {
+    let encoded = ((value << 1) ^ (value >> 63)) as u64;
+    encode_varint(encoded, out);
+}
+
+fn encode_unknown_group(tag: u16, depth: u8, terminate: bool, out: &mut Vec<u8>) {
+    let depth = depth.clamp(1, 8);
+    let base_tag = sanitize_unknown_tag(tag);
+
+    for offset in 0..u32::from(depth) {
+        encode_key(base_tag.saturating_add(offset), 3, out);
+    }
+
+    encode_key(base_tag.saturating_add(u32::from(depth)), 0, out);
+    encode_varint(u64::MAX, out);
+
+    if terminate {
+        for offset in (0..u32::from(depth)).rev() {
+            encode_key(base_tag.saturating_add(offset), 4, out);
+        }
+    }
 }
 
 fn encode_varint(mut value: u64, out: &mut Vec<u8>) {
