@@ -1873,4 +1873,130 @@ mod tests {
 
         // Test complete: metamorphic_saga_determinism_under_replay
     }
+
+    #[test]
+    fn metamorphic_cancel_cut_compensation_permutation_preserves_abort_terminal() {
+        let short_prefix = SagaPlan::new(
+            "cancel_prefix_short",
+            vec![
+                SagaStep::new(SagaOpKind::Reserve, "reserve"),
+                SagaStep::new(SagaOpKind::Send, "send"),
+                SagaStep::new(SagaOpKind::Acquire, "acquire"),
+            ],
+        );
+        let long_prefix = SagaPlan::new(
+            "cancel_prefix_long",
+            vec![
+                SagaStep::new(SagaOpKind::Reserve, "reserve"),
+                SagaStep::new(SagaOpKind::Send, "send"),
+                SagaStep::new(SagaOpKind::Acquire, "acquire"),
+                SagaStep::new(SagaOpKind::Renew, "renew_after_acquire"),
+            ],
+        );
+        let compensation_a = SagaPlan::new(
+            "compensation_a",
+            vec![
+                SagaStep::new(SagaOpKind::CancelDrain, "drain_first"),
+                SagaStep::new(SagaOpKind::Release, "release_second"),
+                SagaStep::new(SagaOpKind::Abort, "abort_last"),
+            ],
+        );
+        let compensation_b = SagaPlan::new(
+            "compensation_b",
+            vec![
+                SagaStep::new(SagaOpKind::Release, "release_first"),
+                SagaStep::new(SagaOpKind::CancelDrain, "drain_second"),
+                SagaStep::new(SagaOpKind::Abort, "abort_last"),
+            ],
+        );
+        let direct_abort = SagaPlan::new(
+            "direct_abort",
+            vec![SagaStep::new(SagaOpKind::Abort, "abort_only")],
+        );
+
+        let short_exec = SagaExecutionPlan::from_plan(&short_prefix);
+        let long_exec = SagaExecutionPlan::from_plan(&long_prefix);
+        let compensation_a_exec = SagaExecutionPlan::from_plan(&compensation_a);
+        let compensation_b_exec = SagaExecutionPlan::from_plan(&compensation_b);
+        let direct_abort_exec = SagaExecutionPlan::from_plan(&direct_abort);
+        let executor = MonotoneSagaExecutor::new();
+
+        let mut short_step_exec = FixedExecutor::new(vec![
+            LatticeState::Reserved,
+            LatticeState::Reserved,
+            LatticeState::Reserved,
+        ]);
+        let short_result = executor.execute(&short_exec, &mut short_step_exec);
+
+        let mut long_step_exec = FixedExecutor::new(vec![
+            LatticeState::Reserved,
+            LatticeState::Reserved,
+            LatticeState::Reserved,
+            LatticeState::Reserved,
+        ]);
+        let long_result = executor.execute(&long_exec, &mut long_step_exec);
+
+        let mut compensation_a_step_exec = FixedExecutor::new(vec![
+            LatticeState::Reserved,
+            LatticeState::Unknown,
+            LatticeState::Aborted,
+        ]);
+        let compensation_a_result =
+            executor.execute(&compensation_a_exec, &mut compensation_a_step_exec);
+
+        let mut compensation_b_step_exec = FixedExecutor::new(vec![
+            LatticeState::Unknown,
+            LatticeState::Reserved,
+            LatticeState::Aborted,
+        ]);
+        let compensation_b_result =
+            executor.execute(&compensation_b_exec, &mut compensation_b_step_exec);
+
+        let mut direct_abort_step_exec = FixedExecutor::new(vec![LatticeState::Aborted]);
+        let direct_abort_result = executor.execute(&direct_abort_exec, &mut direct_abort_step_exec);
+
+        let short_then_a =
+            Lattice::join(&short_result.final_state, &compensation_a_result.final_state);
+        let short_then_b =
+            Lattice::join(&short_result.final_state, &compensation_b_result.final_state);
+        let long_then_a =
+            Lattice::join(&long_result.final_state, &compensation_a_result.final_state);
+        let long_then_b =
+            Lattice::join(&long_result.final_state, &compensation_b_result.final_state);
+
+        assert_eq!(
+            short_then_a,
+            direct_abort_result.final_state,
+            "short prefix + compensation A should collapse to the direct abort terminal state"
+        );
+        assert_eq!(
+            short_then_b,
+            direct_abort_result.final_state,
+            "short prefix + compensation B should collapse to the direct abort terminal state"
+        );
+        assert_eq!(
+            long_then_a,
+            direct_abort_result.final_state,
+            "long prefix + compensation A should collapse to the direct abort terminal state"
+        );
+        assert_eq!(
+            long_then_b,
+            direct_abort_result.final_state,
+            "long prefix + compensation B should collapse to the direct abort terminal state"
+        );
+        assert_eq!(
+            short_then_a, long_then_a,
+            "extending the cancelled forward prefix with an extra monotone renew must not perturb the compensated terminal state"
+        );
+        assert_eq!(
+            short_then_a, short_then_b,
+            "permuting independent compensation steps must preserve the compensated terminal state"
+        );
+        assert!(
+            compensation_a_result.is_clean() && compensation_b_result.is_clean(),
+            "compensation runs must stay conflict-free: a={:?}, b={:?}",
+            compensation_a_result.final_state,
+            compensation_b_result.final_state
+        );
+    }
 }
