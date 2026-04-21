@@ -1150,6 +1150,114 @@ mod tests {
         });
     }
 
+    fn attach_named_order_listener(
+        token: &SymbolCancelToken,
+        label: &'static str,
+        order: &Arc<StdMutex<Vec<&'static str>>>,
+    ) {
+        let order = Arc::clone(order);
+        token.add_listener(move |_: &CancelReason, _: Time| {
+            order.lock().unwrap().push(label);
+        });
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ReasonSnapshot {
+        cancelled: bool,
+        kind: Option<CancelKind>,
+        cancelled_at_nanos: Option<u64>,
+        cause_chain: Vec<CancelKind>,
+    }
+
+    fn snapshot_reason(token: &SymbolCancelToken) -> ReasonSnapshot {
+        let reason = token.reason();
+        let cause_chain = reason
+            .as_ref()
+            .map(|reason| reason.chain().map(|reason| reason.kind).collect())
+            .unwrap_or_default();
+        ReasonSnapshot {
+            cancelled: token.is_cancelled(),
+            kind: reason.as_ref().map(|reason| reason.kind),
+            cancelled_at_nanos: token.cancelled_at().map(Time::as_nanos),
+            cause_chain,
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct DescendantInvariantScenario {
+        creation_order: Vec<&'static str>,
+        observed_order: Vec<&'static str>,
+        left_before_parent: ReasonSnapshot,
+        left_after_parent: ReasonSnapshot,
+        right_child_after_parent: ReasonSnapshot,
+        right_leaf_after_parent: ReasonSnapshot,
+    }
+
+    fn run_descendant_invariant_scenario(
+        swap_creation_order: bool,
+        drop_right_child_handle: bool,
+    ) -> DescendantInvariantScenario {
+        let mut rng = DetRng::new(0xCACE_1001);
+        let parent = SymbolCancelToken::new(ObjectId::new_for_test(77), &mut rng);
+        let order = Arc::new(StdMutex::new(Vec::<&'static str>::new()));
+        let creation_order = if swap_creation_order {
+            vec!["right", "left"]
+        } else {
+            vec!["left", "right"]
+        };
+
+        let mut left_child: Option<SymbolCancelToken> = None;
+        let mut left_leaf: Option<SymbolCancelToken> = None;
+        let mut right_child: Option<SymbolCancelToken> = None;
+        let mut right_leaf: Option<SymbolCancelToken> = None;
+
+        for label in &creation_order {
+            let child = parent.child(&mut rng);
+            attach_named_order_listener(&child, label, &order);
+            let leaf = child.child(&mut rng);
+            match *label {
+                "left" => {
+                    left_child = Some(child);
+                    left_leaf = Some(leaf);
+                }
+                "right" => {
+                    right_child = Some(child);
+                    right_leaf = Some(leaf);
+                }
+                _ => unreachable!("unexpected branch label"),
+            }
+        }
+
+        let left_leaf = left_leaf.expect("left leaf should be created");
+        let right_leaf_observer = right_leaf.expect("right leaf should be created");
+        let right_child_observer = right_child
+            .as_ref()
+            .expect("right child should be created")
+            .clone();
+
+        let descendant_reason = CancelReason::shutdown()
+            .with_cause(CancelReason::timeout().with_cause(CancelReason::user("left-root-cause")));
+        let descendant_at = Time::from_millis(15);
+        assert!(left_leaf.cancel(&descendant_reason, descendant_at));
+        let left_before_parent = snapshot_reason(&left_leaf);
+
+        if drop_right_child_handle {
+            drop(right_child.take());
+        }
+        drop(left_child);
+
+        assert!(parent.cancel(&CancelReason::user("parent-cascade"), Time::from_millis(30)));
+
+        DescendantInvariantScenario {
+            creation_order,
+            observed_order: order.lock().unwrap().clone(),
+            left_before_parent,
+            left_after_parent: snapshot_reason(&left_leaf),
+            right_child_after_parent: snapshot_reason(&right_child_observer),
+            right_leaf_after_parent: snapshot_reason(&right_leaf_observer),
+        }
+    }
+
     impl CancelSink for RecordingSink {
         fn send_to(
             &self,
@@ -1279,6 +1387,79 @@ mod tests {
         cancel_handle.cancel(&CancelReason::user("test"), Time::from_millis(100));
 
         assert!(notified.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn metamorphic_descendant_cancellation_observable_under_reorder_and_drop() {
+        let baseline = run_descendant_invariant_scenario(false, false);
+        let swapped = run_descendant_invariant_scenario(true, false);
+        let dropped = run_descendant_invariant_scenario(false, true);
+
+        for scenario in [&baseline, &swapped, &dropped] {
+            assert_eq!(
+                scenario.observed_order, scenario.creation_order,
+                "sibling cancellation listener order should follow child registration order"
+            );
+            assert_eq!(
+                scenario.left_before_parent, scenario.left_after_parent,
+                "a self-cancelled descendant must remain observable with the same cause chain after parent cancellation"
+            );
+            assert_eq!(
+                scenario.right_child_after_parent.kind,
+                Some(CancelKind::ParentCancelled),
+                "uncancelled sibling should be cancelled by the parent cascade"
+            );
+            assert_eq!(
+                scenario.right_leaf_after_parent.kind,
+                Some(CancelKind::ParentCancelled),
+                "grandchild under the uncancelled sibling should inherit parent cancellation"
+            );
+            assert_eq!(
+                scenario.right_child_after_parent.cause_chain,
+                vec![CancelKind::ParentCancelled],
+                "sibling child should not gain spurious causes during cascade"
+            );
+            assert_eq!(
+                scenario.right_leaf_after_parent.cause_chain,
+                vec![CancelKind::ParentCancelled],
+                "dropped-handle descendant should preserve the canonical parent-cancelled cause chain"
+            );
+        }
+
+        assert_eq!(
+            baseline.left_after_parent.kind,
+            Some(CancelKind::Shutdown),
+            "the stronger descendant cancellation should not be weakened by a later parent cascade"
+        );
+        assert_eq!(
+            baseline.left_after_parent.cause_chain,
+            vec![CancelKind::Shutdown, CancelKind::Timeout, CancelKind::User],
+            "descendant cause chain should remain intact"
+        );
+        assert_eq!(
+            baseline.left_after_parent, swapped.left_after_parent,
+            "sibling creation order should not change descendant observability"
+        );
+        assert_eq!(
+            baseline.left_after_parent, dropped.left_after_parent,
+            "dropping a sibling handle must not corrupt an already-cancelled descendant"
+        );
+        assert_eq!(
+            baseline.right_child_after_parent, swapped.right_child_after_parent,
+            "sibling reordering should not change cascade outcome"
+        );
+        assert_eq!(
+            baseline.right_child_after_parent, dropped.right_child_after_parent,
+            "dropping the sibling handle must preserve child cancellation outcome"
+        );
+        assert_eq!(
+            baseline.right_leaf_after_parent, swapped.right_leaf_after_parent,
+            "sibling reordering should not change leaf cascade outcome"
+        );
+        assert_eq!(
+            baseline.right_leaf_after_parent, dropped.right_leaf_after_parent,
+            "dropping the sibling handle must preserve descendant cascade outcome"
+        );
     }
 
     #[test]
