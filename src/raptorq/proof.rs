@@ -1090,6 +1090,65 @@ mod tests {
         builder.build()
     }
 
+    fn make_source_block_payload_for_snapshot_test(
+        k: usize,
+        symbol_size: usize,
+        salt: u8,
+    ) -> Vec<Vec<u8>> {
+        (0..k)
+            .map(|i| {
+                (0..symbol_size)
+                    .map(|j| ((i * 37 + j * 19 + usize::from(salt)) % 256) as u8)
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn make_known_good_source_block_proof_for_snapshot_test() -> DecodeProof {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 2026;
+        let source = make_source_block_payload_for_snapshot_test(k, symbol_size, 0x21);
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let mut received = decoder.constraint_symbols();
+
+        for (esi, data) in source.iter().enumerate() {
+            received.push(ReceivedSymbol::source(esi as u32, data.clone()));
+        }
+
+        let proof = decoder
+            .decode_with_proof(&received, ObjectId::new_for_test(2026), 0)
+            .expect("known-good source block should decode")
+            .proof;
+        assert!(
+            matches!(proof.outcome, ProofOutcome::Success { .. }),
+            "known-good snapshot scenario must produce a success certificate"
+        );
+        proof
+    }
+
+    fn make_known_bad_source_block_proof_for_snapshot_test() -> DecodeProof {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 2026;
+        let source = make_source_block_payload_for_snapshot_test(k, symbol_size, 0x4D);
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let mut received = decoder.constraint_symbols();
+
+        for (esi, data) in source.iter().enumerate().take(4) {
+            received.push(ReceivedSymbol::source(esi as u32, data.clone()));
+        }
+
+        let (_err, proof) = decoder
+            .decode_with_proof(&received, ObjectId::new_for_test(3030), 0)
+            .expect_err("known-bad source block should fail decode");
+        assert!(
+            matches!(proof.outcome, ProofOutcome::Failure { .. }),
+            "known-bad snapshot scenario must produce a failure certificate"
+        );
+        proof
+    }
+
     #[test]
     fn proof_builder_success() {
         let config = make_test_config();
@@ -1156,6 +1215,8 @@ mod tests {
         let success = make_success_proof_for_snapshot_test();
         let degraded_singular = make_degraded_singular_proof_for_snapshot_test();
         let degraded_insufficient = make_degraded_insufficient_proof_for_snapshot_test();
+        let source_block_success = make_known_good_source_block_proof_for_snapshot_test();
+        let source_block_failure = make_known_bad_source_block_proof_for_snapshot_test();
 
         insta::assert_json_snapshot!(
             "decode_proof_certificate_scrubbed",
@@ -1163,8 +1224,21 @@ mod tests {
                 "success": scrub_decode_proof_for_snapshot_test(&success),
                 "degraded_singular": scrub_decode_proof_for_snapshot_test(&degraded_singular),
                 "degraded_insufficient": scrub_decode_proof_for_snapshot_test(&degraded_insufficient),
+                "source_block_success": scrub_decode_proof_for_snapshot_test(&source_block_success),
+                "source_block_failure": scrub_decode_proof_for_snapshot_test(&source_block_failure),
             })
         );
+    }
+
+    #[test]
+    fn source_block_decode_proof_hashes_are_stable() {
+        let success1 = make_known_good_source_block_proof_for_snapshot_test();
+        let success2 = make_known_good_source_block_proof_for_snapshot_test();
+        let failure1 = make_known_bad_source_block_proof_for_snapshot_test();
+        let failure2 = make_known_bad_source_block_proof_for_snapshot_test();
+
+        assert_eq!(success1.content_hash(), success2.content_hash());
+        assert_eq!(failure1.content_hash(), failure2.content_hash());
     }
 
     #[test]
