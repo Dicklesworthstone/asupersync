@@ -1,0 +1,153 @@
+---
+source: src/lab/oracle/cancellation_protocol.rs
+expression: bundle
+---
+[
+  {
+    "check": "ok",
+    "regions": [
+      {
+        "cancel_reason": null,
+        "parent": null,
+        "region": "R0"
+      }
+    ],
+    "scenario_id": "happy_path",
+    "tasks": [
+      {
+        "cancel_request": {
+          "acknowledged": true,
+          "polls_since": 0,
+          "reason": "Timeout",
+          "requested_at_nanos": 100
+        },
+        "mask_depth": 0,
+        "region": "R0",
+        "state": "CompletedCancelled",
+        "task": "T0",
+        "transitions": [
+          {
+            "from": "Created",
+            "time_nanos": 0,
+            "to": "Running"
+          },
+          {
+            "from": "Running",
+            "time_nanos": 100,
+            "to": "CancelRequested"
+          },
+          {
+            "from": "CancelRequested",
+            "time_nanos": 200,
+            "to": "Cancelling"
+          },
+          {
+            "from": "Cancelling",
+            "time_nanos": 300,
+            "to": "Finalizing"
+          },
+          {
+            "from": "Finalizing",
+            "time_nanos": 400,
+            "to": "CompletedCancelled"
+          }
+        ]
+      }
+    ],
+    "violations": []
+  },
+  {
+    "check": "Task T0 cancel requested at 100ns but not acknowledged after 66 polls",
+    "regions": [
+      {
+        "cancel_reason": null,
+        "parent": null,
+        "region": "R0"
+      }
+    ],
+    "scenario_id": "late_cancel_ack",
+    "tasks": [
+      {
+        "cancel_request": {
+          "acknowledged": false,
+          "polls_since": 66,
+          "reason": "Timeout",
+          "requested_at_nanos": 100
+        },
+        "mask_depth": 0,
+        "region": "R0",
+        "state": "CancelRequested",
+        "task": "T0",
+        "transitions": [
+          {
+            "from": "Created",
+            "time_nanos": 0,
+            "to": "Running"
+          },
+          {
+            "from": "Running",
+            "time_nanos": 100,
+            "to": "CancelRequested"
+          }
+        ]
+      }
+    ],
+    "violations": [
+      "Task T0 cancel requested at 100ns but not acknowledged after 66 polls",
+      "Task T0 cancel requested at 100ns but stuck in CancelRequested"
+    ]
+  },
+  {
+    "check": "ok",
+    "regions": [
+      {
+        "cancel_reason": null,
+        "parent": null,
+        "region": "R0"
+      }
+    ],
+    "scenario_id": "reentrant_cancel_strengthening",
+    "tasks": [
+      {
+        "cancel_request": {
+          "acknowledged": true,
+          "polls_since": 0,
+          "reason": "Shutdown",
+          "requested_at_nanos": 100
+        },
+        "mask_depth": 0,
+        "region": "R0",
+        "state": "CompletedCancelled",
+        "task": "T0",
+        "transitions": [
+          {
+            "from": "Running",
+            "time_nanos": 100,
+            "to": "CancelRequested"
+          },
+          {
+            "from": "CancelRequested",
+            "time_nanos": 150,
+            "to": "CancelRequested"
+          },
+          {
+            "from": "CancelRequested",
+            "time_nanos": 200,
+            "to": "Cancelling"
+          },
+          {
+            "from": "Cancelling",
+            "time_nanos": 300,
+            "to": "Finalizing"
+          },
+          {
+            "from": "Finalizing",
+            "time_nanos": 400,
+            "to": "CompletedCancelled"
+          }
+        ]
+      }
+    ],
+    "violations": []
+  }
+]

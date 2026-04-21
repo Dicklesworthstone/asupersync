@@ -1115,6 +1115,7 @@ mod tests {
     use super::*;
     use crate::types::{Budget, Outcome};
     use crate::util::ArenaIndex;
+    use serde_json::json;
 
     fn task_id(idx: usize) -> TaskId {
         TaskId::from_arena(ArenaIndex::new(idx as u32, 0))
@@ -1127,6 +1128,258 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn scrub_cancellation_protocol_trace(
+        scenario_id: &str,
+        oracle: &CancellationProtocolOracle,
+    ) -> serde_json::Value {
+        let mut region_ids = oracle.region_parents.keys().copied().collect::<Vec<_>>();
+        region_ids.sort();
+        let regions = region_ids
+            .into_iter()
+            .map(|region| {
+                let parent = oracle
+                    .region_parents
+                    .get(&region)
+                    .copied()
+                    .flatten()
+                    .map(|parent| parent.to_string());
+                let cancel_reason = oracle
+                    .cancelled_regions
+                    .get(&region)
+                    .map(|reason| format!("{:?}", reason.kind));
+                json!({
+                    "region": region.to_string(),
+                    "parent": parent,
+                    "cancel_reason": cancel_reason,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut task_ids = oracle.tasks.keys().copied().collect::<Vec<_>>();
+        task_ids.sort();
+        let tasks = task_ids
+            .into_iter()
+            .map(|task| {
+                let record = oracle.tasks.get(&task).expect("task record");
+                let region = oracle.task_regions.get(&task).copied().expect("task region");
+                let cancel_request = record.cancel_request.as_ref().map(|cancel| {
+                    json!({
+                        "requested_at_nanos": cancel.requested_at.as_nanos(),
+                        "reason": format!("{:?}", cancel.reason.kind),
+                        "acknowledged": cancel.acknowledged,
+                        "polls_since": cancel.polls_since,
+                    })
+                });
+                let transitions = record
+                    .transitions
+                    .iter()
+                    .map(|(from, to, time)| {
+                        json!({
+                            "from": format!("{from:?}"),
+                            "to": format!("{to:?}"),
+                            "time_nanos": time.as_nanos(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+                json!({
+                    "task": task.to_string(),
+                    "region": region.to_string(),
+                    "state": format!("{:?}", record.current_state),
+                    "mask_depth": record.mask_depth,
+                    "cancel_request": cancel_request,
+                    "transitions": transitions,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut violations = oracle
+            .all_violations()
+            .into_iter()
+            .map(|violation| violation.to_string())
+            .collect::<Vec<_>>();
+        violations.sort();
+
+        let check = match oracle.check() {
+            Ok(()) => "ok".to_string(),
+            Err(violation) => violation.to_string(),
+        };
+
+        json!({
+            "scenario_id": scenario_id,
+            "check": check,
+            "regions": regions,
+            "tasks": tasks,
+            "violations": violations,
+        })
+    }
+
+    fn happy_cancellation_protocol_trace() -> serde_json::Value {
+        let mut oracle = CancellationProtocolOracle::new();
+        let task = task_id(0);
+        let region = region_id(0);
+        let reason = CancelReason::timeout();
+        let cleanup_budget = Budget::INFINITE;
+
+        oracle.on_region_create(region, None);
+        oracle.on_task_create(task, region);
+        oracle.on_transition(task, &TaskState::Created, &TaskState::Running, Time::ZERO);
+        oracle.on_cancel_request(task, reason.clone(), Time::from_nanos(100));
+        oracle.on_transition(
+            task,
+            &TaskState::Running,
+            &TaskState::CancelRequested {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(100),
+        );
+        oracle.on_cancel_ack(task, Time::from_nanos(200));
+        oracle.on_transition(
+            task,
+            &TaskState::CancelRequested {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            &TaskState::Cancelling {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(200),
+        );
+        oracle.on_transition(
+            task,
+            &TaskState::Cancelling {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            &TaskState::Finalizing {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(300),
+        );
+        oracle.on_transition(
+            task,
+            &TaskState::Finalizing {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            &TaskState::Completed(Outcome::Cancelled(reason)),
+            Time::from_nanos(400),
+        );
+
+        scrub_cancellation_protocol_trace("happy_path", &oracle)
+    }
+
+    fn late_cancel_cancellation_protocol_trace() -> serde_json::Value {
+        let mut oracle = CancellationProtocolOracle::new();
+        let task = task_id(0);
+        let region = region_id(0);
+        let reason = CancelReason::timeout();
+        let cleanup_budget = Budget::INFINITE;
+
+        oracle.on_region_create(region, None);
+        oracle.on_task_create(task, region);
+        oracle.on_transition(task, &TaskState::Created, &TaskState::Running, Time::ZERO);
+        oracle.on_cancel_request(task, reason.clone(), Time::from_nanos(100));
+        oracle.on_transition(
+            task,
+            &TaskState::Running,
+            &TaskState::CancelRequested {
+                reason,
+                cleanup_budget,
+            },
+            Time::from_nanos(100),
+        );
+        for _ in 0..=CANCEL_ACK_POLL_BOUND {
+            oracle.on_task_poll(task);
+        }
+
+        scrub_cancellation_protocol_trace("late_cancel_ack", &oracle)
+    }
+
+    fn reentrant_cancellation_protocol_trace() -> serde_json::Value {
+        let mut oracle = CancellationProtocolOracle::new();
+        let task = task_id(0);
+        let region = region_id(0);
+        let cleanup_budget = Budget::INFINITE;
+        let initial_reason = CancelReason::user("stop");
+        let strengthened_reason = CancelReason::shutdown();
+
+        oracle.on_region_create(region, None);
+        oracle.on_task_create(task, region);
+        oracle.on_cancel_request(task, initial_reason.clone(), Time::from_nanos(100));
+        oracle.on_transition(
+            task,
+            &TaskState::Running,
+            &TaskState::CancelRequested {
+                reason: initial_reason,
+                cleanup_budget,
+            },
+            Time::from_nanos(100),
+        );
+        oracle.on_cancel_request(task, strengthened_reason.clone(), Time::from_nanos(150));
+        oracle.on_transition(
+            task,
+            &TaskState::CancelRequested {
+                reason: CancelReason::user("stop"),
+                cleanup_budget,
+            },
+            &TaskState::CancelRequested {
+                reason: strengthened_reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(150),
+        );
+        oracle.on_transition(
+            task,
+            &TaskState::CancelRequested {
+                reason: strengthened_reason.clone(),
+                cleanup_budget,
+            },
+            &TaskState::Cancelling {
+                reason: strengthened_reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(200),
+        );
+        oracle.on_transition(
+            task,
+            &TaskState::Cancelling {
+                reason: strengthened_reason.clone(),
+                cleanup_budget,
+            },
+            &TaskState::Finalizing {
+                reason: strengthened_reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(300),
+        );
+        oracle.on_transition(
+            task,
+            &TaskState::Finalizing {
+                reason: strengthened_reason.clone(),
+                cleanup_budget,
+            },
+            &TaskState::Completed(Outcome::Cancelled(strengthened_reason)),
+            Time::from_nanos(400),
+        );
+
+        scrub_cancellation_protocol_trace("reentrant_cancel_strengthening", &oracle)
+    }
+
+    #[test]
+    fn cancellation_protocol_trace_bundle_snapshot() {
+        let bundle = vec![
+            happy_cancellation_protocol_trace(),
+            late_cancel_cancellation_protocol_trace(),
+            reentrant_cancellation_protocol_trace(),
+        ];
+
+        insta::assert_json_snapshot!("cancellation_protocol_trace_bundle", bundle);
     }
 
     #[test]
