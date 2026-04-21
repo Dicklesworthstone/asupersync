@@ -765,6 +765,50 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[derive(Clone, Copy)]
+    struct ConformanceManifestTest {
+        name: &'static str,
+        invariant: &'static str,
+    }
+
+    #[derive(Clone)]
+    struct ConformanceManifestComponent {
+        component: &'static str,
+        target: &'static str,
+        tests: Vec<ConformanceManifestTest>,
+    }
+
+    fn render_conformance_manifest_yaml(components: &[ConformanceManifestComponent]) -> String {
+        let mut components = components.to_vec();
+        components.sort_unstable_by(|left, right| {
+            left.component
+                .cmp(right.component)
+                .then(left.target.cmp(right.target))
+        });
+
+        let mut rendered =
+            String::from("schema_version: conformance-manifest/v1\nmodule: asupersync::conformance\ncomponents:\n");
+
+        for component in &mut components {
+            component
+                .tests
+                .sort_unstable_by(|left, right| left.name.cmp(right.name));
+            rendered.push_str(&format!(
+                "  - component: {}\n    target: {}\n    tests:\n",
+                component.component, component.target
+            ));
+
+            for test in &component.tests {
+                rendered.push_str(&format!(
+                    "      - name: {}\n        invariant: {}\n",
+                    test.name, test.invariant
+                ));
+            }
+        }
+
+        rendered
+    }
+
     fn scrub_conformance_markdown(markdown: &str) -> String {
         markdown
             .lines()
@@ -1075,5 +1119,77 @@ mod tests {
         .join("\n\n");
 
         insta::assert_snapshot!("conformance_report_markdown_scrubbed", snapshot);
+    }
+
+    #[test]
+    fn conformance_manifest_yaml_component_matrix_snapshot() {
+        let snapshot = render_conformance_manifest_yaml(&[
+            ConformanceManifestComponent {
+                component: "runtime-target",
+                target: "LabRuntimeTarget",
+                tests: vec![
+                    ConformanceManifestTest {
+                        name: "lab_runtime_target_spawn_registers_real_task_handle",
+                        invariant: "spawned conformance tasks resolve from pending handles to registered task ids",
+                    },
+                    ConformanceManifestTest {
+                        name: "lab_runtime_target_create_region_and_cancel_before_registration_closes_region",
+                        invariant: "region registration resolves before cancellation completes closure",
+                    },
+                    ConformanceManifestTest {
+                        name: "test_lab_runtime_target_create",
+                        invariant: "runtime creation forwards the requested deterministic seed",
+                    },
+                ],
+            },
+            ConformanceManifestComponent {
+                component: "config",
+                target: "TestConfig",
+                tests: vec![
+                    ConformanceManifestTest {
+                        name: "test_config_with_budget",
+                        invariant: "root budget overrides are preserved in the default config chain",
+                    },
+                    ConformanceManifestTest {
+                        name: "test_config_builder",
+                        invariant: "builder setters preserve explicit timeout, seed, tracing, and max-step overrides",
+                    },
+                    ConformanceManifestTest {
+                        name: "test_config_without_seed",
+                        invariant: "seedless configuration is represented explicitly for nondeterministic targets",
+                    },
+                ],
+            },
+            ConformanceManifestComponent {
+                component: "reporting",
+                target: "ConformanceEvent",
+                tests: vec![
+                    ConformanceManifestTest {
+                        name: "report_markdown_snapshot_scrubs_generated_timestamps",
+                        invariant: "markdown reports scrub generated timestamps while preserving summary ordering",
+                    },
+                    ConformanceManifestTest {
+                        name: "reporter_snapshot_scrubs_failure_messages",
+                        invariant: "structured reports preserve pass-fail ordering while redacting failure payloads",
+                    },
+                ],
+            },
+            ConformanceManifestComponent {
+                component: "handles",
+                target: "TaskHandle/RegionHandle",
+                tests: vec![
+                    ConformanceManifestTest {
+                        name: "region_handle_id",
+                        invariant: "region handles surface the registered region id once available",
+                    },
+                    ConformanceManifestTest {
+                        name: "task_handle_id",
+                        invariant: "task handles surface the registered task id once available",
+                    },
+                ],
+            },
+        ]);
+
+        insta::assert_snapshot!("conformance_manifest_yaml_component_matrix", snapshot);
     }
 }
