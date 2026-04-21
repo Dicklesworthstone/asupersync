@@ -1,0 +1,217 @@
+---
+source: src/distributed/encoding.rs
+expression: "json!({ \"base\": scrub_encoded_state_envelope_for_snapshot_test(\"base\", &base), \"extension\": scrub_encoded_state_envelope_for_snapshot_test(\"extension\", &extension), })"
+---
+{
+  "base": {
+    "envelope": {
+      "encoded_at_nanos": 77000000000,
+      "original_size": 73,
+      "redundancy_factor": "1.500",
+      "repair_count": 1,
+      "source_count": 2
+    },
+    "name": "base",
+    "params": {
+      "min_symbols_for_decode": 2,
+      "object_id": "ObjectId(00000000000000000000000000000010)",
+      "object_size": 73,
+      "source_blocks": 1,
+      "symbol_size": 48,
+      "symbols_per_block": 2
+    },
+    "roundtrip_snapshot": {
+      "budget": {
+        "cost_remaining": null,
+        "deadline_nanos": 1000000000,
+        "polls_remaining": 100
+      },
+      "cancel_reason": null,
+      "children": [],
+      "finalizer_count": 2,
+      "metadata": [],
+      "parent": null,
+      "region_id": {
+        "generation": 0,
+        "index": 1
+      },
+      "sequence": 1,
+      "state": "Open",
+      "tasks": [
+        {
+          "priority": 5,
+          "state": "Running",
+          "task_id": {
+            "generation": 0,
+            "index": 1
+          }
+        }
+      ],
+      "timestamp_nanos": 100000000000
+    },
+    "schema_version": "encoding-envelope-v2",
+    "symbols": [
+      {
+        "esi": 0,
+        "kind": "source",
+        "len": 48,
+        "preview_hex": "53 4e 41 50 01 01 00 00",
+        "sbn": 0
+      },
+      {
+        "esi": 1,
+        "kind": "source",
+        "len": 48,
+        "preview_hex": "02 00 00 00 01 00 ca 9a",
+        "sbn": 0
+      },
+      {
+        "esi": 2,
+        "kind": "repair",
+        "len": 48,
+        "preview_hex": "09 60 dc 05 6a d8 30 44",
+        "sbn": 0
+      }
+    ]
+  },
+  "extension": {
+    "envelope": {
+      "encoded_at_nanos": 88000000000,
+      "original_size": 150,
+      "redundancy_factor": "1.286",
+      "repair_count": 2,
+      "source_count": 7
+    },
+    "name": "extension",
+    "params": {
+      "min_symbols_for_decode": 7,
+      "object_id": "ObjectId(00000000000000000000000000000020)",
+      "object_size": 150,
+      "source_blocks": 2,
+      "symbol_size": 24,
+      "symbols_per_block": 4
+    },
+    "roundtrip_snapshot": {
+      "budget": {
+        "cost_remaining": 34,
+        "deadline_nanos": 400000000000,
+        "polls_remaining": 12
+      },
+      "cancel_reason": "timeout: extension fields",
+      "children": [
+        {
+          "generation": 0,
+          "index": 8
+        },
+        {
+          "generation": 1,
+          "index": 9
+        }
+      ],
+      "finalizer_count": 5,
+      "metadata": [
+        222,
+        173,
+        190,
+        239,
+        16,
+        32
+      ],
+      "parent": {
+        "generation": 0,
+        "index": 2
+      },
+      "region_id": {
+        "generation": 1,
+        "index": 7
+      },
+      "sequence": 9,
+      "state": "Closing",
+      "tasks": [
+        {
+          "priority": 4,
+          "state": "Running",
+          "task_id": {
+            "generation": 0,
+            "index": 3
+          }
+        },
+        {
+          "priority": 8,
+          "state": "Cancelled",
+          "task_id": {
+            "generation": 2,
+            "index": 4
+          }
+        }
+      ],
+      "timestamp_nanos": 321000000000
+    },
+    "schema_version": "encoding-envelope-v2",
+    "symbols": [
+      {
+        "esi": 0,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "53 4e 41 50 01 07 00 00",
+        "sbn": 0
+      },
+      {
+        "esi": 1,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "00 00 00 00 00 00 02 00",
+        "sbn": 0
+      },
+      {
+        "esi": 2,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "02 00 00 00 03 08 02 00",
+        "sbn": 0
+      },
+      {
+        "esi": 3,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "00 00 05 00 00 00 01 00",
+        "sbn": 0
+      },
+      {
+        "esi": 4,
+        "kind": "repair",
+        "len": 24,
+        "preview_hex": "5f 60 3b 05 6e 8e 96 00",
+        "sbn": 0
+      },
+      {
+        "esi": 0,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "00 00 00 00 00 01 19 00",
+        "sbn": 1
+      },
+      {
+        "esi": 1,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "73 69 6f 6e 20 66 69 65",
+        "sbn": 1
+      },
+      {
+        "esi": 2,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "de ad be ef 10 20 00 00",
+        "sbn": 1
+      },
+      {
+        "esi": 3,
+        "kind": "repair",
+        "len": 24,
+        "preview_hex": "52 ad f5 32 a6 c1 44 18",
+        "sbn": 1
+      }
+    ]
+  }
+}

@@ -559,11 +559,10 @@ fn block_bounds(block: usize, max_block_size: usize, data_len: usize) -> (usize,
 mod tests {
     use super::*;
     use crate::distributed::snapshot::{BudgetSnapshot, TaskSnapshot, TaskState};
+    use crate::record::region::RegionState;
     use crate::types::RegionId;
 
     fn create_test_snapshot() -> RegionSnapshot {
-        use crate::record::region::RegionState;
-
         RegionSnapshot {
             region_id: RegionId::new_for_test(1, 0),
             state: RegionState::Open,
@@ -584,6 +583,37 @@ mod tests {
             cancel_reason: None,
             parent: None,
             metadata: vec![],
+        }
+    }
+
+    fn create_extension_snapshot() -> RegionSnapshot {
+        RegionSnapshot {
+            region_id: RegionId::new_for_test(7, 1),
+            state: RegionState::Closing,
+            timestamp: Time::from_secs(321),
+            sequence: 9,
+            tasks: vec![
+                TaskSnapshot {
+                    task_id: crate::types::TaskId::new_for_test(3, 0),
+                    state: TaskState::Running,
+                    priority: 4,
+                },
+                TaskSnapshot {
+                    task_id: crate::types::TaskId::new_for_test(4, 2),
+                    state: TaskState::Cancelled,
+                    priority: 8,
+                },
+            ],
+            children: vec![RegionId::new_for_test(8, 0), RegionId::new_for_test(9, 1)],
+            finalizer_count: 5,
+            budget: BudgetSnapshot {
+                deadline_nanos: Some(Time::from_secs(400).as_nanos()),
+                polls_remaining: Some(12),
+                cost_remaining: Some(34),
+            },
+            cancel_reason: Some("timeout: extension fields".to_string()),
+            parent: Some(RegionId::new_for_test(2, 0)),
+            metadata: vec![0xde, 0xad, 0xbe, 0xef, 0x10, 0x20],
         }
     }
 
@@ -615,6 +645,90 @@ mod tests {
     fn decode_roundtrip(encoded: &EncodedState) -> RegionSnapshot {
         let data = rebuild_source_bytes(encoded);
         RegionSnapshot::from_bytes(&data).expect("roundtrip decode should succeed")
+    }
+
+    fn scrub_region_snapshot_for_encoding_snapshot_test(
+        snapshot: &RegionSnapshot,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "region_id": {
+                "index": snapshot.region_id.0.index(),
+                "generation": snapshot.region_id.0.generation(),
+            },
+            "state": format!("{:?}", snapshot.state),
+            "timestamp_nanos": snapshot.timestamp.as_nanos(),
+            "sequence": snapshot.sequence,
+            "tasks": snapshot.tasks.iter().map(|task| {
+                serde_json::json!({
+                    "task_id": {
+                        "index": task.task_id.0.index(),
+                        "generation": task.task_id.0.generation(),
+                    },
+                    "state": format!("{:?}", task.state),
+                    "priority": task.priority,
+                })
+            }).collect::<Vec<_>>(),
+            "children": snapshot.children.iter().map(|child| {
+                serde_json::json!({
+                    "index": child.0.index(),
+                    "generation": child.0.generation(),
+                })
+            }).collect::<Vec<_>>(),
+            "finalizer_count": snapshot.finalizer_count,
+            "budget": {
+                "deadline_nanos": snapshot.budget.deadline_nanos,
+                "polls_remaining": snapshot.budget.polls_remaining,
+                "cost_remaining": snapshot.budget.cost_remaining,
+            },
+            "cancel_reason": snapshot.cancel_reason,
+            "parent": snapshot.parent.map(|parent| serde_json::json!({
+                "index": parent.0.index(),
+                "generation": parent.0.generation(),
+            })),
+            "metadata": snapshot.metadata,
+        })
+    }
+
+    fn scrub_encoded_state_envelope_for_snapshot_test(
+        name: &str,
+        encoded: &EncodedState,
+    ) -> serde_json::Value {
+        let decoded = decode_roundtrip(encoded);
+        serde_json::json!({
+            "name": name,
+            "schema_version": "encoding-envelope-v2",
+            "params": {
+                "object_id": format!("{:?}", encoded.params.object_id),
+                "object_size": encoded.params.object_size,
+                "symbol_size": encoded.params.symbol_size,
+                "source_blocks": encoded.params.source_blocks,
+                "symbols_per_block": encoded.params.symbols_per_block,
+                "min_symbols_for_decode": encoded.params.min_symbols_for_decode(),
+            },
+            "envelope": {
+                "source_count": encoded.source_count,
+                "repair_count": encoded.repair_count,
+                "original_size": encoded.original_size,
+                "encoded_at_nanos": encoded.encoded_at.as_nanos(),
+                "redundancy_factor": format!("{:.3}", encoded.redundancy_factor()),
+            },
+            "symbols": encoded.symbols.iter().map(|symbol| {
+                let preview_len = symbol.len().min(8);
+                let preview = symbol.data()[..preview_len]
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                serde_json::json!({
+                    "sbn": symbol.id().sbn(),
+                    "esi": symbol.id().esi(),
+                    "kind": symbol.kind().to_string(),
+                    "len": symbol.len(),
+                    "preview_hex": preview,
+                })
+            }).collect::<Vec<_>>(),
+            "roundtrip_snapshot": scrub_region_snapshot_for_encoding_snapshot_test(&decoded),
+        })
     }
 
     #[test]
@@ -1172,6 +1286,53 @@ mod tests {
 
         let redundancy = encoded.redundancy_factor();
         assert!((redundancy - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn encoding_envelope_v2_snapshot() {
+        let mut base_encoder = StateEncoder::new(
+            EncodingConfig {
+                symbol_size: 48,
+                min_repair_symbols: 1,
+                max_source_blocks: 1,
+                ..Default::default()
+            },
+            DetRng::new(111),
+        );
+        let mut extension_encoder = StateEncoder::new(
+            EncodingConfig {
+                symbol_size: 24,
+                min_repair_symbols: 2,
+                max_source_blocks: 2,
+                ..Default::default()
+            },
+            DetRng::new(222),
+        );
+
+        let base = base_encoder
+            .encode_with_id(
+                &create_test_snapshot(),
+                ObjectId::new_for_test(0x10),
+                Time::from_secs(77),
+            )
+            .expect("base encoding should succeed");
+        let extension = extension_encoder
+            .encode_with_id(
+                &create_extension_snapshot(),
+                ObjectId::new_for_test(0x20),
+                Time::from_secs(88),
+            )
+            .expect("extension encoding should succeed");
+
+        insta::with_settings!({sort_maps => true}, {
+            insta::assert_json_snapshot!(
+                "encoding_envelope_v2_scrubbed",
+                serde_json::json!({
+                    "base": scrub_encoded_state_envelope_for_snapshot_test("base", &base),
+                    "extension": scrub_encoded_state_envelope_for_snapshot_test("extension", &extension),
+                })
+            );
+        });
     }
 
     // --- wave 80 trait coverage ---
