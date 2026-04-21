@@ -957,6 +957,22 @@ mod tests {
         arena
     }
 
+    fn pop_all_ring(ring: &mut IntrusiveRing, arena: &mut Arena<TaskRecord>) -> Vec<TaskId> {
+        let mut popped = Vec::new();
+        while let Some(task_id) = ring.pop_front(arena) {
+            popped.push(task_id);
+        }
+        popped
+    }
+
+    fn pop_all_stack(stack: &mut IntrusiveStack, arena: &mut Arena<TaskRecord>) -> Vec<TaskId> {
+        let mut popped = Vec::new();
+        while let Some(task_id) = stack.pop(arena) {
+            popped.push(task_id);
+        }
+        popped
+    }
+
     #[test]
     fn empty_queue() {
         let ring = IntrusiveRing::new(QUEUE_TAG_READY);
@@ -1246,6 +1262,38 @@ mod tests {
         assert_eq!(ring.pop_front(&mut arena), Some(task(1)));
     }
 
+    #[test]
+    fn metamorphic_ring_remove_matches_fifo_filter() {
+        let mut baseline_arena = setup_arena(8);
+        let mut filtered_arena = setup_arena(8);
+        let mut baseline = IntrusiveRing::new(QUEUE_TAG_READY);
+        let mut filtered = IntrusiveRing::new(QUEUE_TAG_READY);
+        let removed = [task(1), task(4), task(6)];
+
+        for i in 0..8 {
+            baseline.push_back(task(i), &mut baseline_arena);
+            filtered.push_back(task(i), &mut filtered_arena);
+        }
+
+        for task_id in removed {
+            assert!(filtered.remove(task_id, &mut filtered_arena));
+        }
+
+        let expected: Vec<_> = pop_all_ring(&mut baseline, &mut baseline_arena)
+            .into_iter()
+            .filter(|task_id| !removed.contains(task_id))
+            .collect();
+        let actual = pop_all_ring(&mut filtered, &mut filtered_arena);
+
+        assert_eq!(actual, expected);
+        for task_id in removed {
+            let record = filtered_arena
+                .get(task_id.arena_index())
+                .expect("removed task missing");
+            assert!(!record.is_in_queue());
+        }
+    }
+
     // ── IntrusiveStack tests ─────────────────────────────────────────────
 
     #[test]
@@ -1459,6 +1507,61 @@ mod tests {
         assert_eq!(stack.pop(&mut arena), Some(task(3)));
         assert_eq!(stack.pop(&mut arena), Some(task(2)));
         assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn metamorphic_batch_steal_matches_repeated_single_steals() {
+        let mut batch_arena = setup_arena(8);
+        let mut single_arena = setup_arena(8);
+        let mut batch_stack = IntrusiveStack::new(QUEUE_TAG_READY);
+        let mut single_stack = IntrusiveStack::new(QUEUE_TAG_READY);
+
+        for i in 0..8 {
+            batch_stack.push(task(i), &mut batch_arena);
+            single_stack.push(task(i), &mut single_arena);
+        }
+
+        let mut batch_stolen = Vec::new();
+        batch_stack.steal_batch(4, &mut batch_arena, &mut batch_stolen);
+
+        let mut single_stolen = Vec::new();
+        while single_stolen.len() < batch_stolen.len() {
+            single_stolen.push(
+                single_stack
+                    .steal_one(&mut single_arena)
+                    .expect("single steal should match batch partition"),
+            );
+        }
+
+        assert_eq!(single_stolen, batch_stolen);
+        assert_eq!(
+            pop_all_stack(&mut single_stack, &mut single_arena),
+            pop_all_stack(&mut batch_stack, &mut batch_arena)
+        );
+    }
+
+    #[test]
+    fn metamorphic_restoring_stolen_suffix_reconstructs_owner_order() {
+        let mut baseline_arena = setup_arena(6);
+        let mut restored_arena = setup_arena(6);
+        let mut baseline = IntrusiveStack::new(QUEUE_TAG_READY);
+        let mut restored = IntrusiveStack::new(QUEUE_TAG_READY);
+
+        for i in 0..6 {
+            baseline.push(task(i), &mut baseline_arena);
+            restored.push(task(i), &mut restored_arena);
+        }
+
+        let expected = pop_all_stack(&mut baseline, &mut baseline_arena);
+
+        let mut stolen = Vec::new();
+        restored.steal_batch(3, &mut restored_arena, &mut stolen);
+        for task_id in stolen.into_iter().rev() {
+            restored.push_bottom(task_id, &mut restored_arena);
+        }
+
+        assert_eq!(pop_all_stack(&mut restored, &mut restored_arena), expected);
+        assert!(!restored.has_local_tasks());
     }
 
     #[test]
