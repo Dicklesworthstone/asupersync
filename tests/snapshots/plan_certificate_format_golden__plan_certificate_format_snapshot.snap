@@ -1,0 +1,79 @@
+---
+source: tests/plan_certificate_format_golden.rs
+expression: "json!({\n    \"dedup_race_join\":\n    {\n        \"certificate\": certificate_json(&dedup_cert), \"compact\":\n        compact_certificate_json(&dedup_compact),\n    }, \"identity_join\":\n    {\n        \"certificate\": certificate_json(&identity_cert), \"compact\":\n        compact_certificate_json(&identity_compact),\n    }\n})"
+---
+{
+  "dedup_race_join": {
+    "certificate": {
+      "after_hash": 9330920261498496924,
+      "after_node_count": 8,
+      "before_hash": 12664835006891767254,
+      "before_node_count": 6,
+      "fingerprint": 16580684486522239160,
+      "identity": false,
+      "policy": {
+        "associativity": true,
+        "commutativity": false,
+        "distributivity": true,
+        "require_binary_joins": true,
+        "timeout_simplification": true
+      },
+      "steps": [
+        {
+          "after": 7,
+          "before": 5,
+          "detail": "deduped shared child 0 across 2 joins",
+          "rule": "dedup_race_join"
+        }
+      ],
+      "version": 1
+    },
+    "compact": {
+      "after_hash": 9330920261498496924,
+      "after_node_count": 8,
+      "before_hash": 12664835006891767254,
+      "before_node_count": 6,
+      "byte_size_bound": 42,
+      "policy_bits": 29,
+      "steps": [
+        {
+          "after": 7,
+          "before": 5,
+          "rule": 5
+        }
+      ],
+      "version": 1,
+      "within_linear_bound": true
+    }
+  },
+  "identity_join": {
+    "certificate": {
+      "after_hash": 12566553696209370974,
+      "after_node_count": 3,
+      "before_hash": 12566553696209370974,
+      "before_node_count": 3,
+      "fingerprint": 15209754795333290267,
+      "identity": true,
+      "policy": {
+        "associativity": true,
+        "commutativity": false,
+        "distributivity": true,
+        "require_binary_joins": true,
+        "timeout_simplification": true
+      },
+      "steps": [],
+      "version": 1
+    },
+    "compact": {
+      "after_hash": 12566553696209370974,
+      "after_node_count": 3,
+      "before_hash": 12566553696209370974,
+      "before_node_count": 3,
+      "byte_size_bound": 33,
+      "policy_bits": 29,
+      "steps": [],
+      "version": 1,
+      "within_linear_bound": true
+    }
+  }
+}
