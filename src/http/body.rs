@@ -813,13 +813,6 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
         use std::task::Waker;
 
-    struct NoopWaker;
-
-    use std::task::Wake;
-    impl Wake for NoopWaker {
-        fn wake(self: std::sync::Arc<Self>) {}
-    }
-
     fn noop_waker() -> std::task::Waker {
         std::task::Waker::noop().clone()
     }

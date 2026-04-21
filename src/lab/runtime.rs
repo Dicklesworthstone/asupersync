@@ -2804,13 +2804,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    struct NoopWaker;
-    #[cfg(unix)]
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
-    #[cfg(unix)]
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }
