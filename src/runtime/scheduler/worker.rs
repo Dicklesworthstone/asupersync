@@ -1604,11 +1604,7 @@ mod tests {
 
         for worker_id in 0..NUM_WORKERS {
             let actual = steal_counts.get(&worker_id).unwrap_or(&0);
-            let deviation = if *actual > expected_per_worker {
-                *actual - expected_per_worker
-            } else {
-                expected_per_worker - *actual
-            };
+            let deviation = (*actual).abs_diff(expected_per_worker);
 
             // Allow 30% deviation for randomness, but not systematic bias
             let max_deviation = expected_per_worker * 3 / 10;

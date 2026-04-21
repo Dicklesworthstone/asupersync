@@ -4701,7 +4701,7 @@ mod tests {
 
         crate::assert_with_log!(
             state.finalizer_history()
-                == &[
+                == [
                     FinalizerHistoryEvent::Registered {
                         id: 0,
                         region,
