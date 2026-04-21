@@ -1026,6 +1026,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "sqlite_bind_values"
+path = "fuzz_targets/sqlite_bind_values.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_continuation"
 path = "fuzz_targets/h2_continuation.rs"
 test = false
