@@ -1,6 +1,6 @@
 [package]
 name = "franken-evidence"
-version = "0.2.9"
+version = "0.3.0"
 edition = "2024"
 license-file = "../LICENSE"
 description = "Canonical EvidenceLedger schema for FrankenSuite decision tracing."
