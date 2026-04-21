@@ -61,6 +61,14 @@ struct Rfc6330FuzzInput {
     pub source_block_number: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceSymbolPartition {
+    large_block_len: usize,
+    small_block_len: usize,
+    large_block_count: usize,
+    small_block_count: usize,
+}
+
 /// Validate OTI according to RFC 6330 constraints
 fn validate_oti(oti: &ObjectTransmissionInfo) -> Result<(), String> {
     // RFC 6330 Section 4.3: Transfer length validation
@@ -121,6 +129,27 @@ fn verify_oti_checksum(oti: &ObjectTransmissionInfo) -> bool {
     computed == oti.checksum
 }
 
+fn partition_source_symbols_rfc6330(
+    source_symbols: usize,
+    sub_blocks: usize,
+) -> SourceSymbolPartition {
+    let small_block_len = source_symbols / sub_blocks;
+    let large_block_count = source_symbols % sub_blocks;
+    let large_block_len = if large_block_count == 0 {
+        small_block_len
+    } else {
+        small_block_len + 1
+    };
+    let small_block_count = sub_blocks - large_block_count;
+
+    SourceSymbolPartition {
+        large_block_len,
+        small_block_len,
+        large_block_count,
+        small_block_count,
+    }
+}
+
 /// Test symbol_size and sub_blocks/K' relationships per RFC 6330 Section 4.3
 fn test_symbol_size_sub_block_relationships(oti: &ObjectTransmissionInfo) -> Result<(), String> {
     let k = oti.source_symbols as usize;
@@ -142,11 +171,14 @@ fn test_symbol_size_sub_block_relationships(oti: &ObjectTransmissionInfo) -> Res
     let al = oti.alignment as usize;
 
     // RFC 6330 Section 4.4.1.2: Symbol size must be divisible by alignment
-    if al > 0 && !symbol_size.is_multiple_of(1 << al) {
+    if al > 8 {
+        return Err("Alignment parameter too large".to_string());
+    }
+    let alignment_bytes = 1usize << al;
+    if al > 0 && !symbol_size.is_multiple_of(alignment_bytes) {
         return Err(format!(
             "Symbol size {} not aligned to {} bytes",
-            symbol_size,
-            1 << al
+            symbol_size, alignment_bytes
         ));
     }
 
@@ -168,6 +200,96 @@ fn test_symbol_size_sub_block_relationships(oti: &ObjectTransmissionInfo) -> Res
     // RFC 6330: Each sub-symbol must be at least 1 byte
     if sub_symbol_size < 1 {
         return Err("Sub-symbol size too small".to_string());
+    }
+
+    Ok(())
+}
+
+fn test_sub_block_partitioning_rfc6330(oti: &ObjectTransmissionInfo) -> Result<(), String> {
+    let k = oti.source_symbols as usize;
+    let z = oti.sub_blocks as usize;
+    let partition = partition_source_symbols_rfc6330(k, z);
+
+    let buckets = std::iter::repeat_n(partition.large_block_len, partition.large_block_count)
+        .chain(std::iter::repeat_n(
+            partition.small_block_len,
+            partition.small_block_count,
+        ))
+        .collect::<Vec<_>>();
+
+    if buckets.len() != z {
+        return Err(format!(
+            "Partition produced {} buckets for Z={z}",
+            buckets.len()
+        ));
+    }
+
+    let covered = buckets.iter().sum::<usize>();
+    if covered != k {
+        return Err(format!(
+            "Partition coverage mismatch: expected K={k}, got {covered}"
+        ));
+    }
+
+    let max_bucket = buckets.iter().copied().max().unwrap_or(0);
+    let min_bucket = buckets.iter().copied().min().unwrap_or(0);
+    if max_bucket.saturating_sub(min_bucket) > 1 {
+        return Err(format!(
+            "Partition spread exceeds RFC 6330 allowance: max={max_bucket}, min={min_bucket}"
+        ));
+    }
+
+    if partition.large_block_count + partition.small_block_count != z {
+        return Err(format!(
+            "Partition count mismatch: ZL={} ZS={} Z={z}",
+            partition.large_block_count, partition.small_block_count
+        ));
+    }
+
+    if partition.large_block_count == 0 {
+        if partition.large_block_len != partition.small_block_len {
+            return Err(format!(
+                "Exact multiple partition should have equal bucket sizes: KL={} KS={}",
+                partition.large_block_len, partition.small_block_len
+            ));
+        }
+    } else if partition.large_block_len != partition.small_block_len.saturating_add(1) {
+        return Err(format!(
+            "Non-uniform partition must differ by exactly one: KL={} KS={}",
+            partition.large_block_len, partition.small_block_len
+        ));
+    }
+
+    if z > 1 {
+        let next_partition = partition_source_symbols_rfc6330(k + 1, z);
+        let next_covered = next_partition.large_block_count * next_partition.large_block_len
+            + next_partition.small_block_count * next_partition.small_block_len;
+        if next_covered != k + 1 {
+            return Err(format!(
+                "Adjacent partition coverage mismatch: expected {}, got {}",
+                k + 1,
+                next_covered
+            ));
+        }
+
+        let next_max = next_partition
+            .large_block_len
+            .max(next_partition.small_block_len);
+        let next_min = next_partition
+            .large_block_len
+            .min(next_partition.small_block_len);
+        if next_max.saturating_sub(next_min) > 1 {
+            return Err(format!(
+                "Adjacent partition spread exceeds RFC 6330 allowance: max={next_max}, min={next_min}"
+            ));
+        }
+
+        if k.is_multiple_of(z) && next_partition.large_block_count != 1 {
+            return Err(format!(
+                "Partition rollover should create exactly one large block after exact multiple: K={k}, Z={z}, ZL={}",
+                next_partition.large_block_count
+            ));
+        }
     }
 
     Ok(())
@@ -401,6 +523,10 @@ fn fuzz_rfc6330_oti(mut input: Rfc6330FuzzInput) -> Result<(), String> {
     // Assertion 2: Symbol size and sub_blocks/K' relationships per Section 4.3
     test_symbol_size_sub_block_relationships(&input.oti)?;
 
+    // Assertion 2b: RFC 6330 source-symbol partitioning across Z sub-blocks is
+    // balanced and boundary-stable, including Z > K and exact-multiple rollover.
+    test_sub_block_partitioning_rfc6330(&input.oti)?;
+
     // Assertion 3: Invalid K' > K rejected (verify K' >= K invariant)
     test_invalid_k_prime_rejection(&input.oti, input.test_invalid_k_prime)?;
 
@@ -441,3 +567,46 @@ fuzz_target!(|data: &[u8]| {
     // Run RFC 6330 OTI fuzzing with all required assertions
     let _ = fuzz_rfc6330_oti(input);
 });
+
+#[cfg(test)]
+mod tests {
+    use super::{partition_source_symbols_rfc6330, test_sub_block_partitioning_rfc6330};
+
+    fn make_oti(source_symbols: u16, sub_blocks: u8) -> super::ObjectTransmissionInfo {
+        super::ObjectTransmissionInfo {
+            transfer_length: 1024,
+            symbol_size: 64,
+            source_symbols,
+            sub_blocks,
+            alignment: 0,
+            encoding_id: 6,
+            instance_id: 1,
+            checksum: 0,
+        }
+    }
+
+    #[test]
+    fn partition_handles_more_sub_blocks_than_symbols() {
+        let partition = partition_source_symbols_rfc6330(3, 5);
+        assert_eq!(partition.large_block_len, 1);
+        assert_eq!(partition.small_block_len, 0);
+        assert_eq!(partition.large_block_count, 3);
+        assert_eq!(partition.small_block_count, 2);
+        test_sub_block_partitioning_rfc6330(&make_oti(3, 5)).expect("valid partition");
+    }
+
+    #[test]
+    fn partition_rollover_after_exact_multiple_creates_one_large_block() {
+        let exact = partition_source_symbols_rfc6330(8, 4);
+        let next = partition_source_symbols_rfc6330(9, 4);
+
+        assert_eq!(exact.large_block_len, 2);
+        assert_eq!(exact.small_block_len, 2);
+        assert_eq!(exact.large_block_count, 0);
+        assert_eq!(next.large_block_len, 3);
+        assert_eq!(next.small_block_len, 2);
+        assert_eq!(next.large_block_count, 1);
+        test_sub_block_partitioning_rfc6330(&make_oti(8, 4)).expect("exact multiple");
+        test_sub_block_partitioning_rfc6330(&make_oti(9, 4)).expect("post-rollover");
+    }
+}
