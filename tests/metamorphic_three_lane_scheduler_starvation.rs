@@ -72,7 +72,7 @@ impl StarvationTestHarness {
         for i in 0..count {
             let task_id = TaskId::new_for_test(start_id + i as u32, 0);
             // High priority cancel tasks
-            self.scheduler.schedule_cancel(task_id, 100 + i as u32);
+            self.scheduler.inject_cancel(task_id, (100 + i as u32) as u8);
             cancel_tasks.push(task_id);
         }
         cancel_tasks
@@ -84,7 +84,7 @@ impl StarvationTestHarness {
         for i in 0..count {
             let task_id = TaskId::new_for_test(start_id + i as u32, 1);
             // Medium priority ready tasks
-            self.scheduler.schedule(task_id, 50 + i as u32);
+            self.scheduler.inject_ready(task_id, (50 + i as u32) as u8);
             ready_tasks.push(task_id);
         }
         ready_tasks
@@ -114,17 +114,15 @@ impl StarvationTestHarness {
             }
         }
 
-        // Return workers to scheduler
-        for worker in workers {
-            self.scheduler.add_worker(worker);
-        }
+        // Note: Cannot return workers to scheduler - no API available
+        // Workers are consumed by take_workers() and cannot be re-added
 
         stats
     }
 
     fn is_cancel_task(&self, task_id: TaskId) -> bool {
         // Cancel tasks have generation 0 in our test setup
-        task_id.generation() == 0
+        task_id.arena_index().generation() == 0
     }
 }
 
@@ -154,7 +152,7 @@ impl SchedulerStats {
         self.ensure_worker_capacity(worker_id + 1);
         self.dispatches[worker_id].push((task_id, step));
 
-        if task_id.generation() == 0 {
+        if task_id.arena_index().generation() == 0 {
             self.total_cancel_dispatches += 1;
         } else {
             self.total_ready_dispatches += 1;
@@ -195,7 +193,7 @@ impl SchedulerStats {
 
         let ready_steps: Vec<usize> = self.dispatches[worker_id]
             .iter()
-            .filter(|(task_id, _)| task_id.generation() != 0)
+            .filter(|(task_id, _)| task_id.arena_index().generation() != 0)
             .map(|(_, step)| *step)
             .collect();
 
@@ -275,7 +273,7 @@ fn mr_work_stealing_balance() {
         for i in 0..task_count {
             let task_id = TaskId::new_for_test(3000 + i as u32, 1);
             let target_worker = i % worker_count;
-            harness.scheduler.schedule_local(task_id, 50);
+            harness.scheduler.inject_ready(task_id, 50);
         }
 
         let stats = harness.run_scheduling_simulation(task_count + 50);
@@ -333,7 +331,7 @@ fn mr_cross_worker_progress_fairness() {
         // Add some high-priority tasks that should preempt
         for i in 0..5 {
             let task_id = TaskId::new_for_test(6000 + i, 1);
-            harness.scheduler.schedule(task_id, 200); // Higher priority than ready
+            harness.scheduler.inject_ready(task_id, 200); // Higher priority than ready
         }
 
         let stats = harness.run_scheduling_simulation(300);
@@ -368,7 +366,7 @@ fn mr_cross_worker_progress_fairness() {
         // High-priority tasks (priority > 150) should dispatch before many low-priority
         let high_priority_dispatched = stats.dispatches.iter()
             .flat_map(|worker_dispatches| worker_dispatches.iter())
-            .filter(|(task_id, _)| task_id.sequence() >= 6000)
+            .filter(|(task_id, _)| task_id.arena_index().index() >= 6000)
             .count();
 
         if high_priority_dispatched > 0 {
@@ -396,7 +394,7 @@ fn mr_starvation_recovery_consistency() {
         // Phase 2: Stop cancel injection, add recovery work
         for i in 0..recovery_cycles {
             let task_id = TaskId::new_for_test(9000 + i as u32, 1);
-            harness.scheduler.schedule(task_id, 75); // Recovery ready tasks
+            harness.scheduler.inject_ready(task_id, 75); // Recovery ready tasks
         }
 
         let phase2_stats = harness.run_scheduling_simulation(recovery_cycles + 20);

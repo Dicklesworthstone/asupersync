@@ -24,7 +24,7 @@ const TEST_TIMEOUT_STEPS: usize = 10_000;
 
 /// Test that concurrent acquire ordering is preserved under cancellation.
 fn concurrent_acquire_ordering_under_cancel(seed: u64, cancel_phase: usize) -> Vec<usize> {
-    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS));
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS as u64));
     let region = runtime.state.create_root_region(Budget::INFINITE);
     let semaphore = Arc::new(Semaphore::new(MAX_SEMAPHORE_PERMITS));
     let acquisition_order = Arc::new(StdMutex::new(Vec::new()));
@@ -79,7 +79,7 @@ fn concurrent_acquire_ordering_under_cancel(seed: u64, cancel_phase: usize) -> V
     let cancel_count = cancel_phase.min(CONCURRENT_ACQUIRERS / 2);
     for i in 0..cancel_count {
         if let Some((_, cancel_handle)) = task_ids.get(i) {
-            cancel_handle.request_cancel();
+            cancel_handle.abort();
         }
     }
 
@@ -108,7 +108,7 @@ fn concurrent_acquire_ordering_under_cancel(seed: u64, cancel_phase: usize) -> V
 
 /// Test that release+abort operations are idempotent.
 fn release_abort_idempotency(seed: u64, double_operations: usize) -> (usize, usize) {
-    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS));
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS as u64));
     let region = runtime.state.create_root_region(Budget::INFINITE);
     let semaphore = Arc::new(Semaphore::new(MAX_SEMAPHORE_PERMITS));
     let normal_releases = Arc::new(AtomicUsize::new(0));
@@ -168,7 +168,7 @@ fn release_abort_idempotency(seed: u64, double_operations: usize) -> (usize, usi
 
 /// Test waker deduplication invariants under burst conditions.
 fn waker_dedup_under_burst(seed: u64, burst_size: usize) -> (usize, usize, usize) {
-    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS));
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS as u64));
     let region = runtime.state.create_root_region(Budget::INFINITE);
     let semaphore = Arc::new(Semaphore::new(1)); // Single permit for maximum contention
     let wakeups = Arc::new(AtomicUsize::new(0));

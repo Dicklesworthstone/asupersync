@@ -6,7 +6,7 @@
 #![cfg(test)]
 
 use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
-use asupersync::runtime::{RuntimeState, TaskTable};
+use asupersync::runtime::RuntimeState;
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{TaskId, Time};
 use insta::assert_json_snapshot;
@@ -17,7 +17,8 @@ use std::sync::Arc;
 fn empty_scheduler_state_dump() -> Value {
     let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
     let mut scheduler = ThreeLaneScheduler::new(1, &state);
-    let worker = &mut scheduler.workers[0];
+    let mut workers = scheduler.take_workers();
+    let worker = &mut workers[0];
 
     // Verify invariants before dumping state
     worker.verify_scheduler_invariants();
@@ -56,7 +57,8 @@ fn empty_scheduler_state_dump() -> Value {
 fn loaded_scheduler_state_dump() -> Value {
     let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
     let mut scheduler = ThreeLaneScheduler::new(1, &state);
-    let worker = &mut scheduler.workers[0];
+    let mut workers = scheduler.take_workers();
+    let worker = &mut workers[0];
 
     // Schedule some mock tasks to create loaded state
     worker.schedule_local_ready(TaskId::new_for_test(100, 0));
@@ -111,7 +113,8 @@ fn loaded_scheduler_state_dump() -> Value {
 fn cancel_streak_scheduler_state_dump() -> Value {
     let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
     let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 2);
-    let worker = &mut scheduler.workers[0];
+    let mut workers = scheduler.take_workers();
+    let worker = &mut workers[0];
 
     // Create a scenario with cancel tasks to trigger streak behavior
     let mut dispatch_sequence = Vec::new();
@@ -201,8 +204,9 @@ fn test_multi_worker_scheduler_state_dump() {
     let mut scheduler = ThreeLaneScheduler::new(2, &state);
 
     // Load different tasks on different workers
-    let worker0 = &mut scheduler.workers[0];
-    let worker1 = &mut scheduler.workers[1];
+    let mut workers = scheduler.take_workers();
+    let worker0 = &mut workers[0];
+    let worker1 = &mut workers[1];
 
     // Worker 0: cancel and ready tasks
     worker0.inject_cancel(TaskId::new_for_test(400, 0), 200);
@@ -301,7 +305,8 @@ fn test_multi_worker_scheduler_state_dump() {
 fn test_fairness_bounds_scheduler_state_dump() {
     let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
     let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
-    let worker = &mut scheduler.workers[0];
+    let mut workers = scheduler.take_workers();
+    let worker = &mut workers[0];
 
     // Create scenario that would trigger fairness bounds
     // Add many cancel tasks (higher than limit)
