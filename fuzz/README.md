@@ -25,6 +25,7 @@ cargo +nightly install cargo-fuzz
 | `bytes_cursor_reader` | BytesCursor and reader() position, chunk, and copy invariants | High |
 | `grpc_prost_codec_decode` | Direct ProstCodec decode limits, malformed-wire, and unknown-field invariants | High |
 | `grpc_gzip_message_decode` | Gzip-compressed gRPC frame decode, malformed-gzip rejection, bomb guards, and max-message enforcement | High |
+| `grpc_streaming` | Bidirectional gRPC stream interleaving, half-close/cancel propagation, deadline, and backpressure invariants | High |
 | `key_derivation_context` | AuthKey seed/raw/RNG derivation, chained purpose isolation, and mutated-tag/symbol verification invariants | High |
 | `postgres_scram` | PostgreSQL SCRAM-SHA-256 server-first/server-final parsing, iteration-bound enforcement, and malformed-signature rejection | High |
 | `raptorq_decoder_gauss_matrix` | RaptorQ decoder Gaussian-elimination rank-deficient, malformed-equation, and corrupt-RHS invariants | High |
@@ -81,6 +82,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
   including empty views, clone-heavy cursor churn, and position-reset cases
 - `corpus/grpc_prost_codec_decode/` - Direct ProstCodec decode boundary and malformed-wire scenarios
 - `corpus/grpc_gzip_message_decode/` - Gzip-compressed gRPC frame decode, malformed-gzip rejection, and bomb-guard scenarios
+- `corpus/grpc_streaming/` - Bidirectional stream seeds covering interleaving, half-close/cancel, and deadline/backpressure scenarios
 - `corpus/key_derivation_context/` - AuthKey seed/raw/RNG derivation, chained purpose isolation, and mutated-tag/symbol scenarios
 - `corpus/postgres_scram/` - SCRAM server-first/server-final seeds covering valid nonces, low-iteration rejects, and malformed signatures
 - `corpus/raptorq_decoder_gauss_matrix/` - Rank-deficient duplicate-source/repair systems plus malformed-equation and corrupt-RHS decoder scenarios

@@ -31,6 +31,7 @@ on:
           - bytes_cursor_reader
           - grpc_prost_codec_decode
           - grpc_gzip_message_decode
+          - grpc_streaming
           - key_derivation_context
           - postgres_scram
           - raptorq_decoder_gauss_matrix
@@ -75,6 +76,7 @@ jobs:
           - bytes_cursor_reader
           - grpc_prost_codec_decode
           - grpc_gzip_message_decode
+          - grpc_streaming
           - key_derivation_context
           - postgres_scram
           - raptorq_decoder_gauss_matrix

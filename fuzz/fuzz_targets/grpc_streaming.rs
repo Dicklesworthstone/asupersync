@@ -26,13 +26,11 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::time::Duration;
 
 use asupersync::grpc::{
-    client::{Channel, GrpcClient, RequestSink, ResponseStream},
+    client::{Channel, GrpcClient},
     status::{Code, Status},
-    streaming::{Metadata, Request, Response},
 };
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
@@ -40,6 +38,48 @@ const MAX_FUZZ_SIZE: usize = 32_000;
 
 /// Maximum messages per stream direction to bound fuzzing runtime.
 const MAX_STREAM_MESSAGES: usize = 100;
+
+/// Fuzz-local duration wrapper.
+#[derive(Arbitrary, Debug, Clone, Copy)]
+struct FuzzDuration(u64);
+
+impl FuzzDuration {
+    fn into_duration(self) -> Duration {
+        Duration::from_millis(self.0.min(10_000))
+    }
+}
+
+/// Fuzz-local status wrapper.
+#[derive(Arbitrary, Debug, Clone)]
+struct FuzzStatus {
+    code: u8,
+    message: String,
+}
+
+impl FuzzStatus {
+    fn into_status(self) -> Status {
+        let code = match self.code % 17 {
+            0 => Code::Ok,
+            1 => Code::Cancelled,
+            2 => Code::Unknown,
+            3 => Code::InvalidArgument,
+            4 => Code::DeadlineExceeded,
+            5 => Code::NotFound,
+            6 => Code::AlreadyExists,
+            7 => Code::PermissionDenied,
+            8 => Code::ResourceExhausted,
+            9 => Code::FailedPrecondition,
+            10 => Code::Aborted,
+            11 => Code::OutOfRange,
+            12 => Code::Unimplemented,
+            13 => Code::Internal,
+            14 => Code::Unavailable,
+            15 => Code::DataLoss,
+            _ => Code::Unauthenticated,
+        };
+        Status::new(code, self.message)
+    }
+}
 
 /// Test message type for fuzzing.
 #[derive(Debug, Clone, Arbitrary, PartialEq, Eq)]
@@ -67,7 +107,7 @@ struct StreamingScenario {
     /// Operations to perform on the bidirectional stream
     operations: Vec<StreamOperation>,
     /// Global timeout for the streaming session
-    timeout: Option<Duration>,
+    timeout: Option<FuzzDuration>,
     /// Whether to enable flow-control backpressure testing
     test_backpressure: bool,
     /// Initial metadata to send
@@ -94,12 +134,12 @@ enum StreamOperation {
     /// Server closes its send stream (half-close)
     ServerHalfClose,
     /// Client cancels the entire stream
-    ClientCancel { status: Status },
+    ClientCancel { status: FuzzStatus },
     /// Server cancels the entire stream
-    ServerCancel { status: Status },
+    ServerCancel { status: FuzzStatus },
     /// Test deadline enforcement
     TestDeadline {
-        timeout: Duration,
+        timeout: FuzzDuration,
         /// Whether deadline should trigger
         should_trigger: bool,
     },
@@ -120,46 +160,6 @@ enum StreamOperation {
 enum StreamDirection {
     ClientToServer,
     ServerToClient,
-}
-
-/// Status codes for cancellation testing.
-impl Arbitrary for Status {
-    fn arbitrary(u: &mut arbitrary::Unstructured) -> arbitrary::Result<Self> {
-        let code = u.choose(&[
-            Code::Ok,
-            Code::Cancelled,
-            Code::Unknown,
-            Code::InvalidArgument,
-            Code::DeadlineExceeded,
-            Code::NotFound,
-            Code::AlreadyExists,
-            Code::PermissionDenied,
-            Code::ResourceExhausted,
-            Code::FailedPrecondition,
-            Code::Aborted,
-            Code::OutOfRange,
-            Code::Unimplemented,
-            Code::Internal,
-            Code::Unavailable,
-            Code::DataLoss,
-            Code::Unauthenticated,
-        ])?;
-
-        let message = if u.arbitrary::<bool>()? {
-            String::arbitrary(u)?
-        } else {
-            String::new()
-        };
-
-        Ok(Status::new(*code, message))
-    }
-}
-
-impl Arbitrary for Duration {
-    fn arbitrary(u: &mut arbitrary::Unstructured) -> arbitrary::Result<Self> {
-        let millis = u.int_in_range(0..=10000u64)?; // 0-10 seconds max
-        Ok(Duration::from_millis(millis))
-    }
 }
 
 /// Track streaming state for invariant checking.
@@ -266,11 +266,15 @@ impl StreamState {
 
 /// Create a test channel with appropriate timeouts.
 async fn create_test_channel(timeout: Option<Duration>) -> Result<Channel, Status> {
-    let mut config = asupersync::grpc::client::ChannelConfig::default();
-    if let Some(t) = timeout {
-        config.timeout = Some(t);
-    }
-    Channel::connect("http://loopback/", config).await
+    let builder = if let Some(timeout) = timeout {
+        Channel::builder("http://loopback/").timeout(timeout)
+    } else {
+        Channel::builder("http://loopback/")
+    };
+    builder
+        .connect()
+        .await
+        .map_err(|err| Status::internal(err.to_string()))
 }
 
 /// Simulate bidirectional streaming operations.
@@ -279,11 +283,12 @@ async fn simulate_streaming(
     state: &mut StreamState,
 ) -> Result<(), Status> {
     // Create test channel
-    let channel = create_test_channel(scenario.timeout).await?;
+    let channel = create_test_channel(scenario.timeout.map(FuzzDuration::into_duration)).await?;
     let mut client = GrpcClient::new(channel);
+    let _initial_metadata_count = scenario.initial_metadata.len();
 
     // Start bidirectional streaming
-    let (mut request_sink, mut response_stream) = client
+    let (mut request_sink, _response_stream) = client
         .bidi_streaming::<TestMessage, TestMessage>("/test/TestService/BidiStream")
         .await?;
 
@@ -348,12 +353,14 @@ async fn simulate_streaming(
 
             StreamOperation::ClientCancel { status } => {
                 // Simulate client cancellation
+                let _ = status.clone().into_status();
                 state.client_cancelled = true;
                 // In a real implementation, this would propagate the status
             }
 
             StreamOperation::ServerCancel { status } => {
                 // Simulate server cancellation
+                let _ = status.clone().into_status();
                 state.server_cancelled = true;
                 // In a real implementation, this would propagate the status
             }
@@ -363,7 +370,7 @@ async fn simulate_streaming(
                 should_trigger,
             } => {
                 // Create a new client with the specific timeout
-                let channel = create_test_channel(Some(*timeout)).await?;
+                let channel = create_test_channel(Some(timeout.into_duration())).await?;
                 let mut deadline_client = GrpcClient::new(channel);
 
                 let result = deadline_client
@@ -372,10 +379,10 @@ async fn simulate_streaming(
 
                 if *should_trigger {
                     // Expect deadline exceeded
-                    if let Err(status) = result {
-                        if status.code() == Code::DeadlineExceeded {
-                            state.deadline_exceeded = true;
-                        }
+                    if let Err(status) = result
+                        && status.code() == Code::DeadlineExceeded
+                    {
+                        state.deadline_exceeded = true;
                     }
                 }
             }
@@ -469,7 +476,10 @@ fuzz_target!(|scenario: StreamingScenario| {
     }
 
     // Create runtime for async execution
-    let runtime = asupersync::runtime::Runtime::new_test();
+    let runtime = asupersync::runtime::Runtime::with_config(
+        asupersync::runtime::RuntimeConfig::default(),
+    )
+    .expect("fuzz runtime");
 
     runtime.block_on(async {
         let mut state = StreamState::new();
