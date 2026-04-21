@@ -34,12 +34,35 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::bytes::Bytes;
-use asupersync::web::{extract::Request, multipart::Multipart};
+use asupersync::web::{
+    extract::Request,
+    multipart::{Multipart, MultipartLimits},
+    response::StatusCode,
+    FromRequest,
+};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 /// Maximum generated payload size to prevent timeouts.
 const MAX_FUZZ_PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MiB
+
+/// Fuzzed parser limits so oversized-body enforcement is tested against more than defaults.
+#[derive(Arbitrary, Debug, Clone, Copy)]
+struct MultipartLimitOverrides {
+    max_total_size: u32,
+    max_parts: u16,
+    max_part_headers: u16,
+    max_part_body_size: u32,
+}
+
+impl MultipartLimitOverrides {
+    fn to_runtime_limits(self) -> MultipartLimits {
+        MultipartLimits::new()
+            .max_total_size((self.max_total_size as usize).min(MAX_FUZZ_PAYLOAD_SIZE))
+            .max_parts((self.max_parts as usize).min(64))
+            .max_part_headers((self.max_part_headers as usize).min(64 * 1024))
+            .max_part_body_size((self.max_part_body_size as usize).min(MAX_FUZZ_PAYLOAD_SIZE))
+    }
+}
 
 /// Generates Content-Type header values for multipart/form-data.
 #[derive(Arbitrary, Debug, Clone)]
@@ -60,7 +83,7 @@ impl MultipartContentType {
         let mut result = "multipart/form-data".to_string();
 
         // Add boundary parameter with configurable spacing and quoting
-        let boundary_str = self.boundary.to_string();
+        let boundary_str = self.boundary.render();
         let boundary_value = if self.boundary_quoted {
             format!("\"{}\"", boundary_str.replace('"', r#"\""#))
         } else {
@@ -122,7 +145,7 @@ enum BoundaryValue {
 }
 
 impl BoundaryValue {
-    fn to_string(&self) -> String {
+    fn render(&self) -> String {
         match self {
             Self::Standard(s) => s.clone(),
             Self::Empty => String::new(),
@@ -166,7 +189,7 @@ struct ContentDisposition {
 
 impl ContentDisposition {
     fn to_header_value(&self) -> String {
-        let mut result = self.disposition_type.to_string();
+        let mut result = self.disposition_type.render();
 
         // Add name parameter
         result.push_str(&format!("; name={}", self.name.to_header_format()));
@@ -197,7 +220,7 @@ enum DispositionType {
 }
 
 impl DispositionType {
-    fn to_string(&self) -> String {
+    fn render(&self) -> String {
         match self {
             Self::Standard => "form-data".to_string(),
             Self::Attachment => "attachment".to_string(),
@@ -282,8 +305,17 @@ impl PartBody {
         match self {
             Self::Text(s) => s.as_bytes().to_vec(),
             Self::Binary(bytes) => bytes.clone(),
-            Self::ContainsBoundary(content, _) => {
-                format!("{}\r\n--{}\r\nstill in body\r\n", content, boundary).into_bytes()
+            Self::ContainsBoundary(content, embedded_boundary) => {
+                let embedded_boundary = if embedded_boundary.is_empty() {
+                    boundary
+                } else {
+                    embedded_boundary
+                };
+                format!(
+                    "{}\r\n--{}\r\nstill in body\r\n",
+                    content, embedded_boundary
+                )
+                .into_bytes()
             }
             Self::Oversized(size) => vec![b'A'; *size],
             Self::Nested(nested) => nested.to_bytes(),
@@ -299,7 +331,7 @@ impl PartBody {
 /// Line ending variations for multipart boundaries and headers.
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum LineEnding {
-    CRLF,  // \r\n (standard)
+    Crlf,  // \r\n (standard)
     LF,    // \n (common in Unix)
     CR,    // \r (old Mac)
     Mixed, // Mix of different endings
@@ -308,7 +340,7 @@ enum LineEnding {
 impl LineEnding {
     fn as_bytes(&self) -> &'static [u8] {
         match self {
-            Self::CRLF => b"\r\n",
+            Self::Crlf => b"\r\n",
             Self::LF => b"\n",
             Self::CR => b"\r",
             Self::Mixed => b"\n", // Default for mixed, actual mixing done in generation
@@ -317,10 +349,12 @@ impl LineEnding {
 }
 
 /// Complete multipart payload structure for fuzzing.
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 struct FuzzMultipartPayload {
     /// Content-Type header configuration.
     content_type: MultipartContentType,
+    /// Parser limits injected through request extensions.
+    limits: MultipartLimitOverrides,
     /// The parts in this multipart payload.
     parts: Vec<MultipartPart>,
     /// Optional preamble before first boundary.
@@ -336,10 +370,14 @@ struct FuzzMultipartPayload {
 }
 
 impl FuzzMultipartPayload {
+    fn effective_limits(&self) -> MultipartLimits {
+        self.limits.to_runtime_limits()
+    }
+
     /// Generate the complete multipart body as bytes.
     fn to_bytes(&self) -> Vec<u8> {
         let mut result = Vec::new();
-        let boundary = self.content_type.boundary.to_string();
+        let boundary = self.content_type.boundary.render();
         let line_ending = self.global_line_ending.as_bytes();
 
         // Add preamble if present
@@ -427,6 +465,8 @@ impl FuzzMultipartPayload {
             self.content_type.to_header_value(),
         );
 
+        request.extensions.insert_typed(self.effective_limits());
+
         // Add body
         request.body = Bytes::from(self.to_bytes());
 
@@ -457,10 +497,11 @@ impl MultipartFuzzOracle {
         multipart: Multipart,
     ) -> FuzzResult {
         let mut result = FuzzResult::default();
+        let limits = payload.effective_limits();
 
         // Property 1: Boundary delimiter correctly parsed
-        let boundary_str = payload.content_type.boundary.to_string();
-        if !boundary_str.is_empty() && multipart.len() > 0 {
+        let boundary_str = payload.content_type.boundary.render();
+        if !boundary_str.is_empty() && !multipart.is_empty() {
             result.boundary_parsed_correctly = true;
         }
 
@@ -484,7 +525,7 @@ impl MultipartFuzzOracle {
 
         // Property 5: Oversized parts should be rejected per max_part_size
         // If we get here, either parts were within limits or properly rejected
-        result.size_limits_enforced = true;
+        result.size_limits_enforced = multipart.len() <= limits.max_parts;
 
         result
     }
@@ -600,28 +641,19 @@ impl FuzzResult {
 impl FuzzMultipartPayload {
     /// Check if this payload contains oversized content.
     fn has_oversized_content(&self) -> bool {
+        let limits = self.effective_limits();
+        let boundary = self.content_type.boundary.render();
+
         // Check total payload size
         let body_bytes = self.to_bytes();
-        if body_bytes.len() > 16 * 1024 * 1024 {
-            // DEFAULT_MAX_MULTIPART_SIZE
+        if body_bytes.len() > limits.max_total_size {
             return true;
         }
 
         // Check individual part sizes
         for part in &self.parts {
-            match &part.body {
-                PartBody::Oversized(size) => {
-                    if *size > 8 * 1024 * 1024 {
-                        // DEFAULT_MAX_PART_BODY_SIZE
-                        return true;
-                    }
-                }
-                PartBody::VeryLong(base) => {
-                    if base.len() * 1000 > 8 * 1024 * 1024 {
-                        return true;
-                    }
-                }
-                _ => {}
+            if part.body.to_bytes(&boundary).len() > limits.max_part_body_size {
+                return true;
             }
         }
 
@@ -629,7 +661,83 @@ impl FuzzMultipartPayload {
     }
 }
 
+fn build_regression_request(boundary: &str, body: Bytes, limits: MultipartLimits) -> Request {
+    let mut request = Request::new("POST", "/upload")
+        .with_header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .with_body(body);
+    request.extensions.insert_typed(limits);
+    request
+}
+
+fn regression_total_size_limit() {
+    let boundary = "BOUND";
+    let body = Bytes::from(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"field\"\r\n\r\npayload\r\n--{boundary}--\r\n"
+        )
+        .into_bytes(),
+    );
+    let limits = MultipartLimits::new().max_total_size(body.len().saturating_sub(1));
+    let error = Multipart::from_request(build_regression_request(boundary, body, limits))
+        .expect_err("total-size regression should be rejected");
+
+    assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        error.message.contains("multipart body too large"),
+        "unexpected total-size error: {}",
+        error.message
+    );
+}
+
+fn regression_part_body_limit() {
+    let boundary = "BOUND";
+    let body = Bytes::from(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"field\"\r\n\r\npayload\r\n--{boundary}--\r\n"
+        )
+        .into_bytes(),
+    );
+    let limits = MultipartLimits::new()
+        .max_total_size(body.len() + 16)
+        .max_part_body_size(3);
+    let error = Multipart::from_request(build_regression_request(boundary, body, limits))
+        .expect_err("part-size regression should be rejected");
+
+    assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(error.message, "multipart part body too large");
+}
+
+fn regression_boundary_lookalike_stays_in_body() {
+    let boundary = "BOUND";
+    let body = Bytes::from(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"field\"\r\n\r\nprefix\r\n--{boundary}X\r\nsuffix\r\n--{boundary}--\r\n"
+        )
+        .into_bytes(),
+    );
+    let multipart = Multipart::from_request(build_regression_request(
+        boundary,
+        body,
+        MultipartLimits::new(),
+    ))
+    .expect("lookalike boundary should not split the body");
+
+    assert_eq!(multipart.len(), 1);
+    assert_eq!(
+        multipart.fields()[0].body().as_ref(),
+        b"prefix\r\n--BOUNDX\r\nsuffix"
+    );
+}
+
+fn run_scripted_regressions() {
+    regression_total_size_limit();
+    regression_part_body_limit();
+    regression_boundary_lookalike_stays_in_body();
+}
+
 fuzz_target!(|data: &[u8]| {
+    run_scripted_regressions();
+
     // Skip inputs that are too small to be meaningful
     if data.len() < 10 {
         return;
