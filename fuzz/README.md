@@ -23,6 +23,7 @@ cargo +nightly install cargo-fuzz
 | `length_delimited_decoder_state` | Length-delimited decoder chunking and invalid-header invariants | High |
 | `bytes_slice_split_to` | Immutable Bytes slicing, split_to, and partition invariants | High |
 | `bytes_cursor_reader` | BytesCursor and reader() position, chunk, and copy invariants | High |
+| `gf256_simd_edge_cases` | GF(256) SIMD/scalar parity, fast-path, alignment, and threshold-boundary invariants | High |
 | `grpc_prost_codec_decode` | Direct ProstCodec decode limits, malformed-wire, and unknown-field invariants | High |
 | `grpc_gzip_message_decode` | Gzip-compressed gRPC frame decode, malformed-gzip rejection, bomb guards, and max-message enforcement | High |
 | `grpc_streaming` | Bidirectional gRPC stream interleaving, half-close/cancel propagation, deadline, and backpressure invariants | High |
@@ -80,6 +81,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `corpus/bytes_slice_split_to/` - Immutable Bytes slicing and split partition scenarios
 - `corpus/bytes_cursor_reader/` - BytesCursor reader and cursor-position scenarios
   including empty views, clone-heavy cursor churn, and position-reset cases
+- `corpus/gf256_simd_edge_cases/` - GF(256) fast-path, threshold-boundary, unaligned, and dual-slice parity scenarios
 - `corpus/grpc_prost_codec_decode/` - Direct ProstCodec decode boundary and malformed-wire scenarios
 - `corpus/grpc_gzip_message_decode/` - Gzip-compressed gRPC frame decode, malformed-gzip rejection, and bomb-guard scenarios
 - `corpus/grpc_streaming/` - Bidirectional stream seeds covering interleaving, half-close/cancel, and deadline/backpressure scenarios

@@ -29,6 +29,7 @@ on:
           - length_delimited_frame_boundary
           - bytes_slice_split_to
           - bytes_cursor_reader
+          - gf256_simd_edge_cases
           - grpc_prost_codec_decode
           - grpc_gzip_message_decode
           - grpc_streaming
@@ -74,6 +75,7 @@ jobs:
           - length_delimited_frame_boundary
           - bytes_slice_split_to
           - bytes_cursor_reader
+          - gf256_simd_edge_cases
           - grpc_prost_codec_decode
           - grpc_gzip_message_decode
           - grpc_streaming
