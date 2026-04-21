@@ -33,10 +33,10 @@ use std::task::{Context, Poll};
 #[derive(Arbitrary, Debug)]
 enum TransportFuzzInput {
     /// Raw EndpointId parsing and validation
-    EndpointIdTest(u64),
+    EndpointId(u64),
 
     /// Load balancer strategy testing
-    LoadBalancerTest {
+    LoadBalancer {
         strategy: LoadBalancerStrategy,
         endpoints: Vec<EndpointConfig>,
         object_id: Option<ObjectIdWrapper>,
@@ -44,14 +44,14 @@ enum TransportFuzzInput {
     },
 
     /// Routing table TTL and expiry testing
-    RoutingTableTest {
+    RoutingTable {
         routes: Vec<RouteConfig>,
         current_time_offset_nanos: u64, // Offset from creation time for TTL testing
         prune_expired: bool,
     },
 
     /// Symbol dispatcher strategy testing
-    DispatchTest {
+    Dispatch {
         strategy: DispatchStrategyWrapper,
         endpoints: Vec<EndpointConfig>,
         symbol_config: SymbolConfig,
@@ -59,14 +59,14 @@ enum TransportFuzzInput {
     },
 
     /// Default route fallback testing
-    FallbackRoutingTest {
+    FallbackRouting {
         symbol_config: SymbolConfig,
         has_default_route: bool,
         specific_routes: Vec<RouteConfig>,
     },
 
     /// Comprehensive edge case scenarios
-    EdgeCaseTest(EdgeCaseScenario),
+    EdgeCase(EdgeCaseScenario),
 }
 
 #[derive(Arbitrary, Debug)]
@@ -107,11 +107,11 @@ impl From<DispatchStrategyWrapper> for DispatchStrategy {
         match strategy {
             DispatchStrategyWrapper::Unicast => Self::Unicast,
             DispatchStrategyWrapper::Multicast { count } => Self::Multicast {
-                count: (count as usize).max(1).min(10),
+                count: usize::from(count).clamp(1, 10),
             },
             DispatchStrategyWrapper::Broadcast => Self::Broadcast,
             DispatchStrategyWrapper::QuorumCast { required } => Self::QuorumCast {
-                required: (required as usize).max(1).min(10),
+                required: usize::from(required).clamp(1, 10),
             },
         }
     }
@@ -315,11 +315,11 @@ fuzz_target!(|data: &[u8]| {
 
 fn fuzz_transport_router(input: TransportFuzzInput) {
     match input {
-        TransportFuzzInput::EndpointIdTest(id) => {
+        TransportFuzzInput::EndpointId(id) => {
             fuzz_endpoint_id_parsing(id);
         }
 
-        TransportFuzzInput::LoadBalancerTest {
+        TransportFuzzInput::LoadBalancer {
             strategy,
             endpoints,
             object_id,
@@ -328,7 +328,7 @@ fn fuzz_transport_router(input: TransportFuzzInput) {
             fuzz_load_balancer_strategies(strategy, endpoints, object_id, multi_select_count);
         }
 
-        TransportFuzzInput::RoutingTableTest {
+        TransportFuzzInput::RoutingTable {
             routes,
             current_time_offset_nanos,
             prune_expired,
@@ -336,7 +336,7 @@ fn fuzz_transport_router(input: TransportFuzzInput) {
             fuzz_routing_table_ttl(routes, current_time_offset_nanos, prune_expired);
         }
 
-        TransportFuzzInput::DispatchTest {
+        TransportFuzzInput::Dispatch {
             strategy,
             endpoints,
             symbol_config,
@@ -345,7 +345,7 @@ fn fuzz_transport_router(input: TransportFuzzInput) {
             fuzz_symbol_dispatcher(strategy, endpoints, symbol_config, fail_endpoints);
         }
 
-        TransportFuzzInput::FallbackRoutingTest {
+        TransportFuzzInput::FallbackRouting {
             symbol_config,
             has_default_route,
             specific_routes,
@@ -353,7 +353,7 @@ fn fuzz_transport_router(input: TransportFuzzInput) {
             fuzz_fallback_routing(symbol_config, has_default_route, specific_routes);
         }
 
-        TransportFuzzInput::EdgeCaseTest(edge) => {
+        TransportFuzzInput::EdgeCase(edge) => {
             fuzz_edge_cases(edge);
         }
     }
@@ -414,8 +414,7 @@ fn fuzz_load_balancer_strategies(
     // Create endpoints from configs
     let endpoints: Vec<Arc<Endpoint>> = endpoint_configs
         .into_iter()
-        .enumerate()
-        .map(|(i, config)| {
+        .map(|config| {
             let mut endpoint = Endpoint::new(
                 EndpointId::new(config.id),
                 format!("node-{}:8080", config.address_suffix),
@@ -461,7 +460,7 @@ fn fuzz_load_balancer_strategies(
 
     // Test multiple selection if requested
     if let Some(count) = multi_select_count {
-        let count = (count as usize).max(1).min(10);
+        let count = usize::from(count).clamp(1, 10);
         let selected_multi = lb.select_n(&endpoints, count, object_id);
 
         // ASSERTION: Should not select more than requested or available
@@ -1084,6 +1083,68 @@ fn fuzz_edge_cases(edge_case: EdgeCaseScenario) {
             assert_eq!(
                 is_expired, expected_expired,
                 "TTL boundary check should be accurate"
+            );
+        }
+
+        EdgeCaseScenario::ConcurrentDispatchLimit(limit) => {
+            let requested = usize::from(limit).clamp(1, 10);
+            let lb =
+                LoadBalancer::new(asupersync::transport::router::LoadBalanceStrategy::RoundRobin);
+            let endpoints: Vec<Arc<Endpoint>> = (0..3)
+                .map(|i| {
+                    Arc::new(Endpoint::new(
+                        EndpointId::new(i),
+                        format!("concurrent-{}:8080", i),
+                    ))
+                })
+                .collect();
+
+            let selected = lb.select_n(&endpoints, requested, None);
+            assert!(
+                selected.len() <= requested,
+                "select_n should honor the requested concurrent dispatch limit"
+            );
+            assert!(
+                selected.len() <= endpoints.len(),
+                "select_n should not exceed the available endpoint count"
+            );
+        }
+
+        EdgeCaseScenario::MissingRouteKeys(object_id) => {
+            let router = SymbolRouter::new(Arc::new(RoutingTable::new()));
+            let object_id: ObjectId = object_id.into();
+            let symbol = Symbol::new(SymbolId::new(object_id, 0, 0), vec![0u8], SymbolKind::Source);
+
+            assert!(
+                matches!(
+                    router.route(&symbol),
+                    Err(asupersync::transport::router::RoutingError::NoRoute { .. })
+                ),
+                "Routing without matching keys or a default route should report NoRoute"
+            );
+        }
+
+        EdgeCaseScenario::ConnectionGuardStress(guard_count) => {
+            let endpoint = Endpoint::new(EndpointId::new(77), "guard-stress:8080");
+            let guard_count = usize::from(guard_count).clamp(1, 100);
+            let mut guards = Vec::with_capacity(guard_count);
+
+            for _ in 0..guard_count {
+                guards.push(endpoint.acquire_connection_guard());
+            }
+
+            assert_eq!(
+                endpoint.connection_count(),
+                guard_count as u32,
+                "Each active guard should increment the endpoint connection count"
+            );
+
+            drop(guards);
+
+            assert_eq!(
+                endpoint.connection_count(),
+                0,
+                "Dropping all guards should fully release the endpoint connection count"
             );
         }
 
