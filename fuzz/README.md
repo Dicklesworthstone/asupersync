@@ -29,6 +29,7 @@ cargo +nightly install cargo-fuzz
 | `grpc_streaming` | Bidirectional gRPC stream interleaving, half-close/cancel propagation, deadline, and backpressure invariants | High |
 | `kafka_protocol` | Kafka request-header ApiKey/ApiVersion, correlation echo, tagged-field varint, and size-bound invariants | High |
 | `key_derivation_context` | AuthKey seed/raw/RNG derivation, chained purpose isolation, and mutated-tag/symbol verification invariants | High |
+| `quic_stream_flow` | QUIC stream flow-control window updates, RESET_STREAM/STOP_SENDING, and credit-accounting invariants | High |
 | `symbol_auth` | AuthenticatedSymbol MAC verification, forged-tag rejection, replay-window, and field-tampering invariants | High |
 | `postgres_scram` | PostgreSQL SCRAM-SHA-256 server-first/server-final parsing, iteration-bound enforcement, and malformed-signature rejection | High |
 | `raptorq_decoder_gauss_matrix` | RaptorQ decoder Gaussian-elimination rank-deficient, malformed-equation, and corrupt-RHS invariants | High |
@@ -89,6 +90,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `corpus/grpc_streaming/` - Bidirectional stream seeds covering interleaving, half-close/cancel, and deadline/backpressure scenarios
 - `corpus/kafka_protocol/` - Kafka request-header scenarios covering ApiKey/version mismatches, tagged-field varints, correlation echo, and oversized frames
 - `corpus/key_derivation_context/` - AuthKey seed/raw/RNG derivation, chained purpose isolation, and mutated-tag/symbol scenarios
+- `corpus/quic_stream_flow/` - QUIC flow-control, reset, stop-sending, window-regression, and credit-exhaustion scenarios
 - `corpus/symbol_auth/` - AuthenticatedSymbol forged-tag, wrong-key, replay-window, and payload/context-tampering scenarios
 - `corpus/postgres_scram/` - SCRAM server-first/server-final seeds covering valid nonces, low-iteration rejects, and malformed signatures
 - `corpus/raptorq_decoder_gauss_matrix/` - Rank-deficient duplicate-source/repair systems plus malformed-equation and corrupt-RHS decoder scenarios

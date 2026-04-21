@@ -35,6 +35,7 @@ on:
           - grpc_streaming
           - kafka_protocol
           - key_derivation_context
+          - quic_stream_flow
           - symbol_auth
           - postgres_scram
           - raptorq_decoder_gauss_matrix
@@ -83,6 +84,7 @@ jobs:
           - grpc_streaming
           - kafka_protocol
           - key_derivation_context
+          - quic_stream_flow
           - symbol_auth
           - postgres_scram
           - raptorq_decoder_gauss_matrix
