@@ -3173,6 +3173,10 @@ mod tests {
             "2026-04-21T08:30:00Z",
             4101,
         ));
+        assert_eq!(
+            passing.get("status").and_then(Value::as_str),
+            Some("passing")
+        );
 
         let mut degraded_state = RuntimeState::new();
         let degraded_root = degraded_state.create_root_region(Budget::INFINITE);
@@ -3197,6 +3201,10 @@ mod tests {
             "2026-04-21T08:30:01Z",
             4102,
         ));
+        assert_eq!(
+            degraded.get("status").and_then(Value::as_str),
+            Some("degraded")
+        );
 
         let mut critical_state = RuntimeState::new();
         let critical_root = critical_state.create_root_region(Budget::INFINITE);
@@ -3232,6 +3240,10 @@ mod tests {
             "2026-04-21T08:30:02Z",
             4103,
         ));
+        assert_eq!(
+            critical.get("status").and_then(Value::as_str),
+            Some("critical")
+        );
 
         assert_diagnostic_healthcheck_snapshot(
             "observability_diagnostics_healthcheck_json",
