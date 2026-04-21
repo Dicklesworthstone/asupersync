@@ -851,6 +851,7 @@ mod tests {
     use super::*;
     use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
     use crate::raptorq::systematic::SystematicEncoder;
+    use serde_json::json;
 
     fn make_test_config() -> DecodeConfig {
         DecodeConfig {
@@ -867,6 +868,224 @@ mod tests {
 
     fn make_test_recovered(config: &DecodeConfig) -> Vec<Vec<u8>> {
         vec![vec![0u8; config.symbol_size]; config.k]
+    }
+
+    fn scrub_failure_reason_for_snapshot_test(reason: &FailureReason) -> serde_json::Value {
+        match reason {
+            FailureReason::InsufficientSymbols { received, required } => json!({
+                "kind": "InsufficientSymbols",
+                "received": received,
+                "required": required,
+            }),
+            FailureReason::SingularMatrix {
+                row,
+                attempted_cols,
+            } => json!({
+                "kind": "SingularMatrix",
+                "row": row,
+                "attempted_cols": attempted_cols,
+            }),
+            FailureReason::SymbolSizeMismatch { expected, actual } => json!({
+                "kind": "SymbolSizeMismatch",
+                "expected": expected,
+                "actual": actual,
+            }),
+            FailureReason::SymbolEquationArityMismatch {
+                esi,
+                columns,
+                coefficients,
+            } => json!({
+                "kind": "SymbolEquationArityMismatch",
+                "esi": esi,
+                "columns": columns,
+                "coefficients": coefficients,
+            }),
+            FailureReason::ColumnIndexOutOfRange {
+                esi,
+                column,
+                max_valid,
+            } => json!({
+                "kind": "ColumnIndexOutOfRange",
+                "esi": esi,
+                "column": column,
+                "max_valid": max_valid,
+            }),
+            FailureReason::SourceEsiOutOfRange { esi, max_valid } => json!({
+                "kind": "SourceEsiOutOfRange",
+                "esi": esi,
+                "max_valid": max_valid,
+            }),
+            FailureReason::InvalidSourceSymbolEquation {
+                esi,
+                expected_column,
+            } => json!({
+                "kind": "InvalidSourceSymbolEquation",
+                "esi": esi,
+                "expected_column": expected_column,
+            }),
+            FailureReason::CorruptDecodedOutput {
+                esi,
+                byte_index,
+                expected,
+                actual,
+            } => json!({
+                "kind": "CorruptDecodedOutput",
+                "esi": esi,
+                "byte_index": byte_index,
+                "expected": expected,
+                "actual": actual,
+            }),
+        }
+    }
+
+    fn scrub_decode_proof_for_snapshot_test(proof: &DecodeProof) -> serde_json::Value {
+        json!({
+            "version": proof.version,
+            "content_hash": proof.content_hash(),
+            "config": {
+                "object_id": "[object_id]",
+                "sbn": proof.config.sbn,
+                "k": proof.config.k,
+                "s": proof.config.s,
+                "h": proof.config.h,
+                "l": proof.config.l,
+                "symbol_size": proof.config.symbol_size,
+                "seed": "[seed]",
+            },
+            "received": {
+                "total": proof.received.total,
+                "source_count": proof.received.source_count,
+                "repair_count": proof.received.repair_count,
+                "esi_multiset_hash": proof.received.esi_multiset_hash,
+                "esis": proof.received.esis,
+                "truncated": proof.received.truncated,
+            },
+            "peeling": {
+                "solved": proof.peeling.solved,
+                "solved_indices": proof.peeling.solved_indices,
+                "truncated": proof.peeling.truncated,
+            },
+            "elimination": {
+                "strategy": format!("{:?}", proof.elimination.strategy),
+                "inactivated": proof.elimination.inactivated,
+                "inactive_cols": proof.elimination.inactive_cols,
+                "inactive_cols_truncated": proof.elimination.inactive_cols_truncated,
+                "pivots": proof.elimination.pivots,
+                "pivot_events": proof
+                    .elimination
+                    .pivot_events
+                    .iter()
+                    .map(|event| json!({"col": event.col, "row": event.row}))
+                    .collect::<Vec<_>>(),
+                "pivot_events_truncated": proof.elimination.pivot_events_truncated,
+                "row_ops": proof.elimination.row_ops,
+                "strategy_transitions": proof
+                    .elimination
+                    .strategy_transitions
+                    .iter()
+                    .map(|transition| {
+                        json!({
+                            "from": format!("{:?}", transition.from),
+                            "to": format!("{:?}", transition.to),
+                            "reason": transition.reason,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                "strategy_transitions_truncated": proof.elimination.strategy_transitions_truncated,
+            },
+            "outcome": match &proof.outcome {
+                ProofOutcome::Success {
+                    symbols_recovered,
+                    source_payload_hash,
+                } => json!({
+                    "kind": "Success",
+                    "symbols_recovered": symbols_recovered,
+                    "source_payload_hash": source_payload_hash,
+                }),
+                ProofOutcome::Failure { reason } => json!({
+                    "kind": "Failure",
+                    "reason": scrub_failure_reason_for_snapshot_test(reason),
+                }),
+            },
+        })
+    }
+
+    fn make_success_proof_for_snapshot_test() -> DecodeProof {
+        let config = make_test_config();
+        let recovered = make_test_recovered(&config);
+        let mut builder = DecodeProof::builder(config);
+
+        builder.set_received(ReceivedSummary::from_received(
+            (0..15).map(|esi| (esi, esi < 10)),
+        ));
+        builder.peeling_mut().record_solved(0);
+        builder.peeling_mut().record_solved(4);
+        builder.peeling_mut().record_solved(7);
+
+        let elimination = builder.elimination_mut();
+        elimination.set_strategy(InactivationStrategy::AllAtOnce);
+        elimination.record_strategy_transition(
+            InactivationStrategy::AllAtOnce,
+            InactivationStrategy::HighSupportFirst,
+            "dense_repair_mix",
+        );
+        elimination.record_inactivation(11);
+        elimination.record_pivot(11, 2);
+        elimination.record_row_op();
+        elimination.record_pivot(13, 5);
+        elimination.record_row_op();
+
+        builder.set_success(&recovered);
+        builder.build()
+    }
+
+    fn make_degraded_singular_proof_for_snapshot_test() -> DecodeProof {
+        let mut config = make_test_config();
+        config.seed = 1337;
+        let mut builder = DecodeProof::builder(config);
+
+        builder.set_received(ReceivedSummary::from_received(
+            [(0, true), (1, true), (3, true), (10, false), (11, false)].into_iter(),
+        ));
+        builder.peeling_mut().record_solved(0);
+
+        let elimination = builder.elimination_mut();
+        elimination.set_strategy(InactivationStrategy::HighSupportFirst);
+        elimination.record_inactivation(8);
+        elimination.record_inactivation(9);
+        elimination.record_pivot(8, 1);
+        elimination.record_row_op();
+        elimination.record_strategy_transition(
+            InactivationStrategy::HighSupportFirst,
+            InactivationStrategy::BlockSchurLowRank,
+            "rank_drop_detected",
+        );
+
+        builder.set_failure(FailureReason::SingularMatrix {
+            row: 6,
+            attempted_cols: vec![8, 9, 12],
+        });
+        builder.build()
+    }
+
+    fn make_degraded_insufficient_proof_for_snapshot_test() -> DecodeProof {
+        let mut config = make_test_config();
+        config.seed = 7;
+        let required = config.l;
+        let mut builder = DecodeProof::builder(config);
+
+        builder.set_received(ReceivedSummary::from_received(
+            (0..6).map(|esi| (esi, true)),
+        ));
+        builder.peeling_mut().record_solved(1);
+        builder.peeling_mut().record_solved(2);
+        builder.elimination_mut().set_strategy(InactivationStrategy::AllAtOnce);
+
+        builder.set_failure(FailureReason::InsufficientSymbols {
+            received: 6,
+            required,
+        });
+        builder.build()
     }
 
     #[test]
@@ -928,6 +1147,22 @@ mod tests {
                 reason: FailureReason::InsufficientSymbols { .. }
             }
         ));
+    }
+
+    #[test]
+    fn decode_proof_certificate_scrubbed() {
+        let success = make_success_proof_for_snapshot_test();
+        let degraded_singular = make_degraded_singular_proof_for_snapshot_test();
+        let degraded_insufficient = make_degraded_insufficient_proof_for_snapshot_test();
+
+        insta::assert_json_snapshot!(
+            "decode_proof_certificate_scrubbed",
+            json!({
+                "success": scrub_decode_proof_for_snapshot_test(&success),
+                "degraded_singular": scrub_decode_proof_for_snapshot_test(&degraded_singular),
+                "degraded_insufficient": scrub_decode_proof_for_snapshot_test(&degraded_insufficient),
+            })
+        );
     }
 
     #[test]
