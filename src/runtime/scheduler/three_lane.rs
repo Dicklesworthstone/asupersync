@@ -7415,6 +7415,83 @@ mod tests {
         assert!(cert_a.invariant_holds());
     }
 
+    fn replay_adaptive_cancel_flood_trace(seed: u64) -> Vec<TaskId> {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
+        scheduler.set_adaptive_cancel_streak(true, 1);
+
+        let timed_task = TaskId::new_for_test(77, 1);
+        let ready_task = TaskId::new_for_test(77, 2);
+        for i in 0..24u32 {
+            scheduler.inject_cancel(TaskId::new_for_test(77, 100 + i), 100);
+        }
+        scheduler.inject_timed(timed_task, Time::ZERO);
+        scheduler.inject_ready(ready_task, 50);
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().expect("worker");
+        worker.rng = crate::util::DetRng::new(seed);
+        let adaptive_limit = {
+            let policy = worker
+                .adaptive_cancel_policy
+                .as_mut()
+                .expect("adaptive policy enabled");
+            policy.selected_arm = 0; // 4 consecutive cancel dispatches before yielding.
+            policy.current_limit()
+        };
+        worker.preemption_metrics.adaptive_current_limit = adaptive_limit;
+
+        let mut trace = Vec::new();
+        for _ in 0..12 {
+            let Some(task) = worker.next_task() else {
+                break;
+            };
+            trace.push(task);
+            if trace.contains(&timed_task) && trace.contains(&ready_task) {
+                break;
+            }
+        }
+
+        let timed_index = trace
+            .iter()
+            .position(|task| *task == timed_task)
+            .expect("timed lane should make progress under cancel flood");
+        let ready_index = trace
+            .iter()
+            .position(|task| *task == ready_task)
+            .expect("ready lane should make progress under cancel flood");
+        assert!(
+            timed_index < ready_index,
+            "timed lane should preempt ready once fairness yields under cancel flood: {trace:?}"
+        );
+        assert!(
+            ready_index + 1 <= adaptive_limit * 2 + 2,
+            "ready lane should progress within a bounded number of dispatches under cancel flood: {trace:?}"
+        );
+        assert!(
+            worker.preemption_fairness_certificate().invariant_holds(),
+            "adaptive cancel flood should preserve fairness certificate invariants"
+        );
+        trace
+    }
+
+    #[test]
+    fn metamorphic_adaptive_cancel_flood_progresses_lower_lanes_deterministically() {
+        let seed = 0xC0DE_CAFE_BEEF_0603;
+        let trace_a = replay_adaptive_cancel_flood_trace(seed);
+        let trace_b = replay_adaptive_cancel_flood_trace(seed);
+
+        assert_eq!(
+            trace_a, trace_b,
+            "same-seed adaptive cancel flood should replay the same dispatch trace"
+        );
+        assert!(
+            trace_a.contains(&TaskId::new_for_test(77, 1))
+                && trace_a.contains(&TaskId::new_for_test(77, 2)),
+            "same-seed trace should include both lower-priority lanes: {trace_a:?}"
+        );
+    }
+
     #[test]
     fn test_local_queue_fast_path() {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
