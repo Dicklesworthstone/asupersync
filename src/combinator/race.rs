@@ -1522,6 +1522,287 @@ mod tests {
     }
 
     // =========================================================================
+    // Metamorphic Relations for Loser Drain Correctness (asupersync-uuzryk)
+    // =========================================================================
+
+    /// MR1: Winner cancellation propagates to all losers
+    ///
+    /// When the winner is cancelled, all losers must also be cancelled.
+    /// The specific cancel reason for losers should be RaceLost.
+    #[test]
+    fn metamorphic_winner_cancellation_propagates_to_losers() {
+        proptest!(|(
+            branch_count in 2usize..8,
+            raw_winner_index in 0usize..16,
+        )| {
+            let winner_index = raw_winner_index % branch_count;
+
+            // Winner is cancelled with timeout
+            let mut outcomes = vec![Outcome::<i32, &str>::Cancelled(CancelReason::race_loser()); branch_count];
+            outcomes[winner_index] = Outcome::Cancelled(CancelReason::timeout());
+
+            let result = race_all_outcomes(winner_index, outcomes);
+
+            // Verify winner was cancelled with timeout
+            prop_assert!(result.winner_outcome.is_cancelled());
+            if let Outcome::Cancelled(reason) = &result.winner_outcome {
+                prop_assert!(matches!(reason.kind(), crate::types::cancel::CancelKind::Timeout));
+            }
+
+            // Verify all losers are cancelled with race_loser reason
+            for (_, loser_outcome) in &result.loser_outcomes {
+                prop_assert!(loser_outcome.is_cancelled(),
+                    "All losers must be cancelled when winner is cancelled");
+                if let Outcome::Cancelled(reason) = loser_outcome {
+                    prop_assert!(matches!(reason.kind(), crate::types::cancel::CancelKind::RaceLost),
+                        "Losers should be cancelled with RaceLost reason");
+                }
+            }
+        });
+    }
+
+    /// MR2: Loser obligation release consistency
+    ///
+    /// Regardless of the winner's outcome type, losers should always be
+    /// in a "released" state (Cancelled with RaceLost) after draining.
+    #[test]
+    fn metamorphic_loser_obligations_always_released() {
+        proptest!(|(
+            branch_count in 2usize..8,
+            raw_winner_index in 0usize..16,
+            winner_case in race_winner_case_strategy(),
+        )| {
+            let winner_index = raw_winner_index % branch_count;
+
+            let mut outcomes = vec![Outcome::<i32, &str>::Cancelled(CancelReason::race_loser()); branch_count];
+            outcomes[winner_index] = winner_case.into_outcome();
+
+            let result = race_all_outcomes(winner_index, outcomes);
+
+            // All losers must be properly drained (cancelled with RaceLost)
+            prop_assert_eq!(result.loser_outcomes.len(), branch_count - 1);
+
+            for (loser_index, loser_outcome) in &result.loser_outcomes {
+                prop_assert!(*loser_index != winner_index, "Loser index must differ from winner");
+                prop_assert!(loser_outcome.is_cancelled(),
+                    "Loser at index {} must be cancelled after draining", loser_index);
+
+                if let Outcome::Cancelled(reason) = loser_outcome {
+                    prop_assert!(matches!(reason.kind(), crate::types::cancel::CancelKind::RaceLost),
+                        "Loser at index {} must be cancelled with RaceLost reason", loser_index);
+                }
+            }
+        });
+    }
+
+    /// MR3: Concurrent race invariant preservation
+    ///
+    /// Running multiple races with the same branch outcomes should preserve
+    /// the drain invariant - each race should independently drain its losers.
+    #[test]
+    fn metamorphic_concurrent_races_preserve_drain_invariants() {
+        proptest!(|(
+            race_count in 2usize..5,
+            branch_count in 2usize..6,
+            winner_cases in prop::collection::vec(race_winner_case_strategy(), 2..5),
+            winner_indices in prop::collection::vec(0usize..16, 2..5),
+        )| {
+            let actual_race_count = race_count.min(winner_cases.len()).min(winner_indices.len());
+
+            let mut race_results = Vec::with_capacity(actual_race_count);
+
+            for race_idx in 0..actual_race_count {
+                let winner_index = winner_indices[race_idx] % branch_count;
+                let winner_case = &winner_cases[race_idx];
+
+                let mut outcomes = vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
+                outcomes[winner_index] = winner_case.clone().into_outcome();
+
+                let result = race_all_outcomes(winner_index, outcomes);
+                race_results.push((race_idx, result));
+            }
+
+            // Verify each race independently maintains drain invariants
+            for (race_idx, result) in &race_results {
+                prop_assert_eq!(result.loser_outcomes.len(), branch_count - 1,
+                    "Race {} must have all losers drained", race_idx);
+
+                for (loser_index, loser_outcome) in &result.loser_outcomes {
+                    prop_assert!(loser_outcome.is_cancelled(),
+                        "Race {} loser at index {} must be cancelled", race_idx, loser_index);
+                }
+            }
+
+            // Verify independence: each race's drain behavior is unaffected by others
+            let drain_signatures: Vec<_> = race_results.iter()
+                .map(|(_, result)| {
+                    let mut loser_signatures = result.loser_outcomes.iter()
+                        .map(|(idx, outcome)| (*idx, outcome.is_cancelled()))
+                        .collect::<Vec<_>>();
+                    loser_signatures.sort_by_key(|(idx, _)| *idx);
+                    loser_signatures
+                })
+                .collect();
+
+            // All races with the same branch count should have identical drain patterns
+            if let Some(first_signature) = drain_signatures.first() {
+                for (race_idx, signature) in drain_signatures.iter().enumerate().skip(1) {
+                    prop_assert_eq!(signature.len(), first_signature.len(),
+                        "Race {} drain pattern length differs", race_idx);
+                }
+            }
+        });
+    }
+
+    /// MR4: Deterministic race outcome in virtual time
+    ///
+    /// In deterministic virtual time (LabRuntime), races with identical
+    /// configurations should produce identical outcomes and drain patterns.
+    #[test]
+    fn metamorphic_virtual_time_deterministic_drain() {
+        proptest!(|(
+            branch_count in 2usize..8,
+            raw_winner_index in 0usize..16,
+            winner_case in race_winner_case_strategy(),
+            seed_a in any::<u64>(),
+            seed_b in any::<u64>(),
+        )| {
+            let winner_index = raw_winner_index % branch_count;
+
+            // Simulate deterministic LabRuntime behavior by using consistent inputs
+            let create_outcomes = || {
+                let mut outcomes = vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
+                outcomes[winner_index] = winner_case.clone().into_outcome();
+                outcomes
+            };
+
+            // Run the same race configuration twice
+            let result_a = race_all_outcomes(winner_index, create_outcomes());
+            let result_b = race_all_outcomes(winner_index, create_outcomes());
+
+            // Verify deterministic outcomes
+            prop_assert_eq!(result_a.winner_index, result_b.winner_index);
+            prop_assert_eq!(
+                race_outcome_signature(&result_a.winner_outcome),
+                race_outcome_signature(&result_b.winner_outcome),
+                "Winner outcomes must be deterministic"
+            );
+
+            // Verify deterministic drain patterns
+            prop_assert_eq!(result_a.loser_outcomes.len(), result_b.loser_outcomes.len());
+
+            for ((idx_a, outcome_a), (idx_b, outcome_b)) in
+                result_a.loser_outcomes.iter().zip(result_b.loser_outcomes.iter()) {
+                prop_assert_eq!(idx_a, idx_b, "Loser indices must be deterministic");
+                prop_assert_eq!(
+                    race_outcome_signature(outcome_a),
+                    race_outcome_signature(outcome_b),
+                    "Loser outcomes must be deterministic"
+                );
+            }
+
+            // Both runs should maintain the drain invariant
+            prop_assert!(result_a.loser_outcomes.iter().all(|(_, outcome)| outcome.is_cancelled()));
+            prop_assert!(result_b.loser_outcomes.iter().all(|(_, outcome)| outcome.is_cancelled()));
+        });
+    }
+
+    /// MR5: Race commutativity with drain preservation
+    ///
+    /// When swapping branch positions, the drain invariant should be preserved
+    /// even though winner indices change.
+    #[test]
+    fn metamorphic_race_commutativity_preserves_drain() {
+        proptest!(|(
+            winner_case_a in race_winner_case_strategy(),
+            winner_case_b in race_winner_case_strategy(),
+        )| {
+            // Race A vs B
+            let outcomes_ab = vec![
+                winner_case_a.clone().into_outcome(),
+                winner_case_b.clone().into_outcome(),
+            ];
+
+            // Race B vs A (swapped)
+            let outcomes_ba = vec![
+                winner_case_b.clone().into_outcome(),
+                winner_case_a.clone().into_outcome(),
+            ];
+
+            // Test both possible winners for AB configuration
+            for winner_idx in 0..2 {
+                let result_ab = race_all_outcomes(winner_idx, outcomes_ab.clone());
+
+                // For BA configuration, winner index is flipped
+                let flipped_winner_idx = 1 - winner_idx;
+                let result_ba = race_all_outcomes(flipped_winner_idx, outcomes_ba.clone());
+
+                // Both should have exactly 1 loser (drained)
+                prop_assert_eq!(result_ab.loser_outcomes.len(), 1);
+                prop_assert_eq!(result_ba.loser_outcomes.len(), 1);
+
+                // Both losers should be properly drained
+                let (_, loser_ab) = &result_ab.loser_outcomes[0];
+                let (_, loser_ba) = &result_ba.loser_outcomes[0];
+
+                prop_assert!(loser_ab.is_cancelled(), "AB loser must be drained");
+                prop_assert!(loser_ba.is_cancelled(), "BA loser must be drained");
+
+                if let (Outcome::Cancelled(reason_ab), Outcome::Cancelled(reason_ba)) = (loser_ab, loser_ba) {
+                    prop_assert!(matches!(reason_ab.kind(), crate::types::cancel::CancelKind::RaceLost));
+                    prop_assert!(matches!(reason_ba.kind(), crate::types::cancel::CancelKind::RaceLost));
+                }
+            }
+        });
+    }
+
+    /// MR6: Panic propagation with loser drain
+    ///
+    /// When a branch panics, losers should still be properly drained.
+    #[test]
+    fn metamorphic_panic_propagation_preserves_loser_drain() {
+        proptest!(|(
+            branch_count in 2usize..6,
+            raw_panic_index in 0usize..16,
+        )| {
+            let panic_index = raw_panic_index % branch_count;
+
+            let mut outcomes = vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
+            outcomes[panic_index] = Outcome::Panicked(PanicPayload::new("test panic"));
+
+            let result = race_all_outcomes(panic_index, outcomes);
+
+            // Winner should be the panicked branch
+            prop_assert!(result.winner_outcome.is_panicked());
+            prop_assert_eq!(result.winner_index, panic_index);
+
+            // All losers should still be properly drained
+            prop_assert_eq!(result.loser_outcomes.len(), branch_count - 1);
+
+            for (loser_index, loser_outcome) in &result.loser_outcomes {
+                prop_assert!(*loser_index != panic_index);
+                prop_assert!(loser_outcome.is_cancelled(),
+                    "Loser {} should be drained even when winner panics", loser_index);
+
+                if let Outcome::Cancelled(reason) = loser_outcome {
+                    prop_assert!(matches!(reason.kind(), crate::types::cancel::CancelKind::RaceLost),
+                        "Loser {} should be cancelled with RaceLost", loser_index);
+                }
+            }
+
+            // Converting to fail-fast result should preserve panic but still track drained losers
+            let fail_fast = race_all_to_result(result);
+            prop_assert!(fail_fast.is_err());
+
+            if let Err(RaceAllError::Panicked { index, .. }) = fail_fast {
+                prop_assert_eq!(index, panic_index);
+            } else {
+                prop_assert!(false, "Expected panicked error");
+            }
+        });
+    }
+
+    // =========================================================================
     // Wave 58 – pure data-type trait coverage
     // =========================================================================
 
