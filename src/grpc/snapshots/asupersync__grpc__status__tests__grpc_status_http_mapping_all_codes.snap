@@ -1,0 +1,176 @@
+---
+source: src/grpc/status.rs
+expression: scrub_status_mapping_snapshot(status_http_mapping_snapshot())
+---
+[
+  {
+    "grpc_code": "OK",
+    "grpc_status": 0,
+    "http_status": 200,
+    "wire": {
+      "grpc-message": "OK",
+      "grpc-status": "0",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "CANCELLED",
+    "grpc_status": 1,
+    "http_status": 499,
+    "wire": {
+      "grpc-message": "CANCELLED",
+      "grpc-status": "1",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "UNKNOWN",
+    "grpc_status": 2,
+    "http_status": 500,
+    "wire": {
+      "grpc-message": "UNKNOWN",
+      "grpc-status": "2",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "INVALID_ARGUMENT",
+    "grpc_status": 3,
+    "http_status": 400,
+    "wire": {
+      "grpc-message": "INVALID_ARGUMENT",
+      "grpc-status": "3",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "DEADLINE_EXCEEDED",
+    "grpc_status": 4,
+    "http_status": 504,
+    "wire": {
+      "grpc-message": "DEADLINE_EXCEEDED",
+      "grpc-status": "4",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "NOT_FOUND",
+    "grpc_status": 5,
+    "http_status": 404,
+    "wire": {
+      "grpc-message": "NOT_FOUND",
+      "grpc-status": "5",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "ALREADY_EXISTS",
+    "grpc_status": 6,
+    "http_status": 409,
+    "wire": {
+      "grpc-message": "ALREADY_EXISTS",
+      "grpc-status": "6",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "PERMISSION_DENIED",
+    "grpc_status": 7,
+    "http_status": 403,
+    "wire": {
+      "grpc-message": "PERMISSION_DENIED",
+      "grpc-status": "7",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "RESOURCE_EXHAUSTED",
+    "grpc_status": 8,
+    "http_status": 429,
+    "wire": {
+      "grpc-message": "RESOURCE_EXHAUSTED",
+      "grpc-status": "8",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "FAILED_PRECONDITION",
+    "grpc_status": 9,
+    "http_status": 400,
+    "wire": {
+      "grpc-message": "FAILED_PRECONDITION",
+      "grpc-status": "9",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "ABORTED",
+    "grpc_status": 10,
+    "http_status": 409,
+    "wire": {
+      "grpc-message": "ABORTED",
+      "grpc-status": "10",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "OUT_OF_RANGE",
+    "grpc_status": 11,
+    "http_status": 400,
+    "wire": {
+      "grpc-message": "OUT_OF_RANGE",
+      "grpc-status": "11",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "UNIMPLEMENTED",
+    "grpc_status": 12,
+    "http_status": 501,
+    "wire": {
+      "grpc-message": "UNIMPLEMENTED",
+      "grpc-status": "12",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "INTERNAL",
+    "grpc_status": 13,
+    "http_status": 500,
+    "wire": {
+      "grpc-message": "INTERNAL",
+      "grpc-status": "13",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "UNAVAILABLE",
+    "grpc_status": 14,
+    "http_status": 503,
+    "wire": {
+      "grpc-message": "UNAVAILABLE",
+      "grpc-status": "14",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "DATA_LOSS",
+    "grpc_status": 15,
+    "http_status": 500,
+    "wire": {
+      "grpc-message": "DATA_LOSS",
+      "grpc-status": "15",
+      "grpc-status-details-bin": null
+    }
+  },
+  {
+    "grpc_code": "UNAUTHENTICATED",
+    "grpc_status": 16,
+    "http_status": 401,
+    "wire": {
+      "grpc-message": "UNAUTHENTICATED",
+      "grpc-status": "16",
+      "grpc-status-details-bin": null
+    }
+  }
+]

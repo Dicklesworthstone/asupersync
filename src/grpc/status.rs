@@ -370,6 +370,7 @@ impl From<std::io::Error> for GrpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web::response::StatusCode as HttpStatusCode;
     use base64::Engine as _;
 
     fn init_test(name: &str) {
@@ -805,6 +806,70 @@ mod tests {
         })
     }
 
+    fn canonical_http_status_for_code(code: Code) -> HttpStatusCode {
+        match code {
+            Code::Ok => HttpStatusCode::OK,
+            Code::Cancelled => HttpStatusCode::CLIENT_CLOSED_REQUEST,
+            Code::Unknown => HttpStatusCode::INTERNAL_SERVER_ERROR,
+            Code::InvalidArgument => HttpStatusCode::BAD_REQUEST,
+            Code::DeadlineExceeded => HttpStatusCode::GATEWAY_TIMEOUT,
+            Code::NotFound => HttpStatusCode::NOT_FOUND,
+            Code::AlreadyExists => HttpStatusCode::CONFLICT,
+            Code::PermissionDenied => HttpStatusCode::FORBIDDEN,
+            Code::ResourceExhausted => HttpStatusCode::TOO_MANY_REQUESTS,
+            Code::FailedPrecondition => HttpStatusCode::BAD_REQUEST,
+            Code::Aborted => HttpStatusCode::CONFLICT,
+            Code::OutOfRange => HttpStatusCode::BAD_REQUEST,
+            Code::Unimplemented => HttpStatusCode::NOT_IMPLEMENTED,
+            Code::Internal => HttpStatusCode::INTERNAL_SERVER_ERROR,
+            Code::Unavailable => HttpStatusCode::SERVICE_UNAVAILABLE,
+            Code::DataLoss => HttpStatusCode::INTERNAL_SERVER_ERROR,
+            Code::Unauthenticated => HttpStatusCode::UNAUTHORIZED,
+        }
+    }
+
+    fn scrub_status_mapping_snapshot(mut snapshot: serde_json::Value) -> serde_json::Value {
+        fn scrub(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, entry) in map {
+                        if key.contains("timestamp") {
+                            *entry = serde_json::Value::String("<scrubbed-timestamp>".to_owned());
+                        } else {
+                            scrub(entry);
+                        }
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        scrub(value);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        scrub(&mut snapshot);
+        snapshot
+    }
+
+    fn status_http_mapping_snapshot() -> serde_json::Value {
+        serde_json::Value::Array(
+            CANONICAL_STATUS_CODES
+                .iter()
+                .map(|&(code, grpc_status, grpc_name)| {
+                    let status = Status::new(code, grpc_name);
+                    serde_json::json!({
+                        "grpc_code": grpc_name,
+                        "grpc_status": grpc_status,
+                        "http_status": canonical_http_status_for_code(code).as_u16(),
+                        "wire": status_wire_snapshot(&status),
+                    })
+                })
+                .collect(),
+        )
+    }
+
     #[test]
     fn test_all_canonical_status_codes_encode_correctly() {
         init_test("test_all_canonical_status_codes_encode_correctly");
@@ -911,6 +976,16 @@ mod tests {
             "grpc_status_wire_format_invalid_argument",
             status_wire_snapshot(&status)
         );
+    }
+
+    #[test]
+    fn grpc_status_http_mapping_snapshot() {
+        insta::with_settings!({sort_maps => true}, {
+            insta::assert_json_snapshot!(
+                "grpc_status_http_mapping_all_codes",
+                scrub_status_mapping_snapshot(status_http_mapping_snapshot())
+            );
+        });
     }
 
     #[test]
