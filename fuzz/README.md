@@ -34,6 +34,7 @@ cargo +nightly install cargo-fuzz
 | `otel_span_attributes` | OpenTelemetry span attribute/event limit, overwrite, truncation, and mixed value-shape encoding invariants | High |
 | `quic_stream_flow` | QUIC stream flow-control window updates, RESET_STREAM/STOP_SENDING, and credit-accounting invariants | High |
 | `symbol_auth` | AuthenticatedSymbol MAC verification, forged-tag rejection, replay-window, and field-tampering invariants | High |
+| `symbol_cancel_broadcast` | Symbol cancel fanout, duplicate suppression, max-hop termination, and late-subscriber cancellation invariants | High |
 | `postgres_scram` | PostgreSQL SCRAM-SHA-256 server-first/server-final parsing, iteration-bound enforcement, and malformed-signature rejection | High |
 | `raptorq_decoder_gauss_matrix` | RaptorQ decoder Gaussian-elimination rank-deficient, malformed-equation, and corrupt-RHS invariants | High |
 | `fuzz_raptorq_rfc6330` | RFC 6330 OTI transfer-length, sub-block partitioning, duplicate-ESI tolerance, and checksum-mismatch invariants | High |
@@ -98,6 +99,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `corpus/otel_span_attributes/` - Span attribute overwrite, mixed value-shape, event truncation, and max-event cap scenarios
 - `corpus/quic_stream_flow/` - QUIC flow-control, reset, stop-sending, window-regression, and credit-exhaustion scenarios
 - `corpus/symbol_auth/` - AuthenticatedSymbol forged-tag, wrong-key, replay-window, and payload/context-tampering scenarios
+- `corpus/symbol_cancel_broadcast/` - Symbol cancel fanout scenarios covering duplicate delivery, max-hop exhaustion, and late-child/late-listener observation
 - `corpus/postgres_scram/` - SCRAM server-first/server-final seeds covering valid nonces, low-iteration rejects, and malformed signatures
 - `corpus/raptorq_decoder_gauss_matrix/` - Rank-deficient duplicate-source/repair systems plus malformed-equation and corrupt-RHS decoder scenarios
 - `corpus/fuzz_raptorq_rfc6330/` - RFC 6330 OTI seeds covering aligned transfer lengths, invalid sub-block divisibility, duplicate ESIs, and checksum mismatch cases

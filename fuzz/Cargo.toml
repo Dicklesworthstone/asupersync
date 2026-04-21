@@ -1083,6 +1083,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "symbol_cancel_broadcast"
+path = "fuzz_targets/symbol_cancel_broadcast.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "key_derivation_context"
 path = "fuzz_targets/key_derivation_context.rs"
 test = false

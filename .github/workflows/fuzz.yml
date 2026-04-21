@@ -40,6 +40,7 @@ on:
           - otel_span_attributes
           - quic_stream_flow
           - symbol_auth
+          - symbol_cancel_broadcast
           - postgres_scram
           - raptorq_decoder_gauss_matrix
           - fuzz_raptorq_rfc6330
@@ -92,6 +93,7 @@ jobs:
           - otel_span_attributes
           - quic_stream_flow
           - symbol_auth
+          - symbol_cancel_broadcast
           - postgres_scram
           - raptorq_decoder_gauss_matrix
           - fuzz_raptorq_rfc6330
