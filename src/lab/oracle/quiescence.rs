@@ -247,6 +247,36 @@ mod tests {
             .expect("quiescence report should serialize")
     }
 
+    #[derive(Clone, Copy)]
+    enum CleanupAction {
+        CompleteTask(u32),
+        CloseRegion(u32, u64),
+    }
+
+    fn parent_violation_after_partial_drain(actions: &[CleanupAction]) -> QuiescenceViolation {
+        let mut oracle = QuiescenceOracle::new();
+        oracle.on_region_create(region(0), None);
+        oracle.on_region_create(region(1), Some(region(0)));
+        oracle.on_region_create(region(2), Some(region(0)));
+        oracle.on_spawn(task(1), region(0));
+        oracle.on_spawn(task(2), region(0));
+        oracle.on_spawn(task(3), region(0));
+
+        for action in actions {
+            match action {
+                CleanupAction::CompleteTask(task_id) => oracle.on_task_complete(task(*task_id)),
+                CleanupAction::CloseRegion(region_id, nanos) => {
+                    oracle.on_region_close(region(*region_id), t(*nanos));
+                }
+            }
+        }
+
+        oracle.on_region_close(region(0), t(100));
+        oracle
+            .check()
+            .expect_err("parent should still have one live child and one live task")
+    }
+
     #[test]
     fn empty_region_passes() {
         init_test("empty_region_passes");
@@ -573,6 +603,65 @@ mod tests {
             violation.live_tasks
         );
         crate::test_complete!("both_tasks_and_children_must_complete");
+    }
+
+    #[test]
+    fn mr_cleanup_permutation_preserves_residual_violation() {
+        init_test("mr_cleanup_permutation_preserves_residual_violation");
+        let violation_a = parent_violation_after_partial_drain(&[
+            CleanupAction::CompleteTask(1),
+            CleanupAction::CloseRegion(1, 40),
+            CleanupAction::CompleteTask(2),
+        ]);
+        let violation_b = parent_violation_after_partial_drain(&[
+            CleanupAction::CloseRegion(1, 40),
+            CleanupAction::CompleteTask(2),
+            CleanupAction::CompleteTask(1),
+        ]);
+
+        crate::assert_with_log!(
+            violation_a.region == region(0),
+            "violation_a.region",
+            region(0),
+            violation_a.region
+        );
+        crate::assert_with_log!(
+            violation_a.live_children == vec![region(2)],
+            "violation_a.live_children",
+            vec![region(2)],
+            violation_a.live_children.clone()
+        );
+        crate::assert_with_log!(
+            violation_a.live_tasks == vec![task(3)],
+            "violation_a.live_tasks",
+            vec![task(3)],
+            violation_a.live_tasks.clone()
+        );
+        crate::assert_with_log!(
+            violation_b.region == violation_a.region,
+            "violation_b.region",
+            violation_a.region,
+            violation_b.region
+        );
+        crate::assert_with_log!(
+            violation_b.live_children == violation_a.live_children,
+            "violation_b.live_children",
+            violation_a.live_children.clone(),
+            violation_b.live_children.clone()
+        );
+        crate::assert_with_log!(
+            violation_b.live_tasks == violation_a.live_tasks,
+            "violation_b.live_tasks",
+            violation_a.live_tasks.clone(),
+            violation_b.live_tasks.clone()
+        );
+        crate::assert_with_log!(
+            violation_b.close_time == violation_a.close_time,
+            "violation_b.close_time",
+            violation_a.close_time,
+            violation_b.close_time
+        );
+        crate::test_complete!("mr_cleanup_permutation_preserves_residual_violation");
     }
 
     #[test]
