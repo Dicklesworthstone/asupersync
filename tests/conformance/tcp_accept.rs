@@ -702,5 +702,3 @@ fn test_tcp_accept_performance() {
 
     drop(connections);
 }
-s);
-}

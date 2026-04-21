@@ -1980,7 +1980,7 @@ mod tests {
         }
 
         use std::task::Wake;
-impl Wake for SharedFlagWaker {
+        impl Wake for SharedFlagWaker {
             fn wake(self: Arc<Self>) {
                 self.flag.store(true, Ordering::SeqCst);
             }
@@ -1998,7 +1998,8 @@ impl Wake for SharedFlagWaker {
         counter: Arc<AtomicU64>,
     }
 
-impl Wake for CounterWaker {
+    use std::task::Wake;
+    impl Wake for CounterWaker {
         fn wake(self: Arc<Self>) {
             self.counter.fetch_add(1, Ordering::SeqCst);
         }

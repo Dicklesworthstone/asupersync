@@ -345,7 +345,7 @@ mod tests {
     struct CountingWaker(AtomicUsize);
 
     use std::task::Wake;
-impl Wake for CountingWaker {
+    impl Wake for CountingWaker {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
@@ -367,7 +367,7 @@ impl Wake for CountingWaker {
         wake_order: Arc<Mutex<Vec<usize>>>,
     }
 
-impl Wake for RecordingWaker {
+    impl Wake for RecordingWaker {
         fn wake(self: Arc<Self>) {
             self.wake_order
                 .lock()

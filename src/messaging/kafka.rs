@@ -1615,7 +1615,13 @@ mod tests {
     struct NoopWaker;
 
     #[cfg(feature = "kafka")]
-    use std::task::Wake;#[cfg(feature = "kafka")]
+    use std::task::Wake;
+    #[cfg(feature = "kafka")]
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    #[cfg(feature = "kafka")]
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }
