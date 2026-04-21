@@ -6,11 +6,15 @@ use asupersync::security::{
 };
 use asupersync::types::{Symbol, SymbolId, SymbolKind};
 use asupersync::util::DetRng;
+use hmac::{Hmac, Mac};
 use libfuzzer_sys::fuzz_target;
+use sha2::Sha256;
 
 const MAX_PAYLOAD_LEN: usize = 1024;
 const MAX_PURPOSES: usize = 8;
 const MAX_PURPOSE_LEN: usize = 128;
+
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
@@ -71,6 +75,15 @@ fn fuzz_key_derivation_context(input: FuzzInput) {
     let primary_chain = normalize_chain(input.primary_chain);
     let alternate_chain = normalize_chain(input.alternate_chain);
     let symbol = build_symbol(input.symbol);
+
+    assert_eq!(
+        base_key.derive_subkey(&[]),
+        reference_derive_subkey(base_key, &[]),
+        "empty-purpose derivation must match direct HMAC-SHA256"
+    );
+
+    assert_chain_matches_reference(base_key, &primary_chain);
+    assert_chain_matches_reference(base_key, &alternate_chain);
 
     let primary_key = derive_key(base_key, &primary_chain);
     let repeated_primary_key = derive_key(base_key, &primary_chain);
@@ -164,6 +177,32 @@ fn derive_key(mut key: AuthKey, chain: &[Vec<u8>]) -> AuthKey {
         key = key.derive_subkey(purpose);
     }
     key
+}
+
+fn reference_derive_subkey(key: AuthKey, purpose: &[u8]) -> AuthKey {
+    let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(purpose);
+    AuthKey::from_bytes(mac.finalize().into_bytes().into())
+}
+
+fn assert_chain_matches_reference(base_key: AuthKey, chain: &[Vec<u8>]) {
+    let mut derived = base_key;
+    let mut reference = base_key;
+
+    for purpose in chain {
+        derived = derived.derive_subkey(purpose);
+        reference = reference_derive_subkey(reference, purpose);
+        assert_eq!(
+            derived, reference,
+            "derive_subkey step must match direct HMAC-SHA256 reference"
+        );
+    }
+
+    assert_eq!(
+        derive_key(base_key, chain),
+        reference,
+        "whole-chain derivation must match stepwise reference"
+    );
 }
 
 fn derive_context_chain(mut context: SecurityContext, chain: &[Vec<u8>]) -> SecurityContext {
