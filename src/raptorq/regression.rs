@@ -659,6 +659,71 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_decode_tolerance_bound_is_monotone_at_threshold_edge() {
+        fn calibrated_monitor() -> RegressionMonitor {
+            let mut monitor = RegressionMonitor::new();
+            for i in 0..(MIN_CALIBRATION_SAMPLES + 5) {
+                let stats = make_baseline_stats(10 + i % 3, 3);
+                monitor.calibrate(&stats);
+            }
+            monitor
+        }
+
+        let threshold_probe = calibrated_monitor();
+        let threshold = threshold_probe
+            .threshold("gauss_ops")
+            .expect("gauss_ops threshold should be calibrated");
+
+        let tolerated_value = threshold.floor().max(10.0) as usize;
+        let violating_value = threshold.ceil() as usize + 1;
+
+        let mut tolerated_stats = make_baseline_stats(10, 3);
+        tolerated_stats.gauss_ops = tolerated_value;
+        let mut violating_stats = tolerated_stats.clone();
+        violating_stats.gauss_ops = violating_value;
+
+        let tolerated_report = calibrated_monitor().check(&tolerated_stats);
+        let violating_report = calibrated_monitor().check(&violating_stats);
+
+        let tolerated_metric = tolerated_report
+            .metrics
+            .iter()
+            .find(|metric| metric.metric == "gauss_ops")
+            .expect("gauss_ops metric missing from tolerated report");
+        let violating_metric = violating_report
+            .metrics
+            .iter()
+            .find(|metric| metric.metric == "gauss_ops")
+            .expect("gauss_ops metric missing from violating report");
+
+        assert!(
+            !tolerated_metric.exceeds_threshold,
+            "value {tolerated_value} should remain within threshold {threshold}"
+        );
+        assert_eq!(
+            tolerated_metric.verdict,
+            RegressionVerdict::Accept,
+            "within-threshold observation should be accepted"
+        );
+        assert!(
+            violating_metric.exceeds_threshold,
+            "value {violating_value} should exceed threshold {threshold}"
+        );
+        assert!(
+            matches!(
+                violating_metric.verdict,
+                RegressionVerdict::Warning | RegressionVerdict::Regressed
+            ),
+            "threshold violation should escalate verdict, got {:?}",
+            violating_metric.verdict
+        );
+        assert!(
+            (violating_report.overall_verdict as u8) >= (tolerated_report.overall_verdict as u8),
+            "crossing the learned tolerance bound must not lower overall severity"
+        );
+    }
+
+    #[test]
     fn monitor_stable_workload_no_false_alarm() {
         let mut monitor = RegressionMonitor::new();
 
