@@ -1,0 +1,103 @@
+---
+source: tests/web_middleware_golden.rs
+expression: golden
+---
+{
+  "scenarios": [
+    {
+      "name": "happy_path",
+      "exchanges": [
+        {
+          "label": "authorized_request",
+          "request": {
+            "method": "GET",
+            "path": "/golden/happy",
+            "headers": {
+              "authorization": "Bearer token-123"
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "x-handler": "echo",
+              "x-request-id": "req-41",
+              "x-response-time-ms": "0",
+              "x-trace-id": "req-41"
+            },
+            "body": "{\n  \"method\": \"GET\",\n  \"path\": \"/golden/happy\",\n  \"authorization\": \"Bearer token-123\",\n  \"request_id\": \"req-41\",\n  \"trace_id\": \"req-41\"\n}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "auth_fail",
+      "exchanges": [
+        {
+          "label": "missing_bearer_token",
+          "request": {
+            "method": "GET",
+            "path": "/golden/auth-fail",
+            "headers": {
+              "x-request-id": "client-auth-7"
+            }
+          },
+          "response": {
+            "status": 401,
+            "headers": {
+              "www-authenticate": "Bearer",
+              "x-request-id": "client-auth-7",
+              "x-response-time-ms": "0",
+              "x-trace-id": "client-auth-7"
+            },
+            "body": "Unauthorized"
+          }
+        }
+      ]
+    },
+    {
+      "name": "rate_limit",
+      "exchanges": [
+        {
+          "label": "warmup_allowed",
+          "request": {
+            "method": "GET",
+            "path": "/golden/rate-limit",
+            "headers": {
+              "authorization": "Bearer token-123"
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "x-handler": "echo",
+              "x-request-id": "req-90",
+              "x-response-time-ms": "0",
+              "x-trace-id": "req-90"
+            },
+            "body": "{\n  \"method\": \"GET\",\n  \"path\": \"/golden/rate-limit\",\n  \"authorization\": \"Bearer token-123\",\n  \"request_id\": \"req-90\",\n  \"trace_id\": \"req-90\"\n}"
+          }
+        },
+        {
+          "label": "second_request_rejected",
+          "request": {
+            "method": "GET",
+            "path": "/golden/rate-limit",
+            "headers": {
+              "authorization": "Bearer token-123"
+            }
+          },
+          "response": {
+            "status": 429,
+            "headers": {
+              "retry-after": "1",
+              "x-request-id": "req-91",
+              "x-response-time-ms": "0",
+              "x-trace-id": "req-91"
+            },
+            "body": "Too Many Requests: rate limit exceeded, retry after 1s"
+          }
+        }
+      ]
+    }
+  ]
+}
