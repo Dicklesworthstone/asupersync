@@ -769,8 +769,16 @@ impl GaussianSolver {
 
             // Find pivot row (first nonzero in column, starting from pivot_col)
             let Some(pivot_row) = self.find_pivot(pivot_col, pivot_col) else {
+                // No pivot is available at this column frontier. Surface the
+                // column-level failure as `Singular` unless the row aligned to
+                // the pivot position is itself a zero-coefficient, nonzero-RHS
+                // contradiction — in that single case the caller sees an
+                // explicit inconsistency at the pivot row. Other zero-row
+                // contradictions farther down belong to the post-elimination
+                // sweep so cross-solver diagnostics agree on the first
+                // unpivotable column.
                 return self
-                    .first_inconsistent_row_from(pivot_col)
+                    .first_inconsistent_row_at(pivot_col)
                     .map_or(GaussianResult::Singular { row: pivot_col }, |row| {
                         GaussianResult::Inconsistent { row }
                     });
@@ -819,8 +827,11 @@ impl GaussianSolver {
 
             // Find best pivot (sparsest row with nonzero in column)
             let Some((pivot_row, _nnz)) = self.find_pivot_markowitz(pivot_col, pivot_col) else {
+                // Mirror the basic solver: report the first unpivotable column
+                // as `Singular` unless the pivot-aligned row itself carries an
+                // explicit zero-row contradiction.
                 return self
-                    .first_inconsistent_row_from(pivot_col)
+                    .first_inconsistent_row_at(pivot_col)
                     .map_or(GaussianResult::Singular { row: pivot_col }, |row| {
                         GaussianResult::Inconsistent { row }
                     });
@@ -919,6 +930,24 @@ impl GaussianSolver {
             self.matrix[row].iter().all(|&coef| coef == 0)
                 && self.rhs[row].as_slice().iter().any(|&byte| byte != 0)
         })
+    }
+
+    /// Check whether the single row aligned to the current pivot position is
+    /// an explicit zero-coefficient, nonzero-RHS contradiction. Used during
+    /// forward elimination to classify an unpivotable column as `Inconsistent`
+    /// only when the pivot row itself is a contradiction; rank-deficient rows
+    /// farther down are reported after elimination completes.
+    fn first_inconsistent_row_at(&self, row: usize) -> Option<usize> {
+        if row >= self.rows {
+            return None;
+        }
+        if self.matrix[row].iter().all(|&coef| coef == 0)
+            && self.rhs[row].as_slice().iter().any(|&byte| byte != 0)
+        {
+            Some(row)
+        } else {
+            None
+        }
     }
 
     fn solved_result(&self, pivot_count: usize) -> GaussianResult {

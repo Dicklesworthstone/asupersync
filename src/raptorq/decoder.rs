@@ -2196,6 +2196,17 @@ impl InactivationDecoder {
             .collect();
         let (dense_rows, dropped_zero_rows) = build_dense_core_rows(state, &unused_eqs, &unsolved)?;
         state.stats.dense_core_dropped_rows += dropped_zero_rows;
+
+        // Record the planned inactivation set in the proof trace before any
+        // potentially-fallible validation step. The trace must describe the
+        // decoder's intent — what it inactivated — even if we fail-closed on
+        // RHS width drift without mutating decoder state. Mutations to
+        // `state.inactive_cols` and `state.active_cols` are deferred until
+        // after validation succeeds so callers can roll back deterministically.
+        for &col in &unsolved {
+            trace.record_inactivation(col);
+        }
+
         validate_dense_core_rhs_widths(state, &dense_rows, symbol_size)?;
 
         // Mark all remaining unsolved columns as inactive
@@ -2203,8 +2214,6 @@ impl InactivationDecoder {
             state.inactive_cols.insert(col);
             state.active_cols.remove(&col);
             state.stats.inactivated += 1;
-            // Record inactivation in proof trace
-            trace.record_inactivation(col);
         }
 
         // Reorder dense elimination columns deterministically and reuse cached

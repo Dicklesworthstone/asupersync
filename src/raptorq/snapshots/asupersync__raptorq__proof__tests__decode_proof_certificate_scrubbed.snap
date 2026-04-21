@@ -1,30 +1,186 @@
 ---
 source: src/raptorq/proof.rs
-expression: json!({ ... })
+assertion_line: 1221
+expression: "json!({\n    \"success\": scrub_decode_proof_for_snapshot_test(&success),\n    \"degraded_singular\":\n    scrub_decode_proof_for_snapshot_test(&degraded_singular),\n    \"degraded_insufficient\":\n    scrub_decode_proof_for_snapshot_test(&degraded_insufficient),\n    \"source_block_success\":\n    scrub_decode_proof_for_snapshot_test(&source_block_success),\n    \"source_block_failure\":\n    scrub_decode_proof_for_snapshot_test(&source_block_failure),\n})"
 ---
 {
-  "success": {
-    "version": 2,
-    "content_hash": 15437469237766249660,
+  "degraded_insufficient": {
     "config": {
-      "object_id": "[object_id]",
-      "sbn": 0,
-      "k": 10,
-      "s": 3,
       "h": 2,
+      "k": 10,
       "l": 15,
-      "symbol_size": 64,
-      "seed": "[seed]"
+      "object_id": "[object_id]",
+      "s": 3,
+      "sbn": 0,
+      "seed": "[seed]",
+      "symbol_size": 64
+    },
+    "content_hash": 12954333747468798490,
+    "elimination": {
+      "inactivated": 0,
+      "inactive_cols": [],
+      "inactive_cols_truncated": false,
+      "pivot_events": [],
+      "pivot_events_truncated": false,
+      "pivots": 0,
+      "row_ops": 0,
+      "strategy": "AllAtOnce",
+      "strategy_transitions": [],
+      "strategy_transitions_truncated": false
+    },
+    "outcome": {
+      "kind": "Failure",
+      "reason": {
+        "kind": "InsufficientSymbols",
+        "received": 6,
+        "required": 15
+      }
+    },
+    "peeling": {
+      "solved": 2,
+      "solved_indices": [
+        1,
+        2
+      ],
+      "truncated": false
     },
     "received": {
-      "total": 15,
-      "source_count": 10,
-      "repair_count": 5,
-      "esi_multiset_hash": 13575261062447033934,
+      "esi_multiset_hash": 10461741950012670637,
       "esis": [
         0,
         1,
         2,
+        3,
+        4,
+        5
+      ],
+      "repair_count": 0,
+      "source_count": 6,
+      "total": 6,
+      "truncated": false
+    },
+    "version": 2
+  },
+  "degraded_singular": {
+    "config": {
+      "h": 2,
+      "k": 10,
+      "l": 15,
+      "object_id": "[object_id]",
+      "s": 3,
+      "sbn": 0,
+      "seed": "[seed]",
+      "symbol_size": 64
+    },
+    "content_hash": 10106271345069789680,
+    "elimination": {
+      "inactivated": 2,
+      "inactive_cols": [
+        8,
+        9
+      ],
+      "inactive_cols_truncated": false,
+      "pivot_events": [
+        {
+          "col": 8,
+          "row": 1
+        }
+      ],
+      "pivot_events_truncated": false,
+      "pivots": 1,
+      "row_ops": 1,
+      "strategy": "BlockSchurLowRank",
+      "strategy_transitions": [
+        {
+          "from": "HighSupportFirst",
+          "reason": "rank_drop_detected",
+          "to": "BlockSchurLowRank"
+        }
+      ],
+      "strategy_transitions_truncated": false
+    },
+    "outcome": {
+      "kind": "Failure",
+      "reason": {
+        "attempted_cols": [
+          8,
+          9,
+          12
+        ],
+        "kind": "SingularMatrix",
+        "row": 6
+      }
+    },
+    "peeling": {
+      "solved": 1,
+      "solved_indices": [
+        0
+      ],
+      "truncated": false
+    },
+    "received": {
+      "esi_multiset_hash": 5092946092479749206,
+      "esis": [
+        0,
+        1,
+        3,
+        10,
+        11
+      ],
+      "repair_count": 2,
+      "source_count": 3,
+      "total": 5,
+      "truncated": false
+    },
+    "version": 2
+  },
+  "source_block_failure": {
+    "config": {
+      "h": 10,
+      "k": 8,
+      "l": 27,
+      "object_id": "[object_id]",
+      "s": 7,
+      "sbn": 0,
+      "seed": "[seed]",
+      "symbol_size": 32
+    },
+    "content_hash": 7443765929921201753,
+    "elimination": {
+      "inactivated": 0,
+      "inactive_cols": [],
+      "inactive_cols_truncated": false,
+      "pivot_events": [],
+      "pivot_events_truncated": false,
+      "pivots": 0,
+      "row_ops": 0,
+      "strategy": "AllAtOnce",
+      "strategy_transitions": [],
+      "strategy_transitions_truncated": false
+    },
+    "outcome": {
+      "kind": "Failure",
+      "reason": {
+        "kind": "InsufficientSymbols",
+        "received": 21,
+        "required": 25
+      }
+    },
+    "peeling": {
+      "solved": 0,
+      "solved_indices": [],
+      "truncated": false
+    },
+    "received": {
+      "esi_multiset_hash": 8853628190847435905,
+      "esis": [
+        0,
+        0,
+        1,
+        1,
+        2,
+        2,
+        3,
         3,
         4,
         5,
@@ -36,183 +192,16 @@ expression: json!({ ... })
         11,
         12,
         13,
-        14
+        14,
+        15,
+        16
       ],
+      "repair_count": 17,
+      "source_count": 4,
+      "total": 21,
       "truncated": false
     },
-    "peeling": {
-      "solved": 3,
-      "solved_indices": [
-        0,
-        4,
-        7
-      ],
-      "truncated": false
-    },
-    "elimination": {
-      "strategy": "HighSupportFirst",
-      "inactivated": 1,
-      "inactive_cols": [
-        11
-      ],
-      "inactive_cols_truncated": false,
-      "pivots": 2,
-      "pivot_events": [
-        {
-          "col": 11,
-          "row": 2
-        },
-        {
-          "col": 13,
-          "row": 5
-        }
-      ],
-      "pivot_events_truncated": false,
-      "row_ops": 2,
-      "strategy_transitions": [
-        {
-          "from": "AllAtOnce",
-          "to": "HighSupportFirst",
-          "reason": "dense_repair_mix"
-        }
-      ],
-      "strategy_transitions_truncated": false
-    },
-    "outcome": {
-      "kind": "Success",
-      "symbols_recovered": 10,
-      "source_payload_hash": 12876649971060094004
-    }
-  },
-  "degraded_singular": {
-    "version": 2,
-    "content_hash": 10106271345069789680,
-    "config": {
-      "object_id": "[object_id]",
-      "sbn": 0,
-      "k": 10,
-      "s": 3,
-      "h": 2,
-      "l": 15,
-      "symbol_size": 64,
-      "seed": "[seed]"
-    },
-    "received": {
-      "total": 5,
-      "source_count": 3,
-      "repair_count": 2,
-      "esi_multiset_hash": 5092946092479749206,
-      "esis": [
-        0,
-        1,
-        3,
-        10,
-        11
-      ],
-      "truncated": false
-    },
-    "peeling": {
-      "solved": 1,
-      "solved_indices": [
-        0
-      ],
-      "truncated": false
-    },
-    "elimination": {
-      "strategy": "BlockSchurLowRank",
-      "inactivated": 2,
-      "inactive_cols": [
-        8,
-        9
-      ],
-      "inactive_cols_truncated": false,
-      "pivots": 1,
-      "pivot_events": [
-        {
-          "col": 8,
-          "row": 1
-        }
-      ],
-      "pivot_events_truncated": false,
-      "row_ops": 1,
-      "strategy_transitions": [
-        {
-          "from": "HighSupportFirst",
-          "to": "BlockSchurLowRank",
-          "reason": "rank_drop_detected"
-        }
-      ],
-      "strategy_transitions_truncated": false
-    },
-    "outcome": {
-      "kind": "Failure",
-      "reason": {
-        "kind": "SingularMatrix",
-        "row": 6,
-        "attempted_cols": [
-          8,
-          9,
-          12
-        ]
-      }
-    }
-  },
-  "degraded_insufficient": {
-    "version": 2,
-    "content_hash": 12954333747468798490,
-    "config": {
-      "object_id": "[object_id]",
-      "sbn": 0,
-      "k": 10,
-      "s": 3,
-      "h": 2,
-      "l": 15,
-      "symbol_size": 64,
-      "seed": "[seed]"
-    },
-    "received": {
-      "total": 6,
-      "source_count": 6,
-      "repair_count": 0,
-      "esi_multiset_hash": 10461741950012670637,
-      "esis": [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5
-      ],
-      "truncated": false
-    },
-    "peeling": {
-      "solved": 2,
-      "solved_indices": [
-        1,
-        2
-      ],
-      "truncated": false
-    },
-    "elimination": {
-      "strategy": "AllAtOnce",
-      "inactivated": 0,
-      "inactive_cols": [],
-      "inactive_cols_truncated": false,
-      "pivots": 0,
-      "pivot_events": [],
-      "pivot_events_truncated": false,
-      "row_ops": 0,
-      "strategy_transitions": [],
-      "strategy_transitions_truncated": false
-    },
-    "outcome": {
-      "kind": "Failure",
-      "reason": {
-        "kind": "InsufficientSymbols",
-        "received": 6,
-        "required": 15
-      }
-    }
+    "version": 2
   },
   "source_block_success": {
     "config": {
@@ -312,53 +301,67 @@ expression: json!({ ... })
     },
     "version": 2
   },
-  "source_block_failure": {
+  "success": {
     "config": {
-      "h": 10,
-      "k": 8,
-      "l": 27,
+      "h": 2,
+      "k": 10,
+      "l": 15,
       "object_id": "[object_id]",
-      "s": 7,
+      "s": 3,
       "sbn": 0,
       "seed": "[seed]",
-      "symbol_size": 32
+      "symbol_size": 64
     },
-    "content_hash": 7443765929921201753,
+    "content_hash": 15437469237766249660,
     "elimination": {
-      "inactivated": 0,
-      "inactive_cols": [],
+      "inactivated": 1,
+      "inactive_cols": [
+        11
+      ],
       "inactive_cols_truncated": false,
-      "pivot_events": [],
+      "pivot_events": [
+        {
+          "col": 11,
+          "row": 2
+        },
+        {
+          "col": 13,
+          "row": 5
+        }
+      ],
       "pivot_events_truncated": false,
-      "pivots": 0,
-      "row_ops": 0,
-      "strategy": "AllAtOnce",
-      "strategy_transitions": [],
+      "pivots": 2,
+      "row_ops": 2,
+      "strategy": "HighSupportFirst",
+      "strategy_transitions": [
+        {
+          "from": "AllAtOnce",
+          "reason": "dense_repair_mix",
+          "to": "HighSupportFirst"
+        }
+      ],
       "strategy_transitions_truncated": false
     },
     "outcome": {
-      "kind": "Failure",
-      "reason": {
-        "kind": "InsufficientSymbols",
-        "received": 21,
-        "required": 25
-      }
+      "kind": "Success",
+      "source_payload_hash": 12876649971060094004,
+      "symbols_recovered": 10
     },
     "peeling": {
-      "solved": 0,
-      "solved_indices": [],
+      "solved": 3,
+      "solved_indices": [
+        0,
+        4,
+        7
+      ],
       "truncated": false
     },
     "received": {
-      "esi_multiset_hash": 8853628190847435905,
+      "esi_multiset_hash": 13575261062447033934,
       "esis": [
         0,
-        0,
-        1,
         1,
         2,
-        2,
-        3,
         3,
         4,
         5,
@@ -370,13 +373,11 @@ expression: json!({ ... })
         11,
         12,
         13,
-        14,
-        15,
-        16
+        14
       ],
-      "repair_count": 17,
-      "source_count": 4,
-      "total": 21,
+      "repair_count": 5,
+      "source_count": 10,
+      "total": 15,
       "truncated": false
     },
     "version": 2
