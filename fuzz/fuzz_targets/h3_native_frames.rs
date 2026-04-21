@@ -14,9 +14,8 @@
 
 use arbitrary::Arbitrary;
 use asupersync::http::h3_native::{H3Frame, H3NativeError};
-use asupersync::net::quic_core::{QUIC_VARINT_MAX, decode_varint, encode_varint};
+use asupersync::net::quic_core::{QUIC_VARINT_MAX, encode_varint};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashSet;
 
 /// Maximum frame payload size to prevent OOM during fuzzing
 const MAX_FRAME_PAYLOAD: usize = 65536;
@@ -202,13 +201,13 @@ struct GreaseFrame {
 #[derive(Arbitrary, Debug)]
 enum VarintBoundaryType {
     /// 6-bit boundary (63)
-    SixBit,
+    Six,
     /// 14-bit boundary (16383)
-    FourteenBit,
+    Fourteen,
     /// 30-bit boundary (1073741823)
-    ThirtyBit,
+    Thirty,
     /// 62-bit boundary (4611686018427387903)
-    SixtyTwoBit,
+    SixtyTwo,
 }
 
 /// Payload patterns for testing
@@ -419,12 +418,7 @@ fn test_frame_length_parsing(test: &FrameLengthTest) {
                 frame_data.extend_from_slice(&limited_payload);
 
                 match H3Frame::decode(&frame_data) {
-                    Ok((frame, consumed)) => {
-                        // Verify length consistency
-                        let expected_consumed = varint_encoded_length(*frame_type)
-                            + varint_encoded_length(*payload_length)
-                            + (*payload_length as usize).min(limited_payload.len());
-
+                    Ok((_frame, consumed)) => {
                         assert!(
                             consumed <= frame_data.len(),
                             "Frame consumed more bytes than available"
@@ -636,7 +630,7 @@ fn test_unknown_frame_handling(test: &UnknownFrameTest) {
             let mut combined_data = Vec::new();
             let mut expected_frames = Vec::new();
 
-            for (i, frame_spec) in frame_sequence.iter().take(8).enumerate() {
+            for frame_spec in frame_sequence.iter().take(8) {
                 let frame_type = resolve_frame_type(&frame_spec.frame_type);
                 if frame_type > QUIC_VARINT_MAX {
                     continue;
@@ -903,10 +897,10 @@ fn test_boundary_conditions(test: &BoundaryTest) {
             is_frame_type,
         } => {
             let boundary_value = match boundary_type {
-                VarintBoundaryType::SixBit => 63u64,
-                VarintBoundaryType::FourteenBit => 16383u64,
-                VarintBoundaryType::ThirtyBit => 1073741823u64,
-                VarintBoundaryType::SixtyTwoBit => QUIC_VARINT_MAX,
+                VarintBoundaryType::Six => 63u64,
+                VarintBoundaryType::Fourteen => 16383u64,
+                VarintBoundaryType::Thirty => 1073741823u64,
+                VarintBoundaryType::SixtyTwo => QUIC_VARINT_MAX,
             };
 
             let (frame_type, payload_length) = if *is_frame_type {
@@ -1044,7 +1038,7 @@ fn test_boundary_conditions(test: &BoundaryTest) {
             }
 
             // Should parse at least some frames from valid concatenated data
-            if expected_count > 0 && parsed_count == 0 && combined_data.len() > 0 {
+            if expected_count > 0 && parsed_count == 0 && !combined_data.is_empty() {
                 panic!("No frames parsed from valid concatenated frame data");
             }
         }
@@ -1137,7 +1131,7 @@ fn verify_frame_payload_empty(frame: &H3Frame) {
     match frame {
         H3Frame::Data(payload) => assert!(payload.is_empty()),
         H3Frame::Headers(payload) => assert!(payload.is_empty()),
-        H3Frame::Settings(settings) => {
+        H3Frame::Settings(_settings) => {
             // Settings frame with no settings is valid
         }
         H3Frame::Unknown { payload, .. } => assert!(payload.is_empty()),

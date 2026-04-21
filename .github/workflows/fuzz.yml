@@ -33,6 +33,7 @@ on:
           - grpc_prost_codec_decode
           - grpc_gzip_message_decode
           - grpc_streaming
+          - h3_native_frames
           - kafka_protocol
           - key_derivation_context
           - quic_stream_flow
@@ -82,6 +83,7 @@ jobs:
           - grpc_prost_codec_decode
           - grpc_gzip_message_decode
           - grpc_streaming
+          - h3_native_frames
           - kafka_protocol
           - key_derivation_context
           - quic_stream_flow
