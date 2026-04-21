@@ -725,6 +725,147 @@ fn mr8_duplicate_broadcast_delivery_is_idempotent_for_remote_tokens() {
     );
 }
 
+/// MR9: Broadcast delivery to a remote token tree cancels both existing and
+/// late descendants with parent-cancelled semantics.
+#[test]
+fn mr9_broadcast_delivery_propagates_across_remote_descendants() {
+    let mut local_rng = DetRng::new(0xACED_1001);
+    let mut remote_rng = DetRng::new(0xACED_1002);
+    let object_id = test_object_id(144, 233);
+    let local_token = SymbolCancelToken::new(object_id, &mut local_rng);
+    let remote_root = SymbolCancelToken::new(object_id, &mut remote_rng);
+    let remote_child = remote_root.child(&mut remote_rng);
+    let remote_grandchild = remote_child.child(&mut remote_rng);
+
+    let root_listener = TestCancelListener::new();
+    let child_listener = TestCancelListener::new();
+    let grandchild_listener = TestCancelListener::new();
+    remote_root.add_listener(root_listener.clone());
+    remote_child.add_listener(child_listener.clone());
+    remote_grandchild.add_listener(grandchild_listener.clone());
+
+    let local_broadcaster = CancelBroadcaster::new(NoopCancelSink);
+    let remote_broadcaster = CancelBroadcaster::new(NoopCancelSink);
+    local_broadcaster.register_token(local_token.clone());
+    remote_broadcaster.register_token(remote_root.clone());
+
+    let reason = CancelReason::new(CancelKind::Shutdown);
+    let initiated_at = Time::from_millis(404);
+    let received_at = Time::from_millis(505);
+
+    let msg = local_broadcaster.prepare_cancel(object_id, &reason, initiated_at);
+    let forwarded = remote_broadcaster.receive_message(&msg, received_at);
+
+    assert!(
+        forwarded.is_some(),
+        "first broadcast delivery should forward to downstream peers"
+    );
+    assert!(
+        local_token.is_cancelled(),
+        "preparing a local cancel should cancel the registered token"
+    );
+    assert!(
+        remote_root.is_cancelled(),
+        "remote root should be cancelled"
+    );
+    assert!(
+        remote_child.is_cancelled(),
+        "existing remote child should be cancelled"
+    );
+    assert!(
+        remote_grandchild.is_cancelled(),
+        "existing remote grandchild should be cancelled"
+    );
+    assert!(
+        root_listener.was_notified(),
+        "remote root listener should observe the broadcast"
+    );
+    assert!(
+        child_listener.was_notified(),
+        "remote child listener should observe propagated cancellation"
+    );
+    assert!(
+        grandchild_listener.was_notified(),
+        "remote grandchild listener should observe propagated cancellation"
+    );
+    assert_eq!(
+        remote_root.reason().map(|reason| reason.kind()),
+        Some(CancelKind::Shutdown),
+        "remote root should preserve the broadcast cancel kind"
+    );
+    assert_eq!(
+        remote_child.reason().map(|reason| reason.kind()),
+        Some(CancelKind::ParentCancelled),
+        "existing remote child should observe parent-cancelled semantics"
+    );
+    assert_eq!(
+        remote_grandchild.reason().map(|reason| reason.kind()),
+        Some(CancelKind::ParentCancelled),
+        "existing remote grandchild should observe parent-cancelled semantics"
+    );
+    assert_eq!(
+        remote_root.cancelled_at(),
+        Some(received_at),
+        "remote root should record the delivery timestamp"
+    );
+    assert_eq!(
+        remote_child.cancelled_at(),
+        Some(received_at),
+        "existing remote child should record the propagated timestamp"
+    );
+    assert_eq!(
+        remote_grandchild.cancelled_at(),
+        Some(received_at),
+        "existing remote grandchild should record the propagated timestamp"
+    );
+
+    let late_remote_child = remote_root.child(&mut remote_rng);
+    let late_remote_grandchild = late_remote_child.child(&mut remote_rng);
+    assert!(
+        late_remote_child.is_cancelled(),
+        "late remote child should inherit the already-broadcast cancellation"
+    );
+    assert!(
+        late_remote_grandchild.is_cancelled(),
+        "late remote grandchild should inherit the already-broadcast cancellation"
+    );
+    assert_eq!(
+        late_remote_child.reason().map(|reason| reason.kind()),
+        Some(CancelKind::ParentCancelled),
+        "late remote child should inherit parent-cancelled semantics"
+    );
+    assert_eq!(
+        late_remote_grandchild.reason().map(|reason| reason.kind()),
+        Some(CancelKind::ParentCancelled),
+        "late remote grandchild should inherit parent-cancelled semantics"
+    );
+    assert_eq!(
+        late_remote_child.cancelled_at(),
+        Some(received_at),
+        "late remote child should inherit the broadcast timestamp"
+    );
+    assert_eq!(
+        late_remote_grandchild.cancelled_at(),
+        Some(received_at),
+        "late remote grandchild should inherit the broadcast timestamp"
+    );
+    assert_eq!(
+        remote_broadcaster.metrics().received,
+        1,
+        "remote broadcaster should count exactly one received delivery"
+    );
+    assert_eq!(
+        remote_broadcaster.metrics().forwarded,
+        1,
+        "remote broadcaster should forward the first delivery exactly once"
+    );
+    assert_eq!(
+        remote_broadcaster.metrics().duplicates,
+        0,
+        "non-duplicate broadcast should not increment duplicate metrics"
+    );
+}
+
 /// Integration test: Complex token hierarchy with propagation
 #[test]
 fn integration_complex_token_hierarchy() {
