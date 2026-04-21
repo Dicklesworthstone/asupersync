@@ -306,14 +306,19 @@ impl IoDriver {
         self.stats.events_received += n as u64;
 
         self.waker_buf.clear();
+        let mut seen_tokens = smallvec::SmallVec::<[Token; 64]>::new();
 
         // Dispatch wakers for ready events
         for event in &self.events {
             let interest = self.interests.get(&event.token).copied();
             on_event(event, interest);
+            if seen_tokens.contains(&event.token) {
+                continue;
+            }
             let slab_key = SlabToken::from_usize(event.token.0);
             if let Some(waker) = self.wakers.get(slab_key) {
                 self.waker_buf.push(waker.clone());
+                seen_tokens.push(event.token);
                 self.stats.wakers_dispatched += 1;
             } else {
                 self.stats.unknown_tokens += 1;
@@ -363,12 +368,17 @@ impl IoDriver {
             .as_ref()
             .expect("events should be Some during restore");
         let mut wakers = smallvec::SmallVec::with_capacity(events_ref.len());
+        let mut seen_tokens = smallvec::SmallVec::<[Token; 64]>::new();
         for event in events_ref {
             let interest = restorer.driver.interests.get(&event.token).copied();
             on_event(event, interest);
+            if seen_tokens.contains(&event.token) {
+                continue;
+            }
             let slab_key = SlabToken::from_usize(event.token.0);
             if let Some(waker) = restorer.driver.wakers.get(slab_key) {
                 wakers.push(waker.clone());
+                seen_tokens.push(event.token);
                 restorer.driver.stats.wakers_dispatched += 1;
             } else {
                 restorer.driver.stats.unknown_tokens += 1;
@@ -878,8 +888,9 @@ mod tests {
     use super::*;
     use crate::runtime::reactor::{Event, Interest, LabReactor, Token};
     use crate::test_utils::init_test_logging;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Condvar, Mutex as StdMutex};
+    use std::sync::{Arc, Barrier, Condvar, Mutex as StdMutex};
     use std::task::Wake;
 
     /// A simple waker that sets a flag and counts wakes.
@@ -1773,6 +1784,61 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_cancelled_registration_handoff_releases_old_token() {
+        init_test("metamorphic_cancelled_registration_handoff_releases_old_token");
+        let reactor = Arc::new(LabReactor::new());
+        let source = TestFdSource;
+        let mut driver = IoDriver::new(reactor.clone());
+
+        let (stale_waker, stale_state) = create_test_waker();
+        let stale_token = driver
+            .register(&source, Interest::READABLE, stale_waker)
+            .expect("stale register should succeed");
+        driver
+            .deregister(stale_token)
+            .expect("cancelling stale registration should succeed");
+        reactor
+            .register(&source, stale_token, Interest::READABLE)
+            .expect("manual stale-token registration should succeed");
+        reactor.inject_event(stale_token, Event::readable(stale_token), Duration::ZERO);
+
+        let (fresh_waker, fresh_state) = create_test_waker();
+        let fresh_token = driver
+            .register(&source, Interest::READABLE, fresh_waker)
+            .expect("fresh register should succeed");
+        reactor.inject_event(fresh_token, Event::readable(fresh_token), Duration::ZERO);
+
+        let count = driver
+            .turn(Some(Duration::from_millis(10)))
+            .expect("turn should succeed");
+
+        crate::assert_with_log!(
+            stale_token != fresh_token,
+            "fresh registration must receive a distinct token after cancellation",
+            true,
+            stale_token != fresh_token
+        );
+        crate::assert_with_log!(count == 2, "event count", 2usize, count);
+        let stale_wakes = stale_state.count.load(Ordering::SeqCst);
+        crate::assert_with_log!(stale_wakes == 0, "stale wake count", 0usize, stale_wakes);
+        let fresh_wakes = fresh_state.count.load(Ordering::SeqCst);
+        crate::assert_with_log!(fresh_wakes == 1, "fresh wake count", 1usize, fresh_wakes);
+        crate::assert_with_log!(
+            driver.stats().unknown_tokens == 1,
+            "stale event becomes unknown after cancellation",
+            1usize,
+            driver.stats().unknown_tokens
+        );
+        crate::assert_with_log!(
+            driver.waker_count() == 1,
+            "only the fresh registration remains live",
+            1usize,
+            driver.waker_count()
+        );
+        crate::test_complete!("metamorphic_cancelled_registration_handoff_releases_old_token");
+    }
+
+    #[test]
     fn io_driver_wake() {
         init_test("io_driver_wake");
         let reactor = Arc::new(LabReactor::new());
@@ -1845,6 +1911,42 @@ mod tests {
             driver.stats().wakers_dispatched
         );
         crate::test_complete!("io_driver_multiple_wakers");
+    }
+
+    #[test]
+    fn metamorphic_duplicate_events_wake_once_per_registration() {
+        init_test("metamorphic_duplicate_events_wake_once_per_registration");
+        let reactor = Arc::new(LabReactor::new());
+        let source = TestFdSource;
+        let mut driver = IoDriver::new(reactor.clone());
+        let (waker, state) = create_test_waker();
+
+        let token = driver
+            .register(&source, Interest::READABLE, waker)
+            .expect("register should succeed");
+
+        reactor.inject_event(token, Event::readable(token), Duration::ZERO);
+        reactor.inject_event(token, Event::readable(token), Duration::ZERO);
+
+        let count = driver
+            .turn(Some(Duration::from_millis(10)))
+            .expect("turn should succeed");
+
+        crate::assert_with_log!(count == 2, "event count", 2usize, count);
+        let wake_count = state.count.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            wake_count == 1,
+            "duplicate events wake once per registration",
+            1usize,
+            wake_count
+        );
+        crate::assert_with_log!(
+            driver.stats().wakers_dispatched == 1,
+            "wakers dispatched",
+            1usize,
+            driver.stats().wakers_dispatched
+        );
+        crate::test_complete!("metamorphic_duplicate_events_wake_once_per_registration");
     }
 
     #[test]
@@ -2080,6 +2182,78 @@ mod tests {
         );
 
         crate::test_complete!("io_registration_rearm_preemptively_wakes_reactor");
+    }
+
+    #[test]
+    fn metamorphic_concurrent_registrations_preserve_token_uniqueness() {
+        init_test("metamorphic_concurrent_registrations_preserve_token_uniqueness");
+        let reactor = Arc::new(LabReactor::new());
+        let reactor_handle: Arc<dyn Reactor> = reactor.clone();
+        let driver = Arc::new(IoDriverHandle::new(reactor_handle));
+        let registrations = 12usize;
+        let start = Arc::new(Barrier::new(registrations + 1));
+        let release = Arc::new(Barrier::new(registrations + 1));
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let handles: Vec<_> = (0..registrations)
+            .map(|_| {
+                let driver = Arc::clone(&driver);
+                let start = Arc::clone(&start);
+                let release = Arc::clone(&release);
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    let source = TestFdSource;
+                    let (waker, _) = create_test_waker();
+                    start.wait();
+                    let registration = driver
+                        .register(&source, Interest::READABLE, waker)
+                        .expect("register should succeed");
+                    tx.send(registration.token())
+                        .expect("token send should succeed");
+                    release.wait();
+                    drop(registration);
+                })
+            })
+            .collect();
+        drop(tx);
+
+        start.wait();
+
+        let tokens: Vec<_> = rx.iter().take(registrations).collect();
+        let unique: HashSet<_> = tokens.iter().copied().collect();
+
+        crate::assert_with_log!(
+            tokens.len() == registrations,
+            "registration count",
+            registrations,
+            tokens.len()
+        );
+        crate::assert_with_log!(
+            unique.len() == registrations,
+            "concurrent registrations keep tokens unique",
+            registrations,
+            unique.len()
+        );
+        crate::assert_with_log!(
+            driver.waker_count() == registrations,
+            "all concurrent registrations stay live until release",
+            registrations,
+            driver.waker_count()
+        );
+
+        release.wait();
+
+        for handle in handles {
+            handle.join().expect("registration thread should join");
+        }
+
+        crate::assert_with_log!(
+            driver.is_empty(),
+            "dropping concurrent registrations should clean up all tokens",
+            true,
+            driver.is_empty()
+        );
+        crate::test_complete!("metamorphic_concurrent_registrations_preserve_token_uniqueness");
     }
 
     #[test]
