@@ -2076,6 +2076,15 @@ mod tests {
         rendered.trim_end().to_string()
     }
 
+    fn render_structured_diagnostic_report_v2(sections: &[(&str, &str)]) -> String {
+        let mut rendered = String::from("report_version: v2");
+        for (label, section) in sections {
+            writeln!(&mut rendered, "\n\n[{label}]").expect("write section label");
+            rendered.push_str(section);
+        }
+        rendered.trim_end().to_string()
+    }
+
     fn scrub_diagnostic_report_timestamps(rendered: &str) -> String {
         rendered
             .lines()
@@ -2992,6 +3001,85 @@ mod tests {
 
         let scrubbed = scrub_diagnostic_report_timestamps(&rendered);
         assert_diagnostic_report_snapshot("observability_diagnostics_happy_path", &scrubbed);
+    }
+
+    #[test]
+    fn structured_diagnostic_report_snapshot_v2_happy_and_degraded() {
+        let mut happy_state = RuntimeState::new();
+        let happy_root = happy_state.create_root_region(Budget::INFINITE);
+        let happy_task = insert_task(
+            &mut happy_state,
+            happy_root,
+            TaskState::Completed(Outcome::Ok(())),
+        );
+        let happy_diagnostics = Diagnostics::new(Arc::new(happy_state));
+        let happy_rendered = render_structured_diagnostic_report(
+            "happy_path",
+            "2026-04-20T22:00:00Z",
+            None,
+            Some(&happy_diagnostics.explain_task_blocked(happy_task)),
+            &[],
+        );
+        let happy_scrubbed = scrub_diagnostic_report_timestamps(&happy_rendered);
+
+        let mut degraded_state = RuntimeState::new();
+        let degraded_root = degraded_state.create_root_region(Budget::INFINITE);
+        let degraded_child = insert_child_region(&mut degraded_state, degraded_root);
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(5_000)));
+        degraded_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)));
+
+        let degraded_root_task = insert_task(&mut degraded_state, degraded_root, TaskState::Running);
+        degraded_state
+            .task_mut(degraded_root_task)
+            .expect("root task missing")
+            .total_polls = 9;
+        let degraded_child_task = insert_task(
+            &mut degraded_state,
+            degraded_child,
+            TaskState::CancelRequested {
+                reason: CancelReason::shutdown().with_message("node draining"),
+                cleanup_budget: Budget::new().with_poll_quota(16),
+            },
+        );
+
+        let _degraded_root_obligation = insert_obligation(
+            &mut degraded_state,
+            degraded_root,
+            degraded_root_task,
+            ObligationKind::Ack,
+            Time::from_millis(500),
+        );
+        let _degraded_child_obligation = insert_obligation(
+            &mut degraded_state,
+            degraded_child,
+            degraded_child_task,
+            ObligationKind::Lease,
+            Time::from_millis(750),
+        );
+
+        let degraded_diagnostics = Diagnostics::new(Arc::new(degraded_state));
+        let mut degraded_task = degraded_diagnostics.explain_task_blocked(degraded_child_task);
+        degraded_task
+            .details
+            .insert(0, "observed_at: 2026-04-20T22:00:05Z".to_string());
+        degraded_task
+            .recommendations
+            .push("Continue draining child region tasks before sealing shutdown.".to_string());
+        let degraded_leaks = degraded_diagnostics.find_leaked_obligations();
+        let degraded_rendered = render_structured_diagnostic_report(
+            "shutdown_drain",
+            "2026-04-20T22:00:05Z",
+            Some(&degraded_diagnostics.explain_region_open(degraded_root)),
+            Some(&degraded_task),
+            &degraded_leaks,
+        );
+        let degraded_scrubbed = scrub_diagnostic_report_timestamps(&degraded_rendered);
+
+        let rendered = render_structured_diagnostic_report_v2(&[
+            ("happy", &happy_scrubbed),
+            ("degraded", &degraded_scrubbed),
+        ]);
+        assert_diagnostic_report_snapshot("observability_diagnostics_structured_report_v2", &rendered);
     }
 
     #[test]
