@@ -1158,7 +1158,6 @@ mod tests {
             flag: Arc<AtomicBool>,
         }
 
-        use std::task::Wake;
         impl Wake for FlagWaker {
             fn wake(self: Arc<Self>) {
                 self.flag.store(true, Ordering::SeqCst);

@@ -1637,7 +1637,6 @@ mod tests {
         });
     }
 
-    #[derive(Debug)]
     #[test]
     fn cancelled_send_does_not_flush_frame_later() {
         future::block_on(async {

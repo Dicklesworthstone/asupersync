@@ -4308,7 +4308,6 @@ impl ThreeLaneLocalWaker {
     }
 }
 
-use std::task::Wake;
 impl Wake for ThreeLaneLocalWaker {
     #[inline]
     fn wake(self: Arc<Self>) {
@@ -4361,7 +4360,6 @@ impl CancelLaneWaker {
     }
 }
 
-use std::task::Wake;
 impl Wake for CancelLaneWaker {
     #[inline]
     fn wake(self: Arc<Self>) {
@@ -4423,7 +4421,6 @@ impl ThreeLaneLocalCancelWaker {
     }
 }
 
-use std::task::Wake;
 impl Wake for ThreeLaneLocalCancelWaker {
     #[inline]
     fn wake(self: Arc<Self>) {
@@ -4964,7 +4961,6 @@ mod tests {
 
         // Waker that sets a flag when woken
         struct TestWaker(AtomicBool);
-        use std::task::Wake;
         impl Wake for TestWaker {
             fn wake(self: Arc<Self>) {
                 self.0.store(true, Ordering::SeqCst);

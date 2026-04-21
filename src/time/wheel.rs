@@ -1333,7 +1333,6 @@ mod tests {
         counter: Arc<AtomicU64>,
     }
 
-    use std::task::Wake;
     impl Wake for CounterWaker {
         fn wake(self: Arc<Self>) {
             self.counter.fetch_add(1, Ordering::SeqCst);

@@ -1217,7 +1217,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
     #[test]
     fn writer_permit_release_wakes_first_waiter() {
         future::block_on(async {

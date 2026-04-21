@@ -888,7 +888,6 @@ mod tests {
         count: AtomicUsize,
     }
 
-    use std::task::Wake;
     impl Wake for FlagWaker {
         fn wake(self: Arc<Self>) {
             self.flag.store(true, Ordering::SeqCst);

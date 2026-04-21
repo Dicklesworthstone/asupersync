@@ -367,7 +367,6 @@ impl Wake for CountingWaker {
         wake_order: Arc<Mutex<Vec<usize>>>,
     }
 
-    use std::task::Wake;
 impl Wake for RecordingWaker {
         fn wake(self: Arc<Self>) {
             self.wake_order

@@ -1147,7 +1147,6 @@ mod tests {
         });
     }
 
-    #[derive(Debug)]
     #[test]
     fn send_ignores_cancel_while_masked() {
         let accept = AcceptResponse {
