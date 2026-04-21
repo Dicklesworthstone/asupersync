@@ -4,7 +4,7 @@
 //! system, including bug injection, property-based testing, performance measurement,
 //! and integration testing.
 
-#![allow(unused_imports, unused_variables)] // Temporary for development
+
 
 use super::protocol_state_machines::{
     CancelProtocolValidator, CancelStateMachine, ObligationContext, ObligationEvent,
