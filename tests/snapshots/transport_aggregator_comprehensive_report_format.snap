@@ -1,0 +1,74 @@
+---
+source: src/transport/aggregator.rs
+expression: report
+---
+=== Transport Aggregator Report ===
+
+[path_set_summary]
+path_count: 3
+usable_count: 3
+total_received: 26526
+total_lost: 1044
+total_duplicates: 102
+aggregate_bandwidth_bps: 1110000000
+loss_rate: 0.0379
+
+[individual_paths]
+path_0:
+  id: Path(0)
+  state: Active
+  is_usable: true
+  symbols_received: 15420
+  symbols_lost: 18
+  duplicates_received: 23
+  characteristics:
+    latency_ms: 15
+    bandwidth_bps: 1000000000
+    loss_rate: 0.001
+    jitter_ms: 2
+    is_primary: true
+    priority: 1
+
+path_1:
+  id: Path(1)
+  state: Active
+  is_usable: true
+  symbols_received: 8765
+  symbols_lost: 134
+  duplicates_received: 67
+  characteristics:
+    latency_ms: 45
+    bandwidth_bps: 100000000
+    loss_rate: 0.015
+    jitter_ms: 12
+    is_primary: false
+    priority: 2
+
+path_2:
+  id: Path(2)
+  state: Degraded
+  is_usable: true
+  symbols_received: 2341
+  symbols_lost: 892
+  duplicates_received: 12
+  characteristics:
+    latency_ms: 600
+    bandwidth_bps: 10000000
+    loss_rate: 0.050
+    jitter_ms: 50
+    is_primary: false
+    priority: 3
+
+[aggregator_stats]
+total_processed: 0
+deduplicator:
+  objects_tracked: 0
+  symbols_tracked: 0
+  duplicates_detected: 0
+  unique_symbols: 0
+reorderer:
+  objects_tracked: 0
+  symbols_buffered: 0
+  in_order_deliveries: 0
+  reordered_deliveries: 0
+  timeout_deliveries: 0

@@ -3948,4 +3948,158 @@ mod tests {
         );
         crate::test_complete!("quality_score_zero_bandwidth_is_finite");
     }
+
+    #[test]
+    fn transport_aggregator_comprehensive_report_format_golden_snapshot() {
+        init_test("transport_aggregator_comprehensive_report_format_golden_snapshot");
+
+        // Create a comprehensive aggregator scenario for golden snapshot testing
+        let path_set = PathSet::new(PathSelectionPolicy::UseAll);
+        let aggregator_config = AggregatorConfig::default();
+        let aggregator = MultipathAggregator::new(aggregator_config, path_set);
+
+        // Setup realistic paths with varying characteristics
+        let primary_path = aggregator.path_set().create_path(
+            "primary_fiber",
+            "fiber-endpoint-1",
+            PathCharacteristics {
+                latency_ms: 15,
+                bandwidth_bps: 1_000_000_000, // 1 Gbps
+                loss_rate: 0.001,
+                jitter_ms: 2,
+                is_primary: true,
+                priority: 1,
+            },
+        );
+
+        let backup_path = aggregator.path_set().create_path(
+            "backup_wireless",
+            "wireless-endpoint-2",
+            PathCharacteristics {
+                latency_ms: 45,
+                bandwidth_bps: 100_000_000, // 100 Mbps
+                loss_rate: 0.015,
+                jitter_ms: 12,
+                is_primary: false,
+                priority: 2,
+            },
+        );
+
+        let degraded_path = aggregator.path_set().create_path(
+            "degraded_satellite",
+            "satellite-endpoint-3",
+            PathCharacteristics {
+                latency_ms: 600,
+                bandwidth_bps: 10_000_000, // 10 Mbps
+                loss_rate: 0.05,
+                jitter_ms: 50,
+                is_primary: false,
+                priority: 3,
+            },
+        );
+
+        // Simulate some activity on the paths
+        if let Some(path) = aggregator.path_set().get(primary_path) {
+            path.symbols_received.store(15420, Ordering::Relaxed);
+            path.symbols_lost.store(18, Ordering::Relaxed);
+            path.duplicates_received.store(23, Ordering::Relaxed);
+            path.state.store(PathState::Active as u8, Ordering::Relaxed);
+        }
+
+        if let Some(path) = aggregator.path_set().get(backup_path) {
+            path.symbols_received.store(8765, Ordering::Relaxed);
+            path.symbols_lost.store(134, Ordering::Relaxed);
+            path.duplicates_received.store(67, Ordering::Relaxed);
+            path.state.store(PathState::Active as u8, Ordering::Relaxed);
+        }
+
+        if let Some(path) = aggregator.path_set().get(degraded_path) {
+            path.symbols_received.store(2341, Ordering::Relaxed);
+            path.symbols_lost.store(892, Ordering::Relaxed);
+            path.duplicates_received.store(12, Ordering::Relaxed);
+            path.state.store(PathState::Degraded as u8, Ordering::Relaxed);
+        }
+
+        // Generate comprehensive aggregation report
+        let report = generate_aggregation_report(&aggregator);
+
+        // Create golden snapshot for aggregation report format
+        insta::with_settings!({
+            snapshot_path => "../tests/snapshots",
+            prepend_module_to_snapshot => false,
+        }, {
+            insta::assert_snapshot!("transport_aggregator_comprehensive_report_format", report);
+        });
+
+        crate::test_complete!("transport_aggregator_comprehensive_report_format_golden_snapshot");
+    }
+
+    /// Generate a structured aggregation report for golden snapshot testing
+    fn generate_aggregation_report(aggregator: &MultipathAggregator) -> String {
+        let mut report = String::new();
+
+        report.push_str("=== Transport Aggregator Report ===\n\n");
+
+        // Path Set Statistics
+        let path_stats = aggregator.path_set().stats();
+        report.push_str("[path_set_summary]\n");
+        report.push_str(&format!("path_count: {}\n", path_stats.path_count));
+        report.push_str(&format!("usable_count: {}\n", path_stats.usable_count));
+        report.push_str(&format!("total_received: {}\n", path_stats.total_received));
+        report.push_str(&format!("total_lost: {}\n", path_stats.total_lost));
+        report.push_str(&format!("total_duplicates: {}\n", path_stats.total_duplicates));
+        report.push_str(&format!("aggregate_bandwidth_bps: {}\n", path_stats.aggregate_bandwidth_bps));
+        report.push_str(&format!("loss_rate: {:.4}\n",
+            if path_stats.total_received + path_stats.total_lost > 0 {
+                path_stats.total_lost as f64 / (path_stats.total_received + path_stats.total_lost) as f64
+            } else { 0.0 }
+        ));
+        report.push_str("\n");
+
+        // Individual Path Details
+        report.push_str("[individual_paths]\n");
+        for path_id in 0..path_stats.path_count {
+            let pid = PathId::new(path_id as u64);
+            if let Some(path) = aggregator.path_set().get(pid) {
+                let state = PathState::from_u8(path.state.load(Ordering::Relaxed));
+                let received = path.symbols_received.load(Ordering::Relaxed);
+                let lost = path.symbols_lost.load(Ordering::Relaxed);
+                let duplicates = path.duplicates_received.load(Ordering::Relaxed);
+
+                report.push_str(&format!("path_{}:\n", path_id));
+                report.push_str(&format!("  id: Path({})\n", path_id));
+                report.push_str(&format!("  state: {:?}\n", state));
+                report.push_str(&format!("  is_usable: {}\n", state.is_usable()));
+                report.push_str(&format!("  symbols_received: {}\n", received));
+                report.push_str(&format!("  symbols_lost: {}\n", lost));
+                report.push_str(&format!("  duplicates_received: {}\n", duplicates));
+                report.push_str(&format!("  characteristics:\n"));
+                report.push_str(&format!("    latency_ms: {}\n", path.characteristics.latency_ms));
+                report.push_str(&format!("    bandwidth_bps: {}\n", path.characteristics.bandwidth_bps));
+                report.push_str(&format!("    loss_rate: {:.3}\n", path.characteristics.loss_rate));
+                report.push_str(&format!("    jitter_ms: {}\n", path.characteristics.jitter_ms));
+                report.push_str(&format!("    is_primary: {}\n", path.characteristics.is_primary));
+                report.push_str(&format!("    priority: {}\n", path.characteristics.priority));
+                report.push_str("\n");
+            }
+        }
+
+        // Aggregator Statistics
+        let agg_stats = aggregator.stats();
+        report.push_str("[aggregator_stats]\n");
+        report.push_str(&format!("total_processed: {}\n", agg_stats.total_processed));
+        report.push_str("deduplicator:\n");
+        report.push_str(&format!("  objects_tracked: {}\n", agg_stats.dedup.objects_tracked));
+        report.push_str(&format!("  symbols_tracked: {}\n", agg_stats.dedup.symbols_tracked));
+        report.push_str(&format!("  duplicates_detected: {}\n", agg_stats.dedup.duplicates_detected));
+        report.push_str(&format!("  unique_symbols: {}\n", agg_stats.dedup.unique_symbols));
+        report.push_str("reorderer:\n");
+        report.push_str(&format!("  objects_tracked: {}\n", agg_stats.reorder.objects_tracked));
+        report.push_str(&format!("  symbols_buffered: {}\n", agg_stats.reorder.symbols_buffered));
+        report.push_str(&format!("  in_order_deliveries: {}\n", agg_stats.reorder.in_order_deliveries));
+        report.push_str(&format!("  reordered_deliveries: {}\n", agg_stats.reorder.reordered_deliveries));
+        report.push_str(&format!("  timeout_deliveries: {}\n", agg_stats.reorder.timeout_deliveries));
+
+        report.trim_end().to_string()
+    }
 }
