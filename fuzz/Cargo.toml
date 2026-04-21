@@ -1216,6 +1216,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "transport_aggregator"
+path = "fuzz_targets/transport_aggregator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "websocket_close"
 path = "fuzz_targets/websocket_close.rs"
 test = false
