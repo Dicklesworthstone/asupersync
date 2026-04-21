@@ -3434,6 +3434,77 @@ mod tests {
     }
 
     #[test]
+    fn systematic_index_table_sources_only_decode_succeeds_across_representative_k_values() {
+        let symbol_size = 8;
+        let representative_k_values = [1usize, 2, 3, 4, 5, 8, 16, 31, 32, 33, 63, 64];
+
+        for &k in &representative_k_values {
+            let seed = 10_000u64 + k as u64;
+            let source = make_source_data(k, symbol_size);
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+            let mut received = decoder.constraint_symbols();
+            received.extend(make_received_source(&decoder, &source));
+
+            let decoded = decoder
+                .decode(&received)
+                .unwrap_or_else(|_| panic!("sources-only decode must succeed for k={k}"));
+
+            assert_eq!(
+                decoded.source, source,
+                "systematic-table decode mismatch for k={k}"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_repair_symbols_do_not_reduce_decode_success_rate() {
+        let k = 12;
+        let symbol_size = 16;
+        let seed = 0x5EED_0204u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut baseline = decoder.constraint_symbols();
+        for esi in (k as u32)..(k as u32 + l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            baseline.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let baseline_decoded = decoder
+            .decode(&baseline)
+            .expect("repair-only baseline decode must succeed");
+
+        let mut with_extra_repair = baseline.clone();
+        for esi in (k as u32 + l as u32)..(k as u32 + l as u32 + 4) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            with_extra_repair.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let extra_decoded = decoder
+            .decode(&with_extra_repair)
+            .expect("adding valid repair symbols must not break decode success");
+
+        assert_eq!(
+            extra_decoded.source, baseline_decoded.source,
+            "extra repair symbols must not change recovered source output"
+        );
+
+        let wavefront_extra = decoder
+            .decode_wavefront(&with_extra_repair, 3)
+            .expect("wavefront decode must remain successful with extra repair symbols");
+        assert_eq!(
+            wavefront_extra.source, baseline_decoded.source,
+            "wavefront decode must recover the same output after extra repair symbols are added"
+        );
+    }
+
+    #[test]
     fn decode_rejects_source_esi_in_padded_range() {
         let k = 50;
         let symbol_size = 32;
