@@ -529,6 +529,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_decoder_symbol_set"
+path = "fuzz_targets/raptorq_decoder_symbol_set.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "source_payload_hash_verification"
 path = "fuzz_targets/source_payload_hash_verification.rs"
 test = false
