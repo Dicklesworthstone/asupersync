@@ -196,6 +196,8 @@ impl ServiceHandler for ReflectionService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insta::assert_json_snapshot;
+    use serde_json::{Value, json};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -217,6 +219,48 @@ mod tests {
         fn method_names(&self) -> Vec<&str> {
             vec!["Ping", "Watch"]
         }
+    }
+
+    struct EnumShapeService;
+
+    impl ServiceHandler for EnumShapeService {
+        fn descriptor(&self) -> &ServiceDescriptor {
+            static METHODS: &[MethodDescriptor] = &[
+                MethodDescriptor::unary("Unary", "/pkg.EnumShape/Unary"),
+                MethodDescriptor::server_streaming("ServerStream", "/pkg.EnumShape/ServerStream"),
+                MethodDescriptor::client_streaming("ClientStream", "/pkg.EnumShape/ClientStream"),
+                MethodDescriptor::bidi_streaming("BidiStream", "/pkg.EnumShape/BidiStream"),
+            ];
+            static DESC: ServiceDescriptor =
+                ServiceDescriptor::new("EnumShape", "pkg", METHODS);
+            &DESC
+        }
+
+        fn method_names(&self) -> Vec<&str> {
+            vec!["Unary", "ServerStream", "ClientStream", "BidiStream"]
+        }
+    }
+
+    fn method_kind(method: &ReflectedMethod) -> &'static str {
+        match (method.client_streaming, method.server_streaming) {
+            (false, false) => "unary",
+            (false, true) => "server_streaming",
+            (true, false) => "client_streaming",
+            (true, true) => "bidi_streaming",
+        }
+    }
+
+    fn reflected_service_snapshot(service: &ReflectedService) -> Value {
+        json!({
+            "service": service.name,
+            "methods": service.methods.iter().map(|method| {
+                json!({
+                    "name": method.name,
+                    "path": method.path,
+                    "kind": method_kind(method),
+                })
+            }).collect::<Vec<_>>(),
+        })
     }
 
     #[test]
@@ -330,5 +374,23 @@ mod tests {
             methods
         );
         crate::test_complete!("reflection_service_traits");
+    }
+
+    #[test]
+    fn reflection_descriptor_enum_output_snapshot() {
+        init_test("reflection_descriptor_enum_output_snapshot");
+        let reflection = ReflectionService::new();
+        let enum_shape = EnumShapeService;
+        reflection.register_handler(&enum_shape);
+
+        let described = reflection
+            .describe_service("pkg.EnumShape")
+            .expect("enum-shape service exists");
+
+        assert_json_snapshot!(
+            "grpc_reflection_descriptor_enum_output",
+            reflected_service_snapshot(&described)
+        );
+        crate::test_complete!("reflection_descriptor_enum_output_snapshot");
     }
 }

@@ -1,0 +1,29 @@
+---
+source: src/grpc/reflection.rs
+expression: reflected_service_snapshot(&described)
+---
+{
+  "methods": [
+    {
+      "kind": "unary",
+      "name": "Unary",
+      "path": "/pkg.EnumShape/Unary"
+    },
+    {
+      "kind": "server_streaming",
+      "name": "ServerStream",
+      "path": "/pkg.EnumShape/ServerStream"
+    },
+    {
+      "kind": "client_streaming",
+      "name": "ClientStream",
+      "path": "/pkg.EnumShape/ClientStream"
+    },
+    {
+      "kind": "bidi_streaming",
+      "name": "BidiStream",
+      "path": "/pkg.EnumShape/BidiStream"
+    }
+  ],
+  "service": "pkg.EnumShape"
+}
