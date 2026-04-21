@@ -201,6 +201,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "gf256_scalar_arithmetic"
+path = "fuzz_targets/gf256_scalar_arithmetic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "grpc_server"
 path = "fuzz_targets/grpc_server.rs"
 test = false
