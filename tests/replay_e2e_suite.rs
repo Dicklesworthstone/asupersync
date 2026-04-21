@@ -16,6 +16,7 @@ mod common;
 use asupersync::lab::{DualRunHarness, FuzzConfig, FuzzHarness, LabConfig, LabRuntime};
 use asupersync::runtime::yield_now;
 use asupersync::trace::format::{GoldenTraceConfig, GoldenTraceFixture};
+use asupersync::trace::replay::{CompactTaskId, TraceMetadata};
 use asupersync::trace::{
     DiagnosticConfig, ReplayEvent, ReplayTrace, StreamingReplayer, TraceEvent, TraceReader,
     TraceReplayer, browser_trace_log_fields, browser_trace_schema_v1, diagnose_divergence,
@@ -25,6 +26,7 @@ use asupersync::trace::{
 use asupersync::types::Budget;
 use asupersync::util::DetRng;
 use common::*;
+use insta::assert_snapshot;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -115,6 +117,40 @@ fn write_replay_artifact_text(name: &str, value: &str) {
     } else {
         tracing::info!(path = %path.display(), "replay artifact text written");
     }
+}
+
+fn render_streaming_replay_ndjson(
+    metadata: &TraceMetadata,
+    events: &[ReplayEvent],
+) -> Result<String, Box<dyn std::error::Error>> {
+    let temp = NamedTempFile::new()?;
+    let path = temp.path();
+    write_trace(path, metadata, events)?;
+
+    let mut streamer = StreamingReplayer::open(path)?;
+    let mut lines = Vec::with_capacity(events.len() + 1);
+    lines.push(serde_json::to_string(&serde_json::json!({
+        "kind": "metadata",
+        "seed": streamer.metadata().seed,
+        "version": streamer.metadata().version,
+        "recorded_at": streamer.metadata().recorded_at,
+        "config_hash": streamer.metadata().config_hash,
+        "description": streamer.metadata().description,
+        "total_events": streamer.total_events(),
+    }))?);
+
+    while let Some(event) = streamer.next_event()? {
+        let progress = streamer.progress();
+        lines.push(serde_json::to_string(&serde_json::json!({
+            "kind": "event",
+            "events_processed": progress.events_processed,
+            "total_events": progress.total_events,
+            "remaining": progress.remaining(),
+            "event": event,
+        }))?);
+    }
+
+    Ok(lines.join("\n") + "\n")
 }
 
 fn dual_run_happy_semantics() -> asupersync::lab::NormalizedSemantics {
@@ -520,6 +556,35 @@ fn streaming_replay_with_progress() {
         "streaming_replay_with_progress",
         events = event_count,
         consumed = consumed
+    );
+}
+
+#[test]
+fn streaming_replay_event_ndjson_format_scrubbed() {
+    init_test("streaming_replay_event_ndjson_format_scrubbed");
+
+    let metadata = TraceMetadata::new(0x51A7)
+        .with_config_hash(0xABCD)
+        .with_description("streaming-ndjson");
+    let events = vec![
+        ReplayEvent::RngSeed { seed: 0x51A7 },
+        ReplayEvent::TaskScheduled {
+            task: CompactTaskId(0x0000_0001_0000_0002),
+            at_tick: 7,
+        },
+        ReplayEvent::TaskCompleted {
+            task: CompactTaskId(0x0000_0001_0000_0002),
+            outcome: 0,
+        },
+    ];
+
+    let rendered =
+        render_streaming_replay_ndjson(&metadata, &events).expect("render streaming ndjson");
+
+    assert_snapshot!("streaming_replay_event_ndjson_format_scrubbed", rendered);
+    test_complete!(
+        "streaming_replay_event_ndjson_format_scrubbed",
+        events = events.len()
     );
 }
 

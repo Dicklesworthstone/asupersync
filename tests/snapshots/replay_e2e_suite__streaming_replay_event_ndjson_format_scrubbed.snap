@@ -1,0 +1,8 @@
+---
+source: tests/replay_e2e_suite.rs
+expression: rendered
+---
+{"config_hash":43981,"description":"streaming-ndjson","kind":"metadata","recorded_at":0,"seed":20903,"total_events":3,"version":1}
+{"event":{"seed":20903,"type":"RngSeed"},"events_processed":1,"kind":"event","remaining":2,"total_events":3}
+{"event":{"at_tick":7,"task":4294967298,"type":"TaskScheduled"},"events_processed":2,"kind":"event","remaining":1,"total_events":3}
+{"event":{"outcome":0,"task":4294967298,"type":"TaskCompleted"},"events_processed":3,"kind":"event","remaining":0,"total_events":3}
