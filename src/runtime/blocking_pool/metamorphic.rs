@@ -296,7 +296,7 @@ mod tests {
         }
 
         let assignments = thread_assignments.lock().unwrap();
-        let task_counts: Vec<usize> = assignments.values().cloned().collect();
+        let task_counts: Vec<usize> = assignments.values().copied().collect();
 
         assert!(
             !task_counts.is_empty(),
@@ -396,6 +396,10 @@ mod tests {
             mixed_priority_results,
             vec![0, 1, 2, 3, 4],
             "All tasks should complete regardless of priority"
+        );
+    }
+}
+d complete regardless of priority"
         );
     }
 }

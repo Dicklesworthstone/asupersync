@@ -1800,11 +1800,7 @@ mod tests {
                 }
 
                 let actual = steal_distribution.get(&target_worker).unwrap_or(&0);
-                let deviation = if *actual > expected_per_target {
-                    *actual - expected_per_target
-                } else {
-                    expected_per_target - *actual
-                };
+                let deviation = (*actual).abs_diff(expected_per_target);
 
                 // Allow 40% deviation for small sample sizes and randomness
                 let max_deviation = expected_per_target * 4 / 10;
@@ -2024,5 +2020,8 @@ mod tests {
             total_visits,
             dominance_ratio * 100.0
         );
+    }
+}
+     );
     }
 }

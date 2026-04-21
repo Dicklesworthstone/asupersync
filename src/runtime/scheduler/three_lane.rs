@@ -4676,7 +4676,7 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
 
-        let mut workers = scheduler.take_workers();
+        let workers = scheduler.take_workers();
         assert_eq!(workers.len(), 2);
 
         // Spawn threads for workers
@@ -4945,7 +4945,7 @@ mod tests {
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
 
         // Workers should not have timer driver
-        let mut workers = scheduler.take_workers();
+        let workers = scheduler.take_workers();
         assert!(workers[0].timer_driver.is_none());
         assert!(workers[1].timer_driver.is_none());
 
@@ -8872,7 +8872,7 @@ mod tests {
 
             // Sample queue state every 20 tasks
             if i % 20 == 0 {
-                let mut workers = scheduler.take_workers();
+                let workers = scheduler.take_workers();
                 if let Some(worker) = workers.first() {
                     // Check current ready queue size
                     let ready_queue_size = {
@@ -8889,7 +8889,7 @@ mod tests {
                         ..Default::default()
                     };
 
-                    let suggestion = governor.suggest(&state_snapshot);
+                    let _suggestion = governor.suggest(&state_snapshot);
 
                     if ready_queue_size > 150 {
                         // Governor should suggest backpressure for oversized queues
@@ -8956,7 +8956,7 @@ mod tests {
             let selected = 0;
 
             // Reward function: arm 2 gets 0.6 reward, others get 0.4
-            let reward = if selected == 2 { 0.6 } else { 0.4 };
+            let _reward = if selected == 2 { 0.6 } else { 0.4 };
 
             // Record weights every 50 steps
             if step % 50 == 49 {
@@ -9164,7 +9164,7 @@ mod tests {
             let final_weights: [f64; 5] = worker.adaptive_cancel_policy.as_ref().unwrap().weights;
             for (arm_idx, &weight) in final_weights.iter().enumerate() {
                 assert!(
-                    weight >= 1e-30 && weight <= 1e30,
+                    (1e-30..=1e30).contains(&weight),
                     "Worker {} arm {} weight {:.2e} out of bounds [1e-30, 1e30]",
                     worker_idx,
                     arm_idx,

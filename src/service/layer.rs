@@ -1092,6 +1092,7 @@ mod tests {
             let result = execute_service_call(service, test_value);
 
             // Manually compute expected result: ((((value + 1) * 2) + 3) + 4) * 1 + 0
+            #[allow(clippy::identity_op)]
             let expected = ((((test_value + 1) * 2) + 3) + 4) * 1 + 0;
             assert_eq!(
                 result, expected,
@@ -1115,6 +1116,7 @@ mod tests {
             let reversed_result = execute_service_call(reversed_service, test_value);
 
             // Reversed: ((((value + 0) * 1) + 4) + 3) * 2 + 1
+            #[allow(clippy::identity_op)]
             let reversed_expected = ((((test_value + 0) * 1) + 4) + 3) * 2 + 1;
             assert_eq!(
                 reversed_result, reversed_expected,
