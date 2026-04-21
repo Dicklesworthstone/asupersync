@@ -1129,6 +1129,10 @@ mod tests {
                 target: "LabRuntimeTarget",
                 tests: vec![
                     ConformanceManifestTest {
+                        name: "test_lab_runtime_target_advance_time",
+                        invariant: "virtual time advances by the requested duration without wall-clock drift",
+                    },
+                    ConformanceManifestTest {
                         name: "lab_runtime_target_spawn_registers_real_task_handle",
                         invariant: "spawned conformance tasks resolve from pending handles to registered task ids",
                     },
@@ -1146,6 +1150,10 @@ mod tests {
                 component: "config",
                 target: "TestConfig",
                 tests: vec![
+                    ConformanceManifestTest {
+                        name: "test_config_default",
+                        invariant: "default config preserves the canonical timeout, seed, tracing, and step budget",
+                    },
                     ConformanceManifestTest {
                         name: "test_config_with_budget",
                         invariant: "root budget overrides are preserved in the default config chain",

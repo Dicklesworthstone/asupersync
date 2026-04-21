@@ -10,6 +10,8 @@ components:
     tests:
       - name: test_config_builder
         invariant: builder setters preserve explicit timeout, seed, tracing, and max-step overrides
+      - name: test_config_default
+        invariant: default config preserves the canonical timeout, seed, tracing, and step budget
       - name: test_config_with_budget
         invariant: root budget overrides are preserved in the default config chain
       - name: test_config_without_seed
@@ -35,5 +37,7 @@ components:
         invariant: region registration resolves before cancellation completes closure
       - name: lab_runtime_target_spawn_registers_real_task_handle
         invariant: spawned conformance tasks resolve from pending handles to registered task ids
+      - name: test_lab_runtime_target_advance_time
+        invariant: virtual time advances by the requested duration without wall-clock drift
       - name: test_lab_runtime_target_create
         invariant: runtime creation forwards the requested deterministic seed
