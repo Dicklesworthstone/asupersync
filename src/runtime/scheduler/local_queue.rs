@@ -388,7 +388,7 @@ impl Stealer {
 mod tests {
     use super::*;
     use crate::types::TaskId;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
     use std::thread;
@@ -404,6 +404,68 @@ mod tests {
     fn queue_with_task_table(max_task_id: u32) -> LocalQueue {
         let tasks = LocalQueue::test_task_table(max_task_id);
         LocalQueue::new_with_task_table(tasks)
+    }
+
+    fn run_repeated_steal_batch_schedule(layout: &[(u32, bool)]) -> (Vec<Vec<u32>>, Vec<u32>) {
+        let max_task_id = layout.iter().map(|(id, _)| *id).max().unwrap_or(0);
+        let state = LocalQueue::test_state(max_task_id);
+        let src = LocalQueue::new(Arc::clone(&state));
+
+        {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for &(id, is_local) in layout {
+                if is_local {
+                    let record = guard.task_mut(task(id)).expect("task record missing");
+                    record.mark_local();
+                }
+            }
+        }
+
+        for &(id, _) in layout {
+            src.push(task(id));
+        }
+
+        let mut steal_rounds = Vec::new();
+        loop {
+            let dest = LocalQueue::new(Arc::clone(&state));
+            if !src.stealer().steal_batch(&dest) {
+                break;
+            }
+            steal_rounds.push(
+                dest.snapshot_tasks()
+                    .into_iter()
+                    .map(|task_id| task_id.0.index())
+                    .collect(),
+            );
+        }
+
+        let mut owner_remaining = Vec::new();
+        while let Some(task_id) = src.pop() {
+            owner_remaining.push(task_id.0.index());
+        }
+
+        (steal_rounds, owner_remaining)
+    }
+
+    fn normalize_task_ids(task_ids: Vec<u32>, layout: &[(u32, bool)]) -> Vec<usize> {
+        let order: HashMap<u32, usize> = layout
+            .iter()
+            .enumerate()
+            .map(|(idx, (task_id, _))| (*task_id, idx))
+            .collect();
+        task_ids
+            .into_iter()
+            .map(|task_id| order[&task_id])
+            .collect()
+    }
+
+    fn normalize_rounds(rounds: Vec<Vec<u32>>, layout: &[(u32, bool)]) -> Vec<Vec<usize>> {
+        rounds
+            .into_iter()
+            .map(|round| normalize_task_ids(round, layout))
+            .collect()
     }
 
     #[test]
@@ -857,6 +919,49 @@ mod tests {
             assert_eq!(src.pop(), Some(task(expected)));
         }
         assert_eq!(src.pop(), None);
+    }
+
+    #[test]
+    fn mr_task_id_relabeling_preserves_repeated_steal_batch_schedule() {
+        let base_layout = [
+            (0, true),
+            (1, false),
+            (2, false),
+            (3, true),
+            (4, false),
+            (5, false),
+            (6, true),
+            (7, false),
+        ];
+        let relabeled_layout = [
+            (100, true),
+            (101, false),
+            (102, false),
+            (103, true),
+            (104, false),
+            (105, false),
+            (106, true),
+            (107, false),
+        ];
+
+        let (base_rounds, base_owner_remaining) = run_repeated_steal_batch_schedule(&base_layout);
+        let (relabeled_rounds, relabeled_owner_remaining) =
+            run_repeated_steal_batch_schedule(&relabeled_layout);
+
+        assert!(
+            base_rounds.len() >= 2,
+            "fixture should exercise multiple steal rounds"
+        );
+        assert_eq!(
+            normalize_rounds(base_rounds, &base_layout),
+            normalize_rounds(relabeled_rounds, &relabeled_layout),
+            "relabeling task IDs must not perturb repeated steal_batch partitions"
+        );
+        assert_eq!(
+            normalize_task_ids(base_owner_remaining, &base_layout),
+            normalize_task_ids(relabeled_owner_remaining, &relabeled_layout),
+            "relabeling task IDs must not perturb owner-visible remaining order"
+        );
     }
 
     #[test]
