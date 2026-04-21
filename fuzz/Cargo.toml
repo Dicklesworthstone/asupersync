@@ -1452,3 +1452,10 @@ path = "fuzz_targets/postgres_bind_execute_sync.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_connection_window_update"
+path = "fuzz_targets/h2_connection_window_update.rs"
+test = false
+doc = false
+bench = false
