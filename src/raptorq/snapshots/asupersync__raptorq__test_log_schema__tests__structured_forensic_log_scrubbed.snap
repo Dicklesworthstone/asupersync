@@ -1,0 +1,208 @@
+---
+source: src/raptorq/test_log_schema.rs
+expression: value
+---
+[
+  {
+    "case": "happy",
+    "report": {
+      "assertion_id": "E2E-HAPPY-PATH",
+      "config": {
+        "block_count": 1,
+        "block_k": 24,
+        "data_len": 1536,
+        "max_block_size": 1024,
+        "min_overhead": 0,
+        "repair_overhead": 1.25,
+        "seed": "[seed]",
+        "symbol_size": 64
+      },
+      "loss": {
+        "drop_count": 0,
+        "keep_count": 28,
+        "kind": "none"
+      },
+      "outcome": {
+        "decoded_bytes": 1536,
+        "success": true
+      },
+      "phase_markers": [
+        "encode",
+        "loss",
+        "decode",
+        "proof",
+        "report"
+      ],
+      "profile": "forensics",
+      "proof": {
+        "equations_used": 28,
+        "hash": 93485712014567123,
+        "inactivated": 1,
+        "outcome": "success",
+        "peeling_solved": 21,
+        "pivots": 2,
+        "received_repair": 4,
+        "received_source": 24,
+        "received_total": 28,
+        "row_ops": 19,
+        "summary_bytes": 248
+      },
+      "replay_id": "[replay_id]",
+      "repro_command": "[rch-command]",
+      "run_id": "[run_id]",
+      "scenario": "happy_path",
+      "scenario_id": "RQ-E2E-HAPPY-PATH",
+      "schema_version": "raptorq-e2e-log-v1",
+      "symbols": {
+        "generated": {
+          "repair": 4,
+          "source": 24,
+          "total": 28
+        },
+        "received": {
+          "repair": 4,
+          "source": 24,
+          "total": 28
+        }
+      },
+      "unit_sentinel": "raptorq::tests::forensics::happy_path"
+    }
+  },
+  {
+    "case": "decode_fail",
+    "report": {
+      "assertion_id": "E2E-DECODE-FAIL",
+      "config": {
+        "block_count": 1,
+        "block_k": 24,
+        "data_len": 1536,
+        "max_block_size": 1024,
+        "min_overhead": 0,
+        "repair_overhead": 1.5,
+        "seed": "[seed]",
+        "symbol_size": 64
+      },
+      "loss": {
+        "drop_count": 10,
+        "drop_per_mille": 375,
+        "keep_count": 18,
+        "kind": "random",
+        "seed": "[seed]"
+      },
+      "outcome": {
+        "decoded_bytes": 0,
+        "reject_reason": "decode_failure_insufficient_rank",
+        "success": false
+      },
+      "phase_markers": [
+        "encode",
+        "loss",
+        "decode",
+        "proof",
+        "report"
+      ],
+      "profile": "forensics",
+      "proof": {
+        "equations_used": 18,
+        "hash": 445120044551200,
+        "inactivated": 4,
+        "outcome": "decode_failure",
+        "peeling_solved": 9,
+        "pivots": 5,
+        "received_repair": 4,
+        "received_source": 14,
+        "received_total": 18,
+        "row_ops": 41,
+        "summary_bytes": 312
+      },
+      "replay_id": "[replay_id]",
+      "repro_command": "[rch-command]",
+      "run_id": "[run_id]",
+      "scenario": "decode_fail_random_loss",
+      "scenario_id": "RQ-E2E-DECODE-FAIL",
+      "schema_version": "raptorq-e2e-log-v1",
+      "symbols": {
+        "generated": {
+          "repair": 4,
+          "source": 24,
+          "total": 28
+        },
+        "received": {
+          "repair": 4,
+          "source": 14,
+          "total": 18
+        }
+      },
+      "unit_sentinel": "raptorq::tests::forensics::decode_fail_random_loss"
+    }
+  },
+  {
+    "case": "wavefront_corruption",
+    "report": {
+      "assertion_id": "E2E-WAVEFRONT-CORRUPTION",
+      "config": {
+        "block_count": 1,
+        "block_k": 24,
+        "data_len": 1536,
+        "max_block_size": 1024,
+        "min_overhead": 0,
+        "repair_overhead": 1.75,
+        "seed": "[seed]",
+        "symbol_size": 64
+      },
+      "loss": {
+        "burst_len": 4,
+        "burst_start": 7,
+        "drop_count": 6,
+        "keep_count": 22,
+        "kind": "burst",
+        "seed": "[seed]"
+      },
+      "outcome": {
+        "decoded_bytes": 640,
+        "reject_reason": "wavefront_corruption_detected",
+        "success": false
+      },
+      "phase_markers": [
+        "encode",
+        "loss",
+        "decode",
+        "proof",
+        "report"
+      ],
+      "profile": "forensics",
+      "proof": {
+        "equations_used": 22,
+        "hash": 7700553317700,
+        "inactivated": 6,
+        "outcome": "wavefront_corruption",
+        "peeling_solved": 11,
+        "pivots": 7,
+        "received_repair": 4,
+        "received_source": 18,
+        "received_total": 22,
+        "row_ops": 63,
+        "summary_bytes": 404
+      },
+      "replay_id": "[replay_id]",
+      "repro_command": "[rch-command]",
+      "run_id": "[run_id]",
+      "scenario": "wavefront_corruption",
+      "scenario_id": "RQ-E2E-WAVEFRONT-CORRUPTION",
+      "schema_version": "raptorq-e2e-log-v1",
+      "symbols": {
+        "generated": {
+          "repair": 4,
+          "source": 24,
+          "total": 28
+        },
+        "received": {
+          "repair": 4,
+          "source": 18,
+          "total": 22
+        }
+      },
+      "unit_sentinel": "raptorq::tests::forensics::wavefront_corruption"
+    }
+  }
+]

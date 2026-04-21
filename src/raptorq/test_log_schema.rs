@@ -1512,6 +1512,35 @@ mod tests {
         }
     }
 
+    fn scrub_forensic_e2e_log_value_for_snapshot_test(value: Value) -> Value {
+        match value {
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(key, value)| {
+                        let scrubbed = match key.as_str() {
+                            "replay_id" | "run_id" if value.is_string() => {
+                                Value::String(format!("[{key}]"))
+                            }
+                            "repro_command" if value.is_string() => {
+                                Value::String("[rch-command]".to_string())
+                            }
+                            "seed" if value.is_u64() => Value::String("[seed]".to_string()),
+                            _ => scrub_forensic_e2e_log_value_for_snapshot_test(value),
+                        };
+                        (key, scrubbed)
+                    })
+                    .collect(),
+            ),
+            Value::Array(items) => Value::Array(
+                items
+                    .into_iter()
+                    .map(scrub_forensic_e2e_log_value_for_snapshot_test)
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
     #[test]
     fn unit_log_entry_roundtrip() {
         let entry = UnitLogEntry::new(
@@ -2620,5 +2649,171 @@ mod tests {
     fn unit_log_with_governance_snapshot_scrubbed() {
         let value = scrub_log_value_for_snapshot_test(valid_unit_log_value_with_governance());
         insta::assert_json_snapshot!("unit_log_with_governance_scrubbed", value);
+    }
+
+    #[test]
+    fn structured_forensic_log_snapshot_scrubbed() {
+        let mut happy = valid_e2e_log_value();
+        happy["scenario"] = json!("happy_path");
+        happy["scenario_id"] = json!("RQ-E2E-HAPPY-PATH");
+        happy["replay_id"] = json!("replay:rq-e2e-happy-path-v1");
+        happy["profile"] = json!("forensics");
+        happy["unit_sentinel"] = json!("raptorq::tests::forensics::happy_path");
+        happy["assertion_id"] = json!("E2E-HAPPY-PATH");
+        happy["run_id"] = json!("run-happy-path-seed-20260421");
+        happy["repro_command"] = json!(
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::structured_forensic_log_snapshot_scrubbed -- --nocapture"
+        );
+        happy["config"]["seed"] = json!(20260421u64);
+        happy["config"]["block_k"] = json!(24);
+        happy["config"]["data_len"] = json!(1536);
+        happy["config"]["repair_overhead"] = json!(1.25);
+        happy["loss"] = json!({
+            "kind": "none",
+            "drop_count": 0,
+            "keep_count": 28
+        });
+        happy["symbols"] = json!({
+            "generated": {"total": 28, "source": 24, "repair": 4},
+            "received": {"total": 28, "source": 24, "repair": 4}
+        });
+        happy["outcome"] = json!({
+            "success": true,
+            "decoded_bytes": 1536
+        });
+        happy["proof"] = json!({
+            "hash": 93485712014567123u64,
+            "summary_bytes": 248,
+            "outcome": "success",
+            "received_total": 28,
+            "received_source": 24,
+            "received_repair": 4,
+            "peeling_solved": 21,
+            "inactivated": 1,
+            "pivots": 2,
+            "row_ops": 19,
+            "equations_used": 28
+        });
+
+        let mut decode_fail = valid_e2e_log_value();
+        decode_fail["scenario"] = json!("decode_fail_random_loss");
+        decode_fail["scenario_id"] = json!("RQ-E2E-DECODE-FAIL");
+        decode_fail["replay_id"] = json!("replay:rq-e2e-decode-fail-v1");
+        decode_fail["profile"] = json!("forensics");
+        decode_fail["unit_sentinel"] = json!("raptorq::tests::forensics::decode_fail_random_loss");
+        decode_fail["assertion_id"] = json!("E2E-DECODE-FAIL");
+        decode_fail["run_id"] = json!("run-decode-fail-seed-20260422");
+        decode_fail["repro_command"] = json!(
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::structured_forensic_log_snapshot_scrubbed -- --nocapture"
+        );
+        decode_fail["config"]["seed"] = json!(20260422u64);
+        decode_fail["config"]["block_k"] = json!(24);
+        decode_fail["config"]["data_len"] = json!(1536);
+        decode_fail["config"]["repair_overhead"] = json!(1.5);
+        decode_fail["loss"] = json!({
+            "kind": "random",
+            "seed": 881122u64,
+            "drop_per_mille": 375,
+            "drop_count": 10,
+            "keep_count": 18
+        });
+        decode_fail["symbols"] = json!({
+            "generated": {"total": 28, "source": 24, "repair": 4},
+            "received": {"total": 18, "source": 14, "repair": 4}
+        });
+        decode_fail["outcome"] = json!({
+            "success": false,
+            "reject_reason": "decode_failure_insufficient_rank",
+            "decoded_bytes": 0
+        });
+        decode_fail["proof"] = json!({
+            "hash": 445120044551200u64,
+            "summary_bytes": 312,
+            "outcome": "decode_failure",
+            "received_total": 18,
+            "received_source": 14,
+            "received_repair": 4,
+            "peeling_solved": 9,
+            "inactivated": 4,
+            "pivots": 5,
+            "row_ops": 41,
+            "equations_used": 18
+        });
+
+        let mut wavefront_corruption = valid_e2e_log_value();
+        wavefront_corruption["scenario"] = json!("wavefront_corruption");
+        wavefront_corruption["scenario_id"] = json!("RQ-E2E-WAVEFRONT-CORRUPTION");
+        wavefront_corruption["replay_id"] = json!("replay:rq-e2e-wavefront-corruption-v1");
+        wavefront_corruption["profile"] = json!("forensics");
+        wavefront_corruption["unit_sentinel"] =
+            json!("raptorq::tests::forensics::wavefront_corruption");
+        wavefront_corruption["assertion_id"] = json!("E2E-WAVEFRONT-CORRUPTION");
+        wavefront_corruption["run_id"] = json!("run-wavefront-corruption-seed-20260423");
+        wavefront_corruption["repro_command"] = json!(
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::structured_forensic_log_snapshot_scrubbed -- --nocapture"
+        );
+        wavefront_corruption["config"]["seed"] = json!(20260423u64);
+        wavefront_corruption["config"]["block_k"] = json!(24);
+        wavefront_corruption["config"]["data_len"] = json!(1536);
+        wavefront_corruption["config"]["repair_overhead"] = json!(1.75);
+        wavefront_corruption["loss"] = json!({
+            "kind": "burst",
+            "seed": 551199u64,
+            "drop_count": 6,
+            "keep_count": 22,
+            "burst_start": 7,
+            "burst_len": 4
+        });
+        wavefront_corruption["symbols"] = json!({
+            "generated": {"total": 28, "source": 24, "repair": 4},
+            "received": {"total": 22, "source": 18, "repair": 4}
+        });
+        wavefront_corruption["outcome"] = json!({
+            "success": false,
+            "reject_reason": "wavefront_corruption_detected",
+            "decoded_bytes": 640
+        });
+        wavefront_corruption["proof"] = json!({
+            "hash": 7700553317700u64,
+            "summary_bytes": 404,
+            "outcome": "wavefront_corruption",
+            "received_total": 22,
+            "received_source": 18,
+            "received_repair": 4,
+            "peeling_solved": 11,
+            "inactivated": 6,
+            "pivots": 7,
+            "row_ops": 63,
+            "equations_used": 22
+        });
+
+        for (name, value) in [
+            ("happy", &happy),
+            ("decode_fail", &decode_fail),
+            ("wavefront_corruption", &wavefront_corruption),
+        ] {
+            let violations = validate_e2e_log_json(&value.to_string());
+            assert!(
+                violations.is_empty(),
+                "{name} forensic log should satisfy schema contract: {violations:?}"
+            );
+        }
+
+        let value = json!([
+            {
+                "case": "happy",
+                "report": scrub_forensic_e2e_log_value_for_snapshot_test(happy),
+            },
+            {
+                "case": "decode_fail",
+                "report": scrub_forensic_e2e_log_value_for_snapshot_test(decode_fail),
+            },
+            {
+                "case": "wavefront_corruption",
+                "report": scrub_forensic_e2e_log_value_for_snapshot_test(wavefront_corruption),
+            }
+        ]);
+
+        insta::assert_json_snapshot!("structured_forensic_log_scrubbed", value);
     }
 }
