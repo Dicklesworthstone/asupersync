@@ -1061,6 +1061,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "key_derivation_context"
+path = "fuzz_targets/key_derivation_context.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fs_uring"
 path = "fuzz_targets/fs_uring.rs"
 test = false
