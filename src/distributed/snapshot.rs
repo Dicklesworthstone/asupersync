@@ -592,6 +592,8 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
 
     fn create_test_snapshot() -> RegionSnapshot {
         RegionSnapshot {
@@ -762,6 +764,171 @@ mod tests {
         out
     }
 
+    fn task_key(task_id: TaskId) -> (u32, u32) {
+        let arena = task_id.0;
+        (arena.index(), arena.generation())
+    }
+
+    fn region_key(region_id: RegionId) -> (u32, u32) {
+        let arena = region_id.0;
+        (arena.index(), arena.generation())
+    }
+
+    fn max_region_state(left: RegionState, right: RegionState) -> RegionState {
+        if left.as_u8() >= right.as_u8() {
+            left
+        } else {
+            right
+        }
+    }
+
+    fn max_task_state(left: TaskState, right: TaskState) -> TaskState {
+        if left.as_u8() >= right.as_u8() {
+            left
+        } else {
+            right
+        }
+    }
+
+    fn merge_task_snapshots(left: &TaskSnapshot, right: &TaskSnapshot) -> TaskSnapshot {
+        TaskSnapshot {
+            task_id: left.task_id,
+            state: max_task_state(left.state, right.state),
+            priority: left.priority.max(right.priority),
+        }
+    }
+
+    fn merge_parent_region(left: Option<RegionId>, right: Option<RegionId>) -> Option<RegionId> {
+        match (left, right) {
+            (Some(left), Some(right)) => Some(if region_key(left) >= region_key(right) {
+                left
+            } else {
+                right
+            }),
+            (Some(left), None) | (None, Some(left)) => Some(left),
+            (None, None) => None,
+        }
+    }
+
+    fn merge_snapshot_views(left: &RegionSnapshot, right: &RegionSnapshot) -> RegionSnapshot {
+        assert_eq!(
+            left.region_id, right.region_id,
+            "CRDT merge requires snapshots for the same region"
+        );
+
+        let mut tasks: BTreeMap<(u32, u32), TaskSnapshot> = BTreeMap::new();
+        for task in left.tasks.iter().chain(&right.tasks) {
+            tasks
+                .entry(task_key(task.task_id))
+                .and_modify(|current| *current = merge_task_snapshots(current, task))
+                .or_insert_with(|| task.clone());
+        }
+
+        let mut children: BTreeMap<(u32, u32), RegionId> = BTreeMap::new();
+        for child in left.children.iter().chain(&right.children) {
+            children.entry(region_key(*child)).or_insert(*child);
+        }
+
+        let mut metadata = left.metadata.clone();
+        metadata.extend_from_slice(&right.metadata);
+        metadata.sort_unstable();
+        metadata.dedup();
+
+        let preferred_cancel = if (left.sequence, left.timestamp.as_nanos(), left.state.as_u8())
+            >= (right.sequence, right.timestamp.as_nanos(), right.state.as_u8())
+        {
+            (&left.cancel_reason, &right.cancel_reason)
+        } else {
+            (&right.cancel_reason, &left.cancel_reason)
+        };
+
+        RegionSnapshot {
+            region_id: left.region_id,
+            state: max_region_state(left.state, right.state),
+            timestamp: left.timestamp.max(right.timestamp),
+            sequence: left.sequence.max(right.sequence),
+            tasks: tasks.into_values().collect(),
+            children: children.into_values().collect(),
+            finalizer_count: left.finalizer_count.max(right.finalizer_count),
+            budget: BudgetSnapshot {
+                deadline_nanos: left.budget.deadline_nanos.max(right.budget.deadline_nanos),
+                polls_remaining: left.budget.polls_remaining.max(right.budget.polls_remaining),
+                cost_remaining: left.budget.cost_remaining.max(right.budget.cost_remaining),
+            },
+            cancel_reason: preferred_cancel
+                .0
+                .clone()
+                .or_else(|| preferred_cancel.1.clone()),
+            parent: merge_parent_region(left.parent, right.parent),
+            metadata,
+        }
+    }
+
+    fn scrub_snapshot_for_crdt_merge_snapshot_test(snapshot: &RegionSnapshot) -> serde_json::Value {
+        json!({
+            "region_id": "[region_id]",
+            "state": format!("{:?}", snapshot.state),
+            "timestamp_nanos": "[timestamp_nanos]",
+            "sequence": snapshot.sequence,
+            "tasks": snapshot.tasks.iter().enumerate().map(|(index, task)| {
+                json!({
+                    "task_id": format!("[task_{index}]"),
+                    "state": format!("{:?}", task.state),
+                    "priority": task.priority,
+                })
+            }).collect::<Vec<_>>(),
+            "children": snapshot.children.iter().enumerate().map(|(index, _)| {
+                format!("[child_{index}]")
+            }).collect::<Vec<_>>(),
+            "finalizer_count": snapshot.finalizer_count,
+            "budget": {
+                "deadline_nanos": snapshot.budget.deadline_nanos.map(|_| "[deadline_nanos]"),
+                "polls_remaining": snapshot.budget.polls_remaining,
+                "cost_remaining": snapshot.budget.cost_remaining,
+            },
+            "cancel_reason": snapshot.cancel_reason,
+            "parent": snapshot.parent.map(|_| "[parent_region_id]"),
+            "metadata": snapshot.metadata,
+        })
+    }
+
+    fn merge_test_snapshot(
+        region_id: RegionId,
+        state: RegionState,
+        timestamp_secs: u64,
+        sequence: u64,
+        tasks: &[(u32, u32, TaskState, u8)],
+        children: &[(u32, u32)],
+        finalizer_count: u32,
+        budget: BudgetSnapshot,
+        cancel_reason: Option<&str>,
+        metadata: &[u8],
+    ) -> RegionSnapshot {
+        RegionSnapshot {
+            region_id,
+            state,
+            timestamp: Time::from_secs(timestamp_secs),
+            sequence,
+            tasks: tasks
+                .iter()
+                .map(|(index, generation, state, priority)| TaskSnapshot {
+                    task_id: TaskId::new_for_test(*index, *generation),
+                    state: *state,
+                    priority: *priority,
+                })
+                .collect(),
+            children: children
+                .iter()
+                .map(|(index, generation)| RegionId::new_for_test(*index, *generation))
+                .collect(),
+            finalizer_count,
+            budget,
+            cancel_reason: cancel_reason.map(str::to_string),
+            parent: Some(RegionId::new_for_test(0, 1)),
+            metadata: metadata.to_vec(),
+        }
+    }
+
     #[test]
     fn snapshot_roundtrip() {
         let snapshot = create_test_snapshot();
@@ -871,6 +1038,166 @@ mod tests {
         insta::assert_snapshot!(
             "region_snapshot_wire_layout_scrubbed",
             scrub_snapshot_wire_layout_for_snapshot_test(&bytes, snapshot.tasks.len())
+        );
+    }
+
+    #[test]
+    fn crdt_merge_result_scrubbed() {
+        let region_id = RegionId::new_for_test(42, 7);
+
+        let inserts_left = merge_test_snapshot(
+            region_id,
+            RegionState::Open,
+            10,
+            3,
+            &[(1, 0, TaskState::Pending, 1)],
+            &[(10, 0)],
+            1,
+            BudgetSnapshot {
+                deadline_nanos: Some(100),
+                polls_remaining: Some(4),
+                cost_remaining: Some(16),
+            },
+            None,
+            &[1, 3],
+        );
+        let inserts_right = merge_test_snapshot(
+            region_id,
+            RegionState::Closing,
+            12,
+            4,
+            &[(2, 0, TaskState::Running, 3)],
+            &[(11, 0)],
+            2,
+            BudgetSnapshot {
+                deadline_nanos: Some(150),
+                polls_remaining: Some(8),
+                cost_remaining: Some(32),
+            },
+            None,
+            &[2, 3],
+        );
+
+        let deletes_left = merge_test_snapshot(
+            region_id,
+            RegionState::Draining,
+            20,
+            8,
+            &[
+                (1, 0, TaskState::Cancelled, 5),
+                (2, 0, TaskState::Running, 2),
+            ],
+            &[(10, 0)],
+            3,
+            BudgetSnapshot {
+                deadline_nanos: Some(200),
+                polls_remaining: Some(5),
+                cost_remaining: Some(64),
+            },
+            Some("Shutdown"),
+            &[16],
+        );
+        let deletes_right = merge_test_snapshot(
+            region_id,
+            RegionState::Finalizing,
+            22,
+            9,
+            &[
+                (1, 0, TaskState::Pending, 1),
+                (2, 0, TaskState::Completed, 4),
+            ],
+            &[(10, 0)],
+            4,
+            BudgetSnapshot {
+                deadline_nanos: Some(220),
+                polls_remaining: Some(7),
+                cost_remaining: Some(96),
+            },
+            Some("Timeout"),
+            &[32],
+        );
+
+        let mixed_left = merge_test_snapshot(
+            region_id,
+            RegionState::Closing,
+            30,
+            12,
+            &[
+                (1, 0, TaskState::Running, 2),
+                (3, 0, TaskState::Pending, 6),
+            ],
+            &[(10, 0), (12, 0)],
+            2,
+            BudgetSnapshot {
+                deadline_nanos: Some(300),
+                polls_remaining: Some(6),
+                cost_remaining: Some(100),
+            },
+            None,
+            &[48, 64],
+        );
+        let mixed_right = merge_test_snapshot(
+            region_id,
+            RegionState::Finalizing,
+            31,
+            13,
+            &[
+                (1, 0, TaskState::Running, 3),
+                (2, 0, TaskState::Cancelled, 4),
+            ],
+            &[(10, 0), (13, 0)],
+            5,
+            BudgetSnapshot {
+                deadline_nanos: Some(360),
+                polls_remaining: Some(9),
+                cost_remaining: Some(128),
+            },
+            Some("PollQuota"),
+            &[64, 80],
+        );
+
+        let concurrent_inserts = merge_snapshot_views(&inserts_left, &inserts_right);
+        let concurrent_deletes = merge_snapshot_views(&deletes_left, &deletes_right);
+        let mixed_insert_delete = merge_snapshot_views(&mixed_left, &mixed_right);
+
+        crate::assert_with_log!(
+            concurrent_inserts.to_bytes()
+                == merge_snapshot_views(&inserts_right, &inserts_left).to_bytes(),
+            "concurrent insert merge should be commutative",
+            scrub_snapshot_for_crdt_merge_snapshot_test(&concurrent_inserts),
+            scrub_snapshot_for_crdt_merge_snapshot_test(&merge_snapshot_views(
+                &inserts_right,
+                &inserts_left
+            ))
+        );
+        crate::assert_with_log!(
+            concurrent_deletes.to_bytes()
+                == merge_snapshot_views(&deletes_right, &deletes_left).to_bytes(),
+            "concurrent delete merge should be commutative",
+            scrub_snapshot_for_crdt_merge_snapshot_test(&concurrent_deletes),
+            scrub_snapshot_for_crdt_merge_snapshot_test(&merge_snapshot_views(
+                &deletes_right,
+                &deletes_left
+            ))
+        );
+        crate::assert_with_log!(
+            mixed_insert_delete.to_bytes()
+                == merge_snapshot_views(&mixed_right, &mixed_left).to_bytes(),
+            "mixed merge should be commutative",
+            scrub_snapshot_for_crdt_merge_snapshot_test(&mixed_insert_delete),
+            scrub_snapshot_for_crdt_merge_snapshot_test(&merge_snapshot_views(
+                &mixed_right,
+                &mixed_left
+            ))
+        );
+
+        insta::assert_json_snapshot!(
+            "crdt_merge_result_scrubbed",
+            json!({
+                "concurrent_inserts": scrub_snapshot_for_crdt_merge_snapshot_test(&concurrent_inserts),
+                "concurrent_deletes": scrub_snapshot_for_crdt_merge_snapshot_test(&concurrent_deletes),
+                "mixed_insert_delete": scrub_snapshot_for_crdt_merge_snapshot_test(&mixed_insert_delete),
+            })
         );
     }
 

@@ -1,0 +1,115 @@
+---
+source: src/distributed/snapshot.rs
+expression: json!({ ... })
+---
+{
+  "concurrent_deletes": {
+    "budget": {
+      "cost_remaining": 96,
+      "deadline_nanos": "[deadline_nanos]",
+      "polls_remaining": 7
+    },
+    "cancel_reason": "Timeout",
+    "children": [
+      "[child_0]"
+    ],
+    "finalizer_count": 4,
+    "metadata": [
+      16,
+      32
+    ],
+    "parent": "[parent_region_id]",
+    "region_id": "[region_id]",
+    "sequence": 9,
+    "state": "Finalizing",
+    "tasks": [
+      {
+        "priority": 5,
+        "state": "Cancelled",
+        "task_id": "[task_0]"
+      },
+      {
+        "priority": 4,
+        "state": "Completed",
+        "task_id": "[task_1]"
+      }
+    ],
+    "timestamp_nanos": "[timestamp_nanos]"
+  },
+  "concurrent_inserts": {
+    "budget": {
+      "cost_remaining": 32,
+      "deadline_nanos": "[deadline_nanos]",
+      "polls_remaining": 8
+    },
+    "cancel_reason": null,
+    "children": [
+      "[child_0]",
+      "[child_1]"
+    ],
+    "finalizer_count": 2,
+    "metadata": [
+      1,
+      2,
+      3
+    ],
+    "parent": "[parent_region_id]",
+    "region_id": "[region_id]",
+    "sequence": 4,
+    "state": "Closing",
+    "tasks": [
+      {
+        "priority": 1,
+        "state": "Pending",
+        "task_id": "[task_0]"
+      },
+      {
+        "priority": 3,
+        "state": "Running",
+        "task_id": "[task_1]"
+      }
+    ],
+    "timestamp_nanos": "[timestamp_nanos]"
+  },
+  "mixed_insert_delete": {
+    "budget": {
+      "cost_remaining": 128,
+      "deadline_nanos": "[deadline_nanos]",
+      "polls_remaining": 9
+    },
+    "cancel_reason": "PollQuota",
+    "children": [
+      "[child_0]",
+      "[child_1]",
+      "[child_2]"
+    ],
+    "finalizer_count": 5,
+    "metadata": [
+      48,
+      64,
+      80
+    ],
+    "parent": "[parent_region_id]",
+    "region_id": "[region_id]",
+    "sequence": 13,
+    "state": "Finalizing",
+    "tasks": [
+      {
+        "priority": 3,
+        "state": "Running",
+        "task_id": "[task_0]"
+      },
+      {
+        "priority": 4,
+        "state": "Cancelled",
+        "task_id": "[task_1]"
+      },
+      {
+        "priority": 6,
+        "state": "Pending",
+        "task_id": "[task_2]"
+      }
+    ],
+    "timestamp_nanos": "[timestamp_nanos]"
+  }
+}
