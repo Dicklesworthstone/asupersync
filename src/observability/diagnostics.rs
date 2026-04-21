@@ -453,6 +453,15 @@ impl Diagnostics {
 
         for (_, ob) in self.state.obligations_iter() {
             if ob.state == ObligationState::Reserved {
+                // Skip obligations whose holder task has already completed.
+                // A completed holder will tear down its obligations via
+                // the normal scope-exit path, so flagging them here would
+                // produce false positives in leak detection.
+                if let Some(holder) = self.state.task(ob.holder) {
+                    if matches!(holder.state, TaskState::Completed(_)) {
+                        continue;
+                    }
+                }
                 let age = std::time::Duration::from_nanos(now.duration_since(ob.reserved_at));
                 leaks.push(ObligationLeak {
                     obligation_id: ob.id,

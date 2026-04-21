@@ -317,7 +317,7 @@ impl ObligationTracker {
         let leaks: Vec<_> = self
             .list_obligations()
             .into_iter()
-            .filter(|o| o.age > age_threshold && o.is_active())
+            .filter(|o| o.age >= age_threshold && o.is_active())
             .collect();
 
         if !leaks.is_empty() {
@@ -402,13 +402,13 @@ impl ObligationTracker {
                 entry.primary_holder = Some(format!("{:?}", obligation.holder_task));
             }
 
-            if obligation.age > self.config.leak_age_threshold {
+            if obligation.age >= self.config.leak_age_threshold {
                 potential_leaks += 1;
             }
 
             // Warning threshold at half of leak threshold
             let warning_threshold = self.config.leak_age_threshold / 2;
-            if obligation.age > warning_threshold {
+            if obligation.age >= warning_threshold {
                 age_warnings += 1;
             }
         }
@@ -1275,7 +1275,11 @@ mod tests {
             .expect("create second obligation");
 
         let state = Arc::new(state);
-        let tracker = ObligationTracker::new(Arc::clone(&state), None);
+        // Use a ZERO leak threshold so any unresolved obligation counts
+        // as a potential leak, independent of virtual-clock progression.
+        let mut config = ObligationTrackerConfig::default();
+        config.leak_age_threshold = Duration::ZERO;
+        let tracker = ObligationTracker::with_config(Arc::clone(&state), None, config);
 
         // Verify obligation exists initially
         let initial_obligations = tracker.list_obligations();
