@@ -1480,3 +1480,10 @@ path = "fuzz_targets/h2_connection_window_update.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "lab_network_message_routing"
+path = "fuzz_targets/lab_network_message_routing.rs"
+test = false
+doc = false
+bench = false
