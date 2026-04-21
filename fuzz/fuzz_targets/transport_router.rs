@@ -217,6 +217,17 @@ fn region_id_from_u64(value: u64) -> RegionId {
     RegionId::new_for_test(value as u32, (value >> 32) as u32)
 }
 
+fn make_router_endpoints(prefix: &str, count: usize, base_id: u64) -> Vec<Arc<Endpoint>> {
+    (0..count)
+        .map(|i| {
+            Arc::new(Endpoint::new(
+                EndpointId::new(base_id + i as u64),
+                format!("{prefix}-{i}:8080"),
+            ))
+        })
+        .collect()
+}
+
 fn fuzz_test_cx() -> Cx {
     Cx::new(
         RegionId::new_for_test(0, 0),
@@ -253,6 +264,14 @@ enum EdgeCaseScenario {
 
     /// Route lookup with missing keys
     MissingRouteKeys(ObjectIdWrapper),
+
+    /// Insert a route, prune it after TTL expiry, then reinsert a distinct endpoint set.
+    RoutingTableInsertEvictCycle {
+        initial_endpoint_count: u8,
+        reinsert_endpoint_count: u8,
+        ttl_seconds: u16,
+        expiration_slack_nanos: u32,
+    },
 
     /// Endpoint connection guard stress test
     ConnectionGuardStress(u8), // 1-100 simultaneous guards
@@ -1124,6 +1143,96 @@ fn fuzz_edge_cases(edge_case: EdgeCaseScenario) {
             );
         }
 
+        EdgeCaseScenario::RoutingTableInsertEvictCycle {
+            initial_endpoint_count,
+            reinsert_endpoint_count,
+            ttl_seconds,
+            expiration_slack_nanos,
+        } => {
+            let table = RoutingTable::new();
+            let key = RouteKey::Object(ObjectId::from_u128(0xfeed_face_cafe_beef));
+            let created_at = Time::from_secs(10);
+            let ttl = Time::from_secs(u64::from(ttl_seconds.max(1)).min(3600));
+            let expire_at = created_at
+                .saturating_add_nanos(ttl.as_nanos())
+                .saturating_add_nanos(u64::from(expiration_slack_nanos));
+
+            let initial_endpoints = make_router_endpoints(
+                "initial",
+                usize::from(initial_endpoint_count).clamp(1, 16),
+                10,
+            );
+            let initial_ids = initial_endpoints
+                .iter()
+                .map(|endpoint| endpoint.id)
+                .collect::<Vec<_>>();
+            let initial_entry =
+                RoutingEntry::new(initial_endpoints.clone(), created_at).with_ttl(ttl);
+
+            table.add_route(key.clone(), initial_entry);
+            assert_eq!(table.route_count(), 1, "initial route insert should increase route count");
+
+            let pre_prune = table
+                .lookup_without_default(&key)
+                .expect("freshly inserted route should be discoverable");
+            assert_eq!(
+                pre_prune.endpoints.len(),
+                initial_endpoints.len(),
+                "pre-prune lookup should reflect the initial endpoint set"
+            );
+            assert!(
+                pre_prune
+                    .select_endpoint(None)
+                    .is_some_and(|endpoint| initial_ids.contains(&endpoint.id)),
+                "pre-prune selection should come from the initial endpoint set"
+            );
+
+            let pruned = table.prune_expired(expire_at);
+            assert_eq!(pruned, 1, "expired route should be pruned exactly once");
+            assert_eq!(table.route_count(), 0, "route count should drop after eviction");
+            assert!(
+                table.lookup_without_default(&key).is_none(),
+                "expired route should not survive lookup after pruning"
+            );
+
+            let reinserted_endpoints = make_router_endpoints(
+                "reinsert",
+                usize::from(reinsert_endpoint_count).clamp(1, 16),
+                100,
+            );
+            let reinserted_ids = reinserted_endpoints
+                .iter()
+                .map(|endpoint| endpoint.id)
+                .collect::<Vec<_>>();
+            let reinserted_entry = RoutingEntry::new(
+                reinserted_endpoints.clone(),
+                expire_at.saturating_add_nanos(1),
+            )
+            .with_ttl(ttl);
+            table.add_route(key.clone(), reinserted_entry);
+
+            assert_eq!(
+                table.route_count(),
+                1,
+                "reinserting the same key should restore a single live route"
+            );
+
+            let post_reinsert = table
+                .lookup_without_default(&key)
+                .expect("reinserted route should be discoverable");
+            assert_eq!(
+                post_reinsert.endpoints.len(),
+                reinserted_endpoints.len(),
+                "lookup after reinsertion should reflect the new endpoint set"
+            );
+            assert!(
+                post_reinsert
+                    .select_endpoint(None)
+                    .is_some_and(|endpoint| reinserted_ids.contains(&endpoint.id)),
+                "reinserted route should not retain stale endpoints from the evicted entry"
+            );
+        }
+
         EdgeCaseScenario::ConnectionGuardStress(guard_count) => {
             let endpoint = Endpoint::new(EndpointId::new(77), "guard-stress:8080");
             let guard_count = usize::from(guard_count).clamp(1, 100);
@@ -1215,5 +1324,15 @@ mod tests {
         for id in [0u64, 1, u64::MAX / 2, u64::MAX - 1, u64::MAX] {
             fuzz_endpoint_id_parsing(id);
         }
+    }
+
+    #[test]
+    fn test_routing_table_insert_evict_cycle_reinserts_cleanly() {
+        fuzz_edge_cases(EdgeCaseScenario::RoutingTableInsertEvictCycle {
+            initial_endpoint_count: 3,
+            reinsert_endpoint_count: 5,
+            ttl_seconds: 2,
+            expiration_slack_nanos: 7,
+        });
     }
 }
