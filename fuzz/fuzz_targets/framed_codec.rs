@@ -31,6 +31,10 @@ use std::task::{Context, Poll};
 
 /// Maximum input size to prevent memory exhaustion during fuzzing
 const MAX_INPUT_SIZE: usize = 64 * 1024; // 64KB
+/// Maximum number of frames to include in a round-trip invariant check.
+const MAX_ROUNDTRIP_FRAMES: usize = 16;
+/// Maximum size of any single round-trip frame.
+const MAX_ROUNDTRIP_FRAME_SIZE: usize = 1024;
 
 /// Framed codec fuzzing configuration
 #[derive(Arbitrary, Debug)]
@@ -126,8 +130,8 @@ enum FramedOperation {
     InspectReadBuffer,
     /// Write buffer inspection
     InspectWriteBuffer,
-    /// Change codec behavior (for stateful codecs)
-    ModifyCodec { new_behavior: u8 },
+    /// Touch codec state through the mutable accessor
+    ModifyCodec,
 }
 
 /// Mock transport implementation for testing
@@ -251,10 +255,10 @@ impl AsyncRead for MockTransport {
         self.poll_count += 1;
 
         // Check if we should return EOF early
-        if let Some(eof_pos) = self.eof_position {
-            if self.bytes_read >= eof_pos {
-                return Poll::Ready(Ok(()));
-            }
+        if let Some(eof_pos) = self.eof_position
+            && self.bytes_read >= eof_pos
+        {
+            return Poll::Ready(Ok(()));
         }
 
         match &self.read_behavior {
@@ -279,7 +283,7 @@ impl AsyncRead for MockTransport {
                 Poll::Ready(Ok(()))
             }
             ReadBehavior::Pending { frequency } => {
-                if self.poll_count % (*frequency as usize + 1) == 0 {
+                if self.poll_count.is_multiple_of(*frequency as usize + 1) {
                     Poll::Pending
                 } else {
                     let to_read = buf.remaining().min(self.read_data.len()).min(1);
@@ -293,8 +297,8 @@ impl AsyncRead for MockTransport {
                 }
             }
             ReadBehavior::ErrorProne { frequency } => {
-                if self.poll_count % (*frequency as usize + 1) == 0 {
-                    Poll::Ready(Err(IoError::new(ErrorKind::Other, "simulated read error")))
+                if self.poll_count.is_multiple_of(*frequency as usize + 1) {
+                    Poll::Ready(Err(IoError::other("simulated read error")))
                 } else {
                     let to_read = buf.remaining().min(self.read_data.len());
                     for _ in 0..to_read {
@@ -327,7 +331,7 @@ impl AsyncWrite for MockTransport {
                 Poll::Ready(Ok(to_write))
             }
             WriteBehavior::Pending { frequency } => {
-                if self.poll_count % (*frequency as usize + 1) == 0 {
+                if self.poll_count.is_multiple_of(*frequency as usize + 1) {
                     Poll::Pending
                 } else {
                     let to_write = buf.len().min(1);
@@ -336,8 +340,8 @@ impl AsyncWrite for MockTransport {
                 }
             }
             WriteBehavior::ErrorProne { frequency } => {
-                if self.poll_count % (*frequency as usize + 1) == 0 {
-                    Poll::Ready(Err(IoError::new(ErrorKind::Other, "simulated write error")))
+                if self.poll_count.is_multiple_of(*frequency as usize + 1) {
+                    Poll::Ready(Err(IoError::other("simulated write error")))
                 } else {
                     self.write_data.extend_from_slice(buf);
                     Poll::Ready(Ok(buf.len()))
@@ -380,7 +384,10 @@ impl Decoder for MockErrorCodec {
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         self.decode_count += 1;
 
-        if self.decode_count % (self.error_frequency as usize + 1) == 0 {
+        if self
+            .decode_count
+            .is_multiple_of(self.error_frequency as usize + 1)
+        {
             return Err(std::io::Error::new(
                 ErrorKind::InvalidData,
                 "mock decode error",
@@ -406,7 +413,10 @@ impl Encoder<BytesMut> for MockErrorCodec {
     fn encode(&mut self, item: BytesMut, buf: &mut BytesMut) -> Result<(), Self::Error> {
         self.encode_count += 1;
 
-        if self.encode_count % (self.error_frequency as usize + 1) == 0 {
+        if self
+            .encode_count
+            .is_multiple_of(self.error_frequency as usize + 1)
+        {
             return Err(std::io::Error::new(
                 ErrorKind::InvalidInput,
                 "mock encode error",
@@ -422,15 +432,11 @@ impl Encoder<BytesMut> for MockErrorCodec {
 #[derive(Debug)]
 struct MockSlowCodec {
     decode_speed: u8,
-    partial_state: Option<BytesMut>,
 }
 
 impl MockSlowCodec {
     fn new(decode_speed: u8) -> Self {
-        Self {
-            decode_speed,
-            partial_state: None,
-        }
+        Self { decode_speed }
     }
 }
 
@@ -459,9 +465,163 @@ impl Encoder<BytesMut> for MockSlowCodec {
     }
 }
 
+/// Simple byte-preserving framing codec used for round-trip invariants.
+#[derive(Debug, Default)]
+struct PrefixCodec;
+
+impl Decoder for PrefixCodec {
+    type Item = BytesMut;
+    type Error = std::io::Error;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if buf.len() < 2 {
+            return Ok(None);
+        }
+
+        let frame_len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+        if frame_len > MAX_INPUT_SIZE {
+            return Err(IoError::new(ErrorKind::InvalidData, "frame too large"));
+        }
+        if buf.len() < 2 + frame_len {
+            return Ok(None);
+        }
+
+        let _ = buf.split_to(2);
+        Ok(Some(buf.split_to(frame_len)))
+    }
+}
+
+impl Encoder<BytesMut> for PrefixCodec {
+    type Error = std::io::Error;
+
+    fn encode(&mut self, item: BytesMut, buf: &mut BytesMut) -> Result<(), Self::Error> {
+        if item.len() > u16::MAX as usize {
+            return Err(IoError::new(ErrorKind::InvalidInput, "frame too large"));
+        }
+
+        buf.extend_from_slice(&(item.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&item);
+        Ok(())
+    }
+}
+
+fn collect_roundtrip_frames(config: &FramedFuzzConfig) -> Vec<BytesMut> {
+    config
+        .operations
+        .iter()
+        .filter_map(|operation| match operation {
+            FramedOperation::Send { data } => Some(BytesMut::from(
+                &data[..data.len().min(MAX_ROUNDTRIP_FRAME_SIZE)],
+            )),
+            _ => None,
+        })
+        .take(MAX_ROUNDTRIP_FRAMES)
+        .collect()
+}
+
+fn derive_roundtrip_chunk_size(config: &FramedFuzzConfig) -> u8 {
+    match &config.transport_behavior {
+        TransportBehavior::Partial { chunk_size, .. } => (*chunk_size).clamp(1, 32),
+        TransportBehavior::Pending {
+            pending_frequency, ..
+        } => pending_frequency.saturating_add(1).clamp(1, 16),
+        TransportBehavior::ErrorProne {
+            error_frequency, ..
+        } => error_frequency.saturating_add(1).clamp(1, 16),
+        TransportBehavior::EofEarly { eof_position, .. } => {
+            (*eof_position as usize).clamp(1, 32) as u8
+        }
+        TransportBehavior::SlowWriter {
+            write_success_rate, ..
+        } => (*write_success_rate).clamp(1, 16),
+        TransportBehavior::Normal { .. } => 7,
+    }
+}
+
+fn flush_until_ready<T, U>(framed: &mut Framed<T, U>, cx: &mut Context<'_>)
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+    U: Decoder + Encoder<BytesMut> + Unpin,
+{
+    for _ in 0..64 {
+        match framed.poll_flush(cx) {
+            Poll::Ready(Ok(())) => return,
+            Poll::Ready(Err(err)) => panic!("round-trip flush failed: {err}"),
+            Poll::Pending => {}
+        }
+    }
+
+    panic!("round-trip flush failed to make progress");
+}
+
+fn decode_prefix_roundtrip_frames(
+    encoded: Vec<u8>,
+    chunk_size: u8,
+    capacity: usize,
+) -> Vec<BytesMut> {
+    let transport = MockTransport::new(TransportBehavior::Partial {
+        data: encoded,
+        chunk_size,
+    });
+    let mut framed = Framed::with_capacity(transport, PrefixCodec, capacity.max(1));
+    let waker = futures_util::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let mut decoded = Vec::new();
+
+    for _ in 0..256 {
+        match Pin::new(&mut framed).poll_next(&mut cx) {
+            Poll::Ready(Some(Ok(frame))) => decoded.push(frame),
+            Poll::Ready(Some(Err(err))) => panic!("round-trip decode failed: {err}"),
+            Poll::Ready(None) => break,
+            Poll::Pending => {}
+        }
+    }
+
+    decoded
+}
+
+fn exercise_prefix_roundtrip_invariant(config: &FramedFuzzConfig) {
+    let frames = collect_roundtrip_frames(config);
+    if frames.is_empty() {
+        return;
+    }
+
+    let capacity = config.buffer_capacity.to_usize().clamp(1, MAX_INPUT_SIZE);
+    let transport = MockTransport::new(TransportBehavior::Normal { data: Vec::new() });
+    let mut framed = Framed::with_capacity(transport, PrefixCodec, capacity);
+    let waker = futures_util::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    for frame in &frames {
+        framed
+            .send(frame.clone())
+            .expect("prefix codec must encode bounded round-trip frames");
+    }
+    flush_until_ready(&mut framed, &mut cx);
+
+    let encoded = framed.get_ref().write_data.clone();
+    let decoded =
+        decode_prefix_roundtrip_frames(encoded, derive_roundtrip_chunk_size(config), capacity);
+
+    assert_eq!(
+        decoded.len(),
+        frames.len(),
+        "framed round-trip changed frame count"
+    );
+    for (index, (expected, actual)) in frames.iter().zip(decoded.iter()).enumerate() {
+        assert_eq!(
+            actual.as_ref(),
+            expected.as_ref(),
+            "framed round-trip changed frame payload at index {index}"
+        );
+    }
+}
+
 fuzz_target!(|input: FramedFuzzConfig| {
     // Limit total operations to prevent excessive test time
     let operations = input.operations.iter().take(100);
+
+    exercise_prefix_roundtrip_invariant(&input);
 
     // Create transport
     let transport = MockTransport::new(input.transport_behavior);
@@ -536,7 +696,7 @@ fn test_framed_operations_lines<T>(
                 let _ = framed.write_buffer();
             }
 
-            FramedOperation::ModifyCodec { new_behavior: _ } => {
+            FramedOperation::ModifyCodec => {
                 // LinesCodec doesn't have mutable behavior
                 let _ = framed.codec_mut();
             }
@@ -587,7 +747,7 @@ fn test_framed_operations_bytes<T, U>(
                 let _ = framed.write_buffer();
             }
 
-            FramedOperation::ModifyCodec { new_behavior: _ } => {
+            FramedOperation::ModifyCodec => {
                 // For mock codecs, we could modify behavior here
                 let _ = framed.codec_mut();
             }
