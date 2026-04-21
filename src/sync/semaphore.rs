@@ -2732,6 +2732,135 @@ mod tests {
         );
     }
 
+    fn observe_middle_cancellation_schedule(
+        cancel_before_first_permit: bool,
+        seed_offset: u32,
+    ) -> (Vec<usize>, usize, usize) {
+        let sem = Semaphore::new(0);
+
+        let cx1 = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 30 + seed_offset)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 30 + seed_offset)),
+            crate::types::Budget::INFINITE,
+        );
+        let cx2 = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 31 + seed_offset)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 31 + seed_offset)),
+            crate::types::Budget::INFINITE,
+        );
+        let cx3 = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 32 + seed_offset)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 32 + seed_offset)),
+            crate::types::Budget::INFINITE,
+        );
+
+        let mut fut1 = sem.acquire(&cx1, 1);
+        let mut fut2 = sem.acquire(&cx2, 1);
+        let mut fut3 = sem.acquire(&cx3, 1);
+
+        assert!(poll_once(&mut fut1).is_none(), "waiter 1 should queue");
+        assert!(poll_once(&mut fut2).is_none(), "waiter 2 should queue");
+        assert!(poll_once(&mut fut3).is_none(), "waiter 3 should queue");
+
+        if cancel_before_first_permit {
+            cx2.set_cancel_requested(true);
+            assert!(
+                poll_once(&mut fut2).is_some(),
+                "middle waiter cancellation should complete before permits"
+            );
+        }
+
+        sem.add_permits(1);
+        let permit1 = poll_once(&mut fut1)
+            .expect("first waiter should wake after first permit")
+            .expect("first waiter should acquire permit");
+        assert!(
+            poll_once(&mut fut3).is_none(),
+            "single permit should not wake the third waiter"
+        );
+
+        if !cancel_before_first_permit {
+            cx2.set_cancel_requested(true);
+            assert!(
+                poll_once(&mut fut2).is_some(),
+                "middle waiter cancellation should complete after first permit"
+            );
+        }
+
+        assert!(
+            poll_once(&mut fut3).is_none(),
+            "third waiter should still be pending until the second permit"
+        );
+
+        sem.add_permits(1);
+        let permit3 = poll_once(&mut fut3)
+            .expect("third waiter should wake after second permit")
+            .expect("third waiter should acquire permit");
+
+        let while_held = sem.available_permits();
+        assert_eq!(
+            while_held, 0,
+            "two injected permits should be fully consumed"
+        );
+
+        drop(permit1);
+        let after_first_drop = sem.available_permits();
+
+        drop(permit3);
+        let final_available = sem.available_permits();
+
+        (vec![1, 3], after_first_drop, final_available)
+    }
+
+    #[test]
+    fn metamorphic_middle_cancellation_timing_preserves_wake_order_and_capacity() {
+        init_test("metamorphic_middle_cancellation_timing_preserves_wake_order_and_capacity");
+
+        let cancel_before = observe_middle_cancellation_schedule(true, 0);
+        let cancel_after = observe_middle_cancellation_schedule(false, 10);
+
+        crate::assert_with_log!(
+            cancel_before.0 == cancel_after.0,
+            "survivor wake order preserved",
+            &cancel_before.0,
+            &cancel_after.0
+        );
+        crate::assert_with_log!(
+            cancel_before.0 == vec![1, 3],
+            "survivors wake in FIFO projection",
+            vec![1, 3],
+            cancel_before.0.clone()
+        );
+        crate::assert_with_log!(
+            cancel_before.1 == cancel_after.1,
+            "post-drop permit count preserved",
+            cancel_before.1,
+            cancel_after.1
+        );
+        crate::assert_with_log!(
+            cancel_before.1 == 1,
+            "dropping first survivor releases exactly one permit",
+            1usize,
+            cancel_before.1
+        );
+        crate::assert_with_log!(
+            cancel_before.2 == cancel_after.2,
+            "final permit count preserved",
+            cancel_before.2,
+            cancel_after.2
+        );
+        crate::assert_with_log!(
+            cancel_before.2 == 2,
+            "cancelled waiter does not consume injected permits",
+            2usize,
+            cancel_before.2
+        );
+
+        crate::test_complete!(
+            "metamorphic_middle_cancellation_timing_preserves_wake_order_and_capacity"
+        );
+    }
+
     #[test]
     fn test_semaphore_permit_obligation_structure() {
         init_test("test_semaphore_permit_obligation_structure");
