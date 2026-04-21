@@ -36,6 +36,10 @@ const MAX_FUZZ_INPUT_SIZE: usize = 100_000;
 
 /// Maximum request line length per HTTP/1.1 codec
 const MAX_REQUEST_LINE_LENGTH: usize = 8192;
+/// Maximum header block size per HTTP/1.1 codec
+const MAX_HEADERS_SIZE: usize = 64 * 1024;
+/// Maximum number of headers per HTTP/1.1 codec
+const MAX_HEADERS: usize = 128;
 
 /// HTTP method generation strategy for fuzzing
 #[derive(Arbitrary, Debug, Clone)]
@@ -192,6 +196,26 @@ enum ComponentType {
     Version,
 }
 
+/// Header field used for valid header-block generation.
+#[derive(Arbitrary, Debug, Clone)]
+struct HeaderField {
+    name: String,
+    value: String,
+}
+
+/// Header block generation strategy.
+#[derive(Arbitrary, Debug, Clone)]
+enum HeaderStrategy {
+    /// No headers, only the terminating CRLF.
+    None,
+    /// A small, valid header block.
+    Valid { headers: Vec<HeaderField> },
+    /// A header block that exceeds the codec's size limit.
+    Oversized { size: usize },
+    /// A header block that exceeds the codec's header-count limit.
+    TooMany { extra: u8 },
+}
+
 /// Comprehensive fuzz input for HTTP/1.1 request-line parsing
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
@@ -205,6 +229,8 @@ struct FuzzInput {
     spacing: SpacingStrategy,
     /// Line termination strategy
     termination: TerminationStrategy,
+    /// Header block generation strategy
+    headers: HeaderStrategy,
     /// Corruption strategy for security testing
     corruption: CorruptionStrategy,
 }
@@ -265,6 +291,47 @@ impl FuzzInput {
         request_line.extend_from_slice(&termination);
 
         self.apply_corruption(request_line)
+    }
+
+    fn construct_headers(&self) -> Vec<u8> {
+        match &self.headers {
+            HeaderStrategy::None => Vec::new(),
+            HeaderStrategy::Valid { headers } => {
+                let mut block = Vec::new();
+                for header in headers.iter().take(16) {
+                    let name = sanitize_header_name(&header.name);
+                    let value = sanitize_header_value(&header.value);
+                    block.extend_from_slice(name.as_bytes());
+                    block.extend_from_slice(b": ");
+                    block.extend_from_slice(value.as_bytes());
+                    block.extend_from_slice(b"\r\n");
+                }
+                block
+            }
+            HeaderStrategy::Oversized { size } => {
+                let value_len = (*size).clamp(MAX_HEADERS_SIZE + 1, MAX_FUZZ_INPUT_SIZE / 2);
+                let mut block = b"X-Fuzz: ".to_vec();
+                block.extend(std::iter::repeat_n(b'a', value_len));
+                block.extend_from_slice(b"\r\n");
+                block
+            }
+            HeaderStrategy::TooMany { extra } => {
+                let header_count = MAX_HEADERS + 1 + usize::from(*extra % 16);
+                let mut block = Vec::with_capacity(header_count * 12);
+                for idx in 0..header_count {
+                    block.extend_from_slice(format!("X-{idx}: v\r\n").as_bytes());
+                }
+                block
+            }
+        }
+    }
+
+    fn expected_header_count(&self) -> Option<usize> {
+        match &self.headers {
+            HeaderStrategy::None => Some(0),
+            HeaderStrategy::Valid { headers } => Some(headers.len().min(16)),
+            HeaderStrategy::Oversized { .. } | HeaderStrategy::TooMany { .. } => None,
+        }
     }
 
     fn generate_method(&self) -> String {
@@ -445,6 +512,38 @@ impl FuzzInput {
     }
 }
 
+fn sanitize_header_name(name: &str) -> String {
+    let mut cleaned: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .take(32)
+        .collect();
+
+    if cleaned.is_empty() {
+        cleaned.push_str("x-fuzz");
+    }
+    if cleaned.eq_ignore_ascii_case("content-length")
+        || cleaned.eq_ignore_ascii_case("transfer-encoding")
+    {
+        cleaned.insert_str(0, "x-");
+    }
+    cleaned
+}
+
+fn sanitize_header_value(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .filter(|c| c.is_ascii() && !matches!(c, '\r' | '\n'))
+        .take(128)
+        .collect();
+
+    if cleaned.is_empty() {
+        "ok".to_string()
+    } else {
+        cleaned
+    }
+}
+
 /// Mock HTTP/1.1 request-line parser for validation
 struct MockH1RequestLineParser {
     max_request_line_length: usize,
@@ -609,13 +708,19 @@ enum ParseError {
 fuzz_target!(|input: FuzzInput| {
     // Bound input size to prevent timeouts
     let request_line_bytes = input.construct_request_line();
+    let header_bytes = input.construct_headers();
     if request_line_bytes.len() > MAX_FUZZ_INPUT_SIZE {
         return;
     }
 
     // Create full HTTP request for codec testing
     let mut full_request = request_line_bytes.clone();
+    full_request.extend_from_slice(&header_bytes);
     full_request.extend_from_slice(b"\r\n"); // End headers section
+    if full_request.len() > MAX_FUZZ_INPUT_SIZE {
+        return;
+    }
+    let full_request_len = full_request.len();
 
     let mock_parser = MockH1RequestLineParser::new();
     let mock_result = mock_parser.parse_request_line(&request_line_bytes);
@@ -649,6 +754,10 @@ fuzz_target!(|input: FuzzInput| {
 
                     // **ASSERTION 6: Origin-form vs asterisk-form dispatched correctly**
                     validate_uri_form_consistency(&method, &uri);
+
+                    if let Some(expected_header_count) = input.expected_header_count() {
+                        assert_eq!(request.headers.len(), expected_header_count);
+                    }
                 }
                 (Err(expected_error), Ok(Some(_))) => {
                     // Mock parser correctly rejected but codec accepted - potential issue
@@ -694,6 +803,19 @@ fuzz_target!(|input: FuzzInput| {
                 (Ok(_), Err(HttpError::BadRequestLine)) => {
                     // **ASSERTION 4: CRLF termination**
                     // Expected for malformed request lines
+                }
+                (Ok(_), Err(HttpError::HeadersTooLarge)) => {
+                    assert!(
+                        matches!(input.headers, HeaderStrategy::Oversized { .. })
+                            || full_request_len > MAX_HEADERS_SIZE,
+                        "Codec rejected a header block within configured size limits"
+                    );
+                }
+                (Ok(_), Err(HttpError::TooManyHeaders)) => {
+                    assert!(
+                        matches!(input.headers, HeaderStrategy::TooMany { .. }),
+                        "Codec reported too many headers without a generated overrun"
+                    );
                 }
                 (Err(_), Err(_)) => {
                     // Both parsers correctly rejected the input
