@@ -403,5 +403,72 @@ mod tests {
             );
             prop_assert!(queue.is_empty(), "queue should be empty after the resumed drain");
         }
+
+        #[test]
+        fn metamorphic_local_to_global_migration_appends_at_fifo_tail(
+            ready_len in 1usize..32,
+            migrated_len in 1usize..32,
+        ) {
+            let queue = GlobalQueue::new();
+            let ready_base = 0u32;
+            let migrated_base = 10_000u32;
+
+            for i in 0..ready_len {
+                queue.push(task(ready_base + i as u32));
+            }
+
+            // Simulate a worker spilling its local queue into the shared global queue.
+            for i in 0..migrated_len {
+                queue.push(task(migrated_base + i as u32));
+            }
+
+            let drained = drain_all(&queue);
+            let expected: Vec<_> = (0..ready_len)
+                .map(|i| task(ready_base + i as u32))
+                .chain((0..migrated_len).map(|i| task(migrated_base + i as u32)))
+                .collect();
+
+            prop_assert_eq!(
+                drained,
+                expected,
+                "local-to-global migration must append migrated work after already queued global tasks without reordering either segment",
+            );
+            prop_assert!(queue.is_empty(), "queue should be empty after draining migrated and ready work");
+        }
+
+        #[test]
+        fn metamorphic_yield_now_reschedules_running_head_to_fifo_tail(
+            trailing_len in 1usize..32,
+        ) {
+            let queue = GlobalQueue::new();
+            let total = trailing_len + 1;
+
+            for i in 0..total {
+                queue.push(task(i as u32));
+            }
+
+            let yielded = queue.pop().expect("head task should be runnable");
+
+            // Simulate the running task calling yield_now and being re-enqueued globally.
+            queue.push(yielded);
+
+            let drained = drain_all(&queue);
+            let expected: Vec<_> = (1..total)
+                .map(|i| task(i as u32))
+                .chain(std::iter::once(task(0)))
+                .collect();
+
+            prop_assert_eq!(
+                yielded,
+                task(0),
+                "yield_now should first remove the oldest runnable task from the head of the queue",
+            );
+            prop_assert_eq!(
+                drained,
+                expected,
+                "yield_now must reschedule the running task at the back of the FIFO stream",
+            );
+            prop_assert!(queue.is_empty(), "queue should be empty after draining the yielded FIFO stream");
+        }
     }
 }
