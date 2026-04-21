@@ -244,6 +244,63 @@ fn test_chunked_connection_close_terminates_pipeline() {
     });
 }
 
+/// Test that chunked keep-alive requests preserve the next pipelined request.
+#[test]
+fn test_chunked_keepalive_preserves_followup_pipeline() {
+    let rt = RuntimeBuilder::new().build().unwrap();
+
+    rt.block_on(async {
+        let req1 = concat!(
+            "POST /chunked-keepalive HTTP/1.1\r\n",
+            "Host: example.com\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "Connection: keep-alive\r\n",
+            "\r\n",
+            "5\r\nhello\r\n",
+            "0\r\n\r\n"
+        )
+        .to_string();
+        let req2 = make_http_request(
+            "GET",
+            "/after-chunked",
+            "HTTP/1.1",
+            &[("Host", "example.com"), ("Connection", "close")],
+        );
+
+        let (transport, written) = TestTransport::with_multiple_requests(vec![&req1, &req2]);
+
+        let server = Http1Server::new(|req: Request| async move {
+            Response::new(200, "OK", format!("Response for {}", req.uri).into_bytes())
+        });
+
+        let result = server.serve(transport).await;
+        assert!(result.is_ok());
+
+        let state = result.unwrap();
+        assert_eq!(state.requests_served, 2);
+
+        let written_data = written.lock().unwrap();
+        assert_eq!(parse_response_count(&written_data), 2);
+
+        let response_str = String::from_utf8_lossy(&written_data);
+        let first_response_path = response_str.find("/chunked-keepalive");
+        let followup_response_path = response_str.find("/after-chunked");
+        assert!(
+            first_response_path.is_some(),
+            "chunked keep-alive request should be served"
+        );
+        assert!(
+            followup_response_path.is_some(),
+            "pipelined follow-up should be served after chunked request"
+        );
+        assert!(
+            first_response_path < followup_response_path,
+            "chunked response should be written before the pipelined follow-up"
+        );
+        assert!(response_str.contains("Connection: close"));
+    });
+}
+
 /// Test 100-Continue interaction with keep-alive.
 #[test]
 fn test_100_continue_with_keepalive() {
