@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Leak Regression E2E Suite (bd-105vq).

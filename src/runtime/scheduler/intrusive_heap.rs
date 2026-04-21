@@ -641,13 +641,11 @@ mod tests {
             .collect();
 
         assert_eq!(
-            baseline_prefix,
-            urgent_band,
+            baseline_prefix, urgent_band,
             "equal-priority urgent tasks should pop FIFO without background noise"
         );
         assert_eq!(
-            noisy_prefix,
-            urgent_band,
+            noisy_prefix, urgent_band,
             "lower-priority noise must not perturb FIFO ordering within the urgent band"
         );
         assert!(

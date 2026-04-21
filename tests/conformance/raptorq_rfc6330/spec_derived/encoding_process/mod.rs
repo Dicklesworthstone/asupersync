@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Encoding process tests for RFC 6330 Section 4.2.
 //!

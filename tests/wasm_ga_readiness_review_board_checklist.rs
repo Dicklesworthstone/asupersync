@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! WASM GA readiness review board checklist enforcement (WASM-17.4).
 //!

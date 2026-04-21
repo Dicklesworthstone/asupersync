@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![doc = "Repro for leak-check commutativity in obligation analysis."]
 #![allow(missing_docs)]

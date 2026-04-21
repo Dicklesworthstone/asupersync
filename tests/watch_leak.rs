@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Watch channel leak tests.

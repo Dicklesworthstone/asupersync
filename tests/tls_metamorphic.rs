@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! TLS Handshake Metamorphic Testing (asupersync-yjt2ht)
 //!

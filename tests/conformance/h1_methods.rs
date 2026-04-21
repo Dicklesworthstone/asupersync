@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/1.1 Method Conformance Tests per RFC 9110 Section 9.1
 //!

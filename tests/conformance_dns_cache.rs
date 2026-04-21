@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![cfg(any())]
 //! Conformance tests for DNS cache TTL eviction and NXDOMAIN negative caching.

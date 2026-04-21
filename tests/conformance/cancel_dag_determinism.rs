@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Cancel DAG Determinism Conformance Tests
 //!

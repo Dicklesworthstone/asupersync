@@ -1063,11 +1063,7 @@ mod tests {
             }
 
             let rows = match conn
-                .query(
-                    &cx,
-                    "SELECT name FROM tx_isolation_items ORDER BY id",
-                    &[],
-                )
+                .query(&cx, "SELECT name FROM tx_isolation_items ORDER BY id", &[])
                 .await
             {
                 Outcome::Ok(rows) => rows,

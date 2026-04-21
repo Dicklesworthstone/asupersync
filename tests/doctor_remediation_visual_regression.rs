@@ -1,3 +1,4 @@
+#![allow(warnings)]
 //! Remediation and Trust Visual Regression Suite (Track 6.1)
 //!
 //! Extends the baseline visual-regression harness (6.9) with remediation-specific

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Full-Stack Reference Project Matrix Validation (Track 6.5)
 //!

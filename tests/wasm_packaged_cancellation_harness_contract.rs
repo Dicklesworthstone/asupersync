@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract invariants for the packaged cancellation/quiescence harness
 //! (asupersync-3qv04.8.4.2).

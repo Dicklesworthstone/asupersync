@@ -1153,9 +1153,8 @@ mod tests {
 
         // Verify the obligation is no longer in the active set
         let active_obligations = tracker.list_obligations();
-        let active_ids: Vec<_> = active_obligations.iter().map(|o| o.id).collect();
         assert!(
-            !active_ids.contains(&obligation_id),
+            !active_obligations.iter().any(|o| o.id == obligation_id),
             "Committed obligation should not appear in active list"
         );
     }

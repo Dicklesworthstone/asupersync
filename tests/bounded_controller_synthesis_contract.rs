@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Bounded controller synthesis contract invariants (AA-03.2).
 

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Legacy placeholder for the renamed `metamorphic_io_copy` integration target.
 //!

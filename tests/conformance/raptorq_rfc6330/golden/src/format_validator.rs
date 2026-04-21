@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Golden file format validation for RaptorQ conformance testing.
 //!

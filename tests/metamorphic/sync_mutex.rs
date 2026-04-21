@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic tests for sync::mutex cancel-aware lock ordering invariants.
 //!

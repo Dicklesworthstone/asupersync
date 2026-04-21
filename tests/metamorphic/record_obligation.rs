@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic tests for record::obligation permit/ack lifecycle invariants.
 //!

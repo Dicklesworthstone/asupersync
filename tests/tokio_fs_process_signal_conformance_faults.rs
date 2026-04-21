@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Deterministic Conformance and Fault-Injection Tests (Track 3.7)
 //!

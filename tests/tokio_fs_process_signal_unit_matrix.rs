@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for [T3.9] Exhaustive Unit-Test Matrix: FS, Process, Signal
 //!

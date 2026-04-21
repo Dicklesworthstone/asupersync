@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic tests for bulkhead cancel behavior and concurrency limits.
 //!

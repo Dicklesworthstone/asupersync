@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! MySQL COM_STMT_PREPARE/EXECUTE Conformance Tests
 //!
@@ -35,7 +36,6 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// Test result for a single conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -343,7 +343,7 @@ impl MySqlStmtConformanceHarness {
 
             // NULL bitmap (calculated based on parameter count)
             let param_count = 2;
-            let null_bitmap_len = (param_count + 7) / 8;
+            let _null_bitmap_len = (param_count + 7) / 8;
             let null_bitmap = vec![0x01]; // First param is NULL, second is not
             packet.extend_from_slice(&null_bitmap);
 

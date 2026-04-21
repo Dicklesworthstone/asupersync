@@ -1965,7 +1965,6 @@ mod tests {
     // Helper Functions
     // =========================================================================
 
-    
     /// Creates a no-op waker for testing.
     fn futures_waker() -> Waker {
         std::task::Waker::noop().clone()
@@ -2034,7 +2033,7 @@ mod tests {
         let short_duration = Duration::from_millis(5);
         let start_time = wall_clock.now();
 
-        let timer_id = handle.register(
+        let _timer_id = handle.register(
             handle
                 .now()
                 .saturating_add_nanos(short_duration.as_nanos().min(u128::from(u64::MAX)) as u64),
@@ -2298,7 +2297,7 @@ mod tests {
         }
 
         // Register a timer and verify it works with browser clock
-        let timer_id = handle.register(
+        let _timer_id = handle.register(
             handle.now().saturating_add_nanos(
                 Duration::from_millis(5)
                     .as_nanos()

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Cross-track composition contract invariants (AA-10.4).
 

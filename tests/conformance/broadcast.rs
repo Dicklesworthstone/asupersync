@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Broadcast channel conformance tests.
 //!
@@ -5,17 +6,13 @@
 //! per the internal specification and expected broadcast channel behavior.
 //! Uses metamorphic relations to verify core broadcast protocol invariants.
 
-use asupersync::channel::broadcast::{self, RecvError, SendError, TryRecvError};
+use asupersync::channel::broadcast::{self, SendError, TryRecvError};
 use asupersync::cx::Cx;
 use asupersync::types::Budget;
 use asupersync::util::ArenaIndex;
 use asupersync::{RegionId, TaskId};
 use proptest::prelude::*;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
-use std::time::Duration;
 
 /// Test context for broadcast conformance
 #[allow(dead_code)]
@@ -168,7 +165,7 @@ impl BroadcastState {
 fn test_mr1_subscribe_returns_only_values_sent_after_subscribe() {
     proptest!(|(messages_before in message_sequence_strategy(), messages_after in message_sequence_strategy())| {
         let cx = test_cx();
-        let (sender, receiver) = broadcast::channel::<TestMessage>(10);
+        let (sender, _receiver) = broadcast::channel::<TestMessage>(10);
 
         // Send messages before subscribe
         for msg in &messages_before {
@@ -292,7 +289,7 @@ fn test_mr3_drop_of_receiver_removes_from_broadcast_set() {
 #[test]
 #[allow(dead_code)]
 fn test_mr4_subscriber_count_accurate_through_concurrent_subscribe_drop() {
-    proptest!(|(operations in prop::collection::vec((0u8..3), 10..50))| {
+    proptest!(|(operations in prop::collection::vec(0u8..3, 10..50))| {
         let cx = test_cx();
         let (sender, _initial_receiver) = broadcast::channel::<TestMessage>(10);
 
@@ -417,7 +414,7 @@ fn test_broadcast_metamorphic_comprehensive() {
 
         let mut state = BroadcastState::new();
         let mut receivers = vec![initial_receiver];
-        let initial_receiver_id = state.subscribe();
+        let _initial_receiver_id = state.subscribe();
 
         // Track messages for verification
         let mut all_sent_messages = Vec::new();

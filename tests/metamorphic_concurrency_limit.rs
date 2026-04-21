@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic Testing: service::concurrency_limit fairness + Lyapunov bounded queue
 //!

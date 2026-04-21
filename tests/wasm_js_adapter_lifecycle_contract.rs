@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for React/Next adapter lifecycle helpers and bootstrap
 //! state-machine surfaces (asupersync-3qv04.8.3.3).

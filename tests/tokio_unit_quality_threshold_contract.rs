@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for cross-track unit-test quality thresholds (2oh2u.10.11).
 //!

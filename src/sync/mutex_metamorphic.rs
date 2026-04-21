@@ -170,7 +170,7 @@ fn mr2_cancel_non_poisoning() {
             counter: 0,
         }));
 
-        let lab = LabRuntime::new(LabConfig::default());
+        let _lab = LabRuntime::new(LabConfig::default());
 
         if cancel_during_wait {
             // MR2.1: Cancel while waiting for lock (not holding)
@@ -226,7 +226,7 @@ fn mr2_cancel_non_poisoning() {
         let try_result = mutex.try_lock();
         prop_assert!(try_result.is_ok(), "try_lock should succeed after cancel, got {:?}", try_result);
 
-        let lab2 = LabRuntime::new(LabConfig::default());
+        let _lab2 = LabRuntime::new(LabConfig::default());
         let lock_result = futures_lite::future::block_on(async {
             mutex.lock(&cx).await
         });
@@ -261,7 +261,7 @@ fn mr3_poison_recovery() {
         }));
 
         // Phase 1: Capture state before panic
-        let expected_state = {
+        let _expected_state = {
             let cx = create_test_context(1, 1);
             let _lab = LabRuntime::new(LabConfig::default());
 
@@ -349,7 +349,7 @@ fn mr4_concurrent_poison_consistency() {
             value: 100,
             counter: 0,
         }));
-        let lab = LabRuntime::new(LabConfig::default());
+        let _lab = LabRuntime::new(LabConfig::default());
 
         // Phase 1: Create multiple waiters
         let waiter_handles = Arc::new(std::sync::Mutex::new(Vec::new()));

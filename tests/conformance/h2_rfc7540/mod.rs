@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/2 RFC 7540 conformance test suite.
 //!

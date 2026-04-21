@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic tests for scheduler task migration and work stealing fairness.
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! E2E: Distributed RaptorQ encode/distribute/recover pipeline.
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! End-to-end interoperability scenarios for Tokio adapter ecosystem (T7.11).
 //!

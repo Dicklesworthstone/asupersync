@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic testing for `runtime::scheduler::local_queue` work-stealing invariants.
 //!

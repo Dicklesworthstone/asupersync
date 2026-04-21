@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/2 SETTINGS Frame Negotiation Conformance Tests (RFC 9113)
 //!

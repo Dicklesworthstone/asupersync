@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(clippy::similar_names)]
 //! HTTP/2 Security Hardening Integration Tests (bd-1z7e).

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Regression test for lost wakeups in the mutex waiter baton-passing path.
 

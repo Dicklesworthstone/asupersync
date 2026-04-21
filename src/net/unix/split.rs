@@ -698,7 +698,7 @@ impl std::error::Error for ReuniteError {}
 mod tests {
     use super::*;
     use crate::cx::Cx;
-    use std::sync::Arc;
+
     use std::task::{Context, Poll, Waker};
 
     fn noop_waker() -> Waker {

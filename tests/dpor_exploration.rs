@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Integration tests for DPOR race detection and schedule exploration.
 //!

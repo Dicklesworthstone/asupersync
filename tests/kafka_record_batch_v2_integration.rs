@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Integration test for Kafka RecordBatch v2 conformance.
 

@@ -394,7 +394,7 @@ impl CancellationAnalyzer {
                     .push(step.elapsed_since_prev);
             }
         }
-        
+
         // Prevent division by zero
         if total_trace_time_ms == 0.0 {
             total_trace_time_ms = 1.0;

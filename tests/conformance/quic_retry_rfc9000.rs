@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! QUIC Retry Packet Conformance Tests (RFC 9000 Section 17.2.5)
 //!
@@ -39,9 +40,7 @@
 //! 6. **Single Retry**: Client should only process one Retry packet per connection
 //! 7. **Version Matching**: Retry packet version must match client's Initial packet
 
-use asupersync::net::quic_core::{
-    ConnectionId, LongPacketType, PacketHeader, QuicCoreError, RetryHeader,
-};
+use asupersync::net::quic_core::{ConnectionId, PacketHeader, RetryHeader};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
@@ -636,7 +635,7 @@ impl QuicRetryConformanceHarness {
             RequirementLevel::Must,
             || {
                 // Simulate server generating Retry in response to Initial
-                let client_initial_dcid = ConnectionId::new(&[0x11, 0x22]).map_err(to_string)?;
+                let _client_initial_dcid = ConnectionId::new(&[0x11, 0x22]).map_err(to_string)?;
                 let client_initial_scid = ConnectionId::new(&[0x33, 0x44]).map_err(to_string)?;
                 let server_new_cid = ConnectionId::new(&[0xaa, 0xbb, 0xcc]).map_err(to_string)?;
                 let server_token = vec![0x12, 0x34, 0x56, 0x78];

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! gRPC Health Checking Protocol v1 Conformance Tests
 //!

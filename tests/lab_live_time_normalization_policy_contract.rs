@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for the lab-vs-live time normalization policy (2a6k9.4.4).
 //!

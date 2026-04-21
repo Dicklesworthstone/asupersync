@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/3 SETTINGS frame conformance tests for RFC 9114 Section 7.2.4
 //!

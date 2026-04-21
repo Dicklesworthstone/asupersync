@@ -441,7 +441,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::task::{Waker};
+    use std::task::Waker;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

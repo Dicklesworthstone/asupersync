@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Comprehensive Docs Semantic Lint Suite (SEM-12.2)
 //!

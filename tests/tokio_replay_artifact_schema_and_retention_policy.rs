@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for replay artifact schema and retention policy (2oh2u.10.6).
 //!

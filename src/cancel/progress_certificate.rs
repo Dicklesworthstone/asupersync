@@ -3263,7 +3263,10 @@ mod tests {
         }
 
         let verdict = cert.verdict();
-        assert!(verdict.converging, "drain should still converge after a mid-drain bump");
+        assert!(
+            verdict.converging,
+            "drain should still converge after a mid-drain bump"
+        );
         assert!(
             cert.increase_count() > 0,
             "cancellation-during-drain scenario should record a transient increase",
@@ -3291,7 +3294,10 @@ mod tests {
         }
 
         let verdict = cert.verdict();
-        assert!(verdict.stall_detected, "budget-exceeded scenario should detect a stall");
+        assert!(
+            verdict.stall_detected,
+            "budget-exceeded scenario should detect a stall"
+        );
         assert_ne!(verdict.drain_phase, DrainPhase::Quiescent);
 
         assert_json_snapshot!(

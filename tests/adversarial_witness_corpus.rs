@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Adversarial Witness Corpus and Regression Generator (SEM-12.13)
 //!

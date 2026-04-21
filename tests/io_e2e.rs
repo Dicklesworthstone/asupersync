@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Async I/O Traits Verification Suite - E2E Tests
 //!
@@ -18,7 +19,6 @@ use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId};
 use common::*;
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 #[cfg(unix)]

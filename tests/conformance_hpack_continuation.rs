@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HPACK Continuation Frame Conformance Tests
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! SEM-08.4: Differential conformance harness (trace-driven).
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for [T4.11] End-to-End QUIC/H3 Scenario Manifest with Deep Telemetry Logs.
 //!

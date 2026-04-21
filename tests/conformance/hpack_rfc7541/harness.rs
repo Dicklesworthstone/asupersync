@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HPACK RFC 7541 conformance test harness implementation.
 
@@ -323,7 +324,7 @@ impl ConformanceTest for DynamicTableEvictionTest {
         let _encoded1 = harness.encode_headers(&large_headers[..2], false);
 
         // Encode second batch - should evict earlier entries
-        let encoded2 = harness.encode_headers(&large_headers[2..], false);
+        let _encoded2 = harness.encode_headers(&large_headers[2..], false);
 
         // The fact that encoding succeeded indicates eviction worked
         // (A full implementation would need to examine internal table state)

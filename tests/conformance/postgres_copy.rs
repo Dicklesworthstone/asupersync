@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! PostgreSQL COPY IN/OUT Protocol Conformance Tests
 //!

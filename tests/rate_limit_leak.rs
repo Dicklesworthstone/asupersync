@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Regression coverage for rate limiter cancellation accounting.
 

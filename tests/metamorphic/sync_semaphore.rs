@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic Tests: sync::Semaphore Invariants (Five Relations)
 //!

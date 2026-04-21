@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! ADR regression tests for semantic harmonization (SEM-08.6).
 //!

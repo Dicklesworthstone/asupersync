@@ -315,7 +315,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use std::sync::Arc;
-    
+
     fn noop_waker() -> std::task::Waker {
         std::task::Waker::noop().clone()
     }

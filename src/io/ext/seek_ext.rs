@@ -68,7 +68,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+
     use std::task::{Context, Waker};
 
     fn init_test(name: &str) {

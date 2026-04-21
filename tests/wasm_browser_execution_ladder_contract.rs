@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Browser Edition execution-ladder contract checks.
 //!

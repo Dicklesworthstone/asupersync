@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! WebSocket Extension Negotiation Conformance Tests (RFC 6455 + RFC 7692)
 //!
@@ -903,9 +904,6 @@ impl Default for WsExtensionConformanceHarness {
         Self::new()
     }
 }
-
-/// Re-export types for conformance system integration.
-pub use WsExtensionConformanceResult as WsConformanceResult;
 
 // Tests that always run regardless of features
 #[test]

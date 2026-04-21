@@ -302,12 +302,12 @@ mod tests {
     use super::*;
     use insta::assert_json_snapshot;
     use parking_lot::Mutex;
-    use serde::ser::Error as _;
     use serde::Serializer;
+    use serde::ser::Error as _;
     use serde_json::Value;
     use std::io::{self, Cursor, Write};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[derive(Serialize)]

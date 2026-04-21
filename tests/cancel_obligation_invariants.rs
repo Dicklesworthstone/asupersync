@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Combined cancellation + obligation invariant tests (bd-38kk).
 //!

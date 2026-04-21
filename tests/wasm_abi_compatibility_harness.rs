@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! WASM ABI Compatibility Harness (WASM-8.5)
 //!

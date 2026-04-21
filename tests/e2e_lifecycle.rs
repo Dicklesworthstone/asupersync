@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! T1.1 — Full runtime startup-to-shutdown lifecycle E2E test.
 //!

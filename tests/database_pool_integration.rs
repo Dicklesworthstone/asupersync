@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Integration tests for database pool + transaction management helpers.
 //!

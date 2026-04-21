@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Integration tests for ECOSYSTEM-PARITY G.3 console viewer behavior.
 

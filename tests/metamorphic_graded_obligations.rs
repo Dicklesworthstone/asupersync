@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic Testing for Graded Obligations System
 //!
@@ -460,7 +461,7 @@ fn metamorphic_graded_obligations_integration() {
         let half_count = operation_count / 2;
 
         // First half: Test into_raw escape hatch
-        for i in 0..half_count {
+        for _i in 0..half_count {
             if let Some(obligation) = active_obligations.pop() {
                 let _raw = obligation.into_raw();
                 tracker.track_drop();

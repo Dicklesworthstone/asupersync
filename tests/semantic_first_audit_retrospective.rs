@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! First Recurring Audit Retrospective Validation (SEM-11.5)
 //!

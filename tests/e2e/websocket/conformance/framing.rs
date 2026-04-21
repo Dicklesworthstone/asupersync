@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 use crate::websocket_e2e::util::{
     init_ws_test, read_exact, read_http_headers, ws_handshake_request_bytes,

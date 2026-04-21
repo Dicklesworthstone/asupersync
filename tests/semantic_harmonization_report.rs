@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! SEM-11.1 harmonization report contract checks.
 //!

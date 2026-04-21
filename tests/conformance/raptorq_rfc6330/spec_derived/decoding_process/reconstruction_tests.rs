@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Tests for object reconstruction (RFC 6330 Section 4.3.3).
 

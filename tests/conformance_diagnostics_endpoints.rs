@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![cfg(any())]
 #![allow(missing_docs)]

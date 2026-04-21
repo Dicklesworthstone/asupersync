@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! CI proof gates contract invariants (AA-10.2).
 

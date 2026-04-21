@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! E2E Lab Harness — reusable struct bundling LabRuntime + OracleSuite + structured logging.
 //!

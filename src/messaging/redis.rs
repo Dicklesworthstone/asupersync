@@ -2064,7 +2064,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener as StdTcpListener;
     use std::pin::Pin;
-    use std::sync::Arc;
+
     use std::sync::mpsc;
     use std::task::{Context, Poll, Waker};
     use std::thread;

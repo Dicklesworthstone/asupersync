@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Obligation invariant tracking and validation infrastructure.
 //!
@@ -5,7 +6,7 @@
 //! structured concurrency invariants in the asupersync runtime.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use asupersync::types::{ObligationId, RegionId};

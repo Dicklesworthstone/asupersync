@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic property tests for MPSC channel bounded capacity backpressure invariants.
 //!

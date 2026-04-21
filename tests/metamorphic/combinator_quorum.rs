@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic testing for combinator::quorum k-of-n completion invariants.
 //!

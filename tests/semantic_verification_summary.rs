@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Semantic Verification Summary Validation (SEM-12.10)
 //!

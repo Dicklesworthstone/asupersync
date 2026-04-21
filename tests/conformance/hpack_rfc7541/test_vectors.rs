@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! RFC 7541 Appendix C test vectors and systematic test cases.
 
@@ -403,7 +404,7 @@ mod test_vector_validation {
             );
 
             // Ensure header names and values are valid
-            for (name, value) in vector.headers {
+            for (name, _value) in vector.headers {
                 assert!(!name.is_empty(), "Header name must not be empty");
                 // Value can be empty (e.g., ":authority" often is)
             }

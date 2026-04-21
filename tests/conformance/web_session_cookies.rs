@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! RFC 6265 Cookie Signature Validation Conformance Tests
 //!

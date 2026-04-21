@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Golden snapshots for progress-certificate verdict serialization.
 

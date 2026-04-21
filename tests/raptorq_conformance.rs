@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(missing_docs)]
 //! RaptorQ conformance, property tests, and deterministic fuzz harness.

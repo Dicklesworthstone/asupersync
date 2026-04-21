@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(unsafe_code)]
 //! TCP listener accept loop conformance tests.

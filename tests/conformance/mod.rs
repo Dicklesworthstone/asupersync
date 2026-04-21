@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Conformance testing module for asupersync.
 //!
@@ -42,51 +43,27 @@ pub mod tcp_accept;
 pub mod websocket_extension_negotiation_rfc6455;
 
 // Re-export main conformance test functionality
-pub use aggregator_flush::{
-    AggregatorFlushConformanceHarness, AggregatorFlushConformanceResult,
-    TestCategory as AggregatorFlushTestCategory,
-};
-pub use h1_rfc9112::{H1ConformanceHarness, H1ConformanceResult, RequirementLevel, TestVerdict};
+pub use aggregator_flush::AggregatorFlushConformanceHarness;
+pub use h1_rfc9112::{H1ConformanceHarness, RequirementLevel, TestVerdict};
 #[cfg(feature = "tls")]
 pub use h2_alpn_negotiation_rfc7540::{
     H2AlpnConformanceHarness, H2ConformanceResult as H2AlpnConformanceResult,
     TestCategory as H2AlpnTestCategory,
 };
-pub use h2_priority::{
-    H2PriorityConformanceHarness, H2PriorityConformanceResult,
-    TestCategory as H2PriorityTestCategory,
-};
-pub use h2_rst_stream_ping_rfc9113::{
-    H2ConformanceHarness, H2ConformanceResult, TestCategory as H2TestCategory,
-};
-pub use hpack_table_size::{
-    HpackTableSizeConformanceResult, TestCategory as HpackTableSizeTestCategory,
-};
+pub use h2_rst_stream_ping_rfc9113::H2ConformanceHarness;
 // pub use h3_rfc9114::{H3ConformanceHarness, H3ConformanceResult};
 pub use hpack_rfc7541::HpackConformanceHarness;
-pub use kafka_record_batch_v2::{
-    ConformanceTestResult as KafkaConformanceTestResult, KafkaConformanceHarness,
-    TestCategory as KafkaTestCategory,
-};
 // pub use mysql_auth_switch::{MySqlAuthConformanceHarness, MySqlAuthConformanceResult};
 #[cfg(feature = "deterministic-mode")]
 pub use cancel_dag_determinism::{
     CancelDagDeterminismHarness, CancelDagDeterminismResult, TestCategory as CancelDagTestCategory,
-};
-pub use mysql_stmt_prepare_execute::{
-    MySqlStmtConformanceHarness, MySqlStmtConformanceResult, TestCategory as MySqlTestCategory,
 };
 #[cfg(feature = "deterministic-mode")]
 pub use obligation_lifecycle_metamorphic::{
     ObligationLifecycleMetamorphicHarness, ObligationLifecycleMetamorphicResult,
     TestCategory as ObligationLifecycleTestCategory,
 };
-pub use postgres_logical_replication::{
-    PgLogicalReplicationHarness, PgLogicalReplicationResult, TestCategory as PgLogicalTestCategory,
-};
-pub use quic_retry_rfc9000::{
-    QuicRetryConformanceHarness, QuicRetryConformanceResult, TestCategory as QuicTestCategory,
-};
+pub use quic_retry_rfc9000::QuicRetryConformanceHarness;
 #[cfg(feature = "deterministic-mode")]
 pub use race_loser_drain_metamorphic::{
     RaceLoserDrainMetamorphicHarness, RaceLoserDrainMetamorphicResult,
@@ -102,19 +79,13 @@ pub use trace_replay_idempotency_metamorphic::{
     TraceReplayIdempotencyMetamorphicResult,
 };
 // pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
-pub use grpc_trailer_forwarding_rfc9113::{
-    GrpcConformanceResult as GrpcTrailerConformanceResult, GrpcTrailerConformanceHarness,
-    TestCategory as GrpcTrailerTestCategory,
-};
+pub use grpc_trailer_forwarding_rfc9113::GrpcTrailerConformanceHarness;
 #[cfg(feature = "quic")]
 pub use quic_connection_migration_rfc9000::{
     QuicConnectionMigrationConformanceHarness, QuicConnectionMigrationConformanceResult,
     TestCategory as QuicConnectionMigrationTestCategory,
 };
-pub use websocket_extension_negotiation_rfc6455::{
-    TestCategory as WsExtensionTestCategory, WsExtensionConformanceHarness,
-    WsExtensionConformanceResult,
-};
+pub use websocket_extension_negotiation_rfc6455::WsExtensionConformanceHarness;
 
 // Unified test categories for all conformance suites
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

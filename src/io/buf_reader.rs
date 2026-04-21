@@ -181,8 +181,8 @@ impl<R: AsyncRead + Unpin> AsyncBufRead for BufReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::task::{Waker};
+
+    use std::task::Waker;
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

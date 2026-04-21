@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/2 frame metamorphic property tests.
 //!

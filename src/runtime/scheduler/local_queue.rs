@@ -1008,12 +1008,12 @@ mod tests {
 
             prop_assert_eq!(
                 baseline,
-                expected,
+                expected.clone(),
                 "owner LIFO drain should match reverse arrival order",
             );
             prop_assert_eq!(
                 variant,
-                expected,
+                expected.clone(),
                 "chunking pushes must not perturb owner-visible LIFO order",
             );
         }
@@ -1043,12 +1043,12 @@ mod tests {
 
             prop_assert_eq!(
                 baseline,
-                expected,
+                expected.clone(),
                 "thief FIFO drain should match arrival order",
             );
             prop_assert_eq!(
                 variant,
-                expected,
+                expected.clone(),
                 "chunking pushes must not perturb thief-visible FIFO order",
             );
         }

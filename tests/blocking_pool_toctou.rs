@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Regression test for a `BlockingPool` spawn/shutdown TOCTOU race.
 

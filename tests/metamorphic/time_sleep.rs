@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic Testing for time::sleep cancel-drain virtual-time invariants
 //!

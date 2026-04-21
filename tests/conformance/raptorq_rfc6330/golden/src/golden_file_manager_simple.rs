@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Golden File Management for RaptorQ RFC 6330 Conformance Testing
 //!

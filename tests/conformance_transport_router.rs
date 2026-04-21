@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Conformance tests for transport router symbol dispatch correctness.
 //!

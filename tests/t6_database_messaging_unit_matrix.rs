@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! T6.12 — Behavioral Verification Matrix for Database and Messaging Unit Tests
 //!

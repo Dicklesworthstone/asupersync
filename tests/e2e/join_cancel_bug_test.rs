@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};

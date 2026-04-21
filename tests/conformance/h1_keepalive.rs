@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/1.1 Keep-Alive Connection Pooling Conformance Tests (RFC 9112)
 //!

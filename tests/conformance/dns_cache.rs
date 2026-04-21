@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! DNS Cache RFC 2308 Conformance Tests
 //!

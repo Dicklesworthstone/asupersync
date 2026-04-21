@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Integration tests: net/http/h2/websocket unit gaps (bd-2hvn).
 //!

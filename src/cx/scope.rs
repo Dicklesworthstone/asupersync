@@ -1725,7 +1725,6 @@ mod tests {
 
     #[test]
     fn spawn_registered_task_can_be_polled() {
-        use std::sync::Arc;
         use std::task::Context;
 
         let mut state = RuntimeState::new();
@@ -1914,7 +1913,6 @@ mod tests {
 
     #[test]
     fn test_join_manual_poll() {
-        use std::sync::Arc;
         use std::task::Context;
 
         let mut state = RuntimeState::new();
@@ -1949,8 +1947,7 @@ mod tests {
 
     #[test]
     fn spawn_abort_cancels_task() {
-        use std::sync::Arc;
-        use std::task::{Context, Poll, Waker};
+        use std::task::{Context, Poll};
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2116,7 +2113,7 @@ mod tests {
 
     #[test]
     fn region_spawns_tasks_in_child() {
-        use std::task::{Context, Poll, Waker};
+        use std::task::{Context, Poll};
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2181,8 +2178,7 @@ mod tests {
 
     #[test]
     fn spawn_panic_propagates_as_panicked_error() {
-        use std::sync::Arc;
-        use std::task::{Context, Poll, Waker};
+        use std::task::{Context, Poll};
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2217,8 +2213,7 @@ mod tests {
 
     #[test]
     fn join_all_success() {
-        use std::sync::Arc;
-        use std::task::{Context, Poll, Waker};
+        use std::task::{Context, Poll};
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2249,8 +2244,7 @@ mod tests {
 
     #[test]
     fn race_all_aborted_task_is_drained() {
-        use std::sync::Arc;
-        use std::task::{Context, Poll, Waker};
+        use std::task::{Context, Poll};
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2340,7 +2334,6 @@ mod tests {
 
     #[test]
     fn race_surfaces_loser_panic_even_if_winner_succeeds() {
-        use std::sync::Arc;
         use std::task::Context;
 
         let mut state = RuntimeState::new();
@@ -2369,8 +2362,7 @@ mod tests {
 
     #[test]
     fn race_preserves_winner_panic_over_loser_panic() {
-        use std::sync::Arc;
-        use std::task::{Context, Poll, Waker};
+        use std::task::{Context, Poll};
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2413,7 +2405,6 @@ mod tests {
 
     #[test]
     fn race_all_surfaces_simultaneous_loser_panic() {
-        use std::sync::Arc;
         use std::task::Context;
 
         let mut state = RuntimeState::new();
@@ -2444,8 +2435,7 @@ mod tests {
 
     #[test]
     fn race_all_preserves_winner_panic_over_loser_panic() {
-        use std::sync::Arc;
-        use std::task::{Context, Poll, Waker};
+        use std::task::{Context, Poll};
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -2566,7 +2556,7 @@ mod tests {
     #[test]
     fn conformance_join_awaits_task_completion() {
         // INVARIANT: TaskHandle.join() waits for task completion and returns the result
-        use std::sync::Arc;
+
         use std::task::Context;
 
         let mut state = RuntimeState::new();
@@ -2604,7 +2594,7 @@ mod tests {
     #[test]
     fn conformance_child_region_task_isolation() {
         // INVARIANT: Tasks spawned in child regions belong to the child, not the parent
-        use std::sync::Arc;
+
         use std::task::Context;
 
         let mut state = RuntimeState::new();
@@ -2634,12 +2624,10 @@ mod tests {
                 // Verify region tracking invariants
                 let parent_tracks = state
                     .region(parent_region)
-                    .map(|r| r.task_ids().contains(&handle.task_id()))
-                    .unwrap_or(false);
+                    .is_some_and(|r| r.task_ids().contains(&handle.task_id()));
                 let child_tracks = state
                     .region(child_region)
-                    .map(|r| r.task_ids().contains(&handle.task_id()))
-                    .unwrap_or(false);
+                    .is_some_and(|r| r.task_ids().contains(&handle.task_id()));
 
                 // Complete the task for clean shutdown
                 let waker = std::task::Waker::noop().clone();
@@ -2817,7 +2805,7 @@ mod tests {
     #[test]
     fn conformance_task_cancellation_propagation() {
         // INVARIANT: Cancelling a task via abort() propagates cancellation signal
-        use std::sync::Arc;
+
         use std::task::Context;
 
         let mut state = RuntimeState::new();
@@ -2864,8 +2852,8 @@ mod tests {
     #[test]
     fn conformance_race_loser_drain_invariant() {
         // INVARIANT: In race operations, losers are cancelled and fully drained
-        use std::sync::Arc;
-        use std::task::{Context, Poll, Waker};
+
+        use std::task::{Context, Poll};
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -3008,8 +2996,7 @@ mod tests {
             state.tasks_is_empty()
                 || state
                     .region(region)
-                    .map(|r| r.task_ids().is_empty())
-                    .unwrap_or(true),
+                    .map_or(true, |r| r.task_ids().is_empty()),
             "failed spawn must not create orphaned tasks"
         );
     }
@@ -3017,8 +3004,8 @@ mod tests {
     #[test]
     fn conformance_join_multiple_tasks_preserves_results() {
         // INVARIANT: join_all preserves all task results in order
-        use std::sync::Arc;
-        use std::task::{Context, Poll, Waker};
+
+        use std::task::{Context, Poll};
 
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -3070,8 +3057,8 @@ mod tests {
     #[test]
     fn conformance_panic_propagation_through_join() {
         // INVARIANT: Task panics are captured and propagated through join as JoinError::Panicked
-        use std::sync::Arc;
-        use std::task::{Context, Poll, Waker};
+
+        use std::task::{Context, Poll};
 
         let mut state = RuntimeState::new();
         let cx = test_cx();

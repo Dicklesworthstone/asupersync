@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! RFC 6330 conformance test harness for RaptorQ implementation.
 //!

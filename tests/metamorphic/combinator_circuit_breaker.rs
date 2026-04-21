@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic testing for combinator::circuit_breaker state machine invariants.
 //!

@@ -765,7 +765,7 @@ mod tests {
     use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
     use futures_lite::future;
     use std::pin::Pin;
-    use std::sync::Arc;
+
     use std::task::Poll;
 
     enum WriteBehavior {

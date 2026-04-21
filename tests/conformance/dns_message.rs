@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! DNS RFC 1035 Message Format Conformance Tests
 //!

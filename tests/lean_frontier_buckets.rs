@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Frontier bucket artifact integrity checks (bd-1dorb).
 

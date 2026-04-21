@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Unified Semantic Verification Runner Validation (SEM-12.9)
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Integration and property-based tests for Separation Logic proof infrastructure.
 //!

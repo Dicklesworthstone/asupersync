@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! DPOR Coverage & Backtracking regression tests.
 //!

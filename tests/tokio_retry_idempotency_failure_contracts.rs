@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! T6.9 — Retry, Idempotency, and Failure Contract Enforcement Tests
 //!

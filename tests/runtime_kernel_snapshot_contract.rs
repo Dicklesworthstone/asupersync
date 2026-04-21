@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Runtime kernel snapshot contract invariants (AA-02.1).
 

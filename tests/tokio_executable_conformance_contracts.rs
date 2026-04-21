@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for executable conformance contracts (2oh2u.10.2).
 //!

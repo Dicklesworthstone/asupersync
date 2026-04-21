@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for TOKIO-REPLACE parity dashboard generator (2oh2u.1.4.1).
 //!

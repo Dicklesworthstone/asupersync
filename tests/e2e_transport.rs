@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! E2E: Transport TCP+UDP — connect, send, receive, close, large transfer.
 //!

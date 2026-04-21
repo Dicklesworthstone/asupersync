@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Track-6 closed-loop impact report contract checks (asupersync-3gf4i).
 

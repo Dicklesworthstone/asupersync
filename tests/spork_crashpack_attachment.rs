@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Scenario-level crashpack attachment/linking contract tests (bd-1wen4).
 

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! RFC 7301 ALPN Conformance Testing
 //!

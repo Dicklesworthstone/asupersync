@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Property tests for WebSocket frame codec (RFC 6455).
 //!

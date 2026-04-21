@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! T6.11 — Migration Packs for Database and Messaging Ecosystems
 //!

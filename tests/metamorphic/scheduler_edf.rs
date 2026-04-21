@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic tests for EDF (Earliest Deadline First) scheduler deadline ordering.
 //!

@@ -864,7 +864,7 @@ mod tests {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
     }
-    use std::task::{Waker};
+    use std::task::Waker;
 
     struct TrackWaker(Arc<AtomicBool>);
 

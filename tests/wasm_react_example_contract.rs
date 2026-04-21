@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for the maintained React example fixture (asupersync-3qv04.9.3.2).
 //!

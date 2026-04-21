@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Conformance tests for gRPC status codes and trailers per gRPC specification.
 //!

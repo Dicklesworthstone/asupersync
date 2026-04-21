@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Determinism tests for actors in the lab runtime.
 //!

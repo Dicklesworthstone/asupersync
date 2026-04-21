@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Channel Cancellation Protocol Conformance Matrix
 //!

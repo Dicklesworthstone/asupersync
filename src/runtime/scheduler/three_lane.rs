@@ -7664,7 +7664,7 @@ mod tests {
             "timed lane should preempt ready once fairness yields under cancel flood: {trace:?}"
         );
         assert!(
-            ready_index + 1 <= adaptive_limit * 2 + 2,
+            ready_index < adaptive_limit * 2 + 2,
             "ready lane should progress within a bounded number of dispatches under cancel flood: {trace:?}"
         );
         assert!(
@@ -9096,12 +9096,11 @@ mod tests {
                 }
 
                 // Should not exceed fairness limit without dispatching ready tasks
-                if cancel_dispatches >= cancel_limit * 2 {
-                    panic!(
-                        "Cancel fairness violated: {} cancel dispatches without ready dispatch",
-                        cancel_dispatches
-                    );
-                }
+                assert!(
+                    cancel_dispatches < cancel_limit * 2,
+                    "Cancel fairness violated: {} cancel dispatches without ready dispatch",
+                    cancel_dispatches
+                );
             } else {
                 break;
             }
@@ -9325,7 +9324,7 @@ mod tests {
         // Penalty should be within reasonable bounds [0.0, 2.0]
         for &penalty in recent {
             assert!(
-                penalty >= 0.0 && penalty <= 2.0,
+                (0.0..=2.0).contains(&penalty),
                 "Penalty {:.4} should be in bounds [0.0, 2.0]",
                 penalty
             );
@@ -9380,7 +9379,7 @@ mod tests {
         let extreme_jumps = threshold_history
             .windows(2)
             .filter(|window| {
-                let diff = (window[1] as i32 - window[0] as i32).abs();
+                let diff = window[1].abs_diff(window[0]);
                 diff > 24 // Jump from 4 to 32+ or similar large change
             })
             .count();

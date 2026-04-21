@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Core invariant testing infrastructure for structured concurrency obligations.
 //!
@@ -8,12 +9,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::obligation_tracker::{InvariantViolation, InvariantViolationType, ObligationTracker};
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::types::{ObligationId, RegionId};
 
 /// Main harness for running obligation invariant tests
 #[allow(dead_code)]

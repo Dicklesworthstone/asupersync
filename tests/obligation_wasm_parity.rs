@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Obligation ledger WASM parity verification tests (asupersync-umelq.6.3).

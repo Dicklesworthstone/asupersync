@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Comprehensive spec-derived tests for RFC 6330 RaptorQ implementation.
 //!

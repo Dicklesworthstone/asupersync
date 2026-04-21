@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for JS/TS exports, type declarations, module-resolution
 //! entrypoints, and diagnostics semantics

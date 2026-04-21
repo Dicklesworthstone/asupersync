@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(missing_docs)]
 //! RaptorQ performance invariants, constraint matrix correctness, proof trace

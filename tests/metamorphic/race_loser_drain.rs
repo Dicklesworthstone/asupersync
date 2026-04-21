@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic Testing for combinator::race loser drain correctness invariants
 //!

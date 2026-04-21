@@ -1540,11 +1540,9 @@ mod tests {
 
         fn assert_golden_retry_after_signal(expected: Duration, actual: Duration) {
             let tolerance = Duration::from_millis(1); // 1ms tolerance for floating point
-            let diff = if actual > expected {
-                actual - expected
-            } else {
-                expected - actual
-            };
+            let diff = actual
+                .checked_sub(expected)
+                .unwrap_or_else(|| expected.checked_sub(actual).unwrap());
             assert!(
                 diff <= tolerance,
                 "Golden retry-after signal mismatch: expected {:?}, got {:?}, diff {:?}",

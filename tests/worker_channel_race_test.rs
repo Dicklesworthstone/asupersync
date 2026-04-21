@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Regression coverage for stale worker status snapshots during cancellation.
 

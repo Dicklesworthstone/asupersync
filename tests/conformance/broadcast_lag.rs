@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Conformance Tests: Broadcast Channel Lag Handling
 //!

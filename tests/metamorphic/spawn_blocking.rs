@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic tests for runtime::spawn_blocking cancel-propagation invariants.
 //!

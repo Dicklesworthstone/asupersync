@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Golden test vectors for RFC 9112 HTTP/1.1 chunked encoding.
 //!

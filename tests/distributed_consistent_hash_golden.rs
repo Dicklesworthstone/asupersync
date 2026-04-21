@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Golden snapshots for consistent-hash node-set transitions.
 
@@ -81,12 +82,23 @@ fn node_set_partitioning_scrubbed() {
     let after_add_assignments = assignment_map(&after_add, &keys);
 
     let mut after_remove = after_add.clone();
-    assert_eq!(after_remove.remove_node("node-b"), 32, "remove should drop one node worth of vnodes");
+    assert_eq!(
+        after_remove.remove_node("node-b"),
+        32,
+        "remove should drop one node worth of vnodes"
+    );
     let after_remove_assignments = assignment_map(&after_remove, &keys);
 
     let mut after_replace = baseline.clone();
-    assert_eq!(after_replace.remove_node("node-c"), 32, "replace should first remove node-c");
-    assert!(after_replace.add_node("node-e"), "replacement node should be unique");
+    assert_eq!(
+        after_replace.remove_node("node-c"),
+        32,
+        "replace should first remove node-c"
+    );
+    assert!(
+        after_replace.add_node("node-e"),
+        "replacement node should be unique"
+    );
     let after_replace_assignments = assignment_map(&after_replace, &keys);
 
     assert_json_snapshot!(
@@ -137,7 +149,10 @@ fn node_set_partition_summary_scrubbed() {
         32,
         "replace should first remove node-c"
     );
-    assert!(after_replace.add_node("node-e"), "replacement node should be unique");
+    assert!(
+        after_replace.add_node("node-e"),
+        "replacement node should be unique"
+    );
     let after_replace_assignments = assignment_map(&after_replace, &keys);
 
     assert_json_snapshot!(

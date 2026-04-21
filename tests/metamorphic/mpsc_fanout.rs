@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic property tests for MPSC channel fan-out/fan-in invariants.
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Tests for Encoding Symbol ID (ESI) validation.
 

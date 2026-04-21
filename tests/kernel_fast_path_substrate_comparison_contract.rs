@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Kernel fast path substrate comparison contract invariants (AA-04.1).
 

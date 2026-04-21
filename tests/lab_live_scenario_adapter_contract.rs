@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Contract tests for the lab-vs-live scenario adapter contract (2a6k9.2.1).

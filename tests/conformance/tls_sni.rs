@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! TLS 1.3 Server Name Indication (SNI) Conformance Tests
 //!

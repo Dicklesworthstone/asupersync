@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! WebSocket RFC 6455 conformance test suite.
 //!

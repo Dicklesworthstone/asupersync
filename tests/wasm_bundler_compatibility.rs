@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! WASM Bundler/Runtime Compatibility Matrix Validation (WASM-9.4)
 //!

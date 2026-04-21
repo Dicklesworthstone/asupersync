@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Property tests for the Outcome severity lattice, functor/monad laws,
 //! Severity round-trip, and timer wheel invariants.

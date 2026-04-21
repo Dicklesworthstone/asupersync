@@ -70,8 +70,8 @@ impl<S: Stream> Stream for Fuse<S> {
 mod tests {
     use super::*;
     use crate::stream::iter;
-    use std::sync::Arc;
-    use std::task::{Waker};
+
+    use std::task::Waker;
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

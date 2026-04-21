@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Network fault simulation E2E tests (bd-167hv).
 //!

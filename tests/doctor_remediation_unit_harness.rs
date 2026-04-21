@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Remediation Unit-Test Suite for DSL, Risk, and Rollback Engines (Track 4.5)
 //!

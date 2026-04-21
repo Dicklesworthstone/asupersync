@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! High-concurrency stress testing scenarios for channel cancellation.
 

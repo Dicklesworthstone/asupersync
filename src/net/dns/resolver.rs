@@ -1560,7 +1560,7 @@ mod tests {
     use std::net::{TcpListener, UdpSocket};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::task::{Waker};
+    use std::task::Waker;
     use std::thread::{self, JoinHandle};
 
     fn init_test(name: &str) {
@@ -3454,7 +3454,7 @@ mod tests {
         });
 
         let (ok1, ok2, ok3) = concurrent_result;
-        let async_success_count = [ok1, ok2, ok3].iter().filter(|&&x| x).count();
+        let async_success_count = [ok1, ok2, ok3].into_iter().filter(|x| *x).count();
 
         crate::assert_with_log!(
             async_success_count >= 2,

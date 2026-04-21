@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Trace Replay Idempotency Metamorphic Tests
 //!

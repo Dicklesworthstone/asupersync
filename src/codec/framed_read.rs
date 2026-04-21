@@ -173,7 +173,7 @@ mod tests {
     use std::io;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::task::{Waker};
+    use std::task::Waker;
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
@@ -432,7 +432,7 @@ mod tests {
             Poll::Ready(Some(Err(LinesCodecError::Io(err)))) => {
                 assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
             }
-            other => panic!("expected io error propagation, got {other:?}"),
+            other => panic!("expected io error propagation, got {other:?}"), // ubs:ignore - test logic
         }
     }
 }

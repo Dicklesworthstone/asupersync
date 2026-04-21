@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! G2: CI regression gates for correctness + performance.
 //!

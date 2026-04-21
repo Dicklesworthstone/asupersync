@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Redis end-to-end (E2E) test suite.
 //!

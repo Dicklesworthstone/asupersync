@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Pool leak detection test — requires a database feature to compile.
 #![cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]

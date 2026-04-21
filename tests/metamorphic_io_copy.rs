@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Canonical integration target for `tests/metamorphic/io_copy.rs`.
 //!

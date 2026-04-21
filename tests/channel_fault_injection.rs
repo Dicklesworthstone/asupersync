@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Channel fault injection integration tests (bd-2ktrc.1).
@@ -19,7 +20,7 @@ use asupersync::evidence_sink::{CollectorSink, EvidenceSink};
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 fn test_cx() -> asupersync::cx::Cx {
     asupersync::cx::Cx::for_testing()

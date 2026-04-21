@@ -1678,7 +1678,7 @@ mod tests {
                     client_fd,
                     libc::SOL_SOCKET,
                     libc::SO_NOSIGPIPE,
-                    &mut get_opt as *mut _ as *mut libc::c_void,
+                    std::ptr::from_mut(&mut get_opt).cast::<libc::c_void>(),
                     &mut opt_len,
                 )
             };
@@ -1739,7 +1739,7 @@ mod tests {
                             write_succeeded = false;
                             break;
                         }
-                        Ok(_) => continue,
+                        Ok(_) => {}
                     }
                 }
                 assert!(
@@ -2029,7 +2029,7 @@ mod tests {
                 socket_fd,
                 libc::IPPROTO_TCP,
                 libc::TCP_NODELAY,
-                &mut nodelay_val as *mut _ as *mut libc::c_void,
+                std::ptr::from_mut(&mut nodelay_val).cast::<libc::c_void>(),
                 &mut opt_len,
             )
         };
@@ -2046,7 +2046,7 @@ mod tests {
                 socket_fd,
                 libc::IPPROTO_TCP,
                 libc::TCP_NODELAY,
-                &mut nodelay_val as *mut _ as *mut libc::c_void,
+                std::ptr::from_mut(&mut nodelay_val).cast::<libc::c_void>(),
                 &mut opt_len,
             )
         };
@@ -2080,7 +2080,7 @@ mod tests {
                 socket_fd,
                 libc::SOL_SOCKET,
                 libc::SO_KEEPALIVE,
-                &mut keepalive_val as *mut _ as *mut libc::c_void,
+                std::ptr::from_mut(&mut keepalive_val).cast::<libc::c_void>(),
                 &mut opt_len,
             )
         };
@@ -2097,7 +2097,7 @@ mod tests {
                 socket_fd,
                 libc::SOL_SOCKET,
                 libc::SO_KEEPALIVE,
-                &mut keepalive_val as *mut _ as *mut libc::c_void,
+                std::ptr::from_mut(&mut keepalive_val).cast::<libc::c_void>(),
                 &mut opt_len,
             )
         };
@@ -2132,7 +2132,7 @@ mod tests {
                 socket_fd,
                 libc::IPPROTO_TCP,
                 libc::TCP_KEEPIDLE,
-                &mut keepidle_val as *mut _ as *mut libc::c_void,
+                std::ptr::from_mut(&mut keepidle_val).cast::<libc::c_void>(),
                 &mut opt_len,
             )
         };
@@ -2170,7 +2170,7 @@ mod tests {
                 socket_fd,
                 libc::IPPROTO_TCP,
                 libc::TCP_NODELAY,
-                &mut nodelay_val as *mut _ as *mut libc::c_void,
+                std::ptr::from_mut(&mut nodelay_val).cast::<libc::c_void>(),
                 &mut opt_len,
             )
         };
@@ -2212,7 +2212,7 @@ mod tests {
                 socket_fd,
                 libc::SOL_SOCKET,
                 libc::SO_KEEPALIVE,
-                &mut keepalive_val as *mut _ as *mut libc::c_void,
+                std::ptr::from_mut(&mut keepalive_val).cast::<libc::c_void>(),
                 &mut opt_len,
             )
         };
@@ -2257,7 +2257,7 @@ mod tests {
                 socket_fd,
                 libc::IPPROTO_TCP,
                 libc::TCP_NODELAY,
-                &mut nodelay_val as *mut _ as *mut libc::c_void,
+                std::ptr::from_mut(&mut nodelay_val).cast::<libc::c_void>(),
                 &mut opt_len,
             )
         };
@@ -2271,7 +2271,7 @@ mod tests {
                 socket_fd,
                 libc::SOL_SOCKET,
                 libc::SO_KEEPALIVE,
-                &mut keepalive_val as *mut _ as *mut libc::c_void,
+                std::ptr::from_mut(&mut keepalive_val).cast::<libc::c_void>(),
                 &mut opt_len,
             )
         };

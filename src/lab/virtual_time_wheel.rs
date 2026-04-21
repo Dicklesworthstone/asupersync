@@ -330,7 +330,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    
+
     fn scrub_timer_id(timer_id: u64) -> &'static str {
         match timer_id {
             0 => "[TIMER_A]",

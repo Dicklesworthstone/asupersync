@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Async Streams Verification Suite - E2E Tests
 //!
@@ -26,7 +27,6 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 // ============================================================================

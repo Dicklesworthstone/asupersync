@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Interop conformance suites for prioritized third-party crates (T7.7).
 //!

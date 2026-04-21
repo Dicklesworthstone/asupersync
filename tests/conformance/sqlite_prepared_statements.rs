@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! SQLite Prepared Statement Round-Trip Conformance Tests.
 //!

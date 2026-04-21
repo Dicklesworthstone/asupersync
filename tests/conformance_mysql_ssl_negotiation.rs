@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! MySQL SSL/TLS negotiation conformance tests.
 //!

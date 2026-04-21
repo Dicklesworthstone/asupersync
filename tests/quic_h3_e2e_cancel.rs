@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! QH3-E5 — Cancellation, drain, finalize, and loser-drain invariant E2E tests.
 //!

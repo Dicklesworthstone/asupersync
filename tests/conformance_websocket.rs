@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! WebSocket Handshake Conformance Tests (RFC 6455 Section 4)
 //!

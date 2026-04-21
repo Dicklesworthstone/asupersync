@@ -5,8 +5,6 @@
 //! system, including bug injection, property-based testing, performance measurement,
 //! and integration testing.
 
-
-
 use super::protocol_state_machines::{
     CancelProtocolValidator, CancelStateMachine, ObligationContext, ObligationEvent,
     ObligationState, ObligationStateMachine, RegionContext, RegionEvent, RegionState,

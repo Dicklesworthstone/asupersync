@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Performance Budget and Instrumentation Gate Validation (Track 6.2)
 //!

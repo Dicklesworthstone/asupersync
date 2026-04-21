@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Browser-context loser drain verification tests (asupersync-umelq.6.2).
 //!

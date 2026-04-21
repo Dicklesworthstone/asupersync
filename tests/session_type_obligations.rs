@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Integration tests for session-typed obligation protocols (bd-3u5d3.6).
 //!

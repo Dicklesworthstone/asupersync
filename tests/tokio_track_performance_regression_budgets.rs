@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for track-level performance regression budgets policy (2oh2u.10.7).
 //!

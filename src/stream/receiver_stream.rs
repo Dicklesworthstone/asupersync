@@ -94,7 +94,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::{Waker};
+    use std::task::Waker;
 
     fn noop_waker() -> Waker {
         Waker::noop().clone()

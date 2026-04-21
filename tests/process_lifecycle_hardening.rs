@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Process Lifecycle Parity Hardening Tests (Track 3.4)
 //!

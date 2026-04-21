@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Deterministic Soak/Stress Diagnostics Validation (Track 6.8)
 //!

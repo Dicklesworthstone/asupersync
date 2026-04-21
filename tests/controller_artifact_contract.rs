@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Controller artifact contract invariants (AA-02.2).
 

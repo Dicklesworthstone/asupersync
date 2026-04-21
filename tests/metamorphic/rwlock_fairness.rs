@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic tests for sync::rwlock reader-writer fairness invariants.
 //!

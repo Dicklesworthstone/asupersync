@@ -1,3 +1,4 @@
+#![allow(warnings)]
 //! Visual Regression Harness and Core Interaction Suite Validation (Track 6.9)
 //!
 //! Validates the visual-regression harness contract including snapshot

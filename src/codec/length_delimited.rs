@@ -880,6 +880,7 @@ mod tests {
                                 );
                             }
                             Ok(None) => panic!(
+                                // ubs:ignore - test logic
                                 "Complete encoded frame did not decode for config {:?}, size {}",
                                 config, size
                             ),

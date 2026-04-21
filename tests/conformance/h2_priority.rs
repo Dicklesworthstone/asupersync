@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/2 PRIORITY Frame Conformance Tests (RFC 9113 Section 6.3)
 //!

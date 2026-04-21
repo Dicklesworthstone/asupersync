@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! T5.7 — gRPC production features test suite.
 //!
@@ -11,8 +12,6 @@ use asupersync::bytes::Bytes;
 use asupersync::grpc::server::Interceptor;
 use asupersync::grpc::service::{NamedService, ServiceDescriptor, ServiceHandler};
 use asupersync::grpc::{
-    format_grpc_timeout,
-    parse_grpc_timeout,
     BearerAuthInterceptor,
     BearerAuthValidator,
     // Server
@@ -55,6 +54,8 @@ use asupersync::grpc::{
     Status,
     TimeoutInterceptor,
     TracingInterceptor,
+    format_grpc_timeout,
+    parse_grpc_timeout,
 };
 use insta::assert_json_snapshot;
 use serde::Serialize;
@@ -833,10 +834,12 @@ fn server_builder_compression_config() {
         server.config().send_compression,
         Some(CompressionEncoding::Gzip)
     );
-    assert!(server
-        .config()
-        .accept_compression
-        .contains(&CompressionEncoding::Gzip));
+    assert!(
+        server
+            .config()
+            .accept_compression
+            .contains(&CompressionEncoding::Gzip)
+    );
 }
 
 #[test]
@@ -885,9 +888,11 @@ fn server_builder_reflection_captures_all_services() {
         .build();
 
     // Reflection service is registered
-    assert!(server
-        .get_service("grpc.reflection.v1alpha.ServerReflection")
-        .is_some());
+    assert!(
+        server
+            .get_service("grpc.reflection.v1alpha.ServerReflection")
+            .is_some()
+    );
     // All three services present
     assert_eq!(server.service_names().len(), 3);
 }

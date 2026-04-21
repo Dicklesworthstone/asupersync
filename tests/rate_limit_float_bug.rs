@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Regression test for long-horizon token refill precision in `RateLimiter`.
 

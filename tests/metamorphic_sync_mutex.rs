@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Integration target for sync mutex poisoning metamorphic relations.
 
@@ -24,7 +25,10 @@ fn poison_mutex(mutex: &Arc<Mutex<u32>>) {
         let _lab = LabRuntime::new(LabConfig::default());
 
         futures_lite::future::block_on::<()>(async move {
-            let mut guard = poison_target.lock(&cx).await.expect("poison lock should succeed");
+            let mut guard = poison_target
+                .lock(&cx)
+                .await
+                .expect("poison lock should succeed");
             *guard += 1;
             panic!("deliberate panic to poison mutex");
         });
@@ -102,5 +106,9 @@ fn mr_late_waiter_after_poison_matches_direct_probe() {
         "late waiter should match direct poison probe, got {:?}",
         late_result
     );
-    assert_eq!(mutex.waiters(), 0, "late poisoned waiters should not accumulate");
+    assert_eq!(
+        mutex.waiters(),
+        0,
+        "late poisoned waiters should not accumulate"
+    );
 }

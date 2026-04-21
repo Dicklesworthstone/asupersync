@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 pub struct RuntimeState;
 

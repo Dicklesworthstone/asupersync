@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! UDP Socket Options and Message Framing Conformance Tests
 //!

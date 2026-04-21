@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for Tokio ecosystem capability inventory baseline (2oh2u.1.1.*).
 

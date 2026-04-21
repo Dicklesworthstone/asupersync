@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic testing for lab::oracle e-process evidence accumulation invariants.
 //!

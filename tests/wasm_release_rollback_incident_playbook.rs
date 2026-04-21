@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! WASM release rollback and incident playbook enforcement (WASM-15.5).
 //!

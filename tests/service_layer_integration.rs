@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(clippy::items_after_statements)]
 //! Integration tests for the service layer ecosystem.

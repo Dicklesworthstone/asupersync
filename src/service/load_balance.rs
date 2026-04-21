@@ -26,7 +26,7 @@ use super::discover::{Change, Discover};
 fn tracked_probe_waker() -> (Waker, Arc<AtomicBool>) {
     struct TrackWaker(Arc<AtomicBool>);
 
-use std::task::Wake;
+    use std::task::Wake;
     impl Wake for TrackWaker {
         fn wake(self: Arc<Self>) {
             self.0.store(true, Ordering::SeqCst);

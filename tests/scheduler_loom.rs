@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Loom-based systematic concurrency tests for the scheduler.
 //!

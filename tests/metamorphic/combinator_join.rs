@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic tests for combinator::join all-succeed / short-circuit semantics.
 //!

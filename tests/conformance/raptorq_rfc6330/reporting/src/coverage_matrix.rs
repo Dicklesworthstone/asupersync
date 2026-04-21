@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Coverage matrix calculation and compliance scoring for RaptorQ RFC 6330 conformance.
 //!

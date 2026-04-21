@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Phase/oracle assertion macros for E2E tests.
 

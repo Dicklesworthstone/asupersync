@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! RFC 9000 §9 QUIC Connection Migration Conformance Tests
 //!

@@ -2928,7 +2928,7 @@ mod tests {
 
             // Encode the header - should produce indexed representation
             let mut encoded = BytesMut::new();
-            encoder.encode(&[header.clone()], &mut encoded);
+            encoder.encode(std::slice::from_ref(&header), &mut encoded);
 
             // Verify it encodes as indexed (0x80 | index)
             let expected_encoded = 0x80 | expected_index;
@@ -3088,7 +3088,7 @@ mod tests {
         let evicting_header = Header::new("x-custom-5", "value-5"); // 55 bytes
 
         let mut encoded = BytesMut::new();
-        encoder.encode(&[evicting_header.clone()], &mut encoded);
+        encoder.encode(std::slice::from_ref(&evicting_header), &mut encoded);
 
         let mut src = encoded.freeze();
         decoder

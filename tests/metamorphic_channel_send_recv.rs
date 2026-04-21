@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic Relation Suite for Channel Send/Recv Operations.
 //!

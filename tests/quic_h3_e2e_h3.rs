@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! QH3-E4: HTTP/3 control/request lifecycle and GOAWAY E2E tests.
 //!

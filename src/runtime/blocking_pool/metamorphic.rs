@@ -158,7 +158,7 @@ mod tests {
             }
 
             let mut result = completed.lock().unwrap().clone();
-            result.sort();
+            result.sort_unstable();
             result
         };
 
@@ -183,7 +183,7 @@ mod tests {
             }
 
             let mut result = completed.lock().unwrap().clone();
-            result.sort();
+            result.sort_unstable();
             result
         };
 
@@ -227,7 +227,7 @@ mod tests {
             }
 
             let mut result = results.lock().unwrap().clone();
-            result.sort();
+            result.sort_unstable();
             result
         };
 
@@ -251,7 +251,7 @@ mod tests {
             }
 
             let mut result = results.lock().unwrap().clone();
-            result.sort();
+            result.sort_unstable();
             result
         };
 
@@ -431,7 +431,7 @@ mod tests {
             }
 
             let mut result = completed.lock().unwrap().clone();
-            result.sort();
+            result.sort_unstable();
             result
         };
 
@@ -457,7 +457,7 @@ mod tests {
             }
 
             let mut result = completed.lock().unwrap().clone();
-            result.sort();
+            result.sort_unstable();
             result
         };
 

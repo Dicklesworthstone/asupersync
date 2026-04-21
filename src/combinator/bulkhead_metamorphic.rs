@@ -195,20 +195,17 @@ impl GlobalBulkheadState {
             .processed_per_bulkhead
             .lock()
             .get(name)
-            .map(|v| v.len())
-            .unwrap_or(0);
+            .map_or(0, |v| v.len());
         let rejected = self
             .rejected_per_bulkhead
             .lock()
             .get(name)
-            .map(|v| v.len())
-            .unwrap_or(0);
+            .map_or(0, |v| v.len());
         let cancelled = self
             .cancelled_per_bulkhead
             .lock()
             .get(name)
-            .map(|v| v.len())
-            .unwrap_or(0);
+            .map_or(0, |v| v.len());
 
         BulkheadStats {
             processed,
@@ -460,7 +457,7 @@ fn mr3_cancel_propagation(worker_count: u32, in_flight_count: u32, _seed: u64) -
     let mut queue_entries = Vec::new();
 
     // Fill up the workers
-    for work_id in 0..worker_count {
+    for _work_id in 0..worker_count {
         if let Some(permit) = bulkhead.try_acquire(1) {
             global_state.record_acquisition();
             permits.push(permit);
@@ -482,7 +479,7 @@ fn mr3_cancel_propagation(worker_count: u32, in_flight_count: u32, _seed: u64) -
     }
 
     let initial_metrics = bulkhead.metrics();
-    let initial_active = initial_metrics.active_permits;
+    let _initial_active = initial_metrics.active_permits;
     let initial_queued = initial_metrics.queue_depth;
 
     // Trigger cancellation
@@ -495,7 +492,7 @@ fn mr3_cancel_propagation(worker_count: u32, in_flight_count: u32, _seed: u64) -
     }
 
     // Process the queue to handle cancellations
-    let processed_after_cancel = bulkhead.process_queue(now);
+    let _processed_after_cancel = bulkhead.process_queue(now);
     let final_metrics = bulkhead.metrics();
 
     // **MR3 Verification**: Cancellation should affect queued operations

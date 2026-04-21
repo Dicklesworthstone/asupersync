@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for the Tokio non-functional closure criteria (2oh2u.1.2.3).
 //!

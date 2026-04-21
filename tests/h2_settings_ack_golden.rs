@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Golden transcript for HTTP/2 SETTINGS and SETTINGS ACK exchanges.
 

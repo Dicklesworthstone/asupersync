@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! TLA+ Scenario-Based Model Check Validation (SEM-12.4)
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Golden artifact tests for HPACK header compression/decompression.
 //!

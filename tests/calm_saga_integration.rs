@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Integration tests for CALM-optimized saga execution (bd-2wrsc.3).
 //!

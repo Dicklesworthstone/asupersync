@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/1.1 body framing conformance tests per RFC 9112 Section 6.
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic Testing for sync::rwlock writer-preference and reader-concurrency invariants
 //!

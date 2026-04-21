@@ -1606,7 +1606,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
+        let _rng = crate::util::det_rng::DetRng::new(seed);
 
         // Test that contract checking is identical across different obligation kinds
         let kinds = [
@@ -1698,7 +1698,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
+        let _rng = crate::util::det_rng::DetRng::new(seed);
 
         // Create a base trace with obligations in region 0
         let region0_trace = vec![
@@ -1744,15 +1744,15 @@ mod tests {
             .iter()
             .filter(|v| v.region == Some(r(0)))
             .collect();
-        let region0_violations2: Vec<_> = result2
+        let region0_violations2 = result2
             .violations
             .iter()
             .filter(|v| v.region == Some(r(0)))
-            .collect();
+            .count();
 
         assert_eq!(
             region0_violations1.len(),
-            region0_violations2.len(),
+            region0_violations2,
             "Region isolation failed: region 0 violation count changed when region 1 added"
         );
 
@@ -1796,15 +1796,15 @@ mod tests {
             let result3 = checker3.check(&test_combined);
 
             // Region 0 results should remain consistent
-            let region0_violations3: Vec<_> = result3
+            let region0_violations3 = result3
                 .violations
                 .iter()
                 .filter(|v| v.region == Some(r(0)))
-                .collect();
+                .count();
 
             assert_eq!(
                 region0_violations1.len(),
-                region0_violations3.len(),
+                region0_violations3,
                 "Region isolation failed with region offset {}: region 0 violations changed",
                 region_offset
             );
@@ -2138,7 +2138,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
+        let _rng = crate::util::det_rng::DetRng::new(seed);
 
         // Test combinations of metamorphic transformations:
         // Temporal shift + Kind substitution + Region isolation

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! RFC 9112 §7.1 Chunked Transfer-Encoding edge case tests.
 //!

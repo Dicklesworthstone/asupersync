@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for npm pack/install smoke validation (asupersync-3qv04.6.4).
 //!

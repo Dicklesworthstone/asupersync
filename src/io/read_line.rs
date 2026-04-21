@@ -279,7 +279,7 @@ mod tests {
     use super::*;
     use crate::io::BufReader;
     use crate::io::{AsyncBufRead, AsyncRead, ReadBuf};
-    use std::sync::Arc;
+
     use std::task::{Poll, Waker};
 
     fn noop_waker() -> Waker {

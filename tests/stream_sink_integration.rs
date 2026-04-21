@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Stream/Sink Integration Tests — E.3
 //!

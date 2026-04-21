@@ -628,7 +628,7 @@ write_int_future!(WriteF64Le, f64, 8);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+
     use std::task::{Context, Waker};
 
     fn init_test(name: &str) {

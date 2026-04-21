@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Docs-to-Rule-ID Mapping Lint Tests (SEM-05.1)
 //!

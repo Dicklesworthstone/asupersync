@@ -1079,7 +1079,9 @@ mod tests {
         ));
         builder.peeling_mut().record_solved(1);
         builder.peeling_mut().record_solved(2);
-        builder.elimination_mut().set_strategy(InactivationStrategy::AllAtOnce);
+        builder
+            .elimination_mut()
+            .set_strategy(InactivationStrategy::AllAtOnce);
 
         builder.set_failure(FailureReason::InsufficientSymbols {
             received: 6,

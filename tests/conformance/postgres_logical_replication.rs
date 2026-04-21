@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! PostgreSQL Logical Replication (pgoutput) Conformance Tests
 //!
@@ -36,7 +37,6 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// Test result for a single conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -825,7 +825,7 @@ impl PgLogicalReplicationHarness {
 
     /// Parse tuple data from binary format.
     #[allow(dead_code)]
-    fn parse_tuple_data(&self, data: &[u8]) -> Result<Vec<TupleData>, String> {
+    fn parse_tuple_data(&self, _data: &[u8]) -> Result<Vec<TupleData>, String> {
         // Simplified parser
         Ok(vec![
             TupleData::Text("123".to_string()),

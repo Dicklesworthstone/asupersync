@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! MySQL AuthSwitchRequest Conformance Tests
 //!

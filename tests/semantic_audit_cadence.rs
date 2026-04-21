@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Semantic Audit Cadence Validation (SEM-11.4)
 //!

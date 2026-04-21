@@ -511,7 +511,7 @@ mod tests {
         let large_text = "A".repeat(1000);
         let test_payloads = vec![
             // Text frames
-            ("".to_string(), Opcode::Text),
+            (String::new(), Opcode::Text),
             ("Hello".to_string(), Opcode::Text),
             (
                 "WebSocket test with special chars: üñíçødé".to_string(),
@@ -519,7 +519,7 @@ mod tests {
             ),
             (large_text, Opcode::Text), // Large text
             // Binary frames
-            ("".to_string(), Opcode::Binary),
+            (String::new(), Opcode::Binary),
             // Need to use a separate binary test below for actual binary data
         ];
 

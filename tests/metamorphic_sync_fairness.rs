@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(missing_docs)]
 
@@ -31,7 +32,10 @@ fn mutex_handoff_order(seed: u64, try_lock_noise: usize) -> Vec<usize> {
             .create_task(region, Budget::INFINITE, async move {
                 let cx = Cx::for_testing();
                 let mut guard = mutex.lock(&cx).await.expect("mutex waiter acquires");
-                acquisition_order.lock().expect("order lock").push(waiter_id);
+                acquisition_order
+                    .lock()
+                    .expect("order lock")
+                    .push(waiter_id);
                 *guard += 1;
                 yield_now().await;
                 completed.fetch_add(1, Ordering::SeqCst);

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Channel state consistency validation during cancellation scenarios.
 

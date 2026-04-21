@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/2 WINDOW_UPDATE flow control conformance tests.
 //!

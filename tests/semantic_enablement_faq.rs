@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Semantic Enablement FAQ Validation (SEM-11.3)
 //!

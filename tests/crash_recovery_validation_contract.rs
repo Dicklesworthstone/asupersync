@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Crash recovery validation contract invariants (AA-09.3).
 

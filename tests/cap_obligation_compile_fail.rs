@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Compile-fail emulation and enforcement tests for capability and obligation types.
 //!

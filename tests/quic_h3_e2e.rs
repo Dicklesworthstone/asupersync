@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Deterministic E2E integration tests for the native QUIC/H3 stack.
 //!

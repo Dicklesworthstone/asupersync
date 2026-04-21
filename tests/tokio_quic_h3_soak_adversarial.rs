@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for QUIC/H3 Soak and Adversarial Network Simulations.
 //!

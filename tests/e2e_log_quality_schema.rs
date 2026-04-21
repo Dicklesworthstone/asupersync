@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! E2E log quality + schema validation gates (asupersync-3narc.3.5).
 //!

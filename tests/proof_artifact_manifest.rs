@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Proof artifact manifest format validation (bd-2rhiq).
 //!

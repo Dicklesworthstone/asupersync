@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for the WASM E2E log schema and artifact bundle layout
 //! (asupersync-3qv04.8.4.4).

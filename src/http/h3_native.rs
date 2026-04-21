@@ -5060,10 +5060,10 @@ mod tests {
 
         // Scenario 4: Capacity exhaustion with all entries referenced
         let ids: Vec<_> = table.entries.iter().map(|e| e.insertion_order).collect();
-        ids.into_iter().for_each(|id| {
+        for id in ids {
             // Try to reference all remaining entries
             let _ = table.reference_entry(id);
-        });
+        }
 
         let impossible_result = table.insert(
             "impossible".into(),

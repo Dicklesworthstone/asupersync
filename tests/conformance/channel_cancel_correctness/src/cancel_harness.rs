@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Cancellation test infrastructure for systematic channel conformance testing.
 

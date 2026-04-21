@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Kafka RecordBatch v2 format conformance test suite per KIP-98.
 //!

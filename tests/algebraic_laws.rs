@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Algebraic law property tests for asupersync combinators.
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Channel clock skew fault injection integration tests (bd-2ktrc.4).
 //!

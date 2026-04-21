@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/2 RST_STREAM and PING Frame Conformance Tests (RFC 9113)
 //!
@@ -544,7 +545,7 @@ impl H2ConformanceHarness {
             RequirementLevel::Must,
             || {
                 // PING frames always have stream ID 0 (connection-level)
-                let ping = PingFrame::new([0; 8]);
+                let _ping = PingFrame::new([0; 8]);
 
                 // Test that parsing with wrong stream ID gives connection error
                 let header = FrameHeader {
@@ -629,7 +630,7 @@ impl H2ConformanceHarness {
             RequirementLevel::Must,
             || {
                 // RST_STREAM requires non-zero stream ID
-                let rst_stream = RstStreamFrame::new(0, ErrorCode::Cancel);
+                let _rst_stream = RstStreamFrame::new(0, ErrorCode::Cancel);
                 let header = FrameHeader {
                     length: 4,
                     frame_type: FrameType::RstStream as u8,

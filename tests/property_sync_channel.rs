@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Property-based tests for synchronization primitives and channels.
 //!

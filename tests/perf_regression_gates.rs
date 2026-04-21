@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Perf regression gate tests and helpers (bd-274qo).
 //!

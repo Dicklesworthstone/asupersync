@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/2 GOAWAY Frame Graceful Shutdown Conformance Tests
 //!

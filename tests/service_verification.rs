@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(missing_docs, clippy::items_after_statements)]
 //! Service Layer Verification Suite (bd-221m)

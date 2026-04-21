@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Error handling and edge case conformance tests for HPACK.
 //!

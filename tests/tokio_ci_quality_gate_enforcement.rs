@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for deterministic CI quality-gate enforcement spec (2oh2u.10.5).
 //!

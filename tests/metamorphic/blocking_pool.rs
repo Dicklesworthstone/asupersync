@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic tests for runtime::blocking_pool capacity and spawn invariants.
 //!

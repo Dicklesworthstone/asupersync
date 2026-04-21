@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Time/Timers Verification Suite - E2E Tests
 //!

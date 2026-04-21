@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HPACK Dynamic Table Size Update Conformance Tests (RFC 7541 Section 6.3)
 //!

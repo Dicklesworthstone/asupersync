@@ -453,8 +453,7 @@ impl Default for TokenSlab {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
-    use std::sync::Arc;
-    
+
     fn test_waker() -> Waker {
         std::task::Waker::noop().clone()
     }

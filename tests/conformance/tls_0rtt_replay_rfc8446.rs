@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! TLS 1.3 0-RTT Replay Protection Conformance Tests
 //!

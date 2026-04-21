@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Integration test for mutex metamorphic relations
 //!
@@ -48,7 +49,7 @@ fn mr1_panic_poisoning_consistency_integration() {
     let mutex_clone = Arc::clone(&mutex);
     let handle = std::thread::spawn(move || {
         let cx = create_test_context(1, 1);
-        let lab = LabRuntime::new(LabConfig::default());
+        let _lab = LabRuntime::new(LabConfig::default());
 
         futures_lite::future::block_on::<()>(async {
             let mut guard = mutex_clone.lock(&cx).await.expect("lock should succeed");
@@ -72,7 +73,7 @@ fn mr1_panic_poisoning_consistency_integration() {
 
     // MR1.2: async lock returns Poisoned
     let cx = create_test_context(2, 1);
-    let lab = LabRuntime::new(LabConfig::default());
+    let _lab = LabRuntime::new(LabConfig::default());
     let lock_result = futures_lite::future::block_on(async { mutex.lock(&cx).await });
     assert!(
         matches!(lock_result, Err(LockError::Poisoned)),
@@ -90,7 +91,7 @@ fn mr2_cancel_non_poisoning_integration() {
 
     // Phase 1: Test cancellation while holding lock
     let cx = create_test_context(1, 1);
-    let lab = LabRuntime::new(LabConfig::default());
+    let _lab = LabRuntime::new(LabConfig::default());
 
     futures_lite::future::block_on(async {
         let mut guard = mutex.lock(&cx).await.expect("lock should succeed");
@@ -165,7 +166,7 @@ fn mr4_concurrent_poison_consistency_integration() {
     let mutex_for_poison = Arc::clone(&mutex);
     let poison_handle = std::thread::spawn(move || {
         let cx = create_test_context(1, 1);
-        let lab = LabRuntime::new(LabConfig::default());
+        let _lab = LabRuntime::new(LabConfig::default());
 
         futures_lite::future::block_on::<()>(async {
             let _guard = mutex_for_poison
@@ -222,7 +223,7 @@ fn comprehensive_metamorphic_integration() {
     let mutex1_clone = Arc::clone(&mutex1);
     let handle1 = std::thread::spawn(move || {
         let cx = create_test_context(1, 1);
-        let lab = LabRuntime::new(LabConfig::default());
+        let _lab = LabRuntime::new(LabConfig::default());
 
         futures_lite::future::block_on::<()>(async {
             let _guard = mutex1_clone.lock(&cx).await.expect("lock");
@@ -237,7 +238,7 @@ fn comprehensive_metamorphic_integration() {
     // Test MR2: Cancel doesn't poison
     let mutex2 = Arc::new(Mutex::new(TestData::default()));
     let cx = create_test_context(2, 2);
-    let lab = LabRuntime::new(LabConfig::default());
+    let _lab = LabRuntime::new(LabConfig::default());
 
     futures_lite::future::block_on(async {
         let _guard = mutex2.lock(&cx).await.expect("clean lock");

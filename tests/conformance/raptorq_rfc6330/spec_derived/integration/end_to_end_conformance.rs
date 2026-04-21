@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! End-to-end conformance tests spanning multiple RFC sections.
 

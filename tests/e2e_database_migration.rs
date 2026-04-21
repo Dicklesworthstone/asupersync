@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! E2E: Database (SQLite) full lifecycle and migration configuration tests.
 //!

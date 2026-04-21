@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Minimal tests to verify SharedLabHandle behavior.
 

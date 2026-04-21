@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! End-to-end geodesic normalization harness (bd-1i1w).
 //!

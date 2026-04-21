@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! T5.3 — Deadline cascade through a 7-level deep region tree.
 //!

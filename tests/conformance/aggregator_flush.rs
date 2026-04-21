@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Conformance tests for src/transport::aggregator flush/drain RFC.
 //!

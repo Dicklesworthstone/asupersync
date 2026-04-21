@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Integration target for broadcast slow-receiver metamorphic relations.
 

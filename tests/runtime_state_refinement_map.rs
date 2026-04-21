@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Validation for RuntimeState cross-entity refinement mapping artifact (bd-23hq7).
 

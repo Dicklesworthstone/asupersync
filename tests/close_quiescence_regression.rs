@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Close → Quiescence regression tests (bd-sbi6e).
 //!

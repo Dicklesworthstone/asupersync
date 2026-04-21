@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! SEM-09.2 evidence bundle contract tests.
 //!

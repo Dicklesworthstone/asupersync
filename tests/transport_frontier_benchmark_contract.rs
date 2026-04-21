@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Transport frontier feasibility harness and benchmark contract invariants (AA-08.1).
 

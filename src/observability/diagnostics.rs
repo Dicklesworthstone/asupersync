@@ -3424,21 +3424,21 @@ mod tests {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(100)));
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
 
-        let ob1 = insert_obligation(
+        let _ob1 = insert_obligation(
             &mut state,
             child1,
             task1,
             ObligationKind::Ack,
             Time::from_millis(10),
         );
-        let ob3 = insert_obligation(
+        let _ob3 = insert_obligation(
             &mut state,
             child3,
             task3,
             ObligationKind::Lease,
             Time::from_millis(30),
         );
-        let ob2 = insert_obligation(
+        let _ob2 = insert_obligation(
             &mut state,
             child2,
             task2,
@@ -4208,14 +4208,14 @@ mod tests {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(1000)));
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
 
-        let ob1 = insert_obligation(
+        let _ob1 = insert_obligation(
             &mut state,
             root,
             task1,
             ObligationKind::Ack,
             Time::from_millis(100),
         );
-        let ob2 = insert_obligation(
+        let _ob2 = insert_obligation(
             &mut state,
             root,
             task2,

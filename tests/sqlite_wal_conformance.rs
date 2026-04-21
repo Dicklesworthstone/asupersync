@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! SQLite WAL Mode Conformance Tests
 //!

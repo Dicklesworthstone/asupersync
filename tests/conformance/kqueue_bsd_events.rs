@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! BSD kqueue event semantics conformance tests.
 //!

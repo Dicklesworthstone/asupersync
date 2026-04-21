@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for the lab-vs-live differential scope matrix (2a6k9.1.1).
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/1.1 Expect: 100-continue Conformance Tests Integration Test
 //!

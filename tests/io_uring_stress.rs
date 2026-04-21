@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Stress tests for io_uring reactor edge cases under high contention.
 //!

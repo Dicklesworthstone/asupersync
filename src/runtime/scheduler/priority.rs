@@ -2705,7 +2705,7 @@ mod tests {
 
         let expected_suffix: Vec<_> = baseline_trace
             .into_iter()
-            .filter_map(|(task, _)| (task != task(3)).then_some((task, DispatchLane::Ready)))
+            .filter_map(|(t, _)| (t != task(3)).then_some((t, DispatchLane::Ready)))
             .collect();
 
         crate::assert_with_log!(

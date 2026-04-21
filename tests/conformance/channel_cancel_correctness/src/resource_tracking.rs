@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Resource leak detection infrastructure for cancellation testing.
 

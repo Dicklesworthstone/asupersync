@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/2 ALPN Negotiation Conformance Tests (RFC 7540 + RFC 9113)
 //!

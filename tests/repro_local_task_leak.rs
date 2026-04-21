@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(missing_docs)]
 // This test file was an attempt to reproduce a local task leakage bug via integration testing.

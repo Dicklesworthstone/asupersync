@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Semantic Residual Risk Register Contract (SEM-09.4)
 //!

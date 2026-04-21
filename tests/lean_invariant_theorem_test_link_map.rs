@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Invariant-to-theorem and invariant-to-test link map checks (bd-2iwok).
 

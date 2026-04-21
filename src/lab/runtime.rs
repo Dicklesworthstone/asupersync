@@ -5734,9 +5734,7 @@ mod tests {
                     .state
                     .create_task(root, Budget::INFINITE, async move {
                         // Task 2 will deterministically panic
-                        if i == 2 {
-                            panic!("deterministic panic in task {}", i);
-                        }
+                        assert!(i != 2, "deterministic panic in task {}", i);
 
                         // Other tasks continue working
                         for _j in 0..10 {
@@ -5822,7 +5820,7 @@ mod tests {
                                     let _ = sum;
                                 }
                                 _ => futures_lite::future::yield_now().await,
-                            };
+                            }
                         }
                         i * 1000 + 42
                     })

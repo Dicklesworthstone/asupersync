@@ -1016,7 +1016,7 @@ mod tests {
     use std::cell::Cell;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::pin::Pin;
-    use std::sync::Arc;
+
     use std::task::{Context, Poll, Waker};
 
     fn noop_waker() -> Waker {

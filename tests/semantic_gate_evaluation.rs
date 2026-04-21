@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Semantic Gate Evaluation Report Validation (SEM-09.3)
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Crash-only region semantics contract invariants (AA-09.1).
 

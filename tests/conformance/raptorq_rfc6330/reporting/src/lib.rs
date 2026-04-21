@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! RaptorQ RFC 6330 Conformance Reporting and Maintenance Pipeline
 //!

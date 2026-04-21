@@ -1,11 +1,11 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Kafka RecordBatch v2 format structures per KIP-98.
 //!
 //! This module defines the data structures and encoding/decoding logic
 //! for Kafka RecordBatch v2 format as specified in KIP-98.
 
-use std::collections::HashMap;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 
 /// Record attributes bit flags per KIP-98.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

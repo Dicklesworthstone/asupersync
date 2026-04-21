@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Conformance tests for HTTP/1.1 keep-alive connection reuse.
 //!

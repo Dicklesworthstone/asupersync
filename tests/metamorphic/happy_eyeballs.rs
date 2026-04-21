@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic tests for net::happy_eyeballs RFC 8305 connection racing
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Adversarial regime-shift synthesizer contract invariants (AA-06.4).
 

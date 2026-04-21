@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Semantic Maintainer Playbook Validation (SEM-11.2)
 //!

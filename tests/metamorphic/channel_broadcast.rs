@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic Testing for channel::broadcast lag-aware multi-consumer invariants
 //!

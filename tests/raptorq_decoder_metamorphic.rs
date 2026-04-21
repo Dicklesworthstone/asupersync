@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! RaptorQ Decoder Metamorphic Testing (asupersync-1ucsnc)
 //!

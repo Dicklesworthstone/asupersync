@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Regression test for `io::Chain::read_to_end` across both chained readers.
 

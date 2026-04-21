@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! WASM GA go/no-go evidence packet enforcement (WASM-17.4 support lane).
 //!

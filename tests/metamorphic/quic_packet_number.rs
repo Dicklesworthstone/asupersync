@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic tests for QUIC packet number encoding (RFC 9000 compliance).
 //!

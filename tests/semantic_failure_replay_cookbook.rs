@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Semantic Failure Replay Cookbook Validation (SEM-12.12)
 //!

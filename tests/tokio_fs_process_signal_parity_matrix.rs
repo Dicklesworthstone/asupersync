@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for the fs/process/signal parity matrix (2oh2u.3.1).
 //!

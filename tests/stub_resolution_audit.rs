@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(clippy::items_after_statements)]
 //! Structural probes for the placeholder/stub resolution epic (v2ofj7).

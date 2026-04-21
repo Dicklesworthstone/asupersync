@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Runtime control-seam inventory contract invariants (AA-01.3).
 

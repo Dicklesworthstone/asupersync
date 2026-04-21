@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! TCP Listener Socket Options Conformance Tests (RFC 793/6056)
 //!

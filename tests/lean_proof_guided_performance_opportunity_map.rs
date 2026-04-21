@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Proof-guided performance opportunity map contract checks (bd-1lda7).
 

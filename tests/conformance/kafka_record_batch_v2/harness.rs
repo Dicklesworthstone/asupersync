@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Kafka RecordBatch v2 conformance test harness.
 

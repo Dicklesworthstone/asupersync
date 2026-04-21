@@ -227,8 +227,8 @@ where
 mod tests {
     use super::*;
     use crate::stream;
-    use std::sync::Arc;
-    use std::task::{Waker};
+
+    use std::task::Waker;
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()

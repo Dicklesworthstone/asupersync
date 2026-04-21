@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Placeholder integration test crate for websocket cancellation coverage.
 //!

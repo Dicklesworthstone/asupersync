@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Evidence Bundle Assembly Validation (SEM-09.2)
 //!

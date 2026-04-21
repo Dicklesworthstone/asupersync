@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Compliance report generation for RaptorQ RFC 6330 conformance.
 //!

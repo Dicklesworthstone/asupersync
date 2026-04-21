@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Controller sandbox membrane contract invariants (AA-07.2).
 

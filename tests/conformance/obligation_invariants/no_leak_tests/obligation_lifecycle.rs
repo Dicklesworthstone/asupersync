@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Basic obligation lifecycle tests - create, resolve, no leaks.
 //!
@@ -6,7 +7,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Duration;
 
 use asupersync::lab::config::LabConfig;

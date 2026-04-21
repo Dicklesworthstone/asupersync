@@ -831,7 +831,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+
     use std::task::{Context, Waker};
 
     fn noop_waker() -> Waker {

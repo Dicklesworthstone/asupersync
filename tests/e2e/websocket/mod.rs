@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! WebSocket end-to-end (E2E) test suite.
 //!

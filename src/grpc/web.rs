@@ -367,7 +367,10 @@ mod tests {
         let mut index = 0usize;
 
         while !buf.is_empty() {
-            assert!(buf.len() >= 5, "snapshot input must contain a full gRPC-Web header");
+            assert!(
+                buf.len() >= 5,
+                "snapshot input must contain a full gRPC-Web header"
+            );
 
             let flag = buf[0];
             let length = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
@@ -853,7 +856,8 @@ mod tests {
             true,
             inserted_trace
         );
-        let inserted_bin = happy_metadata.insert_bin("trace-bin", Bytes::from_static(&[0x01, 0x02]));
+        let inserted_bin =
+            happy_metadata.insert_bin("trace-bin", Bytes::from_static(&[0x01, 0x02]));
         crate::assert_with_log!(
             inserted_bin,
             "happy-path binary metadata inserted",
@@ -896,13 +900,17 @@ mod tests {
 
         let mut snapshot = String::new();
         let _ = writeln!(&mut snapshot, "[happy_path]");
-        snapshot.push_str(&render_grpc_web_frames_for_snapshot_test(happy_path.as_ref()));
+        snapshot.push_str(&render_grpc_web_frames_for_snapshot_test(
+            happy_path.as_ref(),
+        ));
         let _ = writeln!(&mut snapshot, "[error_trailers_only]");
         snapshot.push_str(&render_grpc_web_frames_for_snapshot_test(
             error_trailers_only.as_ref(),
         ));
         let _ = writeln!(&mut snapshot, "[trailers_only]");
-        snapshot.push_str(&render_grpc_web_frames_for_snapshot_test(trailers_only.as_ref()));
+        snapshot.push_str(&render_grpc_web_frames_for_snapshot_test(
+            trailers_only.as_ref(),
+        ));
 
         assert_snapshot!("grpc_web_frame_layouts", snapshot);
         crate::test_complete!("grpc_web_frame_layouts_snapshot");

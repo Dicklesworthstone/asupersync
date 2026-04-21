@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Conformance tests for PostgreSQL Extended Query Protocol (wire protocol v3)
 //!

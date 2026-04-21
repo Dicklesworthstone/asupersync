@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! QUIC Initial Packet Conformance Tests (RFC 9000 Section 17)
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Exhaustive Unit-Test Matrix for FS/Process/Signal (Track 3.9)
 //!

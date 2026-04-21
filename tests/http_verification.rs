@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP Server/Client Verification Suite (bd-39ik).
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Phase 0 verification scenarios (oracle-driven E2E tests).
 //!

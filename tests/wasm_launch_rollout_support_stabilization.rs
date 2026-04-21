@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! WASM launch rollout/support stabilization enforcement (WASM-17.5).
 //!

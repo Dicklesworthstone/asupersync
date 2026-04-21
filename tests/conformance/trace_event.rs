@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Trace Event Schema Stability Conformance Tests
 //!

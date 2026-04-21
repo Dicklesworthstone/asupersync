@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(clippy::too_many_lines)]
 //! Comprehensive OTel metrics test suite.

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Region quiescence validation tests.
 //!
@@ -6,7 +7,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Duration;
 
 use asupersync::lab::config::LabConfig;

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Tests for repair symbol generation (RFC 6330 Section 4.2.2).
 

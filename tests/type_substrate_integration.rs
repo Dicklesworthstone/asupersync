@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Cross-crate type substrate integration verification (bd-32awe).
 //!

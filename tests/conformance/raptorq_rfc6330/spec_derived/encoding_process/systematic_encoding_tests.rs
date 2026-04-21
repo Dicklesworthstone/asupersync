@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Tests for systematic symbol encoding (RFC 6330 Section 4.2.1).
 

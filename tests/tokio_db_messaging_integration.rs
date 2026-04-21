@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! T6.10 — Deterministic Integration and Fault-Injection Suites
 //!

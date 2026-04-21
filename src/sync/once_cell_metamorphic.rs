@@ -296,7 +296,7 @@ mod metamorphic_initialization_idempotence {
                     let cell = Arc::new(OnceCell::new());
 
                     // Try get_or_init with different functions sequentially
-                    for (i, &value) in values.iter().enumerate() {
+                    for (_i, &value) in values.iter().enumerate() {
                         let result = cell.get_or_init(|| async { value }).await;
                         global_state.record_observed_value(*result);
                     }

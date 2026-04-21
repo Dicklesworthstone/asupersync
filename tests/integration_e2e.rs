@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Comprehensive cross-cutting E2E test suite.
 //!

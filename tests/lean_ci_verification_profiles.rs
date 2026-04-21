@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Lean CI verification profile consistency checks (bd-rook4).
 

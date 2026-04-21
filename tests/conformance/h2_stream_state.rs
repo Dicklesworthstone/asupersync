@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/2 Stream State Machine Conformance Tests - RFC 9113 Section 5.1
 //!

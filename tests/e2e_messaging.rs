@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! E2E: Messaging pub/sub and queues — broadcast fanout, mpsc queue,
 //! watch state propagation, oneshot rendezvous.

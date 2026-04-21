@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Adapter performance and correctness budget contract tests (T7.8).
 //!

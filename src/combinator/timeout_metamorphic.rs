@@ -280,7 +280,7 @@ where
     let global_state = GlobalTimeoutState::new();
     global_state.reset();
 
-    let lab_runtime = LabRuntime::new(lab_config);
+    let _lab_runtime = LabRuntime::new(lab_config);
     let _result = futures_lite::future::block_on(test_fn(Arc::clone(&global_state)));
 
     global_state.summary()

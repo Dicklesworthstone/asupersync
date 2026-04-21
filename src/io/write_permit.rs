@@ -131,7 +131,7 @@ mod tests {
     use super::*;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::Arc;
+
     use std::task::{Context, Poll, Waker};
 
     fn noop_waker() -> Waker {

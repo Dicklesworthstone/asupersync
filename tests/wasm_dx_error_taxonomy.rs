@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! WASM DX Error Taxonomy Validation (WASM-9.5)
 //!

@@ -1,10 +1,10 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Regression test for join-handle readiness after runtime shutdown.
 
 use asupersync::runtime::RuntimeBuilder;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 struct HangFuture;

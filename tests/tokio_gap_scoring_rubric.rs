@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for the Tokio gap severity scoring rubric (2oh2u.1.3.1).
 //!

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Obligation Lifecycle Metamorphic Tests
 //!

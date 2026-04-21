@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(unsafe_code)]
 //! Contract tests for [T3.7] Deterministic Conformance and Fault-Injection Suites
@@ -65,7 +66,7 @@ fn ff_02_poll_shutdown_is_noop() {
     // AsyncWrite::poll_shutdown should return Ok without any side effect
     use asupersync::io::AsyncWrite;
     use std::pin::Pin;
-    use std::sync::Arc;
+
     use std::task::{Context, Poll, Waker};
 
     let dir = tempfile::tempdir().expect("tempdir");

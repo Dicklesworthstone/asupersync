@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! WebSocket frame fragmentation conformance tests per RFC 6455 Section 5.
 //!
@@ -15,7 +16,7 @@
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
-use asupersync::net::websocket::{Frame, FrameCodec, Opcode, Role, WsError};
+use asupersync::net::websocket::{Frame, FrameCodec, Opcode, WsError};
 
 /// Test continuation frame requirement after non-final data frames.
 /// RFC 6455 Section 5.4: "A fragmented message consists of a single frame with
@@ -32,7 +33,7 @@ fn test_continuation_required_after_nonfinal_text() {
     first_fragment.fin = false;
 
     // Middle fragment: Continuation frame with FIN=false
-    let mut middle_fragment = Frame {
+    let middle_fragment = Frame {
         fin: false,
         rsv1: false,
         rsv2: false,
@@ -183,7 +184,7 @@ fn test_interleaved_control_frames_allowed() {
 
     let ping_frame = Frame::ping("alive?");
 
-    let mut middle_fragment = Frame {
+    let middle_fragment = Frame {
         fin: false,
         rsv1: false,
         rsv2: false,

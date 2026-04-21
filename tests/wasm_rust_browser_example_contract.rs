@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for the maintained Rust-browser consumer fixture (`asupersync-4l9iw.2`).
 //!

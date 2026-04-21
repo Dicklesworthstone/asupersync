@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Authoritative browser-feasibility support matrix contract tests.
 //!

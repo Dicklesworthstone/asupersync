@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Sync Primitives E2E Verification Suite (bd-3qc6)
 //!

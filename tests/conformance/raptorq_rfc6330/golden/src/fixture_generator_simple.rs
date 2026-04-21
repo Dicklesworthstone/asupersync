@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Simple Fixture Generator for RaptorQ Golden File Testing
 

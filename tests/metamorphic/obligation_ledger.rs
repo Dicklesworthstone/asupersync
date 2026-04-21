@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic tests for obligation::ledger commit/abort idempotency invariants.
 //!

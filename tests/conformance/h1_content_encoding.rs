@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/1.1 Content-Encoding conformance tests per RFC 9110 Section 8.4.
 //!

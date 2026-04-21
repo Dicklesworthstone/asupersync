@@ -1257,9 +1257,114 @@ mod tests {
     use crate::trace::{TraceData, TraceEventKind};
     use crate::types::Budget;
     use crate::types::Time;
+    use insta::assert_json_snapshot;
     use serde_json::Value as JsonValue;
+    use std::collections::BTreeMap;
     use std::fs;
     use tempfile::NamedTempFile;
+
+    fn scrub_seed_fields(value: &mut JsonValue) {
+        match value {
+            JsonValue::Object(map) => {
+                for (key, entry) in map.iter_mut() {
+                    match key.as_str() {
+                        "seed" => *entry = JsonValue::String("[seed]".to_string()),
+                        "violation_seeds" => {
+                            if let JsonValue::Array(seeds) = entry {
+                                for seed in seeds {
+                                    *seed = JsonValue::String("[seed]".to_string());
+                                }
+                            }
+                        }
+                        "certificate_divergences" => {
+                            if let JsonValue::Array(pairs) = entry {
+                                for pair in pairs {
+                                    if let JsonValue::Array(seeds) = pair {
+                                        for seed in seeds {
+                                            *seed = JsonValue::String("[seed]".to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => scrub_seed_fields(entry),
+                    }
+                }
+            }
+            JsonValue::Array(entries) => {
+                for entry in entries {
+                    scrub_seed_fields(entry);
+                }
+            }
+            JsonValue::Null | JsonValue::Bool(_) | JsonValue::Number(_) | JsonValue::String(_) => {}
+        }
+    }
+
+    fn scenario_discovery_report_v2() -> ExplorationReport {
+        ExplorationReport {
+            total_runs: 3,
+            unique_classes: 2,
+            violations: vec![ViolationReport {
+                seed: 11,
+                steps: 21,
+                violations: vec![InvariantViolation::TaskLeak { count: 2 }],
+                fingerprint: 7001,
+            }],
+            coverage: CoverageMetrics {
+                equivalence_classes: 2,
+                total_runs: 3,
+                new_class_discoveries: 2,
+                class_run_counts: BTreeMap::from([(7001_u64, 2_usize), (7002_u64, 1_usize)]),
+                novelty_histogram: BTreeMap::from([(0_u32, 1_usize), (1_u32, 2_usize)]),
+                saturation: SaturationMetrics {
+                    window: 10,
+                    saturated: false,
+                    existing_class_hits: 1,
+                    runs_since_last_new_class: Some(1),
+                },
+            },
+            top_unexplored: vec![
+                UnexploredSeed {
+                    seed: 44,
+                    score: Some(TopologicalScore {
+                        novelty: 3,
+                        persistence_sum: 15,
+                        fingerprint: 991,
+                    }),
+                },
+                UnexploredSeed {
+                    seed: 45,
+                    score: None,
+                },
+            ],
+            runs: vec![
+                RunResult {
+                    seed: 11,
+                    steps: 21,
+                    fingerprint: 7001,
+                    is_new_class: true,
+                    violations: vec![InvariantViolation::TaskLeak { count: 2 }],
+                    certificate_hash: 17_001,
+                },
+                RunResult {
+                    seed: 12,
+                    steps: 13,
+                    fingerprint: 7001,
+                    is_new_class: false,
+                    violations: Vec::new(),
+                    certificate_hash: 17_002,
+                },
+                RunResult {
+                    seed: 13,
+                    steps: 8,
+                    fingerprint: 7002,
+                    is_new_class: true,
+                    violations: Vec::new(),
+                    certificate_hash: 17_099,
+                },
+            ],
+        }
+    }
 
     #[test]
     fn explore_single_task_no_violations() {
@@ -1653,6 +1758,14 @@ mod tests {
         let contents = fs::read_to_string(tmp.path()).expect("read");
         let value: JsonValue = serde_json::from_str(&contents).expect("parse");
         assert!(value.get("coverage").is_some());
+    }
+
+    #[test]
+    fn scenario_discovery_output_v2_scrubbed_snapshot() {
+        let mut value = serde_json::to_value(scenario_discovery_report_v2().to_json_summary())
+            .expect("serialize scenario report");
+        scrub_seed_fields(&mut value);
+        assert_json_snapshot!("scenario_discovery_output_v2_scrubbed", value);
     }
 
     #[test]

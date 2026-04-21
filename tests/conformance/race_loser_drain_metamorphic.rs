@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Race Loser-Drain Metamorphic Tests
 //!

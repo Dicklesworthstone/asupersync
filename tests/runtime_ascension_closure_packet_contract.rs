@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Runtime ascension closure packet contract invariants (AA-10.3 prep).
 

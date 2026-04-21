@@ -1163,7 +1163,11 @@ mod tests {
             .into_iter()
             .map(|task| {
                 let record = oracle.tasks.get(&task).expect("task record");
-                let region = oracle.task_regions.get(&task).copied().expect("task region");
+                let region = oracle
+                    .task_regions
+                    .get(&task)
+                    .copied()
+                    .expect("task region");
                 let cancel_request = record.cancel_request.as_ref().map(|cancel| {
                     json!({
                         "requested_at_nanos": cancel.requested_at.as_nanos(),

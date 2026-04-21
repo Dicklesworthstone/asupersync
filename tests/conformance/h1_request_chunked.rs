@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/1.1 Chunked Request Body Transfer-Encoding RFC 9112 Conformance Tests
 //!

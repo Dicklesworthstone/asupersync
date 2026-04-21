@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(
     missing_docs,
@@ -79,7 +80,6 @@ use common::*;
 use futures_lite::future::block_on;
 use std::io::{self, Write};
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
-use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::Duration;

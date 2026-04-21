@@ -40,8 +40,8 @@ use crate::util::{ArenaIndex, DetRng};
 use proptest::prelude::*;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 // ============================================================================

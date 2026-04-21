@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Obligation Invariant Conformance Testing Infrastructure
 //!

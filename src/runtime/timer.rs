@@ -521,8 +521,7 @@ mod tests {
             prop_assert!(
                 noisy_heap
                     .peek_deadline()
-                    .map(|deadline| deadline > frontier)
-                    .unwrap_or(true),
+                    .map_or(true, |deadline| deadline > frontier),
                 "late-only noise should remain strictly after the earlier frontier",
             );
         }

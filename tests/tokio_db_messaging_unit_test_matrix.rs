@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! T6.12 — Exhaustive Unit-Test Matrix for Database and Messaging Semantics
 //!

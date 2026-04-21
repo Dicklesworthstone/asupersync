@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for T2 I/O-track conformance and performance gates (2oh2u.2.8).
 //!

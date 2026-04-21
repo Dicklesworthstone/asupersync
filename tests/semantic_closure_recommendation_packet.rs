@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! SEM-09.5 closure recommendation packet contract checks.
 //!

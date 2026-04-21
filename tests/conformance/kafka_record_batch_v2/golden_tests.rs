@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Golden tests for Kafka RecordBatch v2 format with known test vectors.
 //!
@@ -7,7 +8,6 @@
 
 use super::format::*;
 use super::harness::*;
-use super::test_vectors::*;
 
 #[cfg(test)]
 mod tests {

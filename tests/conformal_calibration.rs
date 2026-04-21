@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! E2E regression tests for conformal calibration of lab metrics.
 //!

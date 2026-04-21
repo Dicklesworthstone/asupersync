@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Comprehensive test suite for epoch-based garbage collection.
 //!

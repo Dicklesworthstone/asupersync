@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Logging-Quality Validators and Observability Assertions (Track 6.7)
 //!

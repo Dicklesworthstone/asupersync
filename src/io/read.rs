@@ -310,7 +310,7 @@ mod tests {
     use super::*;
     use pin_project::pin_project;
     use std::marker::PhantomPinned;
-    use std::sync::Arc;
+
     use std::task::{Context, Waker};
 
     fn noop_waker() -> Waker {

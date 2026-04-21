@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Metamorphic testing for io::buf_reader/buf_writer read-ahead/write-behind invariants.
 //!

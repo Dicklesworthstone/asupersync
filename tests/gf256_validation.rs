@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! GF(256) Kernel Bit-Exactness Validation Tests
 //!

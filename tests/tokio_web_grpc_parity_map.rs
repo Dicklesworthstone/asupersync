@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for the web/gRPC parity map (2oh2u.5.1).
 //!

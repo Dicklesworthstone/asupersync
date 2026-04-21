@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! E2E channel producer/consumer pattern tests (T1.3).
 //!

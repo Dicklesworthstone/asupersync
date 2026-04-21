@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 use asupersync::record::region::RegionState;
 use asupersync::runtime::{RegionCreateError, RegionTable};

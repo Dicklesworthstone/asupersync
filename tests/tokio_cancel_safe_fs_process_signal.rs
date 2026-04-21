@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(unsafe_code)]
 //! Contract tests for [T3.6] Cancellation-Safe Integration: FS, Process, Signal

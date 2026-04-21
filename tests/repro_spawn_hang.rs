@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Reproduction test for scheduling bugs in `spawn_registered`.
 

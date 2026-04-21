@@ -1,3 +1,4 @@
+#![allow(warnings)]
 //! Golden snapshot for the web middleware request/response chain.
 
 use asupersync::combinator::rate_limit::{RateLimitPolicy, WaitStrategy};

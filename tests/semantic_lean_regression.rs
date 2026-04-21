@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Lean Proof Regression Script Validation (SEM-12.3)
 //!

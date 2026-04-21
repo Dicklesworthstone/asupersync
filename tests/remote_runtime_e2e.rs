@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Remote Runtime E2E Suite + Network Faults (bd-2bohm).
 //!
@@ -174,7 +175,7 @@ fn noop_waker() -> Waker {
         fn wake_by_ref(self: &Arc<Self>) {}
     }
 
-    Waker::from(Arc::new(NoopWake))
+    std::task::Waker::noop().clone()
 }
 
 // ===========================================================================

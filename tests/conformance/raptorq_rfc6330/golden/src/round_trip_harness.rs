@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Round-trip validation harness for RaptorQ conformance testing.
 //!

@@ -3393,7 +3393,7 @@ mod tests {
     #[test]
     fn set_cancel_requested_wakes_registered_cancel_waker() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::task::{Waker};
+        use std::task::Waker;
 
         struct CountWaker(Arc<AtomicUsize>);
 
@@ -4119,13 +4119,12 @@ mod tests {
         );
 
         // 3. Deterministic branching produces expected pattern (MR2)
-        let branch_traces: Vec<_> = events
+        let branch_traces = events
             .iter()
             .filter(|e| trace_message(e).contains("_branch_"))
-            .collect();
+            .count();
         assert_eq!(
-            branch_traces.len(),
-            3,
+            branch_traces, 3,
             "Deterministic branching should produce exactly 3 branch traces"
         );
     }

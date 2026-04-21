@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Replay minimization and counterexample quality validation contract (AA-06.3).
 

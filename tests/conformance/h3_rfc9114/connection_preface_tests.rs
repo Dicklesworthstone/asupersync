@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/3 RFC 9114 Section 6.1 connection preface conformance tests.
 //!

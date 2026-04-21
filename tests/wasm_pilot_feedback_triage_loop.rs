@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! WASM Pilot Feedback Triage Loop Contract Checks (WASM-16).
 //!

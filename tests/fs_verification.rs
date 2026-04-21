@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(missing_docs, clippy::items_after_statements)]
 //! Async Filesystem Verification Suite (bd-js88)

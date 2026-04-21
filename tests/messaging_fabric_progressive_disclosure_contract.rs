@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Progressive-disclosure contract checks for the FABRIC messaging surface.
 //!

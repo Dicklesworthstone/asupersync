@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! gRPC Trailer Forwarding Conformance Tests (RFC 9113 + grpc-go parity)
 //!
@@ -49,16 +50,15 @@
 
 //#[cfg(feature = "grpc")]  // gRPC appears to be available by default
 mod grpc_trailer_conformance_tests {
-    use asupersync::bytes::{Bytes, BytesMut};
+    use asupersync::bytes::Bytes;
     use asupersync::grpc::{
         server::{format_grpc_timeout, parse_grpc_timeout},
         status::{Code, Status},
         streaming::{Metadata, MetadataValue},
-        web::{TrailerFrame, decode_trailers, encode_trailers},
     };
-    use asupersync::http::h2::frame::{Frame, FrameHeader, FrameType};
+
     use serde::{Deserialize, Serialize};
-    use std::collections::HashMap;
+
     use std::time::{Duration, Instant};
 
     #[allow(dead_code)]

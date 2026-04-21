@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! HTTP/2 CONNECT method tunneling conformance tests per RFC 9113.
 //!

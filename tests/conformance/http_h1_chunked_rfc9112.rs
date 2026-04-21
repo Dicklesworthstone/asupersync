@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! RFC 9112 Section 7: Chunked Transfer Encoding Conformance Tests
 //!

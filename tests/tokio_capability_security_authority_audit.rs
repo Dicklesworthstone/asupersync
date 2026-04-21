@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Contract tests for [T8.8] Capability-Security and Authority-Flow Audit
 //!

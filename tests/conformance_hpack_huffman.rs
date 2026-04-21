@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! RFC 7541 Appendix B Huffman Encoding Conformance Tests
 //!

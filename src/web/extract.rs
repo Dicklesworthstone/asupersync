@@ -1167,8 +1167,8 @@ mod tests {
             .with_header("content-type", "application/x-www-form-urlencoded")
             .with_body(Bytes::from_static(b"k=123456789"));
         oversized_form_req.extensions.insert_typed(limits);
-        let form_err = Form::<HashMap<String, String>>::from_request(oversized_form_req)
-            .unwrap_err();
+        let form_err =
+            Form::<HashMap<String, String>>::from_request(oversized_form_req).unwrap_err();
         assert_eq!(
             form_err.status,
             crate::web::response::StatusCode::PAYLOAD_TOO_LARGE

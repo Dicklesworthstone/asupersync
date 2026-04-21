@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Lease semantics and liveness tests (bd-yj06g).
 //!

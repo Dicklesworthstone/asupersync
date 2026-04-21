@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Combinator E2E test suite with cancel-correctness verification.
 //!
@@ -41,7 +42,7 @@ impl Wake for NoopWake {
 }
 
 fn noop_waker() -> Waker {
-    Waker::from(Arc::new(NoopWake))
+    std::task::Waker::noop().clone()
 }
 
 #[test]

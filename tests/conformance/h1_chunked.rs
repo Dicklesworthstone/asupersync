@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![allow(clippy::all)]
 //! Conformance Tests: HTTP/1.1 Chunked Transfer Encoding (RFC 9112 §7)
 //!
