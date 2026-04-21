@@ -419,6 +419,38 @@ fn build_declared_frame(config: &FuzzConfig, declared_len: u64) -> BytesMut {
     frame
 }
 
+fn encode_frame(config: &FuzzConfig, payload: &[u8]) -> BytesMut {
+    let mut encoder = config.build_codec().expect("edge-case config should build");
+    let mut wire = BytesMut::new();
+    encoder
+        .encode(BytesMut::from(payload), &mut wire)
+        .expect("edge-case payload should encode");
+    wire
+}
+
+fn visible_frame_bytes(config: &FuzzConfig, wire: &BytesMut) -> BytesMut {
+    BytesMut::from(&wire[usize::from(config.num_skip)..])
+}
+
+fn bounded_payload(source: &[u8], target_len: usize) -> BytesMut {
+    let mut payload = source[..source.len().min(target_len)].to_vec();
+    payload.resize(target_len, 0xA5);
+    BytesMut::from(&payload[..])
+}
+
+fn normalized_edge_case_config(base: &FuzzConfig, payload_len: usize) -> FuzzConfig {
+    let mut config = base.clone();
+    config.length_adjustment = 0;
+    config.max_frame_length = config
+        .max_frame_length
+        .max(u32::try_from(payload_len).expect("payload_len bounded by fuzz target"));
+    let total_frame_len = header_len(&config).saturating_add(payload_len);
+    config.num_skip = usize::from(config.num_skip)
+        .min(total_frame_len)
+        .min(u8::MAX as usize) as u8;
+    config
+}
+
 fuzz_target!(|input: FuzzInput| {
     let frame_bytes = input.construct_frame_bytes();
     if frame_bytes.len() > MAX_FUZZ_INPUT_SIZE {
@@ -497,6 +529,93 @@ fuzz_target!(|input: FuzzInput| {
         &partial_buf[..],
         &second_wire[..second_prefix_len],
         "decoder retained the wrong second-frame prefix"
+    );
+
+    let edge_source = operation_payload(&input.operation);
+
+    let zero_config = normalized_edge_case_config(&roundtrip_config, 0);
+    let zero_wire = encode_frame(&zero_config, &[]);
+    let zero_expected = visible_frame_bytes(&zero_config, &zero_wire);
+    let mut zero_decoder = zero_config
+        .build_codec()
+        .expect("zero-length config should build");
+    let mut zero_buf = zero_wire.clone();
+    let zero_decoded = zero_decoder
+        .decode(&mut zero_buf)
+        .expect("zero-length frame must not error")
+        .expect("zero-length frame should decode");
+    assert_eq!(
+        zero_decoded, zero_expected,
+        "zero-length frame retained the wrong visible bytes"
+    );
+    assert!(
+        zero_buf.is_empty(),
+        "zero-length decode left unread bytes behind"
+    );
+
+    let exact_max_len = roundtrip_config
+        .length_field_width
+        .max_value()
+        .min(usize::MAX as u64);
+    let exact_max_len = (exact_max_len as usize)
+        .min(MAX_FRAME_PAYLOAD_SIZE)
+        .clamp(1, 256);
+    let mut exact_max_config = normalized_edge_case_config(&roundtrip_config, exact_max_len);
+    exact_max_config.max_frame_length =
+        u32::try_from(exact_max_len).expect("exact_max_len bounded by fuzz target");
+    let exact_max_payload = bounded_payload(edge_source, exact_max_len);
+    let exact_max_wire = encode_frame(&exact_max_config, &exact_max_payload);
+    let exact_max_expected = visible_frame_bytes(&exact_max_config, &exact_max_wire);
+    let mut exact_max_decoder = exact_max_config
+        .build_codec()
+        .expect("exact-max config should build");
+    let mut exact_max_buf = exact_max_wire.clone();
+    let exact_max_decoded = exact_max_decoder
+        .decode(&mut exact_max_buf)
+        .expect("exact-max frame must not error")
+        .expect("exact-max frame should decode");
+    assert_eq!(
+        exact_max_decoded, exact_max_expected,
+        "exact-max frame retained the wrong visible bytes"
+    );
+    assert!(
+        exact_max_buf.is_empty(),
+        "exact-max decode left unread bytes behind"
+    );
+
+    let partial_len = exact_max_len.clamp(1, 32);
+    let mut partial_config = normalized_edge_case_config(&roundtrip_config, partial_len);
+    partial_config.max_frame_length =
+        u32::try_from(partial_len).expect("partial_len bounded by fuzz target");
+    let partial_payload = bounded_payload(edge_source, partial_len);
+    let partial_wire = encode_frame(&partial_config, &partial_payload);
+    let partial_expected = visible_frame_bytes(&partial_config, &partial_wire);
+    let mut partial_decoder = partial_config
+        .build_codec()
+        .expect("bytewise partial config should build");
+    let mut partial_stream = BytesMut::new();
+    for (index, byte) in partial_wire.iter().enumerate() {
+        partial_stream.extend_from_slice(std::slice::from_ref(byte));
+        let decoded = partial_decoder
+            .decode(&mut partial_stream)
+            .expect("bytewise partial frame must not error");
+        if index + 1 == partial_wire.len() {
+            assert_eq!(
+                decoded.expect("bytewise partial frame should finish on the last byte"),
+                partial_expected.clone(),
+                "bytewise partial decode retained the wrong visible bytes"
+            );
+        } else {
+            assert!(
+                decoded.is_none(),
+                "bytewise partial frame decoded early at byte {}",
+                index + 1
+            );
+        }
+    }
+    assert!(
+        partial_stream.is_empty(),
+        "bytewise partial decode left unread bytes behind"
     );
 
     let mut max_config = input.config.clone();
