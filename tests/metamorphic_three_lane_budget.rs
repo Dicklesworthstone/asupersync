@@ -92,7 +92,8 @@ impl BudgetTestHarness {
         for i in 0..count_per_lane {
             let task_id = TaskId::new_for_test(base_id + count_per_lane as u32 + i as u32, 1);
             // Schedule for immediate deadline to make them runnable
-            self.scheduler.schedule_timed(task_id, 50 + i as u32, Time::ZERO);
+            self.scheduler
+                .schedule_timed(task_id, 50 + i as u32, Time::ZERO);
         }
 
         // Ready tasks (lower priority)
@@ -211,7 +212,9 @@ impl BudgetStats {
         // Record current streak values (derived from certificate)
         if current_task_type == TaskType::Cancel {
             // Track cancel streak progression
-            let cancel_streak = fairness_cert.observed_max_cancel_streak.min(fairness_cert.effective_limit + 1);
+            let cancel_streak = fairness_cert
+                .observed_max_cancel_streak
+                .min(fairness_cert.effective_limit + 1);
             self.cancel_streaks[worker_id].push(cancel_streak);
             self.max_cancel_streak = self.max_cancel_streak.max(cancel_streak);
         }
@@ -244,12 +247,26 @@ impl BudgetStats {
             return true;
         }
 
-        let cancel_ratio = *self.total_dispatches_by_type.get(&TaskType::Cancel).unwrap_or(&0) as f64 / total_dispatches as f64;
-        let timed_ratio = *self.total_dispatches_by_type.get(&TaskType::Timed).unwrap_or(&0) as f64 / total_dispatches as f64;
-        let ready_ratio = *self.total_dispatches_by_type.get(&TaskType::Ready).unwrap_or(&0) as f64 / total_dispatches as f64;
+        let cancel_ratio = *self
+            .total_dispatches_by_type
+            .get(&TaskType::Cancel)
+            .unwrap_or(&0) as f64
+            / total_dispatches as f64;
+        let timed_ratio = *self
+            .total_dispatches_by_type
+            .get(&TaskType::Timed)
+            .unwrap_or(&0) as f64
+            / total_dispatches as f64;
+        let ready_ratio = *self
+            .total_dispatches_by_type
+            .get(&TaskType::Ready)
+            .unwrap_or(&0) as f64
+            / total_dispatches as f64;
 
         // None should dominate completely (extreme imbalance)
-        cancel_ratio <= (1.0 - tolerance) && timed_ratio <= (1.0 - tolerance) && ready_ratio <= (1.0 - tolerance)
+        cancel_ratio <= (1.0 - tolerance)
+            && timed_ratio <= (1.0 - tolerance)
+            && ready_ratio <= (1.0 - tolerance)
     }
 
     /// Get the maximum observed streak for any worker
@@ -266,11 +283,11 @@ impl BudgetStats {
 /// Generate strategy for scheduler parameters
 fn budget_test_params_strategy() -> impl Strategy<Value = (usize, usize, usize, usize, bool)> {
     (
-        1..=3usize,      // worker_count
-        4..=16usize,     // cancel_streak_limit
-        0..=20usize,     // browser_handoff_limit (0 = disabled)
-        5..=30usize,     // tasks_per_lane
-        any::<bool>(),   // adaptive_enabled
+        1..=3usize,    // worker_count
+        4..=16usize,   // cancel_streak_limit
+        0..=20usize,   // browser_handoff_limit (0 = disabled)
+        5..=30usize,   // tasks_per_lane
+        any::<bool>(), // adaptive_enabled
     )
 }
 
@@ -444,7 +461,10 @@ mod test_helpers {
         harness.inject_balanced_workload(3, 100);
         let stats = harness.run_budget_simulation(20);
 
-        assert!(stats.total_dispatches_by_type.values().sum::<usize>() > 0, "Should dispatch some work");
+        assert!(
+            stats.total_dispatches_by_type.values().sum::<usize>() > 0,
+            "Should dispatch some work"
+        );
     }
 
     #[test]
@@ -454,8 +474,14 @@ mod test_helpers {
         stats.record_dispatch(0, TaskType::Cancel, 5);
         stats.record_dispatch(0, TaskType::Ready, 10);
 
-        assert_eq!(stats.total_dispatches_by_type.get(&TaskType::Cancel), Some(&1));
-        assert_eq!(stats.total_dispatches_by_type.get(&TaskType::Ready), Some(&1));
+        assert_eq!(
+            stats.total_dispatches_by_type.get(&TaskType::Cancel),
+            Some(&1)
+        );
+        assert_eq!(
+            stats.total_dispatches_by_type.get(&TaskType::Ready),
+            Some(&1)
+        );
         assert!(stats.is_cross_lane_balanced(0.1)); // Should be balanced with 1 each
     }
 
@@ -463,8 +489,17 @@ mod test_helpers {
     fn test_task_type_classification() {
         let harness = BudgetTestHarness::new(1, 8, 0, false);
 
-        assert_eq!(harness.classify_task_type(TaskId::new_for_test(1, 0)), TaskType::Cancel);
-        assert_eq!(harness.classify_task_type(TaskId::new_for_test(1, 1)), TaskType::Timed);
-        assert_eq!(harness.classify_task_type(TaskId::new_for_test(1, 2)), TaskType::Ready);
+        assert_eq!(
+            harness.classify_task_type(TaskId::new_for_test(1, 0)),
+            TaskType::Cancel
+        );
+        assert_eq!(
+            harness.classify_task_type(TaskId::new_for_test(1, 1)),
+            TaskType::Timed
+        );
+        assert_eq!(
+            harness.classify_task_type(TaskId::new_for_test(1, 2)),
+            TaskType::Ready
+        );
     }
 }
