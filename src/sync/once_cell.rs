@@ -854,6 +854,39 @@ mod tests {
                 prop_assert_eq!(cloned.get(), Some(&value));
             }
         }
+
+        #[test]
+        fn metamorphic_async_cancellation_recovery_matches_fresh_success_surface(
+            value in any::<u32>(),
+            fallback in any::<u32>(),
+        ) {
+            let recovered = OnceCell::new();
+            let fresh = OnceCell::new();
+
+            let mut cancelled_init = Box::pin(recovered.get_or_init(|| async { pending::<u32>().await }));
+            let noop = noop_waker();
+            let mut cx = Context::from_waker(&noop);
+            prop_assert!(Future::poll(cancelled_init.as_mut(), &mut cx).is_pending());
+            drop(cancelled_init);
+
+            prop_assert!(!recovered.is_initialized());
+
+            let recovered_value = block_on(recovered.get_or_init(|| async move { value }));
+            let fresh_value = block_on(fresh.get_or_init(|| async move { value }));
+
+            let ignored_probe_runs = Arc::new(AtomicUsize::new(0));
+            let ignored_probe_counter = Arc::clone(&ignored_probe_runs);
+            let recovered_again = block_on(recovered.get_or_init(|| async move {
+                ignored_probe_counter.fetch_add(1, Ordering::SeqCst);
+                fallback
+            }));
+
+            prop_assert_eq!(*recovered_value, *fresh_value);
+            prop_assert_eq!(*recovered_again, value);
+            prop_assert_eq!(ignored_probe_runs.load(Ordering::SeqCst), 0);
+            prop_assert_eq!(recovered.get(), fresh.get());
+            prop_assert!(recovered.is_initialized());
+        }
     }
 
     #[test]
