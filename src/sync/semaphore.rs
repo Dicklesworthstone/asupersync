@@ -879,6 +879,78 @@ mod tests {
         poll_until_ready(&mut fut).expect("acquire failed")
     }
 
+    fn waiter_cx(slot: u32) -> Cx {
+        Cx::new(
+            RegionId::from_arena(ArenaIndex::new(0, slot)),
+            TaskId::from_arena(ArenaIndex::new(0, slot)),
+            Budget::INFINITE,
+        )
+    }
+
+    fn observe_waiter_service_order(
+        waiter_count: usize,
+        cancelled: &[usize],
+        base_slot: u32,
+    ) -> Vec<usize> {
+        let sem = Semaphore::new(0);
+        let contexts: Vec<Cx> = (0..waiter_count)
+            .map(|index| {
+                let index = u32::try_from(index).expect("test waiter index fits in u32");
+                waiter_cx(base_slot.checked_add(index).expect("test slot range"))
+            })
+            .collect();
+        let mut futures: Vec<_> = contexts.iter().map(|cx| sem.acquire(cx, 1)).collect();
+        let mut still_waiting = vec![true; waiter_count];
+        let mut held_permits = Vec::with_capacity(waiter_count.saturating_sub(cancelled.len()));
+
+        for future in &mut futures {
+            assert!(
+                poll_once(future).is_none(),
+                "waiters should queue initially"
+            );
+        }
+
+        for &index in cancelled {
+            contexts[index].set_cancel_requested(true);
+            match poll_once(&mut futures[index]).expect("cancelled waiter should complete") {
+                Err(AcquireError::Cancelled) => {}
+                Err(error) => panic!("cancelled waiter {index} returned {error:?}"),
+                Ok(_) => panic!("cancelled waiter {index} unexpectedly acquired a permit"),
+            }
+            still_waiting[index] = false;
+        }
+
+        let survivor_count = still_waiting.iter().filter(|&&waiting| waiting).count();
+        let mut observed = Vec::with_capacity(survivor_count);
+
+        for _ in 0..survivor_count {
+            sem.add_permits(1);
+
+            let mut woken = None;
+            for (index, future) in futures.iter_mut().enumerate() {
+                if !still_waiting[index] {
+                    continue;
+                }
+
+                match poll_once(future) {
+                    Some(Ok(permit)) => {
+                        still_waiting[index] = false;
+                        held_permits.push(permit);
+                        woken = Some(index);
+                        break;
+                    }
+                    Some(Err(error)) => panic!("waiter {index} unexpectedly errored: {error:?}"),
+                    None => {}
+                }
+            }
+
+            observed.push(woken.expect("one waiter should acquire after each permit addition"));
+        }
+
+        drop(held_permits);
+        observed
+    }
+
     #[test]
     fn new_semaphore_has_correct_permits() {
         init_test("new_semaphore_has_correct_permits");
@@ -2366,6 +2438,36 @@ mod tests {
         );
 
         crate::test_complete!("metamorphic_fifo_order_under_cancellation");
+    }
+
+    #[test]
+    fn metamorphic_fifo_survivors_match_baseline_across_n_waiters() {
+        init_test("metamorphic_fifo_survivors_match_baseline_across_n_waiters");
+
+        let waiter_count = 8;
+        let baseline = observe_waiter_service_order(waiter_count, &[], 40);
+        assert_eq!(baseline, (0..waiter_count).collect::<Vec<_>>());
+
+        let cancellation_patterns: [&[usize]; 4] = [&[1], &[0, 3, 5], &[2, 4, 7], &[0, 1, 6]];
+        for (case_idx, cancelled) in cancellation_patterns.iter().enumerate() {
+            let observed = observe_waiter_service_order(
+                waiter_count,
+                cancelled,
+                80 + u32::try_from(case_idx * 16).expect("case offset fits in u32"),
+            );
+            let expected: Vec<_> = baseline
+                .iter()
+                .copied()
+                .filter(|index| !cancelled.contains(index))
+                .collect();
+
+            assert_eq!(
+                observed, expected,
+                "case {case_idx} survivor order should match baseline FIFO projection"
+            );
+        }
+
+        crate::test_complete!("metamorphic_fifo_survivors_match_baseline_across_n_waiters");
     }
 
     /// MR4: try_acquire non-blocking behavior - try_acquire should never block
