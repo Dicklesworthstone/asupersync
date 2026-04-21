@@ -940,6 +940,44 @@ mod tests {
         }
     }
 
+    fn encode_length_prefix_for_test(
+        length: u64,
+        length_field_length: usize,
+        big_endian: bool,
+    ) -> Vec<u8> {
+        let max_value = max_length_field_value(length_field_length).unwrap();
+        assert!(
+            length <= max_value,
+            "test length {} exceeds {}-byte field capacity {}",
+            length,
+            length_field_length,
+            max_value
+        );
+
+        let bytes = if big_endian {
+            length.to_be_bytes()
+        } else {
+            length.to_le_bytes()
+        };
+
+        if big_endian {
+            bytes[bytes.len() - length_field_length..].to_vec()
+        } else {
+            bytes[..length_field_length].to_vec()
+        }
+    }
+
+    fn decode_all_available_frames(
+        codec: &mut LengthDelimitedCodec,
+        src: &mut BytesMut,
+    ) -> io::Result<Vec<BytesMut>> {
+        let mut decoded = Vec::new();
+        while let Some(frame) = codec.decode(src)? {
+            decoded.push(frame);
+        }
+        Ok(decoded)
+    }
+
     // ================================================================================
     // MR3: Max Frame Size Rejections
     // ================================================================================
@@ -1012,6 +1050,204 @@ mod tests {
                 decode_result.is_err(),
                 "Decoder should reject oversized frame length in header"
             );
+        }
+    }
+
+    #[test]
+    fn metamorphic_decoder_boundary_fragmentation_preserves_multi_frame_arrival_order() {
+        let configs = [
+            MetamorphicTestConfig {
+                length_field_length: 1,
+                num_skip: 1,
+                max_frame_length: 31,
+                big_endian: true,
+                ..Default::default()
+            },
+            MetamorphicTestConfig {
+                length_field_length: 1,
+                num_skip: 1,
+                max_frame_length: 31,
+                big_endian: false,
+                ..Default::default()
+            },
+            MetamorphicTestConfig {
+                length_field_length: 2,
+                num_skip: 2,
+                max_frame_length: 257,
+                big_endian: true,
+                ..Default::default()
+            },
+            MetamorphicTestConfig {
+                length_field_length: 4,
+                num_skip: 4,
+                max_frame_length: 257,
+                big_endian: false,
+                ..Default::default()
+            },
+        ];
+
+        for config in configs {
+            let sizes = [
+                0,
+                1,
+                config.max_frame_length.saturating_sub(1),
+                config.max_frame_length,
+            ];
+            let payloads: Vec<BytesMut> = sizes
+                .into_iter()
+                .enumerate()
+                .map(|(index, size)| {
+                    let fill = b'A'.saturating_add(index as u8);
+                    let mut payload = BytesMut::with_capacity(size);
+                    payload.resize(size, fill);
+                    payload
+                })
+                .collect();
+
+            let mut encoder = config.build_codec();
+            let mut encoded_stream = BytesMut::new();
+            for payload in &payloads {
+                encoder
+                    .encode(payload.clone(), &mut encoded_stream)
+                    .expect("boundary payload must encode");
+            }
+
+            let mut reference_decoder = config.build_codec();
+            let mut reference_stream = encoded_stream.clone();
+            let expected =
+                decode_all_available_frames(&mut reference_decoder, &mut reference_stream).unwrap();
+            assert!(
+                reference_stream.is_empty(),
+                "reference decode should drain the full stream for {config:?}"
+            );
+            assert_eq!(
+                expected, payloads,
+                "reference decode should preserve boundary payload order for {config:?}"
+            );
+
+            let mut incremental_decoder = config.build_codec();
+            let mut fragmented_stream = BytesMut::new();
+            let mut fragmented_source = encoded_stream.clone();
+            let mut actual = Vec::new();
+
+            while !fragmented_source.is_empty() {
+                let next_byte = fragmented_source.split_to(1);
+                fragmented_stream.extend_from_slice(&next_byte);
+                actual.extend(
+                    decode_all_available_frames(&mut incremental_decoder, &mut fragmented_stream)
+                        .unwrap(),
+                );
+            }
+
+            assert_eq!(
+                actual, expected,
+                "byte-wise fragmentation changed arrival order for {config:?}"
+            );
+            assert!(
+                fragmented_stream.is_empty(),
+                "fragmented decoder should drain all buffered bytes for {config:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn metamorphic_decoder_boundary_oversized_prefixes_reject_without_consuming_header() {
+        for (length_field_length, big_endian, max_frame_length) in [
+            (1, true, 31usize),
+            (1, false, 31usize),
+            (2, true, 257usize),
+            (2, false, 257usize),
+            (4, true, 257usize),
+            (8, false, 257usize),
+        ] {
+            let config = MetamorphicTestConfig {
+                length_field_length,
+                num_skip: length_field_length,
+                max_frame_length,
+                big_endian,
+                ..Default::default()
+            };
+
+            let mut exact_boundary_decoder = config.build_codec();
+            let exact_header = encode_length_prefix_for_test(
+                max_frame_length as u64,
+                length_field_length,
+                big_endian,
+            );
+            let mut exact_boundary = BytesMut::from(exact_header.as_slice());
+            assert!(
+                exact_boundary_decoder
+                    .decode(&mut exact_boundary)
+                    .expect("exact-max header should not error without payload")
+                    .is_none(),
+                "exact-max frame should wait for payload bytes for {:?}",
+                config
+            );
+            assert_eq!(
+                exact_boundary.as_ref(),
+                &[] as &[u8],
+                "exact-max header should be consumed once the decoder enters payload-wait state for {:?}",
+                config
+            );
+
+            let exact_payload = vec![0xAB; max_frame_length];
+            exact_boundary.extend_from_slice(&exact_payload);
+            let decoded = exact_boundary_decoder
+                .decode(&mut exact_boundary)
+                .expect("exact-max payload should decode")
+                .expect("exact-max payload should be emitted");
+            assert_eq!(
+                decoded.as_ref(),
+                exact_payload.as_slice(),
+                "exact-max payload bytes changed for {:?}",
+                config
+            );
+            assert!(
+                exact_boundary.is_empty(),
+                "exact-max decode should drain the buffer for {:?}",
+                config
+            );
+
+            let max_value = max_length_field_value(length_field_length).unwrap();
+            let mut oversized_lengths = Vec::new();
+            for candidate in [
+                max_frame_length as u64 + 1,
+                max_frame_length as u64 + 17,
+                max_frame_length as u64 * 2 + 1,
+                max_value,
+            ] {
+                if candidate > max_frame_length as u64
+                    && candidate <= max_value
+                    && !oversized_lengths.contains(&candidate)
+                {
+                    oversized_lengths.push(candidate);
+                }
+            }
+
+            for oversized_length in oversized_lengths {
+                let header = encode_length_prefix_for_test(
+                    oversized_length,
+                    length_field_length,
+                    big_endian,
+                );
+                let mut decoder = config.build_codec();
+                let mut src = BytesMut::from(header.as_slice());
+                let error = decoder
+                    .decode(&mut src)
+                    .expect_err("oversized prefix must be rejected");
+                assert_eq!(
+                    error.kind(),
+                    io::ErrorKind::InvalidData,
+                    "oversized prefix must raise InvalidData for {:?}",
+                    config
+                );
+                assert_eq!(
+                    src.as_ref(),
+                    header.as_slice(),
+                    "oversized-prefix rejection must not consume header bytes for {:?}",
+                    config
+                );
+            }
         }
     }
 
