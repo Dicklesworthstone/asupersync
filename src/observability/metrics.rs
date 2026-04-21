@@ -905,6 +905,71 @@ mod tests {
         );
     }
 
+    fn sorted_metric_blocks_snapshot(rendered: &str) -> String {
+        let mut blocks = Vec::new();
+        let mut current = Vec::new();
+
+        for line in rendered.lines() {
+            if line.starts_with("# TYPE ") && !current.is_empty() {
+                blocks.push(current.join("\n"));
+                current.clear();
+            }
+            current.push(line);
+        }
+
+        if !current.is_empty() {
+            blocks.push(current.join("\n"));
+        }
+
+        blocks.sort_unstable();
+        let mut snapshot = blocks.join("\n");
+        if !snapshot.is_empty() {
+            snapshot.push('\n');
+        }
+        snapshot
+    }
+
+    #[test]
+    fn metrics_export_prometheus_runtime_scheduler_region_snapshot() {
+        let mut metrics = Metrics::new();
+
+        metrics
+            .counter("runtime_regions_total{state=\"open\"}")
+            .add(3);
+        metrics
+            .counter("runtime_regions_total{state=\"closed\"}")
+            .add(1);
+        metrics
+            .counter("scheduler_dispatch_total{lane=\"ready\",worker=\"primary\"}")
+            .add(11);
+        metrics
+            .counter("scheduler_dispatch_total{lane=\"cancel\",worker=\"primary\"}")
+            .add(2);
+
+        metrics
+            .gauge("scheduler_queue_depth{lane=\"ready\"}")
+            .set(4);
+        metrics
+            .gauge("scheduler_queue_depth{lane=\"timed\"}")
+            .set(1);
+        metrics
+            .gauge("region_live_tasks{region=\"root\",phase=\"draining\"}")
+            .set(2);
+        metrics
+            .gauge("region_live_tasks{region=\"worker\",phase=\"steady\"}")
+            .set(5);
+
+        let histogram = metrics.histogram("runtime_poll_latency_seconds", vec![0.001, 0.01, 0.1]);
+        for value in [0.0005, 0.004, 0.08] {
+            histogram.observe(value);
+        }
+
+        insta::assert_snapshot!(
+            "metrics_export_prometheus_runtime_scheduler_region",
+            sorted_metric_blocks_snapshot(&metrics.export_prometheus())
+        );
+    }
+
     #[test]
     fn counter_metamorphic_fixed_schedule_never_decreases() {
         let counter = Counter::new("metamorphic_counter");
@@ -1578,5 +1643,67 @@ mod tests {
         } else {
             panic!("Expected Histogram value");
         }
+    }
+
+    #[test]
+    fn metrics_export_prometheus_exposition_format_compliance_snapshot() {
+        let mut metrics = Metrics::new();
+
+        // Test comprehensive Prometheus exposition format compliance
+        // including edge cases, special values, and format requirements
+
+        // Counters with various values
+        metrics.counter("http_requests_total").add(0); // Zero value
+        metrics.counter("bytes_processed_total").add(u64::MAX); // Max value
+        metrics.counter("errors_total{status=\"404\"}").add(42); // With labels
+        metrics.counter("requests_with_underscore_name_total").add(123); // Underscore in name
+
+        // Gauges with various values including negatives
+        metrics.gauge("temperature_celsius").set(-273); // Negative value
+        metrics.gauge("memory_usage_bytes").set(0); // Zero gauge
+        metrics.gauge("cpu_usage_percent{cpu=\"0\"}").set(99); // With labels
+        metrics.gauge("queue_depth").set(i64::MAX); // Max positive value
+        metrics.gauge("offset_microseconds").set(i64::MIN); // Min negative value
+
+        // Histograms with comprehensive bucket testing
+        let response_time_hist = metrics.histogram("http_request_duration_seconds",
+            vec![0.001, 0.01, 0.1, 1.0, 10.0]);
+        response_time_hist.observe(0.0005); // Below first bucket
+        response_time_hist.observe(0.005); // Between buckets
+        response_time_hist.observe(0.05); // Between buckets
+        response_time_hist.observe(0.5); // Between buckets
+        response_time_hist.observe(5.0); // Between buckets
+        response_time_hist.observe(50.0); // Above all buckets (+Inf)
+
+        let size_hist = metrics.histogram("request_size_bytes{endpoint=\"/api/v1/data\"}",
+            vec![100.0, 1000.0, 10000.0]);
+        size_hist.observe(0.0); // Zero value
+        size_hist.observe(50.0); // First bucket
+        size_hist.observe(500.0); // Middle bucket
+        size_hist.observe(5000.0); // Third bucket
+        size_hist.observe(100000.0); // +Inf bucket
+
+        // Summaries with comprehensive quantile testing
+        let latency_summary = metrics.summary("response_latency_summary");
+        for &value in &[1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0] {
+            latency_summary.observe(value);
+        }
+
+        let throughput_summary = metrics.summary("throughput_ops_per_second{worker=\"primary\"}");
+        // Edge case: single observation
+        throughput_summary.observe(1000.0);
+
+        let empty_summary = metrics.summary("empty_metric_summary");
+        // Edge case: no observations (should still export with 0 values)
+
+        // Special metric names testing edge cases
+        metrics.counter("metric_with_1234_numbers").add(1);
+        metrics.gauge("CamelCaseMetric").set(42); // Non-standard but valid
+        metrics.counter("metric.with.dots").add(7); // Dots in name
+
+        insta::assert_snapshot!(
+            "metrics_export_prometheus_exposition_format_compliance",
+            metrics.export_prometheus()
+        );
     }
 }
