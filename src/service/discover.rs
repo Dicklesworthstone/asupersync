@@ -28,6 +28,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 fn wall_clock_now() -> Time {
@@ -267,6 +268,14 @@ pub struct DnsServiceDiscovery {
     config: DnsDiscoveryConfig,
     state: Mutex<DnsDiscoveryState>,
     resolve_done: Condvar,
+    /// Number of pollers currently blocked inside `resolve_done.wait`,
+    /// waiting for the active leader to publish an inflight generation.
+    ///
+    /// Exposed via [`Self::waiter_count`] so tests can deterministically
+    /// synchronise the release of a captive leader with the arrival of
+    /// followers on the condvar; racing the release against an async
+    /// scheduler otherwise makes the coalesce paths flaky.
+    waiters: AtomicUsize,
 }
 
 struct DnsDiscoveryState {
@@ -353,7 +362,18 @@ impl DnsServiceDiscovery {
                 last_resolution_error: None,
             }),
             resolve_done: Condvar::new(),
+            waiters: AtomicUsize::new(0),
         }
+    }
+
+    /// Number of pollers currently waiting on a coalesced in-flight resolution.
+    ///
+    /// Primarily intended for tests that need to observe that at least one
+    /// follower has parked on the condvar before releasing the leader. Callers
+    /// should treat this as a best-effort snapshot.
+    #[must_use]
+    pub fn waiter_count(&self) -> usize {
+        self.waiters.load(Ordering::Acquire)
     }
 
     /// Create with hostname and port.
@@ -413,7 +433,14 @@ impl Discover for DnsServiceDiscovery {
         let resolve_generation = {
             let mut state = self.state.lock();
             if let Some(in_flight_generation) = state.in_flight_generation {
+                // Publish that a follower is about to park before releasing
+                // the state mutex inside `wait`. Tests spin on `waiter_count`
+                // to confirm the follower has arrived before they release the
+                // leader, which eliminates the racy schedule where the leader
+                // completes before the follower observes the in-flight slot.
+                self.waiters.fetch_add(1, Ordering::AcqRel);
                 self.resolve_done.wait(&mut state);
+                self.waiters.fetch_sub(1, Ordering::AcqRel);
                 if let Some(err) = state
                     .last_resolution_error
                     .clone()
@@ -865,15 +892,28 @@ mod tests {
             .expect("first resolver call should start");
 
         let second_discovery = Arc::clone(&discovery);
-        let second_result = thread::spawn(move || second_discovery.poll_discover())
-            .join()
-            .expect("second worker should not panic")
-            .expect("second poll should succeed");
-        assert_eq!(second_result, Vec::<Change<SocketAddr>>::new());
+        let second_worker = thread::spawn(move || second_discovery.poll_discover());
+
+        // Wait for the follower to park on the resolve-done condvar before
+        // releasing the leader. Joining the follower synchronously would
+        // deadlock because the leader is still captive inside its resolver.
+        let waiter_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while discovery.waiter_count() < 1 {
+            if std::time::Instant::now() > waiter_deadline {
+                panic!("follower never parked on resolve_done within 5s");
+            }
+            thread::yield_now();
+        }
 
         let (lock, ready) = &*release_first;
         *lock.lock().expect("release lock poisoned") = true;
         ready.notify_all();
+
+        let second_result = second_worker
+            .join()
+            .expect("second worker should not panic")
+            .expect("second poll should succeed");
+        assert_eq!(second_result, Vec::<Change<SocketAddr>>::new());
 
         let first_result = first_worker
             .join()
@@ -929,6 +969,18 @@ mod tests {
 
         let second_discovery = Arc::clone(&discovery);
         let second_worker = thread::spawn(move || second_discovery.poll_discover());
+
+        // Ensure the follower has parked on the condvar before releasing the
+        // leader. Otherwise the scheduler may let the leader finish first,
+        // in which case the follower would take the `needs_resolve` branch
+        // and invoke the resolver a second time (panicking the test).
+        let waiter_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while discovery.waiter_count() < 1 {
+            if std::time::Instant::now() > waiter_deadline {
+                panic!("follower never parked on resolve_done within 5s");
+            }
+            thread::yield_now();
+        }
 
         let (lock, ready) = &*release_first;
         *lock.lock().expect("release lock poisoned") = true;
@@ -1265,9 +1317,11 @@ mod tests {
 
     /// GT1: DNS refresh vs. in-flight request ordering
     ///
-    /// Property: When a DNS refresh occurs during in-flight requests,
-    /// the refresh should not affect the current request routing until
-    /// the next poll cycle completes.
+    /// Property: While a DNS refresh is in flight, followers must observe a
+    /// stable (pre-refresh) endpoint snapshot and coalesce onto the leader's
+    /// resolution rather than double-fire the resolver. Only the leader's
+    /// resolved addresses are applied to the published endpoint set, and that
+    /// application is atomic across the inflight window.
     #[test]
     fn golden_test_dns_refresh_vs_inflight_request_ordering() {
         init_test("golden_test_dns_refresh_vs_inflight_request_ordering");
@@ -1294,60 +1348,79 @@ mod tests {
                                 .expect("wait for completion signal");
                             Ok(socket_set(&["10.0.0.1:80"]))
                         }
-                        1 => Ok(socket_set(&["10.0.0.2:80"])),
-                        _ => panic!("unexpected call {}", call),
+                        other => panic!(
+                            "coalesced follower must not start resolver call {other}",
+                        ),
                     }
                 }),
         ));
 
-        // Start first resolution in background
+        // Start first resolution in background (it parks inside the resolver
+        // until we signal it to complete).
         let discovery_clone = Arc::clone(&discovery);
         let first_worker = thread::spawn(move || discovery_clone.poll_discover());
 
-        // Wait for first resolution to start
+        // Wait for first resolution to start so we know the leader has claimed
+        // the in-flight slot.
         first_started_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("first resolution should start");
 
-        // While first resolution is in-flight, capture current endpoint state
+        // While first resolution is in-flight, endpoints must still reflect
+        // the pre-refresh (empty) snapshot. GT1 forbids partial publication.
         let endpoints_during_inflight = discovery.endpoints();
         assert!(
             endpoints_during_inflight.is_empty(),
             "Endpoints should be empty while resolution is in-flight"
         );
 
-        // Start second resolution which should complete first
+        // Spawn the follower and wait for it to park on the resolve-done
+        // condvar before we release the leader. A synchronous join here would
+        // deadlock because the leader is still captive inside its resolver.
         let discovery_clone2 = Arc::clone(&discovery);
-        let second_result = thread::spawn(move || discovery_clone2.poll_discover())
-            .join()
-            .expect("second resolution should complete")
-            .expect("second should succeed");
+        let second_worker = thread::spawn(move || discovery_clone2.poll_discover());
 
-        // GT1: Second resolution should win due to generation ordering
-        assert_eq!(
-            second_result,
-            vec![Change::Insert("10.0.0.2:80".parse().unwrap())]
-        );
-        assert_eq!(discovery.endpoints(), vec!["10.0.0.2:80".parse().unwrap()]);
+        let waiter_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while discovery.waiter_count() < 1 {
+            if std::time::Instant::now() > waiter_deadline {
+                panic!("follower never parked on resolve_done within 5s");
+            }
+            thread::yield_now();
+        }
 
-        // Complete first resolution
+        // Release the leader. It will publish its result atomically, then
+        // notify any coalesced followers.
         complete_first_tx
             .send(())
             .expect("complete first resolution");
+
         let first_result = first_worker
             .join()
             .expect("first worker")
             .expect("first should succeed");
-
-        // GT1: First resolution should be ignored due to stale generation
-        assert!(
-            first_result.is_empty(),
-            "Stale resolution should not produce changes"
+        assert_eq!(
+            first_result,
+            vec![Change::Insert("10.0.0.1:80".parse().unwrap())],
+            "leader publishes its own resolution atomically"
         );
+
+        // GT1: coalesced follower must return Ok(empty) and must not re-enter
+        // the resolver (asserted by the resolver's panic arm).
+        let second_result = second_worker
+            .join()
+            .expect("second worker should not panic")
+            .expect("second should succeed");
+        assert!(
+            second_result.is_empty(),
+            "coalesced follower observes the leader's commit, not a new change list"
+        );
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(discovery.resolve_count(), 1);
         assert_eq!(
             discovery.endpoints(),
-            vec!["10.0.0.2:80".parse().unwrap()],
-            "Endpoints should remain from second (newer) resolution"
+            vec!["10.0.0.1:80".parse().unwrap()],
+            "Endpoints reflect the leader's committed resolution"
         );
 
         crate::test_complete!("golden_test_dns_refresh_vs_inflight_request_ordering");
@@ -1424,63 +1497,112 @@ mod tests {
     ///
     /// Property: The generation counter must be strictly monotonic -
     /// each new resolution attempt gets a higher generation than the previous.
+    /// In the concurrent case, followers coalesce onto the leader so exactly
+    /// one resolver call fires and exactly one worker observes changes.
     #[test]
     fn golden_test_generation_counter_monotonic() {
         init_test("golden_test_generation_counter_monotonic");
 
-        let generations = Arc::new(StdMutex::new(Vec::new()));
-        let generations_for_resolver = Arc::clone(&generations);
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_for_resolver = Arc::clone(&call_count);
+        let release_leader = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        let release_leader_for_resolver = Arc::clone(&release_leader);
+        let (leader_started_tx, leader_started_rx) = mpsc::channel();
 
         let discovery = Arc::new(DnsServiceDiscovery::new(
             DnsDiscoveryConfig::new("service.test", 80)
                 .poll_interval(Duration::ZERO)
                 .with_resolver(move |_, _| {
-                    // Capture generation at time of resolver call
-                    let generation = generations_for_resolver.lock().unwrap().len();
-                    Ok(socket_set(&[&format!("10.0.0.{}:80", generation + 1)]))
+                    let n = call_count_for_resolver.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        leader_started_tx
+                            .send(())
+                            .expect("leader-started channel should be open");
+                        let (lock, cvar) = &*release_leader_for_resolver;
+                        let mut released = lock.lock().expect("release lock poisoned");
+                        while !*released {
+                            released = cvar.wait(released).expect("release wait poisoned");
+                        }
+                        drop(released);
+                        Ok(socket_set(&["10.0.0.1:80"]))
+                    } else {
+                        // Subsequent sequential invalidate/poll cycles run a
+                        // plain resolver; each must bump the generation so
+                        // the monotonicity assertion holds.
+                        Ok(socket_set(&[&format!("10.0.0.{}:80", n + 1)]))
+                    }
                 }),
         ));
 
-        // Perform multiple concurrent resolutions
-        let workers: Vec<_> = (0..5)
-            .map(|i| {
+        // Spawn leader first, wait until it is captive in the resolver so
+        // that every subsequent worker will observe `in_flight_generation`.
+        let leader_discovery = Arc::clone(&discovery);
+        let leader_worker = thread::spawn(move || leader_discovery.poll_discover());
+        leader_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("leader resolver call should start");
+
+        // Spawn four followers that must all park on the condvar.
+        let follower_workers: Vec<_> = (0..4)
+            .map(|_| {
                 let discovery_clone = Arc::clone(&discovery);
-                let generations_clone = Arc::clone(&generations);
-                thread::spawn(move || {
-                    let result = discovery_clone.poll_discover().unwrap();
-
-                    // Record generation order (approximated by successful resolution order)
-                    if !result.is_empty() {
-                        generations_clone.lock().unwrap().push(i);
-                    }
-
-                    result
-                })
+                thread::spawn(move || discovery_clone.poll_discover())
             })
             .collect();
 
-        // Collect all results
-        let mut results = Vec::new();
-        for worker in workers {
-            let result = worker.join().expect("worker should complete");
-            if !result.is_empty() {
-                results.push(result);
+        // Wait until every follower has parked before releasing the leader.
+        let waiter_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while discovery.waiter_count() < 4 {
+            if std::time::Instant::now() > waiter_deadline {
+                panic!(
+                    "only {} follower(s) parked on resolve_done within 5s",
+                    discovery.waiter_count()
+                );
             }
+            thread::yield_now();
         }
 
-        // GT3: Only one resolution should succeed (highest generation wins)
+        // Release the leader.
+        {
+            let (lock, cvar) = &*release_leader;
+            *lock.lock().expect("release lock poisoned") = true;
+            cvar.notify_all();
+        }
+
+        // GT3: exactly one worker (the leader) observes the change; all four
+        // followers coalesce onto it and return Ok(empty).
+        let leader_result = leader_worker
+            .join()
+            .expect("leader worker should not panic")
+            .expect("leader should succeed");
         assert_eq!(
-            results.len(),
-            1,
-            "Only one concurrent resolution should produce changes due to generation ordering"
+            leader_result,
+            vec![Change::Insert("10.0.0.1:80".parse().unwrap())]
         );
+
+        let mut non_empty = 1; // the leader already counted
+        for follower in follower_workers {
+            let changes = follower
+                .join()
+                .expect("follower worker should not panic")
+                .expect("follower should succeed");
+            if !changes.is_empty() {
+                non_empty += 1;
+            }
+        }
+        assert_eq!(
+            non_empty, 1,
+            "Only one concurrent resolution should produce changes due to coalescing"
+        );
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(discovery.resolve_count(), 1);
 
         // Verify that subsequent resolutions get higher generations by testing sequentially
         let mut last_resolve_count = discovery.resolve_count();
 
         for i in 0..3 {
             discovery.invalidate(); // Force new resolution
-            let _ = discovery.poll_discover().unwrap();
+            let _ = discovery.poll_discover();
             let current_count = discovery.resolve_count();
 
             // GT3: Resolve count should be strictly increasing (monotonic)
@@ -1637,74 +1759,93 @@ mod tests {
 
         let resolution_count = Arc::new(AtomicUsize::new(0));
         let resolution_count_for_resolver = Arc::clone(&resolution_count);
-        let (all_started_tx, all_started_rx) = mpsc::channel();
-        let (proceed_tx, proceed_rx) = mpsc::channel();
-        let worker_count = Arc::new(AtomicUsize::new(0));
-        let worker_count_for_resolver = Arc::clone(&worker_count);
-
-        let proceed_rx = Arc::new(StdMutex::new(proceed_rx));
+        let (leader_started_tx, leader_started_rx) = mpsc::channel();
+        let release_leader = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        let release_leader_for_resolver = Arc::clone(&release_leader);
 
         let discovery = Arc::new(DnsServiceDiscovery::new(
             DnsDiscoveryConfig::new("service.test", 80)
                 .poll_interval(Duration::ZERO)
                 .with_resolver(move |_, _| {
                     let count = resolution_count_for_resolver.fetch_add(1, Ordering::SeqCst);
-
-                    // Signal when first resolution starts
                     if count == 0 {
-                        // Wait for all workers to be ready
-                        while worker_count_for_resolver.load(Ordering::SeqCst) < 5 {
-                            thread::sleep(Duration::from_millis(1));
+                        leader_started_tx
+                            .send(())
+                            .expect("leader-started channel should be open");
+                        let (lock, cvar) = &*release_leader_for_resolver;
+                        let mut released = lock.lock().expect("release lock poisoned");
+                        while !*released {
+                            released = cvar.wait(released).expect("release wait poisoned");
                         }
-                        all_started_tx.send(()).expect("signal all started");
-                        proceed_rx
-                            .lock()
-                            .unwrap()
-                            .recv()
-                            .expect("wait for proceed signal");
+                        drop(released);
+                    } else {
+                        panic!("coalesced follower should not start resolver call {count}");
                     }
-
                     Ok(socket_set(&[&format!("10.0.0.{}:80", count + 1)]))
                 }),
         ));
 
-        // Start multiple concurrent workers that should trigger the same resolution
-        let workers: Vec<_> = (0..5)
-            .map(|_i| {
+        // Start a leader that will park inside the resolver, then spawn
+        // followers that must each observe the in-flight slot and park on
+        // the condvar. Using `waiter_count` makes the synchronisation
+        // deterministic; the old "sleep 1ms" stagger raced with the
+        // scheduler and let some followers miss the in-flight window.
+        let leader_discovery = Arc::clone(&discovery);
+        let leader_worker = thread::spawn(move || leader_discovery.poll_discover());
+        leader_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("leader resolver call should start");
+
+        let follower_workers: Vec<_> = (0..4)
+            .map(|_| {
                 let discovery_clone = Arc::clone(&discovery);
-                let worker_count_clone = Arc::clone(&worker_count);
-                thread::spawn(move || {
-                    worker_count_clone.fetch_add(1, Ordering::SeqCst);
-                    thread::sleep(Duration::from_millis(1)); // Slight stagger
-                    discovery_clone.poll_discover()
-                })
+                thread::spawn(move || discovery_clone.poll_discover())
             })
             .collect();
 
-        // Wait for all to be ready and first resolution to start
-        all_started_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("all workers should be ready");
+        let waiter_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while discovery.waiter_count() < 4 {
+            if std::time::Instant::now() > waiter_deadline {
+                panic!(
+                    "only {} follower(s) parked on resolve_done within 5s",
+                    discovery.waiter_count()
+                );
+            }
+            thread::yield_now();
+        }
 
-        // Allow resolution to complete
-        proceed_tx.send(()).expect("signal proceed");
+        // Allow the leader to complete. It will then notify all followers.
+        {
+            let (lock, cvar) = &*release_leader;
+            *lock.lock().expect("release lock poisoned") = true;
+            cvar.notify_all();
+        }
 
-        // Collect results
+        // Collect results: leader sees Insert, followers see empty.
         let mut successful_results = 0;
         let mut empty_results = 0;
 
-        for worker in workers {
-            match worker.join().expect("worker should complete") {
-                Ok(changes) => {
-                    if changes.is_empty() {
-                        empty_results += 1;
-                    } else {
-                        successful_results += 1;
-                        assert_eq!(changes.len(), 1);
-                        assert!(changes[0] == Change::Insert("10.0.0.1:80".parse().unwrap()));
-                    }
-                }
-                Err(_) => panic!("Resolution should not fail"),
+        let leader_changes = leader_worker
+            .join()
+            .expect("leader worker should complete")
+            .expect("leader should succeed");
+        if leader_changes.is_empty() {
+            empty_results += 1;
+        } else {
+            successful_results += 1;
+            assert_eq!(leader_changes.len(), 1);
+            assert_eq!(leader_changes[0], Change::Insert("10.0.0.1:80".parse().unwrap()));
+        }
+
+        for worker in follower_workers {
+            let changes = worker
+                .join()
+                .expect("follower worker should complete")
+                .expect("follower should succeed");
+            if changes.is_empty() {
+                empty_results += 1;
+            } else {
+                successful_results += 1;
             }
         }
 

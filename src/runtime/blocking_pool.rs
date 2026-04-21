@@ -2001,15 +2001,20 @@ mod tests {
                 assert!(handle.wait_timeout(Duration::from_secs(5)));
             }
 
-            // Verify tasks ran on dedicated threads (not main thread)
-            let thread_ids = test_data.thread_ids.lock();
-            assert_eq!(thread_ids.len(), 3, "All three tasks should have executed");
+            // Verify tasks ran on dedicated threads (not main thread).
+            // IMPORTANT: release the guard before calling `get_unique_thread_count`
+            // (which re-locks `thread_ids`) — parking_lot's Mutex is NOT reentrant,
+            // so holding the guard across that call used to deadlock this test.
+            {
+                let thread_ids = test_data.thread_ids.lock();
+                assert_eq!(thread_ids.len(), 3, "All three tasks should have executed");
 
-            for thread_id in thread_ids.iter() {
-                assert_ne!(
-                    *thread_id, main_thread_id,
-                    "Blocking tasks should not run on main thread"
-                );
+                for thread_id in thread_ids.iter() {
+                    assert_ne!(
+                        *thread_id, main_thread_id,
+                        "Blocking tasks should not run on main thread"
+                    );
+                }
             }
 
             // Verify at least 2 different threads were used (pool has min 2 threads)
@@ -2027,7 +2032,11 @@ mod tests {
         fn cancellation_drains_pool_correctly_conformance() {
             let _guard = deterministic_hook_test_guard();
 
-            let pool = BlockingPool::new(1, 2);
+            // Use max_threads=1 so task 2 stays queued while task 1 is running.
+            // With max_threads=2, maybe_spawn_thread_on_inner would spawn a second
+            // worker that picks up task 2 before the test's `handle2.cancel()`
+            // call lands, making the cancel-before-execution check racy.
+            let pool = BlockingPool::new(1, 1);
             let start_barrier = Arc::new(Barrier::new(2));
             let finish_gate = Arc::new((Mutex::new(false), Condvar::new()));
 
