@@ -347,10 +347,97 @@ pub fn is_text_mode(content_type: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use insta::assert_snapshot;
+    use std::fmt::Write as _;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn scrub_grpc_web_frame_length(length: usize) -> String {
+        format!("<{length} bytes>")
+    }
+
+    fn render_grpc_web_frames_for_snapshot_test(bytes: &[u8]) -> String {
+        let codec = WebFrameCodec::new();
+        let mut buf = BytesMut::from(bytes);
+        let mut rendered = String::new();
+        let mut index = 0usize;
+
+        while !buf.is_empty() {
+            assert!(buf.len() >= 5, "snapshot input must contain a full gRPC-Web header");
+
+            let flag = buf[0];
+            let length = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+            let payload = buf[5..5 + length].to_vec();
+            let frame = codec
+                .decode(&mut buf)
+                .expect("snapshot frame should decode")
+                .expect("snapshot frame should be complete");
+
+            let _ = writeln!(&mut rendered, "frame[{index}]");
+            let _ = writeln!(&mut rendered, "  flag=0x{flag:02x}");
+            let _ = writeln!(
+                &mut rendered,
+                "  length={}",
+                scrub_grpc_web_frame_length(length)
+            );
+
+            match frame {
+                WebFrame::Data { compressed, data } => {
+                    let _ = writeln!(&mut rendered, "  kind=data");
+                    let _ = writeln!(&mut rendered, "  compressed={compressed}");
+                    let _ = writeln!(
+                        &mut rendered,
+                        "  payload_utf8={:?}",
+                        String::from_utf8_lossy(data.as_ref())
+                    );
+                }
+                WebFrame::Trailers(trailers) => {
+                    let _ = writeln!(&mut rendered, "  kind=trailers");
+                    let _ = writeln!(
+                        &mut rendered,
+                        "  trailer_block={:?}",
+                        String::from_utf8_lossy(&payload)
+                    );
+                    let _ = writeln!(
+                        &mut rendered,
+                        "  status_code={}",
+                        trailers.status.code().as_i32()
+                    );
+                    let _ = writeln!(
+                        &mut rendered,
+                        "  status_message={:?}",
+                        trailers.status.message()
+                    );
+
+                    for (metadata_index, (key, value)) in trailers.metadata.iter().enumerate() {
+                        match value {
+                            MetadataValue::Ascii(text) => {
+                                let _ = writeln!(
+                                    &mut rendered,
+                                    "  metadata[{metadata_index}] {key}={text:?}"
+                                );
+                            }
+                            MetadataValue::Binary(binary) => {
+                                let _ = writeln!(
+                                    &mut rendered,
+                                    "  metadata[{metadata_index}] {key}={:?}",
+                                    base64::engine::general_purpose::STANDARD
+                                        .encode(binary.as_ref())
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            index += 1;
+        }
+
+        rendered
     }
 
     // ── ContentType Tests ────────────────────────────────────────────
@@ -747,6 +834,78 @@ mod tests {
         let empty = buf.is_empty();
         crate::assert_with_log!(empty, "buffer consumed", true, empty);
         crate::test_complete!("test_mixed_data_and_trailers");
+    }
+
+    #[test]
+    fn grpc_web_frame_layouts_snapshot() {
+        init_test("grpc_web_frame_layouts_snapshot");
+        let codec = WebFrameCodec::new();
+
+        let mut happy_path = BytesMut::new();
+        codec
+            .encode_data(b"hello grpc-web", false, &mut happy_path)
+            .expect("happy-path data frame encodes");
+        let mut happy_metadata = Metadata::new();
+        let inserted_trace = happy_metadata.insert("x-trace-id", "trace-123");
+        crate::assert_with_log!(
+            inserted_trace,
+            "happy-path trace metadata inserted",
+            true,
+            inserted_trace
+        );
+        let inserted_bin = happy_metadata.insert_bin("trace-bin", Bytes::from_static(&[0x01, 0x02]));
+        crate::assert_with_log!(
+            inserted_bin,
+            "happy-path binary metadata inserted",
+            true,
+            inserted_bin
+        );
+        codec
+            .encode_trailers(&Status::ok(), &happy_metadata, &mut happy_path)
+            .expect("happy-path trailers encode");
+
+        let mut error_trailers_only = BytesMut::new();
+        let mut error_metadata = Metadata::new();
+        let inserted_hint = error_metadata.insert("retry-after", "3");
+        crate::assert_with_log!(
+            inserted_hint,
+            "error-path retry metadata inserted",
+            true,
+            inserted_hint
+        );
+        codec
+            .encode_trailers(
+                &Status::invalid_argument("bad\nfield"),
+                &error_metadata,
+                &mut error_trailers_only,
+            )
+            .expect("error trailers encode");
+
+        let mut trailers_only = BytesMut::new();
+        let mut trailers_only_metadata = Metadata::new();
+        let inserted_cache = trailers_only_metadata.insert("x-cache", "MISS");
+        crate::assert_with_log!(
+            inserted_cache,
+            "trailers-only metadata inserted",
+            true,
+            inserted_cache
+        );
+        codec
+            .encode_trailers(&Status::ok(), &trailers_only_metadata, &mut trailers_only)
+            .expect("trailers-only encode");
+
+        let mut snapshot = String::new();
+        let _ = writeln!(&mut snapshot, "[happy_path]");
+        snapshot.push_str(&render_grpc_web_frames_for_snapshot_test(happy_path.as_ref()));
+        let _ = writeln!(&mut snapshot, "[error_trailers_only]");
+        snapshot.push_str(&render_grpc_web_frames_for_snapshot_test(
+            error_trailers_only.as_ref(),
+        ));
+        let _ = writeln!(&mut snapshot, "[trailers_only]");
+        snapshot.push_str(&render_grpc_web_frames_for_snapshot_test(trailers_only.as_ref()));
+
+        assert_snapshot!("grpc_web_frame_layouts", snapshot);
+        crate::test_complete!("grpc_web_frame_layouts_snapshot");
     }
 
     // ── Base64 Text Mode Tests ───────────────────────────────────────
