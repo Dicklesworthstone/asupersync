@@ -65,6 +65,12 @@ name = "fuzz_hpack_decode"
 path = "fuzz_targets/hpack_decode.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_hpack_decoder_comprehensive"
+path = "fuzz_targets/fuzz_hpack_decoder_comprehensive.rs"
+test = false
+doc = false
 bench = false
 
 [[bin]]
