@@ -302,12 +302,13 @@ mod tests {
     use super::*;
     use insta::assert_json_snapshot;
     use parking_lot::Mutex;
-    use serde::Serializer;
     use serde::ser::Error as _;
+    use serde::Serializer;
     use serde_json::Value;
     use std::io::{self, Cursor, Write};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[derive(Serialize)]
     struct TestItem {
@@ -322,6 +323,32 @@ mod tests {
 
         fn tsv_format(&self) -> String {
             format!("{}\t{}", self.id, self.name)
+        }
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    enum JsonModeState {
+        Normal,
+        Warn,
+        Error,
+    }
+
+    #[derive(Clone, Serialize)]
+    struct JsonModeStatusItem {
+        state: JsonModeState,
+        message: String,
+        generated_at: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    }
+
+    impl Outputtable for JsonModeStatusItem {
+        fn human_format(&self) -> String {
+            match &self.code {
+                Some(code) => format!("{:?}: {} ({code})", self.state, self.message),
+                None => format!("{:?}: {}", self.state, self.message),
+            }
         }
     }
 
@@ -436,6 +463,16 @@ mod tests {
         written_bytes: usize,
     }
 
+    #[derive(Serialize)]
+    struct JsonRendererStateSnapshot {
+        json_raw: String,
+        json_value: Value,
+        json_pretty_raw: String,
+        json_pretty_value: Value,
+        stream_json_raw: String,
+        stream_json_values: Vec<Value>,
+    }
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
@@ -449,6 +486,60 @@ mod tests {
         raw.lines()
             .map(|line| serde_json::from_str(line).expect("streamed json line should parse"))
             .collect()
+    }
+
+    fn synthetic_timestamp(seed: u64) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch");
+        format!(
+            "2026-04-21T09:15:{:02}.{:09}Z",
+            (now.as_secs().wrapping_add(seed)) % 60,
+            now.subsec_nanos()
+        )
+    }
+
+    fn scrub_generated_at(value: Value) -> Value {
+        match value {
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(key, value)| {
+                        let value = if key == "generated_at" {
+                            Value::String("<scrubbed-timestamp>".to_string())
+                        } else {
+                            scrub_generated_at(value)
+                        };
+                        (key, value)
+                    })
+                    .collect(),
+            ),
+            Value::Array(values) => {
+                Value::Array(values.into_iter().map(scrub_generated_at).collect())
+            }
+            other => other,
+        }
+    }
+
+    fn scrub_json_document_raw(raw: &str, pretty: bool) -> String {
+        let value = scrub_generated_at(parse_json_document(raw));
+        let mut rendered = if pretty {
+            serde_json::to_string_pretty(&value).expect("scrubbed pretty json should serialize")
+        } else {
+            serde_json::to_string(&value).expect("scrubbed json should serialize")
+        };
+        rendered.push('\n');
+        rendered
+    }
+
+    fn scrub_json_lines_raw(raw: &str) -> String {
+        let mut rendered = String::new();
+        for value in parse_json_lines(raw).into_iter().map(scrub_generated_at) {
+            rendered.push_str(
+                &serde_json::to_string(&value).expect("scrubbed json line should serialize"),
+            );
+            rendered.push('\n');
+        }
+        rendered
     }
 
     #[test]
@@ -685,6 +776,62 @@ mod tests {
 
         assert_json_snapshot!("json_renderer_full_failure", snapshot);
         crate::test_complete!("json_renderer_full_failure_snapshot");
+    }
+
+    #[test]
+    fn json_renderer_state_snapshot_scrubs_generated_timestamps() {
+        init_test("json_renderer_state_snapshot_scrubs_generated_timestamps");
+
+        let items = vec![
+            JsonModeStatusItem {
+                state: JsonModeState::Normal,
+                message: "workspace scan complete".to_string(),
+                generated_at: synthetic_timestamp(0),
+                code: None,
+            },
+            JsonModeStatusItem {
+                state: JsonModeState::Warn,
+                message: "using cached dependency graph".to_string(),
+                generated_at: synthetic_timestamp(1),
+                code: Some("cache_stale".to_string()),
+            },
+            JsonModeStatusItem {
+                state: JsonModeState::Error,
+                message: "cargo metadata failed".to_string(),
+                generated_at: synthetic_timestamp(2),
+                code: Some("metadata_error".to_string()),
+            },
+        ];
+
+        let compact_buffer = SharedBuffer::default();
+        let mut compact = Output::with_writer(OutputFormat::Json, compact_buffer.clone());
+        compact.write_list(&items).unwrap();
+        let compact_raw = compact_buffer.snapshot_string();
+
+        let pretty_buffer = SharedBuffer::default();
+        let mut pretty = Output::with_writer(OutputFormat::JsonPretty, pretty_buffer.clone());
+        pretty.write_list(&items).unwrap();
+        let pretty_raw = pretty_buffer.snapshot_string();
+
+        let stream_buffer = SharedBuffer::default();
+        let mut stream = Output::with_writer(OutputFormat::StreamJson, stream_buffer.clone());
+        stream.write_list(&items).unwrap();
+        let stream_raw = stream_buffer.snapshot_string();
+
+        let snapshot = JsonRendererStateSnapshot {
+            json_raw: scrub_json_document_raw(&compact_raw, false),
+            json_value: scrub_generated_at(parse_json_document(&compact_raw)),
+            json_pretty_raw: scrub_json_document_raw(&pretty_raw, true),
+            json_pretty_value: scrub_generated_at(parse_json_document(&pretty_raw)),
+            stream_json_raw: scrub_json_lines_raw(&stream_raw),
+            stream_json_values: parse_json_lines(&stream_raw)
+                .into_iter()
+                .map(scrub_generated_at)
+                .collect(),
+        };
+
+        assert_json_snapshot!("json_renderer_state_matrix_scrubbed", snapshot);
+        crate::test_complete!("json_renderer_state_snapshot_scrubs_generated_timestamps");
     }
 
     #[test]
