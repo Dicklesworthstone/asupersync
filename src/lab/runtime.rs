@@ -2791,7 +2791,7 @@ mod tests {
     use parking_lot::Mutex;
     use parking_lot::RwLock;
     use std::sync::Arc;
-    use std::task::{Waker};
+    use std::task::Waker;
     use std::time::Duration;
 
     #[cfg(unix)]
@@ -2827,6 +2827,80 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    struct TimerAdvanceOutcome {
+        advance_points: Vec<Time>,
+        total_wakeups: u64,
+        final_time: Time,
+        cancelled_wakeups: u64,
+    }
+
+    fn collect_timer_advances(
+        deadlines_secs: &[u64],
+        cancelled_indices: &[usize],
+    ) -> TimerAdvanceOutcome {
+        let mut runtime = LabRuntime::with_seed(42);
+        let timer_handle = runtime.state.timer_driver_handle().expect("timer handle");
+        let live_wakeups = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let cancelled_wakeups = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut handles = Vec::with_capacity(deadlines_secs.len());
+
+        for (idx, secs) in deadlines_secs.iter().copied().enumerate() {
+            let counter = if cancelled_indices.contains(&idx) {
+                cancelled_wakeups.clone()
+            } else {
+                live_wakeups.clone()
+            };
+            let waker = Waker::from(Arc::new(CountWaker(counter)));
+            handles.push(timer_handle.register(Time::from_secs(secs), waker));
+        }
+
+        for &idx in cancelled_indices {
+            let cancelled = timer_handle.cancel(&handles[idx]);
+            crate::assert_with_log!(
+                cancelled,
+                "cancelled timer handle remains removable before auto-advance",
+                true,
+                cancelled
+            );
+        }
+
+        let mut advance_points = Vec::new();
+        while runtime.pending_timer_count() > 0 {
+            let before = runtime.now();
+            let next_deadline = runtime.next_timer_deadline().expect("pending deadline");
+            let wakeups = runtime.advance_to_next_timer();
+            let after = runtime.now();
+
+            crate::assert_with_log!(
+                after >= before,
+                "virtual time stays monotone while advancing timers",
+                true,
+                after >= before
+            );
+            crate::assert_with_log!(
+                after >= next_deadline,
+                "advance reaches or passes scheduled deadline",
+                true,
+                after >= next_deadline
+            );
+            crate::assert_with_log!(
+                wakeups > 0,
+                "each advance drains at least one live timer",
+                true,
+                wakeups > 0
+            );
+
+            advance_points.push(after);
+        }
+
+        TimerAdvanceOutcome {
+            advance_points,
+            total_wakeups: live_wakeups.load(std::sync::atomic::Ordering::SeqCst),
+            final_time: runtime.now(),
+            cancelled_wakeups: cancelled_wakeups.load(std::sync::atomic::Ordering::SeqCst),
+        }
     }
 
     #[test]
@@ -4668,6 +4742,89 @@ mod tests {
         let was_woken = woken.load(std::sync::atomic::Ordering::SeqCst);
         crate::assert_with_log!(was_woken, "waker fired", true, was_woken);
         crate::test_complete!("advance_to_next_timer_fires_timer");
+    }
+
+    #[test]
+    fn metamorphic_timer_registration_permutation_preserves_virtual_time_progression() {
+        init_test("metamorphic_timer_registration_permutation_preserves_virtual_time_progression");
+
+        let baseline = collect_timer_advances(&[5, 1, 3, 1, 8], &[]);
+        let permuted = collect_timer_advances(&[1, 8, 5, 1, 3], &[]);
+
+        crate::assert_with_log!(
+            baseline.advance_points == permuted.advance_points,
+            "deadline multiset permutation preserves advance points",
+            &baseline.advance_points,
+            &permuted.advance_points
+        );
+        crate::assert_with_log!(
+            baseline.total_wakeups == permuted.total_wakeups,
+            "deadline multiset permutation preserves wakeup count",
+            baseline.total_wakeups,
+            permuted.total_wakeups
+        );
+        crate::assert_with_log!(
+            baseline.final_time == permuted.final_time,
+            "deadline multiset permutation preserves final virtual time",
+            baseline.final_time,
+            permuted.final_time
+        );
+        crate::assert_with_log!(
+            baseline.advance_points
+                == vec![
+                    Time::from_secs(1),
+                    Time::from_secs(3),
+                    Time::from_secs(5),
+                    Time::from_secs(8)
+                ],
+            "advance points collapse duplicate deadlines without moving backward",
+            vec![
+                Time::from_secs(1),
+                Time::from_secs(3),
+                Time::from_secs(5),
+                Time::from_secs(8)
+            ],
+            baseline.advance_points.clone()
+        );
+
+        crate::test_complete!(
+            "metamorphic_timer_registration_permutation_preserves_virtual_time_progression"
+        );
+    }
+
+    #[test]
+    fn metamorphic_cancelled_timer_does_not_skew_virtual_time_progression() {
+        init_test("metamorphic_cancelled_timer_does_not_skew_virtual_time_progression");
+
+        let baseline = collect_timer_advances(&[2, 4, 9], &[]);
+        let with_cancelled_timer = collect_timer_advances(&[2, 4, 6, 9], &[2]);
+
+        crate::assert_with_log!(
+            baseline.advance_points == with_cancelled_timer.advance_points,
+            "cancelling an intermediate timer preserves surviving advance points",
+            &baseline.advance_points,
+            &with_cancelled_timer.advance_points
+        );
+        crate::assert_with_log!(
+            baseline.total_wakeups == with_cancelled_timer.total_wakeups,
+            "cancelling an intermediate timer preserves surviving wakeup count",
+            baseline.total_wakeups,
+            with_cancelled_timer.total_wakeups
+        );
+        crate::assert_with_log!(
+            baseline.final_time == with_cancelled_timer.final_time,
+            "cancelling an intermediate timer preserves final virtual time",
+            baseline.final_time,
+            with_cancelled_timer.final_time
+        );
+        crate::assert_with_log!(
+            with_cancelled_timer.cancelled_wakeups == 0,
+            "cancelled timer never wakes after auto-advance",
+            0u64,
+            with_cancelled_timer.cancelled_wakeups
+        );
+
+        crate::test_complete!("metamorphic_cancelled_timer_does_not_skew_virtual_time_progression");
     }
 
     #[cfg(unix)]
