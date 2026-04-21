@@ -1263,6 +1263,14 @@ mod tests {
         TaskId::from_arena(ArenaIndex::new(n, 0))
     }
 
+    fn drain_with_lane_if_due(sched: &mut Scheduler, now: Time) -> Vec<(TaskId, DispatchLane)> {
+        let mut trace = Vec::new();
+        while let Some((task, lane)) = sched.pop_with_lane_if_due(0, now) {
+            trace.push((task, lane));
+        }
+        trace
+    }
+
     #[test]
     fn cancel_lane_has_priority() {
         init_test("cancel_lane_has_priority");
@@ -2671,6 +2679,160 @@ mod tests {
         }
 
         crate::test_complete!("metamorphic_edf_deadline_tightening_is_monotone");
+    }
+
+    #[test]
+    fn metamorphic_cancel_promotion_preserves_waiting_ready_suffix() {
+        init_test("metamorphic_cancel_promotion_preserves_waiting_ready_suffix");
+
+        let mut baseline = Scheduler::new();
+        let mut promoted = Scheduler::new();
+        let entries = [
+            (task(1), 10u8),
+            (task(2), 50u8),
+            (task(3), 40u8),
+            (task(4), 20u8),
+        ];
+
+        for &(task, priority) in &entries {
+            baseline.schedule(task, priority);
+            promoted.schedule(task, priority);
+        }
+
+        let baseline_trace = drain_with_lane_if_due(&mut baseline, Time::from_secs(1));
+        promoted.move_to_cancel_lane(task(3), 200);
+        let promoted_trace = drain_with_lane_if_due(&mut promoted, Time::from_secs(1));
+
+        let expected_suffix: Vec<_> = baseline_trace
+            .into_iter()
+            .filter_map(|(task, _)| (task != task(3)).then_some((task, DispatchLane::Ready)))
+            .collect();
+
+        crate::assert_with_log!(
+            promoted_trace.first() == Some(&(task(3), DispatchLane::Cancel)),
+            "promoted task dispatches first from cancel lane",
+            Some((task(3), DispatchLane::Cancel)),
+            promoted_trace.first().copied()
+        );
+        crate::assert_with_log!(
+            promoted_trace[1..] == expected_suffix,
+            "waiting ready suffix remains intact",
+            expected_suffix.clone(),
+            promoted_trace[1..].to_vec()
+        );
+
+        crate::test_complete!("metamorphic_cancel_promotion_preserves_waiting_ready_suffix");
+    }
+
+    #[test]
+    fn metamorphic_cancel_priority_shifts_preserve_non_cancel_suffix() {
+        init_test("metamorphic_cancel_priority_shifts_preserve_non_cancel_suffix");
+
+        let now = Time::from_secs(100);
+        let mut baseline = Scheduler::new();
+        let mut shifted = Scheduler::new();
+
+        for sched in [&mut baseline, &mut shifted] {
+            sched.schedule_timed(task(1), Time::from_secs(10));
+            sched.schedule_timed(task(2), Time::from_secs(20));
+            sched.schedule(task(3), 70);
+            sched.schedule(task(4), 90);
+            sched.schedule_cancel(task(5), 10);
+            sched.schedule_cancel(task(6), 20);
+        }
+
+        shifted.move_to_cancel_lane(task(5), 200);
+        shifted.move_to_cancel_lane(task(6), 150);
+
+        let baseline_trace = drain_with_lane_if_due(&mut baseline, now);
+        let shifted_trace = drain_with_lane_if_due(&mut shifted, now);
+
+        let baseline_suffix: Vec<_> = baseline_trace
+            .into_iter()
+            .filter(|(_, lane)| !matches!(lane, DispatchLane::Cancel))
+            .collect();
+        let shifted_suffix: Vec<_> = shifted_trace
+            .into_iter()
+            .filter(|(_, lane)| !matches!(lane, DispatchLane::Cancel))
+            .collect();
+
+        crate::assert_with_log!(
+            baseline_suffix == shifted_suffix,
+            "non-cancel suffix is invariant under cancel-priority shifts",
+            baseline_suffix.clone(),
+            shifted_suffix.clone()
+        );
+        crate::assert_with_log!(
+            baseline_suffix
+                == vec![
+                    (task(1), DispatchLane::Timed),
+                    (task(2), DispatchLane::Timed),
+                    (task(4), DispatchLane::Ready),
+                    (task(3), DispatchLane::Ready),
+                ],
+            "timed-before-ready fairness remains intact",
+            vec![
+                (task(1), DispatchLane::Timed),
+                (task(2), DispatchLane::Timed),
+                (task(4), DispatchLane::Ready),
+                (task(3), DispatchLane::Ready),
+            ],
+            baseline_suffix
+        );
+
+        crate::test_complete!("metamorphic_cancel_priority_shifts_preserve_non_cancel_suffix");
+    }
+
+    #[test]
+    fn metamorphic_concurrent_cancel_requests_preserve_total_order() {
+        init_test("metamorphic_concurrent_cancel_requests_preserve_total_order");
+
+        let now = Time::from_secs(100);
+        let mut forward = Scheduler::new();
+        let mut reverse = Scheduler::new();
+
+        for sched in [&mut forward, &mut reverse] {
+            sched.schedule(task(1), 40);
+            sched.schedule(task(2), 60);
+            sched.schedule_timed(task(3), Time::from_secs(5));
+            sched.schedule(task(4), 20);
+        }
+
+        for &(task, priority) in &[(task(2), 120u8), (task(3), 200u8), (task(1), 160u8)] {
+            forward.move_to_cancel_lane(task, priority);
+        }
+        for &(task, priority) in &[(task(1), 160u8), (task(3), 200u8), (task(2), 120u8)] {
+            reverse.move_to_cancel_lane(task, priority);
+        }
+
+        let forward_trace = drain_with_lane_if_due(&mut forward, now);
+        let reverse_trace = drain_with_lane_if_due(&mut reverse, now);
+
+        crate::assert_with_log!(
+            forward_trace == reverse_trace,
+            "reordered cancel promotions preserve total order",
+            forward_trace.clone(),
+            reverse_trace.clone()
+        );
+        crate::assert_with_log!(
+            forward_trace
+                == vec![
+                    (task(3), DispatchLane::Cancel),
+                    (task(1), DispatchLane::Cancel),
+                    (task(2), DispatchLane::Cancel),
+                    (task(4), DispatchLane::Ready),
+                ],
+            "distinct final priorities determine stable total order",
+            vec![
+                (task(3), DispatchLane::Cancel),
+                (task(1), DispatchLane::Cancel),
+                (task(2), DispatchLane::Cancel),
+                (task(4), DispatchLane::Ready),
+            ],
+            forward_trace
+        );
+
+        crate::test_complete!("metamorphic_concurrent_cancel_requests_preserve_total_order");
     }
 
     // ---- Remove from specific lane doesn't corrupt other lanes ----------
