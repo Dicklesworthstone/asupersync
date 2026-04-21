@@ -66,6 +66,10 @@ mod tests {
         TaskId::new_for_test(id, 0)
     }
 
+    fn drain_all(queue: &GlobalQueue) -> Vec<TaskId> {
+        std::iter::from_fn(|| queue.pop()).collect()
+    }
+
     #[test]
     fn test_global_queue_push_pop_basic() {
         let queue = GlobalQueue::new();
@@ -273,6 +277,131 @@ mod tests {
                 "draining an unrelated injected prefix must not perturb the FIFO order of later injections",
             );
             prop_assert!(queue.is_empty(), "queue should be empty after draining all later injections");
+        }
+
+        #[test]
+        fn metamorphic_steal_prefix_partitions_fifo_stream_without_reordering(
+            steal_prefix in 0usize..32,
+            suffix_len in 1usize..32,
+        ) {
+            let queue = GlobalQueue::new();
+            let total = steal_prefix + suffix_len;
+
+            for i in 0..total {
+                queue.push(task(i as u32));
+            }
+
+            let stolen: Vec<_> = (0..steal_prefix)
+                .map(|_| queue.pop().expect("steal prefix should be available"))
+                .collect();
+            let remaining = drain_all(&queue);
+
+            let expected_stolen: Vec<_> = (0..steal_prefix).map(|i| task(i as u32)).collect();
+            let expected_remaining: Vec<_> =
+                (steal_prefix..total).map(|i| task(i as u32)).collect();
+
+            prop_assert_eq!(
+                stolen,
+                expected_stolen,
+                "a thief draining the prefix must observe the oldest global tasks first",
+            );
+            prop_assert_eq!(
+                remaining,
+                expected_remaining,
+                "stealing a prefix must leave the remaining suffix in FIFO order",
+            );
+            prop_assert!(queue.is_empty(), "queue should be empty after draining both partitions");
+        }
+
+        #[test]
+        fn metamorphic_alternating_stealers_partition_queue_without_duplication(
+            total in 1usize..64,
+            first_stealer_is_a in any::<bool>(),
+        ) {
+            let queue = GlobalQueue::new();
+            let expected: Vec<_> = (0..total).map(|i| task(i as u32)).collect();
+
+            for task_id in &expected {
+                queue.push(*task_id);
+            }
+
+            let mut stealer_a = Vec::new();
+            let mut stealer_b = Vec::new();
+            let mut observed = Vec::new();
+            let mut a_turn = first_stealer_is_a;
+
+            while let Some(next) = queue.pop() {
+                observed.push(next);
+                if a_turn {
+                    stealer_a.push(next);
+                } else {
+                    stealer_b.push(next);
+                }
+                a_turn = !a_turn;
+            }
+
+            let mut seen = HashSet::new();
+            for task_id in stealer_a.iter().chain(&stealer_b) {
+                prop_assert!(
+                    seen.insert(*task_id),
+                    "a task must never be duplicated across competing stealers",
+                );
+            }
+
+            prop_assert_eq!(
+                observed,
+                expected,
+                "alternating stealers must still observe the queue in FIFO order",
+            );
+            prop_assert_eq!(
+                seen.len(),
+                total,
+                "the union of both stealers must cover every task exactly once",
+            );
+            prop_assert!(queue.is_empty(), "queue should be empty after alternating steals");
+        }
+
+        #[test]
+        fn metamorphic_cancelled_steal_leaves_remaining_suffix_intact(
+            taken_before_cancel in 0usize..32,
+            trailing_len in 1usize..32,
+        ) {
+            let queue = GlobalQueue::new();
+            let total = taken_before_cancel + trailing_len;
+
+            for i in 0..total {
+                queue.push(task(i as u32));
+            }
+
+            let stolen_before_cancel: Vec<_> = (0..taken_before_cancel)
+                .map(|_| queue.pop().expect("cancelled stealer should only remove available prefix"))
+                .collect();
+
+            // Simulate the stealing worker being cancelled mid-loop; another worker
+            // later resumes draining the shared global queue.
+            let resumed_drain = drain_all(&queue);
+
+            let expected_stolen: Vec<_> = (0..taken_before_cancel).map(|i| task(i as u32)).collect();
+            let expected_suffix: Vec<_> =
+                (taken_before_cancel..total).map(|i| task(i as u32)).collect();
+            let total_observed = stolen_before_cancel.len() + resumed_drain.len();
+
+            prop_assert_eq!(
+                stolen_before_cancel,
+                expected_stolen,
+                "cancellation mid-steal must not reorder the already stolen prefix",
+            );
+            prop_assert_eq!(
+                resumed_drain,
+                expected_suffix,
+                "after a stealer stops early, the remaining global suffix must stay FIFO",
+            );
+            prop_assert_eq!(
+                total_observed,
+                total,
+                "cancelled steal must not drop or duplicate tasks across the handoff",
+            );
+            prop_assert!(queue.is_empty(), "queue should be empty after the resumed drain");
         }
     }
 }
