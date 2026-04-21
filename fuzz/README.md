@@ -26,6 +26,7 @@ cargo +nightly install cargo-fuzz
 | `gf256_simd_edge_cases` | GF(256) SIMD/scalar parity, fast-path, alignment, and threshold-boundary invariants | High |
 | `grpc_prost_codec_decode` | Direct ProstCodec decode limits, malformed-wire, and unknown-field invariants | High |
 | `grpc_gzip_message_decode` | Gzip-compressed gRPC frame decode, malformed-gzip rejection, bomb guards, and max-message enforcement | High |
+| `grpc_length_prefixed` | gRPC frame roundtrip, partial-body accumulation, invalid-flag rejection, and max-size enforcement invariants | High |
 | `grpc_streaming` | Bidirectional gRPC stream interleaving, half-close/cancel propagation, deadline, and backpressure invariants | High |
 | `fuzz_distributed_snapshot_merge` | CRDT snapshot merge convergence under delta reordering, malformed-wire rejection, and region-mismatch handling | High |
 | `h3_native_frames` | HTTP/3 frame-header varint bounds, malformed-frame rejection, unknown-frame preservation, and GREASE tolerance | High |
@@ -91,6 +92,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `corpus/gf256_simd_edge_cases/` - GF(256) fast-path, threshold-boundary, unaligned, and dual-slice parity scenarios
 - `corpus/grpc_prost_codec_decode/` - Direct ProstCodec decode boundary and malformed-wire scenarios
 - `corpus/grpc_gzip_message_decode/` - Gzip-compressed gRPC frame decode, malformed-gzip rejection, and bomb-guard scenarios
+- `corpus/grpc_length_prefixed/` - gRPC frame seeds covering roundtrip framing, partial-body completion, invalid compression flags, and oversize-length rejection
 - `corpus/grpc_streaming/` - Bidirectional stream seeds covering interleaving, half-close/cancel, and deadline/backpressure scenarios
 - `corpus/fuzz_distributed_snapshot_merge/` - CRDT merge seeds covering reordering convergence, malformed delta bytes, and region mismatch handling
 - `corpus/h3_native_frames/` - HTTP/3 DATA/HEADERS header varint, GREASE unknown-frame, reserved-type, and truncated-payload scenarios

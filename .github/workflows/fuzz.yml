@@ -32,6 +32,7 @@ on:
           - gf256_simd_edge_cases
           - grpc_prost_codec_decode
           - grpc_gzip_message_decode
+          - grpc_length_prefixed
           - grpc_streaming
           - fuzz_distributed_snapshot_merge
           - h3_native_frames
@@ -85,6 +86,7 @@ jobs:
           - gf256_simd_edge_cases
           - grpc_prost_codec_decode
           - grpc_gzip_message_decode
+          - grpc_length_prefixed
           - grpc_streaming
           - fuzz_distributed_snapshot_merge
           - h3_native_frames

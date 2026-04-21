@@ -999,6 +999,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "grpc_length_prefixed"
+path = "fuzz_targets/grpc_length_prefixed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "nats_parser"
 path = "fuzz_targets/nats_parser.rs"
 test = false
