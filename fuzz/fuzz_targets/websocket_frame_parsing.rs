@@ -36,23 +36,23 @@ struct WsFrameFuzz {
 #[derive(Arbitrary, Debug)]
 enum FrameOperation {
     /// Parse structured frame
-    ParseFrame {
+    Frame {
         frame_spec: FrameSpec,
         role: FuzzRole,
         max_payload_size: PayloadSizeLimit,
     },
     /// Parse fragmented message
-    ParseFragmentedMessage {
+    FragmentedMessage {
         fragments: Vec<FragmentSpec>,
         role: FuzzRole,
     },
     /// Parse multiple frames in sequence
-    ParseSequence {
+    Sequence {
         frames: Vec<FrameSpec>,
         role: FuzzRole,
     },
     /// Parse frame with protocol violations
-    ParseViolation {
+    Violation {
         violation_type: ViolationType,
         base_frame: FrameSpec,
         role: FuzzRole,
@@ -269,7 +269,7 @@ fuzz_target!(|input: WsFrameFuzz| {
 
 fn test_frame_operation(operation: FrameOperation) {
     match operation {
-        FrameOperation::ParseFrame {
+        FrameOperation::Frame {
             frame_spec,
             role,
             max_payload_size,
@@ -277,31 +277,31 @@ fn test_frame_operation(operation: FrameOperation) {
             let role = convert_role(role);
             let mut codec = FrameCodec::new(role).max_payload_size(max_payload_size as usize);
 
-            if let Ok(frame_bytes) = construct_frame_bytes(&frame_spec, role) {
-                if frame_bytes.len() <= MAX_PAYLOAD_SIZE {
-                    let mut buf = BytesMut::from(frame_bytes.as_slice());
-                    let result = codec.decode(&mut buf);
+            if let Ok(frame_bytes) = construct_frame_bytes(&frame_spec, role)
+                && frame_bytes.len() <= MAX_PAYLOAD_SIZE
+            {
+                let mut buf = BytesMut::from(frame_bytes.as_slice());
+                let result = codec.decode(&mut buf);
 
-                    verify_frame_result(&result, &frame_spec, role);
-                }
+                verify_frame_result(&result, &frame_spec, role);
             }
         }
 
-        FrameOperation::ParseFragmentedMessage { fragments, role } => {
+        FrameOperation::FragmentedMessage { fragments, role } => {
             let role = convert_role(role);
             let mut codec = FrameCodec::new(role);
 
             for (_i, fragment) in fragments.iter().enumerate().take(10) {
-                if let Ok(fragment_bytes) = construct_fragment_bytes(fragment, role) {
-                    if fragment_bytes.len() <= MAX_PAYLOAD_SIZE / 10 {
-                        let mut buf = BytesMut::from(fragment_bytes.as_slice());
-                        let _ = codec.decode(&mut buf);
-                    }
+                if let Ok(fragment_bytes) = construct_fragment_bytes(fragment, role)
+                    && fragment_bytes.len() <= MAX_PAYLOAD_SIZE / 10
+                {
+                    let mut buf = BytesMut::from(fragment_bytes.as_slice());
+                    let _ = codec.decode(&mut buf);
                 }
             }
         }
 
-        FrameOperation::ParseSequence { frames, role } => {
+        FrameOperation::Sequence { frames, role } => {
             let role = convert_role(role);
             let mut codec = FrameCodec::new(role);
             let mut total_size = 0;
@@ -319,7 +319,7 @@ fn test_frame_operation(operation: FrameOperation) {
             }
         }
 
-        FrameOperation::ParseViolation {
+        FrameOperation::Violation {
             violation_type,
             base_frame,
             role,
@@ -329,19 +329,18 @@ fn test_frame_operation(operation: FrameOperation) {
 
             if let Ok(violation_bytes) =
                 construct_violation_bytes(&violation_type, &base_frame, role)
+                && violation_bytes.len() <= MAX_PAYLOAD_SIZE
             {
-                if violation_bytes.len() <= MAX_PAYLOAD_SIZE {
-                    let mut buf = BytesMut::from(violation_bytes.as_slice());
-                    let result = codec.decode(&mut buf);
+                let mut buf = BytesMut::from(violation_bytes.as_slice());
+                let result = codec.decode(&mut buf);
 
-                    // Violations should result in errors, not panics
-                    match result {
-                        Ok(_) => {
-                            // Some violations might be acceptable depending on implementation
-                        }
-                        Err(_) => {
-                            // Expected for protocol violations
-                        }
+                // Violations should result in errors, not panics
+                match result {
+                    Ok(_) => {
+                        // Some violations might be acceptable depending on implementation
+                    }
+                    Err(_) => {
+                        // Expected for protocol violations
                     }
                 }
             }
@@ -355,26 +354,26 @@ fn test_utf8_operation(operation: Utf8Operation) {
             let role = convert_role(role);
             let frame = Frame::text(text);
 
-            if let Ok(encoded) = encode_frame(&frame, role) {
-                if encoded.len() <= MAX_PAYLOAD_SIZE {
-                    let mut codec = FrameCodec::new(role);
-                    let mut buf = BytesMut::from(encoded.as_slice());
+            if let Ok(encoded) = encode_frame(&frame, role)
+                && encoded.len() <= MAX_PAYLOAD_SIZE
+            {
+                let mut codec = FrameCodec::new(role);
+                let mut buf = BytesMut::from(encoded.as_slice());
 
-                    let result = codec.decode(&mut buf);
-                    match result {
-                        Ok(Some(decoded_frame)) => {
-                            assert_eq!(decoded_frame.opcode, Opcode::Text);
-                            // Verify UTF-8 validity is preserved
-                            if let Ok(_decoded_text) = std::str::from_utf8(&decoded_frame.payload) {
-                                // UTF-8 was valid in both directions
-                            }
+                let result = codec.decode(&mut buf);
+                match result {
+                    Ok(Some(decoded_frame)) => {
+                        assert_eq!(decoded_frame.opcode, Opcode::Text);
+                        // Verify UTF-8 validity is preserved
+                        if let Ok(_decoded_text) = std::str::from_utf8(&decoded_frame.payload) {
+                            // UTF-8 was valid in both directions
                         }
-                        Ok(None) => {
-                            // Incomplete frame - need more data
-                        }
-                        Err(_) => {
-                            // Decode failure is acceptable for edge cases
-                        }
+                    }
+                    Ok(None) => {
+                        // Incomplete frame - need more data
+                    }
+                    Err(_) => {
+                        // Decode failure is acceptable for edge cases
                     }
                 }
             }
@@ -384,23 +383,23 @@ fn test_utf8_operation(operation: Utf8Operation) {
             let role = convert_role(role);
 
             // Construct a text frame with potentially invalid UTF-8
-            if let Ok(frame_bytes) = construct_text_frame_bytes(&bytes, role) {
-                if frame_bytes.len() <= MAX_PAYLOAD_SIZE {
-                    let mut codec = FrameCodec::new(role);
-                    let mut buf = BytesMut::from(frame_bytes.as_slice());
+            if let Ok(frame_bytes) = construct_text_frame_bytes(&bytes, role)
+                && frame_bytes.len() <= MAX_PAYLOAD_SIZE
+            {
+                let mut codec = FrameCodec::new(role);
+                let mut buf = BytesMut::from(frame_bytes.as_slice());
 
-                    let result = codec.decode(&mut buf);
-                    // Invalid UTF-8 should either be rejected or handled gracefully
-                    match result {
-                        Ok(Some(_)) => {
-                            // Frame was accepted (might validate UTF-8 later in processing)
-                        }
-                        Ok(None) => {
-                            // Incomplete frame - need more data
-                        }
-                        Err(_) => {
-                            // Frame was rejected (immediate UTF-8 validation)
-                        }
+                let result = codec.decode(&mut buf);
+                // Invalid UTF-8 should either be rejected or handled gracefully
+                match result {
+                    Ok(Some(_)) => {
+                        // Frame was accepted (might validate UTF-8 later in processing)
+                    }
+                    Ok(None) => {
+                        // Incomplete frame - need more data
+                    }
+                    Err(_) => {
+                        // Frame was rejected (immediate UTF-8 validation)
                     }
                 }
             }
@@ -428,12 +427,11 @@ fn test_utf8_operation(operation: Utf8Operation) {
 
                         if let Ok(fragment_bytes) =
                             construct_text_fragment_bytes(fragment_data, is_final, pos == 0, role)
+                            && fragment_bytes.len() <= MAX_PAYLOAD_SIZE / 5
                         {
-                            if fragment_bytes.len() <= MAX_PAYLOAD_SIZE / 5 {
-                                let mut buf = BytesMut::from(fragment_bytes.as_slice());
-                                let _ = codec.decode(&mut buf);
-                                pos = end_pos;
-                            }
+                            let mut buf = BytesMut::from(fragment_bytes.as_slice());
+                            let _ = codec.decode(&mut buf);
+                            pos = end_pos;
                         }
                     }
                 }
@@ -454,23 +452,23 @@ fn test_close_operation(operation: CloseOperation) {
             let close_code = status_code.map(|sc| sc.to_u16());
             let close_frame = Frame::close(close_code, reason.as_deref());
 
-            if let Ok(encoded) = encode_frame(&close_frame, role) {
-                if encoded.len() <= MAX_PAYLOAD_SIZE {
-                    let mut codec = FrameCodec::new(role);
-                    let mut buf = BytesMut::from(encoded.as_slice());
+            if let Ok(encoded) = encode_frame(&close_frame, role)
+                && encoded.len() <= MAX_PAYLOAD_SIZE
+            {
+                let mut codec = FrameCodec::new(role);
+                let mut buf = BytesMut::from(encoded.as_slice());
 
-                    let result = codec.decode(&mut buf);
-                    match result {
-                        Ok(Some(decoded_frame)) => {
-                            assert_eq!(decoded_frame.opcode, Opcode::Close);
-                            // Verify close payload is valid
-                        }
-                        Ok(None) => {
-                            // Incomplete frame - need more data
-                        }
-                        Err(_) => {
-                            // Decode failure is acceptable for edge cases
-                        }
+                let result = codec.decode(&mut buf);
+                match result {
+                    Ok(Some(decoded_frame)) => {
+                        assert_eq!(decoded_frame.opcode, Opcode::Close);
+                        // Verify close payload is valid
+                    }
+                    Ok(None) => {
+                        // Incomplete frame - need more data
+                    }
+                    Err(_) => {
+                        // Decode failure is acceptable for edge cases
                     }
                 }
             }
@@ -480,23 +478,23 @@ fn test_close_operation(operation: CloseOperation) {
             let role = convert_role(role);
 
             // Construct a close frame with potentially invalid payload
-            if let Ok(frame_bytes) = construct_close_frame_bytes(&raw_payload, role) {
-                if frame_bytes.len() <= MAX_PAYLOAD_SIZE {
-                    let mut codec = FrameCodec::new(role);
-                    let mut buf = BytesMut::from(frame_bytes.as_slice());
+            if let Ok(frame_bytes) = construct_close_frame_bytes(&raw_payload, role)
+                && frame_bytes.len() <= MAX_PAYLOAD_SIZE
+            {
+                let mut codec = FrameCodec::new(role);
+                let mut buf = BytesMut::from(frame_bytes.as_slice());
 
-                    let result = codec.decode(&mut buf);
-                    // Invalid close payload should either be rejected or handled gracefully
-                    match result {
-                        Ok(Some(_)) => {
-                            // Frame was accepted
-                        }
-                        Ok(None) => {
-                            // Incomplete frame - need more data
-                        }
-                        Err(_) => {
-                            // Frame was rejected (expected for invalid close payload)
-                        }
+                let result = codec.decode(&mut buf);
+                // Invalid close payload should either be rejected or handled gracefully
+                match result {
+                    Ok(Some(_)) => {
+                        // Frame was accepted
+                    }
+                    Ok(None) => {
+                        // Incomplete frame - need more data
+                    }
+                    Err(_) => {
+                        // Frame was rejected (expected for invalid close payload)
                     }
                 }
             }
@@ -641,7 +639,7 @@ fn construct_frame_bytes(frame_spec: &FrameSpec, role: Role) -> Result<Vec<u8>, 
     let payload = construct_payload(&frame_spec.payload)?;
 
     // Determine masking based on role and force_masked override
-    let masked = frame_spec.force_masked.unwrap_or_else(|| {
+    let masked = frame_spec.force_masked.unwrap_or({
         match role {
             Role::Server => true,  // Server decodes masked client frames
             Role::Client => false, // Client decodes unmasked server frames

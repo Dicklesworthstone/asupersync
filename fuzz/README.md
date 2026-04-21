@@ -25,6 +25,7 @@ cargo +nightly install cargo-fuzz
 | `bytes_cursor_reader` | BytesCursor and reader() position, chunk, and copy invariants | High |
 | `grpc_prost_codec_decode` | Direct ProstCodec decode limits, malformed-wire, and unknown-field invariants | High |
 | `tls_stream_record_framing` | TlsStream handshake/read/write behavior under fragmented and malformed TLS records | High |
+| `fuzz_websocket_frame_parsing` | RFC 6455 frame parser invariants for control, continuation, masking, RSV bits, and extended lengths | High |
 | `fuzz_hpack_decode` | HPACK header compression decoder | Critical |
 | `hpack_indexed` | HPACK indexed-header static/dynamic table lookup invariants | High |
 | `fuzz_http2_frame` | HTTP/2 frame parser | Critical |
@@ -74,6 +75,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
   including empty views, clone-heavy cursor churn, and position-reset cases
 - `corpus/grpc_prost_codec_decode/` - Direct ProstCodec decode boundary and malformed-wire scenarios
 - `corpus/tls_stream_record_framing/` - TlsStream record fragmentation, truncation, and close-notify scenarios
+- `corpus/fuzz_websocket_frame_parsing/` - RFC 6455 control, continuation, mask-role, RSV-bit, and extended-length frame scenarios
 - `corpus/hpack_indexed/` - HPACK indexed-header valid static indices and invalid dynamic lookups
 
 To run with seeds:
