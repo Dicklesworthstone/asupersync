@@ -201,10 +201,9 @@ fn parse_gap_links(gap_plan_json: Option<&str>) -> BTreeMap<String, GapLinks> {
 fn parse_diagnostic_line(line: &str) -> Option<LeanFrontierDiagnostic> {
     let (severity, rest) = if let Some(rest) = line.strip_prefix("error: ") {
         (LeanDiagnosticSeverity::Error, rest)
-    } else if let Some(rest) = line.strip_prefix("warning: ") {
-        (LeanDiagnosticSeverity::Warning, rest)
     } else {
-        return None;
+        let rest = line.strip_prefix("warning: ")?;
+        (LeanDiagnosticSeverity::Warning, rest)
     };
 
     let mut parts = rest.splitn(4, ':');

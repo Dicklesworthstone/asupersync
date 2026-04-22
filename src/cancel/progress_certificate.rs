@@ -878,7 +878,7 @@ impl ProgressCertificate {
             evidence.push(EvidenceEntry {
                 step: last_step,
                 potential: v_current,
-                bound: azuma.min(1.0).max(0.0),
+                bound: azuma.clamp(0.0, 1.0),
                 description: format!(
                     "stall: {run} consecutive non-decreasing steps (threshold: {threshold})",
                 ),
@@ -2767,7 +2767,7 @@ mod tests {
         // length otherwise).
         if let Some(remaining) = verdict.estimated_remaining_steps {
             assert!(
-                remaining >= 0.0 && remaining < 100.0,
+                (0.0..100.0).contains(&remaining),
                 "Estimated remaining steps should be reasonable: {:.2}",
                 remaining
             );

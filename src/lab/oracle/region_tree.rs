@@ -397,17 +397,13 @@ impl RegionTreeOracle {
             }
             visited.insert(current);
 
-            if let Some(entry) = self.regions.get(&current) {
-                if let Some(parent) = entry.parent {
-                    depth += 1;
-                    current = parent;
-                } else {
-                    // Reached root
-                    return Some(depth);
-                }
+            let entry = self.regions.get(&current)?;
+            if let Some(parent) = entry.parent {
+                depth += 1;
+                current = parent;
             } else {
-                // Region not found
-                return None;
+                // Reached root
+                return Some(depth);
             }
         }
     }

@@ -717,11 +717,8 @@ impl PlanDag {
         let mut race_branches = Vec::with_capacity(join_children.len());
         for (_, join_nodes) in &join_children {
             let mut remaining: Vec<PlanId> = join_nodes.clone();
-            if let Some(pos) = remaining.iter().position(|id| *id == shared) {
-                remaining.remove(pos);
-            } else {
-                return None;
-            }
+            let pos = remaining.iter().position(|id| *id == shared)?;
+            remaining.remove(pos);
             if remaining.is_empty() {
                 return None;
             }

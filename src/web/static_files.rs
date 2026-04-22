@@ -122,15 +122,12 @@ impl StaticFiles {
 
         // If it's a directory and we have an index file, try that.
         if full_path.is_dir() {
-            if let Some(ref index) = self.index_file {
-                relative_path.push(index);
-                if path_contains_symlink(&root_canonical, &relative_path) {
-                    return None;
-                }
-                full_path = full_path.join(index);
-            } else {
+            let index = self.index_file.as_ref()?;
+            relative_path.push(index);
+            if path_contains_symlink(&root_canonical, &relative_path) {
                 return None;
             }
+            full_path = full_path.join(index);
         }
 
         // Canonicalize and verify it's under root.

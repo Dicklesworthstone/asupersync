@@ -1546,7 +1546,7 @@ Connection: Upgrade\n\
             );
 
             let request = HttpRequest::parse(request_data.as_bytes())
-                .expect(&format!("Failed to parse request {}", i));
+                .unwrap_or_else(|_| panic!("Failed to parse request {}", i));
 
             let result = server.accept(&request);
             assert!(
@@ -1596,7 +1596,7 @@ Connection: Upgrade\n\
             );
 
             let request = HttpRequest::parse(request_data.as_bytes())
-                .expect(&format!("Failed to parse request for {}", description));
+                .unwrap_or_else(|_| panic!("Failed to parse request for {}", description));
 
             let result = server.accept(&request);
             assert!(
@@ -1760,11 +1760,11 @@ Connection: Upgrade\n\
             );
 
             let request = HttpRequest::parse(request_data.as_bytes())
-                .expect(&format!("Request {} should parse", i));
+                .unwrap_or_else(|_| panic!("Request {} should parse", i));
 
             let accept = server
                 .accept(&request)
-                .expect(&format!("Connection {} should be accepted", i));
+                .unwrap_or_else(|_| panic!("Connection {} should be accepted", i));
 
             assert_eq!(
                 accept.accept_key, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
@@ -1793,11 +1793,11 @@ Connection: Upgrade\n\
             );
 
             let request = HttpRequest::parse(request_data.as_bytes())
-                .expect(&format!("Request for key {} should parse", i));
+                .unwrap_or_else(|_| panic!("Request for key {} should parse", i));
 
             let accept = server
                 .accept(&request)
-                .expect(&format!("Connection for key {} should be accepted", i));
+                .unwrap_or_else(|_| panic!("Connection for key {} should be accepted", i));
 
             accept_keys.push(accept.accept_key.clone());
         }
@@ -2039,7 +2039,7 @@ Connection: Upgrade\n\
 
         for (request_data, expected_error, description) in missing_header_tests {
             let request = HttpRequest::parse(request_data.as_bytes())
-                .expect(&format!("Request should parse: {}", description));
+                .unwrap_or_else(|_| panic!("Request should parse: {}", description));
 
             let result = server.accept(&request);
             assert!(result.is_err(), "Should reject request: {}", description);

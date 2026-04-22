@@ -924,7 +924,7 @@ mod tests {
         for _ in 0..3 {
             received.push(block_on(rx.recv(&cx)).expect("recv from clones"));
         }
-        received.sort(); // Order may vary
+        received.sort_unstable(); // Order may vary
 
         let expected = vec![100, 200, 300];
         crate::assert_with_log!(
@@ -1013,14 +1013,14 @@ mod tests {
         let permits: Vec<_> = (0..5)
             .map(|i| {
                 reserved_permits += 1;
-                block_on(tx.reserve(&cx)).expect(&format!("reserve {i}"))
+                block_on(tx.reserve(&cx)).unwrap_or_else(|_| panic!("reserve {i}"))
             })
             .collect();
 
         // Commit 3, abort 2
         for (i, permit) in permits.into_iter().enumerate() {
             if i < 3 {
-                let _proof = permit.send(i as i32).expect(&format!("send {i}"));
+                let _proof = permit.send(i as i32).unwrap_or_else(|_| panic!("send {i}"));
                 committed_proofs += 1;
             } else {
                 let _proof = permit.abort();
