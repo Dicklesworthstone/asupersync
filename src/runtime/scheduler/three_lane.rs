@@ -9859,4 +9859,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn metamorphic_lane_promotion_fairness() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1000)));
+        {
+            let mut guard = state.lock().expect("lock state");
+            guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+        }
+        
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(2, &state, 8);
+        
+        let mut cancel_tasks = Vec::new();
+        let mut ready_tasks = Vec::new();
+        let mut timed_tasks = Vec::new();
+
+        // 1. High sustained load in cancel lane
+        for i in 0..50 {
+            let task = TaskId::new_for_test(1, i);
+            cancel_tasks.push(task);
+            scheduler.inject_cancel(task, 100);
+        }
+        
+        // 2. High sustained load in timed lane
+        for i in 0..50 {
+            let task = TaskId::new_for_test(2, i);
+            timed_tasks.push(task);
+            scheduler.inject_timed(task, Time::from_nanos(500)); // already due
+        }
+
+        // 3. Ready tasks (lowest priority)
+        for i in 0..50 {
+            let task = TaskId::new_for_test(3, i);
+            ready_tasks.push(task);
+            scheduler.inject_ready(task, 50);
+        }
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker_0 = workers.next().unwrap();
+        let mut worker_1 = workers.next().unwrap();
+        
+        // Concurrent processing simulation
+        let mut w0_dispatched = Vec::new();
+        let mut w1_dispatched = Vec::new();
+        
+        for _ in 0..60 {
+            if let Some(t) = worker_0.next_task() {
+                w0_dispatched.push(t);
+            }
+            if let Some(t) = worker_1.next_task() {
+                w1_dispatched.push(t);
+            }
+        }
+        
+        assert!(!w0_dispatched.is_empty());
+        assert!(!w1_dispatched.is_empty());
+        
+        let mut has_ready = false;
+        let mut has_timed = false;
+        let mut has_cancel = false;
+        
+        for &t in w0_dispatched.iter().chain(w1_dispatched.iter()) {
+            if ready_tasks.contains(&t) {
+                has_ready = true;
+            } else if timed_tasks.contains(&t) {
+                has_timed = true;
+            } else if cancel_tasks.contains(&t) {
+                has_cancel = true;
+            }
+        }
+        
+        assert!(has_ready, "Ready lane completely starved despite fairness yields");
+        assert!(has_timed, "Timed lane completely starved despite fairness yields");
+        assert!(has_cancel, "Cancel lane was not dispatched");
+        
+        for worker in [&mut worker_0, &mut worker_1] {
+            let cert = worker.preemption_fairness_certificate();
+            assert!(cert.invariant_holds(), "Fairness invariant broken during concurrent load");
+            
+            let violations = worker.invariant_violations();
+            assert!(violations.is_empty(), "Scheduler invariants violated: {:?}", violations);
+        }
+    }
 }

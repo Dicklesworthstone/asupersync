@@ -3044,7 +3044,7 @@ mod tests {
 
             // Find what static table index this should match
             let expected_index = find_static_name(&normalized_name)
-                .expect(&format!("Should find static index for {}", normalized_name));
+                .unwrap_or_else(|| panic!("Should find static index for {}", normalized_name));
 
             encoder.encode(&[header], &mut encoded);
 
