@@ -3229,7 +3229,9 @@ mod tests {
         let mut happy_received = happy_decoder.constraint_symbols();
         happy_received.extend(make_received_source(&happy_decoder, &happy_source));
         for esi in (k as u32)..(happy_l as u32) {
-            let (cols, coefs) = happy_decoder.repair_equation(esi);
+            let (cols, coefs) = happy_decoder
+                .repair_equation(esi)
+                .expect("happy-path repair equation should resolve");
             let repair_data = happy_encoder.repair_symbol(esi);
             happy_received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3246,7 +3248,9 @@ mod tests {
 
         let mut degraded_payload = make_received_source(&degraded_decoder, &degraded_source);
         for esi in (k as u32)..((k + degraded_l + 8) as u32) {
-            let (cols, coefs) = degraded_decoder.repair_equation(esi);
+            let (cols, coefs) = degraded_decoder
+                .repair_equation(esi)
+                .expect("degraded-path repair equation should resolve");
             let repair_data = degraded_encoder.repair_symbol(esi);
             degraded_payload.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }

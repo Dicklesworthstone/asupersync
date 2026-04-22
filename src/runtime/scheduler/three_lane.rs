@@ -382,6 +382,17 @@ impl AdaptiveCancelStreakPolicy {
     fn e_value(&self) -> f64 {
         self.e_process_log.clamp(-60.0, 60.0).exp()
     }
+
+    #[cfg(test)]
+    fn update_weights(&mut self, selected: usize, reward: f64) {
+        let p = self.probs[selected].clamp(1e-9, 1.0);
+        let k = usize_to_f64(self.weights.len());
+        let reward_hat = reward / p;
+        let exponent = (ADAPTIVE_EXP3_GAMMA * reward_hat / k).clamp(-20.0, 20.0);
+        self.weights[selected] *= exponent.exp();
+        self.weights[selected] = self.weights[selected].clamp(1e-30, 1e30);
+        self.refresh_probs();
+    }
 }
 
 /// Coordination for waking workers.
