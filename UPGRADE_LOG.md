@@ -1,5 +1,34 @@
 # Dependency Upgrade Log
 
+## 2026-04-22 Upgrade Pass (closes 2026-04-21 deferrals)
+
+**Toolchain:** rustc 1.97.0-nightly (66da6cae1 2026-04-20).
+
+Both items that the 2026-04-21 pass deferred have been unblocked and landed. One dev-dep bump that requires an upstream move (opentelemetry_sdk) is documented as pending upstream.
+
+### Landed
+
+| Crate | From | To | Commit | Notes |
+|-------|------|-----|--------|-------|
+| time | 0.3.46 (pinned `<0.3.47`) | 0.3.47 | c68cb278 | Original pin (f6686c05, 2026-03-02) was added for a then-current nightly toolchain incompatibility. Verified today on rustc 1.97.0-nightly (66da6cae1 2026-04-20): `cargo clippy --lib --features cli -- -D warnings` clean with time 0.3.47 and time-macros 0.2.27. Removed the `<0.3.47` upper bound. |
+| prost | 0.13.5 | 0.14.3 | 439b6bff | Breaking change in 0.14.0 (tokio-rs/prost#1147): `prost::Message` trait no longer requires `Debug`. `src/grpc/protobuf.rs` `Codec` impl only uses `encoded_len`/`encode`/`decode` from the trait — no Debug-dependent generic bounds — so the removal is transparent. Feature `prost-derive` was renamed to `derive` (#1247) but we don't enable it explicitly. MSRV bumped to Rust 1.82 in 0.14.2; project uses nightly so no gate. Prior log deferred this expecting a tonic 0.14 coordination — unnecessary because the project has a **native gRPC implementation** (no tonic dep). Only two call sites touch prost: `src/grpc/protobuf.rs` and `fuzz/fuzz_targets/grpc_protobuf.rs`. Bumped both Cargo.toml files in lockstep. Verified `cargo clippy --lib -- -D warnings` and `cargo test --lib --no-run grpc::` build. |
+| rand (fuzz dev-dep) | 0.8 | 0.9 | a73af889 | Dev-dep in `fuzz/Cargo.toml`. Matches transitive resolution (opentelemetry_sdk 0.31.0 pins `rand = ^0.9`). Currently unused by any `fuzz/fuzz_targets/*.rs` (no `use rand::` imports), so this is a compile-only verification. Kept the dep for future corpus-tooling intent. |
+
+### Pending upstream
+
+| Crate | Current | Latest | Blocker |
+|-------|---------|--------|---------|
+| rand (fuzz dev-dep) | 0.9 | 0.10.1 | opentelemetry_sdk 0.31.0 (latest on crates.io, `opentelemetry_sdk = "0.31"` in root Cargo.toml) transitively pins `rand = ^0.9`. Unblocks when opentelemetry publishes a release that adopts rand 0.10 — or if we remove the unused `rand` dev-dep from fuzz. Not removed here to preserve the existing intent signal ("For seed generation and corpus management"). |
+
+### Verification
+
+- `cargo outdated --workspace --depth 1` → "All dependencies are up to date, yay!"
+- `cargo outdated --depth 1` in `fuzz/` → only `rand` (pending upstream per above)
+- `cargo check --lib` clean, `cargo clippy --lib -- -D warnings` clean
+- Errors observed in `cargo check --all-targets --all-features` (13 errors in `src/tls/record_conformance_tests.rs`) are pre-existing agent work-in-progress, unrelated to these dep bumps (reproducible before the Cargo.toml edits)
+
+---
+
 ## 2026-04-21 Upgrade Pass
 
 **Toolchain:** nightly 1.97.0 (66da6cae1 2026-04-20) — refreshed locally and on ts2 rch worker.
