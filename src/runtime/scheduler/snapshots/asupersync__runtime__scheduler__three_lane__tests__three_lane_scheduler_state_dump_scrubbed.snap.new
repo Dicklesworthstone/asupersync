@@ -39,7 +39,7 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
       "witness_hash": 6666412354065563291
     },
     "invariant_stats": {
-      "avg_monitoring_overhead_ns": 2943,
+      "avg_monitoring_overhead_ns": 2016,
       "monitored_workers": 0,
       "operations_monitored": 14,
       "violations_by_severity": [
@@ -120,7 +120,7 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
       "witness_hash": 11950537627865327450
     },
     "invariant_stats": {
-      "avg_monitoring_overhead_ns": 130,
+      "avg_monitoring_overhead_ns": 75,
       "monitored_workers": 0,
       "operations_monitored": 2,
       "violations_by_severity": [
@@ -201,7 +201,7 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
       "witness_hash": 11950537627865327450
     },
     "invariant_stats": {
-      "avg_monitoring_overhead_ns": 1739,
+      "avg_monitoring_overhead_ns": 3177,
       "monitored_workers": 0,
       "operations_monitored": 5,
       "violations_by_severity": [
