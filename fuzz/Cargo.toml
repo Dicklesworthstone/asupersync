@@ -41,7 +41,7 @@ parking_lot = "0.12"
 
 [dev-dependencies]
 # For seed generation and corpus management
-rand = "0.8"
+rand = "0.9"
 
 # Fuzz targets - each [[bin]] entry defines a fuzz target
 # Run with: cargo +nightly fuzz run <target_name>
