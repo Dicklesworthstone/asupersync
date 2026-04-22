@@ -9407,10 +9407,13 @@ mod tests {
         // Arm 2 (index 2, limit 16) gets slightly better rewards
         for step in 0..500 {
             policy.refresh_probs();
-            let selected = 0;
+            let selected = 2; // Always select arm 2 for this test
 
             // Reward function: arm 2 gets 0.6 reward, others get 0.4
-            let _reward = if selected == 2 { 0.6 } else { 0.4 };
+            let reward = if selected == 2 { 0.6 } else { 0.4 };
+
+            // Actually provide the reward to the policy
+            policy.update_weights(selected, reward);
 
             // Record weights every 50 steps
             if step % 50 == 49 {
@@ -9514,7 +9517,7 @@ mod tests {
     fn golden_test_adaptive_threshold_updates_within_bounds() {
         // Golden test: Adaptive threshold should update within algorithmic bounds
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
-        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 32);
         let worker = &mut scheduler.workers[0];
 
         let mut threshold_history: Vec<usize> = Vec::new();
@@ -9574,7 +9577,7 @@ mod tests {
     fn golden_test_concurrent_cancel_events_no_double_penalize() {
         // Golden test: Concurrent cancel events should not cause double-penalization
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
-        let mut scheduler = ThreeLaneScheduler::new(2, &state); // 2 workers
+        let mut scheduler = ThreeLaneScheduler::new_with_options(2, &state, 16, true, 32); // 2 workers with adaptive enabled
         let mut workers = scheduler.take_workers();
 
         // Setup initial EXP3 state
@@ -9758,7 +9761,7 @@ mod tests {
         // Run 1: Collect EXP3 decision trace
         {
             let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
-            let mut scheduler = ThreeLaneScheduler::new(1, &state);
+            let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 4, true, 32);
             let worker = &mut scheduler.workers[0];
 
             for i in 0..100 {
