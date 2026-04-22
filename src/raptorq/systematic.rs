@@ -74,6 +74,18 @@ pub struct SystematicParams {
 const SYSTEMATIC_INDEX_TABLE: &[(u32, u16, u16, u8, u32)] =
     &include!("rfc6330_systematic_index_table.inc");
 
+/// Error in systematic encoding operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystematicError {
+    /// ESI overflow when computing repair ISI.
+    EsiOverflow {
+        /// The problematic ESI value.
+        esi: u32,
+        /// The padding delta that caused overflow.
+        padding_delta: u32,
+    },
+}
+
 /// Explicit lookup failure for source block parameter derivation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystematicParamError {
@@ -164,17 +176,17 @@ impl SystematicParams {
     /// This helper centralizes decoder/encoder tuple semantics so parity checks
     /// can use one source of truth for RFC tuple expansion.
     #[must_use]
-    pub fn rfc_repair_equation(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
+    pub fn rfc_repair_equation(&self, esi: u32) -> Result<(Vec<usize>, Vec<Gf256>), SystematicError> {
         let padding_delta = u32::try_from(self.k_prime - self.k)
             .expect("RFC systematic padding delta must fit in u32");
-        // The public ESI is a u32 surface; RFC 6330 specifies the repair ISI
-        // domain is K' + (ESI - K), which requires wrapping arithmetic when
-        // ESI approaches u32::MAX so that tuple-derivation stays deterministic
-        // instead of panicking at the public boundary.
-        let repair_isi = esi.wrapping_add(padding_delta);
+        // RFC 6330 repair ISI domain starts at K' and extends upward.
+        // ESIs near u32::MAX cannot be validly mapped without overflow.
+        // Reject instead of wrapping to avoid silent corruption.
+        let repair_isi = esi.checked_add(padding_delta)
+            .ok_or(SystematicError::EsiOverflow { esi, padding_delta })?;
         let columns = repair_indices_for_esi(self.j, self.w, self.p, repair_isi);
         let coefficients = vec![Gf256::ONE; columns.len()];
-        (columns, coefficients)
+        Ok((columns, coefficients))
     }
 }
 
@@ -1112,7 +1124,7 @@ impl SystematicEncoder {
         let symbol_size = self.params.symbol_size;
         buf[..symbol_size].fill(0);
 
-        let (columns, coefficients) = self.params.rfc_repair_equation(esi);
+        let (columns, coefficients) = self.params.rfc_repair_equation(esi).unwrap();
         debug_assert_eq!(
             columns.len(),
             coefficients.len(),
@@ -1226,27 +1238,19 @@ mod tests {
     }
 
     #[test]
-    fn rfc_repair_equation_wraps_padding_delta_at_u32_boundary() {
+    fn rfc_repair_equation_rejects_esi_overflow() {
         let params = SystematicParams::for_source_block(11, 64);
         let padding_delta = u32::try_from(params.k_prime - params.k).unwrap();
         assert_eq!(padding_delta, 1, "test requires a non-zero K' - K delta");
 
-        let (columns, coefficients) = params.rfc_repair_equation(u32::MAX);
-        let expected_columns = repair_indices_for_esi(
-            params.j,
-            params.w,
-            params.p,
-            u32::MAX.wrapping_add(padding_delta),
-        );
-
+        let result = params.rfc_repair_equation(u32::MAX);
         assert_eq!(
-            columns, expected_columns,
-            "repair-equation tuple translation should wrap across the public u32 ESI boundary"
-        );
-        assert_eq!(
-            coefficients,
-            vec![Gf256::ONE; expected_columns.len()],
-            "repair-equation coefficients should stay aligned with the wrapped tuple columns"
+            result,
+            Err(SystematicError::EsiOverflow {
+                esi: u32::MAX,
+                padding_delta,
+            }),
+            "u32::MAX ESI should trigger overflow error instead of wrapping to avoid silent corruption"
         );
     }
 
@@ -1504,7 +1508,7 @@ mod tests {
 
         for esi in (k as u32)..(k as u32 + 8) {
             let repair = enc.repair_symbol(esi);
-            let (columns, coefficients) = enc.params().rfc_repair_equation(esi);
+            let (columns, coefficients) = enc.params().rfc_repair_equation(esi).unwrap();
             let mut expected = vec![0u8; symbol_size];
 
             for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
@@ -1537,7 +1541,7 @@ mod tests {
         let emitted = enc.emit_repair(6);
 
         for symbol in emitted {
-            let (columns, _) = enc.params().rfc_repair_equation(symbol.esi);
+            let (columns, _) = enc.params().rfc_repair_equation(symbol.esi).unwrap();
             assert_eq!(
                 symbol.degree,
                 columns.len(),

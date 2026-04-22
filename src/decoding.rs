@@ -748,7 +748,7 @@ fn decode_block(
                 });
             }
             SymbolKind::Repair => {
-                let (columns, coefficients) = decoder.repair_equation(symbol.esi());
+                let (columns, coefficients) = decoder.repair_equation(symbol.esi()).unwrap();
                 received.push(ReceivedSymbol {
                     esi: symbol.esi(),
                     is_source: false,

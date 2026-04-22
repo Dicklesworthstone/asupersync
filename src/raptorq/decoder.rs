@@ -16,7 +16,7 @@ use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
 };
-use crate::raptorq::systematic::{ConstraintMatrix, SystematicParams};
+use crate::raptorq::systematic::{ConstraintMatrix, SystematicParams, SystematicError};
 use crate::raptorq::{decision_contract, decision_contract::GovernanceSnapshot};
 use crate::types::ObjectId;
 
@@ -2463,8 +2463,11 @@ impl InactivationDecoder {
     ///
     /// This must stay in parity with `SystematicEncoder::repair_symbol` so that
     /// decoder row construction exactly matches encoder repair bytes.
-    #[must_use]
-    pub fn repair_equation(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ESI causes overflow in the repair ISI calculation.
+    pub fn repair_equation(&self, esi: u32) -> Result<(Vec<usize>, Vec<Gf256>), SystematicError> {
         self.params.rfc_repair_equation(esi)
     }
 
@@ -2476,7 +2479,7 @@ impl InactivationDecoder {
     /// This is kept as an explicit alias used by RFC conformance tests.
     #[must_use]
     pub fn repair_equation_rfc6330(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
-        self.repair_equation(esi)
+        self.repair_equation(esi).unwrap()
     }
 
     /// Generate equations for all K source symbols.
@@ -3026,7 +3029,7 @@ mod tests {
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
         let l = decoder.params().l;
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3070,7 +3073,7 @@ mod tests {
 
         // Fill with repair symbols
         for esi in (k as u32)..(l as u32 + k as u32 / 2) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3098,7 +3101,7 @@ mod tests {
 
         // Receive only repair symbols (need at least L)
         for esi in (k as u32)..(k as u32 + l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3123,7 +3126,7 @@ mod tests {
 
         let mut received = decoder.constraint_symbols();
         for esi in (k as u32)..(k as u32 + l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3180,7 +3183,7 @@ mod tests {
 
         let mut payload = make_received_source(&decoder, &source);
         for esi in (k as u32)..((k + l + 8) as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             payload.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3294,7 +3297,7 @@ mod tests {
         let mut received = decoder.constraint_symbols();
         received.extend(make_received_source(&decoder, &source));
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3329,7 +3332,7 @@ mod tests {
         let mut received = decoder.constraint_symbols();
         received.extend(make_received_source(&decoder, &source));
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3378,7 +3381,7 @@ mod tests {
         let mut received = decoder.constraint_symbols();
         received.extend(make_received_source(&decoder, &source));
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3572,7 +3575,7 @@ mod tests {
 
         let mut baseline = decoder.constraint_symbols();
         for esi in (k as u32)..(k as u32 + l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             baseline.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3583,7 +3586,7 @@ mod tests {
 
         let mut with_extra_repair = baseline.clone();
         for esi in (k as u32 + l as u32)..(k as u32 + l as u32 + 4) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             with_extra_repair.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3648,7 +3651,7 @@ mod tests {
         let mut received = decoder.constraint_symbols();
         received.extend(make_received_source(&decoder, &source));
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3683,7 +3686,7 @@ mod tests {
         let mut received = decoder.constraint_symbols();
         received.extend(make_received_source(&decoder, &source));
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3730,7 +3733,7 @@ mod tests {
         let mut received = decoder.constraint_symbols();
         received.extend(make_received_source(&decoder, &source));
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3766,7 +3769,7 @@ mod tests {
         let mut received = decoder.constraint_symbols();
         received.extend(make_received_source(&decoder, &source));
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3814,7 +3817,7 @@ mod tests {
         received.extend(make_received_source(&decoder, &source));
 
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -3884,7 +3887,7 @@ mod tests {
 
         // Add repair symbols to provide enough equations for full coverage
         for esi in (k as u32)..(l as u32 + 2) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -4019,7 +4022,7 @@ mod tests {
                     "decoder_params_parity",
                 );
                 assert_eq!(
-                    decoder_eq, shared_eq,
+                    decoder_eq, shared_eq.unwrap(),
                     "{context} decoder/params equation mismatch for esi={esi}"
                 );
             }
@@ -5230,7 +5233,7 @@ mod tests {
 
         // Add repair to reach L
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -5273,7 +5276,7 @@ mod tests {
             received.push(ReceivedSymbol::source(i as u32, data.clone()));
         }
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -5309,7 +5312,7 @@ mod tests {
             received.push(ReceivedSymbol::source(i as u32, data.clone()));
         }
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -5352,7 +5355,7 @@ mod tests {
             received.push(ReceivedSymbol::source(i as u32, data.clone()));
         }
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -5387,7 +5390,7 @@ mod tests {
         }
         // Add a few repair symbols for robustness.
         for esi in (k as u32)..(k as u32 + 4) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -5439,7 +5442,7 @@ mod tests {
         let mut received = decoder.constraint_symbols();
         // Only repair symbols — no source symbols.
         for esi in (k as u32)..(k as u32 + l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -5482,7 +5485,7 @@ mod tests {
             received.push(ReceivedSymbol::source(esi, source[esi as usize].clone()));
         }
         for esi in (k as u32)..(k as u32 + 4) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -5519,7 +5522,7 @@ mod tests {
             received.push(ReceivedSymbol::source(esi, source[esi as usize].clone()));
         }
         for esi in (k as u32)..(k as u32 + 2) {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
