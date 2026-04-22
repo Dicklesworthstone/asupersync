@@ -9330,7 +9330,7 @@ mod tests {
                 if let Some(worker) = workers.first() {
                     // Check current ready queue size
                     let ready_queue_size = {
-                        let global_ready_count = 0;
+                        let global_ready_count = scheduler.global_injector().ready_count();
                         let local_ready_count = worker.local_ready.lock().len();
                         global_ready_count + local_ready_count
                     };
@@ -9518,7 +9518,7 @@ mod tests {
         let worker = &mut scheduler.workers[0];
 
         let mut threshold_history: Vec<usize> = Vec::new();
-        let initial_threshold = 1000;
+        let initial_threshold = worker.adaptive_cancel_policy.as_ref().unwrap().current_limit();
 
         // Simulate workload with varying cancel patterns
         for epoch in 0..20 {
@@ -9530,7 +9530,7 @@ mod tests {
 
                 // Vary reward pattern every 10 steps to test adaptation
                 if step % 10 == 9 {
-                    let current_threshold = 1000;
+                    let current_threshold = worker.adaptive_cancel_policy.as_ref().unwrap().current_limit();
                     threshold_history.push(current_threshold);
                 }
             }
@@ -9784,7 +9784,7 @@ mod tests {
         // Run 2: Same operations, should produce identical trace
         {
             let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
-            let mut scheduler = ThreeLaneScheduler::new(1, &state);
+            let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 4, true, 32);
             let worker = &mut scheduler.workers[0];
 
             for i in 0..100 {
