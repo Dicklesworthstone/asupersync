@@ -1220,7 +1220,7 @@ mod tests {
                     ReceivedSymbol::source(symbol.esi(), symbol.data().to_vec())
                 }
                 crate::types::SymbolKind::Repair => {
-                    let (columns, coefficients) = decoder.repair_equation(symbol.esi());
+                    let (columns, coefficients) = decoder.repair_equation(symbol.esi()).unwrap();
                     ReceivedSymbol::repair(
                         symbol.esi(),
                         columns,
