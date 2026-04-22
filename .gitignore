@@ -121,6 +121,12 @@ artifacts/*
 !artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json
 !artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json
 
+# Insta pending snapshot files (generated when tests fail or a new
+# snapshot is recorded; awaiting `cargo insta accept` review). Never
+# committed — only accepted `.snap` files go into git.
+*.snap.new
+.insta.pending-snap
+
 # UBS (Ultimate Bug Scanner) output
 ubs_*.txt
 ubs_*.json
