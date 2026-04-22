@@ -1,0 +1,102 @@
+---
+source: src/observability/diagnostics.rs
+expression: rendered
+---
+report_version: v4
+
+[summary]
+scenario_count: 3
+passing_count: 1
+degraded_count: 1
+critical_count: 1
+total_histogram_samples: 3933
+histogram_types: [obligation_hold_time_ms, region_lifecycle_duration_ms, task_execution_latency_ms]
+
+
+[task_execution]
+status: degraded
+resource_accounting:
+  - regions_total: 12
+  - regions_open: 8
+  - tasks_total: 142
+  - tasks_live: 89
+  - obligations_total: 23
+  - obligations_leaked: 2
+extended_metrics:
+  - name: task_execution_latency_ms
+    total_samples: 2330
+    buckets:
+      - 0-1ms: 1247
+      - 1-5ms: 823
+      - 5-10ms: 156
+      - 10-50ms: 89
+      - 50-100ms: 12
+      - 100ms+: 3
+    percentiles:
+      - p5000.0: 1.200
+      - p9500.0: 8.700
+      - p9900.0: 24.100
+      - p9990.0: 78.300
+report:
+  task_execution: Task execution metrics
+    latency_p50: 1.2ms
+    latency_p99: 24.1ms
+    completion_rate: 94.2%
+
+
+[region_lifecycle]
+status: critical
+resource_accounting:
+  - regions_total: 67
+  - regions_open: 37
+  - tasks_total: 245
+  - tasks_live: 156
+  - obligations_total: 45
+  - obligations_leaked: 8
+extended_metrics:
+  - name: region_lifecycle_duration_ms
+    total_samples: 343
+    buckets:
+      - 0-10ms: 89
+      - 10-100ms: 156
+      - 100ms-1s: 67
+      - 1s-10s: 23
+      - 10s+: 8
+    percentiles:
+      - p5000.0: 45.200
+      - p9500.0: 2100.000
+      - p9900.0: 6780.000
+report:
+  region_lifecycle: Region lifecycle analysis
+    duration_p50: 45.2ms
+    duration_p99: 6.78s
+    long_lived_count: 8
+
+
+[obligation_tracking]
+status: passing
+resource_accounting:
+  - regions_total: 34
+  - regions_open: 23
+  - tasks_total: 178
+  - tasks_live: 134
+  - obligations_total: 67
+  - obligations_leaked: 0
+extended_metrics:
+  - name: obligation_hold_time_ms
+    total_samples: 1260
+    buckets:
+      - 0-1s: 1200
+      - 1s-10s: 45
+      - 10s-1min: 12
+      - 1min+: 3
+    percentiles:
+      - p5000.0: 120.000
+      - p9500.0: 8900.000
+      - p9900.0: 45000.000
+      - p9990.0: 120000.000
+report:
+  obligation_tracking: Obligation hold time analysis
+    hold_time_p50: 120ms
+    hold_time_p99: 45s
+    leak_candidates: 3
