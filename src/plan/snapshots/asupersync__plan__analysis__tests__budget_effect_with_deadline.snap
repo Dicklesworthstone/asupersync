@@ -1,0 +1,5 @@
+---
+source: src/plan/analysis.rs
+expression: "format!(\"{}\", effect_with_deadline)"
+---
+polls=[1, 1] deadline=[1ms, 1ms]

@@ -1,0 +1,5 @@
+---
+source: src/plan/analysis.rs
+expression: "format!(\"{}\", DeadlineMicros::from_micros(2500))"
+---
+2ms
