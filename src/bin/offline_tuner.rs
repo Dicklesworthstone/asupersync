@@ -30,6 +30,110 @@ use serde_json;
 use asupersync::raptorq::gf256::{Gf256ArchitectureClass, active_kernel};
 use asupersync::raptorq::offline_tuner::{OfflineTuner, OptimizationCriteria};
 
+/// Test configuration for bit-exactness validation scenarios.
+#[derive(Debug, Clone)]
+struct ValidationConfig {
+    /// Size of test data.
+    size: usize,
+    /// Test scalar value.
+    scalar: u8,
+    /// Data generation seed.
+    seed: u64,
+    /// Test scenario name.
+    scenario: &'static str,
+}
+
+impl ValidationConfig {
+    /// Create deterministic test data based on config.
+    fn generate_data(&self) -> Vec<u8> {
+        let mut data = Vec::with_capacity(self.size);
+        for i in 0..self.size {
+            let value = ((i as u64).wrapping_mul(17).wrapping_add(self.seed)) % 256;
+            data.push(value as u8);
+        }
+        data
+    }
+}
+
+/// Reference scalar implementation for mul_slice operation.
+fn reference_mul_slice(data: &mut [u8], scalar: u8) {
+    use asupersync::raptorq::gf256::Gf256;
+    let gf_scalar = Gf256::new(scalar);
+    for byte in data {
+        *byte = Gf256::new(*byte).mul_field(gf_scalar).raw();
+    }
+}
+
+/// Reference scalar implementation for addmul_slice operation.
+fn reference_addmul_slice(dst: &mut [u8], src: &[u8], scalar: u8) {
+    use asupersync::raptorq::gf256::Gf256;
+    assert_eq!(dst.len(), src.len(), "slice length mismatch");
+    let gf_scalar = Gf256::new(scalar);
+    for (dst_byte, src_byte) in dst.iter_mut().zip(src) {
+        let product = Gf256::new(*src_byte).mul_field(gf_scalar);
+        *dst_byte = Gf256::new(*dst_byte).add(product).raw();
+    }
+}
+
+/// Validate mul_slice kernel against reference scalar implementation.
+fn validate_mul_slice_bit_exact(config: &ValidationConfig, verbose: bool) -> Result<(), String> {
+    use asupersync::raptorq::gf256::{gf256_mul_slice, Gf256};
+
+    let mut reference_data = config.generate_data();
+    let mut test_data = reference_data.clone();
+
+    // Compare the active kernel path against scalar reference
+    reference_mul_slice(&mut reference_data, config.scalar);
+    gf256_mul_slice(&mut test_data, Gf256::new(config.scalar));
+
+    if reference_data == test_data {
+        if verbose {
+            println!("  mul_slice bit-exact: size={}, scalar={}", config.size, config.scalar);
+        }
+        Ok(())
+    } else {
+        Err(format!(
+            "mul_slice not bit-exact: size={}, scalar={}, first_diff={}",
+            config.size,
+            config.scalar,
+            reference_data.iter().zip(&test_data).position(|(a, b)| a != b).unwrap_or(0)
+        ))
+    }
+}
+
+/// Validate addmul_slice kernel against reference scalar implementation.
+fn validate_addmul_slice_bit_exact(config: &ValidationConfig, verbose: bool) -> Result<(), String> {
+    use asupersync::raptorq::gf256::{gf256_addmul_slice, Gf256};
+
+    let src_data = config.generate_data();
+    let mut reference_dst = vec![0u8; config.size];
+    let mut test_dst = vec![0u8; config.size];
+
+    // Initialize with different seed for destination to make test more robust
+    for (i, byte) in reference_dst.iter_mut().enumerate() {
+        *byte = ((i as u64 * 23 + config.seed + 1000) % 256) as u8;
+    }
+    test_dst.copy_from_slice(&reference_dst);
+
+    // Compare the active kernel path against scalar reference
+    reference_addmul_slice(&mut reference_dst, &src_data, config.scalar);
+    gf256_addmul_slice(&mut test_dst, &src_data, Gf256::new(config.scalar));
+
+    if reference_dst == test_dst {
+        if verbose {
+            println!("  addmul_slice bit-exact: size={}, scalar={}", config.size, config.scalar);
+        }
+        Ok(())
+    } else {
+        Err(format!(
+            "addmul_slice not bit-exact: size={}, scalar={}, first_diff={}",
+            config.size,
+            config.scalar,
+            reference_dst.iter().zip(&test_dst).position(|(a, b)| a != b).unwrap_or(0)
+        ))
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "offline_tuner")]
 #[command(about = "Offline kernel superoptimization for RaptorQ GF(256) operations")]
@@ -388,16 +492,9 @@ fn emit_profile_pack(
 fn validate_kernels(
     arch: Gf256ArchitectureClass,
     profile_file: Option<PathBuf>,
-    _verbose: bool,
+    verbose: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Validating bit-exactness for {:?} kernels", arch);
-
-    // TODO: Implement bit-exactness validation
-    // This would:
-    // 1. Load profile pack configuration
-    // 2. Generate test vectors
-    // 3. Compare optimized kernel output against reference scalar implementation
-    // 4. Verify all results are bit-exact
 
     if let Some(profile_path) = profile_file {
         println!("Using profile pack: {}", profile_path.display());
@@ -405,7 +502,46 @@ fn validate_kernels(
         println!("Using default profile pack for {:?}", arch);
     }
 
-    println!("Bit-exactness validation: PASSED");
 
-    Ok(())
+    // Test scenarios covering different sizes and edge cases
+    let validation_scenarios = vec![
+        ValidationConfig { size: 1, scalar: 1, seed: 0, scenario: "single_byte" },
+        ValidationConfig { size: 15, scalar: 17, seed: 42, scenario: "sub_simd_odd" },
+        ValidationConfig { size: 16, scalar: 255, seed: 123, scenario: "exactly_simd" },
+        ValidationConfig { size: 17, scalar: 2, seed: 456, scenario: "just_over_simd" },
+        ValidationConfig { size: 64, scalar: 85, seed: 789, scenario: "cache_line" },
+        ValidationConfig { size: 256, scalar: 42, seed: 1011, scenario: "typical_block" },
+        ValidationConfig { size: 1024, scalar: 170, seed: 1314, scenario: "large_block" },
+    ];
+
+    let mut total_tests = 0;
+    let mut failed_tests = 0;
+
+    for config in &validation_scenarios {
+        // Test mul_slice bit-exactness
+        total_tests += 1;
+        if let Err(e) = validate_mul_slice_bit_exact(config, verbose) {
+            println!("FAILED: mul_slice for scenario {}: {}", config.scenario, e);
+            failed_tests += 1;
+        } else if verbose {
+            println!("PASSED: mul_slice for scenario {}", config.scenario);
+        }
+
+        // Test addmul_slice bit-exactness
+        total_tests += 1;
+        if let Err(e) = validate_addmul_slice_bit_exact(config, verbose) {
+            println!("FAILED: addmul_slice for scenario {}: {}", config.scenario, e);
+            failed_tests += 1;
+        } else if verbose {
+            println!("PASSED: addmul_slice for scenario {}", config.scenario);
+        }
+    }
+
+    if failed_tests == 0 {
+        println!("Bit-exactness validation: PASSED ({} tests)", total_tests);
+        Ok(())
+    } else {
+        println!("Bit-exactness validation: FAILED ({}/{} tests failed)", failed_tests, total_tests);
+        Err(format!("Bit-exactness validation failed: {}/{} tests failed", failed_tests, total_tests).into())
+    }
 }
