@@ -974,11 +974,20 @@ fn qpack_decode_base(
     }
 }
 
-fn qpack_relative_to_absolute(base: u64, relative_index: u64) -> Result<u64, H3NativeError> {
-    base.checked_sub(relative_index + 1)
-        .ok_or(H3NativeError::InvalidFrame(
-            "dynamic qpack relative index exceeds base",
-        ))
+fn qpack_relative_to_absolute(base: u64, relative_index: u64, is_post_base: bool) -> Result<u64, H3NativeError> {
+    if is_post_base {
+        // Post-base reference: absolute = base + index
+        base.checked_add(relative_index)
+            .ok_or(H3NativeError::InvalidFrame(
+                "dynamic qpack post-base index overflow",
+            ))
+    } else {
+        // Pre-base reference: absolute = base - index - 1
+        base.checked_sub(relative_index + 1)
+            .ok_or(H3NativeError::InvalidFrame(
+                "dynamic qpack relative index exceeds base",
+            ))
+    }
 }
 
 fn qpack_decode_field_section_with_context(
@@ -1023,34 +1032,34 @@ fn qpack_decode_field_section_with_context(
                 ));
             }
 
-            let Some(context) = qpack_context else {
+            if let Some(context) = qpack_context {
+                let total_inserts = context.dynamic_table().insertion_counter();
+                let required_insert_count = qpack_decode_required_insert_count(
+                    encoded_insert_count,
+                    total_inserts,
+                    context.max_table_capacity,
+                )?;
+                if required_insert_count > total_inserts {
+                    return Err(H3NativeError::QpackPolicy(
+                        "required insert count exceeds dynamic table state",
+                    ));
+                }
+
+                let base = qpack_decode_base(required_insert_count, sign, delta_base)?;
+                if base > total_inserts {
+                    return Err(H3NativeError::InvalidFrame(
+                        "dynamic qpack base exceeds dynamic table state",
+                    ));
+                }
+                Some(base)
+            } else {
                 if encoded_insert_count != 0 || sign || delta_base != 0 {
                     return Err(H3NativeError::InvalidFrame(
                         "dynamic table context required",
                     ));
                 }
                 None
-            };
-
-            let total_inserts = context.dynamic_table().insertion_counter();
-            let required_insert_count = qpack_decode_required_insert_count(
-                encoded_insert_count,
-                total_inserts,
-                context.max_table_capacity,
-            )?;
-            if required_insert_count > total_inserts {
-                return Err(H3NativeError::QpackPolicy(
-                    "required insert count exceeds dynamic table state",
-                ));
             }
-
-            let base = qpack_decode_base(required_insert_count, sign, delta_base)?;
-            if base > total_inserts {
-                return Err(H3NativeError::InvalidFrame(
-                    "dynamic qpack base exceeds dynamic table state",
-                ));
-            }
-            Some(base)
         }
     };
 
@@ -1078,7 +1087,9 @@ fn qpack_decode_field_section_with_context(
                 let base = dynamic_base.ok_or(H3NativeError::InvalidFrame(
                     "dynamic table context required",
                 ))?;
-                let absolute_index = qpack_relative_to_absolute(base, index)?;
+                // Dynamic table index - check post-base bit (bit 4)
+                let is_post_base = (b & 0x10) != 0;
+                let absolute_index = qpack_relative_to_absolute(base, index, is_post_base)?;
                 out.push(QpackFieldPlan::DynamicIndex(absolute_index));
             }
             continue;
@@ -1111,7 +1122,9 @@ fn qpack_decode_field_section_with_context(
                 let base = dynamic_base.ok_or(H3NativeError::InvalidFrame(
                     "dynamic table context required",
                 ))?;
-                let absolute_name_index = qpack_relative_to_absolute(base, name_index)?;
+                // Dynamic table name reference - check post-base bit (bit 3)
+                let is_post_base_name = (b & 0x08) != 0;
+                let absolute_name_index = qpack_relative_to_absolute(base, name_index, is_post_base_name)?;
                 out.push(QpackFieldPlan::DynamicNameLiteral {
                     name_index: absolute_name_index,
                     value,
