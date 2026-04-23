@@ -2249,4 +2249,238 @@ mod tests {
 
         crate::test_complete!("metamorphic_composite_invariances");
     }
+
+    // ========================================================================
+    // DIALECTICA-DUALITY conformance harness (Pattern 4: spec-derived)
+    //
+    // The spec is the typing judgment at the top of this module:
+    //
+    //   reserve : (K, R) → Permit(K, R)          (forward step)
+    //   resolve : Permit(K, R) → Terminal(K, R)  (backward step)
+    //   Terminal(K, R) = Committed | Aborted | Leaked
+    //
+    // Each DIALECTICA-DUALITY-N clause mechanically verifies one protocol
+    // invariant of the (forward, backward) pair as encoded by
+    // DialecticaMorphism, plus the bridging invariants that connect the
+    // morphism to the event-trace ContractChecker.
+    //
+    // Every case emits one stderr JSON-line verdict:
+    //   {"id":"DIALECTICA-DUALITY-N","verdict":"PASS|FAIL","level":"MUST"}
+    // ========================================================================
+
+    fn emit_duality_verdict(id: &str, pass: bool) {
+        eprintln!(
+            "{{\"id\":\"{id}\",\"verdict\":\"{}\",\"level\":\"MUST\"}}",
+            if pass { "PASS" } else { "FAIL" }
+        );
+    }
+
+    // DIALECTICA-DUALITY-1: Forward-Backward ordering is total — you cannot
+    // take the backward step without first taking the forward step.
+    #[test]
+    #[should_panic(expected = "cannot resolve without forward step")]
+    fn conformance_dialectica_duality_1_backward_requires_forward() {
+        // We cannot emit a verdict from a panicking test; the #[should_panic]
+        // attribute IS the verdict. If the panic message changes, this fails.
+        let mut m = DialecticaMorphism::new(ObligationKind::SendPermit);
+        m.backward(ObligationState::Committed);
+    }
+
+    // DIALECTICA-DUALITY-2: Forward step is at-most-once (linear).
+    #[test]
+    #[should_panic(expected = "forward step already taken")]
+    fn conformance_dialectica_duality_2_forward_is_linear() {
+        let mut m = DialecticaMorphism::new(ObligationKind::Ack);
+        m.forward();
+        m.forward();
+    }
+
+    // DIALECTICA-DUALITY-3: Backward step is at-most-once (linear).
+    #[test]
+    #[should_panic(expected = "backward step already taken")]
+    fn conformance_dialectica_duality_3_backward_is_linear() {
+        let mut m = DialecticaMorphism::new(ObligationKind::Lease);
+        m.forward();
+        m.backward(ObligationState::Committed);
+        m.backward(ObligationState::Aborted);
+    }
+
+    // DIALECTICA-DUALITY-4: Backward resolution must be terminal.
+    // Passing a non-terminal state (Reserved) must panic.
+    #[test]
+    #[should_panic(expected = "resolution must be terminal")]
+    fn conformance_dialectica_duality_4_resolution_must_be_terminal() {
+        let mut m = DialecticaMorphism::new(ObligationKind::IoOp);
+        m.forward();
+        m.backward(ObligationState::Reserved);
+    }
+
+    // DIALECTICA-DUALITY-5: is_complete iff (forward ∧ backward).
+    #[test]
+    fn conformance_dialectica_duality_5_completion_witnesses_both_steps() {
+        let mut m = DialecticaMorphism::new(ObligationKind::SendPermit);
+        let idle = !m.is_complete();
+        m.forward();
+        let pending = !m.is_complete();
+        m.backward(ObligationState::Committed);
+        let done = m.is_complete();
+        let pass = idle && pending && done;
+        emit_duality_verdict("DIALECTICA-DUALITY-5", pass);
+        assert!(pass, "is_complete diverged from (forward ∧ backward)");
+    }
+
+    // DIALECTICA-DUALITY-6: is_pending iff (forward ∧ ¬backward).
+    #[test]
+    fn conformance_dialectica_duality_6_pending_characterization() {
+        let mut m = DialecticaMorphism::new(ObligationKind::Ack);
+        let idle_not_pending = !m.is_pending();
+        m.forward();
+        let forward_is_pending = m.is_pending();
+        m.backward(ObligationState::Aborted);
+        let done_not_pending = !m.is_pending();
+        let pass = idle_not_pending && forward_is_pending && done_not_pending;
+        emit_duality_verdict("DIALECTICA-DUALITY-6", pass);
+        assert!(pass, "is_pending diverged from (forward ∧ ¬backward)");
+    }
+
+    // DIALECTICA-DUALITY-7: is_clean iff resolution ∈ {Committed, Aborted}.
+    // Leaked is complete-but-not-clean; Reserved is neither.
+    #[test]
+    fn conformance_dialectica_duality_7_clean_excludes_leak() {
+        let mut committed = DialecticaMorphism::new(ObligationKind::SendPermit);
+        committed.forward();
+        committed.backward(ObligationState::Committed);
+
+        let mut aborted = DialecticaMorphism::new(ObligationKind::Ack);
+        aborted.forward();
+        aborted.backward(ObligationState::Aborted);
+
+        let mut leaked = DialecticaMorphism::new(ObligationKind::Lease);
+        leaked.forward();
+        leaked.backward(ObligationState::Leaked);
+
+        let pass = committed.is_clean()
+            && aborted.is_clean()
+            && leaked.is_complete()
+            && !leaked.is_clean();
+        emit_duality_verdict("DIALECTICA-DUALITY-7", pass);
+        assert!(pass, "is_clean admitted Leaked or rejected Commit/Abort");
+    }
+
+    // DIALECTICA-DUALITY-8: Duality distinguishes Commit from Abort in Display.
+    #[test]
+    fn conformance_dialectica_duality_8_display_distinguishes_resolutions() {
+        let mut c = DialecticaMorphism::new(ObligationKind::SendPermit);
+        c.forward();
+        c.backward(ObligationState::Committed);
+        let mut a = DialecticaMorphism::new(ObligationKind::SendPermit);
+        a.forward();
+        a.backward(ObligationState::Aborted);
+        let mut l = DialecticaMorphism::new(ObligationKind::SendPermit);
+        l.forward();
+        l.backward(ObligationState::Leaked);
+
+        let c_s = format!("{c}");
+        let a_s = format!("{a}");
+        let l_s = format!("{l}");
+        let pass = c_s.contains("committed")
+            && a_s.contains("aborted")
+            && l_s.contains("LEAKED")
+            && c_s != a_s
+            && a_s != l_s
+            && c_s != l_s;
+        emit_duality_verdict("DIALECTICA-DUALITY-8", pass);
+        assert!(
+            pass,
+            "Display collapsed the Commit/Abort/Leak distinction: {c_s} / {a_s} / {l_s}"
+        );
+    }
+
+    // DIALECTICA-DUALITY-9: Kind-uniformity — all four ObligationKind variants
+    // produce structurally identical morphism state machines (same forward+
+    // backward behavior, same is_complete / is_pending / is_clean verdicts).
+    #[test]
+    fn conformance_dialectica_duality_9_kind_uniformity() {
+        let kinds = [
+            ObligationKind::SendPermit,
+            ObligationKind::Ack,
+            ObligationKind::Lease,
+            ObligationKind::IoOp,
+            ObligationKind::SemaphorePermit,
+        ];
+        let mut pass = true;
+        for k in kinds {
+            let mut m = DialecticaMorphism::new(k);
+            if m.is_complete() || m.is_pending() || m.is_clean() {
+                pass = false;
+            }
+            m.forward();
+            if m.is_complete() || !m.is_pending() || m.is_clean() {
+                pass = false;
+            }
+            m.backward(ObligationState::Committed);
+            if !m.is_complete() || m.is_pending() || !m.is_clean() {
+                pass = false;
+            }
+        }
+        emit_duality_verdict("DIALECTICA-DUALITY-9", pass);
+        assert!(pass, "state machine diverged across ObligationKind variants");
+    }
+
+    // DIALECTICA-DUALITY-10: State monotonicity — (forward_taken, backward_taken)
+    // only advances through (F,F) → (T,F) → (T,T); both bits are sticky.
+    #[test]
+    fn conformance_dialectica_duality_10_state_monotonicity() {
+        let mut m = DialecticaMorphism::new(ObligationKind::Lease);
+        let s0 = (m.forward_taken, m.backward_taken);
+        m.forward();
+        let s1 = (m.forward_taken, m.backward_taken);
+        m.backward(ObligationState::Aborted);
+        let s2 = (m.forward_taken, m.backward_taken);
+        let pass = s0 == (false, false) && s1 == (true, false) && s2 == (true, true);
+        emit_duality_verdict("DIALECTICA-DUALITY-10", pass);
+        assert!(
+            pass,
+            "state tuple did not follow (F,F) → (T,F) → (T,T): {s0:?}→{s1:?}→{s2:?}"
+        );
+    }
+
+    // DIALECTICA-DUALITY-11: Bridging — a reserve+commit trace is clean at the
+    // ContractChecker level, mirroring a completed, clean morphism.
+    #[test]
+    fn conformance_dialectica_duality_11_bridge_clean_trace() {
+        let events = vec![
+            reserve(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            commit(10, o(0), r(0), ObligationKind::SendPermit),
+            close(20, r(0)),
+        ];
+        let mut checker = ContractChecker::new();
+        let res = checker.check(&events);
+        let pass = res.is_clean()
+            && res
+                .contract_status
+                .is_satisfied(DialecticaContract::ExhaustiveResolution)
+            && res
+                .contract_status
+                .is_satisfied(DialecticaContract::NoPartialCommit)
+            && res
+                .contract_status
+                .is_satisfied(DialecticaContract::RegionClosureSafety);
+        emit_duality_verdict("DIALECTICA-DUALITY-11", pass);
+        assert!(pass, "clean reserve+commit trace was flagged by checker");
+    }
+
+    // DIALECTICA-DUALITY-12: Bridging — a resolve without a prior reserve is
+    // a NoPartialCommit violation, mirroring backward-without-forward being
+    // a panic at the morphism level (DIALECTICA-DUALITY-1).
+    #[test]
+    fn conformance_dialectica_duality_12_bridge_resolve_without_reserve() {
+        let events = vec![commit(10, o(99), r(0), ObligationKind::Lease)];
+        let mut checker = ContractChecker::new();
+        let res = checker.check(&events);
+        let viols = res.violations_for(DialecticaContract::NoPartialCommit);
+        let pass = !res.is_clean() && viols.len() == 1;
+        emit_duality_verdict("DIALECTICA-DUALITY-12", pass);
+        assert!(pass, "unreserved resolve did not surface a single NoPartialCommit violation");
+    }
 }
