@@ -1,0 +1,8 @@
+---
+source: tests/plan_analysis_display_goldens.rs
+expression: rendered
+---
+empty: reserves=[] [all-paths-ok]
+leaf_with_obligation: reserves=["obl:permit"] must_resolve=["obl:permit"] leak_on_cancel=["obl:permit"] [all-paths-ok]
+join(a,b): reserves=["obl:a", "obl:b"] must_resolve=["obl:a", "obl:b"] leak_on_cancel=["obl:a", "obl:b"] [all-paths-ok]
+race(winner,loser): reserves=["obl:winner", "obl:loser"] must_resolve=["obl:winner", "obl:loser"] leak_on_cancel=["obl:winner", "obl:loser"] [LEAK-RISK]
