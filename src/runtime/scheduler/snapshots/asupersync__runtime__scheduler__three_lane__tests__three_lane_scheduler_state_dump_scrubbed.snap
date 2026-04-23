@@ -1,11 +1,6 @@
 ---
 source: src/runtime/scheduler/three_lane.rs
-expression: |-
-  json!({
-      "empty": empty_scheduler_state_dump(),
-      "loaded": loaded_scheduler_state_dump(),
-      "cancel_streak": cancel_streak_scheduler_state_dump(),
-  })
+expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n    loaded_scheduler_state_dump(), \"cancel_streak\":\n    cancel_streak_scheduler_state_dump(),\n})"
 ---
 {
   "cancel_streak": {
@@ -43,7 +38,7 @@ expression: |-
       "witness_hash": 6666412354065563291
     },
     "invariant_stats": {
-      "avg_monitoring_overhead_ns": 1319,
+      "avg_monitoring_overhead_ns": 2016,
       "monitored_workers": 0,
       "operations_monitored": 14,
       "violations_by_severity": [
@@ -124,7 +119,7 @@ expression: |-
       "witness_hash": 11950537627865327450
     },
     "invariant_stats": {
-      "avg_monitoring_overhead_ns": 180,
+      "avg_monitoring_overhead_ns": 75,
       "monitored_workers": 0,
       "operations_monitored": 2,
       "violations_by_severity": [
@@ -205,7 +200,7 @@ expression: |-
       "witness_hash": 11950537627865327450
     },
     "invariant_stats": {
-      "avg_monitoring_overhead_ns": 8262,
+      "avg_monitoring_overhead_ns": 3177,
       "monitored_workers": 0,
       "operations_monitored": 5,
       "violations_by_severity": [

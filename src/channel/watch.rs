@@ -2722,4 +2722,182 @@ mod tests {
 
         crate::test_complete!("metamorphic_closed_sender_behavior");
     }
+
+    // =========================================================================
+    // Metamorphic tests for borrow_and_update after sender shutdown
+    // =========================================================================
+
+    /// MR1: Equivalence - borrow_and_update() after shutdown returns same value
+    /// Property: f(shutdown_then_borrow1) = f(shutdown_then_borrow2)
+    /// Detects: value corruption, inconsistent final state retention
+    #[test]
+    fn mr_borrow_and_update_equivalence_after_shutdown() {
+        init_test("mr_borrow_and_update_equivalence_after_shutdown");
+        let (tx, mut rx) = channel(42u32);
+
+        // Send final value then shutdown
+        tx.send(100).expect("send failed");
+        let final_value = 100u32;
+        drop(tx); // Shutdown
+
+        // Multiple calls should return equivalent values
+        let value1 = *rx.borrow_and_update();
+        let value2 = *rx.borrow_and_update();
+        let value3 = *rx.borrow_and_update();
+
+        crate::assert_with_log!(
+            value1 == final_value && value2 == final_value && value3 == final_value,
+            "equivalent values after shutdown",
+            (final_value, final_value, final_value),
+            (value1, value2, value3)
+        );
+
+        crate::assert_with_log!(
+            value1 == value2 && value2 == value3,
+            "all calls return same value",
+            value1,
+            (value2, value3)
+        );
+
+        crate::test_complete!("mr_borrow_and_update_equivalence_after_shutdown");
+    }
+
+    /// MR2: Additive Version Monotonicity
+    /// Property: seen_version never decreases, even after shutdown
+    /// Transformation: multiple borrow_and_update calls
+    /// Relation: version(call_n+1) >= version(call_n)
+    #[test]
+    fn mr_version_monotonicity_after_shutdown() {
+        init_test("mr_version_monotonicity_after_shutdown");
+        let (tx, mut rx) = channel(0u32);
+
+        tx.send(1).expect("send failed");
+        tx.send(2).expect("send failed");
+        let version_before_drop = tx.inner.current_version();
+        drop(tx); // Shutdown
+
+        let mut versions = Vec::new();
+
+        // Multiple calls to collect version progression
+        for i in 0..5 {
+            let _value = rx.borrow_and_update();
+            drop(_value);
+            let version = rx.seen_version();
+            versions.push(version);
+
+            if i > 0 {
+                crate::assert_with_log!(
+                    version >= versions[i-1],
+                    &format!("version monotonic at call {}", i),
+                    versions[i-1],
+                    version
+                );
+            }
+        }
+
+        // Final version should match the version before drop
+        let final_version = versions.last().copied().unwrap();
+        crate::assert_with_log!(
+            final_version == version_before_drop,
+            "final version matches pre-drop version",
+            version_before_drop,
+            final_version
+        );
+
+        crate::test_complete!("mr_version_monotonicity_after_shutdown");
+    }
+
+    /// MR3: Permutative - Receiver Isolation
+    /// Property: Multiple receivers calling borrow_and_update after shutdown
+    /// should not interfere with each other
+    /// Transformation: permute order of receiver operations
+    /// Relation: results should be independent of order
+    #[test]
+    fn mr_receiver_isolation_after_shutdown() {
+        init_test("mr_receiver_isolation_after_shutdown");
+        let (tx, mut rx1) = channel(10u32);
+        let mut rx2 = tx.subscribe();
+        let mut rx3 = tx.subscribe();
+
+        tx.send(200).expect("send failed");
+        drop(tx); // Shutdown
+
+        // Test permutation 1: rx1 -> rx2 -> rx3
+        let value1a = *rx1.borrow_and_update();
+        let version1a = rx1.seen_version();
+        let value2a = *rx2.borrow_and_update();
+        let version2a = rx2.seen_version();
+        let value3a = *rx3.borrow_and_update();
+        let version3a = rx3.seen_version();
+
+        // Reset for permutation 2
+        let (tx, mut rx1) = channel(10u32);
+        let mut rx2 = tx.subscribe();
+        let mut rx3 = tx.subscribe();
+        tx.send(200).expect("send failed");
+        drop(tx);
+
+        // Test permutation 2: rx3 -> rx1 -> rx2
+        let value3b = *rx3.borrow_and_update();
+        let version3b = rx3.seen_version();
+        let value1b = *rx1.borrow_and_update();
+        let version1b = rx1.seen_version();
+        let value2b = *rx2.borrow_and_update();
+        let version2b = rx2.seen_version();
+
+        // Values should be equivalent regardless of order
+        crate::assert_with_log!(
+            (value1a, value2a, value3a) == (value1b, value2b, value3b),
+            "values independent of call order",
+            (value1a, value2a, value3a),
+            (value1b, value2b, value3b)
+        );
+
+        // Versions should be equivalent regardless of order
+        crate::assert_with_log!(
+            (version1a, version2a, version3a) == (version1b, version2b, version3b),
+            "versions independent of call order",
+            (version1a, version2a, version3a),
+            (version1b, version2b, version3b)
+        );
+
+        crate::test_complete!("mr_receiver_isolation_after_shutdown");
+    }
+
+    /// MR4: Equivalence - State Consistency
+    /// Property: borrow_and_update() and borrow() return same value after shutdown
+    /// Transformation: method substitution
+    /// Relation: f(borrow_and_update) value == f(borrow) value
+    #[test]
+    fn mr_state_consistency_borrow_vs_borrow_and_update_after_shutdown() {
+        init_test("mr_state_consistency_borrow_vs_borrow_and_update_after_shutdown");
+        let (tx, mut rx1) = channel(5u32);
+        let rx2 = tx.subscribe();
+
+        tx.send(300).expect("send failed");
+        drop(tx); // Shutdown
+
+        // One receiver uses borrow_and_update
+        let value_update = *rx1.borrow_and_update();
+
+        // Other receiver uses borrow
+        let value_borrow = *rx2.borrow();
+
+        crate::assert_with_log!(
+            value_update == value_borrow,
+            "borrow_and_update and borrow return same value after shutdown",
+            value_update,
+            value_borrow
+        );
+
+        // Both should see the same final value
+        crate::assert_with_log!(
+            value_update == 300 && value_borrow == 300,
+            "both see final sent value",
+            300u32,
+            (value_update, value_borrow)
+        );
+
+        crate::test_complete!("mr_state_consistency_borrow_vs_borrow_and_update_after_shutdown");
+    }
 }

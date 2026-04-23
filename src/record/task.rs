@@ -279,6 +279,7 @@ impl TaskState {
 
 /// Internal record for a task in the runtime.
 #[derive(Debug)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
 pub struct TaskRecord {
     /// Unique identifier for this task.
     pub id: TaskId,
@@ -1744,6 +1745,252 @@ mod tests {
             )
         );
         crate::test_complete!("task_record_cancel_witness_snapshot_scrubs_ids");
+    }
+
+    /// Enhanced scrubbing function for TaskRecord snapshots that handles timing fields
+    fn scrub_task_record_state(value: Value) -> Value {
+        let mut scrubbed = scrub_task_record_ids(value);
+
+        // Scrub timing fields that vary between test runs
+        if let Some(created_instant) = scrubbed.pointer_mut("/created_instant") {
+            *created_instant = json!("[INSTANT]");
+        }
+
+        if let Some(timestamp) = scrubbed.pointer_mut("/reason/timestamp") {
+            *timestamp = json!("[TIMESTAMP]");
+        }
+
+        scrubbed
+    }
+
+    #[test]
+    fn task_record_lifecycle_states_snapshot() {
+        init_test("task_record_lifecycle_states_snapshot");
+
+        // Test each major lifecycle phase with golden snapshots
+        let task_id = TaskId::new_for_test(1, 0);
+        let region_id = RegionId::new_for_test(2, 0);
+        let budget = Budget::new().with_poll_quota(10);
+
+        // Phase 1: Created state
+        let record_created = TaskRecord::new(task_id, region_id, budget);
+        insta::assert_json_snapshot!(
+            "task_record_state_created",
+            scrub_task_record_state(
+                serde_json::to_value(&record_created).expect("serialize created")
+            )
+        );
+
+        // Phase 2: Running state
+        let mut record_running = TaskRecord::new(task_id, region_id, budget);
+        let started = record_running.start_running();
+        crate::assert_with_log!(started, "start_running", true, started);
+        insta::assert_json_snapshot!(
+            "task_record_state_running",
+            scrub_task_record_state(
+                serde_json::to_value(&record_running).expect("serialize running")
+            )
+        );
+
+        // Phase 3: CancelRequested state with timeout reason
+        let mut record_cancel_requested = TaskRecord::new(task_id, region_id, budget);
+        let requested = record_cancel_requested.request_cancel(
+            CancelReason::timeout()
+                .with_timestamp(Time::from_nanos(123456789))
+                .with_message("operation timeout")
+        );
+        crate::assert_with_log!(requested, "request_cancel", true, requested);
+        insta::assert_json_snapshot!(
+            "task_record_state_cancel_requested",
+            scrub_task_record_state(
+                serde_json::to_value(&record_cancel_requested).expect("serialize cancel_requested")
+            )
+        );
+
+        // Phase 4: Cancelling state
+        let mut record_cancelling = TaskRecord::new(task_id, region_id, budget);
+        let _ = record_cancelling.request_cancel(CancelReason::user("abort"));
+        let ack = record_cancelling.acknowledge_cancel();
+        crate::assert_with_log!(ack.is_some(), "acknowledge_cancel", true, ack.is_some());
+        insta::assert_json_snapshot!(
+            "task_record_state_cancelling",
+            scrub_task_record_state(
+                serde_json::to_value(&record_cancelling).expect("serialize cancelling")
+            )
+        );
+
+        // Phase 5: Finalizing state
+        let mut record_finalizing = TaskRecord::new(task_id, region_id, budget);
+        let _ = record_finalizing.request_cancel(CancelReason::shutdown());
+        let _ = record_finalizing.acknowledge_cancel();
+        let cleaned = record_finalizing.cleanup_done();
+        crate::assert_with_log!(cleaned, "cleanup_done", true, cleaned);
+        insta::assert_json_snapshot!(
+            "task_record_state_finalizing",
+            scrub_task_record_state(
+                serde_json::to_value(&record_finalizing).expect("serialize finalizing")
+            )
+        );
+
+        // Phase 6: Completed(Ok) state
+        let mut record_completed_ok = TaskRecord::new(task_id, region_id, budget);
+        let completed = record_completed_ok.complete(Outcome::Ok(()));
+        crate::assert_with_log!(completed, "complete ok", true, completed);
+        insta::assert_json_snapshot!(
+            "task_record_state_completed_ok",
+            scrub_task_record_state(
+                serde_json::to_value(&record_completed_ok).expect("serialize completed_ok")
+            )
+        );
+
+        // Phase 7: Completed(Err) state
+        let mut record_completed_err = TaskRecord::new(task_id, region_id, budget);
+        let err = Error::new(ErrorKind::User);
+        let completed = record_completed_err.complete(Outcome::Err(err));
+        crate::assert_with_log!(completed, "complete err", true, completed);
+        insta::assert_json_snapshot!(
+            "task_record_state_completed_err",
+            scrub_task_record_state(
+                serde_json::to_value(&record_completed_err).expect("serialize completed_err")
+            )
+        );
+
+        // Phase 8: Completed(Cancelled) state through full protocol
+        let mut record_completed_cancelled = TaskRecord::new(task_id, region_id, budget);
+        let _ = record_completed_cancelled.request_cancel(CancelReason::linked_exit()
+            .with_region(RegionId::new_for_test(5, 1))
+            .with_task(TaskId::new_for_test(7, 2)));
+        let _ = record_completed_cancelled.acknowledge_cancel();
+        let _ = record_completed_cancelled.cleanup_done();
+        let finalized = record_completed_cancelled.finalize_done();
+        crate::assert_with_log!(finalized, "finalize_done", true, finalized);
+        insta::assert_json_snapshot!(
+            "task_record_state_completed_cancelled",
+            scrub_task_record_state(
+                serde_json::to_value(&record_completed_cancelled).expect("serialize completed_cancelled")
+            )
+        );
+
+        crate::test_complete!("task_record_lifecycle_states_snapshot");
+    }
+
+    #[test]
+    fn task_record_cancel_reasons_snapshot() {
+        init_test("task_record_cancel_reasons_snapshot");
+
+        let task_id = TaskId::new_for_test(3, 1);
+        let region_id = RegionId::new_for_test(4, 1);
+        let budget = Budget::new().with_poll_quota(5);
+
+        // Test different cancel reason types
+        let cancel_reasons = vec![
+            CancelReason::timeout()
+                .with_timestamp(Time::from_nanos(100))
+                .with_message("request timeout"),
+            CancelReason::user("manual abort")
+                .with_timestamp(Time::from_nanos(200)),
+            CancelReason::shutdown()
+                .with_message("graceful shutdown"),
+            CancelReason::linked_exit()
+                .with_region(RegionId::new_for_test(10, 2))
+                .with_task(TaskId::new_for_test(20, 3))
+                .with_message("dependency failed"),
+        ];
+
+        for (i, reason) in cancel_reasons.into_iter().enumerate() {
+            let mut record = TaskRecord::new(task_id, region_id, budget);
+            let _ = record.request_cancel(reason);
+
+            let snapshot_name = format!("task_record_cancel_reason_{}", i);
+            insta::assert_json_snapshot!(
+                snapshot_name,
+                scrub_task_record_state(
+                    serde_json::to_value(&record).expect("serialize cancel reason")
+                )
+            );
+        }
+
+        crate::test_complete!("task_record_cancel_reasons_snapshot");
+    }
+
+    #[test]
+    fn task_record_budget_variants_snapshot() {
+        init_test("task_record_budget_variants_snapshot");
+
+        let task_id = TaskId::new_for_test(6, 1);
+        let region_id = RegionId::new_for_test(7, 1);
+
+        // Test different budget configurations
+        let budgets = vec![
+            Budget::INFINITE,
+            Budget::new().with_poll_quota(1),
+            Budget::new().with_poll_quota(100),
+            Budget::new().with_poll_quota(u32::MAX),
+        ];
+
+        for (i, budget) in budgets.into_iter().enumerate() {
+            let record = TaskRecord::new(task_id, region_id, budget);
+
+            let snapshot_name = format!("task_record_budget_{}", i);
+            insta::assert_json_snapshot!(
+                snapshot_name,
+                scrub_task_record_state(
+                    serde_json::to_value(&record).expect("serialize budget")
+                )
+            );
+        }
+
+        crate::test_complete!("task_record_budget_variants_snapshot");
+    }
+
+    #[test]
+    fn task_record_transition_sequence_snapshot() {
+        init_test("task_record_transition_sequence_snapshot");
+
+        // Test complete transition sequence with snapshots at each step
+        let task_id = TaskId::new_for_test(9, 1);
+        let region_id = RegionId::new_for_test(11, 1);
+        let budget = Budget::new().with_poll_quota(25);
+
+        let mut record = TaskRecord::new(task_id, region_id, budget);
+
+        // Capture sequence: Created → Running → CancelRequested → Cancelling → Finalizing → Completed
+        let mut sequence = Vec::new();
+
+        // Step 1: Created
+        sequence.push(("created", serde_json::to_value(&record).expect("serialize")));
+
+        // Step 2: Running
+        let _ = record.start_running();
+        sequence.push(("running", serde_json::to_value(&record).expect("serialize")));
+
+        // Step 3: CancelRequested
+        let _ = record.request_cancel(CancelReason::shutdown().with_message("shutdown initiated"));
+        sequence.push(("cancel_requested", serde_json::to_value(&record).expect("serialize")));
+
+        // Step 4: Cancelling
+        let _ = record.acknowledge_cancel();
+        sequence.push(("cancelling", serde_json::to_value(&record).expect("serialize")));
+
+        // Step 5: Finalizing
+        let _ = record.cleanup_done();
+        sequence.push(("finalizing", serde_json::to_value(&record).expect("serialize")));
+
+        // Step 6: Completed
+        let _ = record.finalize_done();
+        sequence.push(("completed", serde_json::to_value(&record).expect("serialize")));
+
+        // Create snapshot for complete sequence
+        let scrubbed_sequence: Vec<_> = sequence.into_iter()
+            .map(|(phase, value)| (phase, scrub_task_record_state(value)))
+            .collect();
+
+        insta::assert_json_snapshot!(
+            "task_record_transition_sequence",
+            scrubbed_sequence
+        );
+
+        crate::test_complete!("task_record_transition_sequence_snapshot");
     }
 
     // =================================================================

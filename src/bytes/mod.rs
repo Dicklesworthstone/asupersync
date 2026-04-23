@@ -27,6 +27,12 @@ pub mod buf;
 mod bytes;
 mod bytes_mut;
 
+#[cfg(feature = "test-internals")]
+pub mod profiling;
+
+#[cfg(test)]
+mod allocation_hotpaths_test;
+
 pub use buf::{Buf, BufMut, Chain, Limit, Take};
 pub use bytes::{Bytes, BytesCursor};
 pub use bytes_mut::BytesMut;

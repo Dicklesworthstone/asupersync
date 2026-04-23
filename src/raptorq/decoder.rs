@@ -5111,6 +5111,292 @@ mod tests {
         assert!(governance.confidence_score <= 1000);
     }
 
+    // =========================================================================
+    // Golden Artifact Testing for Decode Transcripts
+    // =========================================================================
+
+    #[cfg(test)]
+    mod golden_transcript_tests {
+        use super::*;
+        use crate::raptorq::systematic::SystematicEncoder;
+        use crate::types::ObjectId;
+        use std::fs;
+        use std::path::Path;
+
+        /// Golden confidence matrix entry for decode transcripts
+        #[derive(Debug)]
+        struct TranscriptGolden {
+            deterministic: bool,
+            platform_dependent: bool,
+            volatility: u8, // 1-5 scale
+            strategy: &'static str,
+        }
+
+        impl TranscriptGolden {
+            const fn exact() -> Self {
+                Self {
+                    deterministic: true,
+                    platform_dependent: false,
+                    volatility: 1,
+                    strategy: "exact",
+                }
+            }
+
+            const fn scrubbed() -> Self {
+                Self {
+                    deterministic: false,
+                    platform_dependent: false,
+                    volatility: 2,
+                    strategy: "scrubbed",
+                }
+            }
+        }
+
+        /// Core golden comparison infrastructure for decode transcripts
+        fn assert_transcript_golden(test_name: &str, actual_proof: &DecodeProof, strategy: &TranscriptGolden) {
+            let golden_path = Path::new("tests/golden/raptorq_transcripts")
+                .join(format!("{test_name}.golden.json"));
+
+            // Prepare output based on strategy
+            let output = match strategy.strategy {
+                "exact" => serde_json::to_string_pretty(actual_proof).unwrap(),
+                "scrubbed" => {
+                    let scrubbed = scrub_decode_proof_for_golden(actual_proof);
+                    serde_json::to_string_pretty(&scrubbed).unwrap()
+                }
+                _ => panic!("Unknown golden strategy: {}", strategy.strategy),
+            };
+
+            // UPDATE MODE: overwrite golden with actual output
+            if std::env::var("UPDATE_GOLDENS").is_ok() {
+                fs::create_dir_all(golden_path.parent().unwrap()).unwrap();
+                fs::write(&golden_path, &output).unwrap();
+                eprintln!("[GOLDEN] Updated: {}", golden_path.display());
+                return;
+            }
+
+            // COMPARE MODE: diff actual vs golden
+            let expected = fs::read_to_string(&golden_path)
+                .unwrap_or_else(|_| panic!(
+                    "Golden file missing: {}\n\
+                     Run with UPDATE_GOLDENS=1 to create it\n\
+                     Then review and commit: git diff tests/golden/",
+                    golden_path.display()
+                ));
+
+            if output != expected {
+                // Write actual for easy diffing
+                let actual_path = golden_path.with_extension("actual.json");
+                fs::write(&actual_path, &output).unwrap();
+
+                panic!(
+                    "GOLDEN TRANSCRIPT MISMATCH: {test_name}\n\n\
+                     To update: UPDATE_GOLDENS=1 cargo test -- {test_name}\n\
+                     To review: diff {} {}",
+                    golden_path.display(),
+                    actual_path.display(),
+                );
+            }
+        }
+
+        /// Scrubber for non-deterministic values in decode transcripts
+        fn scrub_decode_proof_for_golden(proof: &DecodeProof) -> serde_json::Value {
+            use serde_json::json;
+
+            // Extract transcript-specific data with scrubbing
+            json!({
+                "version": proof.version,
+                "config": {
+                    "k": proof.config.k,
+                    "l": proof.config.l,
+                    "h": proof.config.h,
+                    "s": proof.config.s,
+                    "symbol_size": proof.config.symbol_size,
+                    "seed": "[SEED]", // Scrub non-deterministic seed
+                    "object_id": "[OBJECT_ID]", // Scrub object ID
+                    "sbn": proof.config.sbn,
+                },
+                "peeling_trace": {
+                    "solved": proof.peeling.solved,
+                    "solved_indices": proof.peeling.solved_indices,
+                    "truncated": proof.peeling.truncated,
+                },
+                "elimination_trace": {
+                    "strategy": format!("{:?}", proof.elimination.strategy),
+                    "inactivated": proof.elimination.inactivated,
+                    "inactive_cols": proof.elimination.inactive_cols,
+                    "inactive_cols_truncated": proof.elimination.inactive_cols_truncated,
+                    "pivots": proof.elimination.pivots,
+                    "pivot_events": proof.elimination.pivot_events,
+                    "pivot_events_truncated": proof.elimination.pivot_events_truncated,
+                    "row_ops": proof.elimination.row_ops,
+                    "strategy_transitions": proof.elimination.strategy_transitions,
+                    "strategy_transitions_truncated": proof.elimination.strategy_transitions_truncated,
+                },
+                "outcome": match &proof.outcome {
+                    crate::raptorq::proof::ProofOutcome::Success { symbols_recovered, .. } => {
+                        json!({
+                            "kind": "Success",
+                            "symbols_recovered": symbols_recovered,
+                            "source_payload_hash": "[HASH]", // Scrub hash for determinism
+                        })
+                    }
+                    crate::raptorq::proof::ProofOutcome::Failure { reason } => {
+                        json!({
+                            "kind": "Failure",
+                            "reason": format!("{:?}", reason), // Keep structure but scrub specifics
+                        })
+                    }
+                },
+                "received_summary": {
+                    "total": proof.received.total,
+                    "source_count": proof.received.source_count,
+                    "repair_count": proof.received.repair_count,
+                    "esi_multiset_hash": "[ESI_HASH]", // Scrub for determinism
+                    "esis_length": proof.received.esis.len(),
+                    "truncated": proof.received.truncated,
+                },
+                "content_hash": "[CONTENT_HASH]", // Scrub for determinism
+            })
+        }
+
+        /// Test successful decode transcript with systematic symbols only
+        #[test]
+        fn golden_transcript_systematic_success() {
+            let k = 6;
+            let symbol_size = 16;
+            let seed = 12345u64; // Fixed seed for determinism
+
+            let source = make_deterministic_source_data(k, symbol_size);
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+            // Use only systematic source symbols (should succeed via peeling)
+            let received = make_received_source(&decoder, &source);
+
+            let result = decoder
+                .decode_with_proof(&received, ObjectId::new_for_test(1000), 0)
+                .expect("systematic symbols should decode successfully");
+
+            // This should be deterministic enough for exact golden comparison
+            assert_transcript_golden(
+                "systematic_success",
+                &result.proof,
+                &TranscriptGolden::scrubbed()
+            );
+        }
+
+        /// Test decode transcript with peeling and elimination phases
+        #[test]
+        fn golden_transcript_mixed_peeling_elimination() {
+            let k = 8;
+            let symbol_size = 32;
+            let seed = 54321u64; // Fixed seed for determinism
+
+            let source = make_deterministic_source_data(k, symbol_size);
+            let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+            let l = decoder.params().l;
+
+            let mut received = decoder.constraint_symbols();
+            received.extend(make_received_source(&decoder, &source));
+
+            // Add selective repair symbols to force mixed peeling + elimination
+            for esi in (k as u32)..(k as u32 + 3) {
+                let (cols, coefs) = decoder.repair_equation(esi).unwrap();
+                let repair_data = encoder.repair_symbol(esi);
+                received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+            }
+
+            let result = decoder
+                .decode_with_proof(&received, ObjectId::new_for_test(2000), 0)
+                .expect("mixed scenario should decode successfully");
+
+            assert_transcript_golden(
+                "mixed_peeling_elimination",
+                &result.proof,
+                &TranscriptGolden::scrubbed()
+            );
+        }
+
+        /// Test decode transcript for insufficient symbols failure
+        #[test]
+        fn golden_transcript_insufficient_symbols_failure() {
+            let k = 10;
+            let symbol_size = 32;
+            let seed = 99999u64;
+
+            let source = make_deterministic_source_data(k, symbol_size);
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+            // Provide insufficient symbols (only 3 out of required K=10)
+            let received: Vec<_> = make_received_source(&decoder, &source)
+                .into_iter()
+                .take(3)
+                .collect();
+
+            let (_err, proof) = decoder
+                .decode_with_proof(&received, ObjectId::new_for_test(3000), 0)
+                .expect_err("insufficient symbols should fail");
+
+            assert_transcript_golden(
+                "insufficient_symbols_failure",
+                &proof,
+                &TranscriptGolden::scrubbed()
+            );
+        }
+
+        /// Test decode transcript with strategy transitions
+        #[test]
+        fn golden_transcript_strategy_transitions() {
+            let k = 12;
+            let symbol_size = 64;
+            let seed = 777u64; // Chosen to trigger strategy transitions
+
+            let source = make_deterministic_source_data(k, symbol_size);
+            let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+            let l = decoder.params().l;
+
+            let mut received = decoder.constraint_symbols();
+
+            // Add systematic sources except a few to force strategic pivoting
+            let partial_source: Vec<_> = make_received_source(&decoder, &source)
+                .into_iter()
+                .take(k - 2)
+                .collect();
+            received.extend(partial_source);
+
+            // Add many repair symbols to create complex elimination scenario
+            for esi in (k as u32)..(l as u32) {
+                let (cols, coefs) = decoder.repair_equation(esi).unwrap();
+                let repair_data = encoder.repair_symbol(esi);
+                received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+            }
+
+            let result = decoder
+                .decode_with_proof(&received, ObjectId::new_for_test(4000), 0)
+                .expect("strategy transition scenario should succeed");
+
+            assert_transcript_golden(
+                "strategy_transitions",
+                &result.proof,
+                &TranscriptGolden::scrubbed()
+            );
+        }
+
+        /// Helper to create deterministic source data for golden tests
+        fn make_deterministic_source_data(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
+            (0..k)
+                .map(|i| {
+                    // Use a deterministic, stable pattern
+                    (0..symbol_size)
+                        .map(|j| ((i * 73 + j * 31 + 17) % 256) as u8)
+                        .collect()
+                })
+                .collect()
+        }
+    }
+
     #[test]
     fn decoder_policy_budget_exhaustion_forces_conservative_baseline() {
         let n_rows = 65;

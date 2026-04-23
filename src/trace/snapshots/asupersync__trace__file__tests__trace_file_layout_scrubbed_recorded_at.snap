@@ -1,0 +1,49 @@
+---
+source: src/trace/file.rs
+expression: trace_file_layout_summary(path)
+---
+{
+  "compression_byte": 0,
+  "event_count": 6,
+  "events": [
+    {
+      "seed": 42,
+      "type": "RngSeed"
+    },
+    {
+      "at_tick": 0,
+      "task": 1,
+      "type": "TaskScheduled"
+    },
+    {
+      "from_nanos": 0,
+      "to_nanos": 1000000,
+      "type": "TimeAdvanced"
+    },
+    {
+      "task": 1,
+      "type": "TaskYielded"
+    },
+    {
+      "at_tick": 1,
+      "task": 1,
+      "type": "TaskScheduled"
+    },
+    {
+      "outcome": 0,
+      "task": 1,
+      "type": "TaskCompleted"
+    }
+  ],
+  "flags_hex": "0x0000",
+  "magic": "ASUPERTRACE",
+  "meta_len": 48,
+  "metadata": {
+    "config_hash": 18369548392226273982,
+    "description": "trace file layout snapshot",
+    "recorded_at": "[recorded_at]",
+    "seed": 42,
+    "version": 1
+  },
+  "version": 2
+}

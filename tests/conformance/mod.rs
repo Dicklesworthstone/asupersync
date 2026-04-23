@@ -35,6 +35,7 @@ pub mod postgres_logical_replication;
 // pub mod sqlite_prepared_statements;
 // pub mod websocket_rfc6455;
 pub mod broadcast;
+pub mod consistent_hash_ring;
 pub mod grpc_trailer_forwarding_rfc9113;
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub mod kqueue_bsd_events;

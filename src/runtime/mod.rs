@@ -135,6 +135,8 @@ pub mod obligation_table;
 pub mod panic_isolation;
 pub mod reactor;
 pub mod region_heap;
+#[cfg(test)]
+mod region_heap_metamorphic_tests;
 pub mod region_table;
 pub mod resource_monitor;
 pub mod scheduler;

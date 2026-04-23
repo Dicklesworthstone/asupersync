@@ -45,7 +45,7 @@ expression: canonical_trace_snapshot(&events)
           "secondary": 17179869184,
           "tertiary": 12884901888
         },
-        "data": "obligation=4 task=4 region=3 kind=send_permit state=Reserved duration_ns=none abort_reason=none"
+        "data": "obligation=17179869184 task=4 region=3 kind=send_permit state=Reserved duration_ns=none abort_reason=none"
       }
     ],
     [
@@ -87,7 +87,7 @@ expression: canonical_trace_snapshot(&events)
           "secondary": 17179869184,
           "tertiary": 12884901888
         },
-        "data": "obligation=4 task=4 region=3 kind=send_permit state=Aborted duration_ns=17 abort_reason=cancel"
+        "data": "obligation=17179869184 task=4 region=3 kind=send_permit state=Aborted duration_ns=17 abort_reason=cancel"
       }
     ],
     [

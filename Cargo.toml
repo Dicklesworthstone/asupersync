@@ -364,6 +364,10 @@ harness = false
 [[bench]]
 name = "fabric_bench"
 harness = false
+
+[[bench]]
+name = "bytes_allocation_profile"
+harness = false
 required-features = ["messaging-fabric", "test-internals"]
 
 [[bench]]
@@ -385,6 +389,13 @@ strip = "symbols"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+
+[profile.release-perf]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+debug = "line-tables-only"
+strip = false
 
 [lints.rust]
 # Default to deny for unsafe code - specific modules that require it can use #[allow(unsafe_code)]

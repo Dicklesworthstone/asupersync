@@ -12,6 +12,11 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::task::{Wake, Waker};
 
+#[cfg(feature = "waker-profiling")]
+mod waker_profiling;
+#[cfg(feature = "waker-profiling")]
+use waker_profiling::profile;
+
 /// Source attribution for wake events.
 ///
 /// Tracks what caused a task to be woken, enabling causality analysis
@@ -78,6 +83,9 @@ impl WakerState {
     #[inline]
     #[must_use]
     pub fn waker_for_source(self: &Arc<Self>, task: TaskId, source: WakeSource) -> Waker {
+        #[cfg(feature = "waker-profiling")]
+        profile!(waker_profiling::_profile_waker_allocation);
+
         Waker::from(Arc::new(TaskWaker {
             state: Arc::clone(self),
             task,
@@ -88,7 +96,12 @@ impl WakerState {
     /// Drains all woken tasks.
     #[inline]
     pub fn drain_woken(&self) -> Vec<TaskId> {
+        #[cfg(feature = "waker-profiling")]
+        profile!(waker_profiling::_profile_drain_operation);
+
         let mut drained: Vec<_> = {
+            #[cfg(feature = "waker-profiling")]
+            profile!(waker_profiling::_profile_lock_acquisition);
             let mut woken = self.woken.lock();
             woken.drain().collect()
         };
@@ -107,13 +120,22 @@ impl WakerState {
     #[allow(unused_variables)] // source used by trace! macro when tracing is enabled
     #[inline]
     fn wake(&self, task: TaskId, source: WakeSource) {
+        #[cfg(feature = "waker-profiling")]
+        profile!(waker_profiling::_profile_wake_operation);
+
+        #[cfg(feature = "waker-profiling")]
+        profile!(waker_profiling::_profile_lock_acquisition);
         let mut woken = self.woken.lock();
+
         if woken.insert(task) {
             trace!(
                 task_id = ?task,
                 wake_source = source.label(),
                 "task woken"
             );
+        } else {
+            #[cfg(feature = "waker-profiling")]
+            profile!(waker_profiling::_profile_dedup_hit);
         }
     }
 }

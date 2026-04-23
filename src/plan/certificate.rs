@@ -1999,4 +1999,379 @@ mod tests {
         let s3 = s;
         assert_eq!(s, s3);
     }
+
+    // -----------------------------------------------------------------------
+    // Comprehensive Golden Artifact Tests for latency_algebra certificate format
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn golden_certificate_join_associativity_render() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let inner = dag.join(vec![a, b]);
+        let outer = dag.join(vec![inner, c]);
+        dag.set_root(outer);
+
+        let before_dag = dag.clone();
+        let (_, cert) = dag.apply_rewrites_certified(
+            RewritePolicy::assume_all(),
+            &[RewriteRule::JoinAssoc],
+        );
+
+        let ledger = cert.explain(&before_dag, &dag);
+        insta::assert_snapshot!("plan_certificate_join_associativity_render", ledger.render());
+    }
+
+    #[test]
+    fn golden_certificate_race_associativity_render() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let inner = dag.race(vec![a, b]);
+        let outer = dag.race(vec![inner, c]);
+        dag.set_root(outer);
+
+        let before_dag = dag.clone();
+        let (_, cert) = dag.apply_rewrites_certified(
+            RewritePolicy::assume_all(),
+            &[RewriteRule::RaceAssoc],
+        );
+
+        let ledger = cert.explain(&before_dag, &dag);
+        insta::assert_snapshot!("plan_certificate_race_associativity_render", ledger.render());
+    }
+
+    #[test]
+    fn golden_certificate_timeout_minimization_render() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let inner_timeout = dag.timeout(a, Duration::from_millis(200));
+        let outer_timeout = dag.timeout(inner_timeout, Duration::from_millis(100));
+        dag.set_root(outer_timeout);
+
+        let before_dag = dag.clone();
+        let (_, cert) = dag.apply_rewrites_certified(
+            RewritePolicy::assume_all(),
+            &[RewriteRule::TimeoutMin],
+        );
+
+        let ledger = cert.explain(&before_dag, &dag);
+        insta::assert_snapshot!("plan_certificate_timeout_minimization_render", ledger.render());
+    }
+
+    #[test]
+    fn golden_certificate_join_commutativity_render() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("fast");
+        let b = dag.leaf("slow");
+        let join = dag.join(vec![a, b]);
+        dag.set_root(join);
+
+        let before_dag = dag.clone();
+        let (_, cert) = dag.apply_rewrites_certified(
+            RewritePolicy::assume_all(),
+            &[RewriteRule::JoinCommute],
+        );
+
+        if !cert.is_identity() {
+            let ledger = cert.explain(&before_dag, &dag);
+            insta::assert_snapshot!("plan_certificate_join_commutativity_render", ledger.render());
+        }
+    }
+
+    #[test]
+    fn golden_certificate_race_commutativity_render() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("option_a");
+        let b = dag.leaf("option_b");
+        let race = dag.race(vec![a, b]);
+        dag.set_root(race);
+
+        let before_dag = dag.clone();
+        let (_, cert) = dag.apply_rewrites_certified(
+            RewritePolicy::assume_all(),
+            &[RewriteRule::RaceCommute],
+        );
+
+        if !cert.is_identity() {
+            let ledger = cert.explain(&before_dag, &dag);
+            insta::assert_snapshot!("plan_certificate_race_commutativity_render", ledger.render());
+        }
+    }
+
+    #[test]
+    fn golden_certificate_compact_format_variations() {
+        init_test();
+
+        // Identity certificate (no rewrites)
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("isolated");
+        dag.set_root(a);
+
+        let (_, identity_cert) = dag.apply_rewrites_certified(
+            RewritePolicy::conservative(),
+            &[RewriteRule::DedupRaceJoin],
+        );
+
+        let identity_compact = identity_cert.compact().unwrap();
+        insta::assert_debug_snapshot!("plan_certificate_identity_compact", identity_compact);
+
+        // Multi-step certificate
+        let mut complex_dag = PlanDag::new();
+        let shared = complex_dag.leaf("shared");
+        let left = complex_dag.leaf("left");
+        let right = complex_dag.leaf("right");
+        let extra = complex_dag.leaf("extra");
+
+        let join_a = complex_dag.join(vec![shared, left]);
+        let join_b = complex_dag.join(vec![shared, right]);
+        let inner_race = complex_dag.race(vec![join_a, join_b]);
+        let outer_join = complex_dag.join(vec![inner_race, extra]);
+        complex_dag.set_root(outer_join);
+
+        let (_, multi_cert) = complex_dag.apply_rewrites_certified(
+            RewritePolicy::assume_all(),
+            &[RewriteRule::DedupRaceJoin, RewriteRule::JoinAssoc],
+        );
+
+        if !multi_cert.steps.is_empty() {
+            let multi_compact = multi_cert.compact().unwrap();
+            insta::assert_debug_snapshot!("plan_certificate_multi_step_compact", multi_compact);
+        }
+    }
+
+    #[test]
+    fn golden_certificate_fingerprints() {
+        init_test();
+
+        // Different certificates should have different fingerprints
+        let mut dag1 = PlanDag::new();
+        let a = dag1.leaf("a");
+        let b = dag1.leaf("b");
+        let join1 = dag1.join(vec![a, b]);
+        dag1.set_root(join1);
+
+        let mut dag2 = PlanDag::new();
+        let x = dag2.leaf("x");
+        let y = dag2.leaf("y");
+        let race2 = dag2.race(vec![x, y]);
+        dag2.set_root(race2);
+
+        let (_, cert1) = dag1.apply_rewrites_certified(
+            RewritePolicy::conservative(),
+            &[RewriteRule::JoinAssoc],
+        );
+
+        let (_, cert2) = dag2.apply_rewrites_certified(
+            RewritePolicy::conservative(),
+            &[RewriteRule::RaceAssoc],
+        );
+
+        let fingerprint1 = cert1.fingerprint();
+        let fingerprint2 = cert2.fingerprint();
+
+        // Capture fingerprints as stable golden artifacts
+        insta::assert_snapshot!(
+            "plan_certificate_join_fingerprint",
+            format!("{fingerprint1:#018x}")
+        );
+
+        insta::assert_snapshot!(
+            "plan_certificate_race_fingerprint",
+            format!("{fingerprint2:#018x}")
+        );
+
+        assert_ne!(fingerprint1, fingerprint2, "Different certificates should have different fingerprints");
+    }
+
+    #[test]
+    fn golden_certificate_policy_variations() {
+        init_test();
+
+        let mut dag = PlanDag::new();
+        let shared = dag.leaf("shared");
+        let left = dag.leaf("left");
+        let right = dag.leaf("right");
+        let join_a = dag.join(vec![shared, left]);
+        let join_b = dag.join(vec![shared, right]);
+        let race = dag.race(vec![join_a, join_b]);
+        dag.set_root(race);
+
+        // Conservative policy
+        let before_dag = dag.clone();
+        let mut conservative_dag = dag.clone();
+        let (_, conservative_cert) = conservative_dag.apply_rewrites_certified(
+            RewritePolicy::conservative(),
+            &[RewriteRule::DedupRaceJoin],
+        );
+
+        let conservative_ledger = conservative_cert.explain(&before_dag, &conservative_dag);
+        insta::assert_snapshot!(
+            "plan_certificate_conservative_policy_render",
+            conservative_ledger.render()
+        );
+
+        // Permissive policy
+        let mut permissive_dag = dag.clone();
+        let (_, permissive_cert) = permissive_dag.apply_rewrites_certified(
+            RewritePolicy::assume_all(),
+            &[RewriteRule::DedupRaceJoin],
+        );
+
+        let permissive_ledger = permissive_cert.explain(&before_dag, &permissive_dag);
+        insta::assert_snapshot!(
+            "plan_certificate_permissive_policy_render",
+            permissive_ledger.render()
+        );
+    }
+
+    #[test]
+    fn golden_certificate_minimization_effects() {
+        init_test();
+
+        // Create certificate with redundant steps
+        let hash = PlanHash(0xDEADBEEF);
+        let cert_with_redundancy = RewriteCertificate {
+            version: CertificateVersion::CURRENT,
+            policy: RewritePolicy::conservative(),
+            before_hash: hash,
+            after_hash: hash,
+            before_node_count: 4,
+            after_node_count: 4,
+            steps: vec![
+                CertifiedStep {
+                    rule: RewriteRule::JoinCommute,
+                    before: PlanId::new(0),
+                    after: PlanId::new(1),
+                    detail: "commute forward".to_string(),
+                },
+                CertifiedStep {
+                    rule: RewriteRule::JoinAssoc,
+                    before: PlanId::new(2),
+                    after: PlanId::new(2), // no-op
+                    detail: "no-op associativity".to_string(),
+                },
+                CertifiedStep {
+                    rule: RewriteRule::JoinCommute,
+                    before: PlanId::new(1),
+                    after: PlanId::new(0),
+                    detail: "commute back (inverse)".to_string(),
+                },
+                CertifiedStep {
+                    rule: RewriteRule::RaceAssoc,
+                    before: PlanId::new(3),
+                    after: PlanId::new(4),
+                    detail: "meaningful step".to_string(),
+                },
+            ],
+        };
+
+        let minimized = cert_with_redundancy.minimize();
+
+        // Capture before and after minimization
+        insta::assert_snapshot!(
+            "plan_certificate_before_minimization",
+            format!("steps: {}\nfingerprint: {:#018x}",
+                    cert_with_redundancy.steps.len(),
+                    cert_with_redundancy.fingerprint())
+        );
+
+        insta::assert_snapshot!(
+            "plan_certificate_after_minimization",
+            format!("steps: {}\nfingerprint: {:#018x}",
+                    minimized.steps.len(),
+                    minimized.fingerprint())
+        );
+    }
+
+    #[test]
+    fn golden_certificate_dag_cost_snapshots() {
+        init_test();
+
+        // Complex DAG with all node types
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("service_a");
+        let b = dag.leaf("service_b");
+        let c = dag.leaf("service_c");
+
+        let timeout_a = dag.timeout(a, Duration::from_millis(500));
+        let join_ab = dag.join(vec![timeout_a, b]);
+        let race_abc = dag.race(vec![join_ab, c]);
+        let timeout_root = dag.timeout(race_abc, Duration::from_secs(2));
+        dag.set_root(timeout_root);
+
+        let snapshot = DagCostSnapshot::of(&dag);
+
+        insta::assert_snapshot!(
+            "plan_certificate_dag_cost_snapshot",
+            format!(
+                "node_count: {}\njoins: {}\nraces: {}\ntimeouts: {}\ndepth: {}",
+                snapshot.node_count,
+                snapshot.joins,
+                snapshot.races,
+                snapshot.timeouts,
+                snapshot.depth
+            )
+        );
+    }
+
+    #[test]
+    fn golden_certificate_plan_hash_stability() {
+        init_test();
+
+        // Create several DAGs and capture their stable hashes
+        let test_cases = [
+            ("single_leaf", vec![("a", None)]),
+            ("simple_join", vec![("a", None), ("b", None), ("join_ab", Some("join"))]),
+            ("simple_race", vec![("x", None), ("y", None), ("race_xy", Some("race"))]),
+            ("nested_timeout", vec![("task", None), ("timeout_inner", Some("timeout")), ("timeout_outer", Some("timeout"))]),
+        ];
+
+        let mut hash_outputs = Vec::new();
+
+        for (name, nodes) in test_cases {
+            let mut dag = PlanDag::new();
+            let mut node_ids = Vec::new();
+
+            for (label, node_type) in nodes {
+                let id = match node_type {
+                    None => dag.leaf(label),
+                    Some("join") => {
+                        assert!(node_ids.len() >= 2, "Need at least 2 nodes for join");
+                        dag.join(node_ids.clone())
+                    }
+                    Some("race") => {
+                        assert!(node_ids.len() >= 2, "Need at least 2 nodes for race");
+                        dag.race(node_ids.clone())
+                    }
+                    Some("timeout") => {
+                        assert!(!node_ids.is_empty(), "Need a child for timeout");
+                        dag.timeout(node_ids[node_ids.len() - 1], Duration::from_millis(100))
+                    }
+                    _ => panic!("Unknown node type"),
+                };
+                node_ids.push(id);
+            }
+
+            if !node_ids.is_empty() {
+                dag.set_root(node_ids[node_ids.len() - 1]);
+            }
+
+            let hash = PlanHash::of(&dag);
+            hash_outputs.push(format!("{}: {:#018x}", name, hash.value()));
+        }
+
+        insta::assert_snapshot!(
+            "plan_certificate_hash_stability",
+            hash_outputs.join("\n")
+        );
+    }
 }

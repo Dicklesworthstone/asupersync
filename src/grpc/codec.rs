@@ -857,6 +857,48 @@ mod tests {
 
     #[test]
     #[cfg(feature = "compression")]
+    fn test_compression_bypass_vulnerability() {
+        init_test("test_compression_bypass_vulnerability");
+
+        // This test demonstrates the compression bypass vulnerability described in br-asupersync-trmye2.
+        // A large, highly compressible message can bypass size limits when compression is applied
+        // after size validation rather than before.
+
+        // Create a large, highly compressible payload (1000 zero bytes)
+        let large_payload = vec![0u8; 1000];
+        let large_bytes = Bytes::from(large_payload);
+
+        // Set a small message size limit (100 bytes)
+        let max_size = 100;
+        let mut codec = FramedCodec::with_message_size_limits(IdentityCodec, max_size, max_size)
+            .with_gzip_frame_codec();
+
+        let mut encode_buf = BytesMut::new();
+
+        // This should fail if size limits are applied correctly to uncompressed data
+        let encode_result = codec.encode_message(&large_bytes, &mut encode_buf);
+
+        match encode_result {
+            Ok(()) => {
+                // If encoding succeeded, the vulnerability exists!
+                // The large message was compressed and passed the size check
+                panic!("VULNERABILITY CONFIRMED: Large message ({} bytes) bypassed size limit ({} bytes) via compression",
+                       large_bytes.len(), max_size);
+            }
+            Err(GrpcError::MessageTooLarge) => {
+                // If encoding failed with MessageTooLarge, the size limits are working correctly
+                println!("Size limits working correctly - large message rejected");
+            }
+            Err(other) => {
+                panic!("Unexpected error during encode: {:?}", other);
+            }
+        }
+
+        crate::test_complete!("test_compression_bypass_vulnerability");
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
     fn test_gzip_frame_empty_input() {
         init_test("test_gzip_frame_empty_input");
         let compressed = gzip_frame_compress(b"").expect("compress empty must succeed");

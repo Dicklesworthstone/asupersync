@@ -3434,4 +3434,42 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn display_outputs_golden_artifacts() {
+        // Test all complex Display implementations for golden artifact stability
+
+        // ObligationSafety variants
+        insta::assert_snapshot!("obligation_safety_clean", format!("{}", ObligationSafety::Clean));
+        insta::assert_snapshot!("obligation_safety_may_leak", format!("{}", ObligationSafety::MayLeak));
+        insta::assert_snapshot!("obligation_safety_leaked", format!("{}", ObligationSafety::Leaked));
+        insta::assert_snapshot!("obligation_safety_unknown", format!("{}", ObligationSafety::Unknown));
+
+        // CancelSafety variants
+        insta::assert_snapshot!("cancel_safety_safe", format!("{}", CancelSafety::Safe));
+        insta::assert_snapshot!("cancel_safety_may_orphan", format!("{}", CancelSafety::MayOrphan));
+        insta::assert_snapshot!("cancel_safety_orphan", format!("{}", CancelSafety::Orphan));
+        insta::assert_snapshot!("cancel_safety_unknown", format!("{}", CancelSafety::Unknown));
+
+        // BudgetEffect variants
+        insta::assert_snapshot!("budget_effect_leaf", format!("{}", BudgetEffect::LEAF));
+        insta::assert_snapshot!("budget_effect_unknown", format!("{}", BudgetEffect::UNKNOWN));
+
+        let effect_with_deadline = BudgetEffect::LEAF.with_deadline(DeadlineMicros::from_micros(1500));
+        insta::assert_snapshot!("budget_effect_with_deadline", format!("{}", effect_with_deadline));
+
+        // ObligationFlow variants
+        let empty_flow = ObligationFlow::empty();
+        insta::assert_snapshot!("obligation_flow_empty", format!("{}", empty_flow));
+
+        let flow_with_obligation = ObligationFlow::leaf_with_obligation("test_obligation".to_string());
+        insta::assert_snapshot!("obligation_flow_with_obligation", format!("{}", flow_with_obligation));
+
+        // DeadlineMicros variants
+        insta::assert_snapshot!("deadline_micros_unbounded", format!("{}", DeadlineMicros::UNBOUNDED));
+        insta::assert_snapshot!("deadline_micros_zero", format!("{}", DeadlineMicros::ZERO));
+        insta::assert_snapshot!("deadline_micros_microseconds", format!("{}", DeadlineMicros::from_micros(500)));
+        insta::assert_snapshot!("deadline_micros_milliseconds", format!("{}", DeadlineMicros::from_micros(2500)));
+        insta::assert_snapshot!("deadline_micros_seconds", format!("{}", DeadlineMicros::from_micros(3000000)));
+    }
 }

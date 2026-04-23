@@ -2,11 +2,11 @@
   "state": {
     "openai": {
       "current_delay": 9000000000,
-      "consecutive_success": 1,
+      "consecutive_success": 2,
       "last_rate_limit": "0001-01-01T00:00:00Z",
       "cooldown_until": "0001-01-01T00:00:00Z",
       "total_rate_limits": 0,
-      "total_successes": 11
+      "total_successes": 12
     }
   }
 }

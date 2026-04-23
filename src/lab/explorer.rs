@@ -1263,16 +1263,21 @@ mod tests {
     use std::fs;
     use tempfile::NamedTempFile;
 
-    fn scrub_seed_fields(value: &mut JsonValue) {
+    /// Comprehensive scrubber for DPOR exploration transcript golden artifacts.
+    ///
+    /// Scrubs all non-deterministic fields that vary between runs while preserving
+    /// the structural integrity and meaningful patterns in exploration transcripts.
+    fn scrub_exploration_transcript(value: &mut JsonValue) {
         match value {
             JsonValue::Object(map) => {
                 for (key, entry) in map.iter_mut() {
                     match key.as_str() {
-                        "seed" => *entry = JsonValue::String("[seed]".to_string()),
+                        // Seeds and derived values
+                        "seed" => *entry = JsonValue::String("[SEED]".to_string()),
                         "violation_seeds" => {
                             if let JsonValue::Array(seeds) = entry {
                                 for seed in seeds {
-                                    *seed = JsonValue::String("[seed]".to_string());
+                                    *seed = JsonValue::String("[SEED]".to_string());
                                 }
                             }
                         }
@@ -1281,23 +1286,75 @@ mod tests {
                                 for pair in pairs {
                                     if let JsonValue::Array(seeds) = pair {
                                         for seed in seeds {
-                                            *seed = JsonValue::String("[seed]".to_string());
+                                            *seed = JsonValue::String("[SEED]".to_string());
                                         }
                                     }
                                 }
                             }
                         }
-                        _ => scrub_seed_fields(entry),
+
+                        // Hash values and fingerprints (deterministic but opaque)
+                        "fingerprint" => {
+                            if let JsonValue::Number(n) = entry {
+                                if n.as_u64().is_some() {
+                                    *entry = JsonValue::String("[FINGERPRINT]".to_string());
+                                }
+                            }
+                        }
+                        "certificate_hash" => {
+                            if let JsonValue::Number(n) = entry {
+                                if n.as_u64().is_some() {
+                                    *entry = JsonValue::String("[CERT_HASH]".to_string());
+                                }
+                            }
+                        }
+
+                        // Step counts (execution-dependent)
+                        "steps" => {
+                            if let JsonValue::Number(n) = entry {
+                                if n.as_u64().is_some() {
+                                    *entry = JsonValue::String("[STEPS]".to_string());
+                                }
+                            }
+                        }
+
+                        // Class run counts map (preserve structure, scrub keys)
+                        "class_run_counts" => {
+                            if let JsonValue::Object(counts) = entry {
+                                let scrubbed_counts: serde_json::Map<String, JsonValue> = counts
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, (_, v))| (format!("[FINGERPRINT_{}]", i), v.clone()))
+                                    .collect();
+                                *entry = JsonValue::Object(scrubbed_counts);
+                            }
+                        }
+
+                        // Topological scores with fingerprint scrubbing
+                        "score" => {
+                            if let JsonValue::Object(score_map) = entry {
+                                if let Some(fp) = score_map.get_mut("fingerprint") {
+                                    *fp = JsonValue::String("[FINGERPRINT]".to_string());
+                                }
+                            }
+                        }
+
+                        _ => scrub_exploration_transcript(entry),
                     }
                 }
             }
             JsonValue::Array(entries) => {
                 for entry in entries {
-                    scrub_seed_fields(entry);
+                    scrub_exploration_transcript(entry);
                 }
             }
             JsonValue::Null | JsonValue::Bool(_) | JsonValue::Number(_) | JsonValue::String(_) => {}
         }
+    }
+
+    /// Legacy scrubber for backward compatibility with existing tests.
+    fn scrub_seed_fields(value: &mut JsonValue) {
+        scrub_exploration_transcript(value);
     }
 
     fn scenario_discovery_report_v2() -> ExplorationReport {
@@ -1766,6 +1823,270 @@ mod tests {
             .expect("serialize scenario report");
         scrub_seed_fields(&mut value);
         assert_json_snapshot!("scenario_discovery_output_v2_scrubbed", value);
+    }
+
+    // ── Golden Artifact Tests for DPOR Exploration Transcripts ──────────────
+
+    #[test]
+    fn golden_schedule_explorer_single_task_transcript() {
+        let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(42, 5));
+        let report = explorer.explore(|runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (task_id, _handle) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async { 42 })
+                .expect("create task");
+            runtime.scheduler.lock().schedule(task_id, 0);
+            runtime.run_until_quiescent();
+        });
+
+        let mut transcript = serde_json::to_value(report.to_json_summary())
+            .expect("serialize exploration report");
+        scrub_exploration_transcript(&mut transcript);
+        assert_json_snapshot!("schedule_explorer_single_task_transcript", transcript);
+    }
+
+    #[test]
+    fn golden_schedule_explorer_concurrent_tasks_transcript() {
+        let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(0, 10).worker_count(2));
+        let report = explorer.explore(|runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (t1, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async { 1 })
+                .expect("t1");
+            let (t2, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async { 2 })
+                .expect("t2");
+            {
+                let mut sched = runtime.scheduler.lock();
+                sched.schedule(t1, 0);
+                sched.schedule(t2, 0);
+            }
+            runtime.run_until_quiescent();
+        });
+
+        let mut transcript = serde_json::to_value(report.to_json_summary())
+            .expect("serialize exploration report");
+        scrub_exploration_transcript(&mut transcript);
+        assert_json_snapshot!("schedule_explorer_concurrent_tasks_transcript", transcript);
+    }
+
+    #[test]
+    fn golden_dpor_explorer_basic_exploration_transcript() {
+        let mut explorer = DporExplorer::new(ExplorerConfig::new(0, 8));
+        let report = explorer.explore(|runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (t1, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("t1");
+            let (t2, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("t2");
+            {
+                let mut sched = runtime.scheduler.lock();
+                sched.schedule(t1, 0);
+                sched.schedule(t2, 0);
+            }
+            runtime.run_until_quiescent();
+        });
+
+        let mut transcript = serde_json::to_value(report.to_json_summary())
+            .expect("serialize dpor exploration report");
+        scrub_exploration_transcript(&mut transcript);
+        assert_json_snapshot!("dpor_explorer_basic_exploration_transcript", transcript);
+    }
+
+    #[test]
+    fn golden_dpor_coverage_metrics_transcript() {
+        let mut explorer = DporExplorer::new(ExplorerConfig::new(42, 5));
+        let _report = explorer.explore(|runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (t1, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("t1");
+            runtime.scheduler.lock().schedule(t1, 0);
+            runtime.run_until_quiescent();
+        });
+
+        let coverage = explorer.dpor_coverage();
+        let mut transcript = serde_json::to_value(&coverage)
+            .expect("serialize dpor coverage metrics");
+        scrub_exploration_transcript(&mut transcript);
+        assert_json_snapshot!("dpor_coverage_metrics_transcript", transcript);
+    }
+
+    #[test]
+    fn golden_topology_explorer_homology_scoring_transcript() {
+        // Create a scenario with triangle-like trace structure for homology
+        let mut explorer = TopologyExplorer::new(ExplorerConfig::new(7, 3));
+        let report = explorer.explore(|runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+
+            // Create three tasks that form a triangle dependency pattern
+            let (t1, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("t1");
+            let (t2, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("t2");
+            let (t3, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("t3");
+
+            {
+                let mut sched = runtime.scheduler.lock();
+                sched.schedule(t1, 0);
+                sched.schedule(t2, 0);
+                sched.schedule(t3, 0);
+            }
+            runtime.run_until_quiescent();
+        });
+
+        // Test the exploration report from topology-prioritized exploration
+        let mut transcript = serde_json::to_value(report.to_json_summary())
+            .expect("serialize topology exploration report");
+        scrub_exploration_transcript(&mut transcript);
+        assert_json_snapshot!("topology_explorer_homology_scoring_transcript", transcript);
+    }
+
+    #[test]
+    fn golden_exploration_report_with_violations_transcript() {
+        // Create a mock scenario with violations for golden testing
+        let mut violations = Vec::new();
+        violations.push(ViolationReport {
+            seed: 123,
+            steps: 45,
+            violations: vec![
+                InvariantViolation::TaskLeak { count: 2 },
+                InvariantViolation::ObligationLeak { leaks: Vec::new() },
+            ],
+            fingerprint: 9876,
+        });
+
+        let report = ExplorationReport {
+            total_runs: 10,
+            unique_classes: 5,
+            violations,
+            coverage: CoverageMetrics {
+                equivalence_classes: 5,
+                total_runs: 10,
+                new_class_discoveries: 5,
+                class_run_counts: BTreeMap::from([
+                    (1000_u64, 3_usize),
+                    (2000_u64, 2_usize),
+                    (3000_u64, 2_usize),
+                    (4000_u64, 2_usize),
+                    (5000_u64, 1_usize),
+                ]),
+                novelty_histogram: BTreeMap::from([
+                    (0_u32, 5_usize),
+                    (1_u32, 5_usize),
+                ]),
+                saturation: SaturationMetrics {
+                    window: 10,
+                    saturated: false,
+                    existing_class_hits: 5,
+                    runs_since_last_new_class: Some(2),
+                },
+            },
+            top_unexplored: vec![
+                UnexploredSeed {
+                    seed: 999,
+                    score: Some(TopologicalScore {
+                        novelty: 2,
+                        persistence_sum: 100,
+                        fingerprint: 5555,
+                    }),
+                },
+            ],
+            runs: vec![
+                RunResult {
+                    seed: 100,
+                    steps: 20,
+                    fingerprint: 1000,
+                    is_new_class: true,
+                    violations: Vec::new(),
+                    certificate_hash: 8000,
+                },
+                RunResult {
+                    seed: 123,
+                    steps: 45,
+                    fingerprint: 9876,
+                    is_new_class: true,
+                    violations: vec![
+                        InvariantViolation::TaskLeak { count: 2 },
+                        InvariantViolation::ObligationLeak { leaks: Vec::new() },
+                    ],
+                    certificate_hash: 8123,
+                },
+            ],
+        };
+
+        let mut transcript = serde_json::to_value(report.to_json_summary())
+            .expect("serialize violation report");
+        scrub_exploration_transcript(&mut transcript);
+        assert_json_snapshot!("exploration_report_with_violations_transcript", transcript);
+    }
+
+    #[test]
+    fn golden_saturation_metrics_detailed_transcript() {
+        // Create a scenario that tests saturation detection
+        let metrics = SaturationMetrics {
+            window: 10,
+            saturated: true,
+            existing_class_hits: 15,
+            runs_since_last_new_class: Some(8),
+        };
+
+        let mut transcript = serde_json::to_value(&metrics)
+            .expect("serialize saturation metrics");
+        scrub_exploration_transcript(&mut transcript);
+        assert_json_snapshot!("saturation_metrics_detailed_transcript", transcript);
+    }
+
+    #[test]
+    fn golden_coverage_trends_transcript() {
+        // Test coverage evolution over multiple runs
+        let coverage = CoverageMetrics {
+            equivalence_classes: 8,
+            total_runs: 25,
+            new_class_discoveries: 8,
+            class_run_counts: BTreeMap::from([
+                (100_u64, 5_usize),   // Frequent class
+                (200_u64, 4_usize),   // Common class
+                (300_u64, 3_usize),   // Less common
+                (400_u64, 3_usize),
+                (500_u64, 2_usize),
+                (600_u64, 2_usize),
+                (700_u64, 2_usize),
+                (800_u64, 1_usize),   // Rare classes
+                (900_u64, 1_usize),
+                (1000_u64, 2_usize),
+            ]),
+            novelty_histogram: BTreeMap::from([
+                (0_u32, 17_usize),    // Existing class hits
+                (1_u32, 8_usize),     // New class discoveries
+            ]),
+            saturation: SaturationMetrics {
+                window: 10,
+                saturated: true,
+                existing_class_hits: 17,
+                runs_since_last_new_class: Some(5),
+            },
+        };
+
+        let mut transcript = serde_json::to_value(&coverage)
+            .expect("serialize coverage metrics");
+        scrub_exploration_transcript(&mut transcript);
+        assert_json_snapshot!("coverage_trends_transcript", transcript);
     }
 
     #[test]

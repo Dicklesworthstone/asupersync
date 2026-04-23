@@ -13,7 +13,7 @@ Expected: [TaskScheduled] task=CompactTaskId(2) tick=1
 Actual:   [TaskScheduled] task=CompactTaskId(3) tick=1
 
 Explanation: Scheduler chose task CompactTaskId(3) at tick 1 instead of expected task CompactTaskId(2) at tick 1. The ready queue ordering diverged.
-Suggestion:  Check for non-deterministic task readiness (e.g., I/O completion order, timer resolution). Use a fixed seed and verify the scheduler configuration matches the recording.
+Suggestion:  Check for non-deterministic task readiness (e.g., I/O completion order, timer resolution). Use a fixed seed and verify the scheduler configuration matches the recording. Focus on task(s): [2, 3].
 
 Affected tasks:   [2, 3]
 

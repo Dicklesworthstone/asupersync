@@ -18,7 +18,7 @@ use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
 use crate::combinator::bracket;
 use crate::types::{Budget, CancelReason, RegionId, TaskId, Time};
-use futures::future;
+use futures_lite::future;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

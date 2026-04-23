@@ -14,6 +14,9 @@ pub mod transport;
 #[cfg(test)]
 pub mod transport_conformance_tests;
 
+#[cfg(test)]
+pub mod tls_conformance_harness;
+
 pub use connection::{NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError};
 pub use streams::{
     FlowControlError, FlowCredit, QuicStream, QuicStreamError, StreamDirection, StreamId,

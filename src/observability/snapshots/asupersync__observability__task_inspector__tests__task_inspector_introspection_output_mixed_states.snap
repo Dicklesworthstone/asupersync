@@ -3,8 +3,7 @@ source: src/observability/task_inspector.rs
 expression: scrubbed
 ---
 == Summary ==
-Task Summary
-----------------------------------------------------------------------
+Task Inspector
 Total: 5  |  Running: 2  |  Cancelling: 1  |  Completed: 1  |  Stuck: 1
 ----------------------------------------------------------------------
 By Region:
@@ -27,19 +26,31 @@ POTENTIAL STUCK TASKS:
     "stuck_count": 1,
     "by_region": [
       {
-        "region_id": "<region-root>",
+        "region_id": {
+          "index": 0,
+          "generation": 0
+        },
         "task_count": 2
       },
       {
-        "region_id": "<region-child>",
+        "region_id": {
+          "index": 1,
+          "generation": 0
+        },
         "task_count": 3
       }
     ]
   },
   "tasks": [
     {
-      "id": "<task-created>",
-      "region_id": "<region-root>",
+      "id": {
+        "index": 0,
+        "generation": 0
+      },
+      "region_id": {
+        "index": 0,
+        "generation": 0
+      },
       "state": "Created",
       "phase": "Created",
       "poll_count": 0,
@@ -52,8 +63,14 @@ POTENTIAL STUCK TASKS:
       "waiters": []
     },
     {
-      "id": "<task-running>",
-      "region_id": "<region-root>",
+      "id": {
+        "index": 1,
+        "generation": 0
+      },
+      "region_id": {
+        "index": 0,
+        "generation": 0
+      },
       "state": "Running",
       "phase": "Running",
       "poll_count": 2,
@@ -63,15 +80,27 @@ POTENTIAL STUCK TASKS:
       "time_since_last_poll_nanos": 10000000000,
       "wake_pending": true,
       "obligations": [
-        "<obligation-pending>"
+        {
+          "index": 0,
+          "generation": 0
+        }
       ],
       "waiters": [
-        "<task-waiter>"
+        {
+          "index": 4,
+          "generation": 0
+        }
       ]
     },
     {
-      "id": "<task-cancel-requested>",
-      "region_id": "<region-child>",
+      "id": {
+        "index": 2,
+        "generation": 0
+      },
+      "region_id": {
+        "index": 1,
+        "generation": 0
+      },
       "state": {
         "CancelRequested": {
           "reason": "Timeout"
@@ -88,8 +117,14 @@ POTENTIAL STUCK TASKS:
       "waiters": []
     },
     {
-      "id": "<task-completed>",
-      "region_id": "<region-child>",
+      "id": {
+        "index": 3,
+        "generation": 0
+      },
+      "region_id": {
+        "index": 1,
+        "generation": 0
+      },
       "state": {
         "Completed": {
           "outcome": "Ok"
@@ -106,8 +141,14 @@ POTENTIAL STUCK TASKS:
       "waiters": []
     },
     {
-      "id": "<task-waiter>",
-      "region_id": "<region-child>",
+      "id": {
+        "index": 4,
+        "generation": 0
+      },
+      "region_id": {
+        "index": 1,
+        "generation": 0
+      },
       "state": "Running",
       "phase": "Running",
       "poll_count": 1,

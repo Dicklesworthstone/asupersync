@@ -1546,4 +1546,312 @@ mod tests {
 
         crate::test_complete!("conformance_server_streaming_detailed_status");
     }
+
+    // =============================================================================
+    // GOLDEN ARTIFACT TESTS: gRPC Streaming Stable Output Verification
+    // =============================================================================
+
+    /// Universal golden assertion for this module.
+    fn assert_golden(test_name: &str, actual: &str) {
+        let golden_path = std::path::Path::new("tests/golden/grpc/streaming")
+            .join(format!("{test_name}.golden"));
+
+        // UPDATE MODE: overwrite golden with actual output
+        if std::env::var("UPDATE_GOLDENS").is_ok() {
+            std::fs::create_dir_all(golden_path.parent().unwrap()).unwrap();
+            std::fs::write(&golden_path, actual).unwrap();
+            eprintln!("[GOLDEN] Updated: {}", golden_path.display());
+            return;
+        }
+
+        // COMPARE MODE: diff actual vs golden
+        let expected = std::fs::read_to_string(&golden_path)
+            .unwrap_or_else(|_| panic!(
+                "Golden file missing: {}\n\
+                 Run with UPDATE_GOLDENS=1 to create it\n\
+                 Then review and commit: git diff tests/golden/",
+                golden_path.display()
+            ));
+
+        if actual != expected {
+            // Write actual for easy diffing
+            let actual_path = golden_path.with_extension("actual");
+            std::fs::write(&actual_path, actual).unwrap();
+            panic!(
+                "GOLDEN MISMATCH: {test_name}\n\
+                 Expected file: {}\n\
+                 Actual file:   {}\n\
+                 To update: UPDATE_GOLDENS=1 cargo test -- {test_name}\n\
+                 To diff: diff {} {}",
+                golden_path.display(),
+                actual_path.display(),
+                golden_path.display(),
+                actual_path.display(),
+            );
+        }
+    }
+
+    #[test]
+    fn golden_metadata_debug_formatting() {
+        init_test("golden_metadata_debug_formatting");
+
+        // Test various metadata configurations to ensure stable debug output
+        let mut outputs = Vec::new();
+
+        // Empty metadata
+        let empty_metadata = Metadata::new();
+        outputs.push(format!("=== Empty Metadata ===\n{empty_metadata:?}\n"));
+
+        // Single ASCII entry
+        let mut single_ascii = Metadata::new();
+        single_ascii.insert("content-type", "application/json");
+        outputs.push(format!("=== Single ASCII Entry ===\n{single_ascii:?}\n"));
+
+        // Multiple ASCII entries
+        let mut multi_ascii = Metadata::new();
+        multi_ascii.insert("authorization", "Bearer token123");
+        multi_ascii.insert("x-request-id", "req-456-789");
+        multi_ascii.insert("user-agent", "asupersync/1.0");
+        outputs.push(format!("=== Multiple ASCII Entries ===\n{multi_ascii:?}\n"));
+
+        // Binary entry
+        let mut binary_metadata = Metadata::new();
+        binary_metadata.insert_bin("trace-context", Bytes::from_static(b"\x01\x02\x03\x04"));
+        outputs.push(format!("=== Binary Entry ===\n{binary_metadata:?}\n"));
+
+        // Mixed ASCII and binary
+        let mut mixed_metadata = Metadata::new();
+        mixed_metadata.insert("content-type", "application/grpc");
+        mixed_metadata.insert_bin("custom-data", Bytes::from_static(b"\x00\xFF\x42"));
+        mixed_metadata.insert("grpc-timeout", "30s");
+        outputs.push(format!("=== Mixed ASCII and Binary ===\n{mixed_metadata:?}\n"));
+
+        let combined_output = outputs.join("\n");
+        assert_golden("metadata_debug_formatting", &combined_output);
+    }
+
+    #[test]
+    fn golden_metadata_value_debug_formatting() {
+        init_test("golden_metadata_value_debug_formatting");
+
+        let mut outputs = Vec::new();
+
+        // ASCII values
+        let ascii_simple = MetadataValue::Ascii("hello".to_string());
+        outputs.push(format!("ASCII Simple: {ascii_simple:?}"));
+
+        let ascii_complex = MetadataValue::Ascii("Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9".to_string());
+        outputs.push(format!("ASCII Complex: {ascii_complex:?}"));
+
+        let ascii_with_special = MetadataValue::Ascii("value with spaces and symbols!@#$%".to_string());
+        outputs.push(format!("ASCII Special Chars: {ascii_with_special:?}"));
+
+        // Binary values
+        let binary_empty = MetadataValue::Binary(Bytes::new());
+        outputs.push(format!("Binary Empty: {binary_empty:?}"));
+
+        let binary_simple = MetadataValue::Binary(Bytes::from_static(b"\x01\x02\x03"));
+        outputs.push(format!("Binary Simple: {binary_simple:?}"));
+
+        let binary_complex = MetadataValue::Binary(Bytes::from_static(b"\x00\xFF\x7F\x80\x42\x24"));
+        outputs.push(format!("Binary Complex: {binary_complex:?}"));
+
+        let combined_output = outputs.join("\n");
+        assert_golden("metadata_value_debug_formatting", &combined_output);
+    }
+
+    #[test]
+    fn golden_request_response_debug_formatting() {
+        init_test("golden_request_response_debug_formatting");
+
+        let mut outputs = Vec::new();
+
+        // Simple request
+        let simple_request = Request::new("hello world");
+        outputs.push(format!("=== Simple Request ===\n{simple_request:?}\n"));
+
+        // Request with metadata
+        let mut metadata = Metadata::new();
+        metadata.insert("authorization", "Bearer secret-token");
+        metadata.insert("x-trace-id", "trace-123-456");
+        let request_with_metadata = Request::with_metadata(42u32, metadata);
+        outputs.push(format!("=== Request with Metadata ===\n{request_with_metadata:?}\n"));
+
+        // Simple response
+        let simple_response = Response::new("response data");
+        outputs.push(format!("=== Simple Response ===\n{simple_response:?}\n"));
+
+        // Response with metadata
+        let mut resp_metadata = Metadata::new();
+        resp_metadata.insert("content-type", "application/grpc+proto");
+        resp_metadata.insert_bin("custom-bin", Bytes::from_static(b"\x01\x02"));
+        let response_with_metadata = Response::with_metadata(
+            vec!["item1", "item2", "item3"],
+            resp_metadata
+        );
+        outputs.push(format!("=== Response with Metadata ===\n{response_with_metadata:?}\n"));
+
+        let combined_output = outputs.join("\n");
+        assert_golden("request_response_debug_formatting", &combined_output);
+    }
+
+    #[test]
+    fn golden_metadata_key_normalization() {
+        init_test("golden_metadata_key_normalization");
+
+        let test_cases = vec![
+            // (input_key, binary_flag, description)
+            ("Content-Type", false, "ASCII uppercase"),
+            ("x-REQUEST-id", false, "ASCII mixed case"),
+            ("user_agent", false, "ASCII with underscore"),
+            ("trace.id", false, "ASCII with dot"),
+            ("CUSTOM-HEADER-123", false, "ASCII with numbers"),
+            ("Trace-Context", true, "Binary without -bin suffix"),
+            ("Custom-Data-BIN", true, "Binary with -BIN suffix"),
+            ("trace-context-bin", true, "Binary with correct suffix"),
+            ("", false, "Empty key"),
+            ("invalid key", false, "Key with space"),
+            ("invalid\rkeyyyy", false, "Key with control char"),
+            (":authority", false, "Pseudo header"),
+        ];
+
+        let mut outputs = Vec::new();
+
+        for (input_key, binary, description) in test_cases {
+            let result = normalize_metadata_key(input_key, binary);
+            outputs.push(format!(
+                "{}: \"{}\" (binary={}) -> {:?}",
+                description, input_key, binary, result
+            ));
+        }
+
+        let combined_output = outputs.join("\n");
+        assert_golden("metadata_key_normalization", &combined_output);
+    }
+
+    #[test]
+    fn golden_metadata_value_sanitization() {
+        init_test("golden_metadata_value_sanitization");
+
+        let test_cases = vec![
+            "normal-value",
+            "value with spaces",
+            "value\rwith\rcarriage\rreturns",
+            "value\nwith\nnewlines",
+            "value\r\nwith\r\nboth",
+            "value\r\n\r\nwith\r\n\r\nmultiple",
+            "",
+            "single\r",
+            "single\n",
+            "symbols!@#$%^&*()",
+            "unicode-αβγδε",
+        ];
+
+        let mut outputs = Vec::new();
+
+        for input_value in test_cases {
+            let sanitized = sanitize_metadata_ascii_value(input_value);
+            outputs.push(format!(
+                "Input:  {:?}\nOutput: {:?}\nSame:   {}\n",
+                input_value,
+                sanitized.as_ref(),
+                std::ptr::eq(input_value, sanitized.as_ref())
+            ));
+        }
+
+        let combined_output = outputs.join("\n");
+        assert_golden("metadata_value_sanitization", &combined_output);
+    }
+
+    #[test]
+    fn golden_streaming_request_state_snapshots() {
+        init_test("golden_streaming_request_state_snapshots");
+
+        let mut outputs = Vec::new();
+
+        // Empty stream
+        let empty_stream = StreamingRequest::<u32>::open();
+        outputs.push(format!("=== Empty Stream ===\n{empty_stream:?}\n"));
+
+        // Stream with items
+        let mut populated_stream = StreamingRequest::<String>::open();
+        populated_stream.push("item1".to_string()).unwrap();
+        populated_stream.push("item2".to_string()).unwrap();
+        outputs.push(format!("=== Populated Stream (2 items) ===\n{populated_stream:?}\n"));
+
+        // Stream with mixed success/error
+        let mut mixed_stream = StreamingRequest::<i32>::open();
+        mixed_stream.push(42).unwrap();
+        mixed_stream.push(84).unwrap();
+        outputs.push(format!("=== Mixed Stream ===\n{mixed_stream:?}\n"));
+
+        // Closed stream
+        let mut closed_stream = StreamingRequest::<bool>::open();
+        closed_stream.push(true).unwrap();
+        closed_stream.close();
+        outputs.push(format!("=== Closed Stream ===\n{closed_stream:?}\n"));
+
+        let combined_output = outputs.join("\n");
+        assert_golden("streaming_request_state_snapshots", &combined_output);
+    }
+
+    #[test]
+    fn golden_response_stream_state_snapshots() {
+        init_test("golden_response_stream_state_snapshots");
+
+        let mut outputs = Vec::new();
+
+        // Empty response stream
+        let empty_stream = ResponseStream::<f64>::open();
+        outputs.push(format!("=== Empty Response Stream ===\n{empty_stream:?}\n"));
+
+        // Response stream with successful results
+        let mut success_stream = ResponseStream::<String>::open();
+        success_stream.push(Ok("response1".to_string())).unwrap();
+        success_stream.push(Ok("response2".to_string())).unwrap();
+        outputs.push(format!("=== Success Response Stream ===\n{success_stream:?}\n"));
+
+        // Response stream with error
+        let mut error_stream = ResponseStream::<u32>::open();
+        error_stream.push(Ok(100)).unwrap();
+        error_stream.push(Err(Status::invalid_argument("bad input"))).unwrap();
+        outputs.push(format!("=== Error Response Stream ===\n{error_stream:?}\n"));
+
+        // Closed response stream
+        let mut closed_stream = ResponseStream::<char>::open();
+        closed_stream.push(Ok('A')).unwrap();
+        closed_stream.close();
+        outputs.push(format!("=== Closed Response Stream ===\n{closed_stream:?}\n"));
+
+        let combined_output = outputs.join("\n");
+        assert_golden("response_stream_state_snapshots", &combined_output);
+    }
+
+    #[test]
+    fn golden_streaming_types_debug_formatting() {
+        init_test("golden_streaming_types_debug_formatting");
+
+        let mut outputs = Vec::new();
+
+        // Server streaming
+        let server_streaming = ServerStreaming::<String, ResponseStream<String>>::new(
+            ResponseStream::open()
+        );
+        outputs.push(format!("=== Server Streaming ===\n{server_streaming:?}\n"));
+
+        // Client streaming
+        let client_streaming = ClientStreaming::<u32>::new();
+        outputs.push(format!("=== Client Streaming ===\n{client_streaming:?}\n"));
+
+        // Bidirectional streaming
+        let bidirectional = Bidirectional::<String, i32>::new();
+        outputs.push(format!("=== Bidirectional Streaming ===\n{bidirectional:?}\n"));
+
+        // Request sink
+        let request_sink = RequestSink::<bool>::new();
+        outputs.push(format!("=== Request Sink ===\n{request_sink:?}\n"));
+
+        let combined_output = outputs.join("\n");
+        assert_golden("streaming_types_debug_formatting", &combined_output);
+    }
 }

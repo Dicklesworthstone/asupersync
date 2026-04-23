@@ -3310,3 +3310,7 @@ pub mod span_semantics {
         Err("OpenTelemetry span semantics testing requires 'tracing-integration' feature".into())
     }
 }
+
+// Golden artifact tests for OTEL span serialization
+#[cfg(all(test, feature = "tracing-integration"))]
+mod otel_span_golden_tests;

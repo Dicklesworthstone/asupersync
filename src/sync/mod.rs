@@ -37,6 +37,8 @@ mod once_cell;
 #[cfg(test)]
 mod once_cell_metamorphic;
 mod pool;
+#[cfg(test)]
+mod pool_metamorphic_tests;
 mod rwlock;
 #[cfg(test)]
 mod rwlock_lost_wakeup_test;

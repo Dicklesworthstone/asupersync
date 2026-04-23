@@ -27,3 +27,6 @@ pub use raptorq::{EncodedSymbol, EncodingConfig, EncodingError, EncodingPipeline
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod bytes_codec_fuzz;

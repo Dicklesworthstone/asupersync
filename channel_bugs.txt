@@ -1,0 +1,511 @@
+ℹ Created filtered scan workspace at /tmp/tmp.Bj01mZRSy4/scan
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗              ║
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝              ║
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗                ║
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝                ║
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗              ║
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝              ║
+║                                                                              ║
+║  ██████╗ ██╗   ██╗ ██████╗         __       __                               ║
+║  ██╔══██╗██║   ██║██╔════╝         \ `-'"-'` /                               ║
+║  ██████╔╝██║   ██║██║  ███╗        / \_   _/ \                               ║
+║  ██╔══██╗██║   ██║██║   ██║        |  d\_/b  |                               ║
+║  ██████╔╝╚██████╔╝╚██████╔╝       .'\   V   /'.                              ║
+║  ╚═════╝  ╚═════╝  ╚═════╝        /   '-...-'   \                            ║
+║                                  | /         \ |                             ║
+║                                  \/\         /\/                             ║
+║                                  ==(||)---(||)==                             ║
+║                                                                              ║
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗              ║
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗             ║
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝             ║
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗             ║
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║             ║
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝                  ║
+║                                                                              ║
+║     JS / TS • PYTHON • C / C++ • RUST • GO • JAVA • RUBY • SWIFT             ║
+║                    UBS: ULTIMATE BUG SCANNER • SARIF FUSION ☄️               ║
+║                                                                              ║
+║                                                                              ║
+║                     Night Owl QA                                             ║
+║                     “We see bugs before you do.”                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+UBS Meta-Runner v5.0.7  2026-04-22 07:04:42
+Project: /data/projects/asupersync/src/channel
+Format:  text
+Detected: rust
+Scanning rust...
+Finished rust (9s)
+
+──────── rust ────────
+
+╔═══════════════════════════════════════════════════════════════════╗ 
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗   ║ 
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝   ║ 
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗     ║ 
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝     ║ 
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗   ║ 
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝   ║ 
+║                                            /\                     ║ 
+║  ██████╗ ██╗   ██╗ ██████╗                ( /   @ @    ()         ║ 
+║  ██╔══██╗██║   ██║██╔════╝                 \  __| |__  /          ║ 
+║  ██████╔╝██║   ██║██║  ███╗                 -/   "   \-           ║ 
+║  ██╔══██╗██║   ██║██║   ██║                /-|       |-\          ║ 
+║  ██████╔╝╚██████╔╝╚██████╔╝               / /-\     /-\ \         ║ 
+║  ╚═════╝  ╚═════╝  ╚═════╝                 / /-`---'-\\ \          ║ 
+║                                             /         \           ║ 
+║                                                                   ║ 
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗   ║ 
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗  ║ 
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝  ║ 
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗  ║ 
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║  ║ 
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝       ║ 
+║                                                                   ║ 
+║  Rust module • ownership sanity, unsafe & async spotlights        ║ 
+║  UBS module: rust • cargo-aware targeting, low-noise caching      ║ 
+║  ASCII homage: Ferris crab (ASCII Art Archive)                    ║ 
+║  Run standalone: modules/ubs-rust.sh --help                       ║ 
+║                                                                   ║ 
+║  Night Owl QA                                                     ║ 
+║  “We see bugs before you do.”                                     ║ 
+╚═══════════════════════════════════════════════════════════════════╝ 
+                                                                      
+
+Project:  /data/projects/asupersync/src/channel
+Started:  2026-04-22 07:04:42
+Files:    18 source files (rs)
+
+✓ ast-grep available (ast-grep) - full AST analysis enabled
+✓ cargo detected
+  ✓ clippy available
+  ✓ rustfmt available
+  ⚠ cargo-audit not installed
+  ⚠ cargo-deny not installed
+  ⚠ cargo-udeps not installed
+  ✓ cargo-outdated available
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OWNERSHIP & ERROR HANDLING MACROS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unwrap/expect, panic/unreachable/todo/unimplemented, dbg/println
+Panic-prone and debug macros frequently leak into production and cause crashes
+
+• unwrap()/expect() usage
+  ⚠ Warning (1885 found)
+    Potential panics via unwrap/expect
+    Prefer `?` or match to propagate/handle errors
+      /data/projects/asupersync/src/channel/fault.rs:752 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/fault.rs#L752)
+                  block_on(fault_tx.send(&cx, i)).expect("send failed");
+      /data/projects/asupersync/src/channel/fault.rs:757 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/fault.rs#L757)
+                  let val = rx.try_recv().expect("recv failed");
+      /data/projects/asupersync/src/channel/fault.rs:776 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/fault.rs#L776)
+              block_on(fault_tx.send(&cx, 42)).expect("send failed");
+      /data/projects/asupersync/src/channel/fault.rs:779 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/fault.rs#L779)
+              let v1 = rx.try_recv().expect("recv original");
+      /data/projects/asupersync/src/channel/fault.rs:780 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/fault.rs#L780)
+              let v2 = rx.try_recv().expect("recv duplicate");
+
+• panic!/unreachable!/todo!/unimplemented!
+  🔥 CRITICAL (22 found)
+    panic! macro(s) present
+    Avoid panic! in library code
+      /data/projects/asupersync/src/channel/partition.rs:516 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/partition.rs#L516)
+                      panic!("unexpected full channel while routing value {returned}")
+      /data/projects/asupersync/src/channel/partition.rs:519 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/partition.rs#L519)
+                      panic!("unexpected cancellation while routing value {returned}")
+      /data/projects/asupersync/src/channel/flow_control_monitor.rs:1186 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/flow_control_monitor.rs#L1186)
+                  _ => panic!("Expected ProducerStarvation violation"),
+      /data/projects/asupersync/src/channel/flow_control_monitor.rs:1224 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/flow_control_monitor.rs#L1224)
+                  _ => panic!("Expected PotentialDeadlock violation"),
+      /data/projects/asupersync/src/channel/flow_control_monitor.rs:1268 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/flow_control_monitor.rs#L1268)
+                  _ => panic!("Expected IndefiniteBlocking violation"),
+  ⚠ Warning (12 found)
+    unreachable! may panic if reached
+    Double-check logic
+
+• dbg!/println!/eprintln!
+  ℹ Info (52 found)
+    println! found - prefer logging
+  ℹ Info (11 found)
+    eprintln! found - prefer logging
+
+• Guard clauses that still unwrap later
+  ✓ OK No guard/unwrap mismatches detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. UNSAFE & MEMORY OPERATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unsafe blocks, transmute/uninitialized/zeroed/forget, raw ffi hazards
+These patterns may introduce UB, memory leaks, or hard-to-debug crashes
+
+• unsafe { ... } blocks
+  ✓ OK No unsafe blocks detected
+
+• transmute, uninitialized, zeroed, forget
+  ⚠ Warning (1 found)
+    mem::forget leaks memory
+              std::mem::forget(rx); // ubs:ignore - intentional memory leak for testing
+
+• CStr::from_bytes_with_nul_unchecked
+
+• get_unchecked / from_utf8_unchecked / from_raw_parts
+
+• Unsafe Send/Sync impls
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. CONCURRENCY & ASYNC PITFALLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: Arc<Mutex>, Rc<RefCell>, blocking ops in async, await-in-loop, spawn misuse
+Concurrency misuse leads to deadlocks, head-of-line blocking, and performance issues
+
+• Arc<Mutex<..>> / Rc<RefCell<..>> / RwLock
+  ℹ Info (4 found)
+    Arc<Mutex<..>> detected - verify contention
+  ℹ Info (1 found)
+    RwLock in use - verify read/write patterns
+
+• Mutex::lock().unwrap()/expect()
+  ⚠ Warning (22 found)
+    Poisoned lock handling via unwrap/expect
+      /data/projects/asupersync/src/channel/broadcast.rs:1217 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/broadcast.rs#L1217)
+                              sender_checkpoints.lock().unwrap().push(first);
+      /data/projects/asupersync/src/channel/broadcast.rs:1227 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/broadcast.rs#L1227)
+                              sender_checkpoints.lock().unwrap().push(second);
+      /data/projects/asupersync/src/channel/broadcast.rs:1241 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/broadcast.rs#L1241)
+                              rx1_checkpoints.lock().unwrap().push(first_event);
+      /data/projects/asupersync/src/channel/broadcast.rs:1249 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/broadcast.rs#L1249)
+                              rx1_checkpoints.lock().unwrap().push(second_event);
+      /data/projects/asupersync/src/channel/broadcast.rs:1265 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/broadcast.rs#L1265)
+                              rx2_checkpoints.lock().unwrap().push(first_event);
+
+• await inside loops (sequentialism)
+
+• Blocking ops inside async (thread::sleep, std::fs)
+  ⚠ Warning (2 found)
+    thread::sleep in async
+
+• block_on within async context
+
+• std::thread::spawn within async
+
+• tokio::spawn usage (heuristic for detached tasks)
+
+• Async error path coverage
+  ✓ OK No tokio::spawn usage detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. NUMERIC & FLOATING-POINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: float equality, division/modulo by variable, potential overflow hints
+Numeric bugs cause subtle logic errors or panics in debug builds (overflow)
+
+• Floating-point equality comparisons
+  ℹ Info (4 found)
+    Float equality/inequality check
+    Consider epsilon comparisons
+
+• Division/modulo by variable (verify non-zero)
+  ℹ Info (20 found)
+    Division by variables - guard zero divisors
+  ℹ Info (15 found)
+    Modulo by variables - guard zero divisors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. COLLECTIONS & ITERATORS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: clone in loops, collect then iterate, nth(0), length checks
+Iterator misuse often leads to unnecessary allocations or slow paths
+
+• clone() occurrences & clone() in loops
+  ℹ Info (336 found)
+    clone() usages - audit for necessity
+
+• collect::<Vec<_>>() then for
+  ℹ Info (4 found)
+    Collecting to Vec before iterate - consider streaming
+
+• nth(0) → next()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. STRING & ALLOCATION SMELLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: needless allocations, format!(literal), to_owned().to_string()
+Unnecessary allocations and conversions reduce performance
+
+• to_owned().to_string() chain
+
+• format!("literal") with no placeholders
+  ℹ Info (31 found)
+    format!(literal) allocates - use .to_string()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. FILESYSTEM & PROCESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: blocking std::fs in async, process::Command usage heuristics
+I/O misuse or command construction from untrusted input can be risky
+
+• std::fs usage (general inventory)
+
+• std::process::Command usage
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. SECURITY FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TLS verification disabled, weak hash algos, HTTP URLs, secrets
+Security misconfigurations can lead to credential leaks and MITM attacks
+
+• Weak hash algorithms (MD5/SHA1)
+  ✓ OK No MD5/SHA1 found
+
+• TLS verification disabled
+
+• Plain http:// URLs
+
+• Hardcoded secrets/credentials (heuristic)
+  🔥 CRITICAL (2 found)
+    Possible hardcoded secrets
+      /data/projects/asupersync/src/channel/broadcast.rs:481 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/broadcast.rs#L481)
+                      let token = inner.wakers.insert(current_waker.clone());
+      /data/projects/asupersync/src/channel/broadcast.rs:485 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/broadcast.rs#L485)
+                  let token = inner.wakers.insert(current_waker.clone());
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. CODE QUALITY MARKERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TODO, FIXME, HACK, NOTE
+Technical debt markers indicate incomplete or problematic code
+  ✓ OK No TODO/FIXME/HACK markers found
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. MODULE & VISIBILITY ISSUES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: pub use wildcards, glob imports, re-exports
+Overly broad visibility complicates API stability and encapsulation
+
+• Wildcard imports (use crate::* or ::*)
+  ℹ Info (24 found)
+    Wildcard imports found; prefer explicit names
+      /data/projects/asupersync/src/channel/fault.rs:671 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/fault.rs#L671)
+          use super::*;
+      /data/projects/asupersync/src/channel/clock_skew.rs:25 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/clock_skew.rs#L25)
+      //! use asupersync::channel::clock_skew::*;
+      /data/projects/asupersync/src/channel/clock_skew.rs:456 (https://github.com/Dicklesworthstone/asupersync/blob/865fa158cdd735e348eab8b3eb38cae0d4d664e8/clock_skew.rs#L456)
+          use super::*;
+
+• pub use re-exports (inventory)
+  ℹ Info (2 found)
+    pub use re-exports present - verify API surface
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. TESTS & BENCHES HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: ignored tests, todo! in tests, println!/dbg! in tests
+Ensure tests do not hide failures or produce noisy output
+
+• #[ignore] tests
+
+• todo!/unimplemented! in tests
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. LINTS & STYLE (fmt/clippy)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo fmt -- --check, cargo clippy
+Formatter and lints help maintain consistent style and catch many issues
+  ✓ OK Formatting is clean
+  ✓ OK No clippy warnings/errors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. BUILD HEALTH (check/test)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo check, cargo test --no-run
+Ensures the project compiles and tests build
+  ✓ OK cargo check clean
+  ✓ OK Tests build clean
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. DEPENDENCY HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo audit, cargo deny check, cargo udeps, cargo outdated
+Keeps dependencies safe, minimal, and up-to-date
+  ℹ Info (1 found)
+    cargo-audit not installed; skipping advisory scan
+  ℹ Info (1 found)
+    cargo-deny not installed; skipping policy checks
+  ℹ Info (1 found)
+    cargo-udeps not installed; skipping unused dep scan
+  ✓ OK Dependencies up-to-date
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. API MISUSE (COMMON)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: nth(0), DefaultHasher, expect_err/unwrap_err, Option::unwrap_or_default in hot paths
+Common footguns and readability hazards
+
+• std::collections::hash_map::DefaultHasher
+
+• unwrap_err()/expect_err() usage inventory
+  ℹ Info (5 found)
+    unwrap_err/expect_err present - ensure test-only or justified
+
+• Option::unwrap_or_default inventory
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16. DOMAIN-SPECIFIC HEURISTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: reqwest builder, SQL string concatenation (heuristic), serde_json::from_str without context
+Domain patterns that often hint at bugs
+
+• reqwest::ClientBuilder inventory
+
+• serde_json::from_str without error context (heuristic)
+
+• SQL string concatenation (heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+17. AST-GREP RULE PACK FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ℹ Info (0 found)
+    AST rule pack staged
+    Run with --format=sarif to emit SARIF from the rule pack
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+18. META STATISTICS & INVENTORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: crate counts, bin/lib targets, feature flags (Cargo.toml heuristic)
+High-level view of the project layout
+
+• Cargo.toml features (heuristic count)
+  ℹ Info (1 found)
+    No Cargo.toml at project root (workspace? set PROJECT_DIR accordingly)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+19. RESOURCE LIFECYCLE CORRELATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: std::thread::spawn without join, tokio::spawn without await, TcpStream without shutdown
+Rust relies on explicit joins/shutdowns even with RAII—leaks create zombie work
+
+• Resource lifecycle correlation
+  ✓ OK All tracked resource acquisitions have matching cleanups
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+20. ASYNC LOCKING ACROSS AWAIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: locks acquired in async fns and potentially held across await
+Holding locks across await can deadlock, starve tasks, and cause latency spikes; std::sync locks can block executor threads
+
+• std::sync lock usage inside async fn (blocking risk)
+  ✓ OK No obvious std::sync lock usage inside async fns
+
+• Potential std::sync guard held across await (heuristic)
+
+• Potential async lock guard held across await (tokio/async locks heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+21. PANIC SURFACES & UNWINDING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: assert macros, unreachable_unchecked/unwrap_unchecked, panic/unwrap inside Drop
+Panics in destructors or UB hints can crash/abort in subtle ways; these can slip past linting depending on cfg/features
+
+• assert!/assert_eq!/assert_ne! inventory
+  ⚠ Warning (522 found)
+    assert! macros present (panic surface)
+    If these are runtime invariants, consider explicit error handling; ensure not reachable by untrusted input
+
+• unreachable_unchecked / unwrap_unchecked
+
+• panic!/unwrap/expect inside Drop
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+22. SUSPICIOUS CASTS & TRUNCATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: pervasive `as` casts, try_into().unwrap, numeric narrowing patterns
+`as` casts can silently truncate or change sign; conversion panics may be missed in uncommon input paths
+
+• `as` cast inventory
+  ℹ Info (77 found)
+    `as` casts present (possible truncation/sign bugs)
+    Prefer TryFrom/TryInto for correctness or document invariants
+
+• try_into().unwrap()/expect() (panic on conversion failure)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+23. PARSING & VALIDATION ROBUSTNESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: parse/from_str/env-var unwraps, decode unwraps, missing error context
+Parsing and decoding failures often happen in prod on edge inputs; unwrap/expect turns them into panics
+
+• parse::<T>().unwrap()/expect()
+
+• serde_json::from_str(...).unwrap()/expect()
+
+• std::env::var(...).unwrap()/expect()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+24. PERF/DoS HOTSPOTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: regex compilation in loops, chars().nth(n), format!/allocations in loops
+Some perf pitfalls become DoS risks on large inputs or hot paths; these often evade linting in non-bench builds
+
+• Regex::new occurrences and in-loop compilation
+  ✓ OK No regex::Regex::new detected
+
+• chars().nth(n) (O(n))
+
+• format!/to_string/allocations inside loops (heuristic)
+
+═══════════════════════════════════════════════════════════════════════════
+                    🎯 SCAN COMPLETE 🎯                                  
+═══════════════════════════════════════════════════════════════════════════
+
+Summary Statistics:
+  Files scanned:    18
+  Critical issues:  24
+  Warning issues:   2444
+  Info items:       590
+
+Priority Actions:
+  🔥 FIX CRITICAL ISSUES IMMEDIATELY
+  These cause crashes, security vulnerabilities, or data corruption
+  ⚠ Review and fix WARNING items
+  These cause bugs, performance issues, or maintenance problems
+  ℹ Consider INFO suggestions
+  Code quality improvements and best practices
+
+Scan completed at: 2026-04-22 07:04:51
+
+Tip: Run with -v/--verbose for more code samples per finding.
+Add to CI: ./ubs --ci --fail-on-warning . > rust-bug-scan.txt
+
+
+──────── Combined Summary ────────
+Files: 18
+Critical: 24
+Warning: 2444
+Info: 590

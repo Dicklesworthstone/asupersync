@@ -68,15 +68,16 @@
 #![allow(unsafe_code)]
 
 use super::{Event, Events, Interest, Reactor, Source, Token};
+use hashbrown::hash_map::Entry;
+use hashbrown::HashMap;
 use libc::{F_GETFD, fcntl};
 use parking_lot::Mutex;
 use polling::{Event as PollEvent, Events as PollEvents, PollMode, Poller};
-use std::collections::HashMap;
 use std::collections::HashSet;
-use std::collections::hash_map::Entry;
 use std::io;
 use std::num::NonZeroUsize;
 use std::os::fd::BorrowedFd;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Registration state for a source.
@@ -139,6 +140,8 @@ pub struct EpollReactor {
     state: Mutex<ReactorState>,
     /// Reusable polling event buffer to avoid per-poll allocations.
     poll_events: Mutex<PollEvents>,
+    /// Fast registration count (avoids mutex for read-only queries).
+    registration_count: AtomicUsize,
 }
 
 const DEFAULT_POLL_EVENTS_CAPACITY: usize = 64;
@@ -168,6 +171,7 @@ impl EpollReactor {
             poll_events: Mutex::new(PollEvents::with_capacity(
                 NonZeroUsize::new(DEFAULT_POLL_EVENTS_CAPACITY).expect("non-zero capacity"),
             )),
+            registration_count: AtomicUsize::new(0),
         })
     }
 
@@ -339,6 +343,9 @@ impl Reactor for EpollReactor {
         state.orphaned.remove(&token);
         drop(state);
 
+        // Increment registration count after successful registration
+        self.registration_count.fetch_add(1, Ordering::Relaxed);
+
         Ok(())
     }
 
@@ -378,9 +385,10 @@ impl Reactor for EpollReactor {
         // clean stale bookkeeping so fd-number reuse does not get blocked indefinitely.
         // The entry is reused for both the success update and error removal, saving a
         // second HashMap lookup on the hot path.
-        let result = match self.poller.modify_with_mode(borrowed_fd, event, mode) {
+        match self.poller.modify_with_mode(borrowed_fd, event, mode) {
             Ok(()) => {
                 entry.into_mut().interest = interest;
+                drop(state);
                 Ok(())
             }
             Err(err) => match err.raw_os_error() {
@@ -388,6 +396,9 @@ impl Reactor for EpollReactor {
                     let info = entry.remove();
                     fds.remove(&info.raw_fd);
                     orphaned.insert(token);
+                    drop(state);
+                    // Decrement count after removing registration
+                    self.registration_count.fetch_sub(1, Ordering::Relaxed);
                     Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         "token not registered",
@@ -406,16 +417,20 @@ impl Reactor for EpollReactor {
                     // and surface the failure, even though there is nothing
                     // left to tear down.
                     orphaned.insert(token);
+                    drop(state);
+                    // Decrement count after removing registration
+                    self.registration_count.fetch_sub(1, Ordering::Relaxed);
                     Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         "token not registered",
                     ))
                 }
-                _ => Err(err),
+                _ => {
+                    drop(state);
+                    Err(err)
+                }
             },
-        };
-        drop(state);
-        result
+        }
     }
 
     fn deregister(&self, token: Token) -> io::Result<()> {
@@ -453,16 +468,24 @@ impl Reactor for EpollReactor {
             Ok(()) => {
                 if let Some(info) = state.tokens.remove(&token) {
                     state.fds.remove(&info.raw_fd);
+                    drop(state);
+                    // Decrement count only if we actually removed a registration
+                    self.registration_count.fetch_sub(1, Ordering::Relaxed);
+                } else {
+                    drop(state);
                 }
-                drop(state);
                 Ok(())
             }
             Err(err) => match err.raw_os_error() {
                 Some(libc::ENOENT) => {
                     if let Some(info) = state.tokens.remove(&token) {
                         state.fds.remove(&info.raw_fd);
+                        drop(state);
+                        // Decrement count only if we actually removed a registration
+                        self.registration_count.fetch_sub(1, Ordering::Relaxed);
+                    } else {
+                        drop(state);
                     }
-                    drop(state);
                     Ok(())
                 }
                 Some(libc::EBADF) if unsafe { fcntl(info.raw_fd, F_GETFD) } == -1 => {
@@ -471,8 +494,12 @@ impl Reactor for EpollReactor {
                     // Evaluated AFTER the delete attempt to prevent TOCTOU race.
                     if let Some(info) = state.tokens.remove(&token) {
                         state.fds.remove(&info.raw_fd);
+                        drop(state);
+                        // Decrement count only if we actually removed a registration
+                        self.registration_count.fetch_sub(1, Ordering::Relaxed);
+                    } else {
+                        drop(state);
                     }
-                    drop(state);
                     Ok(())
                 }
                 _ => {
@@ -526,13 +553,13 @@ impl Reactor for EpollReactor {
     }
 
     fn registration_count(&self) -> usize {
-        self.state.lock().tokens.len()
+        self.registration_count.load(Ordering::Relaxed)
     }
 }
 
 impl std::fmt::Debug for EpollReactor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let reg_count = self.state.lock().tokens.len();
+        let reg_count = self.registration_count.load(Ordering::Relaxed);
         f.debug_struct("EpollReactor")
             .field("registration_count", &reg_count)
             .finish_non_exhaustive()

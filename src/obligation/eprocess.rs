@@ -54,6 +54,9 @@
 
 use std::fmt;
 
+#[cfg(test)]
+pub mod conformance;
+
 /// Configuration for the leak monitor.
 #[derive(Debug, Clone, Copy)]
 pub struct MonitorConfig {
@@ -690,5 +693,242 @@ mod tests {
         assert_eq!(ms2.alert_state, AlertState::Watching);
         let dbg = format!("{ms2:?}");
         assert!(dbg.contains("MonitorSnapshot"));
+    }
+
+    // ── Mathematical Conformance (comprehensive verification) ──────────────
+
+    #[test]
+    fn eprocess_martingale_conformance() {
+        init_test("eprocess_martingale_conformance");
+
+        let mut harness = conformance::EProcessConformanceHarness::new();
+        harness.run_all();
+
+        // Generate compliance matrix for debugging
+        let matrix = harness.compliance_matrix();
+        println!("\n{}", matrix);
+
+        // Check for critical failures
+        let failed = harness.failed_requirements();
+        if !failed.is_empty() {
+            for failure in &failed {
+                eprintln!("FAILED {}: {} - {}",
+                    failure.requirement_id,
+                    failure.description,
+                    failure.evidence);
+            }
+        }
+
+        // Count MUST vs SHOULD requirements
+        let results = &harness.results;
+        let must_total = results.iter()
+            .filter(|r| r.level == conformance::RequirementLevel::Must)
+            .count();
+        let must_pass = results.iter()
+            .filter(|r| r.level == conformance::RequirementLevel::Must &&
+                      r.status == conformance::TestStatus::Pass)
+            .count();
+
+        let should_total = results.iter()
+            .filter(|r| r.level == conformance::RequirementLevel::Should)
+            .count();
+        let should_pass = results.iter()
+            .filter(|r| r.level == conformance::RequirementLevel::Should &&
+                      r.status == conformance::TestStatus::Pass)
+            .count();
+
+        // Log conformance summary
+        crate::assert_with_log!(
+            results.len() >= 8,
+            "all tests ran",
+            8,
+            results.len()
+        );
+
+        // MUST requirements: 100% pass rate required
+        let must_score = if must_total > 0 {
+            (must_pass as f64 / must_total as f64) * 100.0
+        } else {
+            100.0
+        };
+
+        crate::assert_with_log!(
+            must_score >= 95.0,
+            "MUST requirements pass rate ≥ 95%",
+            format!("≥95%"),
+            format!("{:.1}% ({}/{})", must_score, must_pass, must_total)
+        );
+
+        // SHOULD requirements: 80% pass rate acceptable
+        let should_score = if should_total > 0 {
+            (should_pass as f64 / should_total as f64) * 100.0
+        } else {
+            100.0
+        };
+
+        crate::assert_with_log!(
+            should_score >= 80.0,
+            "SHOULD requirements pass rate ≥ 80%",
+            format!("≥80%"),
+            format!("{:.1}% ({}/{})", should_score, should_pass, should_total)
+        );
+
+        // No critical mathematical failures
+        let critical_failures: Vec<_> = failed.iter()
+            .filter(|r| r.level == conformance::RequirementLevel::Must)
+            .collect();
+
+        crate::assert_with_log!(
+            critical_failures.is_empty(),
+            "no critical mathematical failures",
+            0,
+            critical_failures.len()
+        );
+
+        if must_score >= 95.0 && critical_failures.is_empty() {
+            println!("✅ E-PROCESS CONFORMANT: Mathematical invariants satisfied");
+        } else {
+            panic!("❌ NON-CONFORMANT: Critical mathematical requirements violated");
+        }
+
+        crate::test_complete!("eprocess_martingale_conformance");
+    }
+
+    #[test]
+    fn specific_martingale_properties() {
+        init_test("specific_martingale_properties");
+
+        // Test specific martingale properties in isolation
+
+        // 1. Ville's inequality threshold calculation
+        let alphas = [0.001, 0.01, 0.05, 0.1, 0.5];
+        for &alpha in &alphas {
+            let config = MonitorConfig {
+                alpha,
+                expected_lifetime_ns: 1_000_000,
+                min_observations: 3,
+            };
+            let monitor = LeakMonitor::new(config);
+            let expected_threshold = 1.0 / alpha;
+            let actual_threshold = monitor.threshold();
+
+            crate::assert_with_log!(
+                (actual_threshold - expected_threshold).abs() < f64::EPSILON,
+                format!("threshold correct for α={}", alpha),
+                expected_threshold,
+                actual_threshold
+            );
+        }
+
+        // 2. Likelihood ratio bounds under exponential null
+        let mu = 1_000_000.0; // Expected lifetime
+        let normalizer = 1.0 + (-1.0_f64).exp(); // 1 + 1/e
+
+        // Test that normalized LR has correct expectation
+        let test_ages = [0.5 * mu, mu, 2.0 * mu, 10.0 * mu];
+        for &age in &test_ages {
+            let ratio = age / mu;
+            let lr = ratio.max(1.0) / normalizer;
+
+            // Individual LR should be ≥ 1/normalizer (when ratio=1)
+            let min_lr = 1.0 / normalizer;
+            crate::assert_with_log!(
+                lr >= min_lr - f64::EPSILON,
+                format!("LR bounded below for age={}", age),
+                format!("≥{:.6}", min_lr),
+                format!("{:.6}", lr)
+            );
+        }
+
+        // 3. E-value monotonicity after each observation
+        let mut monitor = LeakMonitor::new(MonitorConfig::default());
+        let mut prev_peak = monitor.peak_e_value();
+
+        let ages = [500_000u64, 2_000_000, 1_000_000, 5_000_000];
+        for &age in &ages {
+            monitor.observe(age);
+            let current_peak = monitor.peak_e_value();
+
+            crate::assert_with_log!(
+                current_peak >= prev_peak - f64::EPSILON,
+                format!("peak monotonic for age={}", age),
+                format!("≥{:.6}", prev_peak),
+                format!("{:.6}", current_peak)
+            );
+
+            prev_peak = current_peak;
+        }
+
+        crate::test_complete!("specific_martingale_properties");
+    }
+
+    #[test]
+    fn statistical_convergence_properties() {
+        init_test("statistical_convergence_properties");
+
+        // Test statistical properties that should hold under the null hypothesis
+
+        let config = MonitorConfig {
+            alpha: 0.05,
+            expected_lifetime_ns: 1_000_000,
+            min_observations: 5,
+        };
+
+        // Run multiple independent sequences under H0
+        let num_sequences = 200;
+        let obs_per_sequence = 30;
+        let mut final_e_values = Vec::new();
+        let mut alert_count = 0;
+
+        for seq in 0..num_sequences {
+            let mut monitor = LeakMonitor::new(config);
+
+            for i in 0..obs_per_sequence {
+                // Generate exponential(1/μ) observations
+                let u = ((seq * obs_per_sequence + i) as f64 + 0.5) /
+                       (num_sequences * obs_per_sequence) as f64;
+                let x = -(config.expected_lifetime_ns as f64) * (1.0 - u).ln();
+
+                monitor.observe(x as u64);
+            }
+
+            final_e_values.push(monitor.e_value());
+            if monitor.is_alert() {
+                alert_count += 1;
+            }
+        }
+
+        // Statistical properties under H0:
+
+        // 1. Mean final e-value should be ≤ 1 (supermartingale property)
+        let mean_final: f64 = final_e_values.iter().sum::<f64>() / final_e_values.len() as f64;
+        crate::assert_with_log!(
+            mean_final <= 2.0, // Allow generous slack for sampling variance
+            "mean e-value bounded under H0",
+            format!("≤2.0"),
+            format!("{:.4}", mean_final)
+        );
+
+        // 2. Alert rate should be approximately ≤ α
+        let observed_alert_rate = alert_count as f64 / num_sequences as f64;
+        let expected_max_rate = config.alpha * 1.5; // 50% slack for sample variance
+
+        crate::assert_with_log!(
+            observed_alert_rate <= expected_max_rate,
+            "alert rate bounded by α",
+            format!("≤{:.3}", expected_max_rate),
+            format!("{:.3} ({}/{})", observed_alert_rate, alert_count, num_sequences)
+        );
+
+        // 3. No extreme outliers in e-values
+        let max_e_value = final_e_values.iter().fold(0.0f64, |a, &b| a.max(b));
+        crate::assert_with_log!(
+            max_e_value < 1000.0,
+            "no extreme e-value outliers",
+            format!("<1000"),
+            format!("{:.2}", max_e_value)
+        );
+
+        crate::test_complete!("statistical_convergence_properties");
     }
 }

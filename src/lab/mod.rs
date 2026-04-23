@@ -66,6 +66,7 @@ pub mod scenario;
 pub mod scenario_runner;
 pub mod snapshot_restore;
 pub mod spork_harness;
+pub mod util;
 pub mod virtual_time_wheel;
 
 pub use crate::util::{
@@ -165,5 +166,9 @@ pub use snapshot_restore::{
 pub use spork_harness::{
     HarnessError, ScenarioRunnerError, SporkAppHarness, SporkScenarioConfig, SporkScenarioResult,
     SporkScenarioRunner, SporkScenarioSpec,
+};
+pub use util::{
+    capture_stack_trace, capture_stack_trace_default, capture_stack_trace_depth,
+    capture_stack_trace_minimal, StackTraceConfig,
 };
 pub use virtual_time_wheel::{ExpiredTimer, VirtualTimerHandle, VirtualTimerWheel};

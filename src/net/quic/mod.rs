@@ -48,6 +48,9 @@ mod endpoint;
 mod error;
 mod stream;
 
+#[cfg(test)]
+pub mod conformance;
+
 pub use config::{ClientAuth, QuicConfig};
 pub use connection::QuicConnection;
 pub use endpoint::{QuicEndpoint, QuicIncoming};

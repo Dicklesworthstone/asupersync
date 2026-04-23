@@ -97,6 +97,10 @@ pub struct ConsumerConfig {
     pub fetch_max_wait: Duration,
     /// Isolation level for transactional reads.
     pub isolation_level: IsolationLevel,
+    /// Force real Kafka connection even in test mode.
+    /// When true, always use rdkafka broker connection.
+    /// When false (default), use StubBroker in test mode for deterministic testing.
+    pub force_real_kafka: bool,
 }
 
 impl Default for ConsumerConfig {
@@ -115,6 +119,7 @@ impl Default for ConsumerConfig {
             fetch_max_bytes: 50 * 1024 * 1024,
             fetch_max_wait: Duration::from_millis(500),
             isolation_level: IsolationLevel::ReadUncommitted,
+            force_real_kafka: false,
         }
     }
 }
@@ -204,6 +209,13 @@ impl ConsumerConfig {
     #[must_use]
     pub const fn isolation_level(mut self, level: IsolationLevel) -> Self {
         self.isolation_level = level;
+        self
+    }
+
+    /// Force real Kafka connection even in test mode.
+    #[must_use]
+    pub const fn force_real_kafka(mut self, force: bool) -> Self {
+        self.force_real_kafka = force;
         self
     }
 
@@ -557,14 +569,16 @@ impl KafkaConsumer {
     /// Create a new Kafka consumer.
     pub fn new(config: ConsumerConfig) -> Result<Self, KafkaError> {
         config.validate()?;
-        #[cfg(all(feature = "kafka", not(test)))]
-        let consumer = Some(
-            build_consumer_config(&config)
-                .create::<BaseConsumer>()
-                .map_err(map_consumer_error)?,
-        );
-        #[cfg(all(feature = "kafka", test))]
-        let consumer = None;
+        #[cfg(feature = "kafka")]
+        let consumer = if cfg!(not(test)) || config.force_real_kafka {
+            Some(
+                build_consumer_config(&config)
+                    .create::<BaseConsumer>()
+                    .map_err(map_consumer_error)?,
+            )
+        } else {
+            None
+        };
         #[cfg(feature = "kafka")]
         let consumer = consumer.map(Arc::new);
         #[cfg(feature = "kafka")]
@@ -890,11 +904,9 @@ impl KafkaConsumer {
             }
         }
 
-        #[cfg(all(feature = "kafka", not(test)))]
-        unreachable!("feature-enabled KafkaConsumer should always have a broker backend");
-
-        #[cfg(all(feature = "kafka", test))]
+        #[cfg(feature = "kafka")]
         {
+            // Fall back to stub behavior if we're in test mode and force_real_kafka is false
             if timeout.is_zero() {
                 return Ok(None);
             }

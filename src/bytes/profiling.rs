@@ -112,15 +112,6 @@ macro_rules! profile {
 
 pub(crate) use profile;
 
-// Re-export the profiling functions for use in sibling modules
-pub(crate) use {
-    _profile_bytes_allocation,
-    _profile_bytes_mut_allocation,
-    _profile_bytes_mut_growth,
-    _profile_split_to_copy,
-    _profile_freeze_operation,
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;

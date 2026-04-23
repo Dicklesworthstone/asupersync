@@ -81,7 +81,7 @@ expression: canonical_trace_snapshot(&events)
           "secondary": 38654705664,
           "tertiary": 38654705664
         },
-        "data": "obligation=7 task=9 region=9 kind=lease state=Reserved duration_ns=none abort_reason=none"
+        "data": "obligation=30064771072 task=9 region=9 kind=lease state=Reserved duration_ns=none abort_reason=none"
       }
     ],
     [
@@ -95,7 +95,7 @@ expression: canonical_trace_snapshot(&events)
           "secondary": 38654705664,
           "tertiary": 38654705664
         },
-        "data": "obligation=7 task=9 region=9 kind=lease state=Committed duration_ns=18446744073709551615 abort_reason=none"
+        "data": "obligation=30064771072 task=9 region=9 kind=lease state=Committed duration_ns=18446744073709551615 abort_reason=none"
       }
     ]
   ]

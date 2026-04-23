@@ -3,84 +3,84 @@ source: src/lab/explorer.rs
 expression: value
 ---
 {
-  "total_runs": 3,
-  "unique_classes": 2,
-  "violations": [
-    {
-      "seed": "[seed]",
-      "steps": 21,
-      "fingerprint": 7001,
-      "violations": [
-        "2 tasks leaked"
-      ]
-    }
-  ],
-  "violation_seeds": [
-    "[seed]"
-  ],
-  "coverage": {
-    "equivalence_classes": 2,
-    "total_runs": 3,
-    "new_class_discoveries": 2,
-    "class_run_counts": {
-      "7001": 2,
-      "7002": 1
-    },
-    "novelty_histogram": {
-      "0": 1,
-      "1": 2
-    },
-    "saturation": {
-      "window": 10,
-      "saturated": false,
-      "existing_class_hits": 1,
-      "runs_since_last_new_class": 1
-    }
-  },
-  "top_unexplored": [
-    {
-      "seed": "[seed]",
-      "score": {
-        "novelty": 3,
-        "persistence_sum": 15,
-        "fingerprint": 991
-      }
-    },
-    {
-      "seed": "[seed]",
-      "score": null
-    }
-  ],
-  "runs": [
-    {
-      "seed": "[seed]",
-      "steps": 21,
-      "fingerprint": 7001,
-      "is_new_class": true,
-      "violation_count": 1,
-      "certificate_hash": 17001
-    },
-    {
-      "seed": "[seed]",
-      "steps": 13,
-      "fingerprint": 7001,
-      "is_new_class": false,
-      "violation_count": 0,
-      "certificate_hash": 17002
-    },
-    {
-      "seed": "[seed]",
-      "steps": 8,
-      "fingerprint": 7002,
-      "is_new_class": true,
-      "violation_count": 0,
-      "certificate_hash": 17099
-    }
-  ],
   "certificate_divergences": [
     [
       "[seed]",
       "[seed]"
     ]
+  ],
+  "coverage": {
+    "class_run_counts": {
+      "7001": 2,
+      "7002": 1
+    },
+    "equivalence_classes": 2,
+    "new_class_discoveries": 2,
+    "novelty_histogram": {
+      "0": 1,
+      "1": 2
+    },
+    "saturation": {
+      "existing_class_hits": 1,
+      "runs_since_last_new_class": 1,
+      "saturated": false,
+      "window": 10
+    },
+    "total_runs": 3
+  },
+  "runs": [
+    {
+      "certificate_hash": 17001,
+      "fingerprint": 7001,
+      "is_new_class": true,
+      "seed": "[seed]",
+      "steps": 21,
+      "violation_count": 1
+    },
+    {
+      "certificate_hash": 17002,
+      "fingerprint": 7001,
+      "is_new_class": false,
+      "seed": "[seed]",
+      "steps": 13,
+      "violation_count": 0
+    },
+    {
+      "certificate_hash": 17099,
+      "fingerprint": 7002,
+      "is_new_class": true,
+      "seed": "[seed]",
+      "steps": 8,
+      "violation_count": 0
+    }
+  ],
+  "top_unexplored": [
+    {
+      "score": {
+        "fingerprint": 991,
+        "novelty": 3,
+        "persistence_sum": 15
+      },
+      "seed": "[seed]"
+    },
+    {
+      "score": null,
+      "seed": "[seed]"
+    }
+  ],
+  "total_runs": 3,
+  "unique_classes": 2,
+  "violation_seeds": [
+    "[seed]"
+  ],
+  "violations": [
+    {
+      "fingerprint": 7001,
+      "seed": "[seed]",
+      "steps": 21,
+      "violations": [
+        "2 tasks leaked"
+      ]
+    }
   ]
 }
