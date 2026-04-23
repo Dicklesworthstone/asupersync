@@ -1708,3 +1708,10 @@ path = "fuzz_targets/priority_inversion_oracle.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "cancel_debt_oracle"
+path = "fuzz_targets/cancel_debt_oracle.rs"
+test = false
+doc = false
+bench = false
