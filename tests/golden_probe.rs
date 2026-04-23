@@ -185,7 +185,8 @@ fn probe_e2e_fingerprint() {
             });
         }
         for esi in (k as u32)..l as u32 {
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = decoder.repair_equation(esi)
+                .unwrap_or_else(|e| panic!("repair equation should succeed for ESI {esi}: {e:?}"));
             let repair_data = encoder.repair_symbol(esi);
             received.push(asupersync::raptorq::decoder::ReceivedSymbol::repair(
                 esi,

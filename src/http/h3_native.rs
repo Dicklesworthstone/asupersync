@@ -2107,11 +2107,11 @@ pub fn validate_request_pseudo_headers_with_settings(
             // Validate :scheme and :path if present (optional for extended CONNECT)
             if let Some(scheme) = &headers.scheme {
                 validate_header_value(scheme)?;
-                validate_scheme_token(scheme)?;
+                validate_scheme_syntax(scheme)?;
             }
             if let Some(path) = &headers.path {
                 validate_header_value(path)?;
-                validate_path_value(path)?;
+                validate_request_path("CONNECT", path)?;
             }
         } else {
             // Standard CONNECT: reject :scheme/:path/:protocol
