@@ -15,6 +15,7 @@ use crate::types::{TaskId, Time};
 use crate::util::DetRng;
 use std::cell::Cell;
 use std::collections::HashSet;
+use std::convert::TryFrom;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
@@ -396,11 +397,14 @@ impl Worker {
             )
         };
 
+        let poll_attempt = stored.poll_count().saturating_add(1);
+        let poll_attempt = u32::try_from(poll_attempt).unwrap_or(u32::MAX);
+
         // Isolate the potentially panicking task poll operation
         let poll_result = self.panic_isolator.isolate_task_execution(
             task_id,
             region_id,
-            1, // TODO: Track actual poll attempt count
+            poll_attempt,
             || stored.poll(&mut cx),
         );
 

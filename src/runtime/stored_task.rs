@@ -227,6 +227,13 @@ impl LocalStoredTask {
 
         result
     }
+
+    /// Returns the number of times this local task has been polled.
+    #[inline]
+    #[must_use]
+    pub fn poll_count(&self) -> u64 {
+        self.poll_count
+    }
 }
 
 impl std::fmt::Debug for LocalStoredTask {
@@ -251,6 +258,16 @@ impl AnyStoredTask {
         match self {
             Self::Global(t) => t.poll(cx),
             Self::Local(t) => t.poll(cx),
+        }
+    }
+
+    /// Returns the number of times the inner task has been polled.
+    #[inline]
+    #[must_use]
+    pub fn poll_count(&self) -> u64 {
+        match self {
+            Self::Global(t) => t.poll_count(),
+            Self::Local(t) => t.poll_count(),
         }
     }
 
@@ -367,6 +384,24 @@ mod tests {
             before == after
         );
         crate::test_complete!("any_stored_task_is_local_stable_after_poll");
+    }
+
+    #[test]
+    fn any_stored_task_poll_count_tracks_inner_task_polls() {
+        init_test("any_stored_task_poll_count_tracks_inner_task_polls");
+        let mut task = AnyStoredTask::Local(LocalStoredTask::new(async { Outcome::Ok(()) }));
+        let before = task.poll_count();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let _ = task.poll(&mut cx);
+        let after = task.poll_count();
+        crate::assert_with_log!(
+            before == 0 && after == 1,
+            "AnyStoredTask must report the inner poll count",
+            true,
+            before == 0 && after == 1
+        );
+        crate::test_complete!("any_stored_task_poll_count_tracks_inner_task_polls");
     }
 
     #[test]
