@@ -324,6 +324,41 @@ mod tests {
         assert!(display.contains("reason="));
     }
 
+    #[test]
+    fn opportunity_score_display_snapshot() {
+        let score = OpportunityScore::new(3.0, 0.8, 1.0).unwrap();
+        insta::assert_snapshot!(format!("{score}"), @"Impact=3.0 × Confidence=0.8 / Effort=1.0 = 2.40");
+    }
+
+    #[test]
+    fn gate_decision_display_snapshot() {
+        insta::assert_snapshot!(
+            [
+                GateDecision::Implement,
+                GateDecision::NeedsEvidence,
+                GateDecision::Reject,
+            ]
+            .into_iter()
+            .map(|decision| decision.to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+            @r"
+        IMPLEMENT
+        NEEDS_EVIDENCE
+        REJECT
+        "
+        );
+    }
+
+    #[test]
+    fn gate_result_display_snapshot() {
+        let result = OpportunityScore::new(4.0, 0.4, 1.0).unwrap().evaluate();
+        insta::assert_snapshot!(
+            format!("{result}"),
+            @r###"score=1.60 decision=NEEDS_EVIDENCE reason="score below threshold but promising (1.0–2.0)" reason="needs profiling data to increase confidence" reason="high potential impact justifies further investigation""###
+        );
+    }
+
     // =========================================================================
     // Input Validation Tests
     // =========================================================================
