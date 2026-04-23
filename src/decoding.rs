@@ -11,6 +11,7 @@ use crate::raptorq::decoder::{
     DecodeError as RaptorDecodeError, InactivationDecoder, ReceivedSymbol,
 };
 use crate::raptorq::gf256::Gf256;
+use crate::raptorq::systematic::SystematicError;
 use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
@@ -744,7 +745,17 @@ fn decode_block(
                 });
             }
             SymbolKind::Repair => {
-                let (columns, coefficients) = decoder.repair_equation(symbol.esi()).unwrap();
+                let (columns, coefficients) = match decoder.repair_equation(symbol.esi()) {
+                    Ok(equation) => equation,
+                    Err(SystematicError::EsiOverflow { esi, padding_delta }) => {
+                        return Err(DecodingError::InconsistentMetadata {
+                            sbn: plan.sbn,
+                            details: format!(
+                                "repair esi {esi} overflows RFC repair-ISI padding delta {padding_delta}"
+                            ),
+                        });
+                    }
+                };
                 received.push(ReceivedSymbol {
                     esi: symbol.esi(),
                     is_source: false,
@@ -1067,6 +1078,56 @@ mod tests {
         let ok = result == expected;
         crate::assert_with_log!(ok, "invalid metadata", expected, result);
         crate::test_complete!("reject_invalid_metadata_esi_out_of_range");
+    }
+
+    #[test]
+    fn reject_invalid_metadata_repair_esi_overflow_without_panicking() {
+        init_test("reject_invalid_metadata_repair_esi_overflow_without_panicking");
+        let mut decoder = DecodingPipeline::new(DecodingConfig {
+            symbol_size: 8,
+            max_block_size: 16,
+            repair_overhead: 1.0,
+            min_overhead: 0,
+            max_buffered_symbols: 0,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+        let object_id = ObjectId::new_for_test(22);
+        decoder
+            .set_object_params(ObjectParams::new(object_id, 16, 8, 1, 2))
+            .expect("params");
+
+        let source = Symbol::new(
+            SymbolId::new(object_id, 0, 0),
+            vec![0x11; 8],
+            SymbolKind::Source,
+        );
+        let repair = Symbol::new(
+            SymbolId::new(object_id, 0, u32::MAX),
+            vec![0x22; 8],
+            SymbolKind::Repair,
+        );
+
+        let first = decoder
+            .feed(AuthenticatedSymbol::from_parts(
+                source,
+                crate::security::tag::AuthenticationTag::zero(),
+            ))
+            .expect("feed source");
+        let first_ok = matches!(first, SymbolAcceptResult::Accepted { .. });
+        crate::assert_with_log!(first_ok, "source accepted before threshold", true, first_ok);
+
+        let result = decoder
+            .feed(AuthenticatedSymbol::from_parts(
+                repair,
+                crate::security::tag::AuthenticationTag::zero(),
+            ))
+            .expect("feed repair overflow");
+        let expected = SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata);
+        let ok = result == expected;
+        crate::assert_with_log!(ok, "repair overflow rejected as invalid metadata", expected, result);
+
+        crate::test_complete!("reject_invalid_metadata_repair_esi_overflow_without_panicking");
     }
 
     #[test]

@@ -1580,22 +1580,22 @@ mod tests {
     fn dns_name_golden_bytes(case: DnsNameGoldenCase) -> &'static [u8] {
         match case {
             DnsNameGoldenCase::SingleLabel => {
-                include_bytes!("../../tests/goldens/dns_names/single_label.bin").as_slice()
+                include_bytes!("../../../tests/goldens/dns_names/single_label.bin").as_slice()
             }
             DnsNameGoldenCase::MultiLabel => {
-                include_bytes!("../../tests/goldens/dns_names/multi_label.bin").as_slice()
+                include_bytes!("../../../tests/goldens/dns_names/multi_label.bin").as_slice()
             }
             DnsNameGoldenCase::MaxLabel63 => {
-                include_bytes!("../../tests/goldens/dns_names/max_label_63.bin").as_slice()
+                include_bytes!("../../../tests/goldens/dns_names/max_label_63.bin").as_slice()
             }
             DnsNameGoldenCase::MaxName255 => {
-                include_bytes!("../../tests/goldens/dns_names/max_name_255.bin").as_slice()
+                include_bytes!("../../../tests/goldens/dns_names/max_name_255.bin").as_slice()
             }
             DnsNameGoldenCase::TrailingDot => {
-                include_bytes!("../../tests/goldens/dns_names/trailing_dot.bin").as_slice()
+                include_bytes!("../../../tests/goldens/dns_names/trailing_dot.bin").as_slice()
             }
             DnsNameGoldenCase::Punycode => {
-                include_bytes!("../../tests/goldens/dns_names/punycode.bin").as_slice()
+                include_bytes!("../../../tests/goldens/dns_names/punycode.bin").as_slice()
             }
         }
     }
