@@ -835,7 +835,7 @@ fn validate_close_payload(payload: &[u8]) -> Result<(), WsError> {
         1 => Err(WsError::InvalidClosePayload),
         _ => {
             let code = u16::from_be_bytes([payload[0], payload[1]]);
-            if !CloseCode::is_valid_received_code(code) {
+            if !CloseCode::is_valid_code(code) {
                 return Err(WsError::InvalidClosePayload);
             }
             if payload.len() > 2 {
@@ -1664,6 +1664,29 @@ mod tests {
             masked: false,
             mask_key: None,
             payload: Bytes::from_static(&[0xFF]),
+        };
+
+        let result = codec.encode(frame, &mut BytesMut::new());
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    fn encode_manual_close_frame_receive_only_code_rejected() {
+        // Codes 1016-2999 are valid for receiving but must not be sent
+        let mut codec = FrameCodec::server();
+        let frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Close,
+            masked: false,
+            mask_key: None,
+            payload: {
+                let mut payload = BytesMut::with_capacity(2);
+                payload.put_u16(1016); // receive-only code
+                payload.freeze()
+            },
         };
 
         let result = codec.encode(frame, &mut BytesMut::new());
