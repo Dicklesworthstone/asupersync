@@ -1645,3 +1645,10 @@ name = "fuzz_framed_length_delimited_underflow"
 path = "fuzz_targets/framed_length_delimited_underflow.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_length_delimited_eof_retention"
+path = "fuzz_targets/length_delimited_eof_retention.rs"
+test = false
+doc = false
+bench = false
