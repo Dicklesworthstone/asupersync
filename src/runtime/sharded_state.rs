@@ -157,9 +157,21 @@ pub struct ShardedState {
     /// Using AtomicU64 for lock-free increment.
     pub leak_count: AtomicU64,
 
-    // ── Shard D: Instrumentation (lock-free) ───────────────────────────
+    // ── Shard D: Instrumentation (internal mutex + atomics) ────────────
+    //
+    // Shard D is not *lock-free* — `TraceBufferHandle` holds an internal
+    // `Mutex<TraceBuffer>` (see `src/trace/buffer.rs`). The shard is not
+    // represented in [`LockShard`] because its mutex is short-held, never
+    // taken across shard mutations, and always acquired AFTER any shard
+    // lock in the canonical E→D→B→A→C order. Concretely: every current
+    // call site takes the trace mutex last, inside a shard-guarded
+    // critical section. Any future refactor that inverts this — e.g. a
+    // trace-emit callback that re-enters shard mutation — would break
+    // the ordering without tripping `before_lock`'s debug_assert, so the
+    // rule is enforced by convention plus this invariant comment.
     /// Trace buffer for events.
-    /// Internally synchronized via Arc + internal Mutex; no shard lock needed.
+    /// Internally synchronized via Arc + internal Mutex; acquired after
+    /// shard locks by convention (see note above).
     pub trace: TraceBufferHandle,
 
     /// Metrics provider for runtime instrumentation.
