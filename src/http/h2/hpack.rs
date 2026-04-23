@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::LazyLock;
 
-use crate::bytes::{Bytes, BytesMut};
+use crate::bytes::{Bytes, BytesMut, BufMut};
 
 use super::error::H2Error;
 
@@ -541,7 +541,8 @@ impl Decoder {
         }
 
         while !src.is_empty() {
-            let header = self.decode_header(src)?;
+            let remaining_budget = self.max_header_list_size.saturating_sub(total_size);
+            let header = self.decode_header(src, remaining_budget)?;
             total_size += header.size();
             if total_size > self.max_header_list_size {
                 return Err(H2Error::compression("header list too large"));
@@ -554,7 +555,16 @@ impl Decoder {
 
     /// Decode a single header.
     ///
-    fn decode_header(&mut self, src: &mut Bytes) -> Result<Header, H2Error> {
+    /// `remaining_budget` is the remaining `max_header_list_size` allowance; it
+    /// bounds how much memory a literal in this header can allocate before the
+    /// running `total_size` check would reject it anyway. This prevents a
+    /// single oversized literal from being fully decoded (and allocated) prior
+    /// to the post-decode size check.
+    fn decode_header(
+        &mut self,
+        src: &mut Bytes,
+        remaining_budget: usize,
+    ) -> Result<Header, H2Error> {
         if src.is_empty() {
             return Err(H2Error::compression("unexpected end of header block"));
         }
@@ -569,7 +579,7 @@ impl Decoder {
 
         if first & 0x40 != 0 {
             // Literal with incremental indexing
-            let (name, value) = self.decode_literal(src, 6)?;
+            let (name, value) = self.decode_literal(src, 6, remaining_budget)?;
             let header = Header::new(name, value);
             self.dynamic_table.insert(header.clone());
             return Ok(header);
@@ -583,12 +593,12 @@ impl Decoder {
 
         if first & 0x10 != 0 {
             // Literal never indexed
-            let (name, value) = self.decode_literal(src, 4)?;
+            let (name, value) = self.decode_literal(src, 4, remaining_budget)?;
             return Ok(Header::new(name, value));
         }
 
         // Literal without indexing
-        let (name, value) = self.decode_literal(src, 4)?;
+        let (name, value) = self.decode_literal(src, 4, remaining_budget)?;
         Ok(Header::new(name, value))
     }
 
@@ -604,18 +614,20 @@ impl Decoder {
         &self,
         src: &mut Bytes,
         prefix_bits: u8,
+        remaining_budget: usize,
     ) -> Result<(String, String), H2Error> {
         let index = decode_integer(src, prefix_bits)?;
 
         let name = if index == 0 {
-            let n = decode_string(src)?;
+            let n = decode_string_bounded(src, remaining_budget)?;
             validate_header_name(&n)?;
             n
         } else {
             self.get_indexed_name(index)?
         };
 
-        let value = decode_string(src)?;
+        let value_budget = remaining_budget.saturating_sub(name.len());
+        let value = decode_string_bounded(src, value_budget)?;
         validate_header_value(&value)?;
         Ok((name, value))
     }
@@ -751,12 +763,28 @@ const fn build_bit_masks() -> [u64; 65] {
 
 const BIT_MASKS: [u64; 65] = build_bit_masks();
 
-/// Huffman-encode a byte slice per RFC 7541 Appendix B.
+/// Calculate the size of Huffman-encoded data without actually encoding it.
+fn huffman_encoded_size(src: &[u8]) -> usize {
+    let mut total_bits: u32 = 0;
+
+    for &byte in src {
+        let (_, code_bits) = HUFFMAN_TABLE[byte as usize];
+        total_bits += u32::from(code_bits);
+    }
+
+    // Convert bits to bytes (round up)
+    ((total_bits + 7) / 8) as usize
+}
+
+/// Huffman-encode a byte slice directly into a BytesMut buffer per RFC 7541 Appendix B.
 ///
 /// Packs variable-length Huffman codes into whole bytes with EOS-padding
 /// (all-1s) in the final partial byte, as required by Section 5.2.
-fn encode_huffman(src: &[u8]) -> Vec<u8> {
-    let mut dst = Vec::with_capacity(src.len());
+///
+/// This version writes directly to the destination buffer, avoiding intermediate allocation.
+fn encode_huffman_to_buffer(dst: &mut BytesMut, src: &[u8]) {
+    // Reserve estimated space to reduce reallocations
+    dst.reserve(src.len());
     let mut accumulator: u64 = 0;
     let mut bits: u32 = 0;
 
@@ -768,7 +796,7 @@ fn encode_huffman(src: &[u8]) -> Vec<u8> {
 
         while bits >= 8 {
             bits -= 8;
-            dst.push((accumulator >> bits) as u8);
+            dst.put_u8((accumulator >> bits) as u8);
             accumulator &= BIT_MASKS[bits as usize];
         }
     }
@@ -777,20 +805,32 @@ fn encode_huffman(src: &[u8]) -> Vec<u8> {
     if bits > 0 {
         let padding = 8 - bits;
         accumulator = (accumulator << padding) | BIT_MASKS[padding as usize];
-        dst.push(accumulator as u8);
+        dst.put_u8(accumulator as u8);
     }
+}
 
-    dst
+/// Legacy Huffman encoder for tests - returns allocated Vec.
+#[cfg(test)]
+fn encode_huffman(src: &[u8]) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    encode_huffman_to_buffer(&mut buf, src);
+    buf.to_vec()
 }
 
 /// Encode a string (with optional Huffman encoding per RFC 7541 Section 5.2).
 #[inline]
 fn encode_string(dst: &mut BytesMut, value: &str, use_huffman: bool) {
     if use_huffman {
-        let encoded = encode_huffman(value.as_bytes());
+        let src_bytes = value.as_bytes();
+
+        // Calculate encoded size without actually encoding
+        let encoded_size = huffman_encoded_size(src_bytes);
+
         // High bit (0x80) signals Huffman-encoded string.
-        encode_integer(dst, encoded.len(), 7, 0x80);
-        dst.extend_from_slice(&encoded);
+        encode_integer(dst, encoded_size, 7, 0x80);
+
+        // Now encode directly to the destination buffer
+        encode_huffman_to_buffer(dst, src_bytes);
     } else {
         let bytes = value.as_bytes();
         encode_integer(dst, bytes.len(), 7, 0x00);
@@ -842,6 +882,16 @@ fn validate_header_value(value: &str) -> Result<(), H2Error> {
 }
 
 fn decode_string(src: &mut Bytes) -> Result<String, H2Error> {
+    decode_string_bounded(src, MAX_STRING_LENGTH)
+}
+
+/// Decode an HPACK string primitive, bounding the allocation to at most
+/// `max_len` bytes (further capped by the hard `MAX_STRING_LENGTH` ceiling).
+///
+/// The length prefix is checked against `max_len` BEFORE any bytes are split
+/// off or copied, so an attacker cannot force a large allocation by claiming
+/// a length that would later be rejected by `max_header_list_size`.
+fn decode_string_bounded(src: &mut Bytes, max_len: usize) -> Result<String, H2Error> {
     if src.is_empty() {
         return Err(H2Error::compression("unexpected end of string"));
     }
@@ -849,8 +899,9 @@ fn decode_string(src: &mut Bytes) -> Result<String, H2Error> {
     let huffman = src[0] & 0x80 != 0;
     let length = decode_integer(src, 7)?;
 
-    if length > MAX_STRING_LENGTH {
-        return Err(H2Error::compression("string length exceeds maximum"));
+    let effective_max = max_len.min(MAX_STRING_LENGTH);
+    if length > effective_max {
+        return Err(H2Error::compression("string length exceeds budget"));
     }
 
     if src.len() < length {
