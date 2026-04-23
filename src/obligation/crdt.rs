@@ -1313,4 +1313,168 @@ mod tests {
         // The global state should also reflect the conflict
         assert_eq!(entry.state, LatticeState::Conflict);
     }
+
+    // =========================================================================
+    // Metamorphic relations for CRDT merge: idempotence, associativity,
+    // absorption, monotonicity.
+    //
+    // The existing metamorphic_merge_trace_commutativity covers swap-order.
+    // Commutativity alone does not catch bugs in the self-join path
+    // (idempotence), bugs in associative grouping (nested merges), or
+    // non-growing bugs (a merge that drops entries). These MRs close the
+    // semilattice law coverage: (commutativity ∧ associativity ∧
+    // idempotence) is exactly the axiom set for a join-semilattice CRDT.
+    // =========================================================================
+
+    proptest! {
+        /// MR — Idempotence: merge(a, a) must leave `a` signature-equal.
+        /// This is the canonical CRDT self-merge law.
+        #[test]
+        fn metamorphic_merge_is_idempotent(
+            ops in prop::collection::vec((0u8..12, 0u8..7), 0..24),
+        ) {
+            let ops: Vec<TraceOp> = ops
+                .into_iter()
+                .map(|(id_index, action)| TraceOp { id_index, action })
+                .collect();
+
+            let mut a = CrdtObligationLedger::new(node("A"));
+            apply_trace(&mut a, &ops);
+
+            let before = ledger_signature(&a);
+            let clone = a.clone();
+            a.merge(&clone);
+            let after = ledger_signature(&a);
+
+            prop_assert_eq!(before, after, "merge(a, a) altered the ledger");
+        }
+
+        /// MR — Associativity: (a ⊔ b) ⊔ c ≡ a ⊔ (b ⊔ c).
+        /// Equivalent via signature, not struct equality (witnesses are a
+        /// BTreeMap so their iteration order is stable; signature captures
+        /// the observable lattice state).
+        #[test]
+        fn metamorphic_merge_is_associative(
+            a_ops in prop::collection::vec((0u8..12, 0u8..7), 0..16),
+            b_ops in prop::collection::vec((0u8..12, 0u8..7), 0..16),
+            c_ops in prop::collection::vec((0u8..12, 0u8..7), 0..16),
+        ) {
+            let as_ops = |v: Vec<(u8, u8)>| -> Vec<TraceOp> {
+                v.into_iter()
+                    .map(|(id_index, action)| TraceOp { id_index, action })
+                    .collect()
+            };
+            let a_ops = as_ops(a_ops);
+            let b_ops = as_ops(b_ops);
+            let c_ops = as_ops(c_ops);
+
+            let mut a = CrdtObligationLedger::new(node("A"));
+            let mut b = CrdtObligationLedger::new(node("B"));
+            let mut c = CrdtObligationLedger::new(node("C"));
+            apply_trace(&mut a, &a_ops);
+            apply_trace(&mut b, &b_ops);
+            apply_trace(&mut c, &c_ops);
+
+            // (a ⊔ b) ⊔ c
+            let mut left = a.clone();
+            left.merge(&b);
+            left.merge(&c);
+
+            // a ⊔ (b ⊔ c)
+            let mut bc = b.clone();
+            bc.merge(&c);
+            let mut right = a.clone();
+            right.merge(&bc);
+
+            prop_assert_eq!(
+                ledger_signature(&left),
+                ledger_signature(&right),
+                "merge is not associative",
+            );
+        }
+
+        /// Compound MR — Absorption: merge(merge(a, b), b) ≡ merge(a, b).
+        /// Derives from idempotence + commutativity + associativity and
+        /// catches any bug in either component that preserves commutativity
+        /// on its own (a stronger oracle than each individual law).
+        #[test]
+        fn metamorphic_merge_absorbs_repeated_merge(
+            a_ops in prop::collection::vec((0u8..12, 0u8..7), 0..20),
+            b_ops in prop::collection::vec((0u8..12, 0u8..7), 0..20),
+        ) {
+            let a_ops: Vec<TraceOp> = a_ops
+                .into_iter()
+                .map(|(id_index, action)| TraceOp { id_index, action })
+                .collect();
+            let b_ops: Vec<TraceOp> = b_ops
+                .into_iter()
+                .map(|(id_index, action)| TraceOp { id_index, action })
+                .collect();
+
+            let mut a = CrdtObligationLedger::new(node("A"));
+            let mut b = CrdtObligationLedger::new(node("B"));
+            apply_trace(&mut a, &a_ops);
+            apply_trace(&mut b, &b_ops);
+
+            let mut once = a.clone();
+            once.merge(&b);
+            let once_sig = ledger_signature(&once);
+
+            let mut twice = a.clone();
+            twice.merge(&b);
+            twice.merge(&b);
+            let twice_sig = ledger_signature(&twice);
+
+            prop_assert_eq!(
+                once_sig, twice_sig,
+                "re-merging b did not absorb idempotently",
+            );
+        }
+
+        /// MR — Monotonicity: merging never removes entries. For every id
+        /// present in `a`, the merged ledger must still contain it. This
+        /// catches accidental entry drops (e.g. a branch that overwrites
+        /// instead of joining).
+        #[test]
+        fn metamorphic_merge_preserves_existing_entries(
+            a_ops in prop::collection::vec((0u8..12, 0u8..7), 0..20),
+            b_ops in prop::collection::vec((0u8..12, 0u8..7), 0..20),
+        ) {
+            let a_ops: Vec<TraceOp> = a_ops
+                .into_iter()
+                .map(|(id_index, action)| TraceOp { id_index, action })
+                .collect();
+            let b_ops: Vec<TraceOp> = b_ops
+                .into_iter()
+                .map(|(id_index, action)| TraceOp { id_index, action })
+                .collect();
+
+            let mut a = CrdtObligationLedger::new(node("A"));
+            let mut b = CrdtObligationLedger::new(node("B"));
+            apply_trace(&mut a, &a_ops);
+            apply_trace(&mut b, &b_ops);
+
+            let a_ids_before: BTreeSet<ObligationId> = ledger_signature(&a)
+                .into_iter()
+                .map(|(id, ..)| id)
+                .collect();
+
+            let mut merged = a.clone();
+            merged.merge(&b);
+
+            for id in &a_ids_before {
+                prop_assert!(
+                    merged.get_entry(id).is_some(),
+                    "merge dropped entry {:?} that was present in a",
+                    id,
+                );
+            }
+            prop_assert!(
+                merged.len() >= a_ids_before.len(),
+                "merge shrank ledger: {} < {}",
+                merged.len(),
+                a_ids_before.len(),
+            );
+        }
+    }
 }
