@@ -188,7 +188,7 @@ fn metamorphic_bracket_lifecycle_guarantees() {
         
         let cx = test_cx();
         let mut pinned = Box::pin(fut);
-        let waker = futures_util::task::noop_waker();
+        let waker = std::task::Waker::noop().clone();
         let mut ctx = Context::from_waker(&waker);
         
         let mut polls = 0;
@@ -248,7 +248,7 @@ fn metamorphic_bracket_cancellation_guarantees() {
         
         let cx = test_cx();
         let mut pinned = Box::pin(fut);
-        let waker = futures_util::task::noop_waker();
+        let waker = std::task::Waker::noop().clone();
         let mut ctx = Context::from_waker(&waker);
         
         for poll_idx in 0..20 {
