@@ -2303,6 +2303,103 @@ mod tests {
     }
 
     #[test]
+    fn control_stream_rejects_cancel_push_first() {
+        let mut state = H3ControlState::new();
+        let err = state
+            .on_remote_control_frame(&H3Frame::CancelPush(123))
+            .expect_err("CANCEL_PUSH as first frame must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("first remote control frame must be SETTINGS")
+        );
+    }
+
+    #[test]
+    fn control_stream_rejects_max_push_id_first() {
+        let mut state = H3ControlState::new();
+        let err = state
+            .on_remote_control_frame(&H3Frame::MaxPushId(456))
+            .expect_err("MAX_PUSH_ID as first frame must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("first remote control frame must be SETTINGS")
+        );
+    }
+
+    #[test]
+    fn control_stream_rejects_unknown_frame_first() {
+        let mut state = H3ControlState::new();
+        let unknown_frame = H3Frame::Unknown {
+            frame_type: 0xBADF00D,
+            payload: vec![1, 2, 3],
+        };
+        let err = state
+            .on_remote_control_frame(&unknown_frame)
+            .expect_err("unknown frame as first frame must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("first remote control frame must be SETTINGS")
+        );
+    }
+
+    #[test]
+    fn control_stream_rejects_data_headers_first() {
+        let mut state = H3ControlState::new();
+
+        // DATA frames are not allowed on control streams at all
+        let err = state
+            .on_remote_control_frame(&H3Frame::Data(vec![1, 2, 3]))
+            .expect_err("DATA as first frame must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("first remote control frame must be SETTINGS")
+        );
+
+        let mut state2 = H3ControlState::new();
+
+        // HEADERS frames are not allowed on control streams at all
+        let err = state2
+            .on_remote_control_frame(&H3Frame::Headers(vec![4, 5, 6]))
+            .expect_err("HEADERS as first frame must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("first remote control frame must be SETTINGS")
+        );
+    }
+
+    #[test]
+    fn control_stream_accepts_settings_first_then_rejects_duplicate() {
+        let mut state = H3ControlState::new();
+
+        // First SETTINGS frame should be accepted
+        state
+            .on_remote_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("first SETTINGS should be accepted");
+
+        // Second SETTINGS frame should be rejected
+        let err = state
+            .on_remote_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect_err("duplicate SETTINGS must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("duplicate SETTINGS on remote control stream")
+        );
+
+        // After SETTINGS, valid control frames should be accepted
+        state
+            .on_remote_control_frame(&H3Frame::Goaway(789))
+            .expect("GOAWAY after SETTINGS should be accepted");
+
+        state
+            .on_remote_control_frame(&H3Frame::CancelPush(101))
+            .expect("CANCEL_PUSH after SETTINGS should be accepted");
+
+        state
+            .on_remote_control_frame(&H3Frame::MaxPushId(202))
+            .expect("MAX_PUSH_ID after SETTINGS should be accepted");
+    }
+
+    #[test]
     fn pseudo_header_validation() {
         let req = H3PseudoHeaders {
             method: Some("GET".to_string()),
