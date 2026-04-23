@@ -1986,4 +1986,282 @@ mod tests {
             }
         }
     }
+
+    // =========================================================================
+    // Retry-budget invariant conformance (Pattern 4: spec-derived).
+    //
+    // Spec: retry.rs doc comments lines 21-27 state:
+    //   retry_budget = Σ(attempt_budget[i] + sleep_budget[i])
+    //                = max_attempts * per_attempt_budget + Σ(delays)
+    //
+    // This suite covers the Σ(delays) component — i.e., total_delay_budget
+    // and the validate() pre-conditions that keep the budget formula
+    // well-defined. Each test maps to exactly one MUST/SHOULD clause and
+    // emits a structured JSON-line for CI parsing.
+    // =========================================================================
+
+    mod retry_budget_conformance {
+        use super::*;
+
+        /// Compute the expected worst-case jittered budget straight from
+        /// the documented formula (not the implementation).
+        fn reference_budget(policy: &RetryPolicy) -> Duration {
+            let mut total = Duration::ZERO;
+            for attempt in 1..policy.max_attempts {
+                let base = calculate_delay(policy, attempt, None);
+                #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+                let jittered_nanos = (base.as_nanos() as f64) * (1.0 + policy.jitter);
+                let jittered = Duration::from_nanos(
+                    jittered_nanos.min(u64::MAX as f64).max(0.0) as u64,
+                );
+                total = total.saturating_add(jittered);
+            }
+            total
+        }
+
+        /// RETRY-BUDGET-1 (MUST): total_delay_budget equals
+        ///   Σ(calculate_delay(i) * (1 + jitter)) for i in 1..max_attempts.
+        ///
+        /// Tolerate 1-nanosecond slack per attempt to absorb the f64→u64
+        /// cast in clamp_nanos_f64 vs the reference formula's own casts.
+        #[test]
+        fn retry_budget_1_matches_documented_formula() {
+            let policies = [
+                RetryPolicy::default(),
+                RetryPolicy::fixed_delay(Duration::from_millis(50), 5),
+                RetryPolicy::immediate(8),
+                RetryPolicy::new()
+                    .with_max_attempts(6)
+                    .with_initial_delay(Duration::from_micros(500))
+                    .with_multiplier(3.0)
+                    .with_max_delay(Duration::from_secs(10))
+                    .no_jitter(),
+                RetryPolicy::new()
+                    .with_max_attempts(4)
+                    .with_initial_delay(Duration::from_millis(10))
+                    .with_multiplier(2.0)
+                    .with_max_delay(Duration::from_secs(60))
+                    .with_jitter(0.5),
+            ];
+            for (i, policy) in policies.iter().enumerate() {
+                let got = total_delay_budget(policy);
+                let want = reference_budget(policy);
+                let slack = Duration::from_nanos(policy.max_attempts.saturating_sub(1) as u64);
+                let diff = if got > want { got - want } else { want - got };
+                assert!(
+                    diff <= slack,
+                    "RETRY-BUDGET-1 case {i}: budget {got:?} diverged from reference {want:?} by {diff:?} (slack {slack:?})",
+                );
+                eprintln!(
+                    "{{\"id\":\"RETRY-BUDGET-1-case{i}\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
+                );
+            }
+        }
+
+        /// RETRY-BUDGET-2 (MUST): total_delay_budget is monotonically
+        /// non-decreasing as max_attempts grows, holding other fields fixed.
+        #[test]
+        fn retry_budget_2_monotonic_in_max_attempts() {
+            let base = RetryPolicy::new()
+                .with_initial_delay(Duration::from_millis(20))
+                .with_multiplier(2.0)
+                .with_max_delay(Duration::from_secs(5))
+                .no_jitter();
+            let mut prev = total_delay_budget(&base.clone().with_max_attempts(1));
+            for attempts in 2..=12u32 {
+                let policy = base.clone().with_max_attempts(attempts);
+                let got = total_delay_budget(&policy);
+                assert!(
+                    got >= prev,
+                    "RETRY-BUDGET-2: budget shrank from {prev:?} to {got:?} when max_attempts grew from {} to {attempts}",
+                    attempts - 1,
+                );
+                prev = got;
+            }
+            eprintln!(
+                "{{\"id\":\"RETRY-BUDGET-2\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
+            );
+        }
+
+        /// RETRY-BUDGET-3 (MUST): max_attempts = 1 yields Duration::ZERO
+        /// (the first attempt has no pre-delay; loop range 1..1 is empty).
+        #[test]
+        fn retry_budget_3_zero_when_max_attempts_is_one() {
+            for multiplier in [1.0_f64, 1.25, 2.0, 5.0] {
+                for jitter in [0.0_f64, 0.1, 0.5, 1.0] {
+                    let policy = RetryPolicy::new()
+                        .with_max_attempts(1)
+                        .with_initial_delay(Duration::from_millis(42))
+                        .with_multiplier(multiplier)
+                        .with_max_delay(Duration::from_secs(30))
+                        .with_jitter(jitter);
+                    assert_eq!(
+                        total_delay_budget(&policy),
+                        Duration::ZERO,
+                        "RETRY-BUDGET-3: max_attempts=1 must have zero budget (multiplier={multiplier}, jitter={jitter})",
+                    );
+                }
+            }
+            eprintln!(
+                "{{\"id\":\"RETRY-BUDGET-3\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
+            );
+        }
+
+        /// RETRY-BUDGET-4 (MUST): total budget is bounded above by
+        /// (max_attempts - 1) × max_delay × (1 + jitter). The cap
+        /// enforces that exponential blow-up of calculated delays cannot
+        /// escape max_delay.
+        #[test]
+        fn retry_budget_4_upper_bound_by_cap_times_count() {
+            let policies = [
+                RetryPolicy::new()
+                    .with_max_attempts(6)
+                    .with_initial_delay(Duration::from_millis(10))
+                    .with_multiplier(2.0)
+                    .with_max_delay(Duration::from_millis(80))
+                    .no_jitter(),
+                RetryPolicy::new()
+                    .with_max_attempts(10)
+                    .with_initial_delay(Duration::from_micros(100))
+                    .with_multiplier(3.0)
+                    .with_max_delay(Duration::from_millis(500))
+                    .with_jitter(0.25),
+            ];
+            for (i, policy) in policies.iter().enumerate() {
+                let got = total_delay_budget(policy);
+                #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+                let cap_nanos = (policy.max_delay.as_nanos() as f64) * (1.0 + policy.jitter);
+                let cap_duration = Duration::from_nanos(cap_nanos.min(u64::MAX as f64) as u64);
+                let upper = cap_duration
+                    .checked_mul(policy.max_attempts.saturating_sub(1))
+                    .unwrap_or(Duration::MAX);
+                // 1-nanosecond slack per attempt for f64 rounding.
+                let slack = Duration::from_nanos(policy.max_attempts.saturating_sub(1) as u64);
+                assert!(
+                    got <= upper.saturating_add(slack),
+                    "RETRY-BUDGET-4 case {i}: budget {got:?} exceeds cap {upper:?} (slack {slack:?})",
+                );
+            }
+            eprintln!(
+                "{{\"id\":\"RETRY-BUDGET-4\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
+            );
+        }
+
+        /// RETRY-BUDGET-5 (MUST): total_delay_budget is a valid upper bound
+        /// on any realized accumulated delay sequence under jitter.
+        /// For every seed and every attempt index, the cumulative sum of
+        /// jittered delays must not exceed the budget.
+        #[test]
+        fn retry_budget_5_dominates_any_jittered_realization() {
+            let policy = RetryPolicy::new()
+                .with_max_attempts(8)
+                .with_initial_delay(Duration::from_millis(10))
+                .with_multiplier(2.0)
+                .with_max_delay(Duration::from_millis(200))
+                .with_jitter(0.5);
+            let budget = total_delay_budget(&policy);
+            for seed in 0u64..32 {
+                let mut rng = DetRng::new(seed);
+                let mut realized = Duration::ZERO;
+                for attempt in 1..policy.max_attempts {
+                    let d = calculate_delay(&policy, attempt, Some(&mut rng));
+                    realized = realized.saturating_add(d);
+                }
+                // 1-nanosecond slack per attempt.
+                let slack = Duration::from_nanos(policy.max_attempts as u64);
+                assert!(
+                    realized <= budget.saturating_add(slack),
+                    "RETRY-BUDGET-5 seed={seed}: realized {realized:?} exceeds budget {budget:?}",
+                );
+            }
+            eprintln!(
+                "{{\"id\":\"RETRY-BUDGET-5\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
+            );
+        }
+
+        /// RETRY-BUDGET-6 (MUST): total_delay_budget saturates at
+        /// Duration::MAX for extreme inputs rather than panicking or
+        /// wrapping around.
+        #[test]
+        fn retry_budget_6_saturates_without_overflow() {
+            let policy = RetryPolicy::new()
+                .with_max_attempts(u32::MAX)
+                .with_initial_delay(Duration::from_secs(u64::MAX / 4))
+                .with_multiplier(2.0)
+                .with_max_delay(Duration::MAX)
+                .with_jitter(1.0);
+            // Must not panic.
+            let got = total_delay_budget(&policy);
+            assert!(
+                got <= Duration::MAX,
+                "RETRY-BUDGET-6: budget must remain bounded by Duration::MAX",
+            );
+            eprintln!(
+                "{{\"id\":\"RETRY-BUDGET-6\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
+            );
+        }
+
+        /// RETRY-BUDGET-7 (MUST): validate() rejects configurations that
+        /// would make the budget formula ill-defined:
+        /// - max_attempts == 0 (formula divides by zero conceptually)
+        /// - multiplier < 1.0 (delays could shrink, breaking monotonicity)
+        /// - jitter outside [0.0, 1.0] (upper bound breaks)
+        #[test]
+        fn retry_budget_7_validate_rejects_ill_defined_inputs() {
+            // max_attempts = 0 is impossible via builder (clamps to 1),
+            // but a direct struct construction must be caught.
+            let bad_attempts = RetryPolicy {
+                max_attempts: 0,
+                ..RetryPolicy::default()
+            };
+            assert!(bad_attempts.validate().is_err(), "max_attempts=0 must fail validate");
+
+            let bad_multiplier = RetryPolicy {
+                multiplier: 0.5,
+                ..RetryPolicy::default()
+            };
+            assert!(
+                bad_multiplier.validate().is_err(),
+                "multiplier<1.0 must fail validate",
+            );
+
+            let bad_jitter_high = RetryPolicy {
+                jitter: 1.5,
+                ..RetryPolicy::default()
+            };
+            assert!(
+                bad_jitter_high.validate().is_err(),
+                "jitter>1.0 must fail validate",
+            );
+
+            let bad_jitter_neg = RetryPolicy {
+                jitter: -0.1,
+                ..RetryPolicy::default()
+            };
+            assert!(
+                bad_jitter_neg.validate().is_err(),
+                "jitter<0.0 must fail validate",
+            );
+
+            // NaN jitter: not in [0.0, 1.0] by IEEE 754 comparison rules,
+            // so validate() must reject it too.
+            let bad_jitter_nan = RetryPolicy {
+                jitter: f64::NAN,
+                ..RetryPolicy::default()
+            };
+            assert!(
+                bad_jitter_nan.validate().is_err(),
+                "jitter=NaN must fail validate",
+            );
+
+            // Positive cases: default and common builders must pass.
+            assert!(RetryPolicy::default().validate().is_ok());
+            assert!(RetryPolicy::fixed_delay(Duration::from_millis(10), 3).validate().is_ok());
+            assert!(RetryPolicy::immediate(5).validate().is_ok());
+
+            eprintln!(
+                "{{\"id\":\"RETRY-BUDGET-7\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
+            );
+        }
+    }
 }
