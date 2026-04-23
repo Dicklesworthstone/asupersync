@@ -36,6 +36,9 @@ pub const H3_SETTING_ENABLE_CONNECT_PROTOCOL: u64 = 0x08;
 /// HTTP/3 SETTINGS identifier: H3 datagrams.
 pub const H3_SETTING_H3_DATAGRAM: u64 = 0x33;
 
+/// Maximum number of decoded headers per QPACK field section (DoS protection).
+const QPACK_MAX_DECODED_HEADERS: usize = 1000;
+
 /// HTTP/3 errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum H3NativeError {
@@ -1082,6 +1085,9 @@ fn qpack_decode_field_section_with_context(
                     return Err(H3NativeError::InvalidFrame("unknown static qpack index"));
                 }
                 out.push(QpackFieldPlan::StaticIndex(index));
+                if out.len() > QPACK_MAX_DECODED_HEADERS {
+                    return Err(H3NativeError::QpackPolicy("decoded header count exceeds safety limit"));
+                }
             } else {
                 let base = dynamic_base.ok_or(H3NativeError::InvalidFrame(
                     "dynamic table context required",
@@ -1090,6 +1096,9 @@ fn qpack_decode_field_section_with_context(
                 let is_post_base = (b & 0x10) != 0;
                 let absolute_index = qpack_relative_to_absolute(base, index, is_post_base)?;
                 out.push(QpackFieldPlan::DynamicIndex(absolute_index));
+                if out.len() > QPACK_MAX_DECODED_HEADERS {
+                    return Err(H3NativeError::QpackPolicy("decoded header count exceeds safety limit"));
+                }
             }
             continue;
         }
@@ -1117,6 +1126,9 @@ fn qpack_decode_field_section_with_context(
                     name: name.to_string(),
                     value,
                 });
+                if out.len() > QPACK_MAX_DECODED_HEADERS {
+                    return Err(H3NativeError::QpackPolicy("decoded header count exceeds safety limit"));
+                }
             } else {
                 let base = dynamic_base.ok_or(H3NativeError::InvalidFrame(
                     "dynamic table context required",
@@ -1128,6 +1140,9 @@ fn qpack_decode_field_section_with_context(
                     name_index: absolute_name_index,
                     value,
                 });
+                if out.len() > QPACK_MAX_DECODED_HEADERS {
+                    return Err(H3NativeError::QpackPolicy("decoded header count exceeds safety limit"));
+                }
             }
             continue;
         }
@@ -1142,6 +1157,9 @@ fn qpack_decode_field_section_with_context(
             pos += 1 + value_extra;
 
             out.push(QpackFieldPlan::Literal { name, value });
+            if out.len() > QPACK_MAX_DECODED_HEADERS {
+                return Err(H3NativeError::QpackPolicy("decoded header count exceeds safety limit"));
+            }
             continue;
         }
 
@@ -1235,8 +1253,36 @@ pub fn qpack_decode_request_field_section(
     mode: H3QpackMode,
     qpack_context: Option<&QpackContext>,
 ) -> Result<H3RequestHead, H3NativeError> {
+    qpack_decode_request_field_section_with_limit(input, mode, qpack_context, None)
+}
+
+/// Decode a wire-level request field section with optional size limit enforcement.
+///
+/// This applies QPACK decode rules for the configured mode and then enforces
+/// HTTP/3 pseudo-header semantics. If `max_field_section_size` is Some, the total
+/// size of all decoded headers (names + values) is checked against the limit.
+pub fn qpack_decode_request_field_section_with_limit(
+    input: &[u8],
+    mode: H3QpackMode,
+    qpack_context: Option<&QpackContext>,
+    max_field_section_size: Option<u64>,
+) -> Result<H3RequestHead, H3NativeError> {
     let plan = qpack_decode_field_section_with_context(input, mode, qpack_context)?;
     let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
+
+    if let Some(max_size) = max_field_section_size {
+        let total_size: usize = fields
+            .iter()
+            .map(|(name, value)| name.len() + value.len())
+            .sum();
+
+        if total_size as u64 > max_size {
+            return Err(H3NativeError::QpackPolicy(
+                "decoded field section exceeds maximum size limit"
+            ));
+        }
+    }
+
     header_fields_to_request_head(&fields)
 }
 
@@ -1252,8 +1298,36 @@ pub fn qpack_decode_response_field_section(
     mode: H3QpackMode,
     qpack_context: Option<&QpackContext>,
 ) -> Result<H3ResponseHead, H3NativeError> {
+    qpack_decode_response_field_section_with_limit(input, mode, qpack_context, None)
+}
+
+/// Decode a wire-level response field section with optional size limit enforcement.
+///
+/// This applies QPACK decode rules for the configured mode and then enforces
+/// HTTP/3 pseudo-header semantics. If `max_field_section_size` is Some, the total
+/// size of all decoded headers (names + values) is checked against the limit.
+pub fn qpack_decode_response_field_section_with_limit(
+    input: &[u8],
+    mode: H3QpackMode,
+    qpack_context: Option<&QpackContext>,
+    max_field_section_size: Option<u64>,
+) -> Result<H3ResponseHead, H3NativeError> {
     let plan = qpack_decode_field_section_with_context(input, mode, qpack_context)?;
     let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
+
+    if let Some(max_size) = max_field_section_size {
+        let total_size: usize = fields
+            .iter()
+            .map(|(name, value)| name.len() + value.len())
+            .sum();
+
+        if total_size as u64 > max_size {
+            return Err(H3NativeError::QpackPolicy(
+                "decoded field section exceeds maximum size limit"
+            ));
+        }
+    }
+
     header_fields_to_response_head(&fields)
 }
 
@@ -4400,6 +4474,23 @@ mod tests {
     }
 
     #[test]
+    fn qpack_decode_rejects_field_sections_over_header_count_limit() {
+        let plan: Vec<_> = (0..=QPACK_MAX_DECODED_HEADERS)
+            .map(|_| QpackFieldPlan::Literal {
+                name: "x-test".to_string(),
+                value: String::new(),
+            })
+            .collect();
+        let wire = qpack_encode_field_section(&plan).expect("encode");
+
+        let err = qpack_decode_field_section(&wire, H3QpackMode::StaticOnly).expect_err("reject");
+        assert_eq!(
+            err,
+            H3NativeError::QpackPolicy("decoded header count exceeds safety limit")
+        );
+    }
+
+    #[test]
     fn qpack_plan_to_header_fields_rejects_unknown_static_index() {
         let err = qpack_plan_to_header_fields(&[QpackFieldPlan::StaticIndex(999)], None)
             .expect_err("unknown static index");
@@ -6297,6 +6388,71 @@ mod tests {
         assert_eq!(
             err,
             H3NativeError::StreamProtocol("unknown frame type not allowed on bidirectional stream")
+        );
+    }
+
+    #[test]
+    fn qpack_decode_enforces_max_field_section_size() {
+        // Create a valid QPACK-encoded field section with static headers
+        let plan = vec![
+            QpackFieldPlan::StaticIndex(17), // :method GET
+            QpackFieldPlan::StaticIndex(23), // :scheme https
+            QpackFieldPlan::StaticIndex(1),  // :path /
+            QpackFieldPlan::Literal {
+                name: "x-large-header".to_string(),
+                value: "a".repeat(1000), // 1000 byte value
+            },
+        ];
+        let wire = qpack_encode_field_section(&plan).expect("encode");
+
+        // Test that decode succeeds without limit
+        let result = qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly, None);
+        assert!(result.is_ok(), "decode should succeed without limit");
+
+        // Test that decode succeeds with high limit (total size ~1016 bytes)
+        let result = qpack_decode_request_field_section_with_limit(
+            &wire,
+            H3QpackMode::StaticOnly,
+            None,
+            Some(1100),
+        );
+        assert!(result.is_ok(), "decode should succeed with high limit");
+
+        // Test that decode fails with low limit
+        let err = qpack_decode_request_field_section_with_limit(
+            &wire,
+            H3QpackMode::StaticOnly,
+            None,
+            Some(500),
+        )
+        .expect_err("decode should fail with low limit");
+
+        assert_eq!(
+            err,
+            H3NativeError::QpackPolicy("decoded field section exceeds maximum size limit")
+        );
+
+        // Test response function too
+        let response_plan = vec![
+            QpackFieldPlan::StaticIndex(25), // :status 200
+            QpackFieldPlan::Literal {
+                name: "x-response-header".to_string(),
+                value: "b".repeat(800), // 800 byte value
+            },
+        ];
+        let response_wire = qpack_encode_field_section(&response_plan).expect("encode response");
+
+        let err = qpack_decode_response_field_section_with_limit(
+            &response_wire,
+            H3QpackMode::StaticOnly,
+            None,
+            Some(400),
+        )
+        .expect_err("response decode should fail with low limit");
+
+        assert_eq!(
+            err,
+            H3NativeError::QpackPolicy("decoded field section exceeds maximum size limit")
         );
     }
 }
