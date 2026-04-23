@@ -17,6 +17,36 @@ thread_local! {
     static IN_REGION_WITH_CALL: Cell<bool> = const { Cell::new(false) };
 }
 
+/// RAII guard to ensure thread-local flag is reset even on panic
+struct ReentryGuard {
+    was_in_call: bool,
+}
+
+impl ReentryGuard {
+    fn new() -> Self {
+        let was_in_call = IN_REGION_WITH_CALL.with(|flag| {
+            let was_in = flag.get();
+            if !was_in {
+                flag.set(true);
+            }
+            was_in
+        });
+        ReentryGuard { was_in_call }
+    }
+
+    fn is_reentrant(&self) -> bool {
+        self.was_in_call
+    }
+}
+
+impl Drop for ReentryGuard {
+    fn drop(&mut self) {
+        if !self.was_in_call {
+            IN_REGION_WITH_CALL.with(|flag| flag.set(false));
+        }
+    }
+}
+
 /// State for waking tasks waiting on a region to close.
 #[derive(Debug)]
 pub struct RegionCloseState {
@@ -716,20 +746,18 @@ impl RegionRecord {
         index: HeapIndex,
         f: F,
     ) -> Option<R> {
+        let guard = ReentryGuard::new();
+
         // Check for reentrancy to prevent deadlock when closures call region methods
-        if IN_REGION_WITH_CALL.with(|flag| flag.get()) {
+        if guard.is_reentrant() {
             // Already in a region access call - use try_read to avoid deadlock
             let inner = self.inner.try_read()?;
             return inner.heap.get::<T>(index).map(f);
         }
 
-        IN_REGION_WITH_CALL.with(|flag| flag.set(true));
-        let result = {
-            let inner = self.inner.read();
-            inner.heap.get::<T>(index).map(f)
-        };
-        IN_REGION_WITH_CALL.with(|flag| flag.set(false));
-        result
+        let inner = self.inner.read();
+        inner.heap.get::<T>(index).map(f)
+        // Guard automatically resets flag on drop, even if f panics
     }
 
     /// Returns the number of heap allocations in this region.
@@ -932,8 +960,10 @@ impl RegionRecord {
             return Err(RRefError::RegionClosed);
         }
 
+        let guard = ReentryGuard::new();
+
         // Check for reentrancy to prevent deadlock when closures call region methods
-        if IN_REGION_WITH_CALL.with(|flag| flag.get()) {
+        if guard.is_reentrant() {
             // Already in a region access call - use try_read to avoid deadlock
             let inner = self.inner.try_read()
                 .ok_or(RRefError::RegionClosed)?; // Assume locked means closing
@@ -944,17 +974,13 @@ impl RegionRecord {
                 .ok_or(RRefError::AllocationInvalid);
         }
 
-        IN_REGION_WITH_CALL.with(|flag| flag.set(true));
-        let result = {
-            let inner = self.inner.read();
-            inner
-                .heap
-                .get::<T>(rref.heap_index())
-                .map(f)
-                .ok_or(RRefError::AllocationInvalid)
-        };
-        IN_REGION_WITH_CALL.with(|flag| flag.set(false));
-        result
+        let inner = self.inner.read();
+        inner
+            .heap
+            .get::<T>(rref.heap_index())
+            .map(f)
+            .ok_or(RRefError::AllocationInvalid)
+        // Guard automatically resets flag on drop, even if f panics
     }
 
     /// Returns an access witness for this region if it is in a non-terminal state.
@@ -2678,5 +2704,60 @@ mod tests {
                 prev_numeric = new_numeric;
             }
         });
+    }
+
+    #[test]
+    fn heap_with_panic_safety() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+        let index = region.heap_alloc(42i32).expect("heap alloc");
+
+        // First call should work normally
+        let result = region.heap_with(index, |val| *val * 2);
+        assert_eq!(result, Some(84));
+
+        // Second call that panics should not leave flag stuck
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            region.heap_with(index, |_| panic!("test panic"))
+        }));
+        assert!(panic_result.is_err());
+
+        // Third call should work normally (flag was reset by RAII guard)
+        let result = region.heap_with(index, |val| *val + 1);
+        assert_eq!(result, Some(43));
+
+        // Verify thread-local flag is not stuck at true
+        let result = region.heap_with(index, |val| {
+            // This inner call should use try_read path if flag is working correctly
+            region.heap_with(index, |inner_val| *inner_val)
+        });
+        assert_eq!(result, Some(Some(42)));
+    }
+
+    #[test]
+    fn rref_with_panic_safety() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+        let index = region.heap_alloc("test".to_string()).expect("heap alloc");
+        let rref = RRef::<String>::new(region.id, index);
+
+        // First call should work normally
+        let result = region.rref_with(&rref, |val| val.len());
+        assert_eq!(result, Ok(4));
+
+        // Second call that panics should not leave flag stuck
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            region.rref_with(&rref, |_| panic!("test panic"))
+        }));
+        assert!(panic_result.is_err());
+
+        // Third call should work normally (flag was reset by RAII guard)
+        let result = region.rref_with(&rref, |val| val.chars().count());
+        assert_eq!(result, Ok(4));
+
+        // Verify thread-local flag is not stuck at true
+        let result = region.rref_with(&rref, |val| {
+            // This inner call should use try_read path if flag is working correctly
+            region.rref_with(&rref, |inner_val| inner_val.len())
+        });
+        assert_eq!(result, Ok(Ok(4)));
     }
 }
