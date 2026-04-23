@@ -1648,7 +1648,7 @@ pub struct KafkaClient {
 impl KafkaClient {
     /// Create a new unified Kafka client with real broker backend.
     pub async fn new(config: ProducerConfig) -> Result<Self, KafkaError> {
-        let producer = KafkaProducer::new(config.clone()).await?;
+        let producer = KafkaProducer::new(config.clone())?;
         Ok(Self {
             producer,
             consumer: None,
@@ -1664,7 +1664,7 @@ impl KafkaClient {
 
     /// Get broker backend information.
     pub fn backend(&self) -> &dyn BrokerBackend {
-        &self.backend
+        self.backend.as_ref()
     }
 
     /// Initialize consumer for the given topic (stub for now).
@@ -1693,7 +1693,7 @@ pub struct KafkaClient {
 impl KafkaClient {
     /// Create a new unified Kafka client with stub broker backend.
     pub async fn new(config: ProducerConfig) -> Result<Self, KafkaError> {
-        let producer = KafkaProducer::new(config.clone()).await?;
+        let producer = KafkaProducer::new(config.clone())?;
         Ok(Self {
             producer,
             consumer: None,
@@ -1709,7 +1709,7 @@ impl KafkaClient {
 
     /// Get broker backend information.
     pub fn backend(&self) -> &dyn BrokerBackend {
-        &self.backend
+        self.backend.as_ref()
     }
 
     /// Initialize consumer for the given topic (stub implementation).
