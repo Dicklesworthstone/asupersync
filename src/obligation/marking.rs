@@ -1116,13 +1116,18 @@ mod tests {
         init_test("marking_display");
         let mut marking = ObligationMarking::empty();
         let empty_str = format!("{marking}");
-        let has_zero = empty_str.contains("[0]");
-        crate::assert_with_log!(has_zero, "empty display", true, has_zero);
 
         marking.increment(ObligationKind::SendPermit, r(0));
         let nonempty_str = format!("{marking}");
-        let has_m = nonempty_str.contains("M = [");
-        crate::assert_with_log!(has_m, "nonempty display", true, has_m);
+        let rendered = format!("empty: {empty_str}\nnonempty: {nonempty_str}");
+        insta::assert_snapshot!(
+            "marking_display",
+            rendered,
+            @r"
+        empty: M = [0]
+        nonempty: M = [(SendPermit, RegionId(0:0))=1]
+        "
+        );
         crate::test_complete!("marking_display");
     }
 
@@ -1148,6 +1153,20 @@ mod tests {
 
         let max = result.timeline.max_pending();
         crate::assert_with_log!(max == 2, "max pending", 2, max);
+        insta::assert_snapshot!(
+            "marking_timeline_display",
+            format!("{}", result.timeline),
+            @r"
+        Marking Timeline (7 snapshots):
+          t=0ns: M = [0] (initial)
+          t=0ns: M = [(SendPermit, RegionId(0:0))=1] (reserve(SendPermit, RegionId(0:0)))
+          t=5ns: M = [(SendPermit, RegionId(0:0))=1, (Ack, RegionId(0:0))=1] (reserve(Ack, RegionId(0:0)))
+          t=10ns: M = [(Ack, RegionId(0:0))=1] (commit(SendPermit, RegionId(0:0)))
+          t=15ns: M = [0] (commit(Ack, RegionId(0:0)))
+          t=20ns: M = [0] (region_close(RegionId(0:0)))
+          t=20ns: M = [0] (final)
+        "
+        );
         crate::test_complete!("timeline_tracks_evolution");
     }
 
@@ -1217,35 +1236,47 @@ mod tests {
     #[test]
     fn display_impls() {
         init_test("marking_display_impls");
-        let violation = LeakViolation {
-            region: r(0),
-            kind: ObligationKind::SendPermit,
-            count: 2,
-            close_time: Time::from_nanos(100),
-        };
-        let s = format!("{violation}");
-        let has_leak = s.contains("leak");
-        crate::assert_with_log!(has_leak, "violation display", true, has_leak);
+        let events = vec![
+            reserve(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            reserve(5, o(1), ObligationKind::Ack, t(0), r(0)),
+            commit(10, o(0), r(0), ObligationKind::SendPermit),
+            close(15, r(0)),
+            abort(20, o(2), r(1), ObligationKind::Lease),
+        ];
+        let mut analyzer = MarkingAnalyzer::new();
+        let result = analyzer.analyze(&events);
+        let rendered = format!(
+            "leak: {}\ninvalid: {}\n\n{}",
+            result.leaks[0], result.invalid_transitions[0], result
+        );
+        insta::assert_snapshot!(
+            "marking_analysis_result_display",
+            rendered,
+            @r"
+        leak: leak: 1 Ack obligation(s) in RegionId(0:0) at 15ns
+        invalid: invalid at 20ns: abort(Lease, RegionId(1:0)) but marking is already zero
 
-        let invalid = InvalidTransition {
-            time: Time::from_nanos(50),
-            description: "test".to_string(),
-        };
-        let s = format!("{invalid}");
-        let has_invalid = s.contains("invalid");
-        crate::assert_with_log!(has_invalid, "invalid display", true, has_invalid);
+        VASS Marking Analysis Result
+        ============================
+        Events processed: 5
+        Safe: false
 
-        let result = AnalysisResult {
-            timeline: MarkingTimeline::default(),
-            leaks: vec![],
-            invalid_transitions: vec![],
-            closed_regions: HashSet::new(),
-            events_processed: 0,
-            stats: AnalysisStats::default(),
-        };
-        let s = format!("{result}");
-        let has_safe = s.contains("Safe: true");
-        crate::assert_with_log!(has_safe, "result display", true, has_safe);
+        Statistics:
+          Reserved:  2
+          Committed: 1
+          Aborted:   1
+          Leaked:    0
+          Max pending: 2
+          Regions:   1
+          Kinds:     2
+
+        Leak violations (1):
+          leak: 1 Ack obligation(s) in RegionId(0:0) at 15ns
+
+        Invalid transitions (1):
+          invalid at 20ns: abort(Lease, RegionId(1:0)) but marking is already zero
+        "
+        );
         crate::test_complete!("marking_display_impls");
     }
 
