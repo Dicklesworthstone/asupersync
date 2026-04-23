@@ -1257,6 +1257,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "framed_length_delimited_underflow"
+path = "fuzz_targets/framed_length_delimited_underflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_push_promise"
 path = "fuzz_targets/h2_push_promise.rs"
 test = false
@@ -1630,5 +1637,11 @@ bench = false
 [[bin]]
 name = "fuzz_hpack_block_start"
 path = "fuzz_targets/hpack_block_start.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_framed_length_delimited_underflow"
+path = "fuzz_targets/framed_length_delimited_underflow.rs"
 test = false
 doc = false
