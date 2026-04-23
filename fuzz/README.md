@@ -30,6 +30,7 @@ cargo +nightly install cargo-fuzz
 | `grpc_gzip_message_decode` | Gzip-compressed gRPC frame decode, malformed-gzip rejection, bomb guards, and max-message enforcement | High |
 | `grpc_length_prefixed` | gRPC frame roundtrip, partial-body accumulation, invalid-flag rejection, and max-size enforcement invariants | High |
 | `grpc_streaming` | Bidirectional gRPC stream interleaving, half-close/cancel propagation, deadline, and backpressure invariants | High |
+| `cancel_signal_ordering_oracle` | CancelOrderingOracle parent/child spawn, cancel, check, and reset state-machine invariants with bounded violation queues and sorted snapshots | High |
 | `fuzz_distributed_snapshot_merge` | CRDT snapshot merge convergence under delta reordering, malformed-wire rejection, and region-mismatch handling | High |
 | `h3_native_frames` | HTTP/3 frame-header varint bounds, malformed-frame rejection, unknown-frame preservation, and GREASE tolerance | High |
 | `qpack_field_section` | QPACK encoded field section parsing for static-indexed fields, static-name literals, dynamic-reference rejection, and prefixed-integer overflow | High |
@@ -102,6 +103,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `corpus/grpc_gzip_message_decode/` - Gzip-compressed gRPC frame decode, malformed-gzip rejection, and bomb-guard scenarios
 - `corpus/grpc_length_prefixed/` - gRPC frame seeds covering roundtrip framing, partial-body completion, invalid compression flags, and oversize-length rejection
 - `corpus/grpc_streaming/` - Bidirectional stream seeds covering interleaving, half-close/cancel, and deadline/backpressure scenarios
+- `corpus/cancel_signal_ordering_oracle/` - Parent/child spawn graphs plus ordered, orphaned, and delayed-child cancellation sequences
 - `corpus/h2_connection_window_update/` - HTTP/2 connection-state WINDOW_UPDATE seeds covering zero-increment rejection, idle-stream protocol errors, queued frame ordering, and window-overflow guards
 - `corpus/fuzz_distributed_snapshot_merge/` - CRDT merge seeds covering reordering convergence, malformed delta bytes, and region mismatch handling
 - `corpus/h3_native_frames/` - HTTP/3 DATA/HEADERS header varint, GREASE unknown-frame, reserved-type, and truncated-payload scenarios

@@ -879,6 +879,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "cancel_signal_ordering_oracle"
+path = "fuzz_targets/cancel_signal_ordering_oracle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "region_heap_allocator"
 path = "fuzz_targets/region_heap_allocator.rs"
 test = false
