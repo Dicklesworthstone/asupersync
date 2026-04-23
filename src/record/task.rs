@@ -286,19 +286,24 @@ pub struct TaskRecord {
     /// The region that owns this task.
     pub owner: RegionId,
     /// Current state of the task.
+    #[cfg_attr(feature = "test-internals", serde(skip))]
     pub state: TaskState,
     /// Cross-thread lifecycle phase (atomic snapshot).
+    #[cfg_attr(feature = "test-internals", serde(skip))]
     pub phase: TaskPhaseCell,
     /// Cross-thread wake dedup state for this task.
+    #[cfg_attr(feature = "test-internals", serde(skip))]
     pub wake_state: Arc<TaskWakeState>,
     /// Shared capability context state.
     ///
     /// This is shared with the `Cx` held by the user code.
     /// It is `None` only during initial construction or testing if not provided.
+    #[cfg_attr(feature = "test-internals", serde(skip))]
     pub cx_inner: Option<Arc<RwLock<CxInner>>>,
     /// Full capability context for this task.
     ///
     /// This allows the runtime to set a current task context while polling.
+    #[cfg_attr(feature = "test-internals", serde(skip))]
     pub cx: Option<Cx>,
     /// Logical time when the task was created.
     pub created_at: Time,
@@ -316,8 +321,10 @@ pub struct TaskRecord {
     pub waiters: SmallVec<[TaskId; 4]>,
     /// Cached waker for this task (avoids per-poll Arc allocation).
     /// The tuple stores (waker, priority) so we can detect priority changes.
+    #[cfg_attr(feature = "test-internals", serde(skip))]
     pub cached_waker: Option<(Waker, u8)>,
     /// Cached cancel waker for this task (avoids per-poll Arc allocation).
+    #[cfg_attr(feature = "test-internals", serde(skip))]
     pub cached_cancel_waker: Option<(Waker, u8)>,
     /// Cancellation epoch (increments on first cancel request).
     pub cancel_epoch: u64,
