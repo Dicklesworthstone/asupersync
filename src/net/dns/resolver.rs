@@ -1930,6 +1930,7 @@ mod tests {
     fn dns_name_goldens() {
         init_test("dns_name_goldens");
 
+        // Query-name encoding is canonical and uncompressed; pointer compression is decode-only.
         assert_dns_name_golden(DnsNameGoldenCase::SingleLabel, "example");
         assert_dns_name_golden(DnsNameGoldenCase::MultiLabel, "www.example.test");
         assert_dns_name_golden(DnsNameGoldenCase::MaxLabel63, &"a".repeat(63));
