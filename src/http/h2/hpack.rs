@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::LazyLock;
 
-use crate::bytes::{BufMut, Bytes, BytesMut};
+use crate::bytes::{Bytes, BytesMut};
 
 use super::error::H2Error;
 
