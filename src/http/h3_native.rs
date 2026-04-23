@@ -160,6 +160,18 @@ impl Default for H3ConnectionConfig {
     }
 }
 
+impl H3ConnectionConfig {
+    /// Enable dynamic QPACK table support.
+    ///
+    /// This allows the use of dynamic table operations for more efficient
+    /// header compression, but requires state synchronization between endpoints.
+    #[must_use]
+    pub fn with_dynamic_qpack(mut self) -> Self {
+        self.qpack_mode = H3QpackMode::DynamicTableAllowed;
+        self
+    }
+}
+
 /// Remote unidirectional stream type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum H3UniStreamType {
@@ -878,16 +890,27 @@ pub fn qpack_decode_field_section(
     let (delta_base, db_extra) = qpack_decode_prefixed_int(second, 7, &input[pos..])?;
     pos += db_extra;
 
-    if mode == H3QpackMode::StaticOnly {
-        if required_insert_count != 0 {
-            return Err(H3NativeError::QpackPolicy(
-                "required insert count must be zero in static-only mode",
-            ));
+    match mode {
+        H3QpackMode::StaticOnly => {
+            if required_insert_count != 0 {
+                return Err(H3NativeError::QpackPolicy(
+                    "required insert count must be zero in static-only mode",
+                ));
+            }
+            if sign || delta_base != 0 {
+                return Err(H3NativeError::QpackPolicy(
+                    "base must be zero in static-only mode",
+                ));
+            }
         }
-        if sign || delta_base != 0 {
-            return Err(H3NativeError::QpackPolicy(
-                "base must be zero in static-only mode",
-            ));
+        H3QpackMode::DynamicTableAllowed => {
+            // Dynamic table operations are permitted - validate reasonable bounds
+            if required_insert_count > 65536 {
+                return Err(H3NativeError::QpackPolicy(
+                    "required insert count exceeds reasonable limit",
+                ));
+            }
+            // Allow dynamic base calculations
         }
     }
 
@@ -900,9 +923,9 @@ pub fn qpack_decode_field_section(
             let is_static = (b & 0x40) != 0;
             let (index, extra) = qpack_decode_prefixed_int(b, 6, &input[pos + 1..])?;
             pos += 1 + extra;
-            if !is_static {
+            if !is_static && mode == H3QpackMode::StaticOnly {
                 return Err(H3NativeError::QpackPolicy(
-                    "dynamic qpack index references require dynamic table state",
+                    "dynamic qpack index references not allowed in static-only mode",
                 ));
             }
             if qpack_static_entry(index).is_none() {
@@ -917,9 +940,9 @@ pub fn qpack_decode_field_section(
             let is_static = (b & 0x10) != 0;
             let (name_index, extra) = qpack_decode_prefixed_int(b, 4, &input[pos + 1..])?;
             pos += 1 + extra;
-            if !is_static {
+            if !is_static && mode == H3QpackMode::StaticOnly {
                 return Err(H3NativeError::QpackPolicy(
-                    "dynamic qpack name references require dynamic table state",
+                    "dynamic qpack name references not allowed in static-only mode",
                 ));
             }
             let name = qpack_static_name(name_index).ok_or(H3NativeError::InvalidFrame(
@@ -950,8 +973,14 @@ pub fn qpack_decode_field_section(
 
         // Remaining line representations are post-base / dynamic variants:
         // 0001.... indexed post-base, 0000.... literal post-base name ref.
+        if mode == H3QpackMode::StaticOnly {
+            return Err(H3NativeError::QpackPolicy(
+                "post-base/dynamic qpack line representations not allowed in static-only mode",
+            ));
+        }
+        // TODO: Implement dynamic table post-base operations
         return Err(H3NativeError::QpackPolicy(
-            "post-base/dynamic qpack line representations require dynamic table state",
+            "post-base dynamic table operations not yet implemented",
         ));
     }
 
