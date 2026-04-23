@@ -1712,8 +1712,15 @@ impl KafkaClient {
 
     /// Initialize consumer for the given topic.
     pub async fn consumer(&mut self, topic: &str) -> Result<&dyn KafkaConsumerTrait, KafkaError> {
-        if self.consumer.is_some() {
-            return Ok(self.consumer.as_ref().unwrap());
+        if let Some(ref consumer) = self.consumer {
+            // Validate existing consumer is for the requested topic
+            if consumer.topic() != topic {
+                return Err(KafkaError::Config(format!(
+                    "Consumer already exists for topic '{}', cannot create consumer for different topic '{}'",
+                    consumer.topic(), topic
+                )));
+            }
+            return Ok(consumer);
         }
 
         // Create consumer config based on producer config
@@ -1800,7 +1807,18 @@ impl KafkaClient {
 
     /// Initialize consumer for the given topic (stub implementation).
     pub async fn consumer(&mut self, topic: &str) -> Result<&dyn KafkaConsumerTrait, KafkaError> {
-        // Stub implementation creates a fake consumer
+        if let Some(ref consumer) = self.consumer {
+            // Validate existing consumer is for the requested topic
+            if consumer.topic() != topic {
+                return Err(KafkaError::Config(format!(
+                    "Consumer already exists for topic '{}', cannot create consumer for different topic '{}'",
+                    consumer.topic(), topic
+                )));
+            }
+            return Ok(consumer);
+        }
+
+        // Create new stub consumer for the topic
         self.consumer = Some(StubConsumer { topic: topic.to_string() });
         Ok(self.consumer.as_ref().unwrap())
     }
