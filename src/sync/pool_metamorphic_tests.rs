@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::cx::Cx;
-use crate::sync::{GenericPool, Pool, PoolConfig, PooledResource, PoolStats};
+use crate::sync::{GenericPool, Pool, PoolConfig};
 use crate::types::Time;
 
 /// Mock resource for testing pool behavior.
@@ -67,7 +67,7 @@ enum PoolOperation {
 
 /// Execute a sequence of operations and collect accounting data.
 async fn execute_operations(
-    pool: &GenericPool<MockFactory>,
+    pool: &GenericPool<MockResource, MockFactory>,
     operations: &[PoolOperation],
 ) -> OperationResults {
     let mut acquired_count = 0;
@@ -78,7 +78,7 @@ async fn execute_operations(
     for op in operations {
         match op {
             PoolOperation::Acquire { hold_ms } => {
-                let cx = Cx::root();
+                let cx = Cx::for_testing();
                 if let Ok(resource) = pool.acquire(&cx).await {
                     acquired_count += 1;
 
@@ -110,7 +110,7 @@ async fn execute_operations(
                 }
             }
             PoolOperation::AcquireWithCancel { hold_ms, cancel_after_ms } => {
-                let cx = Cx::root();
+                let cx = Cx::for_testing();
                 let cancel_cx = cx.child();
 
                 // Start the acquire operation
@@ -118,7 +118,7 @@ async fn execute_operations(
 
                 // Cancel after the specified time
                 let cancel_future = async {
-                    crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(*cancel_after_ms)).await;
+                    crate::time::sleep(Time::ZERO,Duration::from_millis(*cancel_after_ms)).await;
                     cancel_cx.cancel();
                 };
 
@@ -129,7 +129,7 @@ async fn execute_operations(
                             acquired_count += 1;
 
                             // Hold the resource briefly
-                            crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(*hold_ms)).await;
+                            crate::time::sleep(Time::ZERO,Duration::from_millis(*hold_ms)).await;
 
                             resource.return_to_pool();
                             returned_count += 1;
@@ -144,7 +144,7 @@ async fn execute_operations(
         }
 
         // Small delay between operations to allow async processing
-        crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(10)).await;
+        crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
     }
 
     OperationResults {
@@ -181,7 +181,7 @@ mod metamorphic_tests {
 
         // Test the invariant across various operations
         for _ in 0..10 {
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
             let initial_stats = pool.stats();
 
             // Invariant must hold initially
@@ -198,7 +198,7 @@ mod metamorphic_tests {
 
                 // Return the resource
                 resource.return_to_pool();
-                crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(10)).await;
+                crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
 
                 let final_stats = pool.stats();
                 assert_eq!(final_stats.active + final_stats.idle, final_stats.total,
@@ -223,13 +223,13 @@ mod metamorphic_tests {
         let factory = MockFactory::new(Duration::from_millis(10));
         let pool = GenericPool::new(factory, config);
 
-        let cx = Cx::root();
+        let cx = Cx::for_testing();
         let cancel_cx = cx.child();
 
         // Start acquiring but cancel quickly
         let acquire_future = pool.acquire(&cancel_cx);
         let cancel_future = async {
-            crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(5)).await;
+            crate::time::sleep(Time::ZERO,Duration::from_millis(5)).await;
             cancel_cx.cancel();
         };
 
@@ -246,7 +246,7 @@ mod metamorphic_tests {
             }
         ).await;
 
-        crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(50)).await;
+        crate::time::sleep(Time::ZERO,Duration::from_millis(50)).await;
         let final_stats = pool.stats();
 
         // Pool accounting should remain valid despite cancellation
@@ -271,10 +271,10 @@ mod metamorphic_tests {
         let factory1 = MockFactory::new(Duration::from_millis(1));
         let pool1 = GenericPool::new(factory1, config.clone());
 
-        let cx = Cx::root();
+        let cx = Cx::for_testing();
         let resource1 = pool1.acquire(&cx).await.unwrap();
         resource1.return_to_pool(); // Explicit return
-        crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(10)).await;
+        crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
         let stats1 = pool1.stats();
 
         // Scenario 2: Drop return
@@ -283,7 +283,7 @@ mod metamorphic_tests {
 
         let resource2 = pool2.acquire(&cx).await.unwrap();
         drop(resource2); // Implicit return via Drop
-        crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(10)).await;
+        crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
         let stats2 = pool2.stats();
 
         // Both should result in equivalent pool states
@@ -311,10 +311,10 @@ mod metamorphic_tests {
         let factory1 = MockFactory::new(Duration::from_millis(1));
         let pool1 = GenericPool::new(factory1, config.clone());
 
-        let cx = Cx::root();
+        let cx = Cx::for_testing();
         let resource1 = pool1.acquire(&cx).await.unwrap();
         resource1.return_to_pool();
-        crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(10)).await;
+        crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
         let stats_return = pool1.stats();
 
         // Scenario 2: Discard resources
@@ -323,7 +323,7 @@ mod metamorphic_tests {
 
         let resource2 = pool2.acquire(&cx).await.unwrap();
         resource2.discard(); // Discard instead of return
-        crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(10)).await;
+        crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
         let stats_discard = pool2.stats();
 
         // Discarding should result in lower or equal total compared to returning
@@ -353,11 +353,11 @@ mod metamorphic_tests {
         let factory1 = MockFactory::new(Duration::from_millis(1));
         let pool1 = GenericPool::new(factory1, config.clone());
 
-        let cx = Cx::root();
+        let cx = Cx::for_testing();
         let resource1 = pool1.acquire(&cx).await.unwrap();
-        crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(5)).await; // Short hold
+        crate::time::sleep(Time::ZERO,Duration::from_millis(5)).await; // Short hold
         resource1.return_to_pool();
-        crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(10)).await;
+        crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
         let stats_short = pool1.stats();
 
         // Scenario 2: Long hold
@@ -365,9 +365,9 @@ mod metamorphic_tests {
         let pool2 = GenericPool::new(factory2, config);
 
         let resource2 = pool2.acquire(&cx).await.unwrap();
-        crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(50)).await; // Long hold
+        crate::time::sleep(Time::ZERO,Duration::from_millis(50)).await; // Long hold
         resource2.return_to_pool();
-        crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(10)).await;
+        crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
         let stats_long = pool2.stats();
 
         // Pool correctness should be independent of hold duration
@@ -406,7 +406,7 @@ mod metamorphic_tests {
         let _results = execute_operations(&pool, &operations).await;
 
         // Allow all async processing to complete
-        crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(100)).await;
+        crate::time::sleep(Time::ZERO,Duration::from_millis(100)).await;
 
         let final_stats = pool.stats();
 
