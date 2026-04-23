@@ -997,4 +997,216 @@ mod tests {
             );
         }
     }
+
+    // =========================================================================
+    // Decisiveness metamorphic relations for quorum_outcomes.
+    //
+    // The existing rotation proptest covers cyclic permutation invariance
+    // of the verdict + multiset. These MRs go further: arbitrary
+    // permutation, monotonicity in required, monotonicity in Ok-count,
+    // boundary conditions at required=0 / required=N(Ok) / required=N(Ok)+1,
+    // and decomposition under append. Together they pin down the
+    // verdict surface — any refactor that preserves rotation but breaks
+    // e.g. monotonicity would be caught here.
+    // =========================================================================
+
+    mod decisiveness_mr {
+        use super::*;
+
+        fn outcomes_from(cases: &[QuorumCase]) -> Vec<Outcome<i32, &'static str>> {
+            cases.iter().cloned().map(QuorumCase::into_outcome).collect()
+        }
+
+        fn count_ok(cases: &[QuorumCase]) -> usize {
+            cases.iter().filter(|c| matches!(c, QuorumCase::Ok(_))).count()
+        }
+
+        proptest! {
+            /// MR — Arbitrary permutation preserves verdict + multiset.
+            /// Stronger than the existing rotation MR because any
+            /// permutation is reachable; rotation is a narrow subgroup.
+            #[test]
+            fn mr_quorum_permutation_preserves_verdict_and_multiset(
+                cases in prop::collection::vec(quorum_case_strategy(), 1..10),
+                raw_required in 0usize..12,
+                perm_seed in any::<u64>(),
+            ) {
+                let required = raw_required % (cases.len() + 2);
+
+                let base = quorum_outcomes(required, outcomes_from(&cases));
+
+                // Fisher-Yates shuffle driven by the seed — any permutation.
+                let mut permuted = cases.clone();
+                let mut state = perm_seed.max(1);
+                for i in (1..permuted.len()).rev() {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    let j = (state as usize) % (i + 1);
+                    permuted.swap(i, j);
+                }
+                let permuted_result = quorum_outcomes(required, outcomes_from(&permuted));
+
+                prop_assert_eq!(base.quorum_met, permuted_result.quorum_met);
+                prop_assert_eq!(base.success_count(), permuted_result.success_count());
+                prop_assert_eq!(base.failure_count(), permuted_result.failure_count());
+                prop_assert_eq!(base.total(), permuted_result.total());
+
+                let mut base_ok: Vec<i32> = base.successes.iter().map(|(_, v)| *v).collect();
+                let mut perm_ok: Vec<i32> =
+                    permuted_result.successes.iter().map(|(_, v)| *v).collect();
+                base_ok.sort_unstable();
+                perm_ok.sort_unstable();
+                prop_assert_eq!(base_ok, perm_ok, "permutation changed the success multiset");
+            }
+
+            /// MR — Monotonicity in required (downward).
+            /// If quorum(k+1, xs).quorum_met, then quorum(k, xs).quorum_met.
+            /// Equivalently: the set of required values for which a given
+            /// Ok-count satisfies the quorum is downward-closed.
+            #[test]
+            fn mr_quorum_monotonic_downward_in_required(
+                cases in prop::collection::vec(quorum_case_strategy(), 1..10),
+                raw_k in 0usize..10,
+            ) {
+                let k_hi = raw_k % (cases.len() + 1);
+                let hi = quorum_outcomes(k_hi, outcomes_from(&cases));
+                if !hi.quorum_met {
+                    // Vacuously true when hi is not met.
+                    return Ok(());
+                }
+                for k_lo in 0..k_hi {
+                    let lo = quorum_outcomes(k_lo, outcomes_from(&cases));
+                    prop_assert!(
+                        lo.quorum_met,
+                        "quorum_met at required={k_hi} but not at required={k_lo} (downward closure violated)",
+                    );
+                }
+            }
+
+            /// MR — Monotonicity in Ok-count (upward).
+            /// Replacing the first non-Ok outcome with an Ok can only
+            /// preserve or improve quorum_met; it can never flip met→unmet.
+            #[test]
+            fn mr_quorum_monotonic_upward_in_ok_count(
+                cases in prop::collection::vec(quorum_case_strategy(), 1..10),
+                raw_required in 0usize..10,
+            ) {
+                let required = raw_required % (cases.len() + 1);
+                let before = quorum_outcomes(required, outcomes_from(&cases));
+
+                // Promote the first non-Ok to an Ok.
+                let mut upgraded = cases.clone();
+                for c in upgraded.iter_mut() {
+                    if !matches!(c, QuorumCase::Ok(_)) {
+                        *c = QuorumCase::Ok(99);
+                        break;
+                    }
+                }
+                let after = quorum_outcomes(required, outcomes_from(&upgraded));
+
+                if before.quorum_met {
+                    prop_assert!(
+                        after.quorum_met,
+                        "promoting a failure to success flipped quorum_met true → false",
+                    );
+                }
+                prop_assert!(
+                    after.success_count() >= before.success_count(),
+                    "success_count must be non-decreasing when upgrading a failure",
+                );
+            }
+
+            /// MR — Exact-threshold boundary. For any multiset of outcomes,
+            /// quorum_met holds iff required ≤ count_ok(cases).
+            #[test]
+            fn mr_quorum_exact_threshold(
+                cases in prop::collection::vec(quorum_case_strategy(), 0..10),
+            ) {
+                let n_ok = count_ok(&cases);
+                // required = n_ok must be met (when n_ok > 0); or special
+                // case required = 0 which is always met per the code.
+                let at_thresh = quorum_outcomes(n_ok, outcomes_from(&cases));
+                prop_assert!(
+                    at_thresh.quorum_met,
+                    "required = count_ok must be met (n_ok={n_ok})",
+                );
+                // required = n_ok + 1 must be unmet.
+                let over = quorum_outcomes(n_ok + 1, outcomes_from(&cases));
+                prop_assert!(
+                    !over.quorum_met,
+                    "required = count_ok + 1 must be unmet (n_ok={n_ok})",
+                );
+            }
+
+            /// MR — Appending a failure preserves verdict.
+            /// quorum(k, xs).quorum_met implies quorum(k, xs ++ [failure]).quorum_met.
+            #[test]
+            fn mr_appending_failure_preserves_met(
+                cases in prop::collection::vec(quorum_case_strategy(), 1..10),
+                raw_required in 0usize..10,
+                failure_variant in 0u8..5,
+            ) {
+                let required = raw_required % (cases.len() + 1);
+                let base = quorum_outcomes(required, outcomes_from(&cases));
+                if !base.quorum_met {
+                    return Ok(());
+                }
+                let appended_failure = match failure_variant % 5 {
+                    0 => QuorumCase::ErrAlpha,
+                    1 => QuorumCase::CancelUser,
+                    2 => QuorumCase::CancelTimeout,
+                    3 => QuorumCase::CancelShutdown,
+                    _ => QuorumCase::Panic,
+                };
+                let mut appended = cases.clone();
+                appended.push(appended_failure);
+                let after = quorum_outcomes(required, outcomes_from(&appended));
+                prop_assert!(
+                    after.quorum_met,
+                    "appending a failure flipped met → unmet",
+                );
+                prop_assert_eq!(base.success_count(), after.success_count());
+                prop_assert_eq!(after.failure_count(), base.failure_count() + 1);
+            }
+        }
+
+        /// required=0 is the additive identity — always met regardless of
+        /// outcome composition — and produces zero successes (all
+        /// outcomes become failure entries per the code at lines 267-279).
+        #[test]
+        fn mr_quorum_required_zero_is_additive_identity() {
+            let outcomes: Vec<Outcome<i32, &'static str>> = vec![
+                Outcome::Ok(1),
+                Outcome::Err("e"),
+                Outcome::Cancelled(CancelReason::timeout()),
+                Outcome::Panicked(PanicPayload::new("p")),
+            ];
+            let result = quorum_outcomes(0, outcomes);
+            assert!(result.quorum_met, "required=0 must always be met");
+            assert_eq!(result.success_count(), 0, "required=0 reports zero successes");
+            assert_eq!(result.failure_count(), 4, "all inputs drained into failures");
+        }
+
+        /// quorum_still_possible has a precise algebraic identity:
+        ///   possible ⇔ (total - failures) ≥ required
+        /// when successes + failures ≤ total (the only valid input shape).
+        #[test]
+        fn mr_quorum_still_possible_matches_algebra() {
+            for total in 0..=6usize {
+                for successes in 0..=total {
+                    for failures in 0..=(total - successes) {
+                        for required in 0..=(total + 2) {
+                            let got = quorum_still_possible(required, total, successes, failures);
+                            let remaining = total - successes - failures;
+                            let want = successes + remaining >= required;
+                            assert_eq!(
+                                got, want,
+                                "quorum_still_possible({required}, {total}, {successes}, {failures}) \
+                                 = {got}, algebra says {want}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
