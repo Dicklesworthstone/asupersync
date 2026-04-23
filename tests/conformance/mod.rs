@@ -13,6 +13,7 @@ pub mod h2_connect;
 pub mod h2_priority;
 pub mod h2_rst_stream_ping_rfc9113;
 pub mod hpack_table_size;
+pub mod h2_settings_flow_continuation;
 // pub mod h2_stream_state_machine_rfc7540;
 // pub mod h3_rfc9114;
 // pub mod hpack_metamorphic;
@@ -41,6 +42,7 @@ pub mod kqueue_bsd_events;
 pub mod quic_connection_migration_rfc9000;
 pub mod tcp_accept;
 pub mod websocket_extension_negotiation_rfc6455;
+pub mod timeout_deadline_harness;
 
 // Re-export main conformance test functionality
 pub use aggregator_flush::AggregatorFlushConformanceHarness;
@@ -51,6 +53,7 @@ pub use h2_alpn_negotiation_rfc7540::{
     TestCategory as H2AlpnTestCategory,
 };
 pub use h2_rst_stream_ping_rfc9113::H2ConformanceHarness;
+pub use h2_settings_flow_continuation::H2SettingsFlowContinuationHarness;
 // pub use h3_rfc9114::{H3ConformanceHarness, H3ConformanceResult};
 pub use hpack_rfc7541::HpackConformanceHarness;
 // pub use mysql_auth_switch::{MySqlAuthConformanceHarness, MySqlAuthConformanceResult};
