@@ -1673,3 +1673,10 @@ path = "fuzz_targets/length_delimited_prefix_roundtrip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "http1_chunked"
+path = "fuzz_targets/http1_chunked.rs"
+test = false
+doc = false
+bench = false
