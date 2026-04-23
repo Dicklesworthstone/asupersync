@@ -46,6 +46,7 @@ use rdkafka::{
     error::{KafkaError as RdKafkaError, RDKafkaErrorCode},
     message::{BorrowedMessage, DeliveryResult, Header, Message, OwnedHeaders},
     producer::{BaseRecord, ProducerContext, ThreadedProducer},
+    consumer::{Consumer, StreamConsumer},
 };
 #[cfg(feature = "kafka")]
 use std::future::Future;
@@ -1625,6 +1626,49 @@ mod tests {
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }
+
+/// Unified Kafka client combining producer and consumer capabilities.
+///
+/// This is a high-level wrapper around `KafkaProducer` and rdkafka's
+/// `StreamConsumer` to provide a single entry point for Kafka operations.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let client = KafkaClient::new(config).await?;
+/// let producer = client.producer();
+/// let consumer = client.consumer(topic).await?;
+/// ```
+#[cfg(feature = "kafka")]
+pub struct KafkaClient {
+    producer: KafkaProducer,
+    consumer: Option<StreamConsumer<KafkaContext>>,
+    config: KafkaConfig,
+}
+
+#[cfg(feature = "kafka")]
+impl KafkaClient {
+    /// Create a new unified Kafka client.
+    pub async fn new(config: KafkaConfig) -> Result<Self, KafkaError> {
+        let producer = KafkaProducer::new(config.clone()).await?;
+        Ok(Self {
+            producer,
+            consumer: None,
+            config,
+        })
+    }
+
+    /// Get the producer for publishing messages.
+    pub fn producer(&self) -> &KafkaProducer {
+        &self.producer
+    }
+
+    /// Initialize consumer for the given topic (stub for now).
+    pub async fn consumer(&mut self, _topic: &str) -> Result<&StreamConsumer<KafkaContext>, KafkaError> {
+        // TODO: Implement consumer initialization
+        Err(KafkaError::Configuration("Consumer not yet implemented".to_string()))
+    }
+}
 
     #[test]
     fn test_acks_values() {
