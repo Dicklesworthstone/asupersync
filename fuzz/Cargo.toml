@@ -1659,3 +1659,17 @@ path = "fuzz_targets/websocket_fragmentation_sequences.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "quic_stream_reordering"
+path = "fuzz_targets/quic_stream_reordering.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "length_delimited_prefix_roundtrip"
+path = "fuzz_targets/length_delimited_prefix_roundtrip.rs"
+test = false
+doc = false
+bench = false
