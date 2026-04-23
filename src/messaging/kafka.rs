@@ -1593,40 +1593,6 @@ impl Drop for Transaction<'_> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[cfg(not(feature = "kafka"))]
-    use crate::time::{TimerDriverHandle, VirtualClock};
-    #[cfg(not(feature = "kafka"))]
-    use crate::types::{Budget, RegionId, TaskId};
-    #[cfg(feature = "kafka")]
-    use futures_lite::future;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
-    #[cfg(feature = "kafka")]
-    use std::task::{Context, Waker};
-
-    #[cfg(not(feature = "kafka"))]
-    fn stub_broker_guard() -> StubBrokerTestGuard {
-        lock_stub_broker_for_tests()
-    }
-
-    #[cfg(feature = "kafka")]
-    struct NoopWaker;
-
-    #[cfg(feature = "kafka")]
-    use std::task::Wake;
-    #[cfg(feature = "kafka")]
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
-    #[cfg(feature = "kafka")]
-    fn noop_waker() -> Waker {
-        std::task::Waker::noop().clone()
-    }
-
 /// Broker backend abstraction for switching between real and stub implementations.
 pub trait BrokerBackend: Send + Sync {
     /// Check if this backend supports real broker integration.
@@ -1674,14 +1640,14 @@ impl BrokerBackend for StubBrokerBackend {
 pub struct KafkaClient {
     producer: KafkaProducer,
     consumer: Option<StreamConsumer<KafkaContext>>,
-    config: KafkaConfig,
+    config: ProducerConfig,
     backend: RealBrokerBackend,
 }
 
 #[cfg(feature = "kafka")]
 impl KafkaClient {
     /// Create a new unified Kafka client with real broker backend.
-    pub async fn new(config: KafkaConfig) -> Result<Self, KafkaError> {
+    pub async fn new(config: ProducerConfig) -> Result<Self, KafkaError> {
         let producer = KafkaProducer::new(config.clone()).await?;
         Ok(Self {
             producer,
@@ -1712,14 +1678,14 @@ impl KafkaClient {
 #[cfg(not(feature = "kafka"))]
 pub struct KafkaClient {
     producer: KafkaProducer,
-    config: KafkaConfig,
+    config: ProducerConfig,
     backend: StubBrokerBackend,
 }
 
 #[cfg(not(feature = "kafka"))]
 impl KafkaClient {
     /// Create a new unified Kafka client with stub broker backend.
-    pub async fn new(config: KafkaConfig) -> Result<Self, KafkaError> {
+    pub async fn new(config: ProducerConfig) -> Result<Self, KafkaError> {
         let producer = KafkaProducer::new(config.clone()).await?;
         Ok(Self {
             producer,
@@ -1738,6 +1704,40 @@ impl KafkaClient {
         &self.backend
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(not(feature = "kafka"))]
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    #[cfg(not(feature = "kafka"))]
+    use crate::types::{Budget, RegionId, TaskId};
+    #[cfg(feature = "kafka")]
+    use futures_lite::future;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    #[cfg(feature = "kafka")]
+    use std::task::{Context, Waker};
+
+    #[cfg(not(feature = "kafka"))]
+    fn stub_broker_guard() -> StubBrokerTestGuard {
+        lock_stub_broker_for_tests()
+    }
+
+    #[cfg(feature = "kafka")]
+    struct NoopWaker;
+
+    #[cfg(feature = "kafka")]
+    use std::task::Wake;
+    #[cfg(feature = "kafka")]
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    #[cfg(feature = "kafka")]
+    fn noop_waker() -> Waker {
+        std::task::Waker::noop().clone()
+    }
 
     #[test]
     fn test_acks_values() {
