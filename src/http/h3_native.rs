@@ -899,6 +899,19 @@ pub fn qpack_decode_field_section(
     let (delta_base, db_extra) = qpack_decode_prefixed_int(second, 7, &input[pos..])?;
     pos += db_extra;
 
+    // Calculate the base index for dynamic table references per RFC 9204
+    let base = if required_insert_count == 0 {
+        0
+    } else {
+        if sign {
+            // Negative delta: base = RIC - delta_base - 1
+            required_insert_count.saturating_sub(delta_base).saturating_sub(1)
+        } else {
+            // Positive delta: base = RIC + delta_base
+            required_insert_count.saturating_add(delta_base)
+        }
+    };
+
     match mode {
         H3QpackMode::StaticOnly => {
             if required_insert_count != 0 {
@@ -944,8 +957,16 @@ pub fn qpack_decode_field_section(
                 }
                 out.push(QpackFieldPlan::StaticIndex(index));
             } else {
-                // Dynamic table index - add support for basic dynamic table lookup
-                out.push(QpackFieldPlan::DynamicIndex(index));
+                // Dynamic table index - calculate absolute index from base and wire index
+                let is_post_base = (b & 0x10) != 0;
+                let absolute_index = if is_post_base {
+                    // Post-base reference: absolute = base + index
+                    base.saturating_add(index)
+                } else {
+                    // Pre-base reference: absolute = base - index - 1
+                    base.saturating_sub(index).saturating_sub(1)
+                };
+                out.push(QpackFieldPlan::DynamicIndex(absolute_index));
             }
             continue;
         }
@@ -974,9 +995,17 @@ pub fn qpack_decode_field_section(
                     value,
                 });
             } else {
-                // Dynamic table name reference
+                // Dynamic table name reference - calculate absolute index from base
+                let is_post_base_name = (b & 0x08) != 0;
+                let absolute_name_index = if is_post_base_name {
+                    // Post-base name reference: absolute = base + name_index
+                    base.saturating_add(name_index)
+                } else {
+                    // Pre-base name reference: absolute = base - name_index - 1
+                    base.saturating_sub(name_index).saturating_sub(1)
+                };
                 out.push(QpackFieldPlan::DynamicNameLiteral {
-                    name_index,
+                    name_index: absolute_name_index,
                     value,
                 });
             }

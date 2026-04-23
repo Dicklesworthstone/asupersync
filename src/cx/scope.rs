@@ -203,7 +203,9 @@ impl Future for RegionCloseFuture {
         if state.closed {
             Poll::Ready(())
         } else {
-            state.waiters.push(cx.waker().clone());
+            if !state.waiters.iter().any(|w| w.will_wake(cx.waker())) {
+                state.waiters.push(cx.waker().clone());
+            }
             Poll::Pending
         }
     }
