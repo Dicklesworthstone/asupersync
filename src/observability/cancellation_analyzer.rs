@@ -650,21 +650,74 @@ impl CancellationAnalyzer {
         rankings
     }
 
-    /// Analyze performance trends (placeholder implementation).
-    fn analyze_trends(&self, _traces: &[CancellationTrace]) -> TrendAnalysis {
-        // Would need historical data and time-series analysis
+    /// Analyze performance trends based on trace data ordered by timestamp.
+    fn analyze_trends(&self, traces: &[CancellationTrace]) -> TrendAnalysis {
+        if traces.len() < self.config.trend_window_size {
+            return TrendAnalysis {
+                latency_trend: TrendDirection::Insufficient,
+                throughput_trend: TrendDirection::Insufficient,
+                anomaly_trend: TrendDirection::Insufficient,
+                stability_trend: TrendDirection::Insufficient,
+            };
+        }
+
+        // Sort traces by start time to establish temporal order
+        let mut ordered_traces = traces.to_vec();
+        ordered_traces.sort_by_key(|t| t.start_time);
+
+        // Split into early and recent halves for trend comparison
+        let split_point = ordered_traces.len() / 2;
+        let early_traces = &ordered_traces[..split_point];
+        let recent_traces = &ordered_traces[split_point..];
+
+        // Calculate trend directions
+        let latency_trend = self.calculate_latency_trend(early_traces, recent_traces);
+        let throughput_trend = self.calculate_throughput_trend(early_traces, recent_traces);
+        let anomaly_trend = self.calculate_anomaly_trend(early_traces, recent_traces);
+        let stability_trend = self.calculate_stability_trend(early_traces, recent_traces);
+
         TrendAnalysis {
-            latency_trend: TrendDirection::Insufficient,
-            throughput_trend: TrendDirection::Insufficient,
-            anomaly_trend: TrendDirection::Insufficient,
-            stability_trend: TrendDirection::Insufficient,
+            latency_trend,
+            throughput_trend,
+            anomaly_trend,
+            stability_trend,
         }
     }
 
-    /// Detect performance regressions (placeholder implementation).
-    fn detect_regressions(&self, _traces: &[CancellationTrace]) -> Vec<PerformanceRegression> {
-        // Would need baseline comparison and change point detection
-        Vec::new()
+    /// Detect performance regressions by comparing recent performance to historical baseline.
+    fn detect_regressions(&self, traces: &[CancellationTrace]) -> Vec<PerformanceRegression> {
+        if traces.len() < self.config.min_sample_size * 2 {
+            return Vec::new(); // Need sufficient data for comparison
+        }
+
+        let mut regressions = Vec::new();
+        let now = SystemTime::now();
+
+        // Sort traces by start time for temporal analysis
+        let mut ordered_traces = traces.to_vec();
+        ordered_traces.sort_by_key(|t| t.start_time);
+
+        // Split into baseline (first 60%) and recent (last 40%) for comparison
+        let baseline_end = (ordered_traces.len() as f64 * 0.6) as usize;
+        let baseline_traces = &ordered_traces[..baseline_end];
+        let recent_traces = &ordered_traces[baseline_end..];
+
+        // Detect latency regressions
+        if let Some(regression) = self.detect_latency_regression(baseline_traces, recent_traces, now) {
+            regressions.push(regression);
+        }
+
+        // Detect throughput regressions
+        if let Some(regression) = self.detect_throughput_regression(baseline_traces, recent_traces, now) {
+            regressions.push(regression);
+        }
+
+        // Detect anomaly increase regressions
+        if let Some(regression) = self.detect_anomaly_regression(baseline_traces, recent_traces, now) {
+            regressions.push(regression);
+        }
+
+        regressions
     }
 
     /// Generate optimization recommendations.
@@ -719,6 +772,346 @@ impl CancellationAnalyzer {
         }
 
         recommendations
+    }
+
+    /// Calculate latency trend by comparing early vs recent traces.
+    fn calculate_latency_trend(
+        &self,
+        early_traces: &[CancellationTrace],
+        recent_traces: &[CancellationTrace],
+    ) -> TrendDirection {
+        let early_latencies: Vec<f64> = early_traces
+            .iter()
+            .filter_map(|t| t.total_propagation_time.map(|d| d.as_secs_f64() * 1000.0))
+            .collect();
+
+        let recent_latencies: Vec<f64> = recent_traces
+            .iter()
+            .filter_map(|t| t.total_propagation_time.map(|d| d.as_secs_f64() * 1000.0))
+            .collect();
+
+        if early_latencies.is_empty() || recent_latencies.is_empty() {
+            return TrendDirection::Insufficient;
+        }
+
+        let early_avg = early_latencies.iter().sum::<f64>() / early_latencies.len() as f64;
+        let recent_avg = recent_latencies.iter().sum::<f64>() / recent_latencies.len() as f64;
+
+        // 5% threshold for significance
+        let change_ratio = (recent_avg - early_avg) / early_avg;
+        if change_ratio > 0.05 {
+            TrendDirection::Degrading // Latency increased
+        } else if change_ratio < -0.05 {
+            TrendDirection::Improving // Latency decreased
+        } else {
+            TrendDirection::Stable
+        }
+    }
+
+    /// Calculate throughput trend by comparing trace processing rates.
+    fn calculate_throughput_trend(
+        &self,
+        early_traces: &[CancellationTrace],
+        recent_traces: &[CancellationTrace],
+    ) -> TrendDirection {
+        if early_traces.is_empty() || recent_traces.is_empty() {
+            return TrendDirection::Insufficient;
+        }
+
+        // Approximate throughput as entities cancelled per unit time
+        let early_throughput = early_traces
+            .iter()
+            .filter_map(|t| {
+                t.total_propagation_time.map(|duration| {
+                    if duration.as_secs_f64() > 0.0 {
+                        t.entities_cancelled as f64 / duration.as_secs_f64()
+                    } else {
+                        0.0
+                    }
+                })
+            })
+            .filter(|&x| x > 0.0)
+            .collect::<Vec<f64>>();
+
+        let recent_throughput = recent_traces
+            .iter()
+            .filter_map(|t| {
+                t.total_propagation_time.map(|duration| {
+                    if duration.as_secs_f64() > 0.0 {
+                        t.entities_cancelled as f64 / duration.as_secs_f64()
+                    } else {
+                        0.0
+                    }
+                })
+            })
+            .filter(|&x| x > 0.0)
+            .collect::<Vec<f64>>();
+
+        if early_throughput.is_empty() || recent_throughput.is_empty() {
+            return TrendDirection::Insufficient;
+        }
+
+        let early_avg = early_throughput.iter().sum::<f64>() / early_throughput.len() as f64;
+        let recent_avg = recent_throughput.iter().sum::<f64>() / recent_throughput.len() as f64;
+
+        let change_ratio = (recent_avg - early_avg) / early_avg;
+        if change_ratio > 0.05 {
+            TrendDirection::Improving // Throughput increased
+        } else if change_ratio < -0.05 {
+            TrendDirection::Degrading // Throughput decreased
+        } else {
+            TrendDirection::Stable
+        }
+    }
+
+    /// Calculate anomaly trend by comparing anomaly rates.
+    fn calculate_anomaly_trend(
+        &self,
+        early_traces: &[CancellationTrace],
+        recent_traces: &[CancellationTrace],
+    ) -> TrendDirection {
+        let early_anomaly_rate = if early_traces.is_empty() {
+            0.0
+        } else {
+            early_traces.iter().map(|t| t.anomalies.len()).sum::<usize>() as f64
+                / early_traces.len() as f64
+        };
+
+        let recent_anomaly_rate = if recent_traces.is_empty() {
+            0.0
+        } else {
+            recent_traces.iter().map(|t| t.anomalies.len()).sum::<usize>() as f64
+                / recent_traces.len() as f64
+        };
+
+        if early_anomaly_rate == 0.0 && recent_anomaly_rate == 0.0 {
+            return TrendDirection::Stable;
+        }
+
+        // For anomalies, we use absolute change since rates are typically small
+        let change = recent_anomaly_rate - early_anomaly_rate;
+        if change > 0.1 {
+            TrendDirection::Degrading // More anomalies
+        } else if change < -0.1 {
+            TrendDirection::Improving // Fewer anomalies
+        } else {
+            TrendDirection::Stable
+        }
+    }
+
+    /// Calculate stability trend by comparing latency variance.
+    fn calculate_stability_trend(
+        &self,
+        early_traces: &[CancellationTrace],
+        recent_traces: &[CancellationTrace],
+    ) -> TrendDirection {
+        let early_latencies: Vec<f64> = early_traces
+            .iter()
+            .filter_map(|t| t.total_propagation_time.map(|d| d.as_secs_f64() * 1000.0))
+            .collect();
+
+        let recent_latencies: Vec<f64> = recent_traces
+            .iter()
+            .filter_map(|t| t.total_propagation_time.map(|d| d.as_secs_f64() * 1000.0))
+            .collect();
+
+        if early_latencies.len() < 2 || recent_latencies.len() < 2 {
+            return TrendDirection::Insufficient;
+        }
+
+        let early_stats = self.calculate_distribution_stats(&early_latencies);
+        let recent_stats = self.calculate_distribution_stats(&recent_latencies);
+
+        // Coefficient of variation as stability metric (lower is more stable)
+        let early_cv = if early_stats.mean > 0.0 {
+            early_stats.std_dev / early_stats.mean
+        } else {
+            f64::INFINITY
+        };
+        let recent_cv = if recent_stats.mean > 0.0 {
+            recent_stats.std_dev / recent_stats.mean
+        } else {
+            f64::INFINITY
+        };
+
+        if early_cv.is_infinite() || recent_cv.is_infinite() {
+            return TrendDirection::Insufficient;
+        }
+
+        // 10% threshold for coefficient of variation change
+        let change_ratio = (recent_cv - early_cv) / early_cv;
+        if change_ratio > 0.1 {
+            TrendDirection::Degrading // Less stable
+        } else if change_ratio < -0.1 {
+            TrendDirection::Improving // More stable
+        } else {
+            TrendDirection::Stable
+        }
+    }
+
+    /// Detect latency regression by comparing baseline to recent performance.
+    fn detect_latency_regression(
+        &self,
+        baseline_traces: &[CancellationTrace],
+        recent_traces: &[CancellationTrace],
+        detected_at: SystemTime,
+    ) -> Option<PerformanceRegression> {
+        let baseline_latencies: Vec<f64> = baseline_traces
+            .iter()
+            .filter_map(|t| t.total_propagation_time.map(|d| d.as_secs_f64() * 1000.0))
+            .collect();
+
+        let recent_latencies: Vec<f64> = recent_traces
+            .iter()
+            .filter_map(|t| t.total_propagation_time.map(|d| d.as_secs_f64() * 1000.0))
+            .collect();
+
+        if baseline_latencies.is_empty() || recent_latencies.is_empty() {
+            return None;
+        }
+
+        let baseline_avg = baseline_latencies.iter().sum::<f64>() / baseline_latencies.len() as f64;
+        let recent_avg = recent_latencies.iter().sum::<f64>() / recent_latencies.len() as f64;
+
+        // Detect regression if recent latency is significantly higher
+        let regression_magnitude = (recent_avg - baseline_avg) / baseline_avg;
+        if regression_magnitude > 0.2 {
+            // 20% increase threshold
+            let confidence = if regression_magnitude > 0.5 {
+                0.9
+            } else if regression_magnitude > 0.3 {
+                0.7
+            } else {
+                0.5
+            };
+
+            Some(PerformanceRegression {
+                affected_component: "cancellation_latency".to_string(),
+                metric_name: "average_propagation_time".to_string(),
+                regression_magnitude,
+                confidence,
+                detected_at,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Detect throughput regression by comparing processing rates.
+    fn detect_throughput_regression(
+        &self,
+        baseline_traces: &[CancellationTrace],
+        recent_traces: &[CancellationTrace],
+        detected_at: SystemTime,
+    ) -> Option<PerformanceRegression> {
+        let baseline_throughput = baseline_traces
+            .iter()
+            .filter_map(|t| {
+                t.total_propagation_time.map(|duration| {
+                    if duration.as_secs_f64() > 0.0 {
+                        t.entities_cancelled as f64 / duration.as_secs_f64()
+                    } else {
+                        0.0
+                    }
+                })
+            })
+            .filter(|&x| x > 0.0)
+            .collect::<Vec<f64>>();
+
+        let recent_throughput = recent_traces
+            .iter()
+            .filter_map(|t| {
+                t.total_propagation_time.map(|duration| {
+                    if duration.as_secs_f64() > 0.0 {
+                        t.entities_cancelled as f64 / duration.as_secs_f64()
+                    } else {
+                        0.0
+                    }
+                })
+            })
+            .filter(|&x| x > 0.0)
+            .collect::<Vec<f64>>();
+
+        if baseline_throughput.is_empty() || recent_throughput.is_empty() {
+            return None;
+        }
+
+        let baseline_avg = baseline_throughput.iter().sum::<f64>() / baseline_throughput.len() as f64;
+        let recent_avg = recent_throughput.iter().sum::<f64>() / recent_throughput.len() as f64;
+
+        // Detect regression if recent throughput is significantly lower
+        let throughput_drop = (baseline_avg - recent_avg) / baseline_avg;
+        if throughput_drop > 0.15 {
+            // 15% decrease threshold
+            let confidence = if throughput_drop > 0.4 {
+                0.9
+            } else if throughput_drop > 0.25 {
+                0.7
+            } else {
+                0.5
+            };
+
+            Some(PerformanceRegression {
+                affected_component: "cancellation_throughput".to_string(),
+                metric_name: "entities_per_second".to_string(),
+                regression_magnitude: throughput_drop,
+                confidence,
+                detected_at,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Detect anomaly rate regression (increase in anomalies).
+    fn detect_anomaly_regression(
+        &self,
+        baseline_traces: &[CancellationTrace],
+        recent_traces: &[CancellationTrace],
+        detected_at: SystemTime,
+    ) -> Option<PerformanceRegression> {
+        let baseline_anomaly_rate = if baseline_traces.is_empty() {
+            0.0
+        } else {
+            baseline_traces.iter().map(|t| t.anomalies.len()).sum::<usize>() as f64
+                / baseline_traces.len() as f64
+        };
+
+        let recent_anomaly_rate = if recent_traces.is_empty() {
+            0.0
+        } else {
+            recent_traces.iter().map(|t| t.anomalies.len()).sum::<usize>() as f64
+                / recent_traces.len() as f64
+        };
+
+        // Detect regression if anomaly rate increased significantly
+        let anomaly_increase = recent_anomaly_rate - baseline_anomaly_rate;
+        if anomaly_increase > 0.5 {
+            // 0.5 anomalies per trace threshold
+            let regression_magnitude = if baseline_anomaly_rate > 0.0 {
+                anomaly_increase / baseline_anomaly_rate
+            } else {
+                anomaly_increase // Use absolute increase if baseline was 0
+            };
+
+            let confidence = if anomaly_increase > 2.0 {
+                0.9
+            } else if anomaly_increase > 1.0 {
+                0.7
+            } else {
+                0.5
+            };
+
+            Some(PerformanceRegression {
+                affected_component: "cancellation_anomalies".to_string(),
+                metric_name: "anomaly_rate".to_string(),
+                regression_magnitude,
+                confidence,
+                detected_at,
+            })
+        } else {
+            None
+        }
     }
 
     /// Create analysis for insufficient data scenarios.
@@ -819,5 +1212,213 @@ mod tests {
 
         assert_eq!(analysis.traces_analyzed, 0);
         assert!(!analysis.recommendations.is_empty()); // Should have "collect more data" recommendation
+    }
+
+    #[test]
+    fn test_trend_analysis_non_placeholder() {
+        use crate::observability::cancellation_tracer::CancellationStep;
+        use std::time::{Duration, SystemTime};
+
+        let analyzer = CancellationAnalyzer::default();
+        let base_time = SystemTime::UNIX_EPOCH;
+
+        // Create traces with improving latency trend (early high, recent low)
+        let mut traces = Vec::new();
+
+        // Early traces (higher latency)
+        for i in 0..50 {
+            traces.push(CancellationTrace {
+                trace_id: format!("trace-early-{}", i),
+                start_time: base_time + Duration::from_secs(i),
+                total_propagation_time: Some(Duration::from_millis(100 + i * 2)), // 100-200ms
+                entities_cancelled: 5,
+                max_depth: 3,
+                steps: vec![CancellationStep {
+                    entity_id: format!("entity-{}", i % 3),
+                    elapsed_since_prev: Duration::from_millis(20),
+                }],
+                anomalies: Vec::new(),
+                is_complete: true,
+            });
+        }
+
+        // Recent traces (lower latency)
+        for i in 50..100 {
+            traces.push(CancellationTrace {
+                trace_id: format!("trace-recent-{}", i),
+                start_time: base_time + Duration::from_secs(i),
+                total_propagation_time: Some(Duration::from_millis(50 + (i - 50) / 2)), // 50-75ms
+                entities_cancelled: 8,
+                max_depth: 3,
+                steps: vec![CancellationStep {
+                    entity_id: format!("entity-{}", i % 3),
+                    elapsed_since_prev: Duration::from_millis(15),
+                }],
+                anomalies: Vec::new(),
+                is_complete: true,
+            });
+        }
+
+        let trends = analyzer.analyze_trends(&traces);
+
+        // Should detect improving latency and throughput trends
+        assert!(
+            matches!(trends.latency_trend, TrendDirection::Improving),
+            "Expected improving latency trend, got {:?}",
+            trends.latency_trend
+        );
+        assert!(
+            matches!(trends.throughput_trend, TrendDirection::Improving),
+            "Expected improving throughput trend, got {:?}",
+            trends.throughput_trend
+        );
+        assert!(
+            !matches!(trends.latency_trend, TrendDirection::Insufficient),
+            "Should not return placeholder Insufficient result"
+        );
+    }
+
+    #[test]
+    fn test_regression_detection_non_placeholder() {
+        use crate::observability::cancellation_tracer::{CancellationStep, PropagationAnomaly};
+        use std::time::{Duration, SystemTime};
+
+        let analyzer = CancellationAnalyzer::default();
+        let base_time = SystemTime::UNIX_EPOCH;
+
+        let mut traces = Vec::new();
+
+        // Baseline traces (good performance)
+        for i in 0..30 {
+            traces.push(CancellationTrace {
+                trace_id: format!("baseline-{}", i),
+                start_time: base_time + Duration::from_secs(i),
+                total_propagation_time: Some(Duration::from_millis(50)), // Consistent 50ms
+                entities_cancelled: 10,
+                max_depth: 3,
+                steps: vec![CancellationStep {
+                    entity_id: format!("entity-{}", i % 3),
+                    elapsed_since_prev: Duration::from_millis(15),
+                }],
+                anomalies: Vec::new(),
+                is_complete: true,
+            });
+        }
+
+        // Recent traces with regression (much higher latency + anomalies)
+        for i in 30..50 {
+            let mut anomalies = Vec::new();
+            if i % 3 == 0 {
+                anomalies.push(PropagationAnomaly::SlowPropagation {
+                    entity_id: format!("entity-slow-{}", i),
+                    expected_duration: Duration::from_millis(50),
+                    actual_duration: Duration::from_millis(150),
+                });
+            }
+
+            traces.push(CancellationTrace {
+                trace_id: format!("regressed-{}", i),
+                start_time: base_time + Duration::from_secs(i),
+                total_propagation_time: Some(Duration::from_millis(200)), // 4x worse latency
+                entities_cancelled: 8, // Lower throughput
+                max_depth: 3,
+                steps: vec![CancellationStep {
+                    entity_id: format!("entity-{}", i % 3),
+                    elapsed_since_prev: Duration::from_millis(60),
+                }],
+                anomalies,
+                is_complete: true,
+            });
+        }
+
+        let regressions = analyzer.detect_regressions(&traces);
+
+        // Should detect latency and potentially throughput/anomaly regressions
+        assert!(!regressions.is_empty(), "Should detect regressions");
+
+        let latency_regression = regressions
+            .iter()
+            .find(|r| r.metric_name == "average_propagation_time");
+        assert!(
+            latency_regression.is_some(),
+            "Should detect latency regression"
+        );
+
+        if let Some(reg) = latency_regression {
+            assert!(reg.regression_magnitude > 0.2, "Should detect significant regression");
+            assert!(reg.confidence > 0.0, "Should have confidence measure");
+        }
+    }
+
+    #[test]
+    fn test_trend_analysis_stable_case() {
+        use crate::observability::cancellation_tracer::CancellationStep;
+        use std::time::{Duration, SystemTime};
+
+        let analyzer = CancellationAnalyzer::default();
+        let base_time = SystemTime::UNIX_EPOCH;
+
+        // Create traces with stable performance (no significant change)
+        let mut traces = Vec::new();
+        for i in 0..100 {
+            traces.push(CancellationTrace {
+                trace_id: format!("stable-{}", i),
+                start_time: base_time + Duration::from_secs(i),
+                total_propagation_time: Some(Duration::from_millis(100)), // Consistent timing
+                entities_cancelled: 5,
+                max_depth: 3,
+                steps: vec![CancellationStep {
+                    entity_id: format!("entity-{}", i % 3),
+                    elapsed_since_prev: Duration::from_millis(20),
+                }],
+                anomalies: Vec::new(),
+                is_complete: true,
+            });
+        }
+
+        let trends = analyzer.analyze_trends(&traces);
+
+        // Should detect stable trends, not placeholder insufficient
+        assert!(
+            matches!(trends.latency_trend, TrendDirection::Stable),
+            "Expected stable latency trend, got {:?}",
+            trends.latency_trend
+        );
+        assert!(
+            !matches!(trends.latency_trend, TrendDirection::Insufficient),
+            "Should not return placeholder result for sufficient data"
+        );
+    }
+
+    #[test]
+    fn test_no_regression_with_good_performance() {
+        use crate::observability::cancellation_tracer::CancellationStep;
+        use std::time::{Duration, SystemTime};
+
+        let analyzer = CancellationAnalyzer::default();
+        let base_time = SystemTime::UNIX_EPOCH;
+
+        // Create traces with consistently good performance
+        let mut traces = Vec::new();
+        for i in 0..50 {
+            traces.push(CancellationTrace {
+                trace_id: format!("good-{}", i),
+                start_time: base_time + Duration::from_secs(i),
+                total_propagation_time: Some(Duration::from_millis(50)),
+                entities_cancelled: 10,
+                max_depth: 3,
+                steps: vec![CancellationStep {
+                    entity_id: format!("entity-{}", i % 3),
+                    elapsed_since_prev: Duration::from_millis(15),
+                }],
+                anomalies: Vec::new(),
+                is_complete: true,
+            });
+        }
+
+        let regressions = analyzer.detect_regressions(&traces);
+
+        // Should not detect any regressions with consistent good performance
+        assert!(regressions.is_empty(), "Should not detect regressions with stable good performance");
     }
 }
