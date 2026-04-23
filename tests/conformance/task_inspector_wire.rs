@@ -337,7 +337,7 @@ fn task_inspector_wire_schema_conformance_matrix() {
 
     insta::assert_snapshot!(
         "task_inspector_wire_schema_conformance_matrix",
-        TaskInspectorWireHarness::render_matrix(&results),
+        &TaskInspectorWireHarness::render_matrix(&results),
         @r#"
     # Task Inspector Wire Schema Conformance Matrix
 
