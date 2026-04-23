@@ -1634,13 +1634,26 @@ pub trait KafkaConsumerTrait: Send + Sync {
     fn consumer_type(&self) -> &'static str;
 }
 
-/// Real Kafka consumer backend using rdkafka StreamConsumer.
+/// Wrapper around rdkafka StreamConsumer that tracks the topic name.
 #[cfg(feature = "kafka")]
-impl KafkaConsumerTrait for StreamConsumer<KafkaContext> {
+pub struct TopicAwareConsumer {
+    consumer: StreamConsumer<KafkaContext>,
+    topic: String,
+}
+
+#[cfg(feature = "kafka")]
+impl TopicAwareConsumer {
+    /// Get access to the underlying rdkafka StreamConsumer.
+    pub fn inner(&self) -> &StreamConsumer<KafkaContext> {
+        &self.consumer
+    }
+}
+
+/// Real Kafka consumer backend using rdkafka StreamConsumer with topic tracking.
+#[cfg(feature = "kafka")]
+impl KafkaConsumerTrait for TopicAwareConsumer {
     fn topic(&self) -> &str {
-        // For rdkafka StreamConsumer, we'll return a placeholder since
-        // the real topic info is managed by subscription state
-        "rdkafka-managed"
+        &self.topic
     }
 
     fn is_real_consumer(&self) -> bool {
@@ -1669,7 +1682,7 @@ impl KafkaConsumerTrait for StreamConsumer<KafkaContext> {
 #[cfg(feature = "kafka")]
 pub struct KafkaClient {
     producer: KafkaProducer,
-    consumer: Option<StreamConsumer<KafkaContext>>,
+    consumer: Option<TopicAwareConsumer>,
     config: ProducerConfig,
     backend: Box<dyn BrokerBackend>,
 }
@@ -1697,10 +1710,37 @@ impl KafkaClient {
         self.backend.as_ref()
     }
 
-    /// Initialize consumer for the given topic (stub for now).
-    pub async fn consumer(&mut self, _topic: &str) -> Result<&dyn KafkaConsumerTrait, KafkaError> {
-        // TODO: Implement consumer initialization
-        Err(KafkaError::Configuration("Consumer not yet implemented".to_string()))
+    /// Initialize consumer for the given topic.
+    pub async fn consumer(&mut self, topic: &str) -> Result<&dyn KafkaConsumerTrait, KafkaError> {
+        if self.consumer.is_some() {
+            return Ok(self.consumer.as_ref().unwrap());
+        }
+
+        // Create consumer config based on producer config
+        let mut consumer_config = ClientConfig::new();
+        consumer_config.set("bootstrap.servers", &self.config.bootstrap_servers);
+        consumer_config.set("group.id", "asupersync-consumer");
+        consumer_config.set("enable.partition.eof", "false");
+        consumer_config.set("session.timeout.ms", "6000");
+        consumer_config.set("enable.auto.commit", "true");
+
+        // Create StreamConsumer
+        let rdkafka_consumer: StreamConsumer<KafkaContext> = consumer_config
+            .create_with_context(KafkaContext::new())
+            .map_err(|e| KafkaError::Config(format!("Failed to create consumer: {}", e)))?;
+
+        // Subscribe to the topic
+        rdkafka_consumer
+            .subscribe(&[topic])
+            .map_err(|e| KafkaError::Config(format!("Failed to subscribe to topic {}: {}", topic, e)))?;
+
+        // Wrap in TopicAwareConsumer
+        self.consumer = Some(TopicAwareConsumer {
+            consumer: rdkafka_consumer,
+            topic: topic.to_string(),
+        });
+
+        Ok(self.consumer.as_ref().unwrap())
     }
 }
 
