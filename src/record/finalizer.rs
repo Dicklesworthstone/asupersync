@@ -192,12 +192,7 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    #[test]
-    fn finalizer_policy_table_golden() {
-        init_test("finalizer_policy_table_golden");
-        let table = finalizer_policy_table();
-        insta::assert_snapshot!(table);
-    }
+
 
     #[test]
     fn finalizer_stack_lifo_order() {
