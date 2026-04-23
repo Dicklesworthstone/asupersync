@@ -2,40 +2,169 @@
 //!
 //! Generates detailed RFC 6330 conformance reports from test execution results
 //! in multiple formats (Markdown, JSON, HTML, badges) for documentation and CI.
-//!
-//! # Usage
-//!
-//! ```bash
-//! # Generate Markdown report from conformance test results
-//! cargo run --bin generate_compliance_report -- --input results.json --output report.md
-//!
-//! # Generate all formats
-//! cargo run --bin generate_compliance_report -- --input results.json --format all
-//!
-//! # Generate badge URL only
-//! cargo run --bin generate_compliance_report -- --input results.json --format badge
-//!
-//! # Generate with CI-friendly output
-//! cargo run --bin generate_compliance_report -- --input results.json --format json --ci-mode
-//! ```
 
 use std::fs;
 use std::path::PathBuf;
 use clap::{Arg, ArgAction, Command};
 use serde_json;
 
-// Import from parent crate
+// Import from conformance crate
 use asupersync_conformance::raptorq_rfc6330::TestExecution;
 
-// Import from reporting module
-mod reporting {
-    pub use super::super::src::*;
+#[derive(Debug, Clone)]
+pub enum OutputFormat {
+    Markdown,
+    Json,
+    Html,
+    Badge,
 }
 
-use reporting::{
-    CoverageMatrix, ComplianceReportGenerator, ReportConfig, OutputFormat,
-    generate_ci_summary
-};
+#[derive(Debug, Clone)]
+pub enum ConformanceLevel {
+    FullyConformant,
+    PartiallyConformant,
+    NonConformant,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReportConfig {
+    pub include_failing_tests: bool,
+    pub include_timing_data: bool,
+    pub include_historical_data: bool,
+    pub output_format: OutputFormat,
+}
+
+#[derive(Debug, Clone)]
+pub struct ComplianceMatrix {
+    pub executions: Vec<TestExecution>,
+    pub conformance_level: ConformanceLevel,
+    pub pass_count: usize,
+    pub total_count: usize,
+}
+
+impl ComplianceMatrix {
+    pub fn from_test_results(executions: Vec<TestExecution>, _implementation_version: String) -> Self {
+        let total_count = executions.len();
+        let pass_count = executions.iter()
+            .filter(|e| matches!(e.result, asupersync_conformance::raptorq_rfc6330::ConformanceResult::Pass))
+            .count();
+
+        let conformance_level = if total_count == 0 {
+            ConformanceLevel::NonConformant
+        } else {
+            let pass_rate = (pass_count as f64) / (total_count as f64);
+            if pass_rate >= 1.0 {
+                ConformanceLevel::FullyConformant
+            } else if pass_rate >= 0.8 {
+                ConformanceLevel::PartiallyConformant
+            } else {
+                ConformanceLevel::NonConformant
+            }
+        };
+
+        Self {
+            executions,
+            conformance_level,
+            pass_count,
+            total_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ComplianceReportGenerator {
+    pub config: ReportConfig,
+}
+
+impl ComplianceReportGenerator {
+    pub fn new(config: ReportConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn generate_report(&self, matrix: &ComplianceMatrix) -> String {
+        match self.config.output_format {
+            OutputFormat::Markdown => self.generate_markdown_report(matrix),
+            OutputFormat::Json => self.generate_json_report(matrix),
+            OutputFormat::Html => self.generate_html_report(matrix),
+            OutputFormat::Badge => self.generate_badge_url(matrix),
+        }
+    }
+
+    fn generate_markdown_report(&self, matrix: &ComplianceMatrix) -> String {
+        format!(
+            "# RFC 6330 Conformance Report\n\n\
+            ## Summary\n\n\
+            - Total tests: {}\n\
+            - Passed: {}\n\
+            - Failed: {}\n\
+            - Pass rate: {:.1}%\n\
+            - Conformance level: {:?}\n\n\
+            ## Test Results\n\n{}",
+            matrix.total_count,
+            matrix.pass_count,
+            matrix.total_count - matrix.pass_count,
+            (matrix.pass_count as f64 / matrix.total_count as f64 * 100.0),
+            matrix.conformance_level,
+            if self.config.include_failing_tests {
+                self.format_test_details(&matrix.executions)
+            } else {
+                "Details omitted (use --include-failures for full report)".to_string()
+            }
+        )
+    }
+
+    fn generate_json_report(&self, matrix: &ComplianceMatrix) -> String {
+        let summary = serde_json::json!({
+            "total_tests": matrix.total_count,
+            "passed": matrix.pass_count,
+            "failed": matrix.total_count - matrix.pass_count,
+            "pass_rate": (matrix.pass_count as f64) / (matrix.total_count as f64) * 100.0,
+            "conformance_level": format!("{:?}", matrix.conformance_level),
+            "executions": if self.config.include_failing_tests {
+                serde_json::to_value(&matrix.executions).unwrap_or(serde_json::Value::Null)
+            } else {
+                serde_json::Value::Null
+            }
+        });
+        serde_json::to_string_pretty(&summary).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    fn generate_html_report(&self, matrix: &ComplianceMatrix) -> String {
+        format!(
+            "<html><head><title>RFC 6330 Conformance Report</title></head>\
+            <body><h1>RFC 6330 Conformance Report</h1>\
+            <h2>Summary</h2>\
+            <ul>\
+            <li>Total tests: {}</li>\
+            <li>Passed: {}</li>\
+            <li>Failed: {}</li>\
+            <li>Pass rate: {:.1}%</li>\
+            <li>Conformance level: {:?}</li>\
+            </ul></body></html>",
+            matrix.total_count,
+            matrix.pass_count,
+            matrix.total_count - matrix.pass_count,
+            (matrix.pass_count as f64 / matrix.total_count as f64 * 100.0),
+            matrix.conformance_level
+        )
+    }
+
+    fn generate_badge_url(&self, matrix: &ComplianceMatrix) -> String {
+        let pass_rate = (matrix.pass_count as f64) / (matrix.total_count as f64) * 100.0;
+        let color = if pass_rate >= 100.0 { "green" } else if pass_rate >= 80.0 { "yellow" } else { "red" };
+        format!(
+            "https://img.shields.io/badge/RFC%206330%20Conformance-{:.1}%25-{}",
+            pass_rate, color
+        )
+    }
+
+    fn format_test_details(&self, executions: &[TestExecution]) -> String {
+        executions.iter()
+            .map(|e| format!("- {}: {:?}", e.test_name, e.result))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
 
 fn main() {
     let matches = Command::new("generate_compliance_report")
@@ -83,13 +212,6 @@ fn main() {
                 .action(ArgAction::SetTrue)
                 .help("Include detailed failure analysis in report")
         )
-        .arg(
-            Arg::new("badge-style")
-                .long("badge-style")
-                .value_name("STYLE")
-                .help("Badge style: flat, flat-square, plastic, for-the-badge")
-                .default_value("flat")
-        )
         .get_matches();
 
     let input_path = matches.get_one::<String>("input").unwrap();
@@ -100,7 +222,6 @@ fn main() {
         .unwrap_or_else(|| detect_implementation_version());
     let ci_mode = matches.get_flag("ci-mode");
     let include_failures = matches.get_flag("include-failures");
-    let badge_style = matches.get_one::<String>("badge-style").unwrap();
 
     // Load test execution results
     let executions = match load_test_executions(input_path) {
@@ -111,15 +232,14 @@ fn main() {
         }
     };
 
-    // Generate coverage matrix
-    let matrix = CoverageMatrix::from_test_results(&executions, implementation_version);
+    // Generate compliance matrix
+    let matrix = ComplianceMatrix::from_test_results(executions, implementation_version);
 
     // Configure report generation
     let report_config = ReportConfig {
         include_failing_tests: include_failures,
         include_timing_data: false,
         include_historical_data: false,
-        badge_style: parse_badge_style(badge_style),
         output_format: parse_output_format(format),
     };
 
@@ -129,17 +249,6 @@ fn main() {
     match format.as_str() {
         "all" => {
             generate_all_formats(&generator, &matrix, output_path);
-        }
-        "badge" => {
-            let badge_url = generator.generate_report(&matrix);
-            if let Some(output) = output_path {
-                if let Err(e) = fs::write(output, &badge_url) {
-                    eprintln!("Error writing badge URL: {}", e);
-                    std::process::exit(1);
-                }
-            } else {
-                println!("{}", badge_url);
-            }
         }
         _ => {
             let report = generator.generate_report(&matrix);
@@ -156,24 +265,28 @@ fn main() {
 
     // Generate CI summary if requested
     if ci_mode {
-        let ci_summary = generate_ci_summary(&matrix);
-        let ci_json = serde_json::to_string_pretty(&ci_summary)
-            .unwrap_or_else(|_| "{}".to_string());
+        let ci_summary = serde_json::json!({
+            "total": matrix.total_count,
+            "passed": matrix.pass_count,
+            "failed": matrix.total_count - matrix.pass_count,
+            "pass_rate": (matrix.pass_count as f64) / (matrix.total_count as f64) * 100.0,
+            "conformance_level": format!("{:?}", matrix.conformance_level)
+        });
 
         eprintln!("=== CI SUMMARY ===");
-        eprintln!("{}", ci_json);
+        eprintln!("{}", serde_json::to_string_pretty(&ci_summary).unwrap_or_else(|_| "{}".to_string()));
 
         // Exit with appropriate code based on conformance level
         match matrix.conformance_level {
-            reporting::ConformanceLevel::FullyConformant => {
+            ConformanceLevel::FullyConformant => {
                 eprintln!("✅ Conformance check PASSED");
                 std::process::exit(0);
             }
-            reporting::ConformanceLevel::PartiallyConformant => {
+            ConformanceLevel::PartiallyConformant => {
                 eprintln!("⚠️ Conformance check WARNING - partial conformance only");
                 std::process::exit(1);
             }
-            reporting::ConformanceLevel::NonConformant => {
+            ConformanceLevel::NonConformant => {
                 eprintln!("❌ Conformance check FAILED - non-conformant");
                 std::process::exit(2);
             }
@@ -185,14 +298,11 @@ fn main() {
 fn load_test_executions(path: &str) -> Result<Vec<TestExecution>, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(path)?;
 
-    // For now, use a simplified JSON structure since TestExecution contains trait objects
-    // In a real implementation, this would need proper serialization support
-    let _json_data: serde_json::Value = serde_json::from_str(&content)?;
+    // TestExecution implements Serialize/Deserialize, so we can deserialize directly
+    let executions: Vec<TestExecution> = serde_json::from_str(&content)?;
 
-    // TODO: Implement proper deserialization of TestExecution from JSON
-    // For now, return empty vector as placeholder
-    eprintln!("Warning: Test execution loading not yet fully implemented");
-    Ok(vec![])
+    println!("Loaded {} test execution records", executions.len());
+    Ok(executions)
 }
 
 /// Detect implementation version from git
@@ -223,20 +333,6 @@ fn detect_implementation_version() -> String {
     "unknown-version".to_string()
 }
 
-/// Parse badge style from string
-fn parse_badge_style(style: &str) -> reporting::compliance_report::BadgeStyle {
-    match style.to_lowercase().as_str() {
-        "flat" => reporting::compliance_report::BadgeStyle::Flat,
-        "flat-square" => reporting::compliance_report::BadgeStyle::FlatSquare,
-        "plastic" => reporting::compliance_report::BadgeStyle::Plastic,
-        "for-the-badge" => reporting::compliance_report::BadgeStyle::ForTheBadge,
-        _ => {
-            eprintln!("Warning: Unknown badge style '{}', using 'flat'", style);
-            reporting::compliance_report::BadgeStyle::Flat
-        }
-    }
-}
-
 /// Parse output format from string
 fn parse_output_format(format: &str) -> OutputFormat {
     match format.to_lowercase().as_str() {
@@ -252,7 +348,7 @@ fn parse_output_format(format: &str) -> OutputFormat {
 }
 
 /// Generate all report formats
-fn generate_all_formats(generator: &ComplianceReportGenerator, matrix: &CoverageMatrix, base_path: Option<&String>) {
+fn generate_all_formats(generator: &ComplianceReportGenerator, matrix: &ComplianceMatrix, base_path: Option<&String>) {
     let base = base_path.map(|p| PathBuf::from(p))
         .unwrap_or_else(|| PathBuf::from("conformance_report"));
 
@@ -291,18 +387,6 @@ mod tests {
     fn test_version_detection() {
         let version = detect_implementation_version();
         assert!(!version.is_empty());
-    }
-
-    #[test]
-    fn test_badge_style_parsing() {
-        assert!(matches!(
-            parse_badge_style("flat"),
-            reporting::compliance_report::BadgeStyle::Flat
-        ));
-        assert!(matches!(
-            parse_badge_style("flat-square"),
-            reporting::compliance_report::BadgeStyle::FlatSquare
-        ));
     }
 
     #[test]

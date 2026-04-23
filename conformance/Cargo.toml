@@ -17,6 +17,18 @@ path = "src/bin/raptorq_rfc6330_conformance.rs"
 name = "quic_migration_rfc9000"
 path = "src/bin/quic_migration_rfc9000.rs"
 
+[[bin]]
+name = "generate_compliance_report"
+path = "raptorq_rfc6330/reporting/bin/generate_compliance_report.rs"
+
+[[bin]]
+name = "check_conformance_regression"
+path = "raptorq_rfc6330/reporting/bin/check_conformance_regression.rs"
+
+[[bin]]
+name = "maintain_fixtures"
+path = "raptorq_rfc6330/reporting/bin/maintain_fixtures.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
