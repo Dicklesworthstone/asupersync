@@ -625,4 +625,61 @@ mod tests {
         assert_eq!(cloned.replica_id, "r0");
         assert_eq!(cloned.symbol_indices, [0, 1, 2]);
     }
+
+    // ---- Golden plan snapshots (bead asupersync-a64jii) --------------------
+    //
+    // The four AssignmentStrategy variants produce deterministic routing
+    // plans. Their outputs feed downstream quorum / distribution logic, so
+    // silent regressions (off-by-one in round-robin, rotation-offset drift
+    // in MinimumK, tie-break change in Weighted) would propagate without
+    // being caught by the existing property-style tests above.
+    //
+    // The fixtures below fix a canonical asymmetric input — 3 replicas with
+    // prior symbol_count [10, 5, 20] so Weighted's load-balancing is visible,
+    // 8 symbols, k=4 — and snapshot the entire Vec<ReplicaAssignment> Debug
+    // output via insta. To intentionally update a plan:
+    //   UPDATE_SNAPSHOTS=1 cargo test -p asupersync --lib distributed::assignment::tests::golden_
+    //   cargo insta review
+    //   git diff src/distributed/snapshots/
+    //
+    // Each strategy gets its own #[test] so a plan change shows up in only
+    // one snapshot, making review localized.
+
+    fn golden_replicas() -> Vec<ReplicaInfo> {
+        create_test_replicas_with_symbol_counts(&[10, 5, 20])
+    }
+
+    fn golden_symbols() -> Vec<Symbol> {
+        create_test_symbols(8)
+    }
+
+    const GOLDEN_K: u16 = 4;
+
+    #[test]
+    fn golden_plan_full_strategy() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
+        let plan = assigner.assign(&golden_symbols(), &golden_replicas(), GOLDEN_K);
+        insta::assert_debug_snapshot!(plan);
+    }
+
+    #[test]
+    fn golden_plan_striped_strategy() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Striped);
+        let plan = assigner.assign(&golden_symbols(), &golden_replicas(), GOLDEN_K);
+        insta::assert_debug_snapshot!(plan);
+    }
+
+    #[test]
+    fn golden_plan_minimum_k_strategy() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
+        let plan = assigner.assign(&golden_symbols(), &golden_replicas(), GOLDEN_K);
+        insta::assert_debug_snapshot!(plan);
+    }
+
+    #[test]
+    fn golden_plan_weighted_strategy() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Weighted);
+        let plan = assigner.assign(&golden_symbols(), &golden_replicas(), GOLDEN_K);
+        insta::assert_debug_snapshot!(plan);
+    }
 }
