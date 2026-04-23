@@ -1,0 +1,6 @@
+DATA:abcde
+LIMIT:3
+CHECK
+COPY:2
+ADV:1
+XCOPY:0

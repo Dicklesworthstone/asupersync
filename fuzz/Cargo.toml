@@ -809,6 +809,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "bytes_take_adapter"
+path = "fuzz_targets/bytes_take_adapter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "bytes_mut_boundaries"
 path = "fuzz_targets/bytes_mut_boundaries.rs"
 test = false
