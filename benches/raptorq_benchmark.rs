@@ -1262,7 +1262,7 @@ fn build_decode_received(
     let repair_start = k as u32;
     let repair_end = repair_start.saturating_add(total_repairs as u32);
     for esi in repair_start..repair_end {
-        let (cols, coefs) = decoder.repair_equation(esi);
+        let (cols, coefs) = decoder.repair_equation(esi).expect("repair equation should succeed in benchmark");
         let data = encoder.repair_symbol(esi);
         received.push(ReceivedSymbol::repair(esi, cols, coefs, data));
     }
