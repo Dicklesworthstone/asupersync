@@ -1652,3 +1652,10 @@ path = "fuzz_targets/length_delimited_eof_retention.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "websocket_fragmentation_sequences"
+path = "fuzz_targets/websocket_fragmentation_sequences.rs"
+test = false
+doc = false
+bench = false
