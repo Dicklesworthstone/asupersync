@@ -1627,10 +1627,41 @@ mod tests {
         std::task::Waker::noop().clone()
     }
 
+/// Broker backend abstraction for switching between real and stub implementations.
+pub trait BrokerBackend: Send + Sync {
+    /// Check if this backend supports real broker integration.
+    fn is_real_broker(&self) -> bool;
+
+    /// Get backend type description for diagnostics.
+    fn backend_type(&self) -> &'static str;
+}
+
+/// Real Kafka broker backend using rdkafka.
+#[cfg(feature = "kafka")]
+pub struct RealBrokerBackend;
+
+#[cfg(feature = "kafka")]
+impl BrokerBackend for RealBrokerBackend {
+    fn is_real_broker(&self) -> bool { true }
+    fn backend_type(&self) -> &'static str { "rdkafka" }
+}
+
+/// Stub broker backend for testing and offline scenarios.
+#[cfg(not(feature = "kafka"))]
+pub struct StubBrokerBackend;
+
+#[cfg(not(feature = "kafka"))]
+impl BrokerBackend for StubBrokerBackend {
+    fn is_real_broker(&self) -> bool { false }
+    fn backend_type(&self) -> &'static str { "stub" }
+}
+
 /// Unified Kafka client combining producer and consumer capabilities.
 ///
 /// This is a high-level wrapper around `KafkaProducer` and rdkafka's
 /// `StreamConsumer` to provide a single entry point for Kafka operations.
+/// Automatically selects between real broker integration (when available)
+/// and stub broker (for testing).
 ///
 /// # Example
 ///
@@ -1644,17 +1675,19 @@ pub struct KafkaClient {
     producer: KafkaProducer,
     consumer: Option<StreamConsumer<KafkaContext>>,
     config: KafkaConfig,
+    backend: RealBrokerBackend,
 }
 
 #[cfg(feature = "kafka")]
 impl KafkaClient {
-    /// Create a new unified Kafka client.
+    /// Create a new unified Kafka client with real broker backend.
     pub async fn new(config: KafkaConfig) -> Result<Self, KafkaError> {
         let producer = KafkaProducer::new(config.clone()).await?;
         Ok(Self {
             producer,
             consumer: None,
             config,
+            backend: RealBrokerBackend,
         })
     }
 
@@ -1663,10 +1696,46 @@ impl KafkaClient {
         &self.producer
     }
 
+    /// Get broker backend information.
+    pub fn backend(&self) -> &dyn BrokerBackend {
+        &self.backend
+    }
+
     /// Initialize consumer for the given topic (stub for now).
     pub async fn consumer(&mut self, _topic: &str) -> Result<&StreamConsumer<KafkaContext>, KafkaError> {
         // TODO: Implement consumer initialization
         Err(KafkaError::Configuration("Consumer not yet implemented".to_string()))
+    }
+}
+
+/// Stub version of KafkaClient for testing when kafka feature is disabled.
+#[cfg(not(feature = "kafka"))]
+pub struct KafkaClient {
+    producer: KafkaProducer,
+    config: KafkaConfig,
+    backend: StubBrokerBackend,
+}
+
+#[cfg(not(feature = "kafka"))]
+impl KafkaClient {
+    /// Create a new unified Kafka client with stub broker backend.
+    pub async fn new(config: KafkaConfig) -> Result<Self, KafkaError> {
+        let producer = KafkaProducer::new(config.clone()).await?;
+        Ok(Self {
+            producer,
+            config,
+            backend: StubBrokerBackend,
+        })
+    }
+
+    /// Get the producer for publishing messages.
+    pub fn producer(&self) -> &KafkaProducer {
+        &self.producer
+    }
+
+    /// Get broker backend information.
+    pub fn backend(&self) -> &dyn BrokerBackend {
+        &self.backend
     }
 }
 
