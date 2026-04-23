@@ -106,14 +106,14 @@ fn metamorphic_scale_invariance() {
     let scale_factor = 3;
 
     let controller_base = PeakEwmaHedgeController::new(
-        Duration::from_millis(base_min),
+        Duration::from_millis(base_initial),
         Duration::from_millis(base_min),
         Duration::from_millis(base_max),
         decay,
     );
 
     let controller_scaled = PeakEwmaHedgeController::new(
-        Duration::from_millis(base_min * scale_factor),
+        Duration::from_millis(base_initial * scale_factor),
         Duration::from_millis(base_min * scale_factor),
         Duration::from_millis(base_max * scale_factor),
         decay,
