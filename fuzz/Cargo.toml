@@ -963,6 +963,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_http_h1_codec_split_crlf"
+path = "fuzz_targets/fuzz_http_h1_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "tls_acceptor"
 path = "fuzz_targets/tls_acceptor.rs"
 test = false
