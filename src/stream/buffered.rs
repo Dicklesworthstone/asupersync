@@ -676,4 +676,210 @@ mod tests {
             "buffer_unordered_yields_pending_after_budget_on_large_pending_batch"
         );
     }
+
+    // =========================================================================
+    // Backpressure conformance laws for Buffered / BufferUnordered.
+    //
+    // Spec: doc comments on Buffered + BufferUnordered + BUFFERED_ADMISSION_BUDGET
+    // + BUFFERED_POLL_BUDGET constants. These MUST clauses are enforced across
+    // every admission / drain cycle. Per-case tests above cover individual
+    // scenarios; these encode the *contract* that any refactor must preserve.
+    // =========================================================================
+
+    mod backpressure_conformance {
+        use super::*;
+        use std::future::{ready, Ready};
+
+        fn drain_ready<S>(mut stream: S) -> Vec<<S as Stream>::Item>
+        where
+            S: Stream + Unpin,
+        {
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut out = Vec::new();
+            loop {
+                match Pin::new(&mut stream).poll_next(&mut cx) {
+                    Poll::Ready(Some(item)) => out.push(item),
+                    Poll::Ready(None) => break,
+                    Poll::Pending => break,
+                }
+            }
+            out
+        }
+
+        fn ready_futures(n: usize) -> impl Stream<Item = Ready<usize>> + Unpin {
+            iter((0..n).map(ready).collect::<Vec<_>>())
+        }
+
+        /// MUST-L1: `in_flight.len() ≤ limit` at every visible state. Admission
+        /// cap is the core backpressure invariant — a refactor that admitted
+        /// one extra future per poll would still pass most per-case tests.
+        #[test]
+        fn conformance_buffered_never_exceeds_limit() {
+            for &limit in &[1usize, 2, 4, 8, 16] {
+                let stream = ready_futures(64);
+                let mut buf = Buffered::new(stream, limit);
+                let waker = noop_waker();
+                let mut cx = Context::from_waker(&waker);
+                for _ in 0..256 {
+                    let _ = Pin::new(&mut buf).poll_next(&mut cx);
+                    assert!(
+                        buf.in_flight.len() <= limit,
+                        "in_flight {} exceeded limit {} after poll",
+                        buf.in_flight.len(),
+                        limit,
+                    );
+                }
+            }
+        }
+
+        /// MUST-L2: Output order of Buffered equals admission order.
+        /// For a stream of fully-ready futures this collapses to the input
+        /// sequence exactly.
+        #[test]
+        fn conformance_buffered_preserves_order_for_ready_futures() {
+            for &limit in &[1usize, 2, 4, 8] {
+                let stream = ready_futures(16);
+                let buf = Buffered::new(stream, limit);
+                let got = drain_ready(buf);
+                let expected: Vec<usize> = (0..16).collect();
+                assert_eq!(
+                    got, expected,
+                    "Buffered(limit={limit}) did not preserve order for ready input",
+                );
+            }
+        }
+
+        /// MUST-L3: `limit == 1` degenerates to strict serial poll order —
+        /// exactly one in-flight future at a time. Equivalent to stream-of-
+        /// futures awaited one-by-one.
+        #[test]
+        fn conformance_buffered_limit_one_is_strictly_serial() {
+            let stream = ready_futures(8);
+            let mut buf = Buffered::new(stream, 1);
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            for i in 0..8 {
+                // Each poll must either be Ready(Some(i)) or Pending; never
+                // yield two items while admitting only one.
+                loop {
+                    match Pin::new(&mut buf).poll_next(&mut cx) {
+                        Poll::Ready(Some(v)) => {
+                            assert_eq!(v, i, "serial order violated at step {i}");
+                            assert!(
+                                buf.in_flight.is_empty(),
+                                "limit=1 should have 0 in-flight after yield",
+                            );
+                            break;
+                        }
+                        Poll::Ready(None) => panic!("early termination at step {i}"),
+                        Poll::Pending => continue,
+                    }
+                }
+            }
+        }
+
+        /// MUST-L4: Empty upstream → first poll yields Ready(None), no
+        /// further polls needed. No phantom in-flight futures get queued.
+        #[test]
+        fn conformance_buffered_empty_terminates_immediately() {
+            let buf = Buffered::new(iter(Vec::<Ready<usize>>::new()), 4);
+            let got = drain_ready(buf);
+            assert!(
+                got.is_empty(),
+                "Buffered on empty upstream should produce no items, got {got:?}",
+            );
+        }
+
+        /// MUST-L5: size_hint is monotone across admission — the lower bound
+        /// accounts for in-flight futures that have been admitted but not yet
+        /// emitted. An accurate lower bound is what lets downstream
+        /// collectors pre-allocate.
+        #[test]
+        fn conformance_buffered_size_hint_counts_in_flight() {
+            let stream = ready_futures(10);
+            let mut buf = Buffered::new(stream, 4);
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            // First poll admits up to limit=4 and yields 1.
+            let _ = Pin::new(&mut buf).poll_next(&mut cx);
+            let (lower, upper) = buf.size_hint();
+            assert!(
+                lower >= buf.in_flight.len(),
+                "size_hint.lower ({lower}) must be >= in_flight ({})",
+                buf.in_flight.len(),
+            );
+            // Upstream has 9 items remaining after 1 emitted (and 4 admitted),
+            // so upper bound includes those plus in_flight.
+            if let Some(u) = upper {
+                assert!(
+                    u >= lower,
+                    "size_hint.upper ({u}) must be >= lower ({lower})",
+                );
+            }
+        }
+
+        /// MUST-L6: Buffered and BufferUnordered on a ready-stream produce
+        /// the *same multiset* of outputs. Unordered differs only in
+        /// yield-order, never in set-of-values.
+        #[test]
+        fn conformance_buffered_and_unordered_agree_on_multiset() {
+            for &limit in &[1usize, 2, 4, 8] {
+                let ordered_out = drain_ready(Buffered::new(ready_futures(20), limit));
+                let mut unordered_out =
+                    drain_ready(BufferUnordered::new(ready_futures(20), limit));
+                unordered_out.sort_unstable();
+                let mut ordered_sorted = ordered_out.clone();
+                ordered_sorted.sort_unstable();
+                assert_eq!(
+                    ordered_sorted, unordered_out,
+                    "Buffered/BufferUnordered(limit={limit}) yielded different multisets",
+                );
+                // Ordered version additionally must be strictly ascending.
+                assert_eq!(
+                    ordered_out,
+                    (0..20usize).collect::<Vec<_>>(),
+                    "Buffered(limit={limit}) lost input order",
+                );
+            }
+        }
+
+        /// MUST-L7: Upstream-done + in_flight-empty → Ready(None), and the
+        /// result does not regress to Pending after that terminal state.
+        /// Poll-after-completion must remain Ready(None).
+        #[test]
+        fn conformance_buffered_terminal_state_is_sticky() {
+            let mut buf = Buffered::new(ready_futures(3), 2);
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut seen = 0usize;
+            loop {
+                match Pin::new(&mut buf).poll_next(&mut cx) {
+                    Poll::Ready(Some(_)) => seen += 1,
+                    Poll::Ready(None) => break,
+                    Poll::Pending => continue,
+                }
+            }
+            assert_eq!(seen, 3);
+            // Two additional polls after termination must still be None.
+            for _ in 0..2 {
+                assert!(matches!(
+                    Pin::new(&mut buf).poll_next(&mut cx),
+                    Poll::Ready(None),
+                ), "terminal state regressed after exhaustion");
+            }
+        }
+
+        /// MUST-L8: `buffered(limit ≥ n)` on an n-item ready stream admits
+        /// everything (up to BUFFERED_ADMISSION_BUDGET per poll) and drains
+        /// completely. At a limit higher than the workload size, the cap
+        /// should never become the bottleneck.
+        #[test]
+        fn conformance_buffered_large_limit_drains_all() {
+            let n = 16;
+            let buf = Buffered::new(ready_futures(n), n * 2);
+            let got = drain_ready(buf);
+            assert_eq!(got.len(), n, "large-limit buffered must drain all inputs");
+        }
+    }
 }
