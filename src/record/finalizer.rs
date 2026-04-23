@@ -311,4 +311,155 @@ mod tests {
     fn finalizer_policy_table_snapshot() {
         insta::assert_snapshot!("finalizer_policy_table", finalizer_policy_table());
     }
+
+    // =========================================================================
+    // Golden artifact tests for finalizer outputs
+    // =========================================================================
+
+    /// Generate structured budget configuration output for golden testing
+    fn budget_configuration_table() -> String {
+        let budget = finalizer_budget();
+        vec![
+            format!("poll_quota={}", budget.poll_quota),
+            format!("cost_quota={:?}", budget.cost_quota),
+            format!("priority={}", budget.priority),
+            format!("deadline={:?}", budget.deadline),
+            format!("constants.poll_budget={}", FINALIZER_POLL_BUDGET),
+            format!("constants.time_budget_ns={}", FINALIZER_TIME_BUDGET_NANOS),
+        ].join("\n")
+    }
+
+    /// Generate debug representations of finalizers for golden testing
+    fn finalizer_debug_representations() -> String {
+        let sync_finalizer = Finalizer::Sync(Box::new(|| {}));
+        let async_finalizer = Finalizer::Async(Box::pin(async {}));
+
+        vec![
+            format!("Sync: {:?}", sync_finalizer),
+            format!("Async: {:?}", async_finalizer),
+        ].join("\n")
+    }
+
+    /// Generate finalizer stack states for golden testing
+    fn finalizer_stack_operations() -> String {
+        let mut lines = Vec::new();
+
+        // Empty stack
+        let mut stack = FinalizerStack::new();
+        lines.push(format!("empty_stack: len={}, is_empty={}, escalation={:?}",
+            stack.len(), stack.is_empty(), stack.escalation()));
+
+        // Stack with custom escalation
+        let stack_panic = FinalizerStack::with_escalation(FinalizerEscalation::BoundedPanic);
+        lines.push(format!("panic_stack: len={}, is_empty={}, escalation={:?}",
+            stack_panic.len(), stack_panic.is_empty(), stack_panic.escalation()));
+
+        // Add finalizers and show progression
+        stack.push_sync(|| {});
+        lines.push(format!("after_sync_push: len={}, is_empty={}", stack.len(), stack.is_empty()));
+
+        stack.push_async(async {});
+        lines.push(format!("after_async_push: len={}, is_empty={}", stack.len(), stack.is_empty()));
+
+        stack.push_sync(|| {});
+        lines.push(format!("after_second_sync: len={}, is_empty={}", stack.len(), stack.is_empty()));
+
+        // Pop operations (don't execute, just show types)
+        if let Some(finalizer) = stack.pop() {
+            match finalizer {
+                Finalizer::Sync(_) => lines.push("popped: Sync".to_string()),
+                Finalizer::Async(_) => lines.push("popped: Async".to_string()),
+            }
+        }
+        lines.push(format!("after_first_pop: len={}, is_empty={}", stack.len(), stack.is_empty()));
+
+        if let Some(finalizer) = stack.pop() {
+            match finalizer {
+                Finalizer::Sync(_) => lines.push("popped: Sync".to_string()),
+                Finalizer::Async(_) => lines.push("popped: Async".to_string()),
+            }
+        }
+        lines.push(format!("after_second_pop: len={}, is_empty={}", stack.len(), stack.is_empty()));
+
+        if let Some(finalizer) = stack.pop() {
+            match finalizer {
+                Finalizer::Sync(_) => lines.push("popped: Sync".to_string()),
+                Finalizer::Async(_) => lines.push("popped: Async".to_string()),
+            }
+        }
+        lines.push(format!("after_third_pop: len={}, is_empty={}", stack.len(), stack.is_empty()));
+
+        // Test pop from empty
+        let empty_pop = stack.pop();
+        lines.push(format!("empty_pop: {}", if empty_pop.is_none() { "None" } else { "Some" }));
+
+        lines.join("\n")
+    }
+
+    /// Generate escalation policy behavior matrix for golden testing
+    fn escalation_policy_matrix() -> String {
+        let policies = [
+            FinalizerEscalation::Soft,
+            FinalizerEscalation::BoundedLog,
+            FinalizerEscalation::BoundedPanic,
+        ];
+
+        let mut lines = Vec::new();
+        lines.push("policy|is_soft|allows_continuation|default_match".to_string());
+
+        for policy in policies {
+            let is_default = policy == FinalizerEscalation::default();
+            lines.push(format!("{:?}|{}|{}|{}",
+                policy,
+                policy.is_soft(),
+                policy.allows_continuation(),
+                is_default
+            ));
+        }
+
+        lines.join("\n")
+    }
+
+    /// Generate finalizer stack debug output for golden testing
+    fn finalizer_stack_debug_output() -> String {
+        let mut lines = Vec::new();
+
+        // Empty stack debug
+        let empty_stack = FinalizerStack::new();
+        lines.push(format!("empty: {:?}", empty_stack));
+
+        // Stack with escalation debug
+        let panic_stack = FinalizerStack::with_escalation(FinalizerEscalation::BoundedPanic);
+        lines.push(format!("panic_escalation: {:?}", panic_stack));
+
+        let soft_stack = FinalizerStack::with_escalation(FinalizerEscalation::Soft);
+        lines.push(format!("soft_escalation: {:?}", soft_stack));
+
+        lines.join("\n")
+    }
+
+    #[test]
+    fn finalizer_budget_configuration() {
+        insta::assert_snapshot!("budget_configuration", budget_configuration_table());
+    }
+
+    #[test]
+    fn finalizer_debug_output() {
+        insta::assert_snapshot!("debug_representations", finalizer_debug_representations());
+    }
+
+    #[test]
+    fn finalizer_stack_state_transitions() {
+        insta::assert_snapshot!("stack_operations", finalizer_stack_operations());
+    }
+
+    #[test]
+    fn finalizer_escalation_behavior_matrix() {
+        insta::assert_snapshot!("escalation_matrix", escalation_policy_matrix());
+    }
+
+    #[test]
+    fn finalizer_stack_debug_variants() {
+        insta::assert_snapshot!("stack_debug_output", finalizer_stack_debug_output());
+    }
 }
