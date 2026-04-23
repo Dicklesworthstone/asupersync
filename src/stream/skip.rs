@@ -367,4 +367,169 @@ mod tests {
         assert_eq!(Pin::new(&mut s).poll_next(&mut cx), Poll::Ready(None));
         assert_eq!(Pin::new(&mut s).poll_next(&mut cx), Poll::Ready(None));
     }
+
+    // =========================================================================
+    // Conformance: take/skip adapter algebra laws.
+    //
+    // Per-case tests cover individual Take/Skip behavior. These laws cover
+    // *composition*: nested adapters and cross-adapter identities that a
+    // StreamExt user relies on (slicing, chunking, cursor-style iteration).
+    // A refactor that preserves each adapter in isolation but breaks
+    // composition semantics would not be caught by per-case tests.
+    // =========================================================================
+
+    mod take_skip_laws {
+        use super::*;
+        use crate::stream::StreamExt;
+
+        fn drain<S: Stream + Unpin>(mut s: S) -> Vec<S::Item> {
+            collect(&mut s)
+        }
+
+        /// LAW-TT: take(m).take(n) ≡ take(min(m, n)).
+        /// Nested bounded takes collapse to the tighter bound.
+        #[test]
+        fn law_take_take_is_min() {
+            let xs: Vec<i32> = (0..10).collect();
+            for m in 0..=12usize {
+                for n in 0..=12usize {
+                    let nested = drain(iter(xs.clone()).take(m).take(n));
+                    let collapsed = drain(iter(xs.clone()).take(m.min(n)));
+                    assert_eq!(
+                        nested, collapsed,
+                        "take({m}).take({n}) != take(min) for xs=0..10",
+                    );
+                }
+            }
+        }
+
+        /// LAW-SS: skip(m).skip(n) ≡ skip(m + n).
+        /// Nested skips sum. saturating_add guards against usize overflow
+        /// for caller-supplied counts near usize::MAX.
+        #[test]
+        fn law_skip_skip_is_sum() {
+            let xs: Vec<i32> = (0..10).collect();
+            for m in 0..=6usize {
+                for n in 0..=6usize {
+                    let nested = drain(iter(xs.clone()).skip(m).skip(n));
+                    let collapsed = drain(iter(xs.clone()).skip(m.saturating_add(n)));
+                    assert_eq!(
+                        nested, collapsed,
+                        "skip({m}).skip({n}) != skip(m+n) for xs=0..10",
+                    );
+                }
+            }
+        }
+
+        /// LAW-SLICE: skip(n).take(m) ≡ xs[n..n+m] clamped to len.
+        /// This is the core slicing invariant users rely on.
+        #[test]
+        fn law_skip_then_take_is_slice() {
+            let xs: Vec<i32> = (0..8).collect();
+            for n in 0..=10usize {
+                for m in 0..=10usize {
+                    let got = drain(iter(xs.clone()).skip(n).take(m));
+                    let lo = n.min(xs.len());
+                    let hi = lo.saturating_add(m).min(xs.len());
+                    let expected: Vec<i32> = xs[lo..hi].to_vec();
+                    assert_eq!(
+                        got, expected,
+                        "skip({n}).take({m}) != xs[{lo}..{hi}]",
+                    );
+                }
+            }
+        }
+
+        /// LAW-PARTITION: for any n, the concatenation of take(n)(xs) and
+        /// skip(n)(xs) equals xs exactly (order-preserving).
+        /// This is the fundamental "prefix/suffix partition" identity.
+        #[test]
+        fn law_take_skip_partition_preserves_stream() {
+            let xs: Vec<i32> = (0..10).collect();
+            for n in 0..=12usize {
+                let prefix = drain(iter(xs.clone()).take(n));
+                let suffix = drain(iter(xs.clone()).skip(n));
+                let mut joined = prefix;
+                joined.extend(suffix);
+                assert_eq!(
+                    joined, xs,
+                    "take({n}) ++ skip({n}) did not reconstruct xs",
+                );
+            }
+        }
+
+        /// LAW-TAKE-ZERO: take(0) of any stream yields the empty stream.
+        #[test]
+        fn law_take_zero_is_empty() {
+            let samples: Vec<Vec<i32>> = vec![vec![], vec![1], vec![1, 2, 3, 4, 5]];
+            for xs in samples {
+                let got = drain(iter(xs.clone()).take(0));
+                assert!(
+                    got.is_empty(),
+                    "take(0) on {xs:?} should be empty, got {got:?}",
+                );
+            }
+        }
+
+        /// LAW-SKIP-ZERO: skip(0) is identity on order and content.
+        #[test]
+        fn law_skip_zero_is_identity() {
+            let samples: Vec<Vec<i32>> = vec![vec![], vec![1], vec![1, 2, 3, 4, 5]];
+            for xs in samples {
+                let got = drain(iter(xs.clone()).skip(0));
+                assert_eq!(got, xs, "skip(0) is not identity for {xs:?}");
+            }
+        }
+
+        /// LAW-SKIP-OVERFLOW: skip(len + k) on an xs of length len yields
+        /// the empty stream for any k ≥ 0.
+        #[test]
+        fn law_skip_beyond_length_is_empty() {
+            let xs: Vec<i32> = (0..5).collect();
+            for k in 0..=3usize {
+                let n = xs.len().saturating_add(k);
+                let got = drain(iter(xs.clone()).skip(n));
+                assert!(
+                    got.is_empty(),
+                    "skip(len+{k})={n} on 5-elt stream should be empty, got {got:?}",
+                );
+            }
+        }
+
+        /// LAW-TAKE-SATURATE: take(n) where n >= xs.len() yields all items.
+        /// Beyond-length takes saturate at the stream length rather than
+        /// extending with None spuriously.
+        #[test]
+        fn law_take_beyond_length_is_identity() {
+            let xs: Vec<i32> = (0..5).collect();
+            for k in 0..=3usize {
+                let n = xs.len().saturating_add(k);
+                let got = drain(iter(xs.clone()).take(n));
+                assert_eq!(
+                    got, xs,
+                    "take(len+{k})={n} on 5-elt stream should be identity",
+                );
+            }
+        }
+
+        /// LAW-TS: take(m).skip(n) ≡ xs[n..m.min(len)] (reversed-order
+        /// composition). Differs from skip().take() in that the window
+        /// is bounded by m first, then we discard the first n of that.
+        #[test]
+        fn law_take_then_skip_bounded_by_take() {
+            let xs: Vec<i32> = (0..8).collect();
+            for m in 0..=10usize {
+                for n in 0..=10usize {
+                    let got = drain(iter(xs.clone()).take(m).skip(n));
+                    let upper = m.min(xs.len());
+                    let lo = n.min(upper);
+                    let expected: Vec<i32> = xs[lo..upper].to_vec();
+                    assert_eq!(
+                        got, expected,
+                        "take({m}).skip({n}) != xs[{lo}..{upper}]",
+                    );
+                }
+            }
+        }
+    }
 }
