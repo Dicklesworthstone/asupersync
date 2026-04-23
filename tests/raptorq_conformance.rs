@@ -15,6 +15,74 @@ use asupersync::raptorq::systematic::{ConstraintMatrix, SystematicEncoder, Syste
 use asupersync::util::DetRng;
 
 // ============================================================================
+// RFC 6330 scenario harness skeleton
+// ============================================================================
+
+#[derive(Clone, Copy, Debug)]
+enum RequirementLevel {
+    Must,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Rfc6330Scenario {
+    id: &'static str,
+    clause: &'static str,
+    description: &'static str,
+    requirement: RequirementLevel,
+}
+
+fn assert_roundtrip_scenario(
+    scenario: Rfc6330Scenario,
+    k: usize,
+    symbol_size: usize,
+    seed: u64,
+    drop_source_indices: &[usize],
+    max_repair_esi: u32,
+) {
+    let source = make_patterned_source(k, symbol_size);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+        .unwrap_or_else(|err| panic!("{} setup failed: {err:?}", scenario.id));
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+    let received = build_received_symbols(
+        &encoder,
+        &decoder,
+        &source,
+        drop_source_indices,
+        max_repair_esi,
+        seed,
+    );
+
+    let result = decoder.decode(&received).unwrap_or_else(|err| {
+        panic!(
+            "{} ({:?}, {}) failed unexpectedly: {err:?}",
+            scenario.id, scenario.requirement, scenario.clause
+        )
+    });
+
+    assert_eq!(
+        result.source, source,
+        "{} ({}) must recover the original source block",
+        scenario.id, scenario.description
+    );
+}
+
+fn assert_failure_scenario(
+    scenario: Rfc6330Scenario,
+    decoder: &InactivationDecoder,
+    received: &[ReceivedSymbol],
+    predicate: impl FnOnce(&DecodeError) -> bool,
+) {
+    let err = decoder.decode(received).unwrap_err();
+    assert!(
+        predicate(&err),
+        "{} ({:?}, {}) produced unexpected error: {err:?}",
+        scenario.id,
+        scenario.requirement,
+        scenario.clause
+    );
+}
+
+// ============================================================================
 // Test helpers
 // ============================================================================
 
@@ -92,6 +160,69 @@ fn build_received_symbols(
     }
 
     received
+}
+
+#[test]
+fn rfc6330_harness_systematic_only_decode() {
+    let scenario = Rfc6330Scenario {
+        id: "RFC6330-SYSTEMATIC-ONLY",
+        clause: "RFC 6330 §5.6",
+        description: "systematic symbols alone decode a fully delivered source block",
+        requirement: RequirementLevel::Must,
+    };
+
+    let k = 8;
+    let symbol_size = 64;
+    let seed = 42u64;
+    let max_repair_esi = InactivationDecoder::new(k, symbol_size, seed).params().l as u32;
+
+    assert_roundtrip_scenario(scenario, k, symbol_size, seed, &[], max_repair_esi);
+}
+
+#[test]
+fn rfc6330_harness_repair_assisted_decode() {
+    let scenario = Rfc6330Scenario {
+        id: "RFC6330-REPAIR-ASSISTED",
+        clause: "RFC 6330 §5.3",
+        description: "repair symbols restore a source block after deterministic source loss",
+        requirement: RequirementLevel::Must,
+    };
+
+    let k = 10;
+    let symbol_size = 32;
+    let seed = 123u64;
+    let drop_indices: Vec<usize> = (0..k).filter(|i| i % 2 == 0).collect();
+    let l = InactivationDecoder::new(k, symbol_size, seed).params().l;
+    let max_repair_esi = (l + drop_indices.len()) as u32;
+
+    assert_roundtrip_scenario(
+        scenario,
+        k,
+        symbol_size,
+        seed,
+        &drop_indices,
+        max_repair_esi,
+    );
+}
+
+#[test]
+fn rfc6330_harness_rejects_source_esi_out_of_range() {
+    let scenario = Rfc6330Scenario {
+        id: "RFC6330-SOURCE-ESI-RANGE",
+        clause: "RFC 6330 §5.3",
+        description: "source symbols must stay within the systematic source ESI domain",
+        requirement: RequirementLevel::Must,
+    };
+
+    let k = 4;
+    let symbol_size = 16;
+    let seed = 700u64;
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+    let received = vec![ReceivedSymbol::source(k as u32, vec![0u8; symbol_size])];
+
+    assert_failure_scenario(scenario, &decoder, &received, |err| {
+        matches!(err, DecodeError::SourceEsiOutOfRange { .. })
+    });
 }
 
 // ============================================================================
