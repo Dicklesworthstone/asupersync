@@ -8,6 +8,7 @@
 
 #![cfg(test)]
 
+use asupersync::security::SecurityContext;
 use asupersync::security::authenticated::AuthenticatedSymbol;
 use asupersync::security::tag::AuthenticationTag;
 use asupersync::transport::router::{
@@ -31,7 +32,7 @@ fn test_endpoint(id: u64) -> Endpoint {
 /// Helper to create authenticated symbol.
 fn authenticated_symbol(id: u64) -> AuthenticatedSymbol {
     let symbol = test_symbol(id);
-    AuthenticatedSymbol::new_verified(symbol, AuthenticationTag::zero())
+    SecurityContext::for_testing(id).sign_symbol(&symbol)
 }
 
 /// Test basic routing table functionality.
@@ -218,8 +219,7 @@ fn test_authenticated_symbol_creation() {
     let _object_id = symbol.object_id();
 
     // Verify authenticated symbol can be created
-    let tag = AuthenticationTag::zero();
-    let _auth_symbol2 = AuthenticatedSymbol::new_verified(symbol, tag);
+    let _auth_symbol2 = SecurityContext::for_testing(123).sign_symbol(&symbol);
 }
 
 /// Test route key types.

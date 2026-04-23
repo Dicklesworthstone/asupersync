@@ -18,7 +18,8 @@ pub const TAG_SIZE: usize = 32;
 const AUTH_TAG_DOMAIN: &[u8] = b"asupersync::security::AuthenticationTag::v1";
 
 /// A cryptographic tag verifying a symbol.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Eq, Hash)]
+#[allow(clippy::derived_hash_with_manual_eq)] // PartialEq is deliberately constant-time.
 pub struct AuthenticationTag {
     bytes: [u8; TAG_SIZE],
 }
@@ -87,6 +88,16 @@ impl AuthenticationTag {
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; TAG_SIZE] {
         &self.bytes
+    }
+}
+
+impl PartialEq for AuthenticationTag {
+    fn eq(&self, other: &Self) -> bool {
+        let mut diff = 0u8;
+        for (lhs, rhs) in self.bytes.iter().zip(other.bytes.iter()) {
+            diff |= lhs ^ rhs;
+        }
+        diff == 0
     }
 }
 

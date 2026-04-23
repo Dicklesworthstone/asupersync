@@ -152,12 +152,13 @@ fn arb_verification_context_for_caveats(
     };
 
     Just(VerificationContext {
-        current_time_ms: time,
+        current_time_ms: Some(time),
         region_id: region,
         task_id: task,
-        use_count,
+        use_count: Some(use_count),
         resource_path: Some("files/test".to_string()),
-        window_use_count: 1,
+        window_secs: Some(60),
+        window_use_count: Some(1),
         custom: custom_reqs,
     })
 }
@@ -583,7 +584,7 @@ fn mr_deterministic_verification_replay() {
 
         // Create a deterministic context based on seed
         let context = VerificationContext {
-            current_time_ms: context_seed % 1_000_000,
+            current_time_ms: Some(context_seed % 1_000_000),
             region_id: if context_seed % 3 == 0 {
                 Some((context_seed % 1000) + 1)
             } else {
@@ -594,13 +595,14 @@ fn mr_deterministic_verification_replay() {
             } else {
                 None
             },
-            use_count: (context_seed % 100) as u32,
+            use_count: Some((context_seed % 100) as u32),
             resource_path: if context_seed % 7 == 0 {
                 Some(format!("resource_{}", context_seed % 10))
             } else {
                 None
             },
-            window_use_count: (context_seed % 50) as u32,
+            window_secs: Some(60),
+            window_use_count: Some((context_seed % 50) as u32),
             custom: if context_seed % 11 == 0 {
                 vec![(
                     format!("key_{}", context_seed % 5),

@@ -299,8 +299,13 @@ fn mr3_macaroon_caveats_compose_associatively() {
         let verification_context = VerificationContext::new().with_time(1500).with_resource("test/resource".to_string());
 
         // Both should have the same verification behavior
-        let result1 = cx_c1_c2.verify_capability(&auth_key, &verification_context);
-        let result2 = cx_fresh_c1_c2.verify_capability(&auth_key, &verification_context);
+        let result1 =
+            cx_c1_c2.verify_capability(&auth_key, "test_capability", &verification_context);
+        let result2 = cx_fresh_c1_c2.verify_capability(
+            &auth_key,
+            "test_capability",
+            &verification_context,
+        );
 
         assert_eq!(
             result1.is_ok(),

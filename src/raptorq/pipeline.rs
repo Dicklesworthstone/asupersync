@@ -268,12 +268,10 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
                 }
 
                 if let Some(ctx) = &self.security {
-                    if !auth_symbol.is_verified() {
-                        ctx.verify_authenticated_symbol(&mut auth_symbol)
-                            .map_err(|err| {
-                                Error::new(ErrorKind::CorruptedSymbol).with_message(err.to_string())
-                            })?;
-                    }
+                    ctx.verify_authenticated_symbol(&mut auth_symbol)
+                        .map_err(|err| {
+                            Error::new(ErrorKind::CorruptedSymbol).with_message(err.to_string())
+                        })?;
                     authenticated &= auth_symbol.is_verified();
                 }
 

@@ -1,7 +1,7 @@
 #![allow(warnings)]
 #![allow(clippy::all)]
 use crate::common::*;
-use asupersync::security::{AuthenticatedSymbol, AuthenticationTag};
+use asupersync::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use asupersync::types::Symbol;
 
 fn symbol_with(data: &[u8]) -> Symbol {
@@ -9,13 +9,12 @@ fn symbol_with(data: &[u8]) -> Symbol {
 }
 
 #[test]
-fn new_verified_marks_verified() {
+fn sign_symbol_marks_verified() {
     init_test_logging();
-    test_phase!("new_verified_marks_verified");
+    test_phase!("sign_symbol_marks_verified");
     let symbol = symbol_with(&[1, 2]);
-    let tag = AuthenticationTag::zero();
-
-    let auth = AuthenticatedSymbol::new_verified(symbol.clone(), tag);
+    let ctx = SecurityContext::for_testing(7);
+    let auth = ctx.sign_symbol(&symbol);
     let verified = auth.is_verified();
     assert_with_log!(verified, "symbol should be verified", true, verified);
     assert_with_log!(
@@ -24,8 +23,7 @@ fn new_verified_marks_verified() {
         &symbol,
         auth.symbol()
     );
-    assert_with_log!(auth.tag() == &tag, "tag should match", &tag, auth.tag());
-    test_complete!("new_verified_marks_verified");
+    test_complete!("sign_symbol_marks_verified");
 }
 
 #[test]
@@ -46,9 +44,8 @@ fn into_symbol_discards_tag_and_status() {
     init_test_logging();
     test_phase!("into_symbol_discards_tag_and_status");
     let symbol = symbol_with(&[1, 2, 3]);
-    let tag = AuthenticationTag::zero();
-
-    let auth = AuthenticatedSymbol::new_verified(symbol.clone(), tag);
+    let ctx = SecurityContext::for_testing(9);
+    let auth = ctx.sign_symbol(&symbol);
     let unwrapped = auth.into_symbol();
 
     assert_with_log!(

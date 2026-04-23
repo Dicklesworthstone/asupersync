@@ -20,12 +20,12 @@ pub struct AuthenticatedSymbol {
 }
 
 impl AuthenticatedSymbol {
-    /// Creates a new verified authenticated symbol.
+    /// Creates a new verified authenticated symbol from an internally trusted source.
     ///
-    /// This should only be called when creating a symbol locally with a known key
-    /// (i.e., signing).
+    /// This is crate-internal so external callers cannot forge the trusted
+    /// `verified` bit without going through an actual verification step.
     #[must_use]
-    pub fn new_verified(symbol: Symbol, tag: AuthenticationTag) -> Self {
+    pub(crate) fn new_verified(symbol: Symbol, tag: AuthenticationTag) -> Self {
         Self {
             symbol,
             tag,

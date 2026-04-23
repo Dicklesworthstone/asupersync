@@ -27,7 +27,7 @@ use asupersync::record::distributed_region::{
     ReplicaInfo, ReplicaStatus,
 };
 use asupersync::record::region::RegionState;
-use asupersync::security::{AuthenticatedSymbol, AuthenticationTag};
+use asupersync::security::{AuthenticatedSymbol, SecurityContext};
 use asupersync::types::budget::Budget;
 use asupersync::types::{Outcome, RegionId, TaskId, Time};
 use asupersync::util::DetRng;
@@ -623,7 +623,7 @@ fn e2e_bridge_upgrade_snapshot_close() {
     let encoded = encode_snapshot(&snap_after);
     let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
     for sym in &encoded.symbols {
-        let sym = AuthenticatedSymbol::new_verified(sym.clone(), AuthenticationTag::zero());
+        let sym = SecurityContext::for_testing(0xD157_0001).sign_symbol(sym);
         decoder.add_symbol(&sym).unwrap();
     }
     let recovered = decoder.decode_snapshot(&encoded.params).unwrap();

@@ -960,8 +960,8 @@ fn runner_all_execute_emits_suite_summary_with_reports() {
 
 #[test]
 fn symbol_dispatcher_overload_rejected_deterministically() {
+    use asupersync::security::SecurityContext;
     use asupersync::security::authenticated::AuthenticatedSymbol;
-    use asupersync::security::tag::AuthenticationTag;
     use asupersync::transport::{
         DispatchConfig, DispatchError, Endpoint, EndpointId, RouteKey, RoutingEntry, RoutingTable,
         SymbolDispatcher, SymbolRouter,
@@ -985,10 +985,8 @@ fn symbol_dispatcher_overload_rejected_deterministically() {
         },
     );
 
-    let symbol = AuthenticatedSymbol::new_verified(
-        Symbol::new(SymbolId::new_for_test(1, 0, 1), vec![1], SymbolKind::Source),
-        AuthenticationTag::zero(),
-    );
+    let raw_symbol = Symbol::new(SymbolId::new_for_test(1, 0, 1), vec![1], SymbolKind::Source);
+    let symbol = SecurityContext::for_testing(0xD15A_7C01).sign_symbol(&raw_symbol);
     let cx = asupersync::Cx::for_testing();
     let result = futures_lite::future::block_on(dispatcher.dispatch(&cx, symbol));
 

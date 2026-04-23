@@ -453,10 +453,11 @@ impl std::fmt::Debug for RecoveryCollector {
 pub struct RecoveryDecodingConfig {
     /// Whether to verify decoded data integrity.
     pub verify_integrity: bool,
-    /// Optional security context used to verify untrusted/unverified symbols.
+    /// Optional security context used to verify symbol authentication tags.
     ///
-    /// When `verify_integrity` is true and this is `Some`, decoding will verify
-    /// tags for symbols where `AuthenticatedSymbol::is_verified()` is false.
+    /// When `verify_integrity` is true and this is `Some`, decoding re-verifies
+    /// every supplied symbol against this context rather than trusting a carried
+    /// `verified` bit from an earlier boundary.
     pub auth_context: Option<SecurityContext>,
     /// Maximum decode attempts before failure.
     pub max_decode_attempts: u32,

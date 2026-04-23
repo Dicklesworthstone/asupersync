@@ -299,23 +299,19 @@ impl DecodingPipeline {
         if self.config.verify_auth {
             match &self.auth_context {
                 Some(ctx) => {
-                    if !auth_symbol.is_verified()
-                        && ctx.verify_authenticated_symbol(&mut auth_symbol).is_err()
-                    {
+                    if ctx.verify_authenticated_symbol(&mut auth_symbol).is_err() {
                         return Ok(SymbolAcceptResult::Rejected(
                             RejectReason::AuthenticationFailed,
                         ));
                     }
                 }
                 None => {
-                    // If callers already verified the symbol (e.g. at a trusted boundary), allow
-                    // the verified flag to stand. If not verified and we have no auth context,
-                    // we cannot validate the tag and must reject the symbol deterministically.
-                    if !auth_symbol.is_verified() {
-                        return Ok(SymbolAcceptResult::Rejected(
-                            RejectReason::AuthenticationFailed,
-                        ));
-                    }
+                    // A bare `verified` bit does not identify which key or verifier vouched for
+                    // the symbol. Without an auth context, we cannot authenticate deterministically
+                    // and must fail closed.
+                    return Ok(SymbolAcceptResult::Rejected(
+                        RejectReason::AuthenticationFailed,
+                    ));
                 }
             }
         }
@@ -1907,8 +1903,8 @@ mod tests {
     }
 
     #[test]
-    fn verify_auth_no_context_preverified_symbol_ok() {
-        init_test("verify_auth_no_context_preverified_symbol_ok");
+    fn verify_auth_no_context_preverified_symbol_rejected() {
+        init_test("verify_auth_no_context_preverified_symbol_rejected");
         let config = encoding_config();
         let mut decoder = DecodingPipeline::new(DecodingConfig {
             symbol_size: config.symbol_size,
@@ -1922,19 +1918,20 @@ mod tests {
             vec![0u8; usize::from(config.symbol_size)],
             SymbolKind::Source,
         );
-        // new_verified creates a pre-verified symbol
-        let auth = AuthenticatedSymbol::new_verified(
-            symbol,
-            crate::security::tag::AuthenticationTag::zero(),
-        );
+        let auth = crate::security::SecurityContext::for_testing(108).sign_symbol(&symbol);
 
         let result = decoder.feed(auth);
         let is_ok = result.is_ok();
-        crate::assert_with_log!(is_ok, "preverified symbol accepted", true, is_ok);
+        crate::assert_with_log!(is_ok, "preverified symbol rejected safely", true, is_ok);
         let accept = result.unwrap();
-        let is_accepted = matches!(accept, SymbolAcceptResult::Accepted { .. });
-        crate::assert_with_log!(is_accepted, "result is Accepted variant", true, is_accepted);
-        crate::test_complete!("verify_auth_no_context_preverified_symbol_ok");
+        let expected = SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed);
+        crate::assert_with_log!(
+            accept == expected,
+            "result is auth rejection without verifier context",
+            expected,
+            accept
+        );
+        crate::test_complete!("verify_auth_no_context_preverified_symbol_rejected");
     }
 
     #[test]

@@ -105,8 +105,8 @@ pub enum CaveatPredicate {
     ResourceScope(String),
     /// Windowed rate limit: at most `max_count` uses per `window_secs` seconds.
     ///
-    /// Checked against `VerificationContext::window_use_count`. The caller
-    /// is responsible for tracking the sliding window externally.
+    /// Checked against a verifier-supplied window count and matching window
+    /// duration. Missing or mismatched window metadata fails closed.
     RateLimit {
         /// Maximum invocations allowed in the window.
         max_count: u32,
@@ -547,6 +547,11 @@ impl MacaroonToken {
     /// pass. Third-party caveats are **not** checked (use
     /// [`verify_with_discharges`](Self::verify_with_discharges) for that).
     ///
+    /// This validates integrity and caveat satisfaction only. Callers that are
+    /// authorizing a specific capability should use
+    /// [`verify_for_identifier`](Self::verify_for_identifier) so a token minted
+    /// for one identifier cannot be replayed as a different capability.
+    ///
     /// # Errors
     ///
     /// Returns a `VerificationError` describing what failed.
@@ -556,6 +561,20 @@ impl MacaroonToken {
         context: &VerificationContext,
     ) -> Result<(), VerificationError> {
         self.verify_with_discharges(root_key, context, &[])
+    }
+
+    /// Verify the token for a specific capability identifier.
+    ///
+    /// This is the authorization-safe variant of [`Self::verify`]. It rejects
+    /// tokens whose signed identifier does not match the expected capability,
+    /// then verifies the signature chain and first-party caveats.
+    pub fn verify_for_identifier(
+        &self,
+        root_key: &AuthKey,
+        expected_identifier: &str,
+        context: &VerificationContext,
+    ) -> Result<(), VerificationError> {
+        self.verify_with_discharges_for_identifier(root_key, expected_identifier, context, &[])
     }
 
     /// Verify the token, checking first-party predicates and matching
@@ -573,6 +592,33 @@ impl MacaroonToken {
         context: &VerificationContext,
         discharges: &[Self],
     ) -> Result<(), VerificationError> {
+        let mut active_discharges = Vec::new();
+        self.verify_with_discharges_inner(
+            root_key,
+            context,
+            discharges,
+            None,
+            &mut active_discharges,
+        )
+        .map(|_| ())
+    }
+
+    /// Verify the token for a specific capability identifier, including any
+    /// supplied third-party discharges.
+    pub fn verify_with_discharges_for_identifier(
+        &self,
+        root_key: &AuthKey,
+        expected_identifier: &str,
+        context: &VerificationContext,
+        discharges: &[Self],
+    ) -> Result<(), VerificationError> {
+        if self.identifier != expected_identifier {
+            return Err(VerificationError::UnexpectedIdentifier {
+                expected: expected_identifier.to_string(),
+                actual: self.identifier.clone(),
+            });
+        }
+
         let mut active_discharges = Vec::new();
         self.verify_with_discharges_inner(
             root_key,
@@ -759,9 +805,9 @@ impl MacaroonToken {
 
     fn map_discharge_error(index: usize, tp_id: &str, err: VerificationError) -> VerificationError {
         match err {
-            VerificationError::InvalidSignature | VerificationError::DischargeInvalid { .. } => {
-                Self::discharge_invalid(index, tp_id)
-            }
+            VerificationError::InvalidSignature
+            | VerificationError::UnexpectedIdentifier { .. }
+            | VerificationError::DischargeInvalid { .. } => Self::discharge_invalid(index, tp_id),
             VerificationError::MissingDischarge { identifier, .. } => {
                 VerificationError::MissingDischarge { index, identifier }
             }
@@ -984,18 +1030,20 @@ impl fmt::Display for MacaroonToken {
 #[derive(Debug, Clone, Default)]
 pub struct VerificationContext {
     /// Current virtual time in milliseconds.
-    pub current_time_ms: u64,
+    pub current_time_ms: Option<u64>,
     /// Current region ID (for scope checks).
     pub region_id: Option<u64>,
     /// Current task ID (for scope checks).
     pub task_id: Option<u64>,
     /// Number of times this token has been used (lifetime).
-    pub use_count: u32,
+    pub use_count: Option<u32>,
     /// The resource path being accessed (for [`CaveatPredicate::ResourceScope`] checks).
     pub resource_path: Option<String>,
+    /// Duration of the active rate-limit window in seconds.
+    pub window_secs: Option<u32>,
     /// Number of uses in the current rate-limit window
     /// (for [`CaveatPredicate::RateLimit`] checks).
-    pub window_use_count: u32,
+    pub window_use_count: Option<u32>,
     /// Custom key-value pairs for custom predicate evaluation.
     pub custom: Vec<(String, String)>,
 }
@@ -1010,7 +1058,7 @@ impl VerificationContext {
     /// Set the current virtual time.
     #[must_use]
     pub const fn with_time(mut self, time_ms: u64) -> Self {
-        self.current_time_ms = time_ms;
+        self.current_time_ms = Some(time_ms);
         self
     }
 
@@ -1031,7 +1079,7 @@ impl VerificationContext {
     /// Set the use count.
     #[must_use]
     pub const fn with_use_count(mut self, count: u32) -> Self {
-        self.use_count = count;
+        self.use_count = Some(count);
         self
     }
 
@@ -1042,10 +1090,11 @@ impl VerificationContext {
         self
     }
 
-    /// Set the windowed use count for rate-limit checking.
+    /// Set the rate-limit window duration and observed use count.
     #[must_use]
-    pub const fn with_window_use_count(mut self, count: u32) -> Self {
-        self.window_use_count = count;
+    pub const fn with_window_use_count(mut self, window_secs: u32, count: u32) -> Self {
+        self.window_secs = Some(window_secs);
+        self.window_use_count = Some(count);
         self
     }
 
@@ -1067,6 +1116,13 @@ pub enum VerificationError {
     /// The HMAC chain does not match (token was tampered with or
     /// the wrong root key was used).
     InvalidSignature,
+    /// The token was valid, but for a different capability identifier.
+    UnexpectedIdentifier {
+        /// Capability identifier the caller required.
+        expected: String,
+        /// Capability identifier carried by the token.
+        actual: String,
+    },
     /// A first-party caveat predicate was not satisfied.
     CaveatFailed {
         /// Index of the failing caveat in the chain.
@@ -1102,6 +1158,12 @@ impl fmt::Display for VerificationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidSignature => write!(f, "macaroon signature verification failed"),
+            Self::UnexpectedIdentifier { expected, actual } => {
+                write!(
+                    f,
+                    "macaroon identifier mismatch: expected \"{expected}\", got \"{actual}\""
+                )
+            }
             Self::CaveatFailed {
                 index,
                 predicate,
@@ -1234,26 +1296,22 @@ fn glob_match_parts(pat: &[&str], path: &[&str]) -> bool {
 /// Check a single caveat predicate against a verification context.
 fn check_caveat(predicate: &CaveatPredicate, ctx: &VerificationContext) -> Result<(), String> {
     match predicate {
-        CaveatPredicate::TimeBefore(deadline) => {
-            if ctx.current_time_ms < *deadline {
-                Ok(())
-            } else {
-                Err(format!(
-                    "current time {}ms >= deadline {}ms",
-                    ctx.current_time_ms, deadline
-                ))
-            }
-        }
-        CaveatPredicate::TimeAfter(start) => {
-            if ctx.current_time_ms >= *start {
-                Ok(())
-            } else {
-                Err(format!(
-                    "current time {}ms < start {}ms",
-                    ctx.current_time_ms, start
-                ))
-            }
-        }
+        CaveatPredicate::TimeBefore(deadline) => match ctx.current_time_ms {
+            Some(current_time_ms) if current_time_ms < *deadline => Ok(()),
+            Some(current_time_ms) => Err(format!(
+                "current time {}ms >= deadline {}ms",
+                current_time_ms, deadline
+            )),
+            None => Err("no current time in context".to_string()),
+        },
+        CaveatPredicate::TimeAfter(start) => match ctx.current_time_ms {
+            Some(current_time_ms) if current_time_ms >= *start => Ok(()),
+            Some(current_time_ms) => Err(format!(
+                "current time {}ms < start {}ms",
+                current_time_ms, start
+            )),
+            None => Err("no current time in context".to_string()),
+        },
         CaveatPredicate::RegionScope(expected) => match ctx.region_id {
             Some(actual) if actual == *expected => Ok(()),
             Some(actual) => Err(format!("region {actual} != expected {expected}")),
@@ -1264,13 +1322,11 @@ fn check_caveat(predicate: &CaveatPredicate, ctx: &VerificationContext) -> Resul
             Some(actual) => Err(format!("task {actual} != expected {expected}")),
             None => Err("no task in context".to_string()),
         },
-        CaveatPredicate::MaxUses(max) => {
-            if ctx.use_count <= *max {
-                Ok(())
-            } else {
-                Err(format!("use count {} > max {max}", ctx.use_count))
-            }
-        }
+        CaveatPredicate::MaxUses(max) => match ctx.use_count {
+            Some(use_count) if use_count <= *max => Ok(()),
+            Some(use_count) => Err(format!("use count {} > max {max}", use_count)),
+            None => Err("no use count in context".to_string()),
+        },
         CaveatPredicate::ResourceScope(pattern) => ctx.resource_path.as_ref().map_or_else(
             || Err("no resource path in context".to_string()),
             |path| {
@@ -1285,17 +1341,23 @@ fn check_caveat(predicate: &CaveatPredicate, ctx: &VerificationContext) -> Resul
         ),
         CaveatPredicate::RateLimit {
             max_count,
-            window_secs: _,
-        } => {
-            if ctx.window_use_count <= *max_count {
-                Ok(())
-            } else {
+            window_secs,
+        } => match (ctx.window_secs, ctx.window_use_count) {
+            (Some(actual_window_secs), Some(_window_use_count))
+                if actual_window_secs != *window_secs =>
+            {
                 Err(format!(
-                    "window use count {} > max {max_count}",
-                    ctx.window_use_count
+                    "window seconds {actual_window_secs} != expected {window_secs}"
                 ))
             }
-        }
+            (Some(_), Some(window_use_count)) if window_use_count <= *max_count => Ok(()),
+            (Some(_), Some(window_use_count)) => Err(format!(
+                "window use count {} > max {max_count}",
+                window_use_count
+            )),
+            (None, _) => Err("no window seconds in context".to_string()),
+            (_, None) => Err("no window use count in context".to_string()),
+        },
         CaveatPredicate::Custom(key, expected_value) => {
             for (k, v) in &ctx.custom {
                 if k == key {
@@ -1425,6 +1487,16 @@ mod tests {
     }
 
     #[test]
+    fn time_before_caveat_fails_closed_without_time_context() {
+        let key = test_root_key();
+        let token =
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(1000));
+
+        let err = token.verify(&key, &VerificationContext::new()).unwrap_err();
+        assert!(matches!(err, VerificationError::CaveatFailed { .. }));
+    }
+
+    #[test]
     fn time_after_caveat_passes() {
         let key = test_root_key();
         let token =
@@ -1484,6 +1556,15 @@ mod tests {
         assert!(token.verify(&key, &ok_ctx).is_ok());
         assert!(token.verify(&key, &limit_ctx).is_ok());
         assert!(token.verify(&key, &over_ctx).is_err());
+    }
+
+    #[test]
+    fn max_uses_caveat_fails_closed_without_use_count() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::MaxUses(3));
+
+        let err = token.verify(&key, &VerificationContext::new()).unwrap_err();
+        assert!(matches!(err, VerificationError::CaveatFailed { .. }));
     }
 
     #[test]
@@ -2089,7 +2170,7 @@ mod tests {
             },
         );
 
-        let ctx = VerificationContext::new().with_window_use_count(5);
+        let ctx = VerificationContext::new().with_window_use_count(60, 5);
         assert!(token.verify(&key, &ctx).is_ok());
     }
 
@@ -2103,7 +2184,7 @@ mod tests {
             },
         );
 
-        let ctx = VerificationContext::new().with_window_use_count(10);
+        let ctx = VerificationContext::new().with_window_use_count(60, 10);
         assert!(token.verify(&key, &ctx).is_ok());
     }
 
@@ -2117,8 +2198,41 @@ mod tests {
             },
         );
 
-        let ctx = VerificationContext::new().with_window_use_count(11);
+        let ctx = VerificationContext::new().with_window_use_count(60, 11);
         let err = token.verify(&key, &ctx).unwrap_err();
+        assert!(matches!(err, VerificationError::CaveatFailed { .. }));
+    }
+
+    #[test]
+    fn rate_limit_fails_closed_without_window_context() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "api:call", "cx/api").add_caveat(
+            CaveatPredicate::RateLimit {
+                max_count: 10,
+                window_secs: 60,
+            },
+        );
+
+        let err = token.verify(&key, &VerificationContext::new()).unwrap_err();
+        assert!(matches!(err, VerificationError::CaveatFailed { .. }));
+    }
+
+    #[test]
+    fn rate_limit_rejects_mismatched_window_seconds() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "api:call", "cx/api").add_caveat(
+            CaveatPredicate::RateLimit {
+                max_count: 10,
+                window_secs: 60,
+            },
+        );
+
+        let err = token
+            .verify(
+                &key,
+                &VerificationContext::new().with_window_use_count(300, 5),
+            )
+            .unwrap_err();
         assert!(matches!(err, VerificationError::CaveatFailed { .. }));
     }
 
@@ -2231,7 +2345,7 @@ mod tests {
         let ctx_ok = VerificationContext::new()
             .with_time(1000)
             .with_resource("api/users")
-            .with_window_use_count(5);
+            .with_window_use_count(60, 5);
 
         // Base passes with any context; each attenuated token also passes
         assert!(token_base.verify(&key, &ctx_ok).is_ok());
@@ -2243,7 +2357,7 @@ mod tests {
         let ctx_expired = VerificationContext::new()
             .with_time(6000)
             .with_resource("api/users")
-            .with_window_use_count(5);
+            .with_window_use_count(60, 5);
         assert!(token_base.verify(&key, &ctx_expired).is_ok());
         assert!(token_time.verify(&key, &ctx_expired).is_err());
         assert!(token_scope.verify(&key, &ctx_expired).is_err());
@@ -2253,11 +2367,25 @@ mod tests {
         let ctx_wrong_scope = VerificationContext::new()
             .with_time(1000)
             .with_resource("admin/users")
-            .with_window_use_count(5);
+            .with_window_use_count(60, 5);
         assert!(token_base.verify(&key, &ctx_wrong_scope).is_ok());
         assert!(token_time.verify(&key, &ctx_wrong_scope).is_ok());
         assert!(token_scope.verify(&key, &ctx_wrong_scope).is_err());
         assert!(token_rate.verify(&key, &ctx_wrong_scope).is_err());
+    }
+
+    #[test]
+    fn verify_for_identifier_rejects_capability_confusion() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "scope:read", "svc");
+
+        let err = token
+            .verify_for_identifier(&key, "scope:write", &VerificationContext::new())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            VerificationError::UnexpectedIdentifier { .. }
+        ));
     }
 
     // ===================================================================
@@ -2524,7 +2652,7 @@ mod tests {
             .with_time(5000)
             .with_resource("data/users/123/profile")
             .with_use_count(10)
-            .with_window_use_count(5)
+            .with_window_use_count(60, 5)
             .with_region(42);
         assert!(
             leaf_token.verify(&root_key, &ctx_ok).is_ok(),
@@ -2550,7 +2678,7 @@ mod tests {
             .with_time(15000)
             .with_resource("data/users/123/profile")
             .with_use_count(10)
-            .with_window_use_count(5)
+            .with_window_use_count(60, 5)
             .with_region(42);
         assert!(leaf_token.verify(&root_key, &ctx_expired).is_err());
 
@@ -2559,7 +2687,7 @@ mod tests {
             .with_time(5000)
             .with_resource("data/admin/settings")
             .with_use_count(10)
-            .with_window_use_count(5)
+            .with_window_use_count(60, 5)
             .with_region(42);
         assert!(leaf_token.verify(&root_key, &ctx_wrong_path).is_err());
 
@@ -2568,7 +2696,7 @@ mod tests {
             .with_time(5000)
             .with_resource("data/users/123/profile")
             .with_use_count(10)
-            .with_window_use_count(5)
+            .with_window_use_count(60, 5)
             .with_region(99);
         assert!(leaf_token.verify(&root_key, &ctx_wrong_region).is_err());
 
@@ -2577,7 +2705,7 @@ mod tests {
             .with_time(5000)
             .with_resource("data/users/123/profile")
             .with_use_count(10)
-            .with_window_use_count(11)
+            .with_window_use_count(60, 11)
             .with_region(42);
         assert!(leaf_token.verify(&root_key, &ctx_rate).is_err());
 
@@ -2586,7 +2714,7 @@ mod tests {
             .with_time(5000)
             .with_resource("data/users/123/profile")
             .with_use_count(51)
-            .with_window_use_count(5)
+            .with_window_use_count(60, 5)
             .with_region(42);
         assert!(leaf_token.verify(&root_key, &ctx_uses).is_err());
     }
@@ -2647,24 +2775,30 @@ mod tests {
         let e1 = VerificationError::InvalidSignature;
         assert_eq!(format!("{e1}"), "macaroon signature verification failed");
 
-        let e2 = VerificationError::CaveatFailed {
+        let e2 = VerificationError::UnexpectedIdentifier {
+            expected: "scope:read".to_string(),
+            actual: "scope:write".to_string(),
+        };
+        assert!(format!("{e2}").contains("identifier mismatch"));
+
+        let e3 = VerificationError::CaveatFailed {
             index: 0,
             predicate: "time < 100ms".to_string(),
             reason: "expired".to_string(),
         };
-        assert!(format!("{e2}").contains("caveat 0 failed"));
+        assert!(format!("{e3}").contains("caveat 0 failed"));
 
-        let e3 = VerificationError::MissingDischarge {
+        let e4 = VerificationError::MissingDischarge {
             index: 1,
             identifier: "auth".to_string(),
         };
-        assert!(format!("{e3}").contains("missing discharge"));
+        assert!(format!("{e4}").contains("missing discharge"));
 
-        let e4 = VerificationError::DischargeInvalid {
+        let e5 = VerificationError::DischargeInvalid {
             index: 2,
             identifier: "check".to_string(),
         };
-        assert!(format!("{e4}").contains("discharge"));
+        assert!(format!("{e5}").contains("discharge"));
     }
 
     #[test]

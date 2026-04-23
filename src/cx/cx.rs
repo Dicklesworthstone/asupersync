@@ -751,7 +751,8 @@ impl<Caps> Cx<Caps> {
     ///
     /// Restricts the token to at most `max_count` uses per `window_secs`.
     /// The caller is responsible for tracking the sliding window and
-    /// providing `window_use_count` in [`VerificationContext`].
+    /// providing both the observed window duration and use count in
+    /// [`VerificationContext`].
     ///
     /// Returns `None` if no macaroon is attached.
     #[must_use]
@@ -778,7 +779,8 @@ impl<Caps> Cx<Caps> {
         )
     }
 
-    /// Verify the attached capability token against a root key and context.
+    /// Verify the attached capability token against a root key, expected
+    /// capability identifier, and runtime context.
     ///
     /// Checks the HMAC chain integrity and evaluates all caveat predicates.
     /// Emits evidence to the attached sink on both success and failure.
@@ -793,6 +795,7 @@ impl<Caps> Cx<Caps> {
     pub fn verify_capability(
         &self,
         root_key: &crate::security::key::AuthKey,
+        expected_identifier: &str,
         context: &VerificationContext,
     ) -> Result<(), VerificationError> {
         let Some(token) = self.handles.macaroon.as_ref() else {
@@ -805,7 +808,7 @@ impl<Caps> Cx<Caps> {
             return Err(VerificationError::InvalidSignature);
         };
 
-        let result = token.verify(root_key, context);
+        let result = token.verify_for_identifier(root_key, expected_identifier, context);
 
         // Emit evidence for the verification decision.
         self.emit_macaroon_evidence(token, &result);
@@ -822,6 +825,15 @@ impl<Caps> Cx<Caps> {
                 error!(
                     token_id = %token.identifier(),
                     "HMAC chain integrity violation — possible tampering"
+                );
+            }
+            #[allow(unused_variables)]
+            Err(VerificationError::UnexpectedIdentifier { expected, actual }) => {
+                error!(
+                    token_id = %token.identifier(),
+                    expected = %expected,
+                    actual = %actual,
+                    "macaroon identifier mismatch"
                 );
             }
             #[allow(unused_variables)]
@@ -884,6 +896,9 @@ impl<Caps> Cx<Caps> {
         let (action, loss) = match result {
             Ok(()) => ("verify_success".to_string(), 0.0),
             Err(VerificationError::InvalidSignature) => ("verify_fail_signature".to_string(), 1.0),
+            Err(VerificationError::UnexpectedIdentifier { .. }) => {
+                ("verify_fail_identifier".to_string(), 1.0)
+            }
             Err(VerificationError::CaveatFailed { index, .. }) => {
                 (format!("verify_fail_caveat_{index}"), 0.5)
             }
@@ -3589,7 +3604,7 @@ mod tests {
         let cx = test_cx().with_macaroon(token);
 
         let ctx = VerificationContext::new().with_time(1000);
-        assert!(cx.verify_capability(&key, &ctx).is_ok());
+        assert!(cx.verify_capability(&key, "spawn:r1", &ctx).is_ok());
     }
 
     #[test]
@@ -3600,7 +3615,9 @@ mod tests {
         let cx = test_cx().with_macaroon(token);
 
         let ctx = VerificationContext::new();
-        let err = cx.verify_capability(&wrong_key, &ctx).unwrap_err();
+        let err = cx
+            .verify_capability(&wrong_key, "spawn:r1", &ctx)
+            .unwrap_err();
         assert!(matches!(err, VerificationError::InvalidSignature));
     }
 
@@ -3610,7 +3627,7 @@ mod tests {
         let cx = test_cx();
 
         let ctx = VerificationContext::new();
-        let err = cx.verify_capability(&key, &ctx).unwrap_err();
+        let err = cx.verify_capability(&key, "spawn:r1", &ctx).unwrap_err();
         assert!(matches!(err, VerificationError::InvalidSignature));
     }
 
@@ -3625,11 +3642,13 @@ mod tests {
 
         // Passes with correct context
         let ctx = VerificationContext::new().with_time(1000).with_region(42);
-        assert!(cx.verify_capability(&key, &ctx).is_ok());
+        assert!(cx.verify_capability(&key, "spawn:r1", &ctx).is_ok());
 
         // Fails with expired time
         let ctx_expired = VerificationContext::new().with_time(6000).with_region(42);
-        let err = cx.verify_capability(&key, &ctx_expired).unwrap_err();
+        let err = cx
+            .verify_capability(&key, "spawn:r1", &ctx_expired)
+            .unwrap_err();
         assert!(matches!(
             err,
             VerificationError::CaveatFailed { index: 0, .. }
@@ -3637,7 +3656,9 @@ mod tests {
 
         // Fails with wrong region
         let ctx_wrong_region = VerificationContext::new().with_time(1000).with_region(99);
-        let err = cx.verify_capability(&key, &ctx_wrong_region).unwrap_err();
+        let err = cx
+            .verify_capability(&key, "spawn:r1", &ctx_wrong_region)
+            .unwrap_err();
         assert!(matches!(
             err,
             VerificationError::CaveatFailed { index: 1, .. }
@@ -3658,20 +3679,26 @@ mod tests {
 
         // Original has no restrictions
         let ctx = VerificationContext::new().with_time(1000);
-        assert!(cx.verify_capability(&key, &ctx).is_ok());
+        assert!(cx.verify_capability(&key, "time:sleep", &ctx).is_ok());
 
         // cx2 has time restriction
-        assert!(cx2.verify_capability(&key, &ctx).is_ok());
+        assert!(cx2.verify_capability(&key, "time:sleep", &ctx).is_ok());
         let ctx_late = VerificationContext::new().with_time(4000);
-        assert!(cx2.verify_capability(&key, &ctx_late).is_err());
+        assert!(
+            cx2.verify_capability(&key, "time:sleep", &ctx_late)
+                .is_err()
+        );
 
         // cx3 has both time + uses restriction
         let ctx_ok = VerificationContext::new().with_time(1000).with_use_count(3);
-        assert!(cx3.verify_capability(&key, &ctx_ok).is_ok());
+        assert!(cx3.verify_capability(&key, "time:sleep", &ctx_ok).is_ok());
         let ctx_overuse = VerificationContext::new()
             .with_time(1000)
             .with_use_count(10);
-        assert!(cx3.verify_capability(&key, &ctx_overuse).is_err());
+        assert!(
+            cx3.verify_capability(&key, "time:sleep", &ctx_overuse)
+                .is_err()
+        );
     }
 
     #[test]
@@ -3688,7 +3715,7 @@ mod tests {
         let ctx = VerificationContext::new();
 
         // Successful verification should emit evidence
-        cx.verify_capability(&key, &ctx).unwrap();
+        cx.verify_capability(&key, "spawn:r1", &ctx).unwrap();
         let entries = sink.entries();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].component, "cx_macaroon");
@@ -3696,10 +3723,25 @@ mod tests {
 
         // Failed verification should also emit evidence
         let wrong_key = crate::security::key::AuthKey::from_seed(99);
-        let _ = cx.verify_capability(&wrong_key, &ctx);
+        let _ = cx.verify_capability(&wrong_key, "spawn:r1", &ctx);
         let entries = sink.entries();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].action, "verify_fail_signature");
+    }
+
+    #[test]
+    fn cx_verify_capability_rejects_wrong_identifier() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "spawn:r1", "cx/scheduler");
+        let cx = test_cx().with_macaroon(token);
+
+        let err = cx
+            .verify_capability(&key, "spawn:r2", &VerificationContext::new())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            VerificationError::UnexpectedIdentifier { .. }
+        ));
     }
 
     #[cfg(feature = "messaging-fabric")]

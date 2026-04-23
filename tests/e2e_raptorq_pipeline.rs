@@ -13,7 +13,7 @@ use asupersync::distributed::encoding::{EncodedState, EncodingConfig, StateEncod
 use asupersync::distributed::recovery::{RecoveryDecodingConfig, StateDecoder};
 use asupersync::distributed::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
 use asupersync::record::region::RegionState;
-use asupersync::security::{AuthenticatedSymbol, AuthenticationTag};
+use asupersync::security::{AuthenticatedSymbol, SecurityContext};
 use asupersync::types::{RegionId, TaskId, Time};
 use asupersync::util::DetRng;
 use common::e2e_harness::E2eLabHarness;
@@ -75,6 +75,10 @@ fn encode_snapshot(snapshot: &RegionSnapshot, symbol_size: u16, seed: u64) -> En
         .expect("encoding should succeed")
 }
 
+fn sign_symbol(symbol: &asupersync::types::Symbol) -> AuthenticatedSymbol {
+    SecurityContext::for_testing(0xE2E4_A11C).sign_symbol(symbol)
+}
+
 fn deterministic_exact_budget_symbols(
     encoded: &EncodedState,
 ) -> (Vec<AuthenticatedSymbol>, BTreeMap<u8, usize>) {
@@ -96,10 +100,7 @@ fn deterministic_exact_budget_symbols(
             }
         }
 
-        kept.push(AuthenticatedSymbol::new_verified(
-            symbol.clone(),
-            AuthenticationTag::zero(),
-        ));
+        kept.push(sign_symbol(symbol));
     }
 
     (kept, dropped_source_counts)
@@ -130,7 +131,7 @@ fn e2e_raptorq_roundtrip_no_loss() {
     h.phase("decode — no loss");
     let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
     for sym in &encoded.symbols {
-        let authed = AuthenticatedSymbol::new_verified(sym.clone(), AuthenticationTag::zero());
+        let authed = sign_symbol(sym);
         decoder.add_symbol(&authed).unwrap();
     }
     let recovered = decoder
@@ -193,7 +194,7 @@ fn e2e_raptorq_recovery_30pct_loss() {
         let val = rng.next_u64() as f64 / (u64::MAX as f64 + 1.0);
         if val >= 0.30 {
             // Keep this symbol (not lost)
-            let authed = AuthenticatedSymbol::new_verified(sym.clone(), AuthenticationTag::zero());
+            let authed = sign_symbol(sym);
             decoder.add_symbol(&authed).unwrap();
             kept += 1;
         }
