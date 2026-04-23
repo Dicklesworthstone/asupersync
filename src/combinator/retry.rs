@@ -1749,4 +1749,241 @@ mod tests {
             assert!(bucket.available_tokens() <= expected_capacity);
         }
     }
+
+    // =========================================================================
+    // Metamorphic relations for calculate_delay:
+    // backoff monotonicity, cap invariance, jitter bounds.
+    //
+    // Oracle problem: expected absolute delay is specified only up to the
+    // documented formula, which is sensitive to f64 rounding across
+    // multiplier^n paths. Relations between delays under input transforms
+    // (attempt, multiplier, jitter, seed) are deterministic and exactly
+    // checkable and therefore stronger than a single-point oracle.
+    // =========================================================================
+
+    mod backoff_jitter_mr {
+        use super::super::*;
+        use crate::util::det_rng::DetRng;
+        use std::time::Duration;
+
+        fn base_policy() -> RetryPolicy {
+            RetryPolicy {
+                max_attempts: 32,
+                initial_delay: Duration::from_millis(10),
+                max_delay: Duration::from_secs(600),
+                multiplier: 2.0,
+                jitter: 0.0,
+            }
+        }
+
+        /// MR1 — Base backoff is monotonically non-decreasing in `attempt`.
+        /// With jitter disabled and multiplier ≥ 1.0, calculate_delay(_, a+1, None)
+        /// ≥ calculate_delay(_, a, None) for every a ≥ 1.
+        #[test]
+        fn mr_monotonic_non_decreasing_in_attempt_without_jitter() {
+            for &multiplier in &[1.0_f64, 1.25, 1.5, 2.0, 3.0, 10.0] {
+                let policy = RetryPolicy {
+                    multiplier,
+                    jitter: 0.0,
+                    ..base_policy()
+                };
+                let mut prev = calculate_delay(&policy, 1, None);
+                for attempt in 2..=32 {
+                    let next = calculate_delay(&policy, attempt, None);
+                    assert!(
+                        next >= prev,
+                        "attempt {attempt} produced smaller delay than {}: multiplier={multiplier}, prev={prev:?}, next={next:?}",
+                        attempt - 1,
+                    );
+                    prev = next;
+                }
+            }
+        }
+
+        /// MR2 — Cap invariance: once base ≥ max_delay, further attempts
+        /// stay pinned at max_delay (exactly, not just ≤).
+        #[test]
+        fn mr_cap_invariant_after_saturation() {
+            let policy = RetryPolicy {
+                initial_delay: Duration::from_millis(10),
+                multiplier: 2.0,
+                max_delay: Duration::from_millis(160), // saturates at attempt 5
+                jitter: 0.0,
+                ..base_policy()
+            };
+            let saturated = calculate_delay(&policy, 5, None);
+            assert_eq!(saturated, policy.max_delay);
+            for attempt in 6..=32 {
+                let d = calculate_delay(&policy, attempt, None);
+                assert_eq!(
+                    d, policy.max_delay,
+                    "attempt {attempt} exceeded cap: expected {:?}, got {d:?}",
+                    policy.max_delay,
+                );
+            }
+        }
+
+        /// MR3 — Attempt 0 is always Duration::ZERO regardless of other
+        /// parameters or jitter RNG state.
+        #[test]
+        fn mr_attempt_zero_is_always_zero() {
+            let mut rng = DetRng::new(0xDEAD_BEEF);
+            for &jitter in &[0.0_f64, 0.1, 0.5, 1.0] {
+                let policy = RetryPolicy {
+                    jitter,
+                    ..base_policy()
+                };
+                assert_eq!(
+                    calculate_delay(&policy, 0, None),
+                    Duration::ZERO,
+                    "attempt 0 without RNG was non-zero at jitter={jitter}",
+                );
+                assert_eq!(
+                    calculate_delay(&policy, 0, Some(&mut rng)),
+                    Duration::ZERO,
+                    "attempt 0 with RNG was non-zero at jitter={jitter}",
+                );
+            }
+        }
+
+        /// MR4 — Jitter is additive, never subtractive.
+        /// For any jitter factor j ∈ (0, 1] and any RNG state, the jittered
+        /// delay is at least the un-jittered base delay at the same attempt.
+        #[test]
+        fn mr_jitter_never_shrinks_below_base() {
+            for &jitter in &[0.05_f64, 0.1, 0.25, 0.5, 1.0] {
+                let base_policy = RetryPolicy {
+                    jitter: 0.0,
+                    ..base_policy()
+                };
+                let jittered_policy = RetryPolicy {
+                    jitter,
+                    ..base_policy()
+                };
+                for seed in 0u64..16 {
+                    for attempt in 1..=8u32 {
+                        let mut rng = DetRng::new(seed);
+                        let base = calculate_delay(&base_policy, attempt, None);
+                        let jittered = calculate_delay(&jittered_policy, attempt, Some(&mut rng));
+                        assert!(
+                            jittered >= base,
+                            "jitter shrank below base at attempt={attempt} seed={seed} jitter={jitter}: base={base:?}, jittered={jittered:?}",
+                        );
+                    }
+                }
+            }
+        }
+
+        /// MR5 — Jitter upper bound: jittered delay ≤ base * (1 + jitter).
+        /// Tolerate one-nanosecond rounding from the f64 → u64 cast.
+        #[test]
+        fn mr_jitter_bounded_above_by_base_times_one_plus_jitter() {
+            for &jitter in &[0.05_f64, 0.1, 0.25, 0.5, 1.0] {
+                let base_policy = RetryPolicy {
+                    jitter: 0.0,
+                    ..base_policy()
+                };
+                let jittered_policy = RetryPolicy {
+                    jitter,
+                    ..base_policy()
+                };
+                for seed in 0u64..16 {
+                    for attempt in 1..=8u32 {
+                        let mut rng = DetRng::new(seed);
+                        let base = calculate_delay(&base_policy, attempt, None);
+                        let jittered = calculate_delay(&jittered_policy, attempt, Some(&mut rng));
+                        // base_nanos * (1 + jitter), with +1 ns slack for the
+                        // single floor-cast inside calculate_delay.
+                        #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+                        let upper_nanos =
+                            (base.as_nanos() as f64 * (1.0 + jitter)).ceil() as u128 + 1;
+                        assert!(
+                            jittered.as_nanos() <= upper_nanos,
+                            "jitter exceeded upper bound at attempt={attempt} seed={seed} jitter={jitter}: base={base:?}, jittered={jittered:?}, upper_nanos={upper_nanos}",
+                        );
+                    }
+                }
+            }
+        }
+
+        /// MR6 — Determinism under identical seeds.
+        /// Two runs of calculate_delay with the same policy, attempt, and seed
+        /// produce exactly the same Duration.
+        #[test]
+        fn mr_same_seed_same_delay() {
+            let policy = RetryPolicy {
+                jitter: 0.25,
+                ..base_policy()
+            };
+            for seed in 0u64..32 {
+                for attempt in 1..=8u32 {
+                    let mut rng_a = DetRng::new(seed);
+                    let mut rng_b = DetRng::new(seed);
+                    let da = calculate_delay(&policy, attempt, Some(&mut rng_a));
+                    let db = calculate_delay(&policy, attempt, Some(&mut rng_b));
+                    assert_eq!(
+                        da, db,
+                        "determinism violated at seed={seed} attempt={attempt}: {da:?} vs {db:?}",
+                    );
+                }
+            }
+        }
+
+        /// MR7 — Multiplier monotonicity.
+        /// Holding (initial_delay, attempt, max_delay) fixed and jitter=0,
+        /// increasing multiplier ≥ 1 monotonically grows (or preserves) delay
+        /// up to the max_delay cap.
+        #[test]
+        fn mr_larger_multiplier_never_shrinks_pre_cap_delay() {
+            let multipliers = [1.0_f64, 1.25, 1.5, 2.0, 3.0, 5.0];
+            // Pick a max_delay large enough that attempts 1..=3 stay below cap.
+            let policy_at = |multiplier: f64| RetryPolicy {
+                initial_delay: Duration::from_millis(10),
+                multiplier,
+                max_delay: Duration::from_secs(60 * 60),
+                jitter: 0.0,
+                ..base_policy()
+            };
+            for attempt in 1..=3u32 {
+                let mut prev = calculate_delay(&policy_at(multipliers[0]), attempt, None);
+                for &mult in &multipliers[1..] {
+                    let next = calculate_delay(&policy_at(mult), attempt, None);
+                    assert!(
+                        next >= prev,
+                        "multiplier {mult} produced smaller delay than a smaller multiplier at attempt={attempt}: prev={prev:?}, next={next:?}",
+                    );
+                    prev = next;
+                }
+            }
+        }
+
+        /// MR8 — Composition: (monotonic-in-attempt) ∘ (jitter-upper-bound).
+        /// For every seed, a jittered delay at attempt a+1 must not fall
+        /// below the un-jittered base at attempt a. This would catch a
+        /// sign-flip in the jitter formula AND a reversed attempt exponent
+        /// simultaneously.
+        #[test]
+        fn mr_composite_jittered_attempt_plus_one_ge_base_attempt() {
+            let policy_base = RetryPolicy {
+                jitter: 0.0,
+                ..base_policy()
+            };
+            let policy_jittered = RetryPolicy {
+                jitter: 0.5,
+                ..base_policy()
+            };
+            for seed in 0u64..16 {
+                for attempt in 1..=6u32 {
+                    let base_now = calculate_delay(&policy_base, attempt, None);
+                    let mut rng = DetRng::new(seed);
+                    let jittered_next =
+                        calculate_delay(&policy_jittered, attempt + 1, Some(&mut rng));
+                    assert!(
+                        jittered_next >= base_now,
+                        "composite MR violated: seed={seed} attempt={attempt} base(a)={base_now:?} jittered(a+1)={jittered_next:?}",
+                    );
+                }
+            }
+        }
+    }
 }
