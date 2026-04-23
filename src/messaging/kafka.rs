@@ -1622,6 +1622,36 @@ impl BrokerBackend for StubBrokerBackend {
     fn backend_type(&self) -> &'static str { "stub" }
 }
 
+/// Consumer abstraction for switching between real and stub implementations.
+pub trait KafkaConsumerTrait: Send + Sync {
+    /// Get the topic this consumer is subscribed to.
+    fn topic(&self) -> &str;
+
+    /// Check if this consumer is connected to a real broker.
+    fn is_real_consumer(&self) -> bool;
+
+    /// Get consumer type description for diagnostics.
+    fn consumer_type(&self) -> &'static str;
+}
+
+/// Real Kafka consumer backend using rdkafka StreamConsumer.
+#[cfg(feature = "kafka")]
+impl KafkaConsumerTrait for StreamConsumer<KafkaContext> {
+    fn topic(&self) -> &str {
+        // For rdkafka StreamConsumer, we'll return a placeholder since
+        // the real topic info is managed by subscription state
+        "rdkafka-managed"
+    }
+
+    fn is_real_consumer(&self) -> bool {
+        true
+    }
+
+    fn consumer_type(&self) -> &'static str {
+        "rdkafka::StreamConsumer"
+    }
+}
+
 /// Unified Kafka client combining producer and consumer capabilities.
 ///
 /// This is a high-level wrapper around `KafkaProducer` and rdkafka's
@@ -1668,7 +1698,7 @@ impl KafkaClient {
     }
 
     /// Initialize consumer for the given topic (stub for now).
-    pub async fn consumer(&mut self, _topic: &str) -> Result<&StreamConsumer<KafkaContext>, KafkaError> {
+    pub async fn consumer(&mut self, _topic: &str) -> Result<&dyn KafkaConsumerTrait, KafkaError> {
         // TODO: Implement consumer initialization
         Err(KafkaError::Configuration("Consumer not yet implemented".to_string()))
     }
@@ -1678,6 +1708,22 @@ impl KafkaClient {
 #[cfg(not(feature = "kafka"))]
 pub struct StubConsumer {
     topic: String,
+}
+
+/// Stub Kafka consumer backend.
+#[cfg(not(feature = "kafka"))]
+impl KafkaConsumerTrait for StubConsumer {
+    fn topic(&self) -> &str {
+        &self.topic
+    }
+
+    fn is_real_consumer(&self) -> bool {
+        false
+    }
+
+    fn consumer_type(&self) -> &'static str {
+        "stub"
+    }
 }
 
 /// Stub version of KafkaClient for testing when kafka feature is disabled.
@@ -1713,7 +1759,7 @@ impl KafkaClient {
     }
 
     /// Initialize consumer for the given topic (stub implementation).
-    pub async fn consumer(&mut self, topic: &str) -> Result<&StubConsumer, KafkaError> {
+    pub async fn consumer(&mut self, topic: &str) -> Result<&dyn KafkaConsumerTrait, KafkaError> {
         // Stub implementation creates a fake consumer
         self.consumer = Some(StubConsumer { topic: topic.to_string() });
         Ok(self.consumer.as_ref().unwrap())
