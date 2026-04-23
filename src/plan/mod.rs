@@ -1438,4 +1438,137 @@ mod tests {
         assert!(matches!(&nodes[0], ENode::Timeout { child, duration }
             if *child == a && *duration == Duration::from_millis(250)));
     }
+
+    // =========================================================================
+    // Golden artifact snapshots for PlanDag / PlanNode IR.
+    //
+    // PlanNode + PlanDag derive only Debug (no Display). The Debug form is
+    // the observable IR — any refactor that adds / removes / reorders
+    // fields in PlanNode variants, or changes how PlanDag stores
+    // nodes/root, flips these snapshots and surfaces the change in diff
+    // review before it silently breaks downstream analysis (analysis.rs,
+    // certificate.rs, rewrite.rs, latency_algebra.rs).
+    //
+    // Insta snapshots are deterministic: PlanId is a wrapped usize,
+    // PlanDag preserves insertion order (nodes: Vec<PlanNode>), and
+    // Duration has a stable Debug format. No scrubbing required.
+    // =========================================================================
+
+    #[test]
+    fn golden_plan_dag_empty() {
+        let dag = PlanDag::new();
+        insta::assert_debug_snapshot!("plan_dag_empty", dag);
+    }
+
+    #[test]
+    fn golden_plan_dag_single_leaf() {
+        let mut dag = PlanDag::new();
+        let leaf = dag.leaf("work");
+        dag.set_root(leaf);
+        insta::assert_debug_snapshot!("plan_dag_single_leaf", dag);
+    }
+
+    #[test]
+    fn golden_plan_dag_join_of_two_leaves() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let join = dag.join(vec![a, b]);
+        dag.set_root(join);
+        insta::assert_debug_snapshot!("plan_dag_join_of_two_leaves", dag);
+    }
+
+    #[test]
+    fn golden_plan_dag_race_of_three_leaves() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("alpha");
+        let b = dag.leaf("beta");
+        let c = dag.leaf("gamma");
+        let race = dag.race(vec![a, b, c]);
+        dag.set_root(race);
+        insta::assert_debug_snapshot!("plan_dag_race_of_three_leaves", dag);
+    }
+
+    #[test]
+    fn golden_plan_dag_timeout_wraps_leaf() {
+        let mut dag = PlanDag::new();
+        let leaf = dag.leaf("slow-op");
+        let t = dag.timeout(leaf, Duration::from_millis(250));
+        dag.set_root(t);
+        insta::assert_debug_snapshot!("plan_dag_timeout_wraps_leaf", dag);
+    }
+
+    #[test]
+    fn golden_plan_dag_nested_race_of_joins() {
+        // The DedupRaceJoin reference shape used throughout analysis.rs
+        // tests. Freezes a canonical multi-level DAG so any refactor
+        // touching nodes/root serialization is caught immediately.
+        let mut dag = PlanDag::new();
+        let s = dag.leaf("s");
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let j1 = dag.join(vec![s, a]);
+        let j2 = dag.join(vec![s, b]);
+        let race = dag.race(vec![j1, j2]);
+        dag.set_root(race);
+        insta::assert_debug_snapshot!("plan_dag_nested_race_of_joins", dag);
+    }
+
+    #[test]
+    fn golden_plan_dag_join_with_timeout_branch() {
+        // Heterogeneous: one branch is a leaf, the other is timeout-wrapped.
+        // Exercises Timeout::child + Duration Debug inside a Join children
+        // list, locking the mixed-variant layout.
+        let mut dag = PlanDag::new();
+        let fast = dag.leaf("fast");
+        let slow = dag.leaf("slow");
+        let slow_t = dag.timeout(slow, Duration::from_secs(5));
+        let join = dag.join(vec![fast, slow_t]);
+        dag.set_root(join);
+        insta::assert_debug_snapshot!("plan_dag_join_with_timeout_branch", dag);
+    }
+
+    #[test]
+    fn golden_plan_node_variant_debug_coverage() {
+        // Freeze the Debug form of every PlanNode variant in isolation.
+        // A refactor that renames a field (e.g., `label` → `name`) or
+        // swaps Vec<PlanId> for an alternative container would surface
+        // in one of these four snapshots.
+        let variants: Vec<PlanNode> = vec![
+            PlanNode::Leaf {
+                label: "sample-leaf".to_string(),
+            },
+            PlanNode::Join {
+                children: vec![PlanId::new(0), PlanId::new(1)],
+            },
+            PlanNode::Race {
+                children: vec![PlanId::new(2), PlanId::new(3), PlanId::new(4)],
+            },
+            PlanNode::Timeout {
+                child: PlanId::new(5),
+                duration: Duration::from_millis(750),
+            },
+        ];
+        insta::assert_debug_snapshot!("plan_node_variant_debug_coverage", variants);
+    }
+
+    #[test]
+    fn golden_plan_error_variants() {
+        // PlanError is user-visible via validate(); locking its Debug
+        // form preserves the diagnostic contract for callers that log or
+        // pattern-match on the error.
+        let errors: Vec<PlanError> = vec![
+            PlanError::MissingNode {
+                parent: PlanId::new(0),
+                child: PlanId::new(42),
+            },
+            PlanError::EmptyChildren {
+                parent: PlanId::new(7),
+            },
+            PlanError::Cycle {
+                at: PlanId::new(3),
+            },
+        ];
+        insta::assert_debug_snapshot!("plan_error_variants", errors);
+    }
 }
