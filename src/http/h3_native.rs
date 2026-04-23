@@ -68,7 +68,12 @@ pub enum H3NativeError {
     /// `initial_max_streams_bidi` / MAX_STREAMS limits. The local state machine
     /// returns this error when a frame arrives for a previously-unseen
     /// request-stream id while `active_request_stream_count >= max`.
-    ConcurrentStreamLimitExceeded { active: u64, limit: u64 },
+    ConcurrentStreamLimitExceeded {
+        /// The number of currently active streams.
+        active: u64,
+        /// The maximum allowed streams.
+        limit: u64,
+    },
 }
 
 impl fmt::Display for H3NativeError {
@@ -3068,6 +3073,7 @@ mod tests {
                 authority: Some("example.com".to_string()),
                 path: Some("/".to_string()),
                 status: None,
+                protocol: None,
             },
             vec![],
         )
@@ -3151,6 +3157,7 @@ mod tests {
                 authority: Some("example.com".to_string()),
                 path: Some("/".to_string()),
                 status: None,
+                protocol: None,
             },
             vec![("accept".to_string(), "*/*".to_string())],
         )
@@ -3579,6 +3586,7 @@ mod tests {
                 authority: Some("example.com".to_string()),
                 path: Some("/resource".to_string()),
                 status: None,
+                protocol: None,
             },
             vec![],
         )
@@ -3652,6 +3660,7 @@ mod tests {
                 authority: Some("api.example.com".to_string()),
                 path: Some("/upload".to_string()),
                 status: None,
+                protocol: None,
             },
             vec![("content-type".to_string(), "application/json".to_string())],
         )
@@ -3684,6 +3693,7 @@ mod tests {
                 authority: Some("api.example.com".to_string()),
                 path: Some("/v1/items".to_string()),
                 status: None,
+                protocol: None,
             },
             vec![("accept".to_string(), "application/json".to_string())],
         )
@@ -3898,6 +3908,7 @@ mod tests {
             authority: Some("example.com".to_string()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         };
         let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
         assert_eq!(
@@ -3914,6 +3925,7 @@ mod tests {
             authority: Some("example.com".to_string()),
             path: None,
             status: None,
+            protocol: None,
         };
         let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
         assert_eq!(
@@ -3930,6 +3942,7 @@ mod tests {
             authority: Some("example.com".to_string()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         };
         let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
         assert_eq!(
@@ -3946,6 +3959,7 @@ mod tests {
             authority: Some("example.com".to_string()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         };
         let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
         assert_eq!(
@@ -3962,6 +3976,7 @@ mod tests {
             authority: Some("example.com".to_string()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         };
         validate_request_pseudo_headers(&pseudo).expect("RFC 5234 tchar vector must be valid");
     }
@@ -3974,6 +3989,7 @@ mod tests {
             authority: Some("example.com".to_string()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         };
         let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
         assert_eq!(
@@ -3990,6 +4006,7 @@ mod tests {
             authority: Some("example.com".to_string()),
             path: Some(String::new()),
             status: None,
+            protocol: None,
         };
         let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
         assert_eq!(
@@ -4160,6 +4177,7 @@ mod tests {
                 authority: Some("example.com".to_string()),
                 path: Some("/".to_string()),
                 status: None,
+                protocol: None,
             },
             vec![(":status".to_string(), "200".to_string())],
         )
@@ -4181,6 +4199,7 @@ mod tests {
                 authority: Some("example.com".to_string()),
                 path: Some("/".to_string()),
                 status: None,
+                protocol: None,
             },
             vec![("x-test".to_string(), "bad\r\nvalue".to_string())],
         )
@@ -4202,6 +4221,7 @@ mod tests {
                 authority: Some("example.com\r\nx-bad: 1".to_string()),
                 path: Some("/".to_string()),
                 status: None,
+                protocol: None,
             },
             vec![],
         )
@@ -4223,6 +4243,7 @@ mod tests {
                 authority: Some("example.com".to_string()),
                 path: Some("/ok\nbad".to_string()),
                 status: None,
+                protocol: None,
             },
             vec![],
         )

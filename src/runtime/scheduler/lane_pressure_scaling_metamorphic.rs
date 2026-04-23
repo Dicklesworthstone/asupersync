@@ -219,7 +219,7 @@ pub fn run_pressure_scaling_scenario(
         .lock()
         .unwrap()
         .create_root_region(Budget::unlimited());
-    let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(
+    let _scheduler = ThreeLaneScheduler::new_with_cancel_limit(
         1, // single worker for deterministic testing
         &state,
         config.cancel_streak_limit,
@@ -253,7 +253,7 @@ pub fn run_pressure_scaling_scenario(
             let (task_id, _) = guard
                 .create_task(region, Budget::unlimited(), async move {
                     // Simulate work
-                    let start_cycles = task_counter.fetch_add(1, Ordering::SeqCst);
+                    let _start_cycles = task_counter.fetch_add(1, Ordering::SeqCst);
                     for _ in 0..(work_duration / 1000) {
                         // Virtual CPU work
                         std::hint::spin_loop();

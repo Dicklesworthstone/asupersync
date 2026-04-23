@@ -669,6 +669,89 @@ impl PlanAnalysis {
 }
 
 // ===========================================================================
+// Display implementations for golden artifact testing
+// ===========================================================================
+
+impl fmt::Display for NodeAnalysis {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Node {} Analysis:", self.id.index())?;
+        writeln!(f, "  Obligation Safety: {} (effective: {})",
+                 self.obligation, self.effective_obligation())?;
+        writeln!(f, "  Cancel Safety: {}", self.cancel)?;
+        writeln!(f, "  Budget Effect: {}", self.budget)?;
+        writeln!(f, "  Cost: {}", self.cost)?;
+        writeln!(f, "  Obligation Flow: {}", self.obligation_flow)?;
+        writeln!(f, "  Overall Safe: {}", self.is_safe())?;
+        Ok(())
+    }
+}
+
+impl fmt::Display for PlanAnalysis {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Plan Analysis Report")?;
+        writeln!(f, "====================")?;
+        writeln!(f)?;
+        writeln!(f, "Summary: {}", self.summary())?;
+        writeln!(f, "Overall Safe: {}", self.all_safe())?;
+        writeln!(f)?;
+
+        if self.nodes.is_empty() {
+            writeln!(f, "No nodes analyzed.")?;
+            return Ok(());
+        }
+
+        // Group nodes by safety status for clear reporting
+        let safe_nodes: Vec<_> = self.nodes.values().filter(|n| n.is_safe()).collect();
+        let obligation_issues: Vec<_> = self.obligation_issues();
+        let cancel_issues: Vec<_> = self.cancel_issues();
+
+        if !safe_nodes.is_empty() {
+            writeln!(f, "Safe Nodes ({}):", safe_nodes.len())?;
+            for node in safe_nodes {
+                writeln!(f, "  Node {}: {} (cost: {})",
+                         node.id.index(),
+                         node.obligation,
+                         node.cost)?;
+            }
+            writeln!(f)?;
+        }
+
+        if !obligation_issues.is_empty() {
+            writeln!(f, "Obligation Issues ({}):", obligation_issues.len())?;
+            for node in obligation_issues {
+                writeln!(f, "  Node {}: {} → {} (flow: {})",
+                         node.id.index(),
+                         node.obligation,
+                         node.effective_obligation(),
+                         node.obligation_flow)?;
+            }
+            writeln!(f)?;
+        }
+
+        if !cancel_issues.is_empty() {
+            writeln!(f, "Cancel Issues ({}):", cancel_issues.len())?;
+            for node in cancel_issues {
+                writeln!(f, "  Node {}: {}", node.id.index(), node.cancel)?;
+            }
+            writeln!(f)?;
+        }
+
+        writeln!(f, "Detailed Node Analysis:")?;
+        writeln!(f, "----------------------")?;
+        for (id, node) in &self.nodes {
+            writeln!(f, "Node {}:", id)?;
+            writeln!(f, "  Safety: obligation={}, cancel={}, overall={}",
+                     node.effective_obligation(), node.cancel, node.is_safe())?;
+            writeln!(f, "  Budget: {}", node.budget)?;
+            writeln!(f, "  Cost: {}", node.cost)?;
+            writeln!(f, "  Obligation Flow: {}", node.obligation_flow)?;
+        }
+
+        Ok(())
+    }
+}
+
+// ===========================================================================
 // Analyzer
 // ===========================================================================
 
@@ -2019,8 +2102,8 @@ mod tests {
         
         output.push_str("\n--- BudgetEffect ---\n");
         output.push_str(&format!("LEAF: {}\n", BudgetEffect::LEAF));
-        output.push_str(&format!("Bounded: {}\n", BudgetEffect { min_polls: 2, max_polls: Some(5), has_deadline: true }));
-        output.push_str(&format!("Unbounded: {}\n", BudgetEffect { min_polls: 1, max_polls: None, has_deadline: false }));
+        output.push_str(&format!("Bounded: {}\n", BudgetEffect { min_polls: 2, max_polls: Some(5), has_deadline: true, min_deadline: DeadlineMicros(None), max_deadline: DeadlineMicros(None), parallelism: 1 }));
+        output.push_str(&format!("Unbounded: {}\n", BudgetEffect { min_polls: 1, max_polls: None, has_deadline: false, min_deadline: DeadlineMicros(None), max_deadline: DeadlineMicros(None), parallelism: 1 }));
         
         output.push_str("\n--- ObligationFlow ---\n");
         output.push_str(&format!("Empty: {}\n", ObligationFlow::empty()));
@@ -3128,5 +3211,151 @@ mod tests {
 
         let analysis = PlanAnalyzer::analyze(&dag);
         insta::assert_snapshot!(analysis.summary());
+    }
+
+    // ===========================================================================
+    // Golden artifact tests for full analysis reports
+    // ===========================================================================
+
+    #[test]
+    fn golden_full_analysis_single_leaf() {
+        let (dag, _) = leaf_dag("simple_leaf");
+        let analysis = PlanAnalyzer::analyze(&dag);
+        insta::assert_snapshot!(format!("{}", analysis));
+    }
+
+    #[test]
+    fn golden_full_analysis_race_of_leaves() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("winner");
+        let b = dag.leaf("loser");
+        let race = dag.race(vec![a, b]);
+        dag.set_root(race);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        insta::assert_snapshot!(format!("{}", analysis));
+    }
+
+    #[test]
+    fn golden_full_analysis_join_of_leaves() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("task_a");
+        let b = dag.leaf("task_b");
+        let join = dag.join(vec![a, b]);
+        dag.set_root(join);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        insta::assert_snapshot!(format!("{}", analysis));
+    }
+
+    #[test]
+    fn golden_full_analysis_nested_structure() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("leaf_a");
+        let b = dag.leaf("leaf_b");
+        let c = dag.leaf("leaf_c");
+        let d = dag.leaf("leaf_d");
+
+        // Build: race(join(a,b), join(c,d))
+        let left_join = dag.join(vec![a, b]);
+        let right_join = dag.join(vec![c, d]);
+        let top_race = dag.race(vec![left_join, right_join]);
+        dag.set_root(top_race);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        insta::assert_snapshot!(format!("{}", analysis));
+    }
+
+    #[test]
+    fn golden_full_analysis_obligation_nodes() {
+        let mut dag = PlanDag::new();
+        let permit = dag.leaf("obl:permit");
+        let ack = dag.leaf("obl:ack");
+        let lease = dag.leaf("obl:lease");
+        let normal = dag.leaf("normal_task");
+
+        // Build: join(permit, race(ack, lease), normal)
+        let obl_race = dag.race(vec![ack, lease]);
+        let all_join = dag.join(vec![permit, obl_race, normal]);
+        dag.set_root(all_join);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        insta::assert_snapshot!(format!("{}", analysis));
+    }
+
+    #[test]
+    fn golden_full_analysis_timeout_structure() {
+        let mut dag = PlanDag::new();
+        let slow_task = dag.leaf("slow_operation");
+        let timeout_node = dag.timeout(slow_task, std::time::Duration::from_millis(100));
+        dag.set_root(timeout_node);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        insta::assert_snapshot!(format!("{}", analysis));
+    }
+
+    #[test]
+    fn golden_full_analysis_complex_mixed_structure() {
+        let mut dag = PlanDag::new();
+
+        // Create a complex structure with multiple patterns:
+        // timeout(race(join(obl:permit, task1), slow_task), 50ms)
+        let permit = dag.leaf("obl:permit");
+        let task1 = dag.leaf("fast_task");
+        let slow_task = dag.leaf("slow_task");
+
+        let left_join = dag.join(vec![permit, task1]);
+        let race = dag.race(vec![left_join, slow_task]);
+        let timeout_root = dag.timeout(race, std::time::Duration::from_millis(50));
+        dag.set_root(timeout_root);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        insta::assert_snapshot!(format!("{}", analysis));
+    }
+
+    #[test]
+    fn golden_full_analysis_empty_dag() {
+        let dag = PlanDag::new();
+        let analysis = PlanAnalyzer::analyze(&dag);
+        insta::assert_snapshot!(format!("{}", analysis));
+    }
+
+    #[test]
+    fn golden_single_node_analysis() {
+        let (dag, root_id) = leaf_dag("test_node");
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let node_analysis = analysis.get(root_id).unwrap();
+        insta::assert_snapshot!(format!("{}", node_analysis));
+    }
+
+    #[test]
+    fn golden_obligation_node_analysis() {
+        let mut dag = PlanDag::new();
+        let obl = dag.leaf("obl:lease:critical");
+        dag.set_root(obl);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let node_analysis = analysis.get(obl).unwrap();
+        insta::assert_snapshot!(format!("{}", node_analysis));
+    }
+
+    #[test]
+    fn golden_full_analysis_deep_nesting() {
+        let mut dag = PlanDag::new();
+
+        // Create deeply nested structure: timeout(join(race(a,b), race(c,d)), 200ms)
+        let a = dag.leaf("task_a");
+        let b = dag.leaf("task_b");
+        let c = dag.leaf("task_c");
+        let d = dag.leaf("task_d");
+
+        let race1 = dag.race(vec![a, b]);
+        let race2 = dag.race(vec![c, d]);
+        let join = dag.join(vec![race1, race2]);
+        let timeout_root = dag.timeout(join, std::time::Duration::from_millis(200));
+        dag.set_root(timeout_root);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        insta::assert_snapshot!(format!("{}", analysis));
     }
 }

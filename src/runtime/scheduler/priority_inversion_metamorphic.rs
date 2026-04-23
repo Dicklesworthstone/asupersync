@@ -184,7 +184,7 @@ impl PriorityShiftConfig {
 pub fn run_inversion_detection(
     tasks: &[ShiftTestTask],
     use_shifted_priorities: bool,
-    config: &PriorityShiftConfig,
+    _config: &PriorityShiftConfig,
 ) -> InversionResults {
     // Create a mock oracle for testing (in a real implementation, this would
     // integrate with the actual PriorityInversionOracle)

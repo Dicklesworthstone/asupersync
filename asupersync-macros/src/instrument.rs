@@ -38,19 +38,14 @@ pub fn instrument_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     .into()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum InstrumentLevel {
     Trace,
     Debug,
+    #[default]
     Info,
     Warn,
     Error,
-}
-
-impl Default for InstrumentLevel {
-    fn default() -> Self {
-        Self::Info
-    }
 }
 
 impl InstrumentLevel {

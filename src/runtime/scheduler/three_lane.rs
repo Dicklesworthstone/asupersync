@@ -9912,7 +9912,7 @@ mod tests {
         // a relaxed epoch stream with the same seed.
 
         let epochs = 20;
-        let mut rng = DetRng::new(0x2024_0001);
+        let _rng = DetRng::new(0x2024_0001);
 
         // Test multiple pressure levels with same seed for fairness
         let pressure_levels = [

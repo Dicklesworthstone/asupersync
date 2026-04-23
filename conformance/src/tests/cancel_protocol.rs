@@ -98,7 +98,7 @@ pub fn cp_001_request_phase_continues<RT: RuntimeInterface + Sync>() -> Conforma
                     Ok(_) => TestResult::failed("Task should have been cancelled by timeout"),
                     Err(_) => {
                         // Task was cancelled, verify it did initial work but not final work
-                        if final_work_done >= 1 && final_work_done < 10 {
+                        if (1..10).contains(&final_work_done) {
                             TestResult::passed()
                         } else {
                             TestResult::failed("Task should have done partial work before cancel")
