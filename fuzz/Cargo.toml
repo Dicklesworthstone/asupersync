@@ -1687,3 +1687,10 @@ path = "fuzz_targets/quic_packet_number.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "trace_file_rewind_oracle"
+path = "fuzz_targets/trace_file_rewind_oracle.rs"
+test = false
+doc = false
+bench = false
