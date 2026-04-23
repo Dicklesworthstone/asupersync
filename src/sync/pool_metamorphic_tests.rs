@@ -111,7 +111,7 @@ async fn execute_operations(
             }
             PoolOperation::AcquireWithCancel { hold_ms, cancel_after_ms } => {
                 let cx = Cx::for_testing();
-                let cancel_cx = cx.child();
+                let cancel_cx = cx.clone();
 
                 // Start the acquire operation
                 let acquire_future = pool.acquire(&cancel_cx);
@@ -224,7 +224,7 @@ mod metamorphic_tests {
         let pool = GenericPool::new(factory, config);
 
         let cx = Cx::for_testing();
-        let cancel_cx = cx.child();
+        let cancel_cx = cx.clone();
 
         // Start acquiring but cancel quickly
         let acquire_future = pool.acquire(&cancel_cx);

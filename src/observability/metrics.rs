@@ -1308,6 +1308,8 @@ mod tests {
 
         /// Sends request to the deterministic OTEL collector test harness.
         async fn send_request(&self, request: &OtelMetricsRequest) -> Result<(), OtelExportError> {
+            use std::io::Write;
+
             let serialized_json = Self::serialize_request(request)?;
             let mut headers = BTreeMap::new();
             headers.insert("content-type".to_string(), "application/json".to_string());
