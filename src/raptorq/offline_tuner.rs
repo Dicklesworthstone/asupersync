@@ -441,7 +441,15 @@ impl OfflineTuner {
             architecture_class: self.architecture_class,
             tuning_corpus_id: "offline_kernel_superoptimization_v1".to_string(),
             selected_tuning_candidate_id: selected.candidate_id.clone(),
-            rejected_tuning_candidate_ids: Vec::new(), // TODO: Populate with rejected candidates
+            rejected_tuning_candidate_ids: self
+                .benchmark_results
+                .iter()
+                .map(|r| &r.candidate.candidate_id)
+                .filter(|id| *id != &selected.candidate_id)
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect(),
             mul_min_total,
             mul_max_total,
             addmul_min_total,
