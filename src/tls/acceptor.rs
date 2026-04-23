@@ -218,6 +218,24 @@ impl TlsAcceptorBuilder {
     /// Set ALPN protocols (e.g., `["h2", "http/1.1"]`).
     ///
     /// Protocols are advertised to clients in the order provided.
+    ///
+    /// # Advertise vs. require
+    ///
+    /// This setter **advertises** the listed protocols to the peer but does
+    /// NOT require the peer to negotiate one. Per RFC 7301 a client that
+    /// omits the ALPN extension entirely is still accepted, and
+    /// `accept()` returns `Ok` with `negotiated_alpn = None`. If the caller
+    /// is an HTTP/2-only or gRPC-only server (where a non-ALPN HTTP/1.1
+    /// client is a protocol mismatch rather than a valid fallback), pair
+    /// this call with [`require_alpn`](Self::require_alpn), or — more
+    /// concisely — use [`alpn_protocols_required`](Self::alpn_protocols_required),
+    /// [`alpn_h2`](Self::alpn_h2), or [`alpn_grpc`](Self::alpn_grpc),
+    /// which set the require-ALPN flag for you.
+    ///
+    /// [`alpn_http`](Self::alpn_http) intentionally keeps the require flag
+    /// off because HTTP/1.1 fallback on no-ALPN is the correct behavior for
+    /// dual-stack servers. Use this raw setter only when you need that
+    /// precise advertise-but-don't-require semantic.
     pub fn alpn_protocols(mut self, protocols: Vec<Vec<u8>>) -> Self {
         self.alpn_protocols = protocols;
         self
