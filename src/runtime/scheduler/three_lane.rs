@@ -9912,7 +9912,7 @@ mod tests {
         // a relaxed epoch stream with the same seed.
 
         let epochs = 20;
-        let mut rng = DetRng::new(0x2024_EXP3_PRESSURE_MONO);
+        let mut rng = DetRng::new(0x2024_0001);
 
         // Test multiple pressure levels with same seed for fairness
         let pressure_levels = [
@@ -9930,7 +9930,7 @@ mod tests {
             let start = test_adaptive_epoch_snapshot(100.0, 0.25, 0, 0, 0);
 
             // Reset RNG to same seed for each pressure level
-            let mut epoch_rng = DetRng::new(0x2024_EXP3_EPOCH_SEED);
+            let mut epoch_rng = DetRng::new(0x2024_0002);
 
             // Run epochs with this pressure level
             for _epoch in 0..epochs {

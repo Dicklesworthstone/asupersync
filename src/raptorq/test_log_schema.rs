@@ -212,6 +212,22 @@ pub struct LogProofReport {
 }
 
 // ============================================================================
+// E2E Log Entry methods
+// ============================================================================
+
+impl E2eLogEntry {
+    /// Serialize to JSON string.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    /// Serialize to pretty-printed JSON string.
+    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+}
+
+// ============================================================================
 // Unit test log entry — lightweight
 // ============================================================================
 
@@ -2815,5 +2831,73 @@ mod tests {
         ]);
 
         insta::assert_json_snapshot!("structured_forensic_log_scrubbed", value);
+    }
+
+    #[test]
+    fn e2e_log_entry_to_json_pretty_snapshot() {
+        let entry = E2eLogEntry {
+            schema_version: E2E_LOG_SCHEMA_VERSION.to_string(),
+            scenario: "systematic_only".to_string(),
+            scenario_id: "RQ-E2E-SYSTEMATIC-ONLY".to_string(),
+            replay_id: "replay:rq-e2e-systematic-only-v1".to_string(),
+            profile: "fast".to_string(),
+            unit_sentinel: "test::fn".to_string(),
+            assertion_id: "E2E-TEST".to_string(),
+            run_id: "run-1".to_string(),
+            repro_command: "rch exec -- cargo test".to_string(),
+            phase_markers: vec!["encode".to_string(), "transmit".to_string(), "decode".to_string()],
+            config: LogConfigReport {
+                symbol_size: 64,
+                max_block_size: 1024,
+                repair_overhead: 1.0,
+                min_overhead: 0,
+                seed: 42,
+                block_k: 16,
+                block_count: 1,
+                data_len: 1024,
+            },
+            loss: LogLossReport {
+                kind: "random".to_string(),
+                seed: Some(42),
+                drop_per_mille: Some(100),
+                drop_count: 2,
+                keep_count: 18,
+                burst_start: None,
+                burst_len: None,
+            },
+            symbols: LogSymbolReport {
+                generated: LogSymbolCounts {
+                    total: 20,
+                    source: 16,
+                    repair: 4,
+                },
+                received: LogSymbolCounts {
+                    total: 18,
+                    source: 16,
+                    repair: 2,
+                },
+            },
+            outcome: LogOutcomeReport {
+                success: true,
+                reject_reason: None,
+                decoded_bytes: 1024,
+            },
+            proof: LogProofReport {
+                hash: 0x123456789abcdef0,
+                summary_bytes: 128,
+                outcome: "success".to_string(),
+                received_total: 18,
+                received_source: 16,
+                received_repair: 2,
+                peeling_solved: 16,
+                inactivated: 0,
+                pivots: 2,
+                row_ops: 4,
+                equations_used: 18,
+            },
+        };
+
+        let pretty_json = entry.to_json_pretty().expect("serialize to pretty JSON");
+        insta::assert_snapshot!("e2e_log_entry_pretty_json", pretty_json);
     }
 }
