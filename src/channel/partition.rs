@@ -982,5 +982,63 @@ mod tests {
                 }
             }
         }
+
+        #[test]
+        fn metamorphic_partition_sequence_equivalence(
+            edges in proptest::collection::vec((1u64..100, 1u64..100), 0..50),
+            heals in proptest::collection::vec((1u64..100, 1u64..100), 0..50),
+        ) {
+            let (ctrl, _) = make_controller(PartitionBehavior::Drop);
+            let mut expected_set = std::collections::HashSet::new();
+
+            for &(src, dst) in &edges {
+                ctrl.partition(ActorId::new(src), ActorId::new(dst));
+                expected_set.insert((src, dst));
+            }
+
+            for &(src, dst) in &heals {
+                ctrl.heal(ActorId::new(src), ActorId::new(dst));
+                expected_set.remove(&(src, dst));
+            }
+
+            prop_assert_eq!(
+                ctrl.active_partition_count(),
+                expected_set.len(),
+                "Active partition count must match the hash set size"
+            );
+
+            for &(src, dst) in &expected_set {
+                prop_assert!(
+                    ctrl.is_partitioned(ActorId::new(src), ActorId::new(dst)),
+                    "Edge {:?} should be partitioned",
+                    (src, dst)
+                );
+            }
+
+            for &(src, dst) in &edges {
+                if !expected_set.contains(&(src, dst)) {
+                    prop_assert!(
+                        !ctrl.is_partitioned(ActorId::new(src), ActorId::new(dst)),
+                        "Edge {:?} should NOT be partitioned",
+                        (src, dst)
+                    );
+                }
+            }
+
+            ctrl.heal_all();
+            prop_assert_eq!(
+                ctrl.active_partition_count(),
+                0,
+                "heal_all must result in 0 active partitions"
+            );
+
+            for &(src, dst) in &edges {
+                prop_assert!(
+                    !ctrl.is_partitioned(ActorId::new(src), ActorId::new(dst)),
+                    "Edge {:?} must be healed after heal_all",
+                    (src, dst)
+                );
+            }
+        }
     }
 }
