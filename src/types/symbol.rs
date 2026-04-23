@@ -40,6 +40,7 @@ pub const DEFAULT_SYMBOL_SIZE: usize = 1280;
 /// Objects are the high-level data units that get split into symbols
 /// for erasure-coded transmission. Each object has a unique 128-bit ID.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
 pub struct ObjectId {
     /// High 64 bits of the object ID.
     high: u64,

@@ -318,6 +318,7 @@ pub struct TaskRecord {
     /// Lab-only: last step this task was polled (for futurelock detection).
     pub last_polled_step: u64,
     /// Tasks waiting for this task to complete.
+    #[cfg_attr(feature = "test-internals", serde(skip))]
     pub waiters: SmallVec<[TaskId; 4]>,
     /// Cached waker for this task (avoids per-poll Arc allocation).
     /// The tuple stores (waker, priority) so we can detect priority changes.

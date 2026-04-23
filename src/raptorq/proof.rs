@@ -405,6 +405,7 @@ fn compare_proofs(expected: &DecodeProof, actual: &DecodeProof) -> Result<(), Re
 
 /// Decode configuration captured in the proof.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
 pub struct DecodeConfig {
     /// Object ID being decoded.
     pub object_id: ObjectId,
@@ -426,6 +427,7 @@ pub struct DecodeConfig {
 
 /// Summary of received symbols.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
 pub struct ReceivedSummary {
     /// Total symbols received.
     pub total: usize,
@@ -494,6 +496,7 @@ impl ReceivedSummary {
 
 /// Trace of peeling (belief propagation) phase.
 #[derive(Debug, Clone, Default, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
 pub struct PeelingTrace {
     /// Number of symbols solved via peeling.
     pub solved: usize,
@@ -517,6 +520,7 @@ impl PeelingTrace {
 
 /// Trace of inactivation and Gaussian elimination phase.
 #[derive(Debug, Clone, Default, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
 pub struct EliminationTrace {
     /// Inactivation strategy selected for this decode.
     pub strategy: InactivationStrategy,
@@ -594,6 +598,7 @@ impl EliminationTrace {
 
 /// Inactivation strategy used by the decoder.
 #[derive(Debug, Clone, Copy, Default, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
 pub enum InactivationStrategy {
     /// Legacy behavior: inactivate all remaining unsolved columns in their natural order.
     #[default]
@@ -607,6 +612,7 @@ pub enum InactivationStrategy {
 
 /// A single strategy transition event.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
 pub struct StrategyTransition {
     /// Previous strategy.
     pub from: InactivationStrategy,
@@ -618,6 +624,7 @@ pub struct StrategyTransition {
 
 /// A single pivot selection event.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
 pub struct PivotEvent {
     /// Column being eliminated.
     pub col: usize,
@@ -627,6 +634,7 @@ pub struct PivotEvent {
 
 /// Final decode outcome.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
 pub enum ProofOutcome {
     /// Decode succeeded.
     Success {
@@ -644,6 +652,7 @@ pub enum ProofOutcome {
 
 /// Detailed failure reason for proof artifact.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
 pub enum FailureReason {
     /// Not enough symbols received.
     InsufficientSymbols {
@@ -1393,7 +1402,8 @@ mod tests {
 
         // Add repair symbols
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
+            let (cols, coefs) = decoder.repair_equation(esi)
+                .expect("repair equation should succeed with valid test parameters");
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -1781,7 +1791,8 @@ mod tests {
 
         // Add repair symbols
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
+            let (cols, coefs) = decoder.repair_equation(esi)
+                .expect("repair equation should succeed with valid test parameters");
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -1824,7 +1835,8 @@ mod tests {
                     received.push(ReceivedSymbol::source(i as u32, data.clone()));
                 }
                 for esi in (k as u32)..(l as u32) {
-                    let (cols, coefs) = decoder.repair_equation(esi).unwrap();
+                    let (cols, coefs) = decoder.repair_equation(esi)
+                        .expect("repair equation should succeed with valid test parameters");
                     let repair_data = encoder.repair_symbol(esi);
                     received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
                 }
@@ -1877,7 +1889,8 @@ mod tests {
         }
         for offset in 0..repair_count {
             let esi = k as u32 + offset;
-            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
+            let (cols, coefs) = decoder.repair_equation(esi)
+                .expect("repair equation should succeed with valid test parameters");
             let repair_data = encoder.repair_symbol(esi);
             original_received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
@@ -1886,7 +1899,8 @@ mod tests {
         let replaced_esi = k as u32 + repair_count - 1;
         let replacement_esi = replaced_esi + 10_000;
         let (replacement_cols, replacement_coefs) =
-            decoder.repair_equation(replacement_esi).unwrap();
+            decoder.repair_equation(replacement_esi)
+                .expect("repair equation should succeed with valid test parameters");
         let replacement_data = encoder.repair_symbol(replacement_esi);
         let replacement = ReceivedSymbol::repair(
             replacement_esi,
