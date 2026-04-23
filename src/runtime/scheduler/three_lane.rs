@@ -9905,6 +9905,87 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_exp3_cancel_streak_pressure_monotonicity() {
+        // Metamorphic relation: EXP3 cancel-streak pressure monotonicity
+        // For repeated higher-pressure epochs, probability mass for the repeatedly
+        // selected cancel-streak arm should monotonically decrease compared to
+        // a relaxed epoch stream with the same seed.
+
+        let epochs = 20;
+        let mut rng = DetRng::new(0x2024_EXP3_PRESSURE_MONO);
+
+        // Test multiple pressure levels with same seed for fairness
+        let pressure_levels = [
+            (50.0, 0.05, 0, 0, 0),    // Very relaxed
+            (80.0, 0.20, 1, 1, 0),    // Mild pressure
+            (110.0, 0.50, 3, 4, 2),   // Medium pressure
+            (140.0, 0.80, 6, 8, 4),   // High pressure
+            (170.0, 0.95, 10, 12, 6), // Very high pressure
+        ];
+
+        let mut final_probs = Vec::new();
+
+        for (potential, deadline_pressure, base_exceed, eff_exceed, fallback) in pressure_levels {
+            let mut policy = AdaptiveCancelStreakPolicy::new(10);
+            let start = test_adaptive_epoch_snapshot(100.0, 0.25, 0, 0, 0);
+
+            // Reset RNG to same seed for each pressure level
+            let mut epoch_rng = DetRng::new(0x2024_EXP3_EPOCH_SEED);
+
+            // Run epochs with this pressure level
+            for _epoch in 0..epochs {
+                policy.selected_arm = 2; // Consistently select same arm (16 streak limit)
+                policy.begin_epoch(start);
+
+                let sample = epoch_rng.next_u64();
+                let end = test_adaptive_epoch_snapshot(
+                    potential,
+                    deadline_pressure,
+                    base_exceed,
+                    eff_exceed,
+                    fallback
+                );
+
+                let _reward = policy
+                    .complete_epoch(end, sample)
+                    .expect("epoch start snapshot should be present");
+
+                policy.refresh_probs();
+            }
+
+            // Record final probability for the repeatedly selected arm (arm 2)
+            final_probs.push(policy.probs[2]);
+        }
+
+        // Verify monotonic decrease: higher pressure → lower probability mass
+        for i in 1..final_probs.len() {
+            assert!(
+                final_probs[i-1] > final_probs[i],
+                "EXP3 probability mass should decrease monotonically with pressure: level_{} prob={:.4} > level_{} prob={:.4}",
+                i-1, final_probs[i-1], i, final_probs[i]
+            );
+        }
+
+        // Verify the effect is material (not just floating point noise)
+        let total_decrease = final_probs[0] - final_probs[final_probs.len()-1];
+        assert!(
+            total_decrease > 0.15,
+            "Total probability decrease should be material: {:.4} > 0.15",
+            total_decrease
+        );
+
+        // Verify the decrease is smooth (no inversions in adjacent levels)
+        for i in 1..final_probs.len() {
+            let decrease = final_probs[i-1] - final_probs[i];
+            assert!(
+                decrease > 0.02,
+                "Adjacent pressure levels should show material decrease: {:.4} > 0.02 between levels {} and {}",
+                decrease, i-1, i
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "Broken by recent changes"]
     fn golden_test_lab_runtime_replay_determinism() {
         // Golden test: EXP3 algorithm should be deterministic under LabRuntime replay
