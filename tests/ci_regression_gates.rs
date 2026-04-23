@@ -218,7 +218,7 @@ fn build_decode_received(
     let repair_start = k as u32;
     let repair_end = repair_start.saturating_add(total_repairs as u32);
     for esi in repair_start..repair_end {
-        let (cols, coefs) = decoder.repair_equation(esi);
+        let (cols, coefs) = decoder.repair_equation(esi).expect("repair equation generation should not fail in CI regression gates");
         let data = encoder.repair_symbol(esi);
         received.push(ReceivedSymbol::repair(esi, cols, coefs, data));
     }
@@ -2182,7 +2182,7 @@ fn g2_f8_wavefront_closure_evidence() {
             }
             let dropped = scenario.drop_end_exclusive - scenario.drop_start;
             for esi in (scenario.k as u32)..(scenario.k as u32 + dropped as u32 + extra as u32) {
-                let (cols, coefs) = decoder.repair_equation(esi);
+                let (cols, coefs) = decoder.repair_equation(esi).expect("repair equation generation should not fail in CI regression gates");
                 let repair_data = encoder.repair_symbol(esi);
                 received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
             }
@@ -2260,7 +2260,7 @@ fn g2_f8_wavefront_closure_evidence() {
                 for esi in (scenario.k as u32)
                     ..(scenario.k as u32 + dropped as u32 + scenario.extra_repair as u32)
                 {
-                    let (cols, coefs) = decoder.repair_equation(esi);
+                    let (cols, coefs) = decoder.repair_equation(esi).expect("repair equation generation should not fail in CI regression gates");
                     let repair_data = encoder.repair_symbol(esi);
                     received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
                 }
