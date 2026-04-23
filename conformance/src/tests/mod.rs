@@ -3,6 +3,7 @@ pub mod cancellation;
 pub mod channels;
 pub mod io;
 pub mod negative;
+pub mod obligation_no_leak;
 pub mod outcome;
 pub mod runtime;
 
@@ -14,6 +15,7 @@ pub fn all_tests<RT: RuntimeInterface + Sync>() -> Vec<ConformanceTest<RT>> {
     tests.extend(runtime::all_tests::<RT>());
     tests.extend(channels::collect_tests::<RT>());
     tests.extend(outcome::all_tests::<RT>());
+    tests.extend(obligation_no_leak::all_tests::<RT>());
     tests.extend(budget::all_tests::<RT>());
     tests.extend(negative::all_tests::<RT>());
     tests.extend(io::all_tests::<RT>());
