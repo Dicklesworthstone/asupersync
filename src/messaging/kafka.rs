@@ -1674,10 +1674,17 @@ impl KafkaClient {
     }
 }
 
+/// Stub consumer for testing when kafka feature is disabled.
+#[cfg(not(feature = "kafka"))]
+pub struct StubConsumer {
+    topic: String,
+}
+
 /// Stub version of KafkaClient for testing when kafka feature is disabled.
 #[cfg(not(feature = "kafka"))]
 pub struct KafkaClient {
     producer: KafkaProducer,
+    consumer: Option<StubConsumer>,
     config: ProducerConfig,
     backend: StubBrokerBackend,
 }
@@ -1689,6 +1696,7 @@ impl KafkaClient {
         let producer = KafkaProducer::new(config.clone()).await?;
         Ok(Self {
             producer,
+            consumer: None,
             config,
             backend: StubBrokerBackend,
         })
@@ -1702,6 +1710,13 @@ impl KafkaClient {
     /// Get broker backend information.
     pub fn backend(&self) -> &dyn BrokerBackend {
         &self.backend
+    }
+
+    /// Initialize consumer for the given topic (stub implementation).
+    pub async fn consumer(&mut self, topic: &str) -> Result<&StubConsumer, KafkaError> {
+        // Stub implementation creates a fake consumer
+        self.consumer = Some(StubConsumer { topic: topic.to_string() });
+        Ok(self.consumer.as_ref().unwrap())
     }
 }
 
