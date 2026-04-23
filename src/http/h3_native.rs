@@ -2270,6 +2270,7 @@ mod tests {
             authority: Some("example.com".to_string()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         };
         validate_request_pseudo_headers(&req).expect("valid request");
 
