@@ -213,6 +213,12 @@ pub struct ProfilePackSpec {
     pub selected_targeted_addmul_average_delta_pct: String,
 }
 
+/// Default number of benchmark iterations per (candidate, workload) pair.
+///
+/// Chosen to yield stable p95/p99 latency estimates while keeping tuning-session
+/// runtime practical. Overridable via [`OfflineTuner::with_benchmark_iterations`].
+pub const DEFAULT_BENCHMARK_ITERATIONS: usize = 100;
+
 /// Offline tuning session that manages the complete optimization workflow.
 pub struct OfflineTuner {
     /// Architecture being tuned.
@@ -223,6 +229,8 @@ pub struct OfflineTuner {
     workloads: Vec<TuningWorkload>,
     /// Optimization criteria for candidate selection.
     criteria: OptimizationCriteria,
+    /// Number of timing samples collected per (candidate, workload) pair.
+    benchmark_iterations: usize,
     /// Results from completed benchmarks.
     benchmark_results: Vec<BenchmarkResult>,
 }
@@ -238,8 +246,23 @@ impl OfflineTuner {
             tuning_space,
             workloads,
             criteria,
+            benchmark_iterations: DEFAULT_BENCHMARK_ITERATIONS,
             benchmark_results: Vec::new(),
         }
+    }
+
+    /// Overrides the per-pair benchmark iteration count. Clamped to at least 1
+    /// so median/p95/p99 indexing stays well-defined.
+    #[must_use]
+    pub fn with_benchmark_iterations(mut self, iterations: usize) -> Self {
+        self.benchmark_iterations = iterations.max(1);
+        self
+    }
+
+    /// Returns the currently configured benchmark iteration count.
+    #[must_use]
+    pub fn benchmark_iterations(&self) -> usize {
+        self.benchmark_iterations
     }
 
     /// Generates all candidate kernel configurations in the tuning space.
@@ -333,7 +356,7 @@ impl OfflineTuner {
         Ok(BenchmarkResult {
             candidate: candidate.clone(),
             workload_id: workload.workload_id.clone(),
-            iterations: 100, // TODO: Make configurable
+            iterations: self.benchmark_iterations,
             latency_stats,
             throughput_ops_per_sec,
             bandwidth_gbps,
@@ -394,8 +417,23 @@ impl OfflineTuner {
         };
 
         // Extract optimized thresholds from selected candidate
-        let (mul_min_total, mul_max_total, addmul_min_total, addmul_max_total, addmul_min_lane) =
-            Self::derive_thresholds_from_candidate(selected);
+        let (
+            mul_min_total,
+            mul_max_total,
+            addmul_min_total,
+            addmul_max_total,
+            addmul_min_lane,
+            max_lane_ratio,
+        ) = Self::derive_thresholds_from_candidate(selected);
+
+        let baseline = self.baseline_candidate();
+        let baseline_id = baseline.as_ref().map(|c| c.candidate_id.as_str());
+        let mul_delta_pct =
+            self.format_aggregate_delta_pct(selected, baseline_id, GF256Operation::Mul);
+        let addmul_delta_pct =
+            self.format_aggregate_delta_pct(selected, baseline_id, GF256Operation::AddMul);
+        let targeted_addmul_avg_pct =
+            self.format_per_workload_average_delta_pct(selected, baseline_id, GF256Operation::AddMul);
 
         Ok(ProfilePackSpec {
             schema_version: "raptorq-gf256-profile-pack-v2".to_string(),
@@ -409,7 +447,7 @@ impl OfflineTuner {
             addmul_min_total,
             addmul_max_total,
             addmul_min_lane,
-            max_lane_ratio: 4, // TODO: Derive from candidate
+            max_lane_ratio,
             replay_pointer: "replay:offline-kernel-superopt-v1".to_string(),
             command_bundle: format!(
                 "offline_tuner --arch {:?} --candidate {}",
@@ -421,10 +459,124 @@ impl OfflineTuner {
                 .to_string(),
             rejected_candidate_set_summary: "Rejected candidates had lower multi-objective scores"
                 .to_string(),
-            selected_mul_delta_vs_baseline_pct: "pending_measurement".to_string(), // TODO: Calculate
-            selected_addmul_delta_vs_baseline_pct: "pending_measurement".to_string(), // TODO: Calculate
-            selected_targeted_addmul_average_delta_pct: "pending_measurement".to_string(), // TODO: Calculate
+            selected_mul_delta_vs_baseline_pct: mul_delta_pct,
+            selected_addmul_delta_vs_baseline_pct: addmul_delta_pct,
+            selected_targeted_addmul_average_delta_pct: targeted_addmul_avg_pct,
         })
+    }
+
+    /// Baseline candidate = the first candidate produced by `generate_candidates`,
+    /// i.e. the lexicographically smallest point in the tuning space
+    /// (smallest tile, no/least unroll, no prefetch, first fusion shape). This is
+    /// the "least optimized" configuration and serves as the zero-improvement
+    /// reference against which selected-candidate deltas are reported.
+    fn baseline_candidate(&self) -> Option<KernelCandidate> {
+        self.generate_candidates().into_iter().next()
+    }
+
+    /// Median latency (in ns) for a candidate aggregated across all workloads
+    /// matching `op`. Returns `None` if no benchmark result exists for that
+    /// (candidate, op) pair — which happens when the tuner is asked to emit a
+    /// profile pack without first running `run_systematic_benchmarks`.
+    fn mean_median_ns(&self, candidate_id: &str, op: GF256Operation) -> Option<f64> {
+        let op_workloads: std::collections::HashSet<&str> = self
+            .workloads
+            .iter()
+            .filter(|w| w.operation == op)
+            .map(|w| w.workload_id.as_str())
+            .collect();
+        if op_workloads.is_empty() {
+            return None;
+        }
+        let mut sum = 0.0_f64;
+        let mut count = 0usize;
+        for r in &self.benchmark_results {
+            if r.candidate.candidate_id == candidate_id
+                && op_workloads.contains(r.workload_id.as_str())
+            {
+                sum += r.latency_stats.median_ns;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            None
+        } else {
+            Some(sum / count as f64)
+        }
+    }
+
+    /// Aggregate delta for `op`: positive values mean the selected candidate's
+    /// mean median-latency is faster than the baseline's (delta = (baseline −
+    /// selected) / baseline · 100). Returns a sentinel string when data is
+    /// missing rather than fabricating a number.
+    fn format_aggregate_delta_pct(
+        &self,
+        selected: &KernelCandidate,
+        baseline_id: Option<&str>,
+        op: GF256Operation,
+    ) -> String {
+        let Some(baseline_id) = baseline_id else {
+            return "no_baseline_candidate".to_string();
+        };
+        if selected.candidate_id == baseline_id {
+            return "0.000".to_string();
+        }
+        let baseline_ns = match self.mean_median_ns(baseline_id, op) {
+            Some(v) if v > 0.0 => v,
+            Some(_) => return "baseline_zero_latency".to_string(),
+            None => return "no_baseline_data".to_string(),
+        };
+        let Some(selected_ns) = self.mean_median_ns(&selected.candidate_id, op) else {
+            return "no_selected_data".to_string();
+        };
+        let delta = (baseline_ns - selected_ns) / baseline_ns * 100.0;
+        format!("{delta:.3}")
+    }
+
+    /// Arithmetic mean of per-workload percentage deltas for `op`. This weights
+    /// each workload equally (unlike `format_aggregate_delta_pct`, which is
+    /// dominated by the longest workload). Reports improvement spread across
+    /// the representative inputs rather than absolute time saved.
+    fn format_per_workload_average_delta_pct(
+        &self,
+        selected: &KernelCandidate,
+        baseline_id: Option<&str>,
+        op: GF256Operation,
+    ) -> String {
+        let Some(baseline_id) = baseline_id else {
+            return "no_baseline_candidate".to_string();
+        };
+        if selected.candidate_id == baseline_id {
+            return "0.000".to_string();
+        }
+        let mut deltas: Vec<f64> = Vec::new();
+        for workload in self.workloads.iter().filter(|w| w.operation == op) {
+            let baseline_ns = self
+                .benchmark_results
+                .iter()
+                .find(|r| {
+                    r.candidate.candidate_id == baseline_id && r.workload_id == workload.workload_id
+                })
+                .map(|r| r.latency_stats.median_ns);
+            let selected_ns = self
+                .benchmark_results
+                .iter()
+                .find(|r| {
+                    r.candidate.candidate_id == selected.candidate_id
+                        && r.workload_id == workload.workload_id
+                })
+                .map(|r| r.latency_stats.median_ns);
+            if let (Some(b), Some(s)) = (baseline_ns, selected_ns) {
+                if b > 0.0 {
+                    deltas.push((b - s) / b * 100.0);
+                }
+            }
+        }
+        if deltas.is_empty() {
+            return "no_paired_workload_data".to_string();
+        }
+        let mean = deltas.iter().sum::<f64>() / deltas.len() as f64;
+        format!("{mean:.3}")
     }
 
     /// Default tuning space for the specified architecture.
@@ -551,7 +703,8 @@ impl OfflineTuner {
     /// Derives threshold parameters from a selected candidate.
     fn derive_thresholds_from_candidate(
         candidate: &KernelCandidate,
-    ) -> (usize, usize, usize, usize, usize) {
+    ) -> (usize, usize, usize, usize, usize, usize) {
+        let max_lane_ratio = candidate.unroll.max(1);
         match candidate.fusion_shape {
             FusionShape::Fused => {
                 // Fused kernels benefit from larger working sets
@@ -561,6 +714,7 @@ impl OfflineTuner {
                     candidate.tile_bytes * 2,
                     candidate.tile_bytes * 8,
                     candidate.tile_bytes,
+                    max_lane_ratio,
                 )
             }
             FusionShape::Split => {
@@ -571,6 +725,7 @@ impl OfflineTuner {
                     candidate.tile_bytes,
                     candidate.tile_bytes * 4,
                     candidate.tile_bytes / 2,
+                    max_lane_ratio,
                 )
             }
             FusionShape::Balanced => {
@@ -581,6 +736,7 @@ impl OfflineTuner {
                     candidate.tile_bytes,
                     candidate.tile_bytes * 6,
                     candidate.tile_bytes / 2,
+                    max_lane_ratio,
                 )
             }
         }
@@ -610,7 +766,7 @@ impl OfflineTuner {
     ) -> Result<(LatencyStats, f64, f64), TuningError> {
         // This is a simplified measurement - in practice would dispatch to
         // actual optimized kernel implementations
-        let iterations = 100;
+        let iterations = self.benchmark_iterations;
         let mut latencies = Vec::with_capacity(iterations);
 
         for _ in 0..iterations {
@@ -934,5 +1090,151 @@ mod tests {
                 .iter()
                 .any(|w| w.operation == GF256Operation::AddMul)
         );
+    }
+
+    fn test_criteria() -> OptimizationCriteria {
+        OptimizationCriteria {
+            latency_weight: 0.5,
+            throughput_weight: 0.3,
+            bandwidth_weight: 0.2,
+            min_improvement_threshold: 5.0,
+        }
+    }
+
+    #[test]
+    fn benchmark_iterations_defaults_to_constant() {
+        let tuner = OfflineTuner::new(Gf256ArchitectureClass::GenericScalar, test_criteria());
+        assert_eq!(tuner.benchmark_iterations(), DEFAULT_BENCHMARK_ITERATIONS);
+    }
+
+    #[test]
+    fn benchmark_iterations_override_is_honored() {
+        let tuner = OfflineTuner::new(Gf256ArchitectureClass::GenericScalar, test_criteria())
+            .with_benchmark_iterations(7);
+        assert_eq!(tuner.benchmark_iterations(), 7);
+    }
+
+    #[test]
+    fn benchmark_iterations_clamps_zero_to_one() {
+        let tuner = OfflineTuner::new(Gf256ArchitectureClass::GenericScalar, test_criteria())
+            .with_benchmark_iterations(0);
+        assert_eq!(
+            tuner.benchmark_iterations(),
+            1,
+            "zero iterations would break median/p95 indexing"
+        );
+    }
+
+    #[test]
+    fn benchmark_result_reports_configured_iterations() {
+        let tuner = OfflineTuner::new(Gf256ArchitectureClass::GenericScalar, test_criteria())
+            .with_benchmark_iterations(3);
+        let candidates = tuner.generate_candidates();
+        let candidate = candidates.first().expect("at least one candidate");
+        let workload = tuner
+            .workloads
+            .first()
+            .expect("default workloads non-empty");
+        let result = tuner
+            .benchmark_candidate(candidate, workload)
+            .expect("benchmark runs");
+        assert_eq!(result.iterations, 3);
+    }
+
+    fn synthetic_bench(
+        candidate: &KernelCandidate,
+        workload_id: &str,
+        median_ns: f64,
+    ) -> BenchmarkResult {
+        BenchmarkResult {
+            candidate: candidate.clone(),
+            workload_id: workload_id.to_string(),
+            iterations: 100,
+            latency_stats: LatencyStats {
+                median_ns,
+                p95_ns: median_ns * 1.2,
+                p99_ns: median_ns * 1.5,
+                stddev_ns: median_ns * 0.1,
+                min_ns: median_ns * 0.8,
+                max_ns: median_ns * 2.0,
+            },
+            throughput_ops_per_sec: 1.0e9 / median_ns,
+            bandwidth_gbps: 0.0,
+            bit_exactness_verified: true,
+            benchmark_timestamp: "synthetic".to_string(),
+        }
+    }
+
+    #[test]
+    fn baseline_delta_reports_percentage_when_data_present() {
+        let mut tuner =
+            OfflineTuner::new(Gf256ArchitectureClass::GenericScalar, test_criteria());
+        let candidates = tuner.generate_candidates();
+        let baseline = candidates.first().expect("baseline").clone();
+        let selected = candidates.last().expect("selected").clone();
+        assert_ne!(
+            baseline.candidate_id, selected.candidate_id,
+            "baseline and selected must differ so the delta is non-trivial"
+        );
+
+        // Baseline runs each mul workload at 200ns; selected runs at 100ns
+        // (2x faster => 50.000% delta aggregate and 50.000% per-workload avg).
+        for wl in ["small_mul", "medium_mul", "large_mul"] {
+            tuner
+                .benchmark_results
+                .push(synthetic_bench(&baseline, wl, 200.0));
+            tuner
+                .benchmark_results
+                .push(synthetic_bench(&selected, wl, 100.0));
+        }
+        // AddMul workloads: selected 25% faster than baseline.
+        for wl in ["small_addmul", "medium_addmul", "large_addmul"] {
+            tuner
+                .benchmark_results
+                .push(synthetic_bench(&baseline, wl, 400.0));
+            tuner
+                .benchmark_results
+                .push(synthetic_bench(&selected, wl, 300.0));
+        }
+
+        let pack = tuner.emit_profile_pack(&selected).expect("profile pack");
+        assert_eq!(pack.selected_mul_delta_vs_baseline_pct, "50.000");
+        assert_eq!(pack.selected_addmul_delta_vs_baseline_pct, "25.000");
+        assert_eq!(pack.selected_targeted_addmul_average_delta_pct, "25.000");
+    }
+
+    #[test]
+    fn baseline_delta_sentinel_when_no_benchmarks_run() {
+        let tuner = OfflineTuner::new(Gf256ArchitectureClass::GenericScalar, test_criteria());
+        let selected = tuner
+            .generate_candidates()
+            .last()
+            .expect("selected candidate")
+            .clone();
+        let pack = tuner.emit_profile_pack(&selected).expect("profile pack");
+        // No benchmark results were fed in, so baseline data is missing.
+        assert_eq!(pack.selected_mul_delta_vs_baseline_pct, "no_baseline_data");
+        assert_eq!(
+            pack.selected_addmul_delta_vs_baseline_pct,
+            "no_baseline_data"
+        );
+        assert_eq!(
+            pack.selected_targeted_addmul_average_delta_pct,
+            "no_paired_workload_data"
+        );
+    }
+
+    #[test]
+    fn baseline_delta_zero_when_selected_equals_baseline() {
+        let tuner = OfflineTuner::new(Gf256ArchitectureClass::GenericScalar, test_criteria());
+        let baseline = tuner
+            .generate_candidates()
+            .first()
+            .expect("baseline")
+            .clone();
+        let pack = tuner.emit_profile_pack(&baseline).expect("profile pack");
+        assert_eq!(pack.selected_mul_delta_vs_baseline_pct, "0.000");
+        assert_eq!(pack.selected_addmul_delta_vs_baseline_pct, "0.000");
+        assert_eq!(pack.selected_targeted_addmul_average_delta_pct, "0.000");
     }
 }
