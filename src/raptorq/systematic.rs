@@ -176,13 +176,17 @@ impl SystematicParams {
     /// This helper centralizes decoder/encoder tuple semantics so parity checks
     /// can use one source of truth for RFC tuple expansion.
     #[must_use]
-    pub fn rfc_repair_equation(&self, esi: u32) -> Result<(Vec<usize>, Vec<Gf256>), SystematicError> {
+    pub fn rfc_repair_equation(
+        &self,
+        esi: u32,
+    ) -> Result<(Vec<usize>, Vec<Gf256>), SystematicError> {
         let padding_delta = u32::try_from(self.k_prime - self.k)
             .expect("RFC systematic padding delta must fit in u32");
         // RFC 6330 repair ISI domain starts at K' and extends upward.
         // ESIs near u32::MAX cannot be validly mapped without overflow.
         // Reject instead of wrapping to avoid silent corruption.
-        let repair_isi = esi.checked_add(padding_delta)
+        let repair_isi = esi
+            .checked_add(padding_delta)
             .ok_or(SystematicError::EsiOverflow { esi, padding_delta })?;
         let columns = repair_indices_for_esi(self.j, self.w, self.p, repair_isi);
         let coefficients = vec![Gf256::ONE; columns.len()];
@@ -1993,6 +1997,9 @@ mod tests {
         // Same encoder state should produce identical display
         let display2 = format!("{}", enc.stats());
         assert_eq!(display, display2, "Display must be stable");
+
+        // Golden test for full output format
+        insta::assert_snapshot!(enc.stats().to_string());
     }
 
     #[test]
