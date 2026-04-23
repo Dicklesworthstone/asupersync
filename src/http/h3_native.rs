@@ -755,10 +755,19 @@ impl H3ResponseHead {
 pub enum QpackFieldPlan {
     /// Indexed static-table entry.
     StaticIndex(u64),
+    /// Indexed dynamic-table entry.
+    DynamicIndex(u64),
     /// Literal header field (name/value).
     Literal {
         /// Header name.
         name: String,
+        /// Header value.
+        value: String,
+    },
+    /// Literal with dynamic table name reference.
+    DynamicNameLiteral {
+        /// Dynamic table index for name.
+        name_index: u64,
         /// Header value.
         value: String,
     },
@@ -928,10 +937,16 @@ pub fn qpack_decode_field_section(
                     "dynamic qpack index references not allowed in static-only mode",
                 ));
             }
-            if qpack_static_entry(index).is_none() {
-                return Err(H3NativeError::InvalidFrame("unknown static qpack index"));
+
+            if is_static {
+                if qpack_static_entry(index).is_none() {
+                    return Err(H3NativeError::InvalidFrame("unknown static qpack index"));
+                }
+                out.push(QpackFieldPlan::StaticIndex(index));
+            } else {
+                // Dynamic table index - add support for basic dynamic table lookup
+                out.push(QpackFieldPlan::DynamicIndex(index));
             }
-            out.push(QpackFieldPlan::StaticIndex(index));
             continue;
         }
 
@@ -945,16 +960,26 @@ pub fn qpack_decode_field_section(
                     "dynamic qpack name references not allowed in static-only mode",
                 ));
             }
-            let name = qpack_static_name(name_index).ok_or(H3NativeError::InvalidFrame(
-                "unknown static qpack name index",
-            ))?;
+
             let value_first = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
             let (value, value_extra) = qpack_decode_string(value_first, 7, &input[pos + 1..])?;
             pos += 1 + value_extra;
-            out.push(QpackFieldPlan::Literal {
-                name: name.to_string(),
-                value,
-            });
+
+            if is_static {
+                let name = qpack_static_name(name_index).ok_or(H3NativeError::InvalidFrame(
+                    "unknown static qpack name index",
+                ))?;
+                out.push(QpackFieldPlan::Literal {
+                    name: name.to_string(),
+                    value,
+                });
+            } else {
+                // Dynamic table name reference
+                out.push(QpackFieldPlan::DynamicNameLiteral {
+                    name_index,
+                    value,
+                });
+            }
             continue;
         }
 
@@ -978,9 +1003,10 @@ pub fn qpack_decode_field_section(
                 "post-base/dynamic qpack line representations not allowed in static-only mode",
             ));
         }
-        // TODO: Implement dynamic table post-base operations
-        return Err(H3NativeError::QpackPolicy(
-            "post-base dynamic table operations not yet implemented",
+        // Post-base operations are for advanced QPACK features
+        // For minimum viable implementation, return a more specific error
+        return Err(H3NativeError::InvalidFrame(
+            "post-base dynamic table operations not yet supported",
         ));
     }
 
@@ -1007,6 +1033,7 @@ pub fn qpack_encode_response_field_section(
 /// H3 mapping. Unknown static indices are rejected.
 pub fn qpack_plan_to_header_fields(
     plan: &[QpackFieldPlan],
+    qpack_context: Option<&QpackContext>,
 ) -> Result<Vec<(String, String)>, H3NativeError> {
     let mut out = Vec::with_capacity(plan.len());
     for field in plan {
@@ -1015,6 +1042,24 @@ pub fn qpack_plan_to_header_fields(
                 let (name, value) = qpack_static_entry(*index)
                     .ok_or(H3NativeError::InvalidFrame("unknown static qpack index"))?;
                 out.push((name.to_string(), value.to_string()));
+            }
+            QpackFieldPlan::DynamicIndex(index) => {
+                if let Some(context) = qpack_context {
+                    let (name, value) = qpack_dynamic_entry(context.dynamic_table(), *index)
+                        .ok_or(H3NativeError::InvalidFrame("unknown dynamic qpack index"))?;
+                    out.push((name.to_string(), value.to_string()));
+                } else {
+                    return Err(H3NativeError::InvalidFrame("dynamic table context required"));
+                }
+            }
+            QpackFieldPlan::DynamicNameLiteral { name_index, value } => {
+                if let Some(context) = qpack_context {
+                    let name = qpack_dynamic_name(context.dynamic_table(), *name_index)
+                        .ok_or(H3NativeError::InvalidFrame("unknown dynamic qpack name index"))?;
+                    out.push((name.to_string(), value.clone()));
+                } else {
+                    return Err(H3NativeError::InvalidFrame("dynamic table context required"));
+                }
             }
             QpackFieldPlan::Literal { name, value } => {
                 out.push((name.clone(), value.clone()));
@@ -1034,9 +1079,10 @@ pub fn qpack_plan_to_header_fields(
 pub fn qpack_decode_request_field_section(
     input: &[u8],
     mode: H3QpackMode,
+    qpack_context: Option<&QpackContext>,
 ) -> Result<H3RequestHead, H3NativeError> {
     let plan = qpack_decode_field_section(input, mode)?;
-    let fields = qpack_plan_to_header_fields(&plan)?;
+    let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
     header_fields_to_request_head(&fields)
 }
 
@@ -1050,9 +1096,10 @@ pub fn qpack_decode_request_field_section(
 pub fn qpack_decode_response_field_section(
     input: &[u8],
     mode: H3QpackMode,
+    qpack_context: Option<&QpackContext>,
 ) -> Result<H3ResponseHead, H3NativeError> {
     let plan = qpack_decode_field_section(input, mode)?;
-    let fields = qpack_plan_to_header_fields(&plan)?;
+    let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
     header_fields_to_response_head(&fields)
 }
 
@@ -2259,6 +2306,261 @@ pub fn validate_response_pseudo_headers(headers: &H3PseudoHeaders) -> Result<(),
         ));
     }
     Ok(())
+}
+
+/// Dynamic table entry for QPACK compression.
+#[derive(Debug, Clone)]
+pub struct QpackDynamicEntry {
+    name: String,
+    value: String,
+    size: usize,
+    reference_count: usize,
+    insertion_order: u64,
+}
+
+impl QpackDynamicEntry {
+    fn new(name: String, value: String, insertion_order: u64) -> Self {
+        let size = 32 + name.len() + value.len(); // RFC 9204 size calculation
+        Self {
+            name,
+            value,
+            size,
+            reference_count: 0,
+            insertion_order,
+        }
+    }
+
+    fn add_reference(&mut self) {
+        self.reference_count = self.reference_count.saturating_add(1);
+    }
+
+    fn remove_reference(&mut self) {
+        self.reference_count = self.reference_count.saturating_sub(1);
+    }
+
+    fn is_referenced(&self) -> bool {
+        self.reference_count > 0
+    }
+
+    /// Get the header name for this entry.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get the header value for this entry.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Get the insertion order ID for this entry.
+    pub fn insertion_id(&self) -> u64 {
+        self.insertion_order
+    }
+}
+
+/// Dynamic table for QPACK header compression.
+///
+/// Implements RFC 9204 QPACK dynamic table with LRU eviction and reference protection.
+#[derive(Debug)]
+pub struct QpackDynamicTable {
+    entries: Vec<QpackDynamicEntry>,
+    max_capacity: usize,
+    current_size: usize,
+    insertion_counter: u64,
+    evicted_count: usize,
+}
+
+impl QpackDynamicTable {
+    /// Create a new dynamic table with the specified capacity.
+    pub fn new(max_capacity: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            max_capacity,
+            current_size: 0,
+            insertion_counter: 0,
+            evicted_count: 0,
+        }
+    }
+
+    /// Insert a new header entry into the dynamic table.
+    ///
+    /// Returns the insertion ID on success, or an error if the entry cannot be inserted.
+    pub fn insert(&mut self, name: String, value: String) -> Result<u64, &'static str> {
+        let entry = QpackDynamicEntry::new(name, value, self.insertion_counter);
+        let entry_size = entry.size;
+
+        if entry_size > self.max_capacity {
+            return Err("entry larger than table capacity");
+        }
+
+        // Evict entries to make space (LRU with reference checking)
+        while self.current_size + entry_size > self.max_capacity {
+            if !self.evict_lru_unreferenced() {
+                return Err("cannot evict enough space (all entries referenced)");
+            }
+        }
+
+        let insertion_id = self.insertion_counter;
+        self.entries.push(entry);
+        self.current_size += entry_size;
+        self.insertion_counter += 1;
+
+        Ok(insertion_id)
+    }
+
+    /// Evict the least recently inserted unreferenced entry.
+    fn evict_lru_unreferenced(&mut self) -> bool {
+        // Find the least recently used unreferenced entry
+        let mut lru_index = None;
+        let mut lru_insertion_order = u64::MAX;
+
+        for (i, entry) in self.entries.iter().enumerate() {
+            if !entry.is_referenced() && entry.insertion_order < lru_insertion_order {
+                lru_insertion_order = entry.insertion_order;
+                lru_index = Some(i);
+            }
+        }
+
+        if let Some(index) = lru_index {
+            let evicted = self.entries.remove(index);
+            self.current_size -= evicted.size;
+            self.evicted_count += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Add a reference to an entry by insertion ID.
+    pub fn reference_entry(&mut self, insertion_id: u64) -> bool {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.insertion_order == insertion_id)
+        {
+            entry.add_reference();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove a reference from an entry by insertion ID.
+    pub fn unreference_entry(&mut self, insertion_id: u64) -> bool {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.insertion_order == insertion_id)
+        {
+            entry.remove_reference();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get an entry by absolute index (insertion_counter - insertion_id - 1).
+    pub fn get_by_absolute_index(&self, absolute_index: u64) -> Option<&QpackDynamicEntry> {
+        if absolute_index < self.insertion_counter && absolute_index < self.entries.len() as u64 {
+            // Absolute index is calculated as insertion_counter - 1 - absolute_index
+            let array_index = (self.insertion_counter - 1 - absolute_index) as usize;
+            if array_index < self.entries.len() {
+                // Find entry by insertion order
+                self.entries.iter().rev().nth(array_index)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Get the number of entries in the table.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Check if the table is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Get the current size of the table in bytes.
+    pub fn size(&self) -> usize {
+        self.current_size
+    }
+
+    /// Get the maximum capacity of the table in bytes.
+    pub fn capacity(&self) -> usize {
+        self.max_capacity
+    }
+
+    /// Get the current insertion counter value.
+    pub fn insertion_counter(&self) -> u64 {
+        self.insertion_counter
+    }
+}
+
+impl Default for QpackDynamicTable {
+    fn default() -> Self {
+        Self::new(4096) // Default 4KB capacity
+    }
+}
+
+/// Look up a dynamic table entry by absolute index.
+///
+/// Returns None if the index is out of bounds or the entry doesn't exist.
+pub fn qpack_dynamic_entry(table: &QpackDynamicTable, absolute_index: u64) -> Option<(&str, &str)> {
+    table.get_by_absolute_index(absolute_index)
+        .map(|entry| (entry.name(), entry.value()))
+}
+
+/// Look up a dynamic table entry name by absolute index.
+///
+/// Returns None if the index is out of bounds or the entry doesn't exist.
+pub fn qpack_dynamic_name(table: &QpackDynamicTable, absolute_index: u64) -> Option<&str> {
+    table.get_by_absolute_index(absolute_index)
+        .map(|entry| entry.name())
+}
+
+/// QPACK encoding/decoding context with dynamic table support.
+#[derive(Debug)]
+pub struct QpackContext {
+    /// Dynamic table for encoder and decoder
+    dynamic_table: QpackDynamicTable,
+    /// Maximum table capacity from peer settings
+    max_table_capacity: usize,
+}
+
+impl QpackContext {
+    /// Create a new QPACK context with the specified table capacity.
+    pub fn new(max_table_capacity: usize) -> Self {
+        Self {
+            dynamic_table: QpackDynamicTable::new(max_table_capacity),
+            max_table_capacity,
+        }
+    }
+
+    /// Get a reference to the dynamic table.
+    pub fn dynamic_table(&self) -> &QpackDynamicTable {
+        &self.dynamic_table
+    }
+
+    /// Get a mutable reference to the dynamic table.
+    pub fn dynamic_table_mut(&mut self) -> &mut QpackDynamicTable {
+        &mut self.dynamic_table
+    }
+
+    /// Insert a new entry into the dynamic table.
+    pub fn insert_dynamic_entry(&mut self, name: String, value: String) -> Result<u64, &'static str> {
+        self.dynamic_table.insert(name, value)
+    }
+}
+
+impl Default for QpackContext {
+    fn default() -> Self {
+        Self::new(4096)
+    }
 }
 
 #[cfg(test)]
@@ -3878,7 +4180,7 @@ mod tests {
 
     #[test]
     fn qpack_plan_to_header_fields_rejects_unknown_static_index() {
-        let err = qpack_plan_to_header_fields(&[QpackFieldPlan::StaticIndex(999)])
+        let err = qpack_plan_to_header_fields(&[QpackFieldPlan::StaticIndex(999)], None)
             .expect_err("unknown static index");
         assert_eq!(
             err,
@@ -5218,145 +5520,6 @@ mod tests {
 
     // ========== QPACK Dynamic Table Eviction Conformance Tests ==========
 
-    /// Mock dynamic table entry for conformance testing.
-    #[derive(Debug, Clone, PartialEq)]
-    struct QpackDynamicEntry {
-        name: String,
-        value: String,
-        size: usize,
-        reference_count: usize,
-        insertion_order: u64,
-    }
-
-    impl QpackDynamicEntry {
-        fn new(name: String, value: String, insertion_order: u64) -> Self {
-            let size = 32 + name.len() + value.len(); // RFC 9204 size calculation
-            Self {
-                name,
-                value,
-                size,
-                reference_count: 0,
-                insertion_order,
-            }
-        }
-
-        fn add_reference(&mut self) {
-            self.reference_count = self.reference_count.saturating_add(1);
-        }
-
-        fn remove_reference(&mut self) {
-            self.reference_count = self.reference_count.saturating_sub(1);
-        }
-
-        fn is_referenced(&self) -> bool {
-            self.reference_count > 0
-        }
-    }
-
-    /// Mock QPACK dynamic table for conformance testing.
-    #[derive(Debug, Clone)]
-    struct QpackDynamicTable {
-        entries: Vec<QpackDynamicEntry>,
-        max_capacity: usize,
-        current_size: usize,
-        insertion_counter: u64,
-        evicted_count: usize,
-    }
-
-    impl QpackDynamicTable {
-        fn new(max_capacity: usize) -> Self {
-            Self {
-                entries: Vec::new(),
-                max_capacity,
-                current_size: 0,
-                insertion_counter: 0,
-                evicted_count: 0,
-            }
-        }
-
-        fn insert(&mut self, name: String, value: String) -> Result<u64, &'static str> {
-            let entry = QpackDynamicEntry::new(name, value, self.insertion_counter);
-            let entry_size = entry.size;
-
-            if entry_size > self.max_capacity {
-                return Err("entry larger than table capacity");
-            }
-
-            // Evict entries to make space (LRU with reference checking)
-            while self.current_size + entry_size > self.max_capacity {
-                if !self.evict_lru_unreferenced() {
-                    return Err("cannot evict enough space (all entries referenced)");
-                }
-            }
-
-            let insertion_id = self.insertion_counter;
-            self.entries.push(entry);
-            self.current_size += entry_size;
-            self.insertion_counter += 1;
-
-            Ok(insertion_id)
-        }
-
-        fn evict_lru_unreferenced(&mut self) -> bool {
-            // Find the least recently used unreferenced entry
-            let mut lru_index = None;
-            let mut lru_insertion_order = u64::MAX;
-
-            for (i, entry) in self.entries.iter().enumerate() {
-                if !entry.is_referenced() && entry.insertion_order < lru_insertion_order {
-                    lru_insertion_order = entry.insertion_order;
-                    lru_index = Some(i);
-                }
-            }
-
-            if let Some(index) = lru_index {
-                let evicted = self.entries.remove(index);
-                self.current_size -= evicted.size;
-                self.evicted_count += 1;
-                true
-            } else {
-                false
-            }
-        }
-
-        fn reference_entry(&mut self, insertion_id: u64) -> bool {
-            if let Some(entry) = self
-                .entries
-                .iter_mut()
-                .find(|e| e.insertion_order == insertion_id)
-            {
-                entry.add_reference();
-                true
-            } else {
-                false
-            }
-        }
-
-        fn unreference_entry(&mut self, insertion_id: u64) -> bool {
-            if let Some(entry) = self
-                .entries
-                .iter_mut()
-                .find(|e| e.insertion_order == insertion_id)
-            {
-                entry.remove_reference();
-                true
-            } else {
-                false
-            }
-        }
-
-        fn len(&self) -> usize {
-            self.entries.len()
-        }
-
-        fn size(&self) -> usize {
-            self.current_size
-        }
-
-        fn capacity(&self) -> usize {
-            self.max_capacity
-        }
-    }
 
     #[test]
     fn qpack_conformance_dynamic_table_lru_eviction() {
