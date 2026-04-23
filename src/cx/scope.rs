@@ -203,22 +203,9 @@ impl Future for RegionCloseFuture {
         if state.closed {
             Poll::Ready(())
         } else {
-            if !state
-                .waker
-                .as_ref()
-                .is_some_and(|w| w.will_wake(cx.waker()))
-            {
-                state.waker = Some(cx.waker().clone());
-            }
+            state.waiters.push(cx.waker().clone());
             Poll::Pending
         }
-    }
-}
-
-impl Drop for RegionCloseFuture {
-    fn drop(&mut self) {
-        let mut state = self.state.lock();
-        state.waker = None;
     }
 }
 
@@ -3208,6 +3195,56 @@ mod tests {
             parent_record.child_ids().is_empty(),
             "completed child region must be removed from parent"
         );
+    }
+
+    #[test]
+    fn region_close_future_wakes_all_registered_waiters() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Waker};
+
+        struct CountWaker(Arc<AtomicUsize>);
+
+        impl std::task::Wake for CountWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let notify = Arc::new(parking_lot::Mutex::new(crate::record::region::RegionCloseState {
+            closed: false,
+            waiters: Vec::new(),
+        }));
+        let wake_count_a = Arc::new(AtomicUsize::new(0));
+        let wake_count_b = Arc::new(AtomicUsize::new(0));
+        let waker_a = Waker::from(Arc::new(CountWaker(Arc::clone(&wake_count_a))));
+        let waker_b = Waker::from(Arc::new(CountWaker(Arc::clone(&wake_count_b))));
+        let mut cx_a = Context::from_waker(&waker_a);
+        let mut cx_b = Context::from_waker(&waker_b);
+        let mut future_a = RegionCloseFuture {
+            state: Arc::clone(&notify),
+        };
+        let mut future_b = RegionCloseFuture { state: notify };
+
+        assert!(Pin::new(&mut future_a).poll(&mut cx_a).is_pending());
+        assert!(Pin::new(&mut future_b).poll(&mut cx_b).is_pending());
+
+        let waiters = {
+            let mut state = future_a.state.lock();
+            state.closed = true;
+            std::mem::take(&mut state.waiters)
+        };
+        for waker in waiters {
+            waker.wake();
+        }
+
+        assert_eq!(wake_count_a.load(Ordering::SeqCst), 1);
+        assert_eq!(wake_count_b.load(Ordering::SeqCst), 1);
+        assert!(Pin::new(&mut future_a).poll(&mut cx_a).is_ready());
+        assert!(Pin::new(&mut future_b).poll(&mut cx_b).is_ready());
     }
 
     #[test]

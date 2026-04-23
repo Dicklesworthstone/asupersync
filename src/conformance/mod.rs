@@ -720,12 +720,8 @@ impl ConformanceTarget for LabRuntimeTarget {
                 if state.closed {
                     std::task::Poll::Ready(())
                 } else {
-                    if !state
-                        .waker
-                        .as_ref()
-                        .is_some_and(|waker| waker.will_wake(cx.waker()))
-                    {
-                        state.waker = Some(cx.waker().clone());
+                    if !state.waiters.iter().any(|waker| waker.will_wake(cx.waker())) {
+                        state.waiters.push(cx.waker().clone());
                     }
                     std::task::Poll::Pending
                 }

@@ -16,8 +16,12 @@ use std::sync::atomic::{AtomicU8, Ordering};
 pub struct RegionCloseState {
     /// Whether the region is fully closed.
     pub closed: bool,
-    /// Waker for a task waiting for the region to close.
-    pub waker: Option<std::task::Waker>,
+    /// Wakers for tasks waiting for the region to close.
+    ///
+    /// We retain all registered waiters until the region closes. Stale wakers
+    /// are acceptable here because close is one-shot and spurious wakeups are
+    /// harmless; dropping a waiter must not erase another waiter's registration.
+    pub waiters: Vec<std::task::Waker>,
 }
 
 /// The state of a region in its lifecycle.
@@ -342,7 +346,7 @@ impl RegionRecord {
             created_at,
             close_notify: std::sync::Arc::new(parking_lot::Mutex::new(RegionCloseState {
                 closed: false,
-                waker: None,
+                waiters: Vec::new(),
             })),
             state: AtomicRegionState::new(RegionState::Open),
             inner: RwLock::new(RegionInner {
@@ -829,13 +833,13 @@ impl RegionRecord {
         if transitioned {
             self.trace_state_change(RegionState::Closed);
             inner.heap.reclaim_all();
-            let waker = {
+            let waiters = {
                 let mut notify = self.close_notify.lock();
                 notify.closed = true;
-                notify.waker.take()
+                std::mem::take(&mut notify.waiters)
             };
             drop(inner);
-            if let Some(waker) = waker {
+            for waker in waiters {
                 waker.wake();
             }
         }
@@ -1073,12 +1077,12 @@ impl RegionRecord {
         // Ensure heap is reclaimed if the snapshot forces the region closed
         if state == RegionState::Closed && prev_state != RegionState::Closed {
             self.clear_heap();
-            let waker = {
+            let waiters = {
                 let mut notify = self.close_notify.lock();
                 notify.closed = true;
-                notify.waker.take()
+                std::mem::take(&mut notify.waiters)
             };
-            if let Some(waker) = waker {
+            for waker in waiters {
                 waker.wake();
             }
         }
