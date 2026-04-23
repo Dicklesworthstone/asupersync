@@ -795,4 +795,192 @@ mod tests {
         );
         crate::test_complete!("merge_yields_cooperatively_when_scan_budget_is_exhausted");
     }
+
+    // =========================================================================
+    // Stream-algebra conformance laws for `merge`.
+    //
+    // Round-robin ordering is an implementation detail, so these laws assert
+    // equality *up to multiset*. Exact ordering is already covered by
+    // `merge_round_robin_order` and `merge_interleaving_pending_alternates`.
+    // The laws close the gap between "per-case spot checks" and "the algebra
+    // actually holds on arbitrary inputs".
+    // =========================================================================
+
+    fn drain_to_sorted_vec<S>(mut stream: S) -> Vec<i32>
+    where
+        S: Stream<Item = i32> + Unpin,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut items = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => items.push(item),
+                Poll::Ready(None) => break,
+                Poll::Pending => {}
+            }
+        }
+        items.sort_unstable();
+        items
+    }
+
+    fn make_merge_from_vecs(vecs: Vec<Vec<i32>>) -> Merge<BoxedStream<i32>> {
+        merge(
+            vecs.into_iter()
+                .map(|v| boxed_stream(iter(v)))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// LAW — Singleton identity: `merge([s])` yields the exact same sequence
+    /// (and order) as `s` alone. For a single-stream merge, round-robin
+    /// collapses to passthrough.
+    #[test]
+    fn law_merge_singleton_identity() {
+        init_test("law_merge_singleton_identity");
+        let cases: Vec<Vec<i32>> = vec![
+            vec![],
+            vec![42],
+            vec![1, 2, 3, 4, 5],
+            vec![7, 7, 7],
+            vec![-1, 0, 1],
+        ];
+        for input in cases {
+            let expected = input.clone();
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut stream = merge([iter(input.clone())]);
+            let mut actual = Vec::new();
+            loop {
+                match Pin::new(&mut stream).poll_next(&mut cx) {
+                    Poll::Ready(Some(item)) => actual.push(item),
+                    Poll::Ready(None) => break,
+                    Poll::Pending => {}
+                }
+            }
+            assert_eq!(
+                actual, expected,
+                "singleton merge diverged from passthrough for input {expected:?}",
+            );
+        }
+        crate::test_complete!("law_merge_singleton_identity");
+    }
+
+    /// LAW — Commutativity (up to multiset): `merge([a, b])` and
+    /// `merge([b, a])` yield the same multiset of items. Round-robin order
+    /// differs by cursor start, but the set of delivered items with
+    /// multiplicity is an invariant.
+    #[test]
+    fn law_merge_commutative_up_to_multiset() {
+        init_test("law_merge_commutative_up_to_multiset");
+        let pairs: Vec<(Vec<i32>, Vec<i32>)> = vec![
+            (vec![], vec![1, 2, 3]),
+            (vec![1, 2, 3], vec![]),
+            (vec![1, 3, 5], vec![2, 4, 6]),
+            (vec![1, 1, 1], vec![1, 1, 1]),
+            (vec![1], vec![-1, -1]),
+        ];
+        for (a, b) in pairs {
+            let ab = drain_to_sorted_vec(make_merge_from_vecs(vec![a.clone(), b.clone()]));
+            let ba = drain_to_sorted_vec(make_merge_from_vecs(vec![b.clone(), a.clone()]));
+            assert_eq!(ab, ba, "commutativity violated for a={a:?} b={b:?}");
+        }
+        crate::test_complete!("law_merge_commutative_up_to_multiset");
+    }
+
+    /// LAW — Associativity (up to multiset):
+    /// `merge([merge([a, b]), c])` ≡ `merge([a, merge([b, c])])`.
+    /// Both arrangements must yield the same multiset as the flat
+    /// `merge([a, b, c])`.
+    #[test]
+    fn law_merge_associative_up_to_multiset() {
+        init_test("law_merge_associative_up_to_multiset");
+        let triples: Vec<(Vec<i32>, Vec<i32>, Vec<i32>)> = vec![
+            (vec![], vec![], vec![]),
+            (vec![1, 2], vec![3, 4], vec![5, 6]),
+            (vec![1], vec![2, 3], vec![]),
+            (vec![7, 7], vec![7], vec![7, 7, 7]),
+        ];
+        for (a, b, c) in triples {
+            let flat = drain_to_sorted_vec(make_merge_from_vecs(vec![
+                a.clone(),
+                b.clone(),
+                c.clone(),
+            ]));
+
+            // Left-nested: merge([merge([a, b]), c])
+            let ab = make_merge_from_vecs(vec![a.clone(), b.clone()]);
+            let left_nested: Merge<BoxedStream<i32>> = merge(vec![
+                boxed_stream(ab),
+                boxed_stream(iter(c.clone())),
+            ]);
+            let left = drain_to_sorted_vec(left_nested);
+
+            // Right-nested: merge([a, merge([b, c])])
+            let bc = make_merge_from_vecs(vec![b.clone(), c.clone()]);
+            let right_nested: Merge<BoxedStream<i32>> = merge(vec![
+                boxed_stream(iter(a.clone())),
+                boxed_stream(bc),
+            ]);
+            let right = drain_to_sorted_vec(right_nested);
+
+            assert_eq!(
+                left, flat,
+                "left-nested != flat for a={a:?} b={b:?} c={c:?}",
+            );
+            assert_eq!(
+                right, flat,
+                "right-nested != flat for a={a:?} b={b:?} c={c:?}",
+            );
+        }
+        crate::test_complete!("law_merge_associative_up_to_multiset");
+    }
+
+    /// LAW — Nesting flatten: `merge([merge([a, b])])` ≡ `merge([a, b])`.
+    /// A single-element outer merge wrapping a merge is indistinguishable
+    /// from the inner merge alone (combines singleton identity with
+    /// flattening semantics).
+    #[test]
+    fn law_merge_nesting_flattens() {
+        init_test("law_merge_nesting_flattens");
+        let pairs: Vec<(Vec<i32>, Vec<i32>)> = vec![
+            (vec![], vec![]),
+            (vec![1, 2, 3], vec![4, 5, 6]),
+            (vec![0], vec![]),
+        ];
+        for (a, b) in pairs {
+            let inner = make_merge_from_vecs(vec![a.clone(), b.clone()]);
+            let nested: Merge<BoxedStream<i32>> = merge(vec![boxed_stream(inner)]);
+            let flat = make_merge_from_vecs(vec![a.clone(), b.clone()]);
+            assert_eq!(
+                drain_to_sorted_vec(nested),
+                drain_to_sorted_vec(flat),
+                "nesting flatten violated for a={a:?} b={b:?}",
+            );
+        }
+        crate::test_complete!("law_merge_nesting_flattens");
+    }
+
+    /// LAW — Empty identity: merging any stream `s` with an empty stream is
+    /// equivalent (up to multiset) to `s` alone. `empty` is the two-sided
+    /// identity of the merge operator.
+    #[test]
+    fn law_merge_empty_is_identity() {
+        init_test("law_merge_empty_is_identity");
+        let cases: Vec<Vec<i32>> = vec![
+            vec![],
+            vec![1, 2, 3],
+            vec![42, 42],
+        ];
+        for s in cases {
+            let alone = drain_to_sorted_vec(iter(s.clone()));
+            // Left identity: merge([empty, s])
+            let left = drain_to_sorted_vec(make_merge_from_vecs(vec![Vec::new(), s.clone()]));
+            // Right identity: merge([s, empty])
+            let right = drain_to_sorted_vec(make_merge_from_vecs(vec![s.clone(), Vec::new()]));
+            assert_eq!(left, alone, "left identity violated for s={s:?}");
+            assert_eq!(right, alone, "right identity violated for s={s:?}");
+        }
+        crate::test_complete!("law_merge_empty_is_identity");
+    }
 }
