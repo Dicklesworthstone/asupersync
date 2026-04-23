@@ -1729,3 +1729,10 @@ path = "fuzz_targets/subject_pattern_parser.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "quic_transport_params_tlv"
+path = "fuzz_targets/quic_transport_params_tlv.rs"
+test = false
+doc = false
+bench = false
