@@ -508,4 +508,111 @@ mod tests {
             "repeating cancellation must not perturb survivor execution order"
         );
     }
+
+    /// Metamorphic Relation 8: `spawn_blocking` Soft Cancellation Equivalence
+    ///
+    /// Property: Dropping the future returned by `spawn_blocking` behaves differently
+    /// depending on the execution state at the time of drop:
+    /// - If dropped BEFORE the background thread begins executing the closure, it is skipped (hard cancel).
+    /// - If dropped AFTER the background thread begins execution, it runs to completion (soft cancel).
+    ///
+    /// MR: side_effects(cancel_queued) == 0 AND side_effects(cancel_running) == 1
+    #[test]
+    fn mr_spawn_blocking_cancellation_states() {
+        use crate::runtime::{spawn_blocking, RuntimeBuilder};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+        use futures_lite::future;
+
+        let rt = RuntimeBuilder::new()
+            .worker_threads(1)
+            .blocking_threads(1, 1)
+            .build()
+            .unwrap();
+        
+        let executed_queued = Arc::new(AtomicBool::new(false));
+        let executed_running = Arc::new(AtomicBool::new(false));
+
+        let c_queued = Arc::clone(&executed_queued);
+        let c_running = Arc::clone(&executed_running);
+
+        let blocker_running = Arc::new(AtomicBool::new(false));
+        let blocker_release = Arc::new(AtomicBool::new(false));
+        let b_running = Arc::clone(&blocker_running);
+        let b_release = Arc::clone(&blocker_release);
+
+        let running_task_started = Arc::new(AtomicBool::new(false));
+        let r_started = Arc::clone(&running_task_started);
+
+        rt.block_on(async move {
+            // Task 1: The blocker. It will consume the single blocking thread.
+            // We use block_on with an async block and spawn it normally to run in the background
+            // Wait, spawn_blocking just returns a future, so we must spawn it as a task to run it concurrently.
+            let _blocker_task = crate::runtime::builder::Runtime::current_handle().unwrap().spawn(async move {
+                spawn_blocking(move || {
+                    b_running.store(true, Ordering::SeqCst);
+                    while !b_release.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }).await;
+            });
+
+            // Wait for blocker to start
+            while !blocker_running.load(Ordering::SeqCst) {
+                crate::runtime::yield_now::yield_now().await;
+            }
+
+            // Task 2: Will be queued since the only thread is blocked
+            let queued_fut = spawn_blocking(move || {
+                c_queued.store(true, Ordering::SeqCst);
+            });
+
+            // Poll it once to ensure it gets queued
+            let mut pin_queued = Box::pin(queued_fut);
+            let waker = futures_lite::future::block_on(future::poll_fn(|cx| std::task::Poll::Ready(cx.waker().clone())));
+            let mut ctx = std::task::Context::from_waker(&waker);
+            let _ = std::future::Future::poll(pin_queued.as_mut(), &mut ctx);
+
+            // Drop it immediately BEFORE it can start (hard cancel)
+            drop(pin_queued);
+
+            // Release the blocker
+            blocker_release.store(true, Ordering::SeqCst);
+
+            // Give the blocker time to finish
+            crate::time::sleep(crate::types::Time::ZERO, Duration::from_millis(100)).await;
+
+            // Task 3: Wait for a task to start running, then drop it (soft cancel)
+            let running_fut = spawn_blocking(move || {
+                r_started.store(true, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(50));
+                c_running.store(true, Ordering::SeqCst);
+            });
+
+            let mut pin_running = Box::pin(running_fut);
+            let _ = std::future::Future::poll(pin_running.as_mut(), &mut ctx);
+
+            // Wait for it to actually start on the thread
+            while !running_task_started.load(Ordering::SeqCst) {
+                crate::runtime::yield_now::yield_now().await;
+            }
+
+            // Drop it AFTER it starts
+            drop(pin_running);
+
+            // Give the background thread time to finish Task 3
+            crate::time::sleep(crate::types::Time::ZERO, Duration::from_millis(100)).await;
+        });
+
+        assert!(
+            !executed_queued.load(Ordering::SeqCst),
+            "Queued spawn_blocking must not execute if dropped before starting (hard cancellation)"
+        );
+        
+        assert!(
+            executed_running.load(Ordering::SeqCst),
+            "Running spawn_blocking must run to completion even if dropped (soft cancellation)"
+        );
+    }
 }
