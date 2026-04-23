@@ -3,9 +3,9 @@
 //! Checks for conformance regressions against historical baselines and
 //! configurable thresholds for CI integration.
 
-use std::fs;
 use clap::{Arg, Command};
 use serde_json::Value;
+use std::fs;
 
 fn main() {
     let matches = Command::new("check_conformance_regression")
@@ -18,14 +18,14 @@ fn main() {
                 .long("input")
                 .value_name("FILE")
                 .help("Input JSON file with test execution results")
-                .required(true)
+                .required(true),
         )
         .arg(
             Arg::new("history")
                 .long("history")
                 .value_name("FILE")
                 .help("Historical conformance data file")
-                .default_value("conformance_history.json")
+                .default_value("conformance_history.json"),
         )
         .arg(
             Arg::new("threshold")
@@ -33,7 +33,7 @@ fn main() {
                 .long("threshold")
                 .value_name("PERCENT")
                 .help("Minimum compliance threshold")
-                .default_value("90.0")
+                .default_value("90.0"),
         )
         .arg(
             Arg::new("baseline")
@@ -41,13 +41,15 @@ fn main() {
                 .long("baseline")
                 .value_name("BRANCH")
                 .help("Baseline branch for comparison")
-                .default_value("main")
+                .default_value("main"),
         )
         .get_matches();
 
     let input_file = matches.get_one::<String>("input").unwrap();
     let history_file = matches.get_one::<String>("history").unwrap();
-    let threshold: f64 = matches.get_one::<String>("threshold").unwrap()
+    let threshold: f64 = matches
+        .get_one::<String>("threshold")
+        .unwrap()
         .parse()
         .expect("Threshold must be a valid number");
     let baseline = matches.get_one::<String>("baseline").unwrap();
@@ -78,7 +80,7 @@ fn check_regression(
     input_file: &str,
     _history_file: &str,
     threshold: f64,
-    _baseline: &str
+    _baseline: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     // Read input test results
     let content = fs::read_to_string(input_file)?;
@@ -93,8 +95,10 @@ fn check_regression(
     let regression_detected = conformance_rate < threshold;
 
     if regression_detected {
-        println!("Conformance rate {:.2}% is below threshold {:.2}%",
-                conformance_rate, threshold);
+        println!(
+            "Conformance rate {:.2}% is below threshold {:.2}%",
+            conformance_rate, threshold
+        );
     }
 
     Ok(regression_detected)

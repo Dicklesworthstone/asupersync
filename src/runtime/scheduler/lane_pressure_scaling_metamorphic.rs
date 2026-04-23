@@ -31,10 +31,8 @@
 
 #![allow(dead_code)]
 
-use crate::runtime::scheduler::three_lane::{
-    PreemptionMetrics, ThreeLaneScheduler,
-};
-use crate::runtime::{RuntimeState};
+use crate::runtime::RuntimeState;
+use crate::runtime::scheduler::three_lane::{PreemptionMetrics, ThreeLaneScheduler};
 use crate::sync::ContendedMutex;
 use crate::types::{Budget, TaskId, Time};
 use crate::util::DetRng;
@@ -68,7 +66,7 @@ impl Default for LanePressureConfig {
             lane_mix_ratios: [0.2, 0.3, 0.5], // 20% cancel, 30% timed, 50% ready
             cancel_streak_limit: 16,
             max_fairness_deviation: 0.15, // 15% deviation tolerance
-            work_duration_ns: 1_000_000, // 1ms virtual work
+            work_duration_ns: 1_000_000,  // 1ms virtual work
             seed: 42,
         }
     }
@@ -214,10 +212,13 @@ pub fn run_pressure_scaling_scenario(
 ) -> ScalingTestResults {
     let state = Arc::new(ContendedMutex::new(
         "test_runtime_state",
-        RuntimeState::new()
+        RuntimeState::new(),
     ));
 
-    let region = state.lock().unwrap().create_root_region(Budget::unlimited());
+    let region = state
+        .lock()
+        .unwrap()
+        .create_root_region(Budget::unlimited());
     let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(
         1, // single worker for deterministic testing
         &state,
@@ -271,7 +272,9 @@ pub fn run_pressure_scaling_scenario(
                 lane: lane_idx,
                 injection_order,
                 execution_window: if lane_idx == 1 {
-                    Some(Time::from_nanos(1_000_000 + injection_order as u64 * 500_000))
+                    Some(Time::from_nanos(
+                        1_000_000 + injection_order as u64 * 500_000,
+                    ))
                 } else {
                     None
                 },
@@ -293,7 +296,7 @@ pub fn run_pressure_scaling_scenario(
     for task_trace in &mut task_traces {
         task_trace.poll_count = 1;
         task_trace.completion_time = Some(Time::from_nanos(
-            start_time.elapsed().as_nanos() as u64 + task_trace.injection_order as u64 * 1000
+            start_time.elapsed().as_nanos() as u64 + task_trace.injection_order as u64 * 1000,
         ));
     }
 
@@ -348,9 +351,7 @@ pub fn verify_proportional_pressure_scaling_invariance(
         if certificate.fairness_deviation > config.max_fairness_deviation {
             return Err(format!(
                 "Fairness deviation {} exceeds limit {} at scale factor {}",
-                certificate.fairness_deviation,
-                config.max_fairness_deviation,
-                scaling_factor
+                certificate.fairness_deviation, config.max_fairness_deviation, scaling_factor
             ));
         }
 
@@ -358,9 +359,7 @@ pub fn verify_proportional_pressure_scaling_invariance(
         if certificate.max_ready_stall_bound > baseline.max_ready_stall_bound * 2 {
             return Err(format!(
                 "Ready stall bound {} exceeds 2x baseline {} at scale factor {}",
-                certificate.max_ready_stall_bound,
-                baseline.max_ready_stall_bound,
-                scaling_factor
+                certificate.max_ready_stall_bound, baseline.max_ready_stall_bound, scaling_factor
             ));
         }
     }
@@ -372,9 +371,7 @@ pub fn verify_proportional_pressure_scaling_invariance(
 ///
 /// Tests that lane dispatch ratios converge to expected mix ratios
 /// regardless of absolute pressure scaling.
-pub fn verify_mix_ratio_preservation(
-    config: &LanePressureConfig,
-) -> Result<(), String> {
+pub fn verify_mix_ratio_preservation(config: &LanePressureConfig) -> Result<(), String> {
     for &scaling_factor in &config.scaling_factors {
         let results = run_pressure_scaling_scenario(config, scaling_factor);
         let certificate = results.extract_fairness_certificate();
@@ -449,7 +446,12 @@ mod tests {
         let certificate = results.extract_fairness_certificate();
 
         // Verify certificate has reasonable values
-        assert!(certificate.lane_dispatch_ratios.iter().all(|&ratio| ratio >= 0.0 && ratio <= 1.0));
+        assert!(
+            certificate
+                .lane_dispatch_ratios
+                .iter()
+                .all(|&ratio| ratio >= 0.0 && ratio <= 1.0)
+        );
         assert!(certificate.fairness_deviation >= 0.0);
         assert!(certificate.max_ready_stall_bound > 0);
     }

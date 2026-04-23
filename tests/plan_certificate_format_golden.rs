@@ -87,19 +87,15 @@ fn compact_certificate_json(compact: &CompactCertificate) -> Value {
 #[test]
 fn plan_certificate_format_snapshot() {
     let mut dedup = build_dedup_race_join_dag();
-    let (_, dedup_cert) = dedup.apply_rewrites_certified(
-        RewritePolicy::conservative(),
-        &[RewriteRule::DedupRaceJoin],
-    );
+    let (_, dedup_cert) = dedup
+        .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
     let dedup_compact = dedup_cert
         .compact()
         .expect("dedup certificate should fit compact format");
 
     let mut identity = build_identity_join_dag();
-    let (_, identity_cert) = identity.apply_rewrites_certified(
-        RewritePolicy::conservative(),
-        &[RewriteRule::DedupRaceJoin],
-    );
+    let (_, identity_cert) = identity
+        .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
     let identity_compact = identity_cert
         .compact()
         .expect("identity certificate should fit compact format");

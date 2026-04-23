@@ -3,10 +3,10 @@
 //! Generates detailed RFC 6330 conformance reports from test execution results
 //! in multiple formats (Markdown, JSON, HTML, badges) for documentation and CI.
 
-use std::fs;
-use std::path::PathBuf;
 use clap::{Arg, ArgAction, Command};
 use serde_json;
+use std::fs;
+use std::path::PathBuf;
 
 // Import from conformance crate
 use asupersync_conformance::raptorq_rfc6330::TestExecution;
@@ -43,10 +43,19 @@ pub struct ComplianceMatrix {
 }
 
 impl ComplianceMatrix {
-    pub fn from_test_results(executions: Vec<TestExecution>, _implementation_version: String) -> Self {
+    pub fn from_test_results(
+        executions: Vec<TestExecution>,
+        _implementation_version: String,
+    ) -> Self {
         let total_count = executions.len();
-        let pass_count = executions.iter()
-            .filter(|e| matches!(e.result, asupersync_conformance::raptorq_rfc6330::ConformanceResult::Pass))
+        let pass_count = executions
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.result,
+                    asupersync_conformance::raptorq_rfc6330::ConformanceResult::Pass
+                )
+            })
             .count();
 
         let conformance_level = if total_count == 0 {
@@ -151,7 +160,13 @@ impl ComplianceReportGenerator {
 
     fn generate_badge_url(&self, matrix: &ComplianceMatrix) -> String {
         let pass_rate = (matrix.pass_count as f64) / (matrix.total_count as f64) * 100.0;
-        let color = if pass_rate >= 100.0 { "green" } else if pass_rate >= 80.0 { "yellow" } else { "red" };
+        let color = if pass_rate >= 100.0 {
+            "green"
+        } else if pass_rate >= 80.0 {
+            "yellow"
+        } else {
+            "red"
+        };
         format!(
             "https://img.shields.io/badge/RFC%206330%20Conformance-{:.1}%25-{}",
             pass_rate, color
@@ -159,7 +174,8 @@ impl ComplianceReportGenerator {
     }
 
     fn format_test_details(&self, executions: &[TestExecution]) -> String {
-        executions.iter()
+        executions
+            .iter()
             .map(|e| format!("- {}: {:?}", e.test_name, e.result))
             .collect::<Vec<_>>()
             .join("\n")
@@ -177,14 +193,14 @@ fn main() {
                 .long("input")
                 .value_name("FILE")
                 .help("Input JSON file with test execution results")
-                .required(true)
+                .required(true),
         )
         .arg(
             Arg::new("output")
                 .short('o')
                 .long("output")
                 .value_name("FILE")
-                .help("Output file path (default: stdout)")
+                .help("Output file path (default: stdout)"),
         )
         .arg(
             Arg::new("format")
@@ -192,32 +208,33 @@ fn main() {
                 .long("format")
                 .value_name("FORMAT")
                 .help("Output format: markdown, json, html, badge, all")
-                .default_value("markdown")
+                .default_value("markdown"),
         )
         .arg(
             Arg::new("implementation-version")
                 .long("implementation-version")
                 .value_name("VERSION")
-                .help("Implementation version string (default: detect from git)")
+                .help("Implementation version string (default: detect from git)"),
         )
         .arg(
             Arg::new("ci-mode")
                 .long("ci-mode")
                 .action(ArgAction::SetTrue)
-                .help("Generate CI-friendly output with exit codes")
+                .help("Generate CI-friendly output with exit codes"),
         )
         .arg(
             Arg::new("include-failures")
                 .long("include-failures")
                 .action(ArgAction::SetTrue)
-                .help("Include detailed failure analysis in report")
+                .help("Include detailed failure analysis in report"),
         )
         .get_matches();
 
     let input_path = matches.get_one::<String>("input").unwrap();
     let output_path = matches.get_one::<String>("output");
     let format = matches.get_one::<String>("format").unwrap();
-    let implementation_version = matches.get_one::<String>("implementation-version")
+    let implementation_version = matches
+        .get_one::<String>("implementation-version")
         .map(|s| s.clone())
         .unwrap_or_else(|| detect_implementation_version());
     let ci_mode = matches.get_flag("ci-mode");
@@ -274,7 +291,10 @@ fn main() {
         });
 
         eprintln!("=== CI SUMMARY ===");
-        eprintln!("{}", serde_json::to_string_pretty(&ci_summary).unwrap_or_else(|_| "{}".to_string()));
+        eprintln!(
+            "{}",
+            serde_json::to_string_pretty(&ci_summary).unwrap_or_else(|_| "{}".to_string())
+        );
 
         // Exit with appropriate code based on conformance level
         match matrix.conformance_level {
@@ -348,8 +368,13 @@ fn parse_output_format(format: &str) -> OutputFormat {
 }
 
 /// Generate all report formats
-fn generate_all_formats(generator: &ComplianceReportGenerator, matrix: &ComplianceMatrix, base_path: Option<&String>) {
-    let base = base_path.map(|p| PathBuf::from(p))
+fn generate_all_formats(
+    generator: &ComplianceReportGenerator,
+    matrix: &ComplianceMatrix,
+    base_path: Option<&String>,
+) {
+    let base = base_path
+        .map(|p| PathBuf::from(p))
         .unwrap_or_else(|| PathBuf::from("conformance_report"));
 
     // Generate each format
@@ -373,7 +398,12 @@ fn generate_all_formats(generator: &ComplianceReportGenerator, matrix: &Complian
                 println!("Generated {} report: {}", name, output_path.display());
             }
             Err(e) => {
-                eprintln!("Error writing {} report to {}: {}", name, output_path.display(), e);
+                eprintln!(
+                    "Error writing {} report to {}: {}",
+                    name,
+                    output_path.display(),
+                    e
+                );
             }
         }
     }
@@ -391,7 +421,10 @@ mod tests {
 
     #[test]
     fn test_output_format_parsing() {
-        assert!(matches!(parse_output_format("markdown"), OutputFormat::Markdown));
+        assert!(matches!(
+            parse_output_format("markdown"),
+            OutputFormat::Markdown
+        ));
         assert!(matches!(parse_output_format("json"), OutputFormat::Json));
         assert!(matches!(parse_output_format("html"), OutputFormat::Html));
         assert!(matches!(parse_output_format("badge"), OutputFormat::Badge));

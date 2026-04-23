@@ -1215,35 +1215,49 @@ mod tests {
                     let has_complete = script.contains("complete -F");
                     let has_compgen = script.contains("compgen");
                     let has_bash_completion_func = script.contains("_asupersync_completions");
-                    comprehensive_report.push_str(&format!("has_complete_function: {}\n", has_complete));
+                    comprehensive_report
+                        .push_str(&format!("has_complete_function: {}\n", has_complete));
                     comprehensive_report.push_str(&format!("has_compgen: {}\n", has_compgen));
-                    comprehensive_report.push_str(&format!("has_completion_function: {}\n", has_bash_completion_func));
+                    comprehensive_report.push_str(&format!(
+                        "has_completion_function: {}\n",
+                        has_bash_completion_func
+                    ));
                 }
                 Shell::Zsh => {
                     let has_compdef = script.contains("compdef");
                     let has_zsh_function = script.contains("_asupersync");
                     let has_complete_options = script.contains("_arguments");
                     comprehensive_report.push_str(&format!("has_compdef: {}\n", has_compdef));
-                    comprehensive_report.push_str(&format!("has_zsh_function: {}\n", has_zsh_function));
-                    comprehensive_report.push_str(&format!("has_arguments: {}\n", has_complete_options));
+                    comprehensive_report
+                        .push_str(&format!("has_zsh_function: {}\n", has_zsh_function));
+                    comprehensive_report
+                        .push_str(&format!("has_arguments: {}\n", has_complete_options));
                 }
                 Shell::Fish => {
                     let has_complete_cmd = script.contains("complete --command");
                     let has_fish_conditions = script.contains("__fish_use_subcommand");
-                    comprehensive_report.push_str(&format!("has_complete_command: {}\n", has_complete_cmd));
-                    comprehensive_report.push_str(&format!("has_fish_conditions: {}\n", has_fish_conditions));
+                    comprehensive_report
+                        .push_str(&format!("has_complete_command: {}\n", has_complete_cmd));
+                    comprehensive_report
+                        .push_str(&format!("has_fish_conditions: {}\n", has_fish_conditions));
                 }
                 Shell::PowerShell => {
                     let has_register = script.contains("Register-ArgumentCompleter");
                     let has_scriptblock = script.contains("scriptblock");
-                    comprehensive_report.push_str(&format!("has_register_completer: {}\n", has_register));
-                    comprehensive_report.push_str(&format!("has_scriptblock: {}\n", has_scriptblock));
+                    comprehensive_report
+                        .push_str(&format!("has_register_completer: {}\n", has_register));
+                    comprehensive_report
+                        .push_str(&format!("has_scriptblock: {}\n", has_scriptblock));
                 }
                 Shell::Elvish => {
                     let has_edit_completion = script.contains("edit:completion");
                     let has_elvish_arg_completer = script.contains("arg-completer");
-                    comprehensive_report.push_str(&format!("has_edit_completion: {}\n", has_edit_completion));
-                    comprehensive_report.push_str(&format!("has_arg_completer: {}\n", has_elvish_arg_completer));
+                    comprehensive_report
+                        .push_str(&format!("has_edit_completion: {}\n", has_edit_completion));
+                    comprehensive_report.push_str(&format!(
+                        "has_arg_completer: {}\n",
+                        has_elvish_arg_completer
+                    ));
                 }
                 _ => {}
             }

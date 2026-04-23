@@ -5,12 +5,12 @@
 
 #![cfg(test)]
 
-use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
 use asupersync::runtime::RuntimeState;
+use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{TaskId, Time};
 use insta::assert_json_snapshot;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// Create empty scheduler state dump for golden snapshot
@@ -210,7 +210,9 @@ fn test_multi_worker_scheduler_state_dump() {
     let worker1 = &mut right[0];
 
     // Worker 0: cancel and ready tasks
-    worker0.global.inject_cancel(TaskId::new_for_test(400, 0), 200);
+    worker0
+        .global
+        .inject_cancel(TaskId::new_for_test(400, 0), 200);
     worker0.schedule_local(TaskId::new_for_test(401, 0), 128);
 
     // Worker 1: timed and ready tasks
@@ -295,10 +297,7 @@ fn test_multi_worker_scheduler_state_dump() {
         ]
     });
 
-    assert_json_snapshot!(
-        "multi_worker_scheduler_state_dump",
-        multi_worker_dump
-    );
+    assert_json_snapshot!("multi_worker_scheduler_state_dump", multi_worker_dump);
 }
 
 /// Test scheduler state dump with fairness bounds triggered
@@ -372,8 +371,5 @@ fn test_fairness_bounds_scheduler_state_dump() {
         }
     });
 
-    assert_json_snapshot!(
-        "fairness_bounds_scheduler_state_dump",
-        fairness_dump
-    );
+    assert_json_snapshot!("fairness_bounds_scheduler_state_dump", fairness_dump);
 }

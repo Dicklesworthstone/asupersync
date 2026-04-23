@@ -220,11 +220,7 @@ fn test_ping_frame_golden_request() {
 
     // Golden: PING frame (type 6, flags 0, stream_id 0, 8-byte payload).
     // 9 header bytes + 8 payload bytes = 34 hex chars.
-    tester.assert_frame_golden(
-        &frame,
-        "ping_request",
-        "0000080600000000000123456789abcdef",
-    );
+    tester.assert_frame_golden(&frame, "ping_request", "0000080600000000000123456789abcdef");
 }
 
 #[test]

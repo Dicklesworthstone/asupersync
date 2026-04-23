@@ -837,7 +837,9 @@ mod tests {
                 Self::Complete(val) => Outcome::Ok(val),
                 Self::Error(msg) => Outcome::Err(msg),
                 Self::Cancel => Outcome::Cancelled(CancelReason::shutdown()),
-                Self::Panic => Outcome::Panicked(crate::types::outcome::PanicPayload::new("test panic")),
+                Self::Panic => {
+                    Outcome::Panicked(crate::types::outcome::PanicPayload::new("test panic"))
+                }
             }
         }
     }

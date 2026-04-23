@@ -16,7 +16,7 @@ use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
 };
-use crate::raptorq::systematic::{ConstraintMatrix, SystematicParams, SystematicError};
+use crate::raptorq::systematic::{ConstraintMatrix, SystematicError, SystematicParams};
 use crate::raptorq::{decision_contract, decision_contract::GovernanceSnapshot};
 use crate::types::ObjectId;
 
@@ -4026,7 +4026,8 @@ mod tests {
                     "decoder_params_parity",
                 );
                 assert_eq!(
-                    decoder_eq, shared_eq.unwrap(),
+                    decoder_eq,
+                    shared_eq.unwrap(),
                     "{context} decoder/params equation mismatch for esi={esi}"
                 );
             }

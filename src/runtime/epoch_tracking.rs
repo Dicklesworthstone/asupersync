@@ -17,8 +17,8 @@ use crate::types::{RegionId, TaskId};
 use crate::util::CachePadded;
 use crossbeam_queue::SegQueue;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Shared `Instant` origin used to serialize monotonic timestamps into a

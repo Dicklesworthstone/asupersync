@@ -16,8 +16,8 @@
 
 #![cfg(test)]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -60,9 +60,15 @@ fn mr_initialization_path_equivalence() {
         let blocking_result = cell_blocking.get_or_init_blocking(|| test_value);
 
         // All should have equivalent state
-        assert!(cell_with_value.is_initialized(), "with_value cell should be initialized");
+        assert!(
+            cell_with_value.is_initialized(),
+            "with_value cell should be initialized"
+        );
         assert!(cell_set.is_initialized(), "set cell should be initialized");
-        assert!(cell_blocking.is_initialized(), "blocking init cell should be initialized");
+        assert!(
+            cell_blocking.is_initialized(),
+            "blocking init cell should be initialized"
+        );
 
         // All should return the same value
         assert_eq!(cell_with_value.get(), Some(&test_value));
@@ -123,16 +129,26 @@ fn mr_concurrent_convergence() {
 
         // MR: All results must be identical (convergence)
         let winner = results[0];
-        assert!(results.iter().all(|&v| v == winner),
-               "All concurrent initializers should converge on same value: {:?}", results);
+        assert!(
+            results.iter().all(|&v| v == winner),
+            "All concurrent initializers should converge on same value: {:?}",
+            results
+        );
 
         // MR: Exactly one initializer should have run
-        assert_eq!(init_counter.load(Ordering::SeqCst), 1,
-                  "Exactly one initialization should occur");
+        assert_eq!(
+            init_counter.load(Ordering::SeqCst),
+            1,
+            "Exactly one initialization should occur"
+        );
 
         // MR: Winner must be one of the candidates
-        assert!(candidates.contains(&winner),
-               "Winner {} must be one of the candidates: {:?}", winner, candidates);
+        assert!(
+            candidates.contains(&winner),
+            "Winner {} must be one of the candidates: {:?}",
+            winner,
+            candidates
+        );
 
         // MR: Cell state must be consistent
         assert!(cell.is_initialized());
@@ -291,8 +307,11 @@ fn mr_waiter_consistency() {
             .collect();
 
         // MR: All threads should observe the same value
-        assert!(results.iter().all(|&v| v == winner_value),
-               "All waiters should observe the same value: {:?}", results);
+        assert!(
+            results.iter().all(|&v| v == winner_value),
+            "All waiters should observe the same value: {:?}",
+            results
+        );
 
         // MR: Cell should be in consistent final state
         assert!(cell.is_initialized());
@@ -311,7 +330,10 @@ fn mr_state_monotonicity() {
         let test_value = 99u32;
 
         // Initial state: uninitialized
-        assert!(!cell.is_initialized(), "Initial state should be uninitialized");
+        assert!(
+            !cell.is_initialized(),
+            "Initial state should be uninitialized"
+        );
         assert_eq!(cell.get(), None, "Initial get should return None");
 
         // State progression: uninitialized → initialized
@@ -319,30 +341,54 @@ fn mr_state_monotonicity() {
         assert_eq!(*result, test_value);
 
         // State should now be initialized and remain so
-        assert!(cell.is_initialized(), "Cell should be initialized after init");
-        assert_eq!(cell.get(), Some(&test_value), "Cell should contain the value");
+        assert!(
+            cell.is_initialized(),
+            "Cell should be initialized after init"
+        );
+        assert_eq!(
+            cell.get(),
+            Some(&test_value),
+            "Cell should contain the value"
+        );
 
         // MR: Subsequent operations should not regress state
         let second_result = cell.get_or_init_blocking(|| 999);
-        assert_eq!(*second_result, test_value, "Second init should return original value");
+        assert_eq!(
+            *second_result, test_value,
+            "Second init should return original value"
+        );
         assert!(cell.is_initialized(), "Cell should remain initialized");
 
         // MR: set() on initialized cell should fail but not change state
         let set_result = cell.set(888);
         assert!(set_result.is_err(), "set() on initialized cell should fail");
-        assert!(cell.is_initialized(), "Cell should remain initialized after failed set");
-        assert_eq!(cell.get(), Some(&test_value), "Value should be unchanged after failed set");
+        assert!(
+            cell.is_initialized(),
+            "Cell should remain initialized after failed set"
+        );
+        assert_eq!(
+            cell.get(),
+            Some(&test_value),
+            "Value should be unchanged after failed set"
+        );
 
         // MR: Async operations should also see consistent state
         block_on(async {
             let async_result = cell.get_or_init(|| async { 777 }).await;
-            assert_eq!(*async_result, test_value, "Async init should return original value");
+            assert_eq!(
+                *async_result, test_value,
+                "Async init should return original value"
+            );
         });
 
         // MR: Clone should preserve state monotonicity
         let cloned = cell.clone();
         assert!(cloned.is_initialized(), "Clone should be initialized");
-        assert_eq!(cloned.get(), Some(&test_value), "Clone should have same value");
+        assert_eq!(
+            cloned.get(),
+            Some(&test_value),
+            "Clone should have same value"
+        );
     });
 }
 
@@ -363,9 +409,9 @@ fn mr_error_recovery_consistency() {
 
         // Cause initialization error
         block_on(async {
-            let error_result = error_cell.get_or_try_init(|| async {
-                Err::<u32, &'static str>("intentional error")
-            }).await;
+            let error_result = error_cell
+                .get_or_try_init(|| async { Err::<u32, &'static str>("intentional error") })
+                .await;
             assert!(error_result.is_err(), "Initialization should fail");
         });
 
@@ -409,26 +455,33 @@ fn mr_comprehensive_invariants() {
 
         let cells_3 = &cells[3];
         block_on(async {
-            let _ = cells_3.get_or_try_init(|| async {
-                Ok::<u32, &'static str>(test_values[3])
-            }).await.expect("should succeed");
+            let _ = cells_3
+                .get_or_try_init(|| async { Ok::<u32, &'static str>(test_values[3]) })
+                .await
+                .expect("should succeed");
         });
 
         // Fifth cell: recover from error
         block_on(async {
-            let _ = cells[4].get_or_try_init(|| async {
-                Err::<u32, &'static str>("first error")
-            }).await;
+            let _ = cells[4]
+                .get_or_try_init(|| async { Err::<u32, &'static str>("first error") })
+                .await;
 
-            let _ = cells[4].get_or_try_init(|| async {
-                Ok::<u32, &'static str>(test_values[4])
-            }).await.expect("recovery should work");
+            let _ = cells[4]
+                .get_or_try_init(|| async { Ok::<u32, &'static str>(test_values[4]) })
+                .await
+                .expect("recovery should work");
         });
 
         // MR: All cells should be initialized
         for (i, cell) in cells.iter().enumerate() {
             assert!(cell.is_initialized(), "Cell {} should be initialized", i);
-            assert_eq!(cell.get(), Some(&test_values[i]), "Cell {} should have correct value", i);
+            assert_eq!(
+                cell.get(),
+                Some(&test_values[i]),
+                "Cell {} should have correct value",
+                i
+            );
         }
 
         // MR: All cells should behave identically under equivalent operations

@@ -21,8 +21,8 @@
 //! - SC-008: Resource cleanup on scope exit
 
 use crate::{
-    ConformanceTest, MpscReceiver, MpscSender, OneshotReceiver, OneshotSender,
-    RuntimeInterface, TestCategory, TestMeta, TestResult, checkpoint,
+    ConformanceTest, MpscReceiver, MpscSender, OneshotReceiver, OneshotSender, RuntimeInterface,
+    TestCategory, TestMeta, TestResult, checkpoint,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -51,14 +51,22 @@ pub fn sc_001_context_scope_ownership<RT: RuntimeInterface>() -> ConformanceTest
         TestMeta {
             id: "sc-001".to_string(),
             name: "Context scope ownership - lifetime management".to_string(),
-            description: "Context must properly manage lifetime relative to request scope".to_string(),
+            description: "Context must properly manage lifetime relative to request scope"
+                .to_string(),
             category: TestCategory::Spawn,
-            tags: vec!["structured".to_string(), "scope".to_string(), "context".to_string()],
+            tags: vec![
+                "structured".to_string(),
+                "scope".to_string(),
+                "context".to_string(),
+            ],
             expected: "Context outlives request scope without leaks".to_string(),
         },
         |rt| {
             rt.block_on(async {
-                checkpoint("Starting context scope ownership test", serde_json::json!({}));
+                checkpoint(
+                    "Starting context scope ownership test",
+                    serde_json::json!({}),
+                );
 
                 let completion_flag = Arc::new(AtomicBool::new(false));
                 let completion_flag_clone = completion_flag.clone();
@@ -102,7 +110,10 @@ pub fn sc_001_context_scope_ownership<RT: RuntimeInterface>() -> ConformanceTest
                 match result {
                     Ok(Ok(())) => {
                         if completion_flag.load(Ordering::Acquire) {
-                            checkpoint("Context scope ownership test passed", serde_json::json!({}));
+                            checkpoint(
+                                "Context scope ownership test passed",
+                                serde_json::json!({}),
+                            );
                             TestResult::passed()
                         } else {
                             TestResult::failed("Task completed but flag not set")
@@ -132,12 +143,19 @@ pub fn sc_002_context_cannot_escape_scope<RT: RuntimeInterface>() -> Conformance
             name: "Context cannot escape scope".to_string(),
             description: "Context must not be accessible outside its defining scope".to_string(),
             category: TestCategory::Spawn,
-            tags: vec!["structured".to_string(), "scope".to_string(), "context".to_string()],
+            tags: vec![
+                "structured".to_string(),
+                "scope".to_string(),
+                "context".to_string(),
+            ],
             expected: "Context cannot outlive scope boundaries".to_string(),
         },
         |rt| {
             rt.block_on(async {
-                checkpoint("Starting context escape prevention test", serde_json::json!({}));
+                checkpoint(
+                    "Starting context escape prevention test",
+                    serde_json::json!({}),
+                );
 
                 let (tx, rx) = rt.oneshot();
 
@@ -165,13 +183,16 @@ pub fn sc_002_context_cannot_escape_scope<RT: RuntimeInterface>() -> Conformance
                         // Verify the value was transmitted (showing scope was properly managed)
                         let received = rx.await.expect("Should receive value");
                         if received == 42 {
-                            checkpoint("Context escape prevention test passed", serde_json::json!({}));
+                            checkpoint(
+                                "Context escape prevention test passed",
+                                serde_json::json!({}),
+                            );
                             TestResult::passed()
                         } else {
                             TestResult::failed("Context value not preserved within scope")
                         }
                     }
-                    _ => TestResult::failed("Context scope test failed")
+                    _ => TestResult::failed("Context scope test failed"),
                 }
             })
         },
@@ -186,14 +207,22 @@ pub fn sc_003_request_drain_finalize_lifecycle<RT: RuntimeInterface>() -> Confor
         TestMeta {
             id: "sc-003".to_string(),
             name: "Request-drain-finalize lifecycle".to_string(),
-            description: "Async operations must follow proper request→drain→finalize phases".to_string(),
+            description: "Async operations must follow proper request→drain→finalize phases"
+                .to_string(),
             category: TestCategory::Spawn,
-            tags: vec!["structured".to_string(), "lifecycle".to_string(), "phases".to_string()],
+            tags: vec![
+                "structured".to_string(),
+                "lifecycle".to_string(),
+                "phases".to_string(),
+            ],
             expected: "Operations follow request→drain→finalize sequence".to_string(),
         },
         |rt| {
             rt.block_on(async {
-                checkpoint("Starting request-drain-finalize lifecycle test", serde_json::json!({}));
+                checkpoint(
+                    "Starting request-drain-finalize lifecycle test",
+                    serde_json::json!({}),
+                );
 
                 let phase_counter = Arc::new(AtomicUsize::new(0));
                 let phase_counter_clone = phase_counter.clone();
@@ -226,13 +255,19 @@ pub fn sc_003_request_drain_finalize_lifecycle<RT: RuntimeInterface>() -> Confor
                     Ok(Ok(())) => {
                         let final_phase = phase_counter.load(Ordering::Acquire);
                         if final_phase == 3 {
-                            checkpoint("Request-drain-finalize lifecycle test passed", serde_json::json!({"final_phase": final_phase}));
+                            checkpoint(
+                                "Request-drain-finalize lifecycle test passed",
+                                serde_json::json!({"final_phase": final_phase}),
+                            );
                             TestResult::passed()
                         } else {
-                            TestResult::failed(format!("Lifecycle incomplete, stopped at phase {}", final_phase))
+                            TestResult::failed(format!(
+                                "Lifecycle incomplete, stopped at phase {}",
+                                final_phase
+                            ))
                         }
                     }
-                    _ => TestResult::failed("Lifecycle test failed")
+                    _ => TestResult::failed("Lifecycle test failed"),
                 }
             })
         },
@@ -249,12 +284,19 @@ pub fn sc_004_region_close_implies_quiescence<RT: RuntimeInterface>() -> Conform
             name: "Region close implies quiescence".to_string(),
             description: "Region closure must result in quiescent state".to_string(),
             category: TestCategory::Spawn,
-            tags: vec!["structured".to_string(), "region".to_string(), "quiescence".to_string()],
+            tags: vec![
+                "structured".to_string(),
+                "region".to_string(),
+                "quiescence".to_string(),
+            ],
             expected: "Region close results in quiescent state".to_string(),
         },
         |rt| {
             rt.block_on(async {
-                checkpoint("Starting region close quiescence test", serde_json::json!({}));
+                checkpoint(
+                    "Starting region close quiescence test",
+                    serde_json::json!({}),
+                );
 
                 let active_tasks = Arc::new(AtomicUsize::new(0));
                 let region_closed = Arc::new(AtomicBool::new(false));
@@ -313,7 +355,10 @@ pub fn sc_004_region_close_implies_quiescence<RT: RuntimeInterface>() -> Conform
 
                 if all_completed && final_active == 0 {
                     let quiescence_duration = quiescence_start.elapsed();
-                    checkpoint("Quiescence achieved", serde_json::json!({"duration_ms": quiescence_duration.as_millis()}));
+                    checkpoint(
+                        "Quiescence achieved",
+                        serde_json::json!({"duration_ms": quiescence_duration.as_millis()}),
+                    );
                     TestResult::passed()
                 } else {
                     TestResult::failed(format!(
@@ -336,12 +381,19 @@ pub fn sc_005_no_obligation_leaks<RT: RuntimeInterface>() -> ConformanceTest<RT>
             name: "No obligation leaks after region close".to_string(),
             description: "Region close must not leak obligations".to_string(),
             category: TestCategory::Spawn,
-            tags: vec!["structured".to_string(), "obligations".to_string(), "leak".to_string()],
+            tags: vec![
+                "structured".to_string(),
+                "obligations".to_string(),
+                "leak".to_string(),
+            ],
             expected: "No obligation leaks after region close".to_string(),
         },
         |rt| {
             rt.block_on(async {
-                checkpoint("Starting obligation leak prevention test", serde_json::json!({}));
+                checkpoint(
+                    "Starting obligation leak prevention test",
+                    serde_json::json!({}),
+                );
 
                 let obligation_count = Arc::new(AtomicUsize::new(0));
                 let obligation_count_clone = obligation_count.clone();
@@ -351,7 +403,10 @@ pub fn sc_005_no_obligation_leaks<RT: RuntimeInterface>() -> ConformanceTest<RT>
                     // Create some obligations (simulated as reference counts)
                     for i in 0..5 {
                         obligation_count_clone.fetch_add(1, Ordering::SeqCst);
-                        checkpoint("Created obligation", serde_json::json!({"obligation_id": i}));
+                        checkpoint(
+                            "Created obligation",
+                            serde_json::json!({"obligation_id": i}),
+                        );
 
                         // Simulate async work that creates obligations
                         rt.sleep(Duration::from_millis(2)).await;
@@ -364,7 +419,10 @@ pub fn sc_005_no_obligation_leaks<RT: RuntimeInterface>() -> ConformanceTest<RT>
                     while obligation_count_clone.load(Ordering::Acquire) > 0 {
                         let current = obligation_count_clone.fetch_sub(1, Ordering::SeqCst);
                         if current > 0 {
-                            checkpoint("Cleaned obligation", serde_json::json!({"obligation_id": current - 1}));
+                            checkpoint(
+                                "Cleaned obligation",
+                                serde_json::json!({"obligation_id": current - 1}),
+                            );
                         }
                         rt.sleep(Duration::from_millis(1)).await;
                     }
@@ -385,7 +443,7 @@ pub fn sc_005_no_obligation_leaks<RT: RuntimeInterface>() -> ConformanceTest<RT>
                             TestResult::failed(format!("Leaked {} obligations", final_obligations))
                         }
                     }
-                    _ => TestResult::failed("Obligation leak test failed")
+                    _ => TestResult::failed("Obligation leak test failed"),
                 }
             })
         },
@@ -402,12 +460,19 @@ pub fn sc_006_nested_scope_ownership<RT: RuntimeInterface>() -> ConformanceTest<
             name: "Nested scope ownership laws".to_string(),
             description: "Nested scopes must maintain proper ownership hierarchy".to_string(),
             category: TestCategory::Spawn,
-            tags: vec!["structured".to_string(), "nested".to_string(), "ownership".to_string()],
+            tags: vec![
+                "structured".to_string(),
+                "nested".to_string(),
+                "ownership".to_string(),
+            ],
             expected: "Nested scopes maintain proper hierarchy".to_string(),
         },
         |rt| {
             rt.block_on(async {
-                checkpoint("Starting nested scope ownership test", serde_json::json!({}));
+                checkpoint(
+                    "Starting nested scope ownership test",
+                    serde_json::json!({}),
+                );
 
                 let outer_scope_active = Arc::new(AtomicBool::new(true));
                 let inner_scope_active = Arc::new(AtomicBool::new(false));
@@ -431,8 +496,9 @@ pub fn sc_006_nested_scope_ownership<RT: RuntimeInterface>() -> ConformanceTest<
                             inner_scope_active_clone.store(true, Ordering::Release);
 
                             // Both scopes should be active
-                            if !outer_scope_active_clone.load(Ordering::Acquire) ||
-                               !inner_scope_active_clone.load(Ordering::Acquire) {
+                            if !outer_scope_active_clone.load(Ordering::Acquire)
+                                || !inner_scope_active_clone.load(Ordering::Acquire)
+                            {
                                 return Err("Both scopes should be active");
                             }
 
@@ -443,8 +509,9 @@ pub fn sc_006_nested_scope_ownership<RT: RuntimeInterface>() -> ConformanceTest<
                         }
 
                         // Inner scope should be inactive, outer still active
-                        if !outer_scope_active_clone.load(Ordering::Acquire) ||
-                           inner_scope_active_clone.load(Ordering::Acquire) {
+                        if !outer_scope_active_clone.load(Ordering::Acquire)
+                            || inner_scope_active_clone.load(Ordering::Acquire)
+                        {
                             return Err("Incorrect scope state after inner scope exit");
                         }
 
@@ -455,8 +522,9 @@ pub fn sc_006_nested_scope_ownership<RT: RuntimeInterface>() -> ConformanceTest<
                     }
 
                     // Both scopes should be inactive
-                    if outer_scope_active_clone.load(Ordering::Acquire) ||
-                       inner_scope_active_clone.load(Ordering::Acquire) {
+                    if outer_scope_active_clone.load(Ordering::Acquire)
+                        || inner_scope_active_clone.load(Ordering::Acquire)
+                    {
                         return Err("Scopes should be inactive after exit");
                     }
 
@@ -475,8 +543,10 @@ pub fn sc_006_nested_scope_ownership<RT: RuntimeInterface>() -> ConformanceTest<
                             TestResult::failed("Test did not complete properly")
                         }
                     }
-                    Ok(Err(e)) => TestResult::failed(format!("Nested scope ownership test failed: {}", e)),
-                    Err(_) => TestResult::failed("Test timed out")
+                    Ok(Err(e)) => {
+                        TestResult::failed(format!("Nested scope ownership test failed: {}", e))
+                    }
+                    Err(_) => TestResult::failed("Test timed out"),
                 }
             })
         },
@@ -491,14 +561,22 @@ pub fn sc_007_cancel_propagation_hierarchy<RT: RuntimeInterface>() -> Conformanc
         TestMeta {
             id: "sc-007".to_string(),
             name: "Cancel propagation hierarchy".to_string(),
-            description: "Cancellation must propagate correctly through scope hierarchy".to_string(),
+            description: "Cancellation must propagate correctly through scope hierarchy"
+                .to_string(),
             category: TestCategory::Cancel,
-            tags: vec!["structured".to_string(), "cancel".to_string(), "hierarchy".to_string()],
+            tags: vec![
+                "structured".to_string(),
+                "cancel".to_string(),
+                "hierarchy".to_string(),
+            ],
             expected: "Cancellation propagates through scope hierarchy".to_string(),
         },
         |rt| {
             rt.block_on(async {
-                checkpoint("Starting cancel propagation hierarchy test", serde_json::json!({}));
+                checkpoint(
+                    "Starting cancel propagation hierarchy test",
+                    serde_json::json!({}),
+                );
 
                 let cancel_signal = Arc::new(AtomicBool::new(false));
                 let child_cancelled = Arc::new(AtomicBool::new(false));
@@ -539,7 +617,10 @@ pub fn sc_007_cancel_propagation_hierarchy<RT: RuntimeInterface>() -> Conformanc
                             Ok(())
                         }
                         _ => {
-                            checkpoint("Child task did not complete properly", serde_json::json!({}));
+                            checkpoint(
+                                "Child task did not complete properly",
+                                serde_json::json!({}),
+                            );
                             Err("Child cancellation failed")
                         }
                     }
@@ -550,14 +631,19 @@ pub fn sc_007_cancel_propagation_hierarchy<RT: RuntimeInterface>() -> Conformanc
                 match result {
                     Ok(Ok(())) => {
                         if child_cancelled.load(Ordering::Acquire) {
-                            checkpoint("Cancel propagation hierarchy test passed", serde_json::json!({}));
+                            checkpoint(
+                                "Cancel propagation hierarchy test passed",
+                                serde_json::json!({}),
+                            );
                             TestResult::passed()
                         } else {
                             TestResult::failed("Child task was not cancelled")
                         }
                     }
-                    Ok(Err(e)) => TestResult::failed(format!("Cancel propagation test failed: {}", e)),
-                    Err(_) => TestResult::failed("Test timed out")
+                    Ok(Err(e)) => {
+                        TestResult::failed(format!("Cancel propagation test failed: {}", e))
+                    }
+                    Err(_) => TestResult::failed("Test timed out"),
                 }
             })
         },
@@ -574,7 +660,11 @@ pub fn sc_008_resource_cleanup_on_scope_exit<RT: RuntimeInterface>() -> Conforma
             name: "Resource cleanup on scope exit".to_string(),
             description: "Resources must be cleaned up when scopes exit".to_string(),
             category: TestCategory::Spawn,
-            tags: vec!["structured".to_string(), "cleanup".to_string(), "resources".to_string()],
+            tags: vec![
+                "structured".to_string(),
+                "cleanup".to_string(),
+                "resources".to_string(),
+            ],
             expected: "Resources cleaned up on scope exit".to_string(),
         },
         |rt| {
@@ -601,13 +691,19 @@ pub fn sc_008_resource_cleanup_on_scope_exit<RT: RuntimeInterface>() -> Conforma
                         // Simulate work with resources
                         rt.sleep(Duration::from_millis(10)).await;
 
-                        checkpoint("Scope ending - cleaning up resources", serde_json::json!({}));
+                        checkpoint(
+                            "Scope ending - cleaning up resources",
+                            serde_json::json!({}),
+                        );
 
                         // Simulate resource cleanup (would be in Drop impl in real code)
                         while resource_count_clone.load(Ordering::Acquire) > 0 {
                             let current = resource_count_clone.fetch_sub(1, Ordering::SeqCst);
                             if current > 0 {
-                                checkpoint("Released resource", serde_json::json!({"resource_id": current - 1}));
+                                checkpoint(
+                                    "Released resource",
+                                    serde_json::json!({"resource_id": current - 1}),
+                                );
                             }
                         }
 
@@ -636,7 +732,7 @@ pub fn sc_008_resource_cleanup_on_scope_exit<RT: RuntimeInterface>() -> Conforma
                             ))
                         }
                     }
-                    _ => TestResult::failed("Resource cleanup test failed")
+                    _ => TestResult::failed("Resource cleanup test failed"),
                 }
             })
         },

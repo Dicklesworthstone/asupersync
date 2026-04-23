@@ -1884,7 +1884,8 @@ mod tests {
         let mut mutated_received = original_received.clone();
         let replaced_esi = k as u32 + repair_count - 1;
         let replacement_esi = replaced_esi + 10_000;
-        let (replacement_cols, replacement_coefs) = decoder.repair_equation(replacement_esi).unwrap();
+        let (replacement_cols, replacement_coefs) =
+            decoder.repair_equation(replacement_esi).unwrap();
         let replacement_data = encoder.repair_symbol(replacement_esi);
         let replacement = ReceivedSymbol::repair(
             replacement_esi,

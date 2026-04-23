@@ -15,7 +15,7 @@
 #![cfg(test)]
 #![cfg(feature = "cli")]
 
-use asupersync::cli::output::{OutputFormat, Output, Outputtable};
+use asupersync::cli::output::{Output, OutputFormat, Outputtable};
 use insta::assert_snapshot;
 use parking_lot::Mutex;
 use serde::Serialize;

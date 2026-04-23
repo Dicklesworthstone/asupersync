@@ -1961,29 +1961,33 @@ mod tests {
         let mut direct_abort_step_exec = FixedExecutor::new(vec![LatticeState::Aborted]);
         let direct_abort_result = executor.execute(&direct_abort_exec, &mut direct_abort_step_exec);
 
-        let short_then_a = Lattice::join(&short_result.final_state, &compensation_a_result.final_state);
-        let short_then_b = Lattice::join(&short_result.final_state, &compensation_b_result.final_state);
-        let long_then_a = Lattice::join(&long_result.final_state, &compensation_a_result.final_state);
-        let long_then_b = Lattice::join(&long_result.final_state, &compensation_b_result.final_state);
+        let short_then_a = Lattice::join(
+            &short_result.final_state,
+            &compensation_a_result.final_state,
+        );
+        let short_then_b = Lattice::join(
+            &short_result.final_state,
+            &compensation_b_result.final_state,
+        );
+        let long_then_a =
+            Lattice::join(&long_result.final_state, &compensation_a_result.final_state);
+        let long_then_b =
+            Lattice::join(&long_result.final_state, &compensation_b_result.final_state);
 
         assert_eq!(
-            short_then_a,
-            direct_abort_result.final_state,
+            short_then_a, direct_abort_result.final_state,
             "short prefix + compensation A should collapse to the direct abort terminal state"
         );
         assert_eq!(
-            short_then_b,
-            direct_abort_result.final_state,
+            short_then_b, direct_abort_result.final_state,
             "short prefix + compensation B should collapse to the direct abort terminal state"
         );
         assert_eq!(
-            long_then_a,
-            direct_abort_result.final_state,
+            long_then_a, direct_abort_result.final_state,
             "long prefix + compensation A should collapse to the direct abort terminal state"
         );
         assert_eq!(
-            long_then_b,
-            direct_abort_result.final_state,
+            long_then_b, direct_abort_result.final_state,
             "long prefix + compensation B should collapse to the direct abort terminal state"
         );
         assert_eq!(
@@ -2081,32 +2085,65 @@ mod tests {
     #[test]
     fn metamorphic_concurrent_saga_total_order() {
         // Create two sagas that operate on overlapping obligations
-        let saga_a = SagaPlan::new("saga_a", vec![
-            SagaStep::new(SagaOpKind::Reserve, "reserve_a"),
-            SagaStep::new(SagaOpKind::Send, "send_a"),
-        ]);
-        let saga_b = SagaPlan::new("saga_b", vec![
-            SagaStep::new(SagaOpKind::Reserve, "reserve_b"),
-            SagaStep::new(SagaOpKind::Acquire, "acquire_b"),
-        ]);
+        let saga_a = SagaPlan::new(
+            "saga_a",
+            vec![
+                SagaStep::new(SagaOpKind::Reserve, "reserve_a"),
+                SagaStep::new(SagaOpKind::Send, "send_a"),
+            ],
+        );
+        let saga_b = SagaPlan::new(
+            "saga_b",
+            vec![
+                SagaStep::new(SagaOpKind::Reserve, "reserve_b"),
+                SagaStep::new(SagaOpKind::Acquire, "acquire_b"),
+            ],
+        );
 
         // Test all possible interleavings
         let interleavings = vec![
             // saga_a then saga_b
-            ("sequential_a_then_b", vec![
-                ("saga_a", vec![LatticeState::Reserved, LatticeState::Reserved]),
-                ("saga_b", vec![LatticeState::Reserved, LatticeState::Reserved]),
-            ]),
+            (
+                "sequential_a_then_b",
+                vec![
+                    (
+                        "saga_a",
+                        vec![LatticeState::Reserved, LatticeState::Reserved],
+                    ),
+                    (
+                        "saga_b",
+                        vec![LatticeState::Reserved, LatticeState::Reserved],
+                    ),
+                ],
+            ),
             // saga_b then saga_a
-            ("sequential_b_then_a", vec![
-                ("saga_b", vec![LatticeState::Reserved, LatticeState::Reserved]),
-                ("saga_a", vec![LatticeState::Reserved, LatticeState::Reserved]),
-            ]),
+            (
+                "sequential_b_then_a",
+                vec![
+                    (
+                        "saga_b",
+                        vec![LatticeState::Reserved, LatticeState::Reserved],
+                    ),
+                    (
+                        "saga_a",
+                        vec![LatticeState::Reserved, LatticeState::Reserved],
+                    ),
+                ],
+            ),
             // interleaved execution
-            ("interleaved", vec![
-                ("saga_a", vec![LatticeState::Reserved, LatticeState::Reserved]),
-                ("saga_b", vec![LatticeState::Reserved, LatticeState::Reserved]),
-            ]),
+            (
+                "interleaved",
+                vec![
+                    (
+                        "saga_a",
+                        vec![LatticeState::Reserved, LatticeState::Reserved],
+                    ),
+                    (
+                        "saga_b",
+                        vec![LatticeState::Reserved, LatticeState::Reserved],
+                    ),
+                ],
+            ),
         ];
 
         let executor = MonotoneSagaExecutor::new();
@@ -2116,7 +2153,11 @@ mod tests {
             let mut combined_state = LatticeState::Unknown;
 
             for (saga_name, step_states) in saga_executions {
-                let plan = if saga_name == "saga_a" { &saga_a } else { &saga_b };
+                let plan = if saga_name == "saga_a" {
+                    &saga_a
+                } else {
+                    &saga_b
+                };
                 let exec_plan = SagaExecutionPlan::from_plan(plan);
                 let mut step_exec = FixedExecutor::new(step_states);
                 let result = executor.execute(&exec_plan, &mut step_exec);
@@ -2129,8 +2170,11 @@ mod tests {
         // MR2: All interleavings should produce the same final state
         let reference_state = final_states[0].1;
         for (interleaving_name, state) in &final_states {
-            assert_eq!(*state, reference_state,
-                "Interleaving {} produced different final state than reference", interleaving_name);
+            assert_eq!(
+                *state, reference_state,
+                "Interleaving {} produced different final state than reference",
+                interleaving_name
+            );
         }
     }
 

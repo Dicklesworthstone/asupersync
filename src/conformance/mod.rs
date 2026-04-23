@@ -786,8 +786,9 @@ mod tests {
                 .then(left.target.cmp(right.target))
         });
 
-        let mut rendered =
-            String::from("schema_version: conformance-manifest/v1\nmodule: asupersync::conformance\ncomponents:\n");
+        let mut rendered = String::from(
+            "schema_version: conformance-manifest/v1\nmodule: asupersync::conformance\ncomponents:\n",
+        );
 
         for component in &mut components {
             component

@@ -1527,11 +1527,11 @@ Connection: Upgrade\n\
 
         // Valid 16-byte keys (should succeed)
         let valid_keys = vec![
-            "dGhlIHNhbXBsZSBub25jZQ==",    // RFC 6455 example
-            "AQIDBAUGBwgJCgsMDQ4PEA==",    // Sequential bytes 0x01-0x10
-            "/////////////////////w==",    // All 0xFF bytes (16 bytes)
-            "AAAAAAAAAAAAAAAAAAAAAA==",    // All zero bytes
-            "MTIzNDU2Nzg5YWJjZGVmZw==",    // "1234567890abcdefg" (16 bytes)
+            "dGhlIHNhbXBsZSBub25jZQ==", // RFC 6455 example
+            "AQIDBAUGBwgJCgsMDQ4PEA==", // Sequential bytes 0x01-0x10
+            "/////////////////////w==", // All 0xFF bytes (16 bytes)
+            "AAAAAAAAAAAAAAAAAAAAAA==", // All zero bytes
+            "MTIzNDU2Nzg5YWJjZGVmZw==", // "1234567890abcdefg" (16 bytes)
         ];
 
         for (i, key) in valid_keys.iter().enumerate() {
@@ -2129,8 +2129,8 @@ Connection: Upgrade\n\
         // Test case 5: Verify complete successful response format.
         // Re-parse the valid request so we don't accidentally reuse the
         // unsupported-version request bound above.
-        let valid_request_for_response = HttpRequest::parse(valid_request_data.as_bytes())
-            .expect("Valid request should parse");
+        let valid_request_for_response =
+            HttpRequest::parse(valid_request_data.as_bytes()).expect("Valid request should parse");
         let accept = server
             .accept(&valid_request_for_response)
             .expect("Valid request should be accepted");

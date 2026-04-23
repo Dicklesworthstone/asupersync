@@ -708,7 +708,10 @@ mod tests {
             }
             v
         };
-        assert_eq!(normalize_json(report_a.to_json()), normalize_json(report_b.to_json()));
+        assert_eq!(
+            normalize_json(report_a.to_json()),
+            normalize_json(report_b.to_json())
+        );
 
         crate::test_complete!("harness_deterministic_across_runs");
     }

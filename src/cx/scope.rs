@@ -3203,10 +3203,7 @@ mod tests {
 
         // State should remain consistent (no orphaned tasks)
         assert!(
-            state.tasks_is_empty()
-                || state
-                    .region(region)
-                    .is_none_or(|r| r.task_ids().is_empty()),
+            state.tasks_is_empty() || state.region(region).is_none_or(|r| r.task_ids().is_empty()),
             "failed spawn must not create orphaned tasks"
         );
     }

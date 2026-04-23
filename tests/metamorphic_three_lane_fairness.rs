@@ -124,7 +124,9 @@ fn test_cancel_lane_fairness_bound(
         assert!(
             ready_count > 0,
             "ready tasks should be scheduled despite cancel pressure: cancel={}, ready={}, order={:?}",
-            cancel_count, ready_count, order
+            cancel_count,
+            ready_count,
+            order
         );
 
         // Check that ready work appears interspersed with cancel work, not blocked indefinitely
@@ -144,7 +146,10 @@ fn test_cancel_lane_fairness_bound(
             assert!(
                 spread >= order.len() / 4,
                 "ready tasks appear to be starved - insufficient temporal spread: first={}, last={}, spread={}, total={}",
-                first_ready, last_ready, spread, order.len()
+                first_ready,
+                last_ready,
+                spread,
+                order.len()
             );
         }
     }
@@ -187,10 +192,11 @@ fn test_lane_promotion_ordering(
                 .create_task(task_region, Budget::INFINITE, async move {
                     yield_now().await;
                     let timestamp = scenario as u64 * 100 + lane_idx as u64;
-                    promotion_events
-                        .lock()
-                        .unwrap()
-                        .push((lane_name.to_string(), priority, timestamp));
+                    promotion_events.lock().unwrap().push((
+                        lane_name.to_string(),
+                        priority,
+                        timestamp,
+                    ));
                 })
                 .expect("create promotion test task");
 
@@ -238,7 +244,8 @@ fn test_lane_promotion_ordering(
                 assert!(
                     priorities[i - 1] >= priorities[i],
                     "lane promotion ordering violated in scenario {}: priorities should be descending, got {:?}",
-                    scenario, priorities
+                    scenario,
+                    priorities
                 );
             }
         }
@@ -279,18 +286,21 @@ fn test_adaptive_streak_convergence(
             let (task_id, _) = runtime
                 .state
                 .create_task(task_region, Budget::INFINITE, async move {
-                // Simulate work that might trigger streak adaptation
-                for step in 0..(epoch_steps as usize / 4) {
-                    yield_now().await;
-                }
+                    // Simulate work that might trigger streak adaptation
+                    for step in 0..(epoch_steps as usize / 4) {
+                        yield_now().await;
+                    }
 
-                // Sample the current adaptive limit periodically
-                if task_type == 1 {
-                    // This is a placeholder - in real implementation we'd need access to scheduler metrics
-                    streak_samples.lock().unwrap().push(DEFAULT_CANCEL_STREAK_LIMIT);
-                }
-            })
-            .expect("create adaptive test task");
+                    // Sample the current adaptive limit periodically
+                    if task_type == 1 {
+                        // This is a placeholder - in real implementation we'd need access to scheduler metrics
+                        streak_samples
+                            .lock()
+                            .unwrap()
+                            .push(DEFAULT_CANCEL_STREAK_LIMIT);
+                    }
+                })
+                .expect("create adaptive test task");
 
             if is_cancel {
                 runtime.scheduler.lock().schedule_cancel(task_id, 200);
@@ -325,10 +335,7 @@ fn test_adaptive_streak_convergence(
     let variance = if samples.len() <= 1 {
         0.0
     } else {
-        let squared_diffs: f64 = samples
-            .iter()
-            .map(|&x| (x as f64 - mean).powi(2))
-            .sum();
+        let squared_diffs: f64 = samples.iter().map(|&x| (x as f64 - mean).powi(2)).sum();
         squared_diffs / (samples.len() - 1) as f64
     };
 
@@ -345,7 +352,9 @@ fn test_adaptive_streak_convergence(
         assert!(
             drift <= DEFAULT_CANCEL_STREAK_LIMIT as f64 / 2.0,
             "adaptive policy showing excessive drift: first_mean={:.1}, second_mean={:.1}, drift={:.1}",
-            first_mean, second_mean, drift
+            first_mean,
+            second_mean,
+            drift
         );
     }
 
@@ -424,7 +433,9 @@ fn test_cross_worker_fairness_consistency(
         assert!(
             workers_with_tasks.len() >= (worker_count / 2).max(1),
             "cross-worker fairness issue: only {} of {} workers processed tasks, events: {:?}",
-            workers_with_tasks.len(), worker_count, events
+            workers_with_tasks.len(),
+            worker_count,
+            events
         );
     }
 
@@ -446,7 +457,10 @@ fn test_cross_worker_fairness_consistency(
             assert!(
                 imbalance_ratio <= 4.0,
                 "excessive cross-worker imbalance: max={}, min={}, ratio={:.1}, distribution={:?}",
-                max_tasks, min_tasks, imbalance_ratio, tasks_per_worker_actual
+                max_tasks,
+                min_tasks,
+                imbalance_ratio,
+                tasks_per_worker_actual
             );
         }
     }
@@ -473,7 +487,14 @@ fn metamorphic_cancel_lane_fairness_bound() {
                         assert!(
                             cancel_count > 0 && ready_count > 0,
                             "fairness bound test failed: seed={}, workers={}, cancel_tasks={}, ready_tasks={}, limit={}, cancel_count={}, ready_count={}, order={:?}",
-                            seed, worker_count, cancel_tasks, ready_tasks, cancel_streak_limit, cancel_count, ready_count, order
+                            seed,
+                            worker_count,
+                            cancel_tasks,
+                            ready_tasks,
+                            cancel_streak_limit,
+                            cancel_count,
+                            ready_count,
+                            order
                         );
                     }
                 }
@@ -493,7 +514,9 @@ fn metamorphic_lane_promotion_ordering() {
                 assert!(
                     !events.is_empty(),
                     "promotion ordering test should generate events: seed={}, workers={}, scenarios={}",
-                    seed, worker_count, scenarios
+                    seed,
+                    worker_count,
+                    scenarios
                 );
 
                 // Check that we have a reasonable mix of lane types
@@ -502,7 +525,9 @@ fn metamorphic_lane_promotion_ordering() {
                 assert!(
                     lane_types.len() >= 2,
                     "promotion test should exercise multiple lane types: seed={}, workers={}, lanes={:?}",
-                    seed, worker_count, lane_types
+                    seed,
+                    worker_count,
+                    lane_types
                 );
             }
         }
@@ -523,13 +548,21 @@ fn metamorphic_adaptive_streak_convergence() {
                     assert!(
                         mean >= 1.0 && mean <= 64.0,
                         "adaptive convergence produced unreasonable mean: seed={}, workers={}, epochs={}, mean={:.1}, samples={:?}",
-                        seed, worker_count, test_epochs, mean, samples
+                        seed,
+                        worker_count,
+                        test_epochs,
+                        mean,
+                        samples
                     );
 
                     assert!(
                         variance >= 0.0 && variance <= 400.0,
                         "adaptive convergence produced unreasonable variance: seed={}, workers={}, epochs={}, variance={:.1}, samples={:?}",
-                        seed, worker_count, test_epochs, variance, samples
+                        seed,
+                        worker_count,
+                        test_epochs,
+                        variance,
+                        samples
                     );
                 }
             }
@@ -550,7 +583,9 @@ fn metamorphic_cross_worker_fairness_consistency() {
                     assert!(
                         !events.is_empty(),
                         "cross-worker consistency test should generate events: seed={}, workers={}, tasks_per_worker={}",
-                        seed, worker_count, tasks_per_worker
+                        seed,
+                        worker_count,
+                        tasks_per_worker
                     );
 
                     // Verify event format
@@ -558,7 +593,11 @@ fn metamorphic_cross_worker_fairness_consistency() {
                         assert!(
                             *worker_id < worker_count,
                             "invalid worker_id in event: worker_id={}, max={}, event=({}, {}, {})",
-                            worker_id, worker_count, worker_id, task_name, step
+                            worker_id,
+                            worker_count,
+                            worker_id,
+                            task_name,
+                            step
                         );
                     }
                 }

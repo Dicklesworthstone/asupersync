@@ -4684,7 +4684,8 @@ mod tests {
         };
 
         assert_eq!(
-            normalize(json_a), normalize(json_b),
+            normalize(json_a),
+            normalize(json_b),
             "same seed must produce identical JSON (mod sequential event_hash)",
         );
 

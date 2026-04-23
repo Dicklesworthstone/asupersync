@@ -899,7 +899,10 @@ mod tests {
         // deadlock because the leader is still captive inside its resolver.
         let waiter_deadline = std::time::Instant::now() + Duration::from_secs(5);
         while discovery.waiter_count() < 1 {
-            assert!(std::time::Instant::now() <= waiter_deadline, "follower never parked on resolve_done within 5s");
+            assert!(
+                std::time::Instant::now() <= waiter_deadline,
+                "follower never parked on resolve_done within 5s"
+            );
             thread::yield_now();
         }
 
@@ -974,7 +977,10 @@ mod tests {
         // and invoke the resolver a second time (panicking the test).
         let waiter_deadline = std::time::Instant::now() + Duration::from_secs(5);
         while discovery.waiter_count() < 1 {
-            assert!(std::time::Instant::now() <= waiter_deadline, "follower never parked on resolve_done within 5s");
+            assert!(
+                std::time::Instant::now() <= waiter_deadline,
+                "follower never parked on resolve_done within 5s"
+            );
             thread::yield_now();
         }
 
@@ -1344,9 +1350,7 @@ mod tests {
                                 .expect("wait for completion signal");
                             Ok(socket_set(&["10.0.0.1:80"]))
                         }
-                        other => panic!(
-                            "coalesced follower must not start resolver call {other}",
-                        ),
+                        other => panic!("coalesced follower must not start resolver call {other}",),
                     }
                 }),
         ));
@@ -1378,7 +1382,10 @@ mod tests {
 
         let waiter_deadline = std::time::Instant::now() + Duration::from_secs(5);
         while discovery.waiter_count() < 1 {
-            assert!(std::time::Instant::now() <= waiter_deadline, "follower never parked on resolve_done within 5s");
+            assert!(
+                std::time::Instant::now() <= waiter_deadline,
+                "follower never parked on resolve_done within 5s"
+            );
             thread::yield_now();
         }
 
@@ -1547,7 +1554,8 @@ mod tests {
         // Wait until every follower has parked before releasing the leader.
         let waiter_deadline = std::time::Instant::now() + Duration::from_secs(5);
         while discovery.waiter_count() < 4 {
-            assert!(std::time::Instant::now() <= waiter_deadline, 
+            assert!(
+                std::time::Instant::now() <= waiter_deadline,
                 "only {} follower(s) parked on resolve_done within 5s",
                 discovery.waiter_count()
             );
@@ -1797,7 +1805,8 @@ mod tests {
 
         let waiter_deadline = std::time::Instant::now() + Duration::from_secs(5);
         while discovery.waiter_count() < 4 {
-            assert!(std::time::Instant::now() <= waiter_deadline, 
+            assert!(
+                std::time::Instant::now() <= waiter_deadline,
                 "only {} follower(s) parked on resolve_done within 5s",
                 discovery.waiter_count()
             );
@@ -1824,7 +1833,10 @@ mod tests {
         } else {
             successful_results += 1;
             assert_eq!(leader_changes.len(), 1);
-            assert_eq!(leader_changes[0], Change::Insert("10.0.0.1:80".parse().unwrap()));
+            assert_eq!(
+                leader_changes[0],
+                Change::Insert("10.0.0.1:80".parse().unwrap())
+            );
         }
 
         for worker in follower_workers {

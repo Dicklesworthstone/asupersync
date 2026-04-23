@@ -93,10 +93,10 @@ impl HeapTestHarness {
 
     /// Verify all heap invariants
     fn verify_all_invariants(&self) -> bool {
-        self.verify_heap_property() &&
-        self.verify_index_consistency() &&
-        self.verify_membership_invariant() &&
-        self.verify_priority_preservation()
+        self.verify_heap_property()
+            && self.verify_index_consistency()
+            && self.verify_membership_invariant()
+            && self.verify_priority_preservation()
     }
 
     /// MR1: Heap Property Invariant - max-heap structure
@@ -111,7 +111,12 @@ impl HeapTestHarness {
         for (_, record) in self.arena.iter() {
             if let Some(heap_idx) = record.heap_index {
                 if (heap_idx as usize) < self.heap.len() {
-                    heap_tasks.push((heap_idx as usize, record.id, record.sched_priority, record.sched_generation));
+                    heap_tasks.push((
+                        heap_idx as usize,
+                        record.id,
+                        record.sched_priority,
+                        record.sched_generation,
+                    ));
                 }
             }
         }
@@ -120,20 +125,28 @@ impl HeapTestHarness {
         heap_tasks.sort_by_key(|&(pos, _, _, _)| pos);
 
         for &(pos, _task, child_priority, child_generation) in &heap_tasks {
-            if pos == 0 { continue; } // root has no parent
+            if pos == 0 {
+                continue;
+            } // root has no parent
 
             let parent_pos = (pos - 1) / 2;
-            if let Some(&(_, _, parent_priority, parent_generation)) = heap_tasks.iter().find(|&&(p, _, _, _)| p == parent_pos) {
+            if let Some(&(_, _, parent_priority, parent_generation)) =
+                heap_tasks.iter().find(|&&(p, _, _, _)| p == parent_pos)
+            {
                 if parent_priority < child_priority {
-                    eprintln!("Heap property violated: parent[{}] priority {} < child[{}] priority {}",
-                             parent_pos, parent_priority, pos, child_priority);
+                    eprintln!(
+                        "Heap property violated: parent[{}] priority {} < child[{}] priority {}",
+                        parent_pos, parent_priority, pos, child_priority
+                    );
                     return false;
                 }
 
                 // For equal priorities, check FIFO ordering (earlier generation)
                 if parent_priority == child_priority && parent_generation > child_generation {
-                    eprintln!("FIFO ordering violated: parent gen {} > child gen {}",
-                             parent_generation, child_generation);
+                    eprintln!(
+                        "FIFO ordering violated: parent gen {} > child gen {}",
+                        parent_generation, child_generation
+                    );
                     return false;
                 }
             }
@@ -149,15 +162,21 @@ impl HeapTestHarness {
             if let Some(heap_idx) = record.heap_index {
                 let task = record.id;
                 if !self.heap.contains(task, &self.arena) {
-                    eprintln!("Index inconsistency: task {:?} has heap_index {} but contains() returns false",
-                             task, heap_idx);
+                    eprintln!(
+                        "Index inconsistency: task {:?} has heap_index {} but contains() returns false",
+                        task, heap_idx
+                    );
                     return false;
                 }
 
                 // Verify heap_index is within bounds
                 if heap_idx as usize >= self.heap.len() {
-                    eprintln!("Index inconsistency: task {:?} has heap_index {} >= heap.len() {}",
-                             task, heap_idx, self.heap.len());
+                    eprintln!(
+                        "Index inconsistency: task {:?} has heap_index {} >= heap.len() {}",
+                        task,
+                        heap_idx,
+                        self.heap.len()
+                    );
                     return false;
                 }
             }
@@ -174,8 +193,10 @@ impl HeapTestHarness {
             let has_index = record.heap_index.is_some();
 
             if in_heap != has_index {
-                eprintln!("Membership inconsistency: task {:?} in_heap={} has_index={}",
-                         task, in_heap, has_index);
+                eprintln!(
+                    "Membership inconsistency: task {:?} in_heap={} has_index={}",
+                    task, in_heap, has_index
+                );
                 return false;
             }
         }
@@ -205,14 +226,15 @@ impl HeapTestHarness {
         // Check that no task in heap has higher priority than root
         for (_, record) in self.arena.iter() {
             if record.heap_index.is_some() && record.sched_priority > root_priority {
-                eprintln!("Priority violation: task {:?} has priority {} > root priority {}",
-                         record.id, record.sched_priority, root_priority);
+                eprintln!(
+                    "Priority violation: task {:?} has priority {} > root priority {}",
+                    record.id, record.sched_priority, root_priority
+                );
                 return false;
             }
         }
         true
     }
-
 }
 
 // MR1: Heap Property Invariant
@@ -228,13 +250,22 @@ fn mr_heap_property_invariant() {
     harness.push_task(3, 5);
     harness.push_task(4, 1);
 
-    assert!(harness.verify_heap_property(), "Heap property should hold after pushes");
+    assert!(
+        harness.verify_heap_property(),
+        "Heap property should hold after pushes"
+    );
 
     harness.pop_task();
-    assert!(harness.verify_heap_property(), "Heap property should hold after pop");
+    assert!(
+        harness.verify_heap_property(),
+        "Heap property should hold after pop"
+    );
 
     harness.remove_task(1);
-    assert!(harness.verify_heap_property(), "Heap property should hold after remove");
+    assert!(
+        harness.verify_heap_property(),
+        "Heap property should hold after remove"
+    );
 }
 
 // MR2: Index Consistency
@@ -248,16 +279,25 @@ fn mr_index_consistency() {
         harness.push_task(i, (i % 4) as u8);
     }
 
-    assert!(harness.verify_index_consistency(), "Index consistency after pushes");
+    assert!(
+        harness.verify_index_consistency(),
+        "Index consistency after pushes"
+    );
 
     // Remove middle element
     harness.remove_task(2);
-    assert!(harness.verify_index_consistency(), "Index consistency after remove");
+    assert!(
+        harness.verify_index_consistency(),
+        "Index consistency after remove"
+    );
 
     // Pop some elements
     harness.pop_task();
     harness.pop_task();
-    assert!(harness.verify_index_consistency(), "Index consistency after pops");
+    assert!(
+        harness.verify_index_consistency(),
+        "Index consistency after pops"
+    );
 }
 
 // MR3: Membership Invariant
@@ -267,22 +307,34 @@ fn mr_membership_invariant() {
     let mut harness = HeapTestHarness::new(6);
 
     // Initially all tasks should have heap_index = None
-    assert!(harness.verify_membership_invariant(), "Initial membership state");
+    assert!(
+        harness.verify_membership_invariant(),
+        "Initial membership state"
+    );
 
     // Add some tasks
     harness.push_task(0, 5);
     harness.push_task(2, 3);
     harness.push_task(4, 7);
 
-    assert!(harness.verify_membership_invariant(), "Membership after selective pushes");
+    assert!(
+        harness.verify_membership_invariant(),
+        "Membership after selective pushes"
+    );
 
     // Remove one
     harness.remove_task(2);
-    assert!(harness.verify_membership_invariant(), "Membership after remove");
+    assert!(
+        harness.verify_membership_invariant(),
+        "Membership after remove"
+    );
 
     // Pop one
     harness.pop_task();
-    assert!(harness.verify_membership_invariant(), "Membership after pop");
+    assert!(
+        harness.verify_membership_invariant(),
+        "Membership after pop"
+    );
 }
 
 // MR4: Priority Preservation
@@ -293,16 +345,22 @@ fn mr_priority_preservation() {
 
     // Add tasks with various priorities
     harness.push_task(0, 3);
-    harness.push_task(1, 7);  // Highest
+    harness.push_task(1, 7); // Highest
     harness.push_task(2, 5);
-    harness.push_task(3, 7);  // Also highest
+    harness.push_task(3, 7); // Also highest
 
-    assert!(harness.verify_priority_preservation(), "Priority preservation after pushes");
+    assert!(
+        harness.verify_priority_preservation(),
+        "Priority preservation after pushes"
+    );
 
     // Pop highest
     let popped = harness.pop_task();
     assert!(popped.is_some());
-    assert!(harness.verify_priority_preservation(), "Priority preservation after pop");
+    assert!(
+        harness.verify_priority_preservation(),
+        "Priority preservation after pop"
+    );
 }
 
 // MR5: Combined Operations Invariant
@@ -312,15 +370,17 @@ fn mr_combined_operations_invariant() {
     let mut harness = HeapTestHarness::new(12);
 
     // Complex sequence of operations
-    let operations = vec![
-        (0, 5), (1, 3), (2, 7), (3, 5), (4, 1), (5, 8), (6, 5)
-    ];
+    let operations = vec![(0, 5), (1, 3), (2, 7), (3, 5), (4, 1), (5, 8), (6, 5)];
 
     // Push all
     for (id, priority) in operations {
         harness.push_task(id, priority);
-        assert!(harness.verify_all_invariants(),
-               "All invariants after push task {} with priority {}", id, priority);
+        assert!(
+            harness.verify_all_invariants(),
+            "All invariants after push task {} with priority {}",
+            id,
+            priority
+        );
     }
 
     // Pop a few
@@ -331,19 +391,31 @@ fn mr_combined_operations_invariant() {
 
     // Remove specific tasks
     harness.remove_task(3);
-    assert!(harness.verify_all_invariants(), "All invariants after remove");
+    assert!(
+        harness.verify_all_invariants(),
+        "All invariants after remove"
+    );
 
     harness.remove_task(0);
-    assert!(harness.verify_all_invariants(), "All invariants after remove");
+    assert!(
+        harness.verify_all_invariants(),
+        "All invariants after remove"
+    );
 
     // Add more tasks
     harness.push_task(7, 6);
     harness.push_task(8, 2);
-    assert!(harness.verify_all_invariants(), "All invariants after additional pushes");
+    assert!(
+        harness.verify_all_invariants(),
+        "All invariants after additional pushes"
+    );
 
     // Pop remaining
     while harness.pop_task().is_some() {
-        assert!(harness.verify_all_invariants(), "All invariants during final pops");
+        assert!(
+            harness.verify_all_invariants(),
+            "All invariants during final pops"
+        );
     }
 }
 
@@ -359,11 +431,18 @@ fn mr_fifo_order_within_priority() {
     harness.push_task(2, 5);
     harness.push_task(3, 5);
 
-    assert!(harness.verify_all_invariants(), "Invariants with same priority tasks");
+    assert!(
+        harness.verify_all_invariants(),
+        "Invariants with same priority tasks"
+    );
 
     // Pop them - should come out in FIFO order for same priority
     let popped = harness.pop_task().unwrap();
-    assert_eq!(popped, harness.task(0), "First pushed should be first popped for same priority");
+    assert_eq!(
+        popped,
+        harness.task(0),
+        "First pushed should be first popped for same priority"
+    );
 }
 
 #[test]

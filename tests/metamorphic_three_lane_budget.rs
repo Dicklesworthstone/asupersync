@@ -97,15 +97,15 @@ impl BudgetTestHarness {
         // Cancel tasks (highest priority)
         for i in 0..count_per_lane {
             let task_id = TaskId::new_for_test(base_id + i as u32, 0);
-            self.scheduler.inject_cancel(task_id, (100 + i as u32) as u8);
+            self.scheduler
+                .inject_cancel(task_id, (100 + i as u32) as u8);
         }
 
         // Timed tasks (medium priority)
         for i in 0..count_per_lane {
             let task_id = TaskId::new_for_test(base_id + count_per_lane as u32 + i as u32, 1);
             // Schedule for immediate deadline to make them runnable
-            self.scheduler
-                .inject_timed(task_id, Time::ZERO);
+            self.scheduler.inject_timed(task_id, Time::ZERO);
         }
 
         // Ready tasks (lower priority)
@@ -119,7 +119,8 @@ impl BudgetTestHarness {
     fn inject_cancel_pressure(&mut self, count: usize, base_id: u32) {
         for i in 0..count {
             let task_id = TaskId::new_for_test(base_id + i as u32, 0);
-            self.scheduler.inject_cancel(task_id, (200 + i as u32) as u8);
+            self.scheduler
+                .inject_cancel(task_id, (200 + i as u32) as u8);
         }
     }
 

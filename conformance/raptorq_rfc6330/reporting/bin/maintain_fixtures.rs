@@ -2,8 +2,8 @@
 //!
 //! Automated fixture maintenance, version tracking, and regeneration workflows.
 
-use std::fs;
 use clap::{Arg, ArgAction, Command};
+use std::fs;
 
 fn main() {
     let matches = Command::new("maintain_fixtures")
@@ -14,20 +14,20 @@ fn main() {
             Arg::new("check-versions")
                 .long("check-versions")
                 .action(ArgAction::SetTrue)
-                .help("Check reference implementation versions")
+                .help("Check reference implementation versions"),
         )
         .arg(
             Arg::new("regenerate")
                 .short('r')
                 .long("regenerate")
                 .value_name("REFERENCE")
-                .help("Regenerate fixtures for specific reference implementation")
+                .help("Regenerate fixtures for specific reference implementation"),
         )
         .arg(
             Arg::new("dry-run")
                 .long("dry-run")
                 .action(ArgAction::SetTrue)
-                .help("Show what would be done without executing")
+                .help("Show what would be done without executing"),
         )
         .arg(
             Arg::new("config")
@@ -35,7 +35,7 @@ fn main() {
                 .long("config")
                 .value_name("FILE")
                 .help("Maintenance configuration file")
-                .default_value("maintenance_config.json")
+                .default_value("maintenance_config.json"),
         )
         .get_matches();
 
@@ -111,7 +111,10 @@ fn check_reference_versions() -> Result<Vec<(String, String)>, Box<dyn std::erro
 }
 
 /// Regenerate test fixtures for specified reference implementation
-fn regenerate_fixtures(reference: &str, dry_run: bool) -> Result<usize, Box<dyn std::error::Error>> {
+fn regenerate_fixtures(
+    reference: &str,
+    dry_run: bool,
+) -> Result<usize, Box<dyn std::error::Error>> {
     let fixture_dirs = [
         "tests/conformance/raptorq_rfc6330/golden/fixtures",
         "tests/conformance/raptorq_rfc6330/differential/fixtures",
@@ -124,13 +127,19 @@ fn regenerate_fixtures(reference: &str, dry_run: bool) -> Result<usize, Box<dyn 
             Ok(count) => {
                 total_count += count;
                 if dry_run {
-                    println!("DRY RUN: Would regenerate {} fixtures in {}", count, fixture_dir);
+                    println!(
+                        "DRY RUN: Would regenerate {} fixtures in {}",
+                        count, fixture_dir
+                    );
                 } else {
                     println!("Regenerated {} fixtures in {}", count, fixture_dir);
                 }
             }
             Err(e) => {
-                eprintln!("Warning: Failed to regenerate fixtures in {}: {}", fixture_dir, e);
+                eprintln!(
+                    "Warning: Failed to regenerate fixtures in {}: {}",
+                    fixture_dir, e
+                );
             }
         }
     }
@@ -139,7 +148,11 @@ fn regenerate_fixtures(reference: &str, dry_run: bool) -> Result<usize, Box<dyn 
 }
 
 /// Regenerate fixtures in a specific directory
-fn regenerate_fixture_directory(reference: &str, dir: &str, dry_run: bool) -> Result<usize, Box<dyn std::error::Error>> {
+fn regenerate_fixture_directory(
+    reference: &str,
+    dir: &str,
+    dry_run: bool,
+) -> Result<usize, Box<dyn std::error::Error>> {
     // Create directory if it doesn't exist
     if !dry_run {
         fs::create_dir_all(dir)?;
@@ -147,10 +160,10 @@ fn regenerate_fixture_directory(reference: &str, dir: &str, dry_run: bool) -> Re
 
     // Generate fixture count based on reference type
     let fixture_count = match reference {
-        "golden" => 5,      // Basic golden test cases
+        "golden" => 5,       // Basic golden test cases
         "differential" => 3, // Comparison test cases
-        "rfc6330" => 10,    // RFC compliance test cases
-        "all" => 18,        // All fixture types
+        "rfc6330" => 10,     // RFC compliance test cases
+        "all" => 18,         // All fixture types
         _ => {
             return Err(format!("Unknown reference implementation: {}", reference).into());
         }
@@ -190,9 +203,7 @@ fn get_git_version() -> Result<String, Box<dyn std::error::Error>> {
 fn get_cargo_version() -> Result<String, Box<dyn std::error::Error>> {
     use std::process::Command;
 
-    let output = Command::new("cargo")
-        .args(&["pkgid"])
-        .output()?;
+    let output = Command::new("cargo").args(&["pkgid"]).output()?;
 
     if output.status.success() {
         let pkgid = String::from_utf8_lossy(&output.stdout);

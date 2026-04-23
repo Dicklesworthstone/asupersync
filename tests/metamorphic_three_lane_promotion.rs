@@ -85,8 +85,7 @@ impl PromotionTestHarness {
             let task_id = TaskId::new_for_test(base_id + count_per_lane as u32 + i as u32, 1);
             let priority = 75 + i as u32;
             let deadline = self.base_time.saturating_add_nanos((i as u64 + 1) * 100); // staggered every 100ns
-            self.scheduler
-                .inject_timed(task_id, deadline);
+            self.scheduler.inject_timed(task_id, deadline);
             task_set
                 .timed_tasks
                 .push((task_id, priority as u8, deadline));

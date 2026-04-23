@@ -5,7 +5,7 @@
 
 #![cfg(feature = "postgres")]
 
-use asupersync::database::postgres::{PgColumn, PgValue, PgError, oid};
+use asupersync::database::postgres::{PgColumn, PgError, PgValue, oid};
 
 /// Simulated query execution result for testing log formatting.
 #[derive(Debug)]
@@ -83,8 +83,12 @@ fn format_pg_value(value: &PgValue) -> String {
         PgValue::Float4(f) => f.to_string(),
         PgValue::Float8(f) => f.to_string(),
         PgValue::Text(s) => format!("\"{}\"", s),
-        PgValue::Bytes(b) => format!("\\x{}",
-            b.iter().map(|byte| format!("{:02x}", byte)).collect::<String>()),
+        PgValue::Bytes(b) => format!(
+            "\\x{}",
+            b.iter()
+                .map(|byte| format!("{:02x}", byte))
+                .collect::<String>()
+        ),
     }
 }
 
@@ -191,7 +195,8 @@ fn test_query_execution_log_constraint_violation() {
         elapsed_ms: 8,
         error: Some(PgError::Server {
             code: "23505".to_string(),
-            message: "duplicate key value violates unique constraint \"users_email_key\"".to_string(),
+            message: "duplicate key value violates unique constraint \"users_email_key\""
+                .to_string(),
             detail: Some("Key (email)=(alice@example.com) already exists.".to_string()),
             hint: None,
         }),
@@ -206,21 +211,20 @@ fn test_query_execution_log_mixed_data_types() {
     // Test logging with various PostgreSQL data types
     let result = QueryExecutionResult {
         query_id: 12349,
-        sql: "SELECT id, metadata, binary_data, created_at FROM documents WHERE id = $1".to_string(),
+        sql: "SELECT id, metadata, binary_data, created_at FROM documents WHERE id = $1"
+            .to_string(),
         columns: vec![
             create_test_column("id", oid::INT8, 1),
             create_test_column("metadata", oid::JSONB, 2),
             create_test_column("binary_data", oid::BYTEA, 3),
             create_test_column("created_at", oid::TIMESTAMPTZ, 4),
         ],
-        rows: vec![
-            vec![
-                PgValue::Int8(9876543210),
-                PgValue::Text("{\"tags\": [\"important\", \"urgent\"]}".to_string()),
-                PgValue::Bytes(vec![0xFF, 0x00, 0xAB, 0xCD]),
-                PgValue::Text("2024-03-15 14:30:00+00".to_string()),
-            ],
-        ],
+        rows: vec![vec![
+            PgValue::Int8(9876543210),
+            PgValue::Text("{\"tags\": [\"important\", \"urgent\"]}".to_string()),
+            PgValue::Bytes(vec![0xFF, 0x00, 0xAB, 0xCD]),
+            PgValue::Text("2024-03-15 14:30:00+00".to_string()),
+        ]],
         elapsed_ms: 23,
         error: None,
     };

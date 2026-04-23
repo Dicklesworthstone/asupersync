@@ -2610,7 +2610,7 @@ mod tests {
         // until the terminal `Closed` signal is observed.
         let mid_close_result = loop {
             match block_on(rx_mid.recv(&cx)) {
-                Ok(_) => continue,               // Consume any buffered messages
+                Ok(_) => continue,                     // Consume any buffered messages
                 Err(RecvError::Lagged(_)) => continue, // Acknowledge lag and retry
                 Err(e) => break e,
             }

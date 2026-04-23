@@ -53,7 +53,10 @@ mod regression_tests {
             .expect("encode empty failed");
         assert!(empty_buf.is_empty());
         assert!(
-            codec.decode(&mut empty_buf).expect("decode empty").is_none(),
+            codec
+                .decode(&mut empty_buf)
+                .expect("decode empty")
+                .is_none(),
             "decoding an empty buffer must return None"
         );
     }
@@ -88,7 +91,10 @@ mod regression_tests {
         let mut cr_codec = LinesCodec::new();
         let mut cr_src = BytesMut::from("old_mac\r");
         assert!(
-            cr_codec.decode(&mut cr_src).expect("cr-only decode").is_none(),
+            cr_codec
+                .decode(&mut cr_src)
+                .expect("cr-only decode")
+                .is_none(),
             "CR-only input has no frame terminator"
         );
     }

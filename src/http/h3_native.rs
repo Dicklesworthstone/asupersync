@@ -389,10 +389,8 @@ impl H3Frame {
         if frame_type == H3_FRAME_DATAGRAM {
             let available = input.len().saturating_sub(payload_start);
             let bounded_payload = &input[payload_start..payload_start + available.min(len)];
-            let (quarter_stream_id, n) =
-                decode_varint(bounded_payload).map_err(|_| {
-                    H3NativeError::InvalidFrame("quarter stream id varint")
-                })?;
+            let (quarter_stream_id, n) = decode_varint(bounded_payload)
+                .map_err(|_| H3NativeError::InvalidFrame("quarter stream id varint"))?;
             if available < len {
                 return Err(H3NativeError::InvalidFrame("insufficient frame payload"));
             }

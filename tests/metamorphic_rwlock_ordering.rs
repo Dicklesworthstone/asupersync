@@ -18,8 +18,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::Duration;
@@ -71,7 +71,10 @@ fn read_blocking<'a, T>(lock: &'a RwLock<T>, cx: &Cx) -> asupersync::sync::RwLoc
     poll_until_ready(lock.read(cx)).expect("read failed")
 }
 
-fn write_blocking<'a, T>(lock: &'a RwLock<T>, cx: &Cx) -> asupersync::sync::RwLockWriteGuard<'a, T> {
+fn write_blocking<'a, T>(
+    lock: &'a RwLock<T>,
+    cx: &Cx,
+) -> asupersync::sync::RwLockWriteGuard<'a, T> {
     poll_until_ready(lock.write(cx)).expect("write failed")
 }
 
@@ -140,7 +143,10 @@ fn mr_mutual_exclusion() {
             let guard = read_blocking(&lock, &cx);
 
             // Assert no writer is active
-            assert!(!writer_active.load(Ordering::SeqCst), "Writer active while reader holds lock");
+            assert!(
+                !writer_active.load(Ordering::SeqCst),
+                "Writer active while reader holds lock"
+            );
 
             reader_active.store(true, Ordering::SeqCst);
             counter.fetch_add(1, Ordering::SeqCst);
@@ -163,14 +169,20 @@ fn mr_mutual_exclusion() {
             let mut guard = write_blocking(&lock, &cx);
 
             // Assert no readers are active
-            assert!(!reader_active.load(Ordering::SeqCst), "Readers active while writer holds lock");
-            assert!(!writer_active.swap(true, Ordering::SeqCst), "Multiple writers active");
+            assert!(
+                !reader_active.load(Ordering::SeqCst),
+                "Readers active while writer holds lock"
+            );
+            assert!(
+                !writer_active.swap(true, Ordering::SeqCst),
+                "Multiple writers active"
+            );
 
             *guard = i as i32;
             thread::sleep(Duration::from_millis(1));
 
             writer_active.store(false, Ordering::SeqCst);
-            0_i32  // Return same type as readers
+            0_i32 // Return same type as readers
         });
         handles.push(handle);
     }
@@ -180,7 +192,10 @@ fn mr_mutual_exclusion() {
         handle.join().unwrap();
     }
 
-    assert!(counter.load(Ordering::SeqCst) >= 4, "All readers should complete");
+    assert!(
+        counter.load(Ordering::SeqCst) >= 4,
+        "All readers should complete"
+    );
 }
 
 // MR3: Reader Concurrency
@@ -209,7 +224,12 @@ fn mr_reader_concurrency_when_no_writers() {
             let current = concurrent_readers.fetch_add(1, Ordering::SeqCst) + 1;
             let mut max = max_concurrent.load(Ordering::SeqCst);
             while max < current {
-                match max_concurrent.compare_exchange_weak(max, current, Ordering::SeqCst, Ordering::SeqCst) {
+                match max_concurrent.compare_exchange_weak(
+                    max,
+                    current,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
                     Ok(_) => break,
                     Err(actual) => max = actual,
                 }
@@ -234,9 +254,11 @@ fn mr_reader_concurrency_when_no_writers() {
     assert!(results.iter().all(|&x| x == 42));
 
     // Multiple readers should have been concurrent
-    assert!(max_concurrent.load(Ordering::SeqCst) >= 2,
-           "Multiple readers should be concurrent, got max: {}",
-           max_concurrent.load(Ordering::SeqCst));
+    assert!(
+        max_concurrent.load(Ordering::SeqCst) >= 2,
+        "Multiple readers should be concurrent, got max: {}",
+        max_concurrent.load(Ordering::SeqCst)
+    );
 }
 
 // MR4: Temporal Consistency
@@ -277,7 +299,11 @@ fn mr_temporal_consistency_no_deadlock() {
         handle.join().unwrap();
     }
 
-    assert_eq!(completed_ops.load(Ordering::SeqCst), 10, "All operations should complete");
+    assert_eq!(
+        completed_ops.load(Ordering::SeqCst),
+        10,
+        "All operations should complete"
+    );
 }
 
 // MR5: State Invariant
@@ -328,7 +354,11 @@ fn mr_state_consistency_under_concurrency() {
     let final_value = *final_guard;
 
     assert!(final_value >= 100, "Final value should be >= initial value");
-    assert_eq!(operations.load(Ordering::SeqCst), 8 * 5, "All operations should complete");
+    assert_eq!(
+        operations.load(Ordering::SeqCst),
+        8 * 5,
+        "All operations should complete"
+    );
 }
 
 #[test]

@@ -1207,10 +1207,7 @@ mod validation_tests {
         let minimal_drain_end = std::cmp::min(4, minimal_erasures.len());
         let minimal_drain_start = std::cmp::min(2, minimal_drain_end);
         minimal_erasures.drain(minimal_drain_start..minimal_drain_end);
-        let minimal_take = std::cmp::min(
-            minimal_erasures.len(),
-            original_count.saturating_sub(2),
-        );
+        let minimal_take = std::cmp::min(minimal_erasures.len(), original_count.saturating_sub(2));
         let minimal_received = symbols_to_received(&minimal_erasures[..minimal_take], k);
 
         // More erasures.

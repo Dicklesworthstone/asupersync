@@ -84,7 +84,8 @@ impl StarvationTestHarness {
         for i in 0..count {
             let task_id = TaskId::new_for_test(start_id + i as u32, 0);
             // High priority cancel tasks
-            self.scheduler.inject_cancel(task_id, (100 + i as u32) as u8);
+            self.scheduler
+                .inject_cancel(task_id, (100 + i as u32) as u8);
             cancel_tasks.push(task_id);
         }
         cancel_tasks
