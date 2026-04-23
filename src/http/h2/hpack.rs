@@ -881,6 +881,7 @@ fn validate_header_value(value: &str) -> Result<(), H2Error> {
     Ok(())
 }
 
+#[cfg(test)]
 fn decode_string(src: &mut Bytes) -> Result<String, H2Error> {
     decode_string_bounded(src, MAX_STRING_LENGTH)
 }
