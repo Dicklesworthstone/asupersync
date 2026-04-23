@@ -382,7 +382,6 @@ impl AdaptiveCancelStreakPolicy {
     fn e_value(&self) -> f64 {
         self.e_process_log.clamp(-60.0, 60.0).exp()
     }
-
 }
 
 /// Coordination for waking workers.
@@ -567,8 +566,16 @@ pub(crate) fn current_worker_id() -> Option<WorkerId> {
 }
 
 fn has_trapped_scc(adjacency: &[Vec<usize>]) -> bool {
-    struct Tarjan<'a> {
+    has_trapped_scc_with_edge_observer(adjacency, |_, _| {})
+}
+
+fn has_trapped_scc_with_edge_observer<F>(adjacency: &[Vec<usize>], mut observe_edge: F) -> bool
+where
+    F: FnMut(usize, usize),
+{
+    struct Tarjan<'a, F> {
         adjacency: &'a [Vec<usize>],
+        observe_edge: &'a mut F,
         index: usize,
         stack: Vec<usize>,
         on_stack: Vec<bool>,
@@ -577,8 +584,12 @@ fn has_trapped_scc(adjacency: &[Vec<usize>]) -> bool {
         trapped: bool,
     }
 
-    impl Tarjan<'_> {
+    impl<F: FnMut(usize, usize)> Tarjan<'_, F> {
         fn strongconnect(&mut self, v: usize) {
+            if self.trapped {
+                return;
+            }
+
             self.indices[v] = Some(self.index);
             self.lowlink[v] = self.index;
             self.index += 1;
@@ -586,8 +597,17 @@ fn has_trapped_scc(adjacency: &[Vec<usize>]) -> bool {
             self.on_stack[v] = true;
 
             for &w in &self.adjacency[v] {
+                if self.trapped {
+                    return;
+                }
+
+                (self.observe_edge)(v, w);
+
                 if self.indices[w].is_none() {
                     self.strongconnect(w);
+                    if self.trapped {
+                        return;
+                    }
                     self.lowlink[v] = self.lowlink[v].min(self.lowlink[w]);
                 } else if self.on_stack[w] {
                     self.lowlink[v] = self.lowlink[v].min(self.indices[w].unwrap_or(usize::MAX));
@@ -628,6 +648,7 @@ fn has_trapped_scc(adjacency: &[Vec<usize>]) -> bool {
     let n = adjacency.len();
     let mut tarjan = Tarjan {
         adjacency,
+        observe_edge: &mut observe_edge,
         index: 0,
         stack: Vec::new(),
         on_stack: vec![false; n],
@@ -6646,6 +6667,26 @@ mod tests {
     }
 
     #[test]
+    fn trapped_scc_detection_short_circuits_remaining_sibling_branches() {
+        let adjacency = vec![vec![1, 3, 4], vec![2], vec![1], vec![5], vec![], vec![]];
+        let mut visited_edges = Vec::new();
+
+        let trapped = has_trapped_scc_with_edge_observer(&adjacency, |from, to| {
+            visited_edges.push((from, to));
+        });
+
+        assert!(
+            trapped,
+            "the cycle rooted under the first child should still be detected as trapped"
+        );
+        assert_eq!(
+            visited_edges,
+            vec![(0, 1), (1, 2), (2, 1)],
+            "once a trapped SCC is found, Tarjan should stop scanning sibling branches"
+        );
+    }
+
+    #[test]
     fn test_governor_meet_deadlines_dispatches_timed_first() {
         use crate::time::{TimerDriverHandle, VirtualClock};
 
@@ -9546,7 +9587,8 @@ mod tests {
             assert!(
                 (first_weights[i] - 1.0).abs() < 0.001,
                 "Initial weight {} should be 1.0, got {}",
-                i, first_weights[i]
+                i,
+                first_weights[i]
             );
         }
 
@@ -9623,7 +9665,11 @@ mod tests {
         let worker = &mut scheduler.workers[0];
 
         let mut threshold_history: Vec<usize> = Vec::new();
-        let initial_threshold = worker.adaptive_cancel_policy.as_ref().unwrap().current_limit();
+        let initial_threshold = worker
+            .adaptive_cancel_policy
+            .as_ref()
+            .unwrap()
+            .current_limit();
 
         // Simulate workload with varying cancel patterns
         for epoch in 0..20 {
@@ -9635,7 +9681,11 @@ mod tests {
 
                 // Vary reward pattern every 10 steps to test adaptation
                 if step % 10 == 9 {
-                    let current_threshold = worker.adaptive_cancel_policy.as_ref().unwrap().current_limit();
+                    let current_threshold = worker
+                        .adaptive_cancel_policy
+                        .as_ref()
+                        .unwrap()
+                        .current_limit();
                     threshold_history.push(current_threshold);
                 }
             }
@@ -10037,16 +10087,29 @@ mod tests {
             }
         }
 
-        assert!(has_ready, "Ready lane completely starved despite fairness yields");
-        assert!(has_timed, "Timed lane completely starved despite fairness yields");
+        assert!(
+            has_ready,
+            "Ready lane completely starved despite fairness yields"
+        );
+        assert!(
+            has_timed,
+            "Timed lane completely starved despite fairness yields"
+        );
         assert!(has_cancel, "Cancel lane was not dispatched");
 
         for worker in [&mut worker_0, &mut worker_1] {
             let cert = worker.preemption_fairness_certificate();
-            assert!(cert.invariant_holds(), "Fairness invariant broken during concurrent load");
+            assert!(
+                cert.invariant_holds(),
+                "Fairness invariant broken during concurrent load"
+            );
 
             let violations = worker.invariant_violations();
-            assert!(violations.is_empty(), "Scheduler invariants violated: {:?}", violations);
+            assert!(
+                violations.is_empty(),
+                "Scheduler invariants violated: {:?}",
+                violations
+            );
         }
     }
 }
