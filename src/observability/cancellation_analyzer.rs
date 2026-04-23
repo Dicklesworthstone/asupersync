@@ -780,6 +780,28 @@ impl CancellationAnalyzer {
         recommendations
     }
 
+    /// Calculate relative change while handling zero-valued baselines deterministically.
+    fn relative_change(&self, baseline: f64, recent: f64) -> f64 {
+        if baseline.abs() <= f64::EPSILON {
+            if recent.abs() <= f64::EPSILON {
+                0.0
+            } else {
+                1.0
+            }
+        } else {
+            (recent - baseline) / baseline
+        }
+    }
+
+    /// Calculate a regression drop ratio against a positive baseline.
+    fn regression_drop(&self, baseline: f64, recent: f64) -> f64 {
+        if baseline.abs() <= f64::EPSILON {
+            0.0
+        } else {
+            (baseline - recent) / baseline
+        }
+    }
+
     /// Calculate latency trend by comparing early vs recent traces.
     fn calculate_latency_trend(
         &self,
@@ -804,7 +826,7 @@ impl CancellationAnalyzer {
         let recent_avg = recent_latencies.iter().sum::<f64>() / recent_latencies.len() as f64;
 
         // 5% threshold for significance
-        let change_ratio = (recent_avg - early_avg) / early_avg;
+        let change_ratio = self.relative_change(early_avg, recent_avg);
         if change_ratio > 0.05 {
             TrendDirection::Degrading // Latency increased
         } else if change_ratio < -0.05 {
@@ -860,7 +882,7 @@ impl CancellationAnalyzer {
         let early_avg = early_throughput.iter().sum::<f64>() / early_throughput.len() as f64;
         let recent_avg = recent_throughput.iter().sum::<f64>() / recent_throughput.len() as f64;
 
-        let change_ratio = (recent_avg - early_avg) / early_avg;
+        let change_ratio = self.relative_change(early_avg, recent_avg);
         if change_ratio > 0.05 {
             TrendDirection::Improving // Throughput increased
         } else if change_ratio < -0.05 {
@@ -937,11 +959,15 @@ impl CancellationAnalyzer {
         // Coefficient of variation as stability metric (lower is more stable)
         let early_cv = if early_stats.mean > 0.0 {
             early_stats.std_dev / early_stats.mean
+        } else if early_stats.std_dev <= f64::EPSILON {
+            0.0
         } else {
             f64::INFINITY
         };
         let recent_cv = if recent_stats.mean > 0.0 {
             recent_stats.std_dev / recent_stats.mean
+        } else if recent_stats.std_dev <= f64::EPSILON {
+            0.0
         } else {
             f64::INFINITY
         };
@@ -951,7 +977,7 @@ impl CancellationAnalyzer {
         }
 
         // 10% threshold for coefficient of variation change
-        let change_ratio = (recent_cv - early_cv) / early_cv;
+        let change_ratio = self.relative_change(early_cv, recent_cv);
         if change_ratio > 0.1 {
             TrendDirection::Degrading // Less stable
         } else if change_ratio < -0.1 {
@@ -982,11 +1008,12 @@ impl CancellationAnalyzer {
             return None;
         }
 
-        let baseline_avg = baseline_latencies.iter().sum::<f64>() / baseline_latencies.len() as f64;
+        let baseline_avg =
+            baseline_latencies.iter().sum::<f64>() / baseline_latencies.len() as f64;
         let recent_avg = recent_latencies.iter().sum::<f64>() / recent_latencies.len() as f64;
 
         // Detect regression if recent latency is significantly higher
-        let regression_magnitude = (recent_avg - baseline_avg) / baseline_avg;
+        let regression_magnitude = self.relative_change(baseline_avg, recent_avg);
         if regression_magnitude > 0.2 {
             // 20% increase threshold
             let confidence = if regression_magnitude > 0.5 {
@@ -1053,7 +1080,7 @@ impl CancellationAnalyzer {
         let recent_avg = recent_throughput.iter().sum::<f64>() / recent_throughput.len() as f64;
 
         // Detect regression if recent throughput is significantly lower
-        let throughput_drop = (baseline_avg - recent_avg) / baseline_avg;
+        let throughput_drop = self.regression_drop(baseline_avg, recent_avg);
         if throughput_drop > 0.15 {
             // 15% decrease threshold
             let confidence = if throughput_drop > 0.4 {
@@ -1471,6 +1498,106 @@ mod tests {
         assert!(
             regressions.is_empty(),
             "Should not detect regressions with stable good performance"
+        );
+    }
+
+    #[test]
+    fn test_zero_baseline_trends_do_not_divide_by_zero() {
+        use std::time::{Duration, SystemTime};
+
+        let analyzer = CancellationAnalyzer::default();
+        let base_time = SystemTime::UNIX_EPOCH;
+        let early_traces = vec![
+            test_trace(
+                0,
+                base_time,
+                Duration::ZERO,
+                0,
+                vec![test_step("entity-a".to_string(), Duration::ZERO)],
+                Vec::new(),
+            ),
+            test_trace(
+                1,
+                base_time + Duration::from_secs(1),
+                Duration::ZERO,
+                0,
+                vec![test_step("entity-b".to_string(), Duration::ZERO)],
+                Vec::new(),
+            ),
+        ];
+        let recent_traces = vec![
+            test_trace(
+                2,
+                base_time + Duration::from_secs(2),
+                Duration::from_millis(10),
+                2,
+                vec![test_step("entity-c".to_string(), Duration::from_millis(10))],
+                Vec::new(),
+            ),
+            test_trace(
+                3,
+                base_time + Duration::from_secs(3),
+                Duration::from_millis(20),
+                4,
+                vec![test_step("entity-d".to_string(), Duration::from_millis(20))],
+                Vec::new(),
+            ),
+        ];
+
+        assert!(matches!(
+            analyzer.calculate_latency_trend(&early_traces, &recent_traces),
+            TrendDirection::Degrading
+        ));
+        assert!(matches!(
+            analyzer.calculate_throughput_trend(&early_traces, &recent_traces),
+            TrendDirection::Improving
+        ));
+        assert!(matches!(
+            analyzer.calculate_stability_trend(&early_traces, &recent_traces),
+            TrendDirection::Degrading
+        ));
+    }
+
+    #[test]
+    fn test_zero_baseline_regressions_do_not_divide_by_zero() {
+        use std::time::{Duration, SystemTime};
+
+        let analyzer = CancellationAnalyzer::default();
+        let detected_at = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        let baseline_traces = vec![test_trace(
+            0,
+            SystemTime::UNIX_EPOCH,
+            Duration::ZERO,
+            0,
+            vec![test_step("entity-a".to_string(), Duration::ZERO)],
+            Vec::new(),
+        )];
+        let recent_traces = vec![test_trace(
+            1,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            Duration::from_millis(25),
+            5,
+            vec![test_step("entity-b".to_string(), Duration::from_millis(25))],
+            Vec::new(),
+        )];
+
+        let latency_regression =
+            analyzer.detect_latency_regression(&baseline_traces, &recent_traces, detected_at);
+        assert!(
+            latency_regression.is_some(),
+            "positive latency after a zero baseline should register as a regression"
+        );
+        assert_eq!(
+            latency_regression.unwrap().regression_magnitude,
+            1.0,
+            "zero-baseline regression magnitude should be clamped to a finite sentinel"
+        );
+
+        let throughput_regression =
+            analyzer.detect_throughput_regression(&baseline_traces, &recent_traces, detected_at);
+        assert!(
+            throughput_regression.is_none(),
+            "zero throughput baseline should not report a throughput drop regression"
         );
     }
 }
