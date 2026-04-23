@@ -956,6 +956,23 @@ impl From<CloseCode> for u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insta::assert_snapshot;
+
+    fn render_wire_hex(label: &str, bytes: &[u8]) -> String {
+        let mut out = String::new();
+        out.push_str(label);
+        out.push_str(":\n");
+        for chunk in bytes.chunks(16) {
+            let line = chunk
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            out.push_str(&line);
+            out.push('\n');
+        }
+        out
+    }
 
     #[test]
     fn test_opcode_is_control() {
@@ -1159,6 +1176,63 @@ mod tests {
 
         let parsed = server_codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(parsed.payload.as_ref(), b"mask-me");
+    }
+
+    #[test]
+    fn golden_websocket_frame_wire_bytes() {
+        let mut snapshot = String::new();
+
+        let mut server_text = BytesMut::new();
+        FrameCodec::server()
+            .encode(Frame::text("Hi"), &mut server_text)
+            .unwrap();
+        snapshot.push_str(&render_wire_hex("server_text_hi", &server_text));
+
+        let mut client_text = BytesMut::new();
+        FrameCodec::client()
+            .encode_with_entropy(
+                &Frame::text("Hi"),
+                &mut client_text,
+                &FixedEntropy([0x10, 0x20, 0x30, 0x40]),
+            )
+            .unwrap();
+        snapshot.push_str(&render_wire_hex("client_text_hi_masked", &client_text));
+
+        let mut close_frame = BytesMut::new();
+        FrameCodec::server()
+            .encode(Frame::close(Some(1000), Some("goodbye")), &mut close_frame)
+            .unwrap();
+        snapshot.push_str(&render_wire_hex("server_close_1000_goodbye", &close_frame));
+
+        let extended_payload = Bytes::from((0u8..=125).collect::<Vec<_>>());
+        let mut binary_len_126 = BytesMut::new();
+        FrameCodec::server()
+            .encode(Frame::binary(extended_payload), &mut binary_len_126)
+            .unwrap();
+        snapshot.push_str(&render_wire_hex("server_binary_len_126", &binary_len_126));
+
+        assert_snapshot!(
+            "websocket_frame_wire_bytes",
+            &snapshot,
+            @r"
+        server_text_hi:
+        81 02 48 69
+        client_text_hi_masked:
+        81 82 10 20 30 40 58 49
+        server_close_1000_goodbye:
+        88 09 03 e8 67 6f 6f 64 62 79 65
+        server_binary_len_126:
+        82 7e 00 7e 00 01 02 03 04 05 06 07 08 09 0a 0b
+        0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b
+        1c 1d 1e 1f 20 21 22 23 24 25 26 27 28 29 2a 2b
+        2c 2d 2e 2f 30 31 32 33 34 35 36 37 38 39 3a 3b
+        3c 3d 3e 3f 40 41 42 43 44 45 46 47 48 49 4a 4b
+        4c 4d 4e 4f 50 51 52 53 54 55 56 57 58 59 5a 5b
+        5c 5d 5e 5f 60 61 62 63 64 65 66 67 68 69 6a 6b
+        6c 6d 6e 6f 70 71 72 73 74 75 76 77 78 79 7a 7b
+        7c 7d
+        "
+        );
     }
 
     #[test]
