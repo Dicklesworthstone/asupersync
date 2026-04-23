@@ -703,17 +703,23 @@ impl CancellationAnalyzer {
         let recent_traces = &ordered_traces[baseline_end..];
 
         // Detect latency regressions
-        if let Some(regression) = self.detect_latency_regression(baseline_traces, recent_traces, now) {
+        if let Some(regression) =
+            self.detect_latency_regression(baseline_traces, recent_traces, now)
+        {
             regressions.push(regression);
         }
 
         // Detect throughput regressions
-        if let Some(regression) = self.detect_throughput_regression(baseline_traces, recent_traces, now) {
+        if let Some(regression) =
+            self.detect_throughput_regression(baseline_traces, recent_traces, now)
+        {
             regressions.push(regression);
         }
 
         // Detect anomaly increase regressions
-        if let Some(regression) = self.detect_anomaly_regression(baseline_traces, recent_traces, now) {
+        if let Some(regression) =
+            self.detect_anomaly_regression(baseline_traces, recent_traces, now)
+        {
             regressions.push(regression);
         }
 
@@ -873,14 +879,20 @@ impl CancellationAnalyzer {
         let early_anomaly_rate = if early_traces.is_empty() {
             0.0
         } else {
-            early_traces.iter().map(|t| t.anomalies.len()).sum::<usize>() as f64
+            early_traces
+                .iter()
+                .map(|t| t.anomalies.len())
+                .sum::<usize>() as f64
                 / early_traces.len() as f64
         };
 
         let recent_anomaly_rate = if recent_traces.is_empty() {
             0.0
         } else {
-            recent_traces.iter().map(|t| t.anomalies.len()).sum::<usize>() as f64
+            recent_traces
+                .iter()
+                .map(|t| t.anomalies.len())
+                .sum::<usize>() as f64
                 / recent_traces.len() as f64
         };
 
@@ -1036,7 +1048,8 @@ impl CancellationAnalyzer {
             return None;
         }
 
-        let baseline_avg = baseline_throughput.iter().sum::<f64>() / baseline_throughput.len() as f64;
+        let baseline_avg =
+            baseline_throughput.iter().sum::<f64>() / baseline_throughput.len() as f64;
         let recent_avg = recent_throughput.iter().sum::<f64>() / recent_throughput.len() as f64;
 
         // Detect regression if recent throughput is significantly lower
@@ -1073,14 +1086,20 @@ impl CancellationAnalyzer {
         let baseline_anomaly_rate = if baseline_traces.is_empty() {
             0.0
         } else {
-            baseline_traces.iter().map(|t| t.anomalies.len()).sum::<usize>() as f64
+            baseline_traces
+                .iter()
+                .map(|t| t.anomalies.len())
+                .sum::<usize>() as f64
                 / baseline_traces.len() as f64
         };
 
         let recent_anomaly_rate = if recent_traces.is_empty() {
             0.0
         } else {
-            recent_traces.iter().map(|t| t.anomalies.len()).sum::<usize>() as f64
+            recent_traces
+                .iter()
+                .map(|t| t.anomalies.len())
+                .sum::<usize>() as f64
                 / recent_traces.len() as f64
         };
 
@@ -1185,6 +1204,48 @@ impl CancellationAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observability::cancellation_tracer::{CancellationTraceStep, TraceId};
+
+    fn test_step(entity_id: String, elapsed_since_prev: Duration) -> CancellationTraceStep {
+        CancellationTraceStep {
+            step_id: 0,
+            entity_id,
+            entity_type: EntityType::Task,
+            cancel_reason: "test".to_string(),
+            cancel_kind: "User".to_string(),
+            timestamp: SystemTime::UNIX_EPOCH,
+            elapsed_since_start: elapsed_since_prev,
+            elapsed_since_prev,
+            depth: 0,
+            parent_entity: None,
+            entity_state: "Cancelled".to_string(),
+            propagation_completed: true,
+        }
+    }
+
+    fn test_trace(
+        trace_index: usize,
+        start_time: SystemTime,
+        total_propagation_time: Duration,
+        entities_cancelled: u32,
+        steps: Vec<CancellationTraceStep>,
+        anomalies: Vec<PropagationAnomaly>,
+    ) -> CancellationTrace {
+        CancellationTrace {
+            trace_id: TraceId::new(),
+            root_cancel_reason: format!("test-{trace_index}"),
+            root_cancel_kind: "User".to_string(),
+            root_entity: "root".to_string(),
+            root_entity_type: EntityType::Task,
+            start_time,
+            steps,
+            is_complete: true,
+            total_propagation_time: Some(total_propagation_time),
+            max_depth: 3,
+            entities_cancelled,
+            anomalies,
+        }
+    }
 
     #[test]
     fn test_analyzer_creation() {
@@ -1216,7 +1277,6 @@ mod tests {
 
     #[test]
     fn test_trend_analysis_non_placeholder() {
-        use crate::observability::cancellation_tracer::CancellationStep;
         use std::time::{Duration, SystemTime};
 
         let analyzer = CancellationAnalyzer::default();
@@ -1227,36 +1287,32 @@ mod tests {
 
         // Early traces (higher latency)
         for i in 0..50 {
-            traces.push(CancellationTrace {
-                trace_id: format!("trace-early-{}", i),
-                start_time: base_time + Duration::from_secs(i),
-                total_propagation_time: Some(Duration::from_millis(100 + i * 2)), // 100-200ms
-                entities_cancelled: 5,
-                max_depth: 3,
-                steps: vec![CancellationStep {
-                    entity_id: format!("entity-{}", i % 3),
-                    elapsed_since_prev: Duration::from_millis(20),
-                }],
-                anomalies: Vec::new(),
-                is_complete: true,
-            });
+            traces.push(test_trace(
+                i as usize,
+                base_time + Duration::from_secs(i),
+                Duration::from_millis(100 + i * 2),
+                5,
+                vec![test_step(
+                    format!("entity-{}", i % 3),
+                    Duration::from_millis(20),
+                )],
+                Vec::new(),
+            ));
         }
 
         // Recent traces (lower latency)
         for i in 50..100 {
-            traces.push(CancellationTrace {
-                trace_id: format!("trace-recent-{}", i),
-                start_time: base_time + Duration::from_secs(i),
-                total_propagation_time: Some(Duration::from_millis(50 + (i - 50) / 2)), // 50-75ms
-                entities_cancelled: 8,
-                max_depth: 3,
-                steps: vec![CancellationStep {
-                    entity_id: format!("entity-{}", i % 3),
-                    elapsed_since_prev: Duration::from_millis(15),
-                }],
-                anomalies: Vec::new(),
-                is_complete: true,
-            });
+            traces.push(test_trace(
+                i as usize,
+                base_time + Duration::from_secs(i),
+                Duration::from_millis(50 + (i - 50) / 2),
+                8,
+                vec![test_step(
+                    format!("entity-{}", i % 3),
+                    Duration::from_millis(15),
+                )],
+                Vec::new(),
+            ));
         }
 
         let trends = analyzer.analyze_trends(&traces);
@@ -1280,7 +1336,6 @@ mod tests {
 
     #[test]
     fn test_regression_detection_non_placeholder() {
-        use crate::observability::cancellation_tracer::{CancellationStep, PropagationAnomaly};
         use std::time::{Duration, SystemTime};
 
         let analyzer = CancellationAnalyzer::default();
@@ -1290,19 +1345,17 @@ mod tests {
 
         // Baseline traces (good performance)
         for i in 0..30 {
-            traces.push(CancellationTrace {
-                trace_id: format!("baseline-{}", i),
-                start_time: base_time + Duration::from_secs(i),
-                total_propagation_time: Some(Duration::from_millis(50)), // Consistent 50ms
-                entities_cancelled: 10,
-                max_depth: 3,
-                steps: vec![CancellationStep {
-                    entity_id: format!("entity-{}", i % 3),
-                    elapsed_since_prev: Duration::from_millis(15),
-                }],
-                anomalies: Vec::new(),
-                is_complete: true,
-            });
+            traces.push(test_trace(
+                i as usize,
+                base_time + Duration::from_secs(i),
+                Duration::from_millis(50),
+                10,
+                vec![test_step(
+                    format!("entity-{}", i % 3),
+                    Duration::from_millis(15),
+                )],
+                Vec::new(),
+            ));
         }
 
         // Recent traces with regression (much higher latency + anomalies)
@@ -1310,25 +1363,24 @@ mod tests {
             let mut anomalies = Vec::new();
             if i % 3 == 0 {
                 anomalies.push(PropagationAnomaly::SlowPropagation {
+                    step_id: 0,
                     entity_id: format!("entity-slow-{}", i),
-                    expected_duration: Duration::from_millis(50),
-                    actual_duration: Duration::from_millis(150),
+                    elapsed: Duration::from_millis(150),
+                    threshold: Duration::from_millis(50),
                 });
             }
 
-            traces.push(CancellationTrace {
-                trace_id: format!("regressed-{}", i),
-                start_time: base_time + Duration::from_secs(i),
-                total_propagation_time: Some(Duration::from_millis(200)), // 4x worse latency
-                entities_cancelled: 8, // Lower throughput
-                max_depth: 3,
-                steps: vec![CancellationStep {
-                    entity_id: format!("entity-{}", i % 3),
-                    elapsed_since_prev: Duration::from_millis(60),
-                }],
+            traces.push(test_trace(
+                i as usize,
+                base_time + Duration::from_secs(i),
+                Duration::from_millis(200),
+                8,
+                vec![test_step(
+                    format!("entity-{}", i % 3),
+                    Duration::from_millis(60),
+                )],
                 anomalies,
-                is_complete: true,
-            });
+            ));
         }
 
         let regressions = analyzer.detect_regressions(&traces);
@@ -1345,14 +1397,16 @@ mod tests {
         );
 
         if let Some(reg) = latency_regression {
-            assert!(reg.regression_magnitude > 0.2, "Should detect significant regression");
+            assert!(
+                reg.regression_magnitude > 0.2,
+                "Should detect significant regression"
+            );
             assert!(reg.confidence > 0.0, "Should have confidence measure");
         }
     }
 
     #[test]
     fn test_trend_analysis_stable_case() {
-        use crate::observability::cancellation_tracer::CancellationStep;
         use std::time::{Duration, SystemTime};
 
         let analyzer = CancellationAnalyzer::default();
@@ -1361,19 +1415,17 @@ mod tests {
         // Create traces with stable performance (no significant change)
         let mut traces = Vec::new();
         for i in 0..100 {
-            traces.push(CancellationTrace {
-                trace_id: format!("stable-{}", i),
-                start_time: base_time + Duration::from_secs(i),
-                total_propagation_time: Some(Duration::from_millis(100)), // Consistent timing
-                entities_cancelled: 5,
-                max_depth: 3,
-                steps: vec![CancellationStep {
-                    entity_id: format!("entity-{}", i % 3),
-                    elapsed_since_prev: Duration::from_millis(20),
-                }],
-                anomalies: Vec::new(),
-                is_complete: true,
-            });
+            traces.push(test_trace(
+                i as usize,
+                base_time + Duration::from_secs(i),
+                Duration::from_millis(100),
+                5,
+                vec![test_step(
+                    format!("entity-{}", i % 3),
+                    Duration::from_millis(20),
+                )],
+                Vec::new(),
+            ));
         }
 
         let trends = analyzer.analyze_trends(&traces);
@@ -1392,7 +1444,6 @@ mod tests {
 
     #[test]
     fn test_no_regression_with_good_performance() {
-        use crate::observability::cancellation_tracer::CancellationStep;
         use std::time::{Duration, SystemTime};
 
         let analyzer = CancellationAnalyzer::default();
@@ -1401,24 +1452,25 @@ mod tests {
         // Create traces with consistently good performance
         let mut traces = Vec::new();
         for i in 0..50 {
-            traces.push(CancellationTrace {
-                trace_id: format!("good-{}", i),
-                start_time: base_time + Duration::from_secs(i),
-                total_propagation_time: Some(Duration::from_millis(50)),
-                entities_cancelled: 10,
-                max_depth: 3,
-                steps: vec![CancellationStep {
-                    entity_id: format!("entity-{}", i % 3),
-                    elapsed_since_prev: Duration::from_millis(15),
-                }],
-                anomalies: Vec::new(),
-                is_complete: true,
-            });
+            traces.push(test_trace(
+                i as usize,
+                base_time + Duration::from_secs(i),
+                Duration::from_millis(50),
+                10,
+                vec![test_step(
+                    format!("entity-{}", i % 3),
+                    Duration::from_millis(15),
+                )],
+                Vec::new(),
+            ));
         }
 
         let regressions = analyzer.detect_regressions(&traces);
 
         // Should not detect any regressions with consistent good performance
-        assert!(regressions.is_empty(), "Should not detect regressions with stable good performance");
+        assert!(
+            regressions.is_empty(),
+            "Should not detect regressions with stable good performance"
+        );
     }
 }
