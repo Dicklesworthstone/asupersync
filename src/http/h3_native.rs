@@ -864,12 +864,24 @@ pub fn qpack_encode_field_section(plan: &[QpackFieldPlan]) -> Result<Vec<u8>, H3
                 // Indexed field line: 1 T Index(6+), T=1 for static table.
                 qpack_encode_prefixed_int(&mut out, 0b1100_0000, 6, *index)?;
             }
+            QpackFieldPlan::DynamicIndex(_index) => {
+                // Dynamic table indexed field - not supported in static-only encoder
+                return Err(H3NativeError::InvalidFrame(
+                    "dynamic table indexed fields not supported in static-only encoder",
+                ));
+            }
             QpackFieldPlan::Literal { name, value } => {
                 // Literal field line with literal name: 001 N H NameLen(3+)
                 // N=0, H=0 (non-Huffman)
                 qpack_encode_string(&mut out, 0b0010_0000, 3, name)?;
                 // Value string literal: H=0 + ValueLen(7+)
                 qpack_encode_string(&mut out, 0, 7, value)?;
+            }
+            QpackFieldPlan::DynamicNameLiteral { name_index: _name_index, value: _value } => {
+                // Dynamic table name reference - not supported in static-only encoder
+                return Err(H3NativeError::InvalidFrame(
+                    "dynamic table name references not supported in static-only encoder",
+                ));
             }
         }
     }
