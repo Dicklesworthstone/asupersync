@@ -10,6 +10,12 @@ use crate::types::rref::{RRef, RRefAccessWitness, RRefError};
 use crate::types::{Budget, CancelReason, CurveBudget, RRefAccess, RegionId, TaskId, Time};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::cell::Cell;
+
+// Thread-local flag to detect reentrant calls and prevent deadlock
+thread_local! {
+    static IN_REGION_WITH_CALL: Cell<bool> = const { Cell::new(false) };
+}
 
 /// State for waking tasks waiting on a region to close.
 #[derive(Debug)]
@@ -710,8 +716,20 @@ impl RegionRecord {
         index: HeapIndex,
         f: F,
     ) -> Option<R> {
-        let inner = self.inner.read();
-        inner.heap.get::<T>(index).map(f)
+        // Check for reentrancy to prevent deadlock when closures call region methods
+        if IN_REGION_WITH_CALL.with(|flag| flag.get()) {
+            // Already in a region access call - use try_read to avoid deadlock
+            let inner = self.inner.try_read()?;
+            return inner.heap.get::<T>(index).map(f);
+        }
+
+        IN_REGION_WITH_CALL.with(|flag| flag.set(true));
+        let result = {
+            let inner = self.inner.read();
+            inner.heap.get::<T>(index).map(f)
+        };
+        IN_REGION_WITH_CALL.with(|flag| flag.set(false));
+        result
     }
 
     /// Returns the number of heap allocations in this region.
@@ -913,12 +931,30 @@ impl RegionRecord {
         if self.state().is_terminal() {
             return Err(RRefError::RegionClosed);
         }
-        let inner = self.inner.read();
-        inner
-            .heap
-            .get::<T>(rref.heap_index())
-            .map(f)
-            .ok_or(RRefError::AllocationInvalid)
+
+        // Check for reentrancy to prevent deadlock when closures call region methods
+        if IN_REGION_WITH_CALL.with(|flag| flag.get()) {
+            // Already in a region access call - use try_read to avoid deadlock
+            let inner = self.inner.try_read()
+                .ok_or(RRefError::RegionClosed)?; // Assume locked means closing
+            return inner
+                .heap
+                .get::<T>(rref.heap_index())
+                .map(f)
+                .ok_or(RRefError::AllocationInvalid);
+        }
+
+        IN_REGION_WITH_CALL.with(|flag| flag.set(true));
+        let result = {
+            let inner = self.inner.read();
+            inner
+                .heap
+                .get::<T>(rref.heap_index())
+                .map(f)
+                .ok_or(RRefError::AllocationInvalid)
+        };
+        IN_REGION_WITH_CALL.with(|flag| flag.set(false));
+        result
     }
 
     /// Returns an access witness for this region if it is in a non-terminal state.
