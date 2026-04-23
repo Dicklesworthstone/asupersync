@@ -1320,4 +1320,216 @@ mod tests {
         let dbg2 = format!("{cloned:?}");
         assert_eq!(dbg, dbg2);
     }
+
+    // =========================================================================
+    // Codegen determinism metamorphic relations.
+    //
+    // Oracle problem: the "correct" generated Rust code is defined by the
+    // codegen algorithm itself. We cannot independently compute expected
+    // output. But we CAN pin relations:
+    //   - Same input → byte-identical output (determinism)
+    //   - compile_all(p)[pn] == compile(p, pn) (single/batch agreement)
+    //   - Fresh compiler instances with same config → identical output
+    //   - Validation errors are deterministic too
+    //
+    // Per-case determinism tests exist for two fixed protocols
+    // (codegen_deterministic_two_phase_commit + _all_participants). These
+    // MRs bind the full determinism contract across every bundled example.
+    // =========================================================================
+
+    mod codegen_determinism_mr {
+        use super::*;
+
+        fn all_examples() -> Vec<(&'static str, GlobalProtocol)> {
+            vec![
+                ("two_phase_commit", example_two_phase_commit()),
+                ("saga_compensation", example_saga_compensation()),
+                ("lease_renewal", example_lease_renewal()),
+            ]
+        }
+
+        /// MR — Byte-exact determinism across all bundled examples.
+        /// Running compile() N times on the same (protocol, participant)
+        /// must produce byte-identical session_type, handler_skeleton, and
+        /// render() output. Covers every participant in every example.
+        #[test]
+        fn mr_codegen_byte_exact_determinism_across_examples() {
+            let c = compiler();
+            for (label, protocol) in all_examples() {
+                for participant_name in protocol.participants.keys() {
+                    let out_a = c
+                        .compile(&protocol, participant_name)
+                        .unwrap_or_else(|e| panic!("{label}/{participant_name}: {e:?}"));
+                    let out_b = c
+                        .compile(&protocol, participant_name)
+                        .unwrap_or_else(|e| panic!("{label}/{participant_name}: {e:?}"));
+                    assert_eq!(
+                        out_a.render(),
+                        out_b.render(),
+                        "render() diverged on repeat compile for {label}/{participant_name}",
+                    );
+                    assert_eq!(out_a.session_type, out_b.session_type);
+                    assert_eq!(out_a.handler_skeleton, out_b.handler_skeleton);
+                    assert_eq!(out_a.message_structs, out_b.message_structs);
+                    assert_eq!(
+                        format!("{:?}", out_a.calm_annotations),
+                        format!("{:?}", out_b.calm_annotations),
+                    );
+                    assert_eq!(out_a.local_state_count, out_b.local_state_count);
+                    assert_eq!(out_a.local_transition_count, out_b.local_transition_count);
+                }
+            }
+        }
+
+        /// MR — Single/batch API agreement: compile_all(p)[pn] equals
+        /// compile(p, pn) for every participant. The batch API must not
+        /// diverge from the single-participant API.
+        #[test]
+        fn mr_codegen_compile_all_agrees_with_single() {
+            let c = compiler();
+            for (label, protocol) in all_examples() {
+                let all = c
+                    .compile_all(&protocol)
+                    .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+                for (participant_name, _info) in &protocol.participants {
+                    let single = c
+                        .compile(&protocol, participant_name)
+                        .unwrap_or_else(|e| panic!("{label}/{participant_name}: {e:?}"));
+                    let batch = all.get(participant_name).unwrap_or_else(|| {
+                        panic!("{label}: compile_all missing participant {participant_name}")
+                    });
+                    assert_eq!(
+                        single.render(),
+                        batch.render(),
+                        "single/batch rendering diverged for {label}/{participant_name}",
+                    );
+                    assert_eq!(single.session_type, batch.session_type);
+                }
+            }
+        }
+
+        /// MR — Compiler-instance independence: two fresh ProjectionCompiler
+        /// instances with the same config produce byte-identical output on
+        /// the same input. Rejects any hidden per-instance state or
+        /// construction-time seeding.
+        #[test]
+        fn mr_codegen_fresh_instance_equals_reused_instance() {
+            for (label, protocol) in all_examples() {
+                for participant_name in protocol.participants.keys() {
+                    let reused = compiler();
+                    let fresh_1 = ProjectionCompiler::new();
+                    let fresh_2 = ProjectionCompiler::new();
+                    let a = reused.compile(&protocol, participant_name).unwrap();
+                    let b = fresh_1.compile(&protocol, participant_name).unwrap();
+                    let c = fresh_2.compile(&protocol, participant_name).unwrap();
+                    assert_eq!(a.render(), b.render(), "{label}/{participant_name}: reused vs fresh diverged");
+                    assert_eq!(b.render(), c.render(), "{label}/{participant_name}: two fresh instances diverged");
+                }
+            }
+        }
+
+        /// MR — Tracing-flag monotonicity: the same compiler config produces
+        /// the same output across invocations; toggling tracing does NOT
+        /// change anything other than the generated handler skeleton's
+        /// tracing sites. Session type, message structs, CALM annotations,
+        /// and complexity counts are identical with and without tracing.
+        #[test]
+        fn mr_codegen_tracing_flag_affects_only_handler() {
+            let with_tracing = ProjectionCompiler { include_tracing: true };
+            let without = ProjectionCompiler { include_tracing: false };
+            for (label, protocol) in all_examples() {
+                for participant_name in protocol.participants.keys() {
+                    let a = with_tracing.compile(&protocol, participant_name).unwrap();
+                    let b = without.compile(&protocol, participant_name).unwrap();
+                    // Invariant surface: independent of tracing.
+                    assert_eq!(
+                        a.session_type, b.session_type,
+                        "{label}/{participant_name}: session_type depends on tracing flag",
+                    );
+                    assert_eq!(
+                        a.message_structs, b.message_structs,
+                        "{label}/{participant_name}: message_structs depend on tracing flag",
+                    );
+                    assert_eq!(
+                        format!("{:?}", a.calm_annotations),
+                        format!("{:?}", b.calm_annotations),
+                        "{label}/{participant_name}: calm_annotations depend on tracing flag",
+                    );
+                    assert_eq!(
+                        a.local_state_count, b.local_state_count,
+                        "{label}/{participant_name}: state_count depends on tracing flag",
+                    );
+                    assert_eq!(
+                        a.local_transition_count, b.local_transition_count,
+                        "{label}/{participant_name}: transition_count depends on tracing flag",
+                    );
+                }
+            }
+        }
+
+        /// MR — compile_all key stability: compile_all(p) returns keys that
+        /// are exactly protocol.participants' keys, independent of any
+        /// iteration order the implementation might use internally.
+        #[test]
+        fn mr_codegen_compile_all_keys_match_participants() {
+            let c = compiler();
+            for (label, protocol) in all_examples() {
+                let all = c.compile_all(&protocol).unwrap();
+                let expected_keys: std::collections::BTreeSet<&str> =
+                    protocol.participants.keys().map(String::as_str).collect();
+                let got_keys: std::collections::BTreeSet<&str> =
+                    all.keys().map(String::as_str).collect();
+                assert_eq!(
+                    got_keys, expected_keys,
+                    "{label}: compile_all keys diverge from protocol.participants",
+                );
+            }
+        }
+
+        /// MR — Error determinism: requesting an unknown participant twice
+        /// yields equivalent CompilationError::ParticipantNotFound values.
+        /// A refactor that swapped BTreeMap → HashMap could make the error
+        /// message nondeterministic; this pins it.
+        #[test]
+        fn mr_codegen_unknown_participant_error_is_deterministic() {
+            let c = compiler();
+            let (_, protocol) = all_examples().into_iter().next().unwrap();
+            let e1 = c
+                .compile(&protocol, "this-participant-does-not-exist")
+                .expect_err("should fail");
+            let e2 = c
+                .compile(&protocol, "this-participant-does-not-exist")
+                .expect_err("should fail");
+            assert_eq!(format!("{e1:?}"), format!("{e2:?}"));
+            match (&e1, &e2) {
+                (
+                    CompilationError::ParticipantNotFound { name: n1 },
+                    CompilationError::ParticipantNotFound { name: n2 },
+                ) => assert_eq!(n1, n2),
+                _ => panic!("expected ParticipantNotFound twice, got {e1:?} / {e2:?}"),
+            }
+        }
+
+        /// MR — Composite: determinism × batch-agreement. Calling
+        /// compile_all twice and comparing per-participant render() is
+        /// equivalent to pairing individual compile() calls — any mismatch
+        /// localizes to which participant's rendering drifted.
+        #[test]
+        fn mr_codegen_composite_compile_all_twice_matches_single_twice() {
+            let c = compiler();
+            for (label, protocol) in all_examples() {
+                let all_a = c.compile_all(&protocol).unwrap();
+                let all_b = c.compile_all(&protocol).unwrap();
+                for (participant_name, out_a) in &all_a {
+                    let out_b = all_b
+                        .get(participant_name)
+                        .unwrap_or_else(|| panic!("{label}: missing {participant_name}"));
+                    let single = c.compile(&protocol, participant_name).unwrap();
+                    // Triangle: compile_all#1 == compile_all#2 == single.
+                    assert_eq!(out_a.render(), out_b.render());
+                    assert_eq!(out_a.render(), single.render());
+                }
+            }
+        }
+    }
 }
