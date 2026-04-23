@@ -862,4 +862,89 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn bytes_conformance_clone_shares_data() {
+        let data = b"hello world";
+        let original = Bytes::copy_from_slice(data);
+        let clone1 = original.clone();
+        let clone2 = original.clone();
+
+        assert_eq!(&original[..], data);
+        assert_eq!(&clone1[..], data);
+        assert_eq!(&clone2[..], data);
+
+        // Verify pointer equality of the underlying slice to confirm sharing
+        assert_eq!(
+            shared_arc_ptr(&original),
+            shared_arc_ptr(&clone1),
+            "clones must share the same backing allocation"
+        );
+    }
+
+    #[test]
+    fn bytes_conformance_truncate_and_clear() {
+        let mut b = Bytes::copy_from_slice(b"hello world");
+
+        b.truncate(5);
+        assert_eq!(&b[..], b"hello");
+
+        b.truncate(10); // no-op since len is already 5
+        assert_eq!(&b[..], b"hello");
+
+        b.clear();
+        assert_eq!(&b[..], b"");
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn bytes_conformance_nested_slicing() {
+        let mut b = Bytes::copy_from_slice(b"the quick brown fox jumps over the lazy dog");
+
+        // "quick brown fox jumps over the lazy dog"
+        let mut part1 = b.split_off(4);
+        assert_eq!(&b[..], b"the ");
+
+        // "quick brown fox"
+        let part2 = part1.split_to(15);
+        assert_eq!(&part2[..], b"quick brown fox");
+
+        // "brown"
+        let brown = part2.slice(6..11);
+        assert_eq!(&brown[..], b"brown");
+
+        // "fox jumps over"
+        let mut fox = part1.slice(0..15);
+        assert_eq!(&fox[..], b" jumps over the");
+
+        // "over"
+        let over = fox.split_off(7);
+        assert_eq!(&fox[..], b" jumps ");
+        assert_eq!(&over[..], b"over the");
+
+        // Verify all point to the original allocation
+        assert_eq!(shared_arc_ptr(&b), shared_arc_ptr(&part2));
+        assert_eq!(shared_arc_ptr(&b), shared_arc_ptr(&brown));
+    }
+
+    #[test]
+    #[should_panic]
+    fn bytes_conformance_slice_out_of_bounds() {
+        let b = Bytes::copy_from_slice(b"hello");
+        let _ = b.slice(0..10);
+    }
+
+    #[test]
+    #[should_panic]
+    fn bytes_conformance_split_to_out_of_bounds() {
+        let mut b = Bytes::copy_from_slice(b"hello");
+        let _ = b.split_to(10);
+    }
+
+    #[test]
+    #[should_panic]
+    fn bytes_conformance_split_off_out_of_bounds() {
+        let mut b = Bytes::copy_from_slice(b"hello");
+        let _ = b.split_off(10);
+    }
 }
