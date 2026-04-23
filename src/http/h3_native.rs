@@ -3968,7 +3968,7 @@ mod tests {
             qpack_decode_field_section(&encoded, H3QpackMode::StaticOnly).expect("decode");
         assert_eq!(decoded, plan);
 
-        let headers = qpack_plan_to_header_fields(&decoded).expect("expand headers");
+        let headers = qpack_plan_to_header_fields(&decoded, None).expect("expand headers");
         assert_eq!(headers[0], (":method".to_string(), "GET".to_string()));
         assert_eq!(headers[1], (":scheme".to_string(), "https".to_string()));
         assert_eq!(headers[2], (":path".to_string(), "/".to_string()));
@@ -4031,7 +4031,7 @@ mod tests {
         .expect("request");
         let wire = qpack_encode_request_field_section(&request).expect("encode");
         let decoded =
-            qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly).expect("decode");
+            qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly, None).expect("decode");
         assert_eq!(decoded, request);
     }
 
@@ -4047,7 +4047,7 @@ mod tests {
         .expect("response");
         let wire = qpack_encode_response_field_section(&response).expect("encode");
         let decoded =
-            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly).expect("decode");
+            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly, None).expect("decode");
         assert_eq!(decoded, response);
     }
 
@@ -4064,7 +4064,7 @@ mod tests {
         ];
         let wire = qpack_encode_field_section(&plan).expect("encode");
         let err =
-            qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly).expect_err("fail");
+            qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly, None).expect_err("fail");
         assert_eq!(
             err,
             H3NativeError::InvalidRequestPseudoHeader(
@@ -4086,7 +4086,7 @@ mod tests {
         ];
         let wire = qpack_encode_field_section(&plan).expect("encode");
         let err =
-            qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly).expect_err("fail");
+            qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly, None).expect_err("fail");
         assert_eq!(
             err,
             H3NativeError::InvalidRequestPseudoHeader("duplicate :method")
@@ -4101,7 +4101,7 @@ mod tests {
         }];
         let wire = qpack_encode_field_section(&plan).expect("encode");
         let err =
-            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly).expect_err("fail");
+            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly, None).expect_err("fail");
         assert_eq!(
             err,
             H3NativeError::InvalidResponsePseudoHeader("invalid :status value")
@@ -4126,7 +4126,7 @@ mod tests {
         }];
         let wire = qpack_encode_field_section(&plan).expect("encode");
         let err =
-            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly).expect_err("fail");
+            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly, None).expect_err("fail");
         assert_eq!(
             err,
             H3NativeError::InvalidResponsePseudoHeader("invalid :status value")
@@ -4144,7 +4144,7 @@ mod tests {
         ];
         let wire = qpack_encode_field_section(&plan).expect("encode");
         let err =
-            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly).expect_err("fail");
+            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly, None).expect_err("fail");
         assert_eq!(
             err,
             H3NativeError::InvalidResponsePseudoHeader(

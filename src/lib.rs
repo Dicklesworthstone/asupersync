@@ -203,6 +203,10 @@ pub mod types;
 pub mod util;
 pub mod web;
 
+#[cfg(test)]
+#[path = "../tests/conformance/task_inspector_wire.rs"]
+mod task_inspector_wire_conformance;
+
 // ── Feature-gated modules ───────────────────────────────────────────────
 #[cfg(feature = "cli")]
 pub mod cli;
