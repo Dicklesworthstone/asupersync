@@ -40,6 +40,7 @@
 //! }
 //! ```
 
+mod instrument;
 mod join;
 mod race;
 mod scope;
@@ -232,6 +233,36 @@ pub fn join_all(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn race(input: TokenStream) -> TokenStream {
     race::race_impl(input)
+}
+
+/// Instruments a function or impl method with a tracing span.
+///
+/// The generated wrapper uses `asupersync::tracing_compat`, so it creates real
+/// spans when `tracing-integration` is enabled and becomes a no-op when tracing
+/// is disabled.
+///
+/// Supported arguments:
+///
+/// - `name = "custom_name"` overrides the span name
+/// - `level = "trace" | "debug" | "info" | "warn" | "error"` sets span level
+/// - `skip(arg1, arg2, ...)` excludes arguments from captured fields
+///
+/// # Examples
+///
+/// ```ignore
+/// use asupersync::tracing_compat::instrument;
+///
+/// #[instrument]
+/// async fn load_user(user_id: u64) -> Result<(), Error> {
+///     Ok(())
+/// }
+///
+/// #[instrument(name = "cache_refresh", level = "debug", skip(secret))]
+/// fn refresh(secret: &Secret, key: &str) {}
+/// ```
+#[proc_macro_attribute]
+pub fn instrument(attr: TokenStream, item: TokenStream) -> TokenStream {
+    instrument::instrument_impl(attr, item)
 }
 
 /// Marks a test with the specification section and requirement it validates.

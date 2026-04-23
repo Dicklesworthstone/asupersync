@@ -28,9 +28,12 @@
 
 #[cfg(feature = "tracing-integration")]
 pub use tracing::{
-    Instrument, Level, Span, debug, debug_span, error, error_span, event, info, info_span,
-    instrument, span, trace, trace_span, warn, warn_span,
+    Instrument, Level, Span, debug, debug_span, error, error_span, event, info, info_span, span,
+    trace, trace_span, warn, warn_span,
 };
+
+#[cfg(feature = "proc-macros")]
+pub use asupersync_macros::instrument;
 
 // When tracing is disabled, provide no-op macros
 #[cfg(not(feature = "tracing-integration"))]
@@ -123,17 +126,10 @@ mod noop {
         };
     }
 
-    /// No-op instrument attribute (does nothing).
-    /// This is a placeholder - the actual `#[instrument]` attribute requires proc-macro.
-    #[macro_export]
-    macro_rules! instrument {
-        ($($arg:tt)*) => {};
-    }
-
     // Re-export the macros at module level
     pub use crate::{
-        debug, debug_span, error, error_span, event, info, info_span, instrument, span, trace,
-        trace_span, warn, warn_span,
+        debug, debug_span, error, error_span, event, info, info_span, span, trace, trace_span,
+        warn, warn_span,
     };
 }
 
@@ -256,10 +252,35 @@ impl<T> Instrument for T {}
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
+    #[cfg(feature = "proc-macros")]
+    use futures_lite::future::block_on;
 
     fn init_test(test_name: &str) {
         init_test_logging();
         crate::test_phase!(test_name);
+    }
+
+    #[cfg(feature = "proc-macros")]
+    #[super::instrument]
+    fn instrumented_sync_add(task_id: u32, label: &str) -> usize {
+        usize::try_from(task_id).expect("task_id fits usize") + label.len()
+    }
+
+    #[cfg(feature = "proc-macros")]
+    struct InstrumentedWorker;
+
+    #[cfg(feature = "proc-macros")]
+    impl InstrumentedWorker {
+        #[super::instrument(level = "debug", skip(self))]
+        fn tick(&self, value: usize) -> usize {
+            value + 1
+        }
+    }
+
+    #[cfg(feature = "proc-macros")]
+    #[super::instrument(name = "instrumented_async_len", level = "trace", skip(secret))]
+    async fn instrumented_async_len(secret: String, visible: usize) -> usize {
+        visible + secret.len()
     }
 
     #[test]
@@ -397,5 +418,33 @@ mod tests {
             drop(async { 1 }.in_current_span());
             drop(instrumented);
         }
+    }
+
+    #[cfg(feature = "proc-macros")]
+    #[test]
+    fn instrument_attribute_wraps_sync_functions() {
+        init_test("instrument_attribute_wraps_sync_functions");
+        let value = instrumented_sync_add(7, "abc");
+        crate::assert_with_log!(value == 10, "sync result", 10usize, value);
+        crate::test_complete!("instrument_attribute_wraps_sync_functions");
+    }
+
+    #[cfg(feature = "proc-macros")]
+    #[test]
+    fn instrument_attribute_wraps_methods() {
+        init_test("instrument_attribute_wraps_methods");
+        let worker = InstrumentedWorker;
+        let value = worker.tick(9);
+        crate::assert_with_log!(value == 10, "method result", 10usize, value);
+        crate::test_complete!("instrument_attribute_wraps_methods");
+    }
+
+    #[cfg(feature = "proc-macros")]
+    #[test]
+    fn instrument_attribute_wraps_async_functions() {
+        init_test("instrument_attribute_wraps_async_functions");
+        let value = block_on(instrumented_async_len("secret".to_string(), 4));
+        crate::assert_with_log!(value == 10, "async result", 10usize, value);
+        crate::test_complete!("instrument_attribute_wraps_async_functions");
     }
 }

@@ -370,6 +370,25 @@ pub struct MySqlColumn {
     pub decimals: u8,
 }
 
+impl MySqlColumn {
+    /// Create a simple string column for prepared statement metadata.
+    pub fn new_simple_string(name: &str) -> Self {
+        Self {
+            catalog: "def".to_string(),
+            schema: String::new(),
+            table: String::new(),
+            org_table: String::new(),
+            name: name.to_string(),
+            org_name: name.to_string(),
+            charset: 0,
+            length: 0,
+            column_type: 0,
+            flags: 0,
+            decimals: 0,
+        }
+    }
+}
+
 /// A value from a MySQL row.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MySqlValue {
@@ -1062,6 +1081,8 @@ struct MySqlConnectionInner {
     needs_rollback: bool,
     /// Maximum number of rows to return from a result set.
     max_result_rows: usize,
+    /// Next statement ID for prepared statements.
+    next_stmt_id: u32,
 }
 
 /// An async MySQL connection.
@@ -1144,6 +1165,7 @@ impl MySqlConnection {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                next_stmt_id: 1,
             },
         };
 
@@ -2081,6 +2103,332 @@ impl MySqlConnection {
         Ok(())
     }
 
+    /// Prepare a statement for later execution.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let stmt = conn.prepare(cx, "SELECT id FROM users WHERE active = ?").await?;
+    /// let rows1 = conn.query_prepared(cx, &stmt, &[&true]).await?;
+    /// let rows2 = conn.query_prepared(cx, &stmt, &[&false]).await?;
+    /// ```
+    pub async fn prepare(&mut self, cx: &Cx, sql: &str) -> Outcome<MySqlStatement, MySqlError> {
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+
+        if self.inner.closed {
+            return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+
+        if let Err(e) = self.drain_abandoned_transaction().await {
+            return Outcome::Err(e);
+        }
+
+        // Build COM_STMT_PREPARE packet
+        let mut buf = PacketBuffer::new();
+        buf.set_sequence(0);
+        buf.write_byte(command::COM_STMT_PREPARE);
+        buf.write_bytes(sql.as_bytes());
+        let packet = buf.build_packet();
+
+        // Mark closed before the protocol exchange to prevent desync on cancel
+        self.inner.closed = true;
+
+        if let Err(e) = self.write_all(&packet.bytes).await {
+            return Outcome::Err(e);
+        }
+
+        // Read prepare response
+        let (response_data, seq) = match self.read_packet().await {
+            Ok((data, seq)) => (data, seq),
+            Err(e) => return Outcome::Err(e),
+        };
+        self.inner.sequence = seq.wrapping_add(1);
+
+        if response_data.is_empty() {
+            self.inner.closed = false;
+            return Outcome::Err(MySqlError::InvalidPacket("Empty prepare response".into()));
+        }
+
+        // Check for error response
+        if response_data[0] == 0xff {
+            self.inner.closed = false;
+            return Outcome::Err(self.parse_error_packet(&response_data));
+        }
+
+        // Parse prepare OK response
+        if response_data[0] != 0x00 {
+            self.inner.closed = false;
+            return Outcome::Err(MySqlError::InvalidPacket("Invalid prepare response".into()));
+        }
+
+        if response_data.len() < 13 {
+            self.inner.closed = false;
+            return Outcome::Err(MySqlError::InvalidPacket("Prepare response too short".into()));
+        }
+
+        let mut reader = PacketReader::new(&response_data[1..]);
+        let statement_id = reader.read_u32_le();
+        let column_count = reader.read_u16_le();
+        let param_count = reader.read_u16_le();
+        let _reserved = reader.read_u8(); // Should be 0x00
+        let _warning_count = reader.read_u16_le();
+
+        // Read parameter metadata if any
+        let mut params = Vec::new();
+        if param_count > 0 {
+            for _ in 0..param_count {
+                let (param_data, seq) = match self.read_packet().await {
+                    Ok((data, seq)) => (data, seq),
+                    Err(e) => return Outcome::Err(e),
+                };
+                self.inner.sequence = seq.wrapping_add(1);
+
+                // Parse column definition packet - simplified for now
+                params.push(MySqlColumn::new_simple_string("param"));
+            }
+
+            // Read EOF packet after parameters
+            let (eof_data, seq) = match self.read_packet().await {
+                Ok((data, seq)) => (data, seq),
+                Err(e) => return Outcome::Err(e),
+            };
+            self.inner.sequence = seq.wrapping_add(1);
+        }
+
+        // Read column metadata if any
+        let mut columns = Vec::new();
+        if column_count > 0 {
+            for _ in 0..column_count {
+                let (col_data, seq) = match self.read_packet().await {
+                    Ok((data, seq)) => (data, seq),
+                    Err(e) => return Outcome::Err(e),
+                };
+                self.inner.sequence = seq.wrapping_add(1);
+
+                // Parse column definition packet - simplified for now
+                columns.push(MySqlColumn::new_simple_string("column"));
+            }
+
+            // Read EOF packet after columns
+            let (eof_data, seq) = match self.read_packet().await {
+                Ok((data, seq)) => (data, seq),
+                Err(e) => return Outcome::Err(e),
+            };
+            self.inner.sequence = seq.wrapping_add(1);
+        }
+
+        self.inner.closed = false;
+
+        let stmt = MySqlStatement {
+            statement_id,
+            param_count,
+            column_count,
+            params,
+            columns,
+        };
+
+        Outcome::Ok(stmt)
+    }
+
+    /// Execute a prepared statement that returns rows.
+    pub async fn query_prepared(
+        &mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+    ) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+
+        if self.inner.closed {
+            return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+
+        if params.len() != stmt.param_count as usize {
+            return Outcome::Err(MySqlError::InvalidParameter(format!(
+                "Expected {} parameters, got {}",
+                stmt.param_count,
+                params.len()
+            )));
+        }
+
+        if let Err(e) = self.drain_abandoned_transaction().await {
+            return Outcome::Err(e);
+        }
+
+        // Build COM_STMT_EXECUTE packet
+        let mut buf = PacketBuffer::new();
+        buf.set_sequence(0);
+        buf.write_byte(command::COM_STMT_EXECUTE);
+        buf.write_u32_le(stmt.statement_id);
+        buf.write_byte(0x00); // flags
+        buf.write_u32_le(1); // iteration count
+
+        // Null bitmap
+        if stmt.param_count > 0 {
+            let null_bitmap_len = (stmt.param_count + 7) / 8;
+            for _ in 0..null_bitmap_len {
+                buf.write_byte(0x00);
+            }
+
+            // Send new parameter types flag
+            buf.write_byte(0x01);
+
+            // Parameter types
+            for param in params {
+                buf.write_u16_le(param.mysql_type_code() as u16);
+            }
+
+            // Parameter values
+            for param in params {
+                let data = match param.to_sql() {
+                    Ok(data) => data,
+                    Err(e) => return Outcome::Err(e),
+                };
+                buf.write_bytes(&data);
+            }
+        }
+
+        let packet = buf.build_packet();
+
+        // Mark closed before the protocol exchange
+        self.inner.closed = true;
+
+        if let Err(e) = self.write_all(&packet.bytes).await {
+            return Outcome::Err(e);
+        }
+
+        // Read and parse the result set
+        match self.read_result_set().await {
+            Ok((rows, status_flags)) => {
+                self.inner.status_flags = status_flags;
+                self.inner.closed = false;
+                Outcome::Ok(rows)
+            }
+            Err(e) => {
+                self.inner.closed = false;
+                Outcome::Err(e)
+            }
+        }
+    }
+
+    /// Execute a prepared statement that does not return rows.
+    pub async fn execute_prepared(
+        &mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+    ) -> Outcome<u64, MySqlError> {
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+
+        if self.inner.closed {
+            return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+
+        if params.len() != stmt.param_count as usize {
+            return Outcome::Err(MySqlError::InvalidParameter(format!(
+                "Expected {} parameters, got {}",
+                stmt.param_count,
+                params.len()
+            )));
+        }
+
+        if let Err(e) = self.drain_abandoned_transaction().await {
+            return Outcome::Err(e);
+        }
+
+        // Build COM_STMT_EXECUTE packet (same as query_prepared)
+        let mut buf = PacketBuffer::new();
+        buf.set_sequence(0);
+        buf.write_byte(command::COM_STMT_EXECUTE);
+        buf.write_u32_le(stmt.statement_id);
+        buf.write_byte(0x00); // flags
+        buf.write_u32_le(1); // iteration count
+
+        // Null bitmap
+        if stmt.param_count > 0 {
+            let null_bitmap_len = (stmt.param_count + 7) / 8;
+            for _ in 0..null_bitmap_len {
+                buf.write_byte(0x00);
+            }
+
+            // Send new parameter types flag
+            buf.write_byte(0x01);
+
+            // Parameter types
+            for param in params {
+                buf.write_u16_le(param.mysql_type_code() as u16);
+            }
+
+            // Parameter values
+            for param in params {
+                let data = match param.to_sql() {
+                    Ok(data) => data,
+                    Err(e) => return Outcome::Err(e),
+                };
+                buf.write_bytes(&data);
+            }
+        }
+
+        let packet = buf.build_packet();
+
+        // Mark closed before the protocol exchange
+        self.inner.closed = true;
+
+        if let Err(e) = self.write_all(&packet.bytes).await {
+            return Outcome::Err(e);
+        }
+
+        // Read response
+        let (response_data, seq) = match self.read_packet().await {
+            Ok((data, seq)) => (data, seq),
+            Err(e) => return Outcome::Err(e),
+        };
+        self.inner.sequence = seq.wrapping_add(1);
+
+        if response_data.is_empty() {
+            self.inner.closed = false;
+            return Outcome::Err(MySqlError::InvalidPacket("Empty execute response".into()));
+        }
+
+        // Check for error response
+        if response_data[0] == 0xff {
+            self.inner.closed = false;
+            return Outcome::Err(self.parse_error_packet(&response_data));
+        }
+
+        // Parse OK packet
+        if response_data[0] == 0x00 {
+            let ok_packet = match self.parse_ok_packet(&response_data) {
+                Ok(packet) => packet,
+                Err(e) => {
+                    self.inner.closed = false;
+                    return Outcome::Err(e);
+                }
+            };
+            self.inner.status_flags = ok_packet.status_flags;
+            self.inner.closed = false;
+            return Outcome::Ok(ok_packet.affected_rows);
+        }
+
+        self.inner.closed = false;
+        Outcome::Err(MySqlError::InvalidPacket("Unexpected execute response".into()))
+    }
+
     /// Set the maximum number of rows returned from a single result set.
     ///
     /// Default is 1,000,000. Set to `usize::MAX` to disable.
@@ -2297,6 +2645,175 @@ impl MySqlConnection {
 }
 
 // ============================================================================
+// Prepared Statements
+// ============================================================================
+
+/// Trait for types that can be bound to MySQL prepared statement parameters.
+pub trait ToSql: Sync {
+    /// Encode this value for MySQL protocol.
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError>;
+
+    /// The MySQL type code for this value.
+    fn mysql_type_code(&self) -> u8;
+}
+
+impl ToSql for bool {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        Ok(vec![if *self { 1 } else { 0 }])
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_TINY
+    }
+}
+
+impl ToSql for i32 {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        Ok(self.to_le_bytes().to_vec())
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_LONG
+    }
+}
+
+impl ToSql for i64 {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        Ok(self.to_le_bytes().to_vec())
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_LONGLONG
+    }
+}
+
+impl ToSql for f32 {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        Ok(self.to_le_bytes().to_vec())
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_FLOAT
+    }
+}
+
+impl ToSql for f64 {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        Ok(self.to_le_bytes().to_vec())
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_DOUBLE
+    }
+}
+
+impl ToSql for str {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        Ok(self.as_bytes().to_vec())
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_VAR_STRING
+    }
+}
+
+impl ToSql for String {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        self.as_str().to_sql()
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_VAR_STRING
+    }
+}
+
+impl ToSql for [u8] {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        Ok(self.to_vec())
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_BLOB
+    }
+}
+
+impl ToSql for Vec<u8> {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        Ok(self.clone())
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_BLOB
+    }
+}
+
+impl<T: ToSql> ToSql for Option<T> {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        match self {
+            Some(value) => value.to_sql(),
+            None => Ok(vec![]),
+        }
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        match self {
+            Some(value) => value.mysql_type_code(),
+            None => mysql_type::MYSQL_TYPE_NULL,
+        }
+    }
+}
+
+impl<T: ToSql + ?Sized> ToSql for &T {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        (*self).to_sql()
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        (*self).mysql_type_code()
+    }
+}
+
+/// MySQL type codes for protocol.
+mod mysql_type {
+    pub const MYSQL_TYPE_TINY: u8 = 1;
+    pub const MYSQL_TYPE_LONG: u8 = 3;
+    pub const MYSQL_TYPE_FLOAT: u8 = 4;
+    pub const MYSQL_TYPE_DOUBLE: u8 = 5;
+    pub const MYSQL_TYPE_NULL: u8 = 6;
+    pub const MYSQL_TYPE_LONGLONG: u8 = 8;
+    pub const MYSQL_TYPE_VAR_STRING: u8 = 253;
+    pub const MYSQL_TYPE_BLOB: u8 = 252;
+}
+
+/// A MySQL prepared statement.
+pub struct MySqlStatement {
+    /// Server-side statement ID.
+    statement_id: u32,
+    /// Number of parameters.
+    param_count: u16,
+    /// Number of columns.
+    column_count: u16,
+    /// Parameter metadata.
+    params: Vec<MySqlColumn>,
+    /// Result column metadata.
+    columns: Vec<MySqlColumn>,
+}
+
+impl MySqlStatement {
+    /// Number of parameters in this statement.
+    #[must_use]
+    pub fn param_count(&self) -> u16 {
+        self.param_count
+    }
+
+    /// Number of result columns.
+    #[must_use]
+    pub fn column_count(&self) -> u16 {
+        self.column_count
+    }
+}
+
+// ============================================================================
 // Transaction
 // ============================================================================
 
@@ -2499,6 +3016,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                next_stmt_id: 1,
             },
         }
     }
@@ -2554,6 +3072,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                next_stmt_id: 1,
             },
         };
 
@@ -3278,6 +3797,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                next_stmt_id: 1,
             },
         };
         let cx = Cx::for_testing();
@@ -3353,6 +3873,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                next_stmt_id: 1,
             },
         };
         let cx = Cx::for_testing();
@@ -3425,6 +3946,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                next_stmt_id: 1,
             },
         };
         let cx = Cx::for_testing();
