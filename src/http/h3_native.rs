@@ -558,7 +558,7 @@ impl H3ControlState {
 }
 
 /// HTTP/3 pseudo-header block (decoded representation).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct H3PseudoHeaders {
     /// `:method`.
     pub method: Option<String>,
@@ -572,6 +572,19 @@ pub struct H3PseudoHeaders {
     pub status: Option<u16>,
     /// `:protocol` (RFC 8441 extended CONNECT protocol).
     pub protocol: Option<String>,
+}
+
+impl Default for H3PseudoHeaders {
+    fn default() -> Self {
+        Self {
+            method: None,
+            scheme: None,
+            authority: None,
+            path: None,
+            status: None,
+            protocol: None,
+        }
+    }
 }
 
 /// HTTP/3 request-head representation.
@@ -3874,6 +3887,7 @@ mod tests {
             authority: Some("[2001:db8::8:800:200c:417a]:443".to_string()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         };
         validate_request_pseudo_headers(&valid).expect("compressed RFC 4291 IPv6 literal valid");
 
