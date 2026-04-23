@@ -6542,6 +6542,110 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_trapped_scc_fan_in_preserves_detection_until_true_egress() {
+        fn build_state(
+            include_fan_in: bool,
+            include_egress: bool,
+        ) -> (RuntimeState, TaskId, TaskId, Option<TaskId>, Option<TaskId>) {
+            let mut state = RuntimeState::new();
+            let root = state.create_root_region(Budget::unlimited());
+            let (task_a, _handle_a) = state
+                .create_task(root, Budget::unlimited(), async {})
+                .expect("create task a");
+            let (task_b, _handle_b) = state
+                .create_task(root, Budget::unlimited(), async {})
+                .expect("create task b");
+
+            // Mutual wait establishes the trapped SCC: a -> b and b -> a.
+            state.task_mut(task_a).expect("task a").waiters.push(task_b);
+            state.task_mut(task_b).expect("task b").waiters.push(task_a);
+
+            let fan_in_task = if include_fan_in {
+                let (task_c, _handle_c) = state
+                    .create_task(root, Budget::unlimited(), async {})
+                    .expect("create task c");
+                // c -> a is inbound-only to the SCC and must not clear the trap.
+                state.task_mut(task_a).expect("task a").waiters.push(task_c);
+                Some(task_c)
+            } else {
+                None
+            };
+
+            let egress_task = if include_egress {
+                let (task_d, _handle_d) = state
+                    .create_task(root, Budget::unlimited(), async {})
+                    .expect("create task d");
+                // a -> d adds a genuine SCC egress edge and should clear the trap.
+                state.task_mut(task_d).expect("task d").waiters.push(task_a);
+                Some(task_d)
+            } else {
+                None
+            };
+
+            (state, task_a, task_b, fan_in_task, egress_task)
+        }
+
+        let (base_state, task_a, task_b, _, _) = build_state(false, false);
+        let (base_nodes, base_edges, base_trapped) = wait_graph_signals_from_state(&base_state);
+        assert_eq!(base_nodes, 2, "base SCC should have exactly two live tasks");
+        assert_eq!(
+            base_edges.len(),
+            1,
+            "base SCC should collapse to one undirected edge"
+        );
+        assert!(
+            base_trapped,
+            "two-task SCC without egress should be trapped"
+        );
+
+        let (fan_in_state, fan_in_a, fan_in_b, fan_in_task, _) = build_state(true, false);
+        let (fan_in_nodes, fan_in_edges, fan_in_trapped) =
+            wait_graph_signals_from_state(&fan_in_state);
+        assert_eq!(
+            (fan_in_a, fan_in_b),
+            (task_a, task_b),
+            "rebuilding the relation should preserve the base SCC identities"
+        );
+        let fan_in_task = fan_in_task.expect("fan-in task should exist");
+        assert_ne!(
+            fan_in_task, fan_in_a,
+            "fan-in perturbation should introduce a distinct task"
+        );
+        assert_ne!(
+            fan_in_task, fan_in_b,
+            "fan-in perturbation should not alias the SCC tasks"
+        );
+        assert_eq!(fan_in_nodes, 3, "acyclic fan-in adds one live task");
+        assert_eq!(
+            fan_in_edges.len(),
+            base_edges.len() + 1,
+            "acyclic fan-in should add exactly one edge to the wait graph"
+        );
+        assert!(
+            fan_in_trapped,
+            "inbound acyclic fan-in must not clear trapped SCC detection"
+        );
+
+        let (egress_state, _, _, fan_in_task_with_egress, egress_task) = build_state(true, true);
+        let (egress_nodes, egress_edges, egress_trapped) =
+            wait_graph_signals_from_state(&egress_state);
+        assert_eq!(egress_nodes, 4, "fan-in + egress adds two live tasks");
+        assert_eq!(
+            egress_edges.len(),
+            fan_in_edges.len() + 1,
+            "true SCC egress should add one more edge than the fan-in-only variant"
+        );
+        assert!(
+            !egress_trapped,
+            "adding a real egress edge from the SCC must clear trapped-cycle detection"
+        );
+        assert!(
+            fan_in_task_with_egress.is_some() && egress_task.is_some(),
+            "both perturbation tasks should exist in the egress scenario"
+        );
+    }
+
+    #[test]
     fn test_governor_meet_deadlines_dispatches_timed_first() {
         use crate::time::{TimerDriverHandle, VirtualClock};
 
@@ -9871,9 +9975,9 @@ mod tests {
             let mut guard = state.lock().expect("lock state");
             guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
         }
-        
+
         let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(2, &state, 8);
-        
+
         let mut cancel_tasks = Vec::new();
         let mut ready_tasks = Vec::new();
         let mut timed_tasks = Vec::new();
@@ -9884,7 +9988,7 @@ mod tests {
             cancel_tasks.push(task);
             scheduler.inject_cancel(task, 100);
         }
-        
+
         // 2. High sustained load in timed lane
         for i in 0..50 {
             let task = TaskId::new_for_test(2, i);
@@ -9902,11 +10006,11 @@ mod tests {
         let mut workers = scheduler.take_workers().into_iter();
         let mut worker_0 = workers.next().unwrap();
         let mut worker_1 = workers.next().unwrap();
-        
+
         // Concurrent processing simulation
         let mut w0_dispatched = Vec::new();
         let mut w1_dispatched = Vec::new();
-        
+
         for _ in 0..60 {
             if let Some(t) = worker_0.next_task() {
                 w0_dispatched.push(t);
@@ -9915,14 +10019,14 @@ mod tests {
                 w1_dispatched.push(t);
             }
         }
-        
+
         assert!(!w0_dispatched.is_empty());
         assert!(!w1_dispatched.is_empty());
-        
+
         let mut has_ready = false;
         let mut has_timed = false;
         let mut has_cancel = false;
-        
+
         for &t in w0_dispatched.iter().chain(w1_dispatched.iter()) {
             if ready_tasks.contains(&t) {
                 has_ready = true;
@@ -9932,15 +10036,15 @@ mod tests {
                 has_cancel = true;
             }
         }
-        
+
         assert!(has_ready, "Ready lane completely starved despite fairness yields");
         assert!(has_timed, "Timed lane completely starved despite fairness yields");
         assert!(has_cancel, "Cancel lane was not dispatched");
-        
+
         for worker in [&mut worker_0, &mut worker_1] {
             let cert = worker.preemption_fairness_certificate();
             assert!(cert.invariant_holds(), "Fairness invariant broken during concurrent load");
-            
+
             let violations = worker.invariant_violations();
             assert!(violations.is_empty(), "Scheduler invariants violated: {:?}", violations);
         }
