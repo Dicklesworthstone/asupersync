@@ -1722,3 +1722,10 @@ path = "fuzz_targets/quic_varint_codec.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "subject_pattern_parser"
+path = "fuzz_targets/subject_pattern_parser.rs"
+test = false
+doc = false
+bench = false
