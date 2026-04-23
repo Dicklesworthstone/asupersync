@@ -758,6 +758,75 @@ mod tests {
         crate::test_complete!("test_bytes_equality");
     }
 
+    fn shared_arc_ptr(bytes: &Bytes) -> *const Vec<u8> {
+        match &bytes.data {
+            BytesInner::Shared(arc) => Arc::as_ptr(arc),
+            _ => panic!("expected shared bytes backing"),
+        }
+    }
+
+    #[test]
+    fn bytes_conformance_clone_preserves_shared_backing_and_full_view() {
+        let original = Bytes::copy_from_slice(b"conformance");
+        let clone = original.clone();
+
+        assert!(std::ptr::eq(shared_arc_ptr(&original), shared_arc_ptr(&clone)));
+        assert_eq!(original.start, 0);
+        assert_eq!(clone.start, 0);
+        assert_eq!(original.len, b"conformance".len());
+        assert_eq!(clone.len, b"conformance".len());
+        assert_eq!(&original[..], b"conformance");
+        assert_eq!(&clone[..], b"conformance");
+    }
+
+    #[test]
+    fn bytes_conformance_slice_preserves_backing_with_adjusted_offsets() {
+        let original = Bytes::copy_from_slice(b"grpc-frame");
+        let slice = original.slice(5..10);
+
+        assert!(std::ptr::eq(shared_arc_ptr(&original), shared_arc_ptr(&slice)));
+        assert_eq!(original.start, 0);
+        assert_eq!(slice.start, 5);
+        assert_eq!(original.len, b"grpc-frame".len());
+        assert_eq!(slice.len, 5);
+        assert_eq!(&slice[..], b"frame");
+        assert_eq!(&original[..], b"grpc-frame");
+    }
+
+    #[test]
+    fn bytes_conformance_split_to_keeps_prefix_and_suffix_on_same_backing() {
+        let mut working = Bytes::copy_from_slice(b"wire-format");
+        let witness = working.clone();
+        let prefix = working.split_to(5);
+
+        assert!(std::ptr::eq(shared_arc_ptr(&witness), shared_arc_ptr(&prefix)));
+        assert!(std::ptr::eq(shared_arc_ptr(&witness), shared_arc_ptr(&working)));
+        assert_eq!(prefix.start, 0);
+        assert_eq!(prefix.len, 5);
+        assert_eq!(working.start, 5);
+        assert_eq!(working.len, b"wire-format".len() - 5);
+        assert_eq!(&prefix[..], b"wire-");
+        assert_eq!(&working[..], b"format");
+        assert_eq!(&witness[..], b"wire-format");
+    }
+
+    #[test]
+    fn bytes_conformance_split_off_keeps_tail_view_on_same_backing() {
+        let mut working = Bytes::copy_from_slice(b"task-region");
+        let witness = working.clone();
+        let tail = working.split_off(5);
+
+        assert!(std::ptr::eq(shared_arc_ptr(&witness), shared_arc_ptr(&tail)));
+        assert!(std::ptr::eq(shared_arc_ptr(&witness), shared_arc_ptr(&working)));
+        assert_eq!(working.start, 0);
+        assert_eq!(working.len, 5);
+        assert_eq!(tail.start, 5);
+        assert_eq!(tail.len, b"task-region".len() - 5);
+        assert_eq!(&working[..], b"task-");
+        assert_eq!(&tail[..], b"region");
+        assert_eq!(&witness[..], b"task-region");
+    }
+
     proptest! {
         #[test]
         fn metamorphic_slice_matches_split_extraction(

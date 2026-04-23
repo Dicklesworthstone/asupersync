@@ -671,6 +671,15 @@ pub enum VerifyError {
         /// Hash computed from the DAG.
         actual: u64,
     },
+    /// The after-node count in the certificate doesn't match the DAG.
+    NodeCountMismatch {
+        /// Node count recorded in the certificate.
+        expected: usize,
+        /// Node count computed from the DAG.
+        actual: usize,
+    },
+    /// A certified rewrite step was not structurally valid for the DAG.
+    InvalidStep(StepVerifyError),
 }
 
 /// Error from step-level verification.
@@ -1156,7 +1165,13 @@ fn verify_dedup_race_join_result(
     verify_side_conditions(idx, step, policy, dag)
 }
 
-/// Verify that a certificate's `after_hash` matches the given (post-rewrite) DAG.
+/// Verify that a certificate matches the given post-rewrite DAG.
+///
+/// This checks:
+/// - schema version compatibility
+/// - post-rewrite hash stability
+/// - post-rewrite node-count stability
+/// - structural validity of every certified rewrite step
 pub fn verify(cert: &RewriteCertificate, dag: &PlanDag) -> Result<(), VerifyError> {
     if cert.version != CertificateVersion::CURRENT {
         return Err(VerifyError::VersionMismatch {
@@ -1171,6 +1186,14 @@ pub fn verify(cert: &RewriteCertificate, dag: &PlanDag) -> Result<(), VerifyErro
             actual: actual.value(),
         });
     }
+    let actual_node_count = dag.nodes.len();
+    if cert.after_node_count != actual_node_count {
+        return Err(VerifyError::NodeCountMismatch {
+            expected: cert.after_node_count,
+            actual: actual_node_count,
+        });
+    }
+    verify_steps(cert, dag).map_err(VerifyError::InvalidStep)?;
     Ok(())
 }
 
@@ -1372,6 +1395,26 @@ mod tests {
     }
 
     #[test]
+    fn verify_detects_node_count_mismatch() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let shared = dag.leaf("shared");
+        let left = dag.leaf("left");
+        let right = dag.leaf("right");
+        let join_a = dag.join(vec![shared, left]);
+        let join_b = dag.join(vec![shared, right]);
+        let race = dag.race(vec![join_a, join_b]);
+        dag.set_root(race);
+
+        let (_report, mut cert) = dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
+        cert.after_node_count += 1;
+
+        let result = verify(&cert, &dag);
+        assert!(matches!(result, Err(VerifyError::NodeCountMismatch { .. })));
+    }
+
+    #[test]
     fn certificate_fingerprint_is_deterministic() {
         init_test();
         let mut dag = PlanDag::new();
@@ -1494,6 +1537,42 @@ mod tests {
         assert!(matches!(
             result,
             Err(StepVerifyError::InvalidAfterShape { .. })
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_invalid_step_structure() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let shared = dag.leaf("shared");
+        let left = dag.leaf("left");
+        let right = dag.leaf("right");
+        let join_a = dag.join(vec![shared, left]);
+        let join_b = dag.join(vec![shared, right]);
+        let race = dag.race(vec![join_a, join_b]);
+        dag.set_root(race);
+
+        let cert = RewriteCertificate {
+            version: CertificateVersion::CURRENT,
+            policy: RewritePolicy::conservative(),
+            before_hash: PlanHash::of(&dag),
+            after_hash: PlanHash::of(&dag),
+            before_node_count: dag.nodes.len(),
+            after_node_count: dag.nodes.len(),
+            steps: vec![CertifiedStep {
+                rule: RewriteRule::DedupRaceJoin,
+                before: race,
+                after: shared,
+                detail: "fake".to_string(),
+            }],
+        };
+
+        let result = verify(&cert, &dag);
+        assert!(matches!(
+            result,
+            Err(VerifyError::InvalidStep(
+                StepVerifyError::InvalidAfterShape { .. }
+            ))
         ));
     }
 
