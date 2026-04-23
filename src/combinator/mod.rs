@@ -19,7 +19,11 @@
 
 /// Adaptive latency-hedging controllers.
 pub mod adaptive_hedge;
+#[cfg(test)]
+pub mod adaptive_hedge_metamorphic;
 pub mod bracket;
+#[cfg(test)]
+pub mod bracket_metamorphic;
 pub mod bulkhead;
 #[cfg(test)]
 pub mod bulkhead_metamorphic;
