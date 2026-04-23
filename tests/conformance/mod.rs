@@ -31,6 +31,7 @@ pub mod trace_replay_idempotency_metamorphic;
 pub mod mysql_stmt_prepare_execute;
 pub mod obligation_invariants;
 pub mod postgres_logical_replication;
+pub mod plan_latency;
 // TODO: SQLite conformance tests - module has unresolved dependencies
 // pub mod sqlite_prepared_statements;
 // pub mod websocket_rfc6455;
