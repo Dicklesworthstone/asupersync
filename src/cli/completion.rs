@@ -1174,6 +1174,30 @@ mod tests {
         crate::test_complete!("completion_script_bundle_scrubbed_snapshot");
     }
 
+    /// Golden artifact: raw PowerShell + Elvish completion scripts.
+    ///
+    /// The original `completion_script_bundle_scrubbed` snapshot only
+    /// covers bash/zsh/fish; the comprehensive format snapshot records
+    /// only analyzer metadata (line_count, char_count, boolean checks) for
+    /// PowerShell and Elvish, not their rendered script bodies. A silent
+    /// regression in the PowerShell or Elvish renderer (e.g. drift in
+    /// `Register-ArgumentCompleter` wiring or `edit:completion:arg-completer`
+    /// attachment) would not be caught by either existing golden. This
+    /// test closes that gap with a byte-level snapshot of the scrubbed
+    /// output for both remaining shells.
+    #[test]
+    fn completion_script_pwsh_elvish_scrubbed_snapshot() {
+        init_test("completion_script_pwsh_elvish_scrubbed_snapshot");
+
+        let snapshot = json!({
+            "powershell": render_scrubbed_completion(Shell::PowerShell),
+            "elvish": render_scrubbed_completion(Shell::Elvish),
+        });
+
+        insta::assert_json_snapshot!("completion_script_pwsh_elvish_scrubbed", snapshot);
+        crate::test_complete!("completion_script_pwsh_elvish_scrubbed_snapshot");
+    }
+
     #[test]
     fn completion_script_comprehensive_format_golden_snapshot() {
         init_test("completion_script_comprehensive_format_golden_snapshot");
