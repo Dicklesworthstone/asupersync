@@ -709,6 +709,113 @@ mod tests {
         assert_eq!(dst, original, "encode must not partially mutate dst");
     }
 
+    fn encode_golden_frame(
+        length_field_length: usize,
+        big_endian: bool,
+        length_adjustment: isize,
+    ) -> BytesMut {
+        let mut builder = LengthDelimitedCodec::builder()
+            .length_field_length(length_field_length)
+            .num_skip(length_field_length)
+            .length_adjustment(length_adjustment);
+        builder = if big_endian {
+            builder.big_endian()
+        } else {
+            builder.little_endian()
+        };
+
+        let mut codec = builder.new_codec();
+        let mut dst = BytesMut::new();
+        codec.encode(BytesMut::from(&b"lock"[..]), &mut dst).unwrap();
+        dst
+    }
+
+    #[test]
+    fn length_delim_goldens_match_frozen_wire_prefixes() {
+        let cases = [
+            (
+                "u8",
+                1usize,
+                true,
+                0isize,
+                include_bytes!("../../tests/goldens/length_delim/u8.bin").as_slice(),
+            ),
+            (
+                "u8_adjusted",
+                1,
+                true,
+                -2,
+                include_bytes!("../../tests/goldens/length_delim/u8_adjusted.bin").as_slice(),
+            ),
+            (
+                "u16_be",
+                2,
+                true,
+                0,
+                include_bytes!("../../tests/goldens/length_delim/u16_be.bin").as_slice(),
+            ),
+            (
+                "u16_be_adjusted",
+                2,
+                true,
+                -2,
+                include_bytes!("../../tests/goldens/length_delim/u16_be_adjusted.bin").as_slice(),
+            ),
+            (
+                "u16_le",
+                2,
+                false,
+                0,
+                include_bytes!("../../tests/goldens/length_delim/u16_le.bin").as_slice(),
+            ),
+            (
+                "u16_le_adjusted",
+                2,
+                false,
+                -2,
+                include_bytes!("../../tests/goldens/length_delim/u16_le_adjusted.bin").as_slice(),
+            ),
+            (
+                "u32_be",
+                4,
+                true,
+                0,
+                include_bytes!("../../tests/goldens/length_delim/u32_be.bin").as_slice(),
+            ),
+            (
+                "u32_be_adjusted",
+                4,
+                true,
+                -2,
+                include_bytes!("../../tests/goldens/length_delim/u32_be_adjusted.bin").as_slice(),
+            ),
+            (
+                "u32_le",
+                4,
+                false,
+                0,
+                include_bytes!("../../tests/goldens/length_delim/u32_le.bin").as_slice(),
+            ),
+            (
+                "u32_le_adjusted",
+                4,
+                false,
+                -2,
+                include_bytes!("../../tests/goldens/length_delim/u32_le_adjusted.bin").as_slice(),
+            ),
+        ];
+
+        for (name, field_len, big_endian, adjustment, expected) in cases {
+            let encoded = encode_golden_frame(field_len, big_endian, adjustment);
+            assert_eq!(
+                encoded.as_ref(),
+                expected,
+                "golden mismatch for {name}: {:?}",
+                encoded
+            );
+        }
+    }
+
     // ================================================================================
     // METAMORPHIC TESTING SUITE
     // ================================================================================

@@ -1568,6 +1568,50 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    enum DnsNameGoldenCase {
+        SingleLabel,
+        MultiLabel,
+        MaxLabel63,
+        MaxName255,
+        TrailingDot,
+        Punycode,
+    }
+
+    fn dns_name_golden_bytes(case: DnsNameGoldenCase) -> &'static [u8] {
+        match case {
+            DnsNameGoldenCase::SingleLabel => {
+                include_bytes!("../../tests/goldens/dns_names/single_label.bin").as_slice()
+            }
+            DnsNameGoldenCase::MultiLabel => {
+                include_bytes!("../../tests/goldens/dns_names/multi_label.bin").as_slice()
+            }
+            DnsNameGoldenCase::MaxLabel63 => {
+                include_bytes!("../../tests/goldens/dns_names/max_label_63.bin").as_slice()
+            }
+            DnsNameGoldenCase::MaxName255 => {
+                include_bytes!("../../tests/goldens/dns_names/max_name_255.bin").as_slice()
+            }
+            DnsNameGoldenCase::TrailingDot => {
+                include_bytes!("../../tests/goldens/dns_names/trailing_dot.bin").as_slice()
+            }
+            DnsNameGoldenCase::Punycode => {
+                include_bytes!("../../tests/goldens/dns_names/punycode.bin").as_slice()
+            }
+        }
+    }
+
+    fn assert_dns_name_golden(case: DnsNameGoldenCase, name: &str) {
+        let mut encoded = Vec::new();
+        encode_dns_name(name, &mut encoded).expect("encode DNS name");
+        let expected = dns_name_golden_bytes(case);
+        crate::assert_with_log!(
+            encoded == expected,
+            "DNS name golden bytes must stay stable",
+            format!("{expected:02x?}"),
+            format!("{encoded:02x?}")
+        );
+    }
+
     thread_local! {
         static TEST_NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
@@ -1880,6 +1924,29 @@ mod tests {
         );
 
         crate::test_complete!("decode_dns_name_consumes_zero_terminator");
+    }
+
+    #[test]
+    fn dns_name_goldens() {
+        init_test("dns_name_goldens");
+
+        assert_dns_name_golden(DnsNameGoldenCase::SingleLabel, "example");
+        assert_dns_name_golden(DnsNameGoldenCase::MultiLabel, "www.example.test");
+        assert_dns_name_golden(DnsNameGoldenCase::MaxLabel63, &"a".repeat(63));
+        assert_dns_name_golden(
+            DnsNameGoldenCase::MaxName255,
+            &format!(
+                "{}.{}.{}.{}",
+                "a".repeat(63),
+                "b".repeat(63),
+                "c".repeat(63),
+                "d".repeat(61)
+            ),
+        );
+        assert_dns_name_golden(DnsNameGoldenCase::TrailingDot, "www.example.test.");
+        assert_dns_name_golden(DnsNameGoldenCase::Punycode, "xn--bcher-kva.example");
+
+        crate::test_complete!("dns_name_goldens");
     }
 
     #[test]

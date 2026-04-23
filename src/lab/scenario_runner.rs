@@ -29,7 +29,7 @@ use super::runtime::{LabRunReport, LabRuntime};
 use super::scenario::{FaultAction, Scenario, ValidationError};
 use crate::trace::replay::ReplayTrace;
 use crate::types::Time;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 
 const LAB_SCENARIO_RUNNER_ADAPTER: &str = "lab.scenario_runner";
@@ -208,6 +208,12 @@ pub struct FilteredOracleReport {
 impl FilteredOracleReport {
     fn from_full(full_report: OracleReport, oracle_names: &[String]) -> Self {
         let check_all = oracle_names.iter().any(|n| n == "all");
+        let oracle_filter = (!check_all).then(|| {
+            oracle_names
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>()
+        });
 
         let entries: Vec<_> = if check_all {
             full_report.entries.clone()
@@ -215,7 +221,11 @@ impl FilteredOracleReport {
             full_report
                 .entries
                 .iter()
-                .filter(|e| oracle_names.contains(&e.invariant))
+                .filter(|e| {
+                    oracle_filter
+                        .as_ref()
+                        .is_some_and(|filter| filter.contains(e.invariant.as_str()))
+                })
                 .cloned()
                 .collect()
         };
