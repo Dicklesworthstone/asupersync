@@ -1,0 +1,32 @@
+---
+source: src/observability/resource_accounting.rs
+expression: summary
+---
+Resource Accounting Snapshot
+===========================
+
+Obligations:
+   send_permit: reserved=1      committed=1      aborted=0      leaked=0      pending=0
+           ack: reserved=0      committed=0      aborted=0      leaked=0      pending=0
+         lease: reserved=0      committed=0      aborted=0      leaked=0      pending=0
+         io_op: reserved=0      committed=0      aborted=0      leaked=0      pending=0
+  semaphore_permit: reserved=0      committed=0      aborted=0      leaked=0      pending=0
+  Total pending: 0  Peak: 1
+  Derived pending: 0  Accounting mismatch: no
+  Cleanup complete: yes
+
+Budget:
+  Poll consumed: 0  Exhaustions: 0
+  Cost consumed: 0  Exhaustions: 0
+  Deadline misses: 0
+
+Admission Control:
+         Child: admitted=0      rejected=0      rate=0.0%
+          Task: admitted=0      rejected=1      rate=100.0%
+    Obligation: admitted=0      rejected=0      rate=0.0%
+     HeapBytes: admitted=0      rejected=0      rate=0.0%
+
+High-Water Marks:
+  Tasks peak: 0
+  Children peak: 0
+  Heap bytes peak: 0

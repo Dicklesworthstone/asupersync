@@ -735,6 +735,15 @@ impl ResourceAccountingSnapshot {
 mod tests {
     use super::*;
 
+    fn assert_summary_snapshot(snapshot_name: &str, summary: &str) {
+        insta::with_settings!({
+            snapshot_path => "snapshots",
+            prepend_module_to_snapshot => false,
+        }, {
+            insta::assert_snapshot!(snapshot_name, summary);
+        });
+    }
+
     #[test]
     fn obligation_lifecycle_tracking() {
         let acc = ResourceAccounting::new();
@@ -1008,13 +1017,7 @@ mod tests {
 
         let snap = acc.snapshot();
         let summary = snap.summary();
-
-        assert!(summary.contains("Resource Accounting Snapshot"));
-        assert!(summary.contains("send_permit"));
-        assert!(summary.contains("Task"));
-        assert!(summary.contains("Poll consumed"));
-        assert!(summary.contains("Accounting mismatch: no"));
-        assert!(summary.contains("Cleanup complete: yes"));
+        assert_summary_snapshot("resource_accounting_summary_cleanup_complete", &summary);
     }
 
     #[test]
@@ -1024,10 +1027,7 @@ mod tests {
         acc.obligation_committed(ObligationKind::Ack);
 
         let summary = acc.snapshot().summary();
-
-        assert!(summary.contains("Derived pending: 1"));
-        assert!(summary.contains("Accounting mismatch: yes"));
-        assert!(summary.contains("Cleanup complete: no"));
+        assert_summary_snapshot("resource_accounting_summary_accounting_mismatch", &summary);
     }
 
     #[test]
