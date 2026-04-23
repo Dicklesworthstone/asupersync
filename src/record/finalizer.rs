@@ -193,6 +193,13 @@ mod tests {
     }
 
     #[test]
+    fn finalizer_policy_table_golden() {
+        init_test("finalizer_policy_table_golden");
+        let table = finalizer_policy_table();
+        insta::assert_snapshot!(table);
+    }
+
+    #[test]
     fn finalizer_stack_lifo_order() {
         init_test("finalizer_stack_lifo_order");
         let mut stack = FinalizerStack::new();
