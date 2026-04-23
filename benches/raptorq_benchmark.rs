@@ -1681,60 +1681,95 @@ fn bench_repair_campaign(c: &mut Criterion) {
 
 /// Microbenchmark for decoder critical path operations.
 ///
-/// Exercises actual decoder hot paths with varying batch sizes:
-/// - Single symbol decode (minimal overhead)
-/// - Small batch decode (16 symbols)
-/// - Larger batch decode (64 symbols, matrix operations)
+/// Exercises actual decoder hot paths on precomputed encoded inputs so the
+/// timing loop measures decode work rather than symbol construction overhead.
 fn bench_decoder_microbench(c: &mut Criterion) {
     let mut group = c.benchmark_group("raptorq_decoder_microbench");
-    group.sample_size(100);
+    group.sample_size(20);
     group.warm_up_time(std::time::Duration::from_millis(10));
     group.measurement_time(std::time::Duration::from_millis(50));
 
-    // Symbol processing microbench
-    let k = 1024;
-    let symbol_size = 1400;
-    let decoder = InactivationDecoder::new(k, symbol_size, 12345);
-
-    // Create test symbols for microbenchmarking
-    let mut test_symbols = Vec::new();
-    for i in 0..k {
-        test_symbols.push(ReceivedSymbol {
-            symbol_id: i,
-            data: vec![0xAB; symbol_size],
-        });
+    struct DecoderMicrobenchCase {
+        label: &'static str,
+        decoder: InactivationDecoder,
+        received: Vec<ReceivedSymbol>,
+        batch_size: Option<usize>,
+        bytes: usize,
     }
 
-    // Microbench: Single symbol decode attempt
-    group.throughput(Throughput::Elements(1));
-    group.bench_function("symbol_decode_single", |b| {
-        b.iter(|| {
-            // Exercise actual decoder hot path with single symbol
-            let result = decoder.decode(&test_symbols[0..1]);
-            std::hint::black_box(result);
-        });
-    });
+    let make_source = |k: usize, symbol_size: usize, seed: u64| -> Vec<Vec<u8>> {
+        (0..k)
+            .map(|index| deterministic_bytes(symbol_size, seed.wrapping_add(index as u64)))
+            .collect()
+    };
 
-    // Microbench: Batch symbol decode attempt
-    group.throughput(Throughput::Elements(16));
-    group.bench_function("symbol_decode_batch_16", |b| {
-        b.iter(|| {
-            // Exercise actual decoder hot path with batch of symbols
-            let result = decoder.decode(&test_symbols[0..16]);
-            std::hint::black_box(result);
-        });
-    });
+    let make_case = |label: &'static str,
+                     k: usize,
+                     symbol_size: usize,
+                     seed: u64,
+                     drop_source_indices: Vec<usize>,
+                     extra_repair: usize,
+                     batch_size: Option<usize>| {
+        let source = make_source(k, symbol_size, seed);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let received =
+            build_decode_received(&source, &encoder, &decoder, &drop_source_indices, extra_repair);
 
-    // Microbench: Larger decode attempt to exercise matrix operations
-    let large_symbol_batch = 64.min(k);
-    group.throughput(Throughput::Elements(large_symbol_batch as u64));
-    group.bench_function("symbol_decode_batch_64", |b| {
-        b.iter(|| {
-            // Exercise decoder with larger batch to stress matrix operations
-            let result = decoder.decode(&test_symbols[0..large_symbol_batch]);
-            std::hint::black_box(result);
+        DecoderMicrobenchCase {
+            label,
+            decoder,
+            received,
+            batch_size,
+            bytes: k * symbol_size,
+        }
+    };
+
+    let cases = [
+        make_case("decode_source_only", 32, 1024, 0xDEC0DE01, Vec::new(), 0, None),
+        make_case(
+            "decode_repair_heavy",
+            64,
+            1024,
+            0xDEC0DE02,
+            (0..64).filter(|index| index % 4 != 0).collect(),
+            3,
+            None,
+        ),
+        make_case(
+            "decode_near_rank_deficient",
+            64,
+            1024,
+            0xDEC0DE03,
+            (0..32).collect(),
+            1,
+            None,
+        ),
+        make_case(
+            "decode_wavefront_repair_heavy_batch16",
+            64,
+            1024,
+            0xDEC0DE04,
+            (0..64).filter(|index| index % 4 != 0).collect(),
+            3,
+            Some(16),
+        ),
+    ];
+
+    for case in &cases {
+        group.throughput(Throughput::Bytes(case.bytes as u64));
+        group.bench_function(case.label, |b| {
+            b.iter(|| {
+                let result = match case.batch_size {
+                    Some(batch_size) => case
+                        .decoder
+                        .decode_wavefront(std::hint::black_box(&case.received), batch_size),
+                    None => case.decoder.decode(std::hint::black_box(&case.received)),
+                };
+                std::hint::black_box(result)
+            });
         });
-    });
+    }
 
     group.finish();
 }

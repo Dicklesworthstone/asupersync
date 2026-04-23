@@ -3,6 +3,7 @@
 use super::Bytes;
 use super::buf::BufMut;
 use std::ops::{Deref, DerefMut, RangeBounds};
+use std::sync::Arc;
 
 /// Mutable buffer that can be frozen into `Bytes`.
 ///
@@ -11,11 +12,11 @@ use std::ops::{Deref, DerefMut, RangeBounds};
 ///
 /// # Implementation
 ///
-/// This implementation uses `Vec<u8>` as the backing storage, ensuring
-/// safety without unsafe code. Because `Vec<u8>` has unique ownership over a
-/// contiguous allocation, split operations must copy one side of the split
-/// rather than creating two O(1) views into the same storage. For small
-/// buffers, inline storage could be added as an optimization in the future.
+/// This implementation uses `Arc<Vec<u8>>` as the backing storage with offset/length
+/// tracking, enabling O(1) split operations. Each BytesMut represents a view into
+/// a shared buffer. When mutations are needed on a shared buffer, copy-on-write
+/// semantics ensure safety. Split operations create new views with different
+/// offsets without copying the underlying data.
 ///
 /// # Examples
 ///
@@ -31,8 +32,12 @@ use std::ops::{Deref, DerefMut, RangeBounds};
 /// ```
 #[derive(Clone)]
 pub struct BytesMut {
-    /// The backing storage.
-    data: Vec<u8>,
+    /// The backing storage (shared).
+    backing: Arc<Vec<u8>>,
+    /// Offset into the backing storage where this view starts.
+    offset: usize,
+    /// Length of this view.
+    len: usize,
 }
 
 impl BytesMut {
@@ -40,7 +45,11 @@ impl BytesMut {
     #[inline]
     #[must_use]
     pub fn new() -> Self {
-        Self { data: Vec::new() }
+        Self {
+            backing: Arc::new(Vec::new()),
+            offset: 0,
+            len: 0,
+        }
     }
 
     /// Create a `BytesMut` with the given capacity.
@@ -58,7 +67,9 @@ impl BytesMut {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            data: Vec::with_capacity(capacity),
+            backing: Arc::new(Vec::with_capacity(capacity)),
+            offset: 0,
+            len: 0,
         }
     }
 
@@ -66,21 +77,26 @@ impl BytesMut {
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
-        self.data.len()
+        self.len
     }
 
     /// Returns true if empty.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        self.len == 0
     }
 
     /// Returns the capacity.
     #[inline]
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.data.capacity()
+        // Only report available capacity for uniquely owned backing
+        if Arc::strong_count(&self.backing) == 1 {
+            self.backing.capacity() - self.offset
+        } else {
+            0 // Shared backing, no capacity for growth
+        }
     }
 
     /// Freeze into an immutable `Bytes`.
@@ -215,13 +231,18 @@ impl BytesMut {
             self.len()
         );
 
-        let mut head = Vec::with_capacity(at);
-        head.extend_from_slice(&self.data[..at]);
+        // O(1) split: create a new view for the head
+        let head = Self {
+            backing: Arc::clone(&self.backing),
+            offset: self.offset,
+            len: at,
+        };
 
-        // Remove the head from our data
-        self.data.drain(..at);
+        // Update our view to skip the head
+        self.offset += at;
+        self.len -= at;
 
-        Self { data: head }
+        head
     }
 
     /// Truncate to `len` bytes.
@@ -329,21 +350,32 @@ impl Deref for BytesMut {
 
     #[inline]
     fn deref(&self) -> &[u8] {
-        &self.data
+        &self.backing[self.offset..self.offset + self.len]
     }
 }
 
 impl DerefMut for BytesMut {
     #[inline]
     fn deref_mut(&mut self) -> &mut [u8] {
-        &mut self.data
+        // Copy-on-write: if backing is shared, make a private copy
+        if Arc::strong_count(&self.backing) > 1 {
+            let mut new_backing = Vec::with_capacity(self.len);
+            new_backing.extend_from_slice(&self.backing[self.offset..self.offset + self.len]);
+            self.backing = Arc::new(new_backing);
+            self.offset = 0;
+            // len stays the same
+        }
+
+        // Now we have unique access
+        let backing = Arc::get_mut(&mut self.backing).expect("backing should be unique after COW");
+        &mut backing[self.offset..self.offset + self.len]
     }
 }
 
 impl AsRef<[u8]> for BytesMut {
     #[inline]
     fn as_ref(&self) -> &[u8] {
-        &self.data
+        &self.backing[self.offset..self.offset + self.len]
     }
 }
 

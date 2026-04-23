@@ -36,6 +36,7 @@ pub const PROOF_SCHEMA_VERSION: u8 = 2;
 /// - Key decision points (pivots, inactivation)
 /// - Final outcome with explanation
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
 pub struct DecodeProof {
     /// Schema version for forward compatibility.
     pub version: u8,

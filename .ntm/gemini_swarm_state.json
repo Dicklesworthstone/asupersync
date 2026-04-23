@@ -2,19 +2,21 @@
   "swarm": "asupersync-gemini-review",
   "started_at": "2026-04-23T15:58:00Z",
   "session": "asupersync",
-  "agent_panes": [10, 11, 12, 13, 14],
+  "agent_panes": [1, 2, 3, 4, 5],
+  "_session_rearranged_at": "2026-04-23T17:32Z — gmi panes moved from 10-14 to 1-5",
   "retired_panes": [],
-  "degraded_panes": {},
+  "degraded_panes": {"3": "OAuth error hit #4 at t+2h20m; agent still productive between hits; retire at #5"},
   "_degraded_history": {"12": "OAuth token refresh failures at t+16m; recovered by t+20m"},
   "round": 1,
   "max_rounds": 10,
   "per_pane_step": {
-    "10": "round1_done_continuation",
-    "11": "explore_2",
-    "12": "explore_1",
-    "13": "explore_2",
-    "14": "cross_review_1"
+    "1": "unknown_post_rearrange",
+    "2": "unknown_post_rearrange",
+    "3": "cross_review_post_rearrange_1",
+    "4": "unknown_post_rearrange",
+    "5": "unknown_post_rearrange"
   },
+  "_note_rearrange": "Session was restructured at t+1h32m. Prior pane-10..14 step tracking invalid. All 5 gmi panes are at 1..5 and actively working — step state will be re-seeded on next idle-window for each pane.",
   "_step_sequence": [
     "study",
     "explore_1", "cross_review_1",
