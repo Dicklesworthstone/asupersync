@@ -335,6 +335,15 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn assert_display_snapshot(snapshot_name: &str, rendered: &str) {
+        insta::with_settings!({
+            snapshot_path => "snapshots",
+            prepend_module_to_snapshot => false,
+        }, {
+            insta::assert_snapshot!(snapshot_name, rendered);
+        });
+    }
+
     fn default_config() -> MonitorConfig {
         MonitorConfig {
             alpha: 0.01,
@@ -568,11 +577,8 @@ mod tests {
         crate::assert_with_log!(snap.observations == 1, "observations", 1, snap.observations);
         let has_threshold = snap.threshold > 0.0;
         crate::assert_with_log!(has_threshold, "threshold", true, has_threshold);
-
-        // Display impl works.
         let display = format!("{snap}");
-        let has_leak = display.contains("LeakMonitor");
-        crate::assert_with_log!(has_leak, "display", true, has_leak);
+        assert_display_snapshot("eprocess_monitor_snapshot_display", &display);
         crate::test_complete!("snapshot_captures_state");
     }
 
@@ -639,17 +645,13 @@ mod tests {
     #[test]
     fn alert_state_display() {
         init_test("alert_state_display");
-        let clear = format!("{}", AlertState::Clear);
-        crate::assert_with_log!(clear == "clear", "clear display", "clear", clear);
-        let watching = format!("{}", AlertState::Watching);
-        crate::assert_with_log!(
-            watching == "watching",
-            "watching display",
-            "watching",
-            watching
-        );
-        let alert = format!("{}", AlertState::Alert);
-        crate::assert_with_log!(alert == "ALERT", "alert display", "ALERT", alert);
+        let rendered = [
+            format!("clear={}", AlertState::Clear),
+            format!("watching={}", AlertState::Watching),
+            format!("alert={}", AlertState::Alert),
+        ]
+        .join("\n");
+        assert_display_snapshot("eprocess_alert_state_display", &rendered);
         crate::test_complete!("alert_state_display");
     }
 

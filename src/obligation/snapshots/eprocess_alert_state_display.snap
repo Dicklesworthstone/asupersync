@@ -1,0 +1,7 @@
+---
+source: src/obligation/eprocess.rs
+expression: rendered
+---
+clear=clear
+watching=watching
+alert=ALERT
