@@ -1680,3 +1680,10 @@ path = "fuzz_targets/http1_chunked.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "quic_packet_number"
+path = "fuzz_targets/quic_packet_number.rs"
+test = false
+doc = false
+bench = false
