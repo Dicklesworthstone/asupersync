@@ -1,4 +1,4 @@
-//! Mutable buffer with efficient growth and splitting.
+//! Mutable buffer with efficient growth and owned splitting.
 
 use super::Bytes;
 use super::buf::BufMut;
@@ -6,14 +6,16 @@ use std::ops::{Deref, DerefMut, RangeBounds};
 
 /// Mutable buffer that can be frozen into `Bytes`.
 ///
-/// `BytesMut` provides a mutable buffer with efficient growth, splitting,
+/// `BytesMut` provides a mutable buffer with efficient growth, owned splitting,
 /// and the ability to freeze into an immutable `Bytes`.
 ///
 /// # Implementation
 ///
 /// This implementation uses `Vec<u8>` as the backing storage, ensuring
-/// safety without unsafe code. For small buffers, inline storage could
-/// be added as an optimization in the future.
+/// safety without unsafe code. Because `Vec<u8>` has unique ownership over a
+/// contiguous allocation, split operations must copy one side of the split
+/// rather than creating two O(1) views into the same storage. For small
+/// buffers, inline storage could be added as an optimization in the future.
 ///
 /// # Examples
 ///
@@ -181,6 +183,12 @@ impl BytesMut {
     /// Split off bytes from beginning to `at`.
     ///
     /// Self becomes `[at, len)`, returns `[0, at)`.
+    ///
+    /// This is O(n) in the current `Vec<u8>`-backed implementation. Unlike
+    /// [`Bytes`](super::Bytes), `BytesMut` does not carry shared backing storage
+    /// plus offset metadata, so splitting requires copying one side of the
+    /// buffer to preserve distinct ownership of the returned prefix and the
+    /// remaining suffix.
     ///
     /// # Panics
     ///
