@@ -4,8 +4,8 @@
 //! behavior, focusing on scenarios where computing exact expected outputs
 //! is intractable due to concurrency and cancellation.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::cx::Cx;
@@ -15,8 +15,8 @@ use crate::types::Time;
 /// Mock resource for testing pool behavior.
 #[derive(Debug, Clone)]
 struct MockResource {
-    id: usize,
-    created_at: std::time::Instant,
+    _id: usize,
+    _created_at: std::time::Instant,
 }
 
 /// Resource factory that tracks creation count.
@@ -33,25 +33,25 @@ impl MockFactory {
             creation_delay,
         }
     }
-
-    fn creation_count(&self) -> usize {
-        self.counter.load(Ordering::Acquire)
-    }
 }
 
 impl crate::sync::AsyncResourceFactory for MockFactory {
     type Resource = MockResource;
     type Error = std::io::Error;
 
-    fn create(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Resource, Self::Error>> + Send + '_>> {
+    fn create(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Resource, Self::Error>> + Send + '_>,
+    > {
         let id = self.counter.fetch_add(1, Ordering::AcqRel);
         let delay = self.creation_delay;
 
         Box::pin(async move {
             crate::time::sleep(Time::ZERO, delay).await;
             Ok(MockResource {
-                id,
-                created_at: std::time::Instant::now(),
+                _id: id,
+                _created_at: std::time::Instant::now(),
             })
         })
     }
@@ -109,7 +109,10 @@ async fn execute_operations(
                     }
                 }
             }
-            PoolOperation::AcquireWithCancel { hold_ms, cancel_after_ms } => {
+            PoolOperation::AcquireWithCancel {
+                hold_ms,
+                cancel_after_ms,
+            } => {
                 let cx = Cx::for_testing();
                 let cancel_cx = cx.clone();
 
@@ -118,8 +121,8 @@ async fn execute_operations(
 
                 // Cancel after the specified time
                 let cancel_future = async {
-                    crate::time::sleep(Time::ZERO,Duration::from_millis(*cancel_after_ms)).await;
-                    cancel_cx.cancel();
+                    crate::time::sleep(Time::ZERO, Duration::from_millis(*cancel_after_ms)).await;
+                    cancel_cx.set_cancel_requested(true);
                 };
 
                 // Race the acquire against cancellation
@@ -129,7 +132,7 @@ async fn execute_operations(
                             acquired_count += 1;
 
                             // Hold the resource briefly
-                            crate::time::sleep(Time::ZERO,Duration::from_millis(*hold_ms)).await;
+                            crate::time::sleep(Time::ZERO, Duration::from_millis(*hold_ms)).await;
 
                             resource.return_to_pool();
                             returned_count += 1;
@@ -138,13 +141,14 @@ async fn execute_operations(
                     async {
                         cancel_future.await;
                         cancel_count += 1;
-                    }
-                ).await;
+                    },
+                )
+                .await;
             }
         }
 
         // Small delay between operations to allow async processing
-        crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
+        crate::time::sleep(Time::ZERO, Duration::from_millis(10)).await;
     }
 
     OperationResults {
@@ -172,42 +176,57 @@ mod metamorphic_tests {
     #[test]
     fn mr_pool_accounting_invariant() {
         futures_lite::future::block_on(async {
-        crate::test_utils::init_test_logging();
-        crate::test_phase!("mr_pool_accounting_invariant");
+            crate::test_utils::init_test_logging();
+            crate::test_phase!("mr_pool_accounting_invariant");
 
-        let config = PoolConfig::default().max_size(5).min_size(1);
-        let factory = MockFactory::new(Duration::from_millis(1));
-        let pool = GenericPool::new(factory, config);
+            let config = PoolConfig::default().max_size(5).min_size(1);
+            let factory = MockFactory::new(Duration::from_millis(1));
+            let pool = GenericPool::new(factory, config);
 
-        // Test the invariant across various operations
-        for _ in 0..10 {
-            let cx = Cx::for_testing();
-            let initial_stats = pool.stats();
+            // Test the invariant across various operations
+            for _ in 0..10 {
+                let cx = Cx::for_testing();
+                let initial_stats = pool.stats();
 
-            // Invariant must hold initially
-            assert_eq!(initial_stats.active + initial_stats.idle, initial_stats.total,
-                "Invariant violated initially: active={}, idle={}, total={}",
-                initial_stats.active, initial_stats.idle, initial_stats.total);
+                // Invariant must hold initially
+                assert_eq!(
+                    initial_stats.active + initial_stats.idle,
+                    initial_stats.total,
+                    "Invariant violated initially: active={}, idle={}, total={}",
+                    initial_stats.active,
+                    initial_stats.idle,
+                    initial_stats.total
+                );
 
-            // Acquire a resource
-            if let Ok(resource) = pool.acquire(&cx).await {
-                let during_stats = pool.stats();
-                assert_eq!(during_stats.active + during_stats.idle, during_stats.total,
-                    "Invariant violated during hold: active={}, idle={}, total={}",
-                    during_stats.active, during_stats.idle, during_stats.total);
+                // Acquire a resource
+                if let Ok(resource) = pool.acquire(&cx).await {
+                    let during_stats = pool.stats();
+                    assert_eq!(
+                        during_stats.active + during_stats.idle,
+                        during_stats.total,
+                        "Invariant violated during hold: active={}, idle={}, total={}",
+                        during_stats.active,
+                        during_stats.idle,
+                        during_stats.total
+                    );
 
-                // Return the resource
-                resource.return_to_pool();
-                crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
+                    // Return the resource
+                    resource.return_to_pool();
+                    crate::time::sleep(Time::ZERO, Duration::from_millis(10)).await;
 
-                let final_stats = pool.stats();
-                assert_eq!(final_stats.active + final_stats.idle, final_stats.total,
-                    "Invariant violated after return: active={}, idle={}, total={}",
-                    final_stats.active, final_stats.idle, final_stats.total);
+                    let final_stats = pool.stats();
+                    assert_eq!(
+                        final_stats.active + final_stats.idle,
+                        final_stats.total,
+                        "Invariant violated after return: active={}, idle={}, total={}",
+                        final_stats.active,
+                        final_stats.idle,
+                        final_stats.total
+                    );
+                }
             }
-        }
 
-        crate::test_complete!("mr_pool_accounting_invariant");
+            crate::test_complete!("mr_pool_accounting_invariant");
         });
     }
 
@@ -216,44 +235,46 @@ mod metamorphic_tests {
     #[test]
     fn mr_cancel_safety_invariance() {
         futures_lite::future::block_on(async {
-        crate::test_utils::init_test_logging();
-        crate::test_phase!("mr_cancel_safety_invariance");
+            crate::test_utils::init_test_logging();
+            crate::test_phase!("mr_cancel_safety_invariance");
 
-        let config = PoolConfig::default().max_size(3);
-        let factory = MockFactory::new(Duration::from_millis(10));
-        let pool = GenericPool::new(factory, config);
+            let config = PoolConfig::default().max_size(3);
+            let factory = MockFactory::new(Duration::from_millis(10));
+            let pool = GenericPool::new(factory, config);
 
-        let cx = Cx::for_testing();
-        let cancel_cx = cx.clone();
+            let cx = Cx::for_testing();
+            let cancel_cx = cx.clone();
 
-        // Start acquiring but cancel quickly
-        let acquire_future = pool.acquire(&cancel_cx);
-        let cancel_future = async {
-            crate::time::sleep(Time::ZERO,Duration::from_millis(5)).await;
-            cancel_cx.cancel();
-        };
+            // Start acquiring but cancel quickly
+            let acquire_future = pool.acquire(&cancel_cx);
+            let cancel_future = async {
+                crate::time::sleep(Time::ZERO, Duration::from_millis(5)).await;
+                cancel_cx.set_cancel_requested(true);
+            };
 
-        let initial_stats = pool.stats();
+            futures_lite::future::race(
+                async {
+                    if let Ok(resource) = acquire_future.await {
+                        resource.return_to_pool();
+                    }
+                },
+                async {
+                    cancel_future.await;
+                },
+            )
+            .await;
 
-        futures_lite::future::race(
-            async {
-                if let Ok(resource) = acquire_future.await {
-                    resource.return_to_pool();
-                }
-            },
-            async {
-                cancel_future.await;
-            }
-        ).await;
+            crate::time::sleep(Time::ZERO, Duration::from_millis(50)).await;
+            let final_stats = pool.stats();
 
-        crate::time::sleep(Time::ZERO,Duration::from_millis(50)).await;
-        let final_stats = pool.stats();
+            // Pool accounting should remain valid despite cancellation
+            assert_eq!(
+                final_stats.active + final_stats.idle,
+                final_stats.total,
+                "Pool accounting broken by cancellation"
+            );
 
-        // Pool accounting should remain valid despite cancellation
-        assert_eq!(final_stats.active + final_stats.idle, final_stats.total,
-            "Pool accounting broken by cancellation");
-
-        crate::test_complete!("mr_cancel_safety_invariance");
+            crate::test_complete!("mr_cancel_safety_invariance");
         });
     }
 
@@ -262,38 +283,44 @@ mod metamorphic_tests {
     #[test]
     fn mr_return_vs_drop_equivalence() {
         futures_lite::future::block_on(async {
-        crate::test_utils::init_test_logging();
-        crate::test_phase!("mr_return_vs_drop_equivalence");
+            crate::test_utils::init_test_logging();
+            crate::test_phase!("mr_return_vs_drop_equivalence");
 
-        let config = PoolConfig::default().max_size(2);
+            let config = PoolConfig::default().max_size(2);
 
-        // Scenario 1: Explicit return
-        let factory1 = MockFactory::new(Duration::from_millis(1));
-        let pool1 = GenericPool::new(factory1, config.clone());
+            // Scenario 1: Explicit return
+            let factory1 = MockFactory::new(Duration::from_millis(1));
+            let pool1 = GenericPool::new(factory1, config.clone());
 
-        let cx = Cx::for_testing();
-        let resource1 = pool1.acquire(&cx).await.unwrap();
-        resource1.return_to_pool(); // Explicit return
-        crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
-        let stats1 = pool1.stats();
+            let cx = Cx::for_testing();
+            let resource1 = pool1.acquire(&cx).await.unwrap();
+            resource1.return_to_pool(); // Explicit return
+            crate::time::sleep(Time::ZERO, Duration::from_millis(10)).await;
+            let stats1 = pool1.stats();
 
-        // Scenario 2: Drop return
-        let factory2 = MockFactory::new(Duration::from_millis(1));
-        let pool2 = GenericPool::new(factory2, config);
+            // Scenario 2: Drop return
+            let factory2 = MockFactory::new(Duration::from_millis(1));
+            let pool2 = GenericPool::new(factory2, config);
 
-        let resource2 = pool2.acquire(&cx).await.unwrap();
-        drop(resource2); // Implicit return via Drop
-        crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
-        let stats2 = pool2.stats();
+            let resource2 = pool2.acquire(&cx).await.unwrap();
+            drop(resource2); // Implicit return via Drop
+            crate::time::sleep(Time::ZERO, Duration::from_millis(10)).await;
+            let stats2 = pool2.stats();
 
-        // Both should result in equivalent pool states
-        assert_eq!(stats1.active, stats2.active, "Active count differs between return methods");
-        assert_eq!(stats1.active + stats1.idle, stats1.total);
-        assert_eq!(stats2.active + stats2.idle, stats2.total);
-        assert_eq!(stats1.active, 0, "Resource not returned properly (explicit)");
-        assert_eq!(stats2.active, 0, "Resource not returned properly (drop)");
+            // Both should result in equivalent pool states
+            assert_eq!(
+                stats1.active, stats2.active,
+                "Active count differs between return methods"
+            );
+            assert_eq!(stats1.active + stats1.idle, stats1.total);
+            assert_eq!(stats2.active + stats2.idle, stats2.total);
+            assert_eq!(
+                stats1.active, 0,
+                "Resource not returned properly (explicit)"
+            );
+            assert_eq!(stats2.active, 0, "Resource not returned properly (drop)");
 
-        crate::test_complete!("mr_return_vs_drop_equivalence");
+            crate::test_complete!("mr_return_vs_drop_equivalence");
         });
     }
 
@@ -302,40 +329,46 @@ mod metamorphic_tests {
     #[test]
     fn mr_discard_vs_return_counting() {
         futures_lite::future::block_on(async {
-        crate::test_utils::init_test_logging();
-        crate::test_phase!("mr_discard_vs_return_counting");
+            crate::test_utils::init_test_logging();
+            crate::test_phase!("mr_discard_vs_return_counting");
 
-        let config = PoolConfig::default().max_size(3);
+            let config = PoolConfig::default().max_size(3);
 
-        // Scenario 1: Return resources
-        let factory1 = MockFactory::new(Duration::from_millis(1));
-        let pool1 = GenericPool::new(factory1, config.clone());
+            // Scenario 1: Return resources
+            let factory1 = MockFactory::new(Duration::from_millis(1));
+            let pool1 = GenericPool::new(factory1, config.clone());
 
-        let cx = Cx::for_testing();
-        let resource1 = pool1.acquire(&cx).await.unwrap();
-        resource1.return_to_pool();
-        crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
-        let stats_return = pool1.stats();
+            let cx = Cx::for_testing();
+            let resource1 = pool1.acquire(&cx).await.unwrap();
+            resource1.return_to_pool();
+            crate::time::sleep(Time::ZERO, Duration::from_millis(10)).await;
+            let stats_return = pool1.stats();
 
-        // Scenario 2: Discard resources
-        let factory2 = MockFactory::new(Duration::from_millis(1));
-        let pool2 = GenericPool::new(factory2, config);
+            // Scenario 2: Discard resources
+            let factory2 = MockFactory::new(Duration::from_millis(1));
+            let pool2 = GenericPool::new(factory2, config);
 
-        let resource2 = pool2.acquire(&cx).await.unwrap();
-        resource2.discard(); // Discard instead of return
-        crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
-        let stats_discard = pool2.stats();
+            let resource2 = pool2.acquire(&cx).await.unwrap();
+            resource2.discard(); // Discard instead of return
+            crate::time::sleep(Time::ZERO, Duration::from_millis(10)).await;
+            let stats_discard = pool2.stats();
 
-        // Discarding should result in lower or equal total compared to returning
-        assert!(stats_discard.total <= stats_return.total,
-            "Discard should not increase total: discard_total={}, return_total={}",
-            stats_discard.total, stats_return.total);
+            // Discarding should result in lower or equal total compared to returning
+            assert!(
+                stats_discard.total <= stats_return.total,
+                "Discard should not increase total: discard_total={}, return_total={}",
+                stats_discard.total,
+                stats_return.total
+            );
 
-        // Accounting should be valid in both cases
-        assert_eq!(stats_return.active + stats_return.idle, stats_return.total);
-        assert_eq!(stats_discard.active + stats_discard.idle, stats_discard.total);
+            // Accounting should be valid in both cases
+            assert_eq!(stats_return.active + stats_return.idle, stats_return.total);
+            assert_eq!(
+                stats_discard.active + stats_discard.idle,
+                stats_discard.total
+            );
 
-        crate::test_complete!("mr_discard_vs_return_counting");
+            crate::test_complete!("mr_discard_vs_return_counting");
         });
     }
 
@@ -344,39 +377,45 @@ mod metamorphic_tests {
     #[test]
     fn mr_hold_duration_invariance() {
         futures_lite::future::block_on(async {
-        crate::test_utils::init_test_logging();
-        crate::test_phase!("mr_hold_duration_invariance");
+            crate::test_utils::init_test_logging();
+            crate::test_phase!("mr_hold_duration_invariance");
 
-        let config = PoolConfig::default().max_size(2);
+            let config = PoolConfig::default().max_size(2);
 
-        // Scenario 1: Short hold
-        let factory1 = MockFactory::new(Duration::from_millis(1));
-        let pool1 = GenericPool::new(factory1, config.clone());
+            // Scenario 1: Short hold
+            let factory1 = MockFactory::new(Duration::from_millis(1));
+            let pool1 = GenericPool::new(factory1, config.clone());
 
-        let cx = Cx::for_testing();
-        let resource1 = pool1.acquire(&cx).await.unwrap();
-        crate::time::sleep(Time::ZERO,Duration::from_millis(5)).await; // Short hold
-        resource1.return_to_pool();
-        crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
-        let stats_short = pool1.stats();
+            let cx = Cx::for_testing();
+            let resource1 = pool1.acquire(&cx).await.unwrap();
+            crate::time::sleep(Time::ZERO, Duration::from_millis(5)).await; // Short hold
+            resource1.return_to_pool();
+            crate::time::sleep(Time::ZERO, Duration::from_millis(10)).await;
+            let stats_short = pool1.stats();
 
-        // Scenario 2: Long hold
-        let factory2 = MockFactory::new(Duration::from_millis(1));
-        let pool2 = GenericPool::new(factory2, config);
+            // Scenario 2: Long hold
+            let factory2 = MockFactory::new(Duration::from_millis(1));
+            let pool2 = GenericPool::new(factory2, config);
 
-        let resource2 = pool2.acquire(&cx).await.unwrap();
-        crate::time::sleep(Time::ZERO,Duration::from_millis(50)).await; // Long hold
-        resource2.return_to_pool();
-        crate::time::sleep(Time::ZERO,Duration::from_millis(10)).await;
-        let stats_long = pool2.stats();
+            let resource2 = pool2.acquire(&cx).await.unwrap();
+            crate::time::sleep(Time::ZERO, Duration::from_millis(50)).await; // Long hold
+            resource2.return_to_pool();
+            crate::time::sleep(Time::ZERO, Duration::from_millis(10)).await;
+            let stats_long = pool2.stats();
 
-        // Pool correctness should be independent of hold duration
-        assert_eq!(stats_short.active + stats_short.idle, stats_short.total);
-        assert_eq!(stats_long.active + stats_long.idle, stats_long.total);
-        assert_eq!(stats_short.active, 0, "Resource not returned after short hold");
-        assert_eq!(stats_long.active, 0, "Resource not returned after long hold");
+            // Pool correctness should be independent of hold duration
+            assert_eq!(stats_short.active + stats_short.idle, stats_short.total);
+            assert_eq!(stats_long.active + stats_long.idle, stats_long.total);
+            assert_eq!(
+                stats_short.active, 0,
+                "Resource not returned after short hold"
+            );
+            assert_eq!(
+                stats_long.active, 0,
+                "Resource not returned after long hold"
+            );
 
-        crate::test_complete!("mr_hold_duration_invariance");
+            crate::test_complete!("mr_hold_duration_invariance");
         });
     }
 
@@ -385,44 +424,53 @@ mod metamorphic_tests {
     #[test]
     fn mr_composite_operation_sequence() {
         futures_lite::future::block_on(async {
-        crate::test_utils::init_test_logging();
-        crate::test_phase!("mr_composite_operation_sequence");
+            crate::test_utils::init_test_logging();
+            crate::test_phase!("mr_composite_operation_sequence");
 
-        let config = PoolConfig::default().max_size(3).min_size(1);
-        let factory = MockFactory::new(Duration::from_millis(2));
-        let pool = GenericPool::new(factory, config);
+            let config = PoolConfig::default().max_size(3).min_size(1);
+            let max_size = config.max_size;
+            let factory = MockFactory::new(Duration::from_millis(2));
+            let pool = GenericPool::new(factory, config);
 
-        // Execute a complex sequence: acquire, hold, return, try_acquire, discard
-        let operations = vec![
-            PoolOperation::Acquire { hold_ms: 10 },
-            PoolOperation::TryAcquire { hold_ms: 5 },
-            PoolOperation::AcquireWithCancel { hold_ms: 20, cancel_after_ms: 5 },
-            PoolOperation::Acquire { hold_ms: 15 },
-        ];
+            // Execute a complex sequence: acquire, hold, return, try_acquire, discard
+            let operations = vec![
+                PoolOperation::Acquire { hold_ms: 10 },
+                PoolOperation::TryAcquire { hold_ms: 5 },
+                PoolOperation::AcquireWithCancel {
+                    hold_ms: 20,
+                    cancel_after_ms: 5,
+                },
+                PoolOperation::Acquire { hold_ms: 15 },
+            ];
 
-        let initial_stats = pool.stats();
-        assert_eq!(initial_stats.active + initial_stats.idle, initial_stats.total);
+            let initial_stats = pool.stats();
+            assert_eq!(
+                initial_stats.active + initial_stats.idle,
+                initial_stats.total
+            );
 
-        let _results = execute_operations(&pool, &operations).await;
+            let _results = execute_operations(&pool, &operations).await;
 
-        // Allow all async processing to complete
-        crate::time::sleep(Time::ZERO,Duration::from_millis(100)).await;
+            // Allow all async processing to complete
+            crate::time::sleep(Time::ZERO, Duration::from_millis(100)).await;
 
-        let final_stats = pool.stats();
+            let final_stats = pool.stats();
 
-        // All invariants must hold after complex operations
-        assert_eq!(final_stats.active + final_stats.idle, final_stats.total,
-            "Pool accounting violated after composite operations");
+            // All invariants must hold after complex operations
+            assert_eq!(
+                final_stats.active + final_stats.idle,
+                final_stats.total,
+                "Pool accounting violated after composite operations"
+            );
 
-        assert!(final_stats.active >= 0 && final_stats.idle >= 0 && final_stats.total >= 0,
-            "Negative counts detected: active={}, idle={}, total={}",
-            final_stats.active, final_stats.idle, final_stats.total);
+            assert!(
+                final_stats.total <= max_size,
+                "Pool exceeded max_size: total={}, max={}",
+                final_stats.total,
+                max_size
+            );
 
-        assert!(final_stats.total <= config.max_size,
-            "Pool exceeded max_size: total={}, max={}",
-            final_stats.total, config.max_size);
-
-        crate::test_complete!("mr_composite_operation_sequence");
+            crate::test_complete!("mr_composite_operation_sequence");
         });
     }
 }

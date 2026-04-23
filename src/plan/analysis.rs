@@ -675,8 +675,12 @@ impl PlanAnalysis {
 impl fmt::Display for NodeAnalysis {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Node {} Analysis:", self.id.index())?;
-        writeln!(f, "  Obligation Safety: {} (effective: {})",
-                 self.obligation, self.effective_obligation())?;
+        writeln!(
+            f,
+            "  Obligation Safety: {} (effective: {})",
+            self.obligation,
+            self.effective_obligation()
+        )?;
         writeln!(f, "  Cancel Safety: {}", self.cancel)?;
         writeln!(f, "  Budget Effect: {}", self.budget)?;
         writeln!(f, "  Cost: {}", self.cost)?;
@@ -708,10 +712,13 @@ impl fmt::Display for PlanAnalysis {
         if !safe_nodes.is_empty() {
             writeln!(f, "Safe Nodes ({}):", safe_nodes.len())?;
             for node in safe_nodes {
-                writeln!(f, "  Node {}: {} (cost: {})",
-                         node.id.index(),
-                         node.obligation,
-                         node.cost)?;
+                writeln!(
+                    f,
+                    "  Node {}: {} (cost: {})",
+                    node.id.index(),
+                    node.obligation,
+                    node.cost
+                )?;
             }
             writeln!(f)?;
         }
@@ -719,11 +726,14 @@ impl fmt::Display for PlanAnalysis {
         if !obligation_issues.is_empty() {
             writeln!(f, "Obligation Issues ({}):", obligation_issues.len())?;
             for node in obligation_issues {
-                writeln!(f, "  Node {}: {} → {} (flow: {})",
-                         node.id.index(),
-                         node.obligation,
-                         node.effective_obligation(),
-                         node.obligation_flow)?;
+                writeln!(
+                    f,
+                    "  Node {}: {} → {} (flow: {})",
+                    node.id.index(),
+                    node.obligation,
+                    node.effective_obligation(),
+                    node.obligation_flow
+                )?;
             }
             writeln!(f)?;
         }
@@ -740,8 +750,13 @@ impl fmt::Display for PlanAnalysis {
         writeln!(f, "----------------------")?;
         for (id, node) in &self.nodes {
             writeln!(f, "Node {}:", id)?;
-            writeln!(f, "  Safety: obligation={}, cancel={}, overall={}",
-                     node.effective_obligation(), node.cancel, node.is_safe())?;
+            writeln!(
+                f,
+                "  Safety: obligation={}, cancel={}, overall={}",
+                node.effective_obligation(),
+                node.cancel,
+                node.is_safe()
+            )?;
             writeln!(f, "  Budget: {}", node.budget)?;
             writeln!(f, "  Cost: {}", node.cost)?;
             writeln!(f, "  Obligation Flow: {}", node.obligation_flow)?;
@@ -2093,18 +2108,38 @@ mod tests {
         output.push_str(&format!("MayLeak: {}\n", ObligationSafety::MayLeak));
         output.push_str(&format!("Leaked: {}\n", ObligationSafety::Leaked));
         output.push_str(&format!("Unknown: {}\n", ObligationSafety::Unknown));
-        
+
         output.push_str("\n--- CancelSafety ---\n");
         output.push_str(&format!("Safe: {}\n", CancelSafety::Safe));
         output.push_str(&format!("MayOrphan: {}\n", CancelSafety::MayOrphan));
         output.push_str(&format!("Orphan: {}\n", CancelSafety::Orphan));
         output.push_str(&format!("Unknown: {}\n", CancelSafety::Unknown));
-        
+
         output.push_str("\n--- BudgetEffect ---\n");
         output.push_str(&format!("LEAF: {}\n", BudgetEffect::LEAF));
-        output.push_str(&format!("Bounded: {}\n", BudgetEffect { min_polls: 2, max_polls: Some(5), has_deadline: true, min_deadline: DeadlineMicros(None), max_deadline: DeadlineMicros(None), parallelism: 1 }));
-        output.push_str(&format!("Unbounded: {}\n", BudgetEffect { min_polls: 1, max_polls: None, has_deadline: false, min_deadline: DeadlineMicros(None), max_deadline: DeadlineMicros(None), parallelism: 1 }));
-        
+        output.push_str(&format!(
+            "Bounded: {}\n",
+            BudgetEffect {
+                min_polls: 2,
+                max_polls: Some(5),
+                has_deadline: true,
+                min_deadline: DeadlineMicros(None),
+                max_deadline: DeadlineMicros(None),
+                parallelism: 1
+            }
+        ));
+        output.push_str(&format!(
+            "Unbounded: {}\n",
+            BudgetEffect {
+                min_polls: 1,
+                max_polls: None,
+                has_deadline: false,
+                min_deadline: DeadlineMicros(None),
+                max_deadline: DeadlineMicros(None),
+                parallelism: 1
+            }
+        ));
+
         output.push_str("\n--- ObligationFlow ---\n");
         output.push_str(&format!("Empty: {}\n", ObligationFlow::empty()));
         let mut flow_complex = ObligationFlow::empty();
@@ -2113,19 +2148,33 @@ mod tests {
         flow_complex.leak_on_cancel.push("Lease".to_string());
         flow_complex.all_paths_resolve = false;
         output.push_str(&format!("Complex: {}\n", flow_complex));
-        
+
         output.push_str("\n--- IndependenceResult ---\n");
-        output.push_str(&format!("Independent: {}\n", IndependenceResult::Independent));
+        output.push_str(&format!(
+            "Independent: {}\n",
+            IndependenceResult::Independent
+        ));
         output.push_str(&format!("Dependent: {}\n", IndependenceResult::Dependent));
         output.push_str(&format!("Uncertain: {}\n", IndependenceResult::Uncertain));
-        
+
         output.push_str("\n--- TraceEquivalenceHint ---\n");
         output.push_str(&format!("Atomic: {}\n", TraceEquivalenceHint::Atomic));
-        output.push_str(&format!("FullyCommutative: {}\n", TraceEquivalenceHint::FullyCommutative));
-        output.push_str(&format!("PartiallyCommutative: {}\n", TraceEquivalenceHint::PartiallyCommutative { groups: vec![vec![0, 1], vec![2, 3]] }));
-        output.push_str(&format!("Sequential: {}\n", TraceEquivalenceHint::Sequential));
+        output.push_str(&format!(
+            "FullyCommutative: {}\n",
+            TraceEquivalenceHint::FullyCommutative
+        ));
+        output.push_str(&format!(
+            "PartiallyCommutative: {}\n",
+            TraceEquivalenceHint::PartiallyCommutative {
+                groups: vec![vec![0, 1], vec![2, 3]]
+            }
+        ));
+        output.push_str(&format!(
+            "Sequential: {}\n",
+            TraceEquivalenceHint::Sequential
+        ));
         output.push_str(&format!("Unknown: {}\n", TraceEquivalenceHint::Unknown));
-        
+
         insta::assert_snapshot!("analysis_display_outputs", output);
     }
 
@@ -3123,8 +3172,9 @@ mod tests {
         let leaf = ObligationFlow::leaf_with_obligation("obl:permit".to_string());
         let joined = ObligationFlow::leaf_with_obligation("obl:a".to_string())
             .join(ObligationFlow::leaf_with_obligation("obl:b".to_string()));
-        let raced = ObligationFlow::leaf_with_obligation("obl:winner".to_string())
-            .race(ObligationFlow::leaf_with_obligation("obl:loser".to_string()));
+        let raced = ObligationFlow::leaf_with_obligation("obl:winner".to_string()).race(
+            ObligationFlow::leaf_with_obligation("obl:loser".to_string()),
+        );
         let rendered = [
             ("empty", empty),
             ("leaf_with_obligation", leaf),
@@ -3397,12 +3447,12 @@ mod tests {
 
         // Per-node view (sorted by PlanId index for determinism).
         let mut by_id: Vec<_> = analysis.nodes.iter().collect();
-        by_id.sort_by_key(|(id, _)| id.index());
+        by_id.sort_by_key(|(id, _)| **id);
         let per_node: Vec<_> = by_id
             .into_iter()
             .map(|(id, n)| {
                 serde_json::json!({
-                    "id": id.index(),
+                    "id": *id,
                     "obligation":            format!("{}", n.obligation),
                     "effective_obligation":  format!("{}", n.effective_obligation()),
                     "obligation_flow":       format!("{}", n.obligation_flow),
@@ -3420,7 +3470,11 @@ mod tests {
             .iter()
             .map(|n| n.id.index())
             .collect();
-        let cancel_ids: Vec<_> = analysis.cancel_issues().iter().map(|n| n.id.index()).collect();
+        let cancel_ids: Vec<_> = analysis
+            .cancel_issues()
+            .iter()
+            .map(|n| n.id.index())
+            .collect();
 
         insta::assert_json_snapshot!(
             "canonical_plan_analysis_report",
@@ -3440,36 +3494,77 @@ mod tests {
         // Test all complex Display implementations for golden artifact stability
 
         // ObligationSafety variants
-        insta::assert_snapshot!("obligation_safety_clean", format!("{}", ObligationSafety::Clean));
-        insta::assert_snapshot!("obligation_safety_may_leak", format!("{}", ObligationSafety::MayLeak));
-        insta::assert_snapshot!("obligation_safety_leaked", format!("{}", ObligationSafety::Leaked));
-        insta::assert_snapshot!("obligation_safety_unknown", format!("{}", ObligationSafety::Unknown));
+        insta::assert_snapshot!(
+            "obligation_safety_clean",
+            format!("{}", ObligationSafety::Clean)
+        );
+        insta::assert_snapshot!(
+            "obligation_safety_may_leak",
+            format!("{}", ObligationSafety::MayLeak)
+        );
+        insta::assert_snapshot!(
+            "obligation_safety_leaked",
+            format!("{}", ObligationSafety::Leaked)
+        );
+        insta::assert_snapshot!(
+            "obligation_safety_unknown",
+            format!("{}", ObligationSafety::Unknown)
+        );
 
         // CancelSafety variants
         insta::assert_snapshot!("cancel_safety_safe", format!("{}", CancelSafety::Safe));
-        insta::assert_snapshot!("cancel_safety_may_orphan", format!("{}", CancelSafety::MayOrphan));
+        insta::assert_snapshot!(
+            "cancel_safety_may_orphan",
+            format!("{}", CancelSafety::MayOrphan)
+        );
         insta::assert_snapshot!("cancel_safety_orphan", format!("{}", CancelSafety::Orphan));
-        insta::assert_snapshot!("cancel_safety_unknown", format!("{}", CancelSafety::Unknown));
+        insta::assert_snapshot!(
+            "cancel_safety_unknown",
+            format!("{}", CancelSafety::Unknown)
+        );
 
         // BudgetEffect variants
         insta::assert_snapshot!("budget_effect_leaf", format!("{}", BudgetEffect::LEAF));
-        insta::assert_snapshot!("budget_effect_unknown", format!("{}", BudgetEffect::UNKNOWN));
+        insta::assert_snapshot!(
+            "budget_effect_unknown",
+            format!("{}", BudgetEffect::UNKNOWN)
+        );
 
-        let effect_with_deadline = BudgetEffect::LEAF.with_deadline(DeadlineMicros::from_micros(1500));
-        insta::assert_snapshot!("budget_effect_with_deadline", format!("{}", effect_with_deadline));
+        let effect_with_deadline =
+            BudgetEffect::LEAF.with_deadline(DeadlineMicros::from_micros(1500));
+        insta::assert_snapshot!(
+            "budget_effect_with_deadline",
+            format!("{}", effect_with_deadline)
+        );
 
         // ObligationFlow variants
         let empty_flow = ObligationFlow::empty();
         insta::assert_snapshot!("obligation_flow_empty", format!("{}", empty_flow));
 
-        let flow_with_obligation = ObligationFlow::leaf_with_obligation("test_obligation".to_string());
-        insta::assert_snapshot!("obligation_flow_with_obligation", format!("{}", flow_with_obligation));
+        let flow_with_obligation =
+            ObligationFlow::leaf_with_obligation("test_obligation".to_string());
+        insta::assert_snapshot!(
+            "obligation_flow_with_obligation",
+            format!("{}", flow_with_obligation)
+        );
 
         // DeadlineMicros variants
-        insta::assert_snapshot!("deadline_micros_unbounded", format!("{}", DeadlineMicros::UNBOUNDED));
+        insta::assert_snapshot!(
+            "deadline_micros_unbounded",
+            format!("{}", DeadlineMicros::UNBOUNDED)
+        );
         insta::assert_snapshot!("deadline_micros_zero", format!("{}", DeadlineMicros::ZERO));
-        insta::assert_snapshot!("deadline_micros_microseconds", format!("{}", DeadlineMicros::from_micros(500)));
-        insta::assert_snapshot!("deadline_micros_milliseconds", format!("{}", DeadlineMicros::from_micros(2500)));
-        insta::assert_snapshot!("deadline_micros_seconds", format!("{}", DeadlineMicros::from_micros(3000000)));
+        insta::assert_snapshot!(
+            "deadline_micros_microseconds",
+            format!("{}", DeadlineMicros::from_micros(500))
+        );
+        insta::assert_snapshot!(
+            "deadline_micros_milliseconds",
+            format!("{}", DeadlineMicros::from_micros(2500))
+        );
+        insta::assert_snapshot!(
+            "deadline_micros_seconds",
+            format!("{}", DeadlineMicros::from_micros(3000000))
+        );
     }
 }

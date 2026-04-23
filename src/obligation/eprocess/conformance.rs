@@ -9,7 +9,7 @@
 //! 4. **Alert Threshold**: False positive rate bounds
 //! 5. **Numerical Stability**: No overflow/underflow in realistic scenarios
 
-use super::{LeakMonitor, MonitorConfig, AlertState};
+use super::{LeakMonitor, MonitorConfig};
 use std::f64;
 
 /// Mathematical tolerance for floating-point comparisons.
@@ -18,12 +18,18 @@ const MATH_EPSILON: f64 = 1e-10;
 /// Conformance test result for a specific mathematical requirement.
 #[derive(Debug, Clone)]
 pub struct ConformanceResult {
+    /// Stable requirement identifier covered by this result.
     pub requirement_id: &'static str,
+    /// Human-readable requirement summary.
     pub description: &'static str,
+    /// Criticality level for the requirement.
     pub level: RequirementLevel,
+    /// Execution status for the requirement check.
     pub status: TestStatus,
+    /// Evidence or failure details captured by the check.
     pub evidence: String,
-    pub confidence: f64, // 0.0 to 1.0
+    /// Confidence score for the result, from 0.0 to 1.0.
+    pub confidence: f64,
 }
 
 /// Requirement criticality level.
@@ -40,10 +46,14 @@ pub enum RequirementLevel {
 /// Test execution status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestStatus {
+    /// Requirement check passed.
     Pass,
+    /// Requirement check failed.
     Fail,
+    /// Requirement check was skipped.
     Skip,
-    XFail, // Expected failure (known limitation)
+    /// Requirement check is an expected failure for a known limitation.
+    XFail,
 }
 
 /// Complete conformance matrix for e-process implementation.
@@ -54,9 +64,13 @@ pub struct EProcessConformanceHarness {
 
 /// Individual conformance test.
 pub struct ConformanceTest {
+    /// Stable requirement identifier covered by this test.
     pub id: &'static str,
+    /// Human-readable requirement summary.
     pub description: &'static str,
+    /// Criticality level for the requirement.
     pub level: RequirementLevel,
+    /// Test function that evaluates the requirement.
     pub test_fn: fn() -> ConformanceResult,
 }
 
@@ -160,14 +174,18 @@ impl EProcessConformanceHarness {
             let level_str = match result.level {
                 RequirementLevel::Must => {
                     must_total += 1;
-                    if result.status == TestStatus::Pass { must_pass += 1; }
+                    if result.status == TestStatus::Pass {
+                        must_pass += 1;
+                    }
                     "MUST"
-                },
+                }
                 RequirementLevel::Should => {
                     should_total += 1;
-                    if result.status == TestStatus::Pass { should_pass += 1; }
+                    if result.status == TestStatus::Pass {
+                        should_pass += 1;
+                    }
                     "SHOULD"
-                },
+                }
                 RequirementLevel::May => "MAY",
             };
 
@@ -194,13 +212,23 @@ impl EProcessConformanceHarness {
             100.0
         };
 
-        output.push_str(&format!("**MUST Requirements**: {}/{} ({:.1}%)\n", must_pass, must_total, must_score));
-        output.push_str(&format!("**SHOULD Requirements**: {}/{} ({:.1}%)\n", should_pass, should_total, should_score));
+        output.push_str(&format!(
+            "**MUST Requirements**: {}/{} ({:.1}%)\n",
+            must_pass, must_total, must_score
+        ));
+        output.push_str(&format!(
+            "**SHOULD Requirements**: {}/{} ({:.1}%)\n",
+            should_pass, should_total, should_score
+        ));
 
         if must_score >= 95.0 {
-            output.push_str("\n✅ **CONFORMANT**: Implementation satisfies martingale requirements\n");
+            output.push_str(
+                "\n✅ **CONFORMANT**: Implementation satisfies martingale requirements\n",
+            );
         } else {
-            output.push_str("\n❌ **NON-CONFORMANT**: Critical mathematical requirements not satisfied\n");
+            output.push_str(
+                "\n❌ **NON-CONFORMANT**: Critical mathematical requirements not satisfied\n",
+            );
         }
 
         output
@@ -212,6 +240,11 @@ impl EProcessConformanceHarness {
             .iter()
             .filter(|r| r.status == TestStatus::Fail)
             .collect()
+    }
+
+    /// Returns all conformance results collected by the last run.
+    pub fn results(&self) -> &[ConformanceResult] {
+        &self.results
     }
 }
 
@@ -300,8 +333,8 @@ fn test_supermartingale_property() -> ConformanceResult {
 
         for i in 0..observations_per_sequence {
             // Generate exponential sample with rate 1/μ
-            let u = ((seq * observations_per_sequence + i) as f64 + 0.5) /
-                   (num_sequences * observations_per_sequence) as f64;
+            let u = ((seq * observations_per_sequence + i) as f64 + 0.5)
+                / (num_sequences * observations_per_sequence) as f64;
             let x = -(config.expected_lifetime_ns as f64) * (1.0 - u).ln();
 
             monitor.observe(x as u64);
@@ -316,7 +349,7 @@ fn test_supermartingale_property() -> ConformanceResult {
     // Under the supermartingale property, mean should be ≤ 1 (starting value).
     // We allow some slack for sampling variance.
     let martingale_ok = mean_e_value <= 1.5; // Allow 50% slack
-    let bounded_ok = max_e_value <= 100.0;   // No extreme outliers
+    let bounded_ok = max_e_value <= 100.0; // No extreme outliers
 
     if martingale_ok && bounded_ok {
         ConformanceResult {
@@ -409,9 +442,9 @@ fn test_numerical_stability() -> ConformanceResult {
 
     // Stress test: extreme values that could cause overflow/underflow
     let test_cases = [
-        (1_000_000_000u64, "very large age"),        // 1 second
-        (100u64, "very small age"),                  // 0.1 microsecond
-        (u64::MAX / 2, "near-max age"),              // Extreme but not overflow
+        (1_000_000_000u64, "very large age"), // 1 second
+        (100u64, "very small age"),           // 0.1 microsecond
+        (u64::MAX / 2, "near-max age"),       // Extreme but not overflow
     ];
 
     let mut all_stable = true;
@@ -482,8 +515,8 @@ fn test_false_positive_rate_convergence() -> ConformanceResult {
 
         for i in 0..observations_per_trial {
             // Generate exponential observations (null hypothesis)
-            let u = ((trial * observations_per_trial + i) as f64 + 0.5) /
-                   (num_trials * observations_per_trial) as f64;
+            let u = ((trial * observations_per_trial + i) as f64 + 0.5)
+                / (num_trials * observations_per_trial) as f64;
             let x = -(config.expected_lifetime_ns as f64) * (1.0 - u).ln();
 
             monitor.observe(x as u64);
@@ -611,14 +644,14 @@ fn test_reset_preserves_invariants() -> ConformanceResult {
     let observations_after = monitor.observations();
     let peak_after = monitor.peak_e_value();
 
-    let config_preserved = (config_before.alpha - config_after.alpha).abs() < MATH_EPSILON &&
-                          config_before.expected_lifetime_ns == config_after.expected_lifetime_ns &&
-                          config_before.min_observations == config_after.min_observations;
+    let config_preserved = (config_before.alpha - config_after.alpha).abs() < MATH_EPSILON
+        && config_before.expected_lifetime_ns == config_after.expected_lifetime_ns
+        && config_before.min_observations == config_after.min_observations;
 
     let threshold_preserved = (threshold_before - threshold_after).abs() < MATH_EPSILON;
-    let state_reset = (e_value_after - 1.0).abs() < MATH_EPSILON &&
-                     observations_after == 0 &&
-                     (peak_after - 1.0).abs() < MATH_EPSILON;
+    let state_reset = (e_value_after - 1.0).abs() < MATH_EPSILON
+        && observations_after == 0
+        && (peak_after - 1.0).abs() < MATH_EPSILON;
 
     if config_preserved && threshold_preserved && state_reset {
         ConformanceResult {
@@ -731,7 +764,8 @@ mod tests {
         assert!(matrix.contains("E-Process Martingale Conformance Matrix"));
 
         // Should categorize by requirement level
-        let must_requirements: Vec<_> = harness.results
+        let must_requirements: Vec<_> = harness
+            .results
             .iter()
             .filter(|r| r.level == RequirementLevel::Must)
             .collect();

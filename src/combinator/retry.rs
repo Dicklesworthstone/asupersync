@@ -1852,7 +1852,7 @@ mod tests {
         #[test]
         fn mr_jitter_never_shrinks_below_base() {
             for &jitter in &[0.05_f64, 0.1, 0.25, 0.5, 1.0] {
-                let base_policy = RetryPolicy {
+                let no_jitter_policy = RetryPolicy {
                     jitter: 0.0,
                     ..base_policy()
                 };
@@ -1863,7 +1863,7 @@ mod tests {
                 for seed in 0u64..16 {
                     for attempt in 1..=8u32 {
                         let mut rng = DetRng::new(seed);
-                        let base = calculate_delay(&base_policy, attempt, None);
+                        let base = calculate_delay(&no_jitter_policy, attempt, None);
                         let jittered = calculate_delay(&jittered_policy, attempt, Some(&mut rng));
                         assert!(
                             jittered >= base,
@@ -1879,7 +1879,7 @@ mod tests {
         #[test]
         fn mr_jitter_bounded_above_by_base_times_one_plus_jitter() {
             for &jitter in &[0.05_f64, 0.1, 0.25, 0.5, 1.0] {
-                let base_policy = RetryPolicy {
+                let no_jitter_policy = RetryPolicy {
                     jitter: 0.0,
                     ..base_policy()
                 };
@@ -1890,7 +1890,7 @@ mod tests {
                 for seed in 0u64..16 {
                     for attempt in 1..=8u32 {
                         let mut rng = DetRng::new(seed);
-                        let base = calculate_delay(&base_policy, attempt, None);
+                        let base = calculate_delay(&no_jitter_policy, attempt, None);
                         let jittered = calculate_delay(&jittered_policy, attempt, Some(&mut rng));
                         // base_nanos * (1 + jitter), with +1 ns slack for the
                         // single floor-cast inside calculate_delay.
@@ -2011,9 +2011,8 @@ mod tests {
                 let base = calculate_delay(policy, attempt, None);
                 #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
                 let jittered_nanos = (base.as_nanos() as f64) * (1.0 + policy.jitter);
-                let jittered = Duration::from_nanos(
-                    jittered_nanos.min(u64::MAX as f64).max(0.0) as u64,
-                );
+                let jittered =
+                    Duration::from_nanos(jittered_nanos.min(u64::MAX as f64).max(0.0) as u64);
                 total = total.saturating_add(jittered);
             }
             total
@@ -2078,9 +2077,7 @@ mod tests {
                 );
                 prev = got;
             }
-            eprintln!(
-                "{{\"id\":\"RETRY-BUDGET-2\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-            );
+            eprintln!("{{\"id\":\"RETRY-BUDGET-2\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// RETRY-BUDGET-3 (MUST): max_attempts = 1 yields Duration::ZERO
@@ -2102,9 +2099,7 @@ mod tests {
                     );
                 }
             }
-            eprintln!(
-                "{{\"id\":\"RETRY-BUDGET-3\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-            );
+            eprintln!("{{\"id\":\"RETRY-BUDGET-3\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// RETRY-BUDGET-4 (MUST): total budget is bounded above by
@@ -2142,9 +2137,7 @@ mod tests {
                     "RETRY-BUDGET-4 case {i}: budget {got:?} exceeds cap {upper:?} (slack {slack:?})",
                 );
             }
-            eprintln!(
-                "{{\"id\":\"RETRY-BUDGET-4\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-            );
+            eprintln!("{{\"id\":\"RETRY-BUDGET-4\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// RETRY-BUDGET-5 (MUST): total_delay_budget is a valid upper bound
@@ -2174,9 +2167,7 @@ mod tests {
                     "RETRY-BUDGET-5 seed={seed}: realized {realized:?} exceeds budget {budget:?}",
                 );
             }
-            eprintln!(
-                "{{\"id\":\"RETRY-BUDGET-5\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-            );
+            eprintln!("{{\"id\":\"RETRY-BUDGET-5\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// RETRY-BUDGET-6 (MUST): total_delay_budget saturates at
@@ -2196,9 +2187,7 @@ mod tests {
                 got <= Duration::MAX,
                 "RETRY-BUDGET-6: budget must remain bounded by Duration::MAX",
             );
-            eprintln!(
-                "{{\"id\":\"RETRY-BUDGET-6\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-            );
+            eprintln!("{{\"id\":\"RETRY-BUDGET-6\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// RETRY-BUDGET-7 (MUST): validate() rejects configurations that
@@ -2214,7 +2203,10 @@ mod tests {
                 max_attempts: 0,
                 ..RetryPolicy::default()
             };
-            assert!(bad_attempts.validate().is_err(), "max_attempts=0 must fail validate");
+            assert!(
+                bad_attempts.validate().is_err(),
+                "max_attempts=0 must fail validate"
+            );
 
             let bad_multiplier = RetryPolicy {
                 multiplier: 0.5,
@@ -2256,12 +2248,14 @@ mod tests {
 
             // Positive cases: default and common builders must pass.
             assert!(RetryPolicy::default().validate().is_ok());
-            assert!(RetryPolicy::fixed_delay(Duration::from_millis(10), 3).validate().is_ok());
+            assert!(
+                RetryPolicy::fixed_delay(Duration::from_millis(10), 3)
+                    .validate()
+                    .is_ok()
+            );
             assert!(RetryPolicy::immediate(5).validate().is_ok());
 
-            eprintln!(
-                "{{\"id\":\"RETRY-BUDGET-7\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-            );
+            eprintln!("{{\"id\":\"RETRY-BUDGET-7\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
     }
 }

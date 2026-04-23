@@ -6,7 +6,7 @@
 //! Run with `UPDATE_QUIC_GOLDENS=1` to regenerate golden artifacts.
 
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::sync::LazyLock;
 
 // ============================================================================
 // RFC 9000 Stream State Conformance Framework
@@ -157,265 +157,250 @@ pub enum TestVerdict {
 // RFC 9000 Stream State Test Cases
 // ============================================================================
 
-const RFC9000_STREAM_TEST_CASES: &[StreamStateTestCase] = &[
-    // Section 3.2 - Stream Types and Identifiers
-    StreamStateTestCase {
-        id: "RFC9000-3.2.1",
-        section: "3.2",
-        level: RequirementLevel::Must,
-        description: "Client-initiated bidirectional streams have IDs with low-order 2 bits set to 0x00",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: Some(SendStreamState::Ready),
-        initial_recv_state: Some(RecvStreamState::Recv),
-        events: vec![],
-        expected_send_state: Some(SendStreamState::Ready),
-        expected_recv_state: Some(RecvStreamState::Recv),
-        expected_error: None,
-    },
-
-    // Section 3.4 - Stream States
-    StreamStateTestCase {
-        id: "RFC9000-3.4.1",
-        section: "3.4",
-        level: RequirementLevel::Must,
-        description: "Send stream starts in Ready state",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: None, // Will be tested on creation
-        initial_recv_state: None,
-        events: vec![],
-        expected_send_state: Some(SendStreamState::Ready),
-        expected_recv_state: None,
-        expected_error: None,
-    },
-
-    StreamStateTestCase {
-        id: "RFC9000-3.4.2",
-        section: "3.4",
-        level: RequirementLevel::Must,
-        description: "Send stream transitions Ready → Send on app finish",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: Some(SendStreamState::Ready),
-        initial_recv_state: None,
-        events: vec![StreamEvent::AppFinish],
-        expected_send_state: Some(SendStreamState::Send),
-        expected_recv_state: None,
-        expected_error: None,
-    },
-
-    StreamStateTestCase {
-        id: "RFC9000-3.4.3",
-        section: "3.4",
-        level: RequirementLevel::Must,
-        description: "Send stream transitions Send → DataSent when all data sent",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: Some(SendStreamState::Send),
-        initial_recv_state: None,
-        events: vec![],
-        expected_send_state: Some(SendStreamState::DataSent),
-        expected_recv_state: None,
-        expected_error: None,
-    },
-
-    StreamStateTestCase {
-        id: "RFC9000-3.4.4",
-        section: "3.4",
-        level: RequirementLevel::Must,
-        description: "Send stream transitions DataSent → DataRecvd when peer acknowledges",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: Some(SendStreamState::DataSent),
-        initial_recv_state: None,
-        events: vec![StreamEvent::AllDataAcked],
-        expected_send_state: Some(SendStreamState::DataRecvd),
-        expected_recv_state: None,
-        expected_error: None,
-    },
-
-    StreamStateTestCase {
-        id: "RFC9000-3.4.5",
-        section: "3.4",
-        level: RequirementLevel::Must,
-        description: "Send stream transitions Ready → ResetSent on app reset",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: Some(SendStreamState::Ready),
-        initial_recv_state: None,
-        events: vec![StreamEvent::AppReset(42)],
-        expected_send_state: Some(SendStreamState::ResetSent),
-        expected_recv_state: None,
-        expected_error: None,
-    },
-
-    StreamStateTestCase {
-        id: "RFC9000-3.4.6",
-        section: "3.4",
-        level: RequirementLevel::Must,
-        description: "Send stream transitions ResetSent → ResetRecvd when peer acknowledges reset",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: Some(SendStreamState::ResetSent),
-        initial_recv_state: None,
-        events: vec![StreamEvent::AllDataAcked],
-        expected_send_state: Some(SendStreamState::ResetRecvd),
-        expected_recv_state: None,
-        expected_error: None,
-    },
-
-    // Receive stream state transitions
-    StreamStateTestCase {
-        id: "RFC9000-3.4.7",
-        section: "3.4",
-        level: RequirementLevel::Must,
-        description: "Recv stream starts in Recv state",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: None,
-        initial_recv_state: None,
-        events: vec![],
-        expected_send_state: None,
-        expected_recv_state: Some(RecvStreamState::Recv),
-        expected_error: None,
-    },
-
-    StreamStateTestCase {
-        id: "RFC9000-3.4.8",
-        section: "3.4",
-        level: RequirementLevel::Must,
-        description: "Recv stream transitions Recv → SizeKnown on peer FIN",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: None,
-        initial_recv_state: Some(RecvStreamState::Recv),
-        events: vec![StreamEvent::PeerStreamFin],
-        expected_send_state: None,
-        expected_recv_state: Some(RecvStreamState::SizeKnown),
-        expected_error: None,
-    },
-
-    StreamStateTestCase {
-        id: "RFC9000-3.4.9",
-        section: "3.4",
-        level: RequirementLevel::Must,
-        description: "Recv stream transitions SizeKnown → DataRecvd when all data received",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: None,
-        initial_recv_state: Some(RecvStreamState::SizeKnown),
-        events: vec![],
-        expected_send_state: None,
-        expected_recv_state: Some(RecvStreamState::DataRecvd),
-        expected_error: None,
-    },
-
-    StreamStateTestCase {
-        id: "RFC9000-3.4.10",
-        section: "3.4",
-        level: RequirementLevel::Must,
-        description: "Recv stream transitions DataRecvd → DataRead when app reads all",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: None,
-        initial_recv_state: Some(RecvStreamState::DataRecvd),
-        events: vec![StreamEvent::AppReadAll],
-        expected_send_state: None,
-        expected_recv_state: Some(RecvStreamState::DataRead),
-        expected_error: None,
-    },
-
-    StreamStateTestCase {
-        id: "RFC9000-3.4.11",
-        section: "3.4",
-        level: RequirementLevel::Must,
-        description: "Recv stream transitions Recv → ResetRecvd on peer reset",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: None,
-        initial_recv_state: Some(RecvStreamState::Recv),
-        events: vec![StreamEvent::PeerReset(99)],
-        expected_send_state: None,
-        expected_recv_state: Some(RecvStreamState::ResetRecvd),
-        expected_error: None,
-    },
-
-    StreamStateTestCase {
-        id: "RFC9000-3.4.12",
-        section: "3.4",
-        level: RequirementLevel::Must,
-        description: "Recv stream transitions ResetRecvd → ResetRead when app acknowledges",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: None,
-        initial_recv_state: Some(RecvStreamState::ResetRecvd),
-        events: vec![StreamEvent::AppReadAll],
-        expected_send_state: None,
-        expected_recv_state: Some(RecvStreamState::ResetRead),
-        expected_error: None,
-    },
-
-    // Error conditions
-    StreamStateTestCase {
-        id: "RFC9000-3.4.13",
-        section: "3.4",
-        level: RequirementLevel::Must,
-        description: "Cannot send data after stream reset",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: Some(SendStreamState::ResetSent),
-        initial_recv_state: None,
-        events: vec![StreamEvent::AppSend],
-        expected_send_state: Some(SendStreamState::ResetSent),
-        expected_recv_state: None,
-        expected_error: Some("StreamClosed"),
-    },
-
-    StreamStateTestCase {
-        id: "RFC9000-3.4.14",
-        section: "3.4",
-        level: RequirementLevel::Must,
-        description: "Cannot read data after stream stopped",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: None,
-        initial_recv_state: Some(RecvStreamState::ResetRead),
-        events: vec![StreamEvent::AppReadAll],
-        expected_send_state: None,
-        expected_recv_state: Some(RecvStreamState::ResetRead),
-        expected_error: Some("StreamClosed"),
-    },
-
-    // Unidirectional stream constraints
-    StreamStateTestCase {
-        id: "RFC9000-3.2.2",
-        section: "3.2",
-        level: RequirementLevel::Must,
-        description: "Client-initiated unidirectional streams only allow client to send",
-        stream_type: StreamType::ClientUnidirectional,
-        initial_send_state: Some(SendStreamState::Ready),
-        initial_recv_state: None, // No receive side
-        events: vec![StreamEvent::PeerStream],
-        expected_send_state: Some(SendStreamState::Ready),
-        expected_recv_state: None,
-        expected_error: Some("ProtocolViolation"),
-    },
-
-    StreamStateTestCase {
-        id: "RFC9000-3.2.3",
-        section: "3.2",
-        level: RequirementLevel::Must,
-        description: "Server-initiated unidirectional streams only allow server to send",
-        stream_type: StreamType::ServerUnidirectional,
-        initial_send_state: None, // No send side on client
-        initial_recv_state: Some(RecvStreamState::Recv),
-        events: vec![StreamEvent::AppSend],
-        expected_send_state: None,
-        expected_recv_state: Some(RecvStreamState::Recv),
-        expected_error: Some("ProtocolViolation"),
-    },
-
-    // STOP_SENDING interactions
-    StreamStateTestCase {
-        id: "RFC9000-3.4.15",
-        section: "3.4",
-        level: RequirementLevel::Should,
-        description: "Send stream should transition to ResetSent when peer sends STOP_SENDING",
-        stream_type: StreamType::ClientBidirectional,
-        initial_send_state: Some(SendStreamState::Ready),
-        initial_recv_state: None,
-        events: vec![StreamEvent::PeerStopSending(5)],
-        expected_send_state: Some(SendStreamState::ResetSent),
-        expected_recv_state: None,
-        expected_error: None,
-    },
-];
+static RFC9000_STREAM_TEST_CASES: LazyLock<Vec<StreamStateTestCase>> = LazyLock::new(|| {
+    vec![
+        // Section 3.2 - Stream Types and Identifiers
+        StreamStateTestCase {
+            id: "RFC9000-3.2.1",
+            section: "3.2",
+            level: RequirementLevel::Must,
+            description: "Client-initiated bidirectional streams have IDs with low-order 2 bits set to 0x00",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: Some(SendStreamState::Ready),
+            initial_recv_state: Some(RecvStreamState::Recv),
+            events: vec![],
+            expected_send_state: Some(SendStreamState::Ready),
+            expected_recv_state: Some(RecvStreamState::Recv),
+            expected_error: None,
+        },
+        // Section 3.4 - Stream States
+        StreamStateTestCase {
+            id: "RFC9000-3.4.1",
+            section: "3.4",
+            level: RequirementLevel::Must,
+            description: "Send stream starts in Ready state",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: None, // Will be tested on creation
+            initial_recv_state: None,
+            events: vec![],
+            expected_send_state: Some(SendStreamState::Ready),
+            expected_recv_state: None,
+            expected_error: None,
+        },
+        StreamStateTestCase {
+            id: "RFC9000-3.4.2",
+            section: "3.4",
+            level: RequirementLevel::Must,
+            description: "Send stream transitions Ready → Send on app finish",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: Some(SendStreamState::Ready),
+            initial_recv_state: None,
+            events: vec![StreamEvent::AppFinish],
+            expected_send_state: Some(SendStreamState::Send),
+            expected_recv_state: None,
+            expected_error: None,
+        },
+        StreamStateTestCase {
+            id: "RFC9000-3.4.3",
+            section: "3.4",
+            level: RequirementLevel::Must,
+            description: "Send stream transitions Send → DataSent when all data sent",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: Some(SendStreamState::Send),
+            initial_recv_state: None,
+            events: vec![],
+            expected_send_state: Some(SendStreamState::DataSent),
+            expected_recv_state: None,
+            expected_error: None,
+        },
+        StreamStateTestCase {
+            id: "RFC9000-3.4.4",
+            section: "3.4",
+            level: RequirementLevel::Must,
+            description: "Send stream transitions DataSent → DataRecvd when peer acknowledges",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: Some(SendStreamState::DataSent),
+            initial_recv_state: None,
+            events: vec![StreamEvent::AllDataAcked],
+            expected_send_state: Some(SendStreamState::DataRecvd),
+            expected_recv_state: None,
+            expected_error: None,
+        },
+        StreamStateTestCase {
+            id: "RFC9000-3.4.5",
+            section: "3.4",
+            level: RequirementLevel::Must,
+            description: "Send stream transitions Ready → ResetSent on app reset",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: Some(SendStreamState::Ready),
+            initial_recv_state: None,
+            events: vec![StreamEvent::AppReset(42)],
+            expected_send_state: Some(SendStreamState::ResetSent),
+            expected_recv_state: None,
+            expected_error: None,
+        },
+        StreamStateTestCase {
+            id: "RFC9000-3.4.6",
+            section: "3.4",
+            level: RequirementLevel::Must,
+            description: "Send stream transitions ResetSent → ResetRecvd when peer acknowledges reset",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: Some(SendStreamState::ResetSent),
+            initial_recv_state: None,
+            events: vec![StreamEvent::AllDataAcked],
+            expected_send_state: Some(SendStreamState::ResetRecvd),
+            expected_recv_state: None,
+            expected_error: None,
+        },
+        // Receive stream state transitions
+        StreamStateTestCase {
+            id: "RFC9000-3.4.7",
+            section: "3.4",
+            level: RequirementLevel::Must,
+            description: "Recv stream starts in Recv state",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: None,
+            initial_recv_state: None,
+            events: vec![],
+            expected_send_state: None,
+            expected_recv_state: Some(RecvStreamState::Recv),
+            expected_error: None,
+        },
+        StreamStateTestCase {
+            id: "RFC9000-3.4.8",
+            section: "3.4",
+            level: RequirementLevel::Must,
+            description: "Recv stream transitions Recv → SizeKnown on peer FIN",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: None,
+            initial_recv_state: Some(RecvStreamState::Recv),
+            events: vec![StreamEvent::PeerStreamFin],
+            expected_send_state: None,
+            expected_recv_state: Some(RecvStreamState::SizeKnown),
+            expected_error: None,
+        },
+        StreamStateTestCase {
+            id: "RFC9000-3.4.9",
+            section: "3.4",
+            level: RequirementLevel::Must,
+            description: "Recv stream transitions SizeKnown → DataRecvd when all data received",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: None,
+            initial_recv_state: Some(RecvStreamState::SizeKnown),
+            events: vec![],
+            expected_send_state: None,
+            expected_recv_state: Some(RecvStreamState::DataRecvd),
+            expected_error: None,
+        },
+        StreamStateTestCase {
+            id: "RFC9000-3.4.10",
+            section: "3.4",
+            level: RequirementLevel::Must,
+            description: "Recv stream transitions DataRecvd → DataRead when app reads all",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: None,
+            initial_recv_state: Some(RecvStreamState::DataRecvd),
+            events: vec![StreamEvent::AppReadAll],
+            expected_send_state: None,
+            expected_recv_state: Some(RecvStreamState::DataRead),
+            expected_error: None,
+        },
+        StreamStateTestCase {
+            id: "RFC9000-3.4.11",
+            section: "3.4",
+            level: RequirementLevel::Must,
+            description: "Recv stream transitions Recv → ResetRecvd on peer reset",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: None,
+            initial_recv_state: Some(RecvStreamState::Recv),
+            events: vec![StreamEvent::PeerReset(99)],
+            expected_send_state: None,
+            expected_recv_state: Some(RecvStreamState::ResetRecvd),
+            expected_error: None,
+        },
+        StreamStateTestCase {
+            id: "RFC9000-3.4.12",
+            section: "3.4",
+            level: RequirementLevel::Must,
+            description: "Recv stream transitions ResetRecvd → ResetRead when app acknowledges",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: None,
+            initial_recv_state: Some(RecvStreamState::ResetRecvd),
+            events: vec![StreamEvent::AppReadAll],
+            expected_send_state: None,
+            expected_recv_state: Some(RecvStreamState::ResetRead),
+            expected_error: None,
+        },
+        // Error conditions
+        StreamStateTestCase {
+            id: "RFC9000-3.4.13",
+            section: "3.4",
+            level: RequirementLevel::Must,
+            description: "Cannot send data after stream reset",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: Some(SendStreamState::ResetSent),
+            initial_recv_state: None,
+            events: vec![StreamEvent::AppSend],
+            expected_send_state: Some(SendStreamState::ResetSent),
+            expected_recv_state: None,
+            expected_error: Some("StreamClosed"),
+        },
+        StreamStateTestCase {
+            id: "RFC9000-3.4.14",
+            section: "3.4",
+            level: RequirementLevel::Must,
+            description: "Cannot read data after stream stopped",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: None,
+            initial_recv_state: Some(RecvStreamState::ResetRead),
+            events: vec![StreamEvent::AppReadAll],
+            expected_send_state: None,
+            expected_recv_state: Some(RecvStreamState::ResetRead),
+            expected_error: Some("StreamClosed"),
+        },
+        // Unidirectional stream constraints
+        StreamStateTestCase {
+            id: "RFC9000-3.2.2",
+            section: "3.2",
+            level: RequirementLevel::Must,
+            description: "Client-initiated unidirectional streams only allow client to send",
+            stream_type: StreamType::ClientUnidirectional,
+            initial_send_state: Some(SendStreamState::Ready),
+            initial_recv_state: None, // No receive side
+            events: vec![StreamEvent::PeerStream],
+            expected_send_state: Some(SendStreamState::Ready),
+            expected_recv_state: None,
+            expected_error: Some("ProtocolViolation"),
+        },
+        StreamStateTestCase {
+            id: "RFC9000-3.2.3",
+            section: "3.2",
+            level: RequirementLevel::Must,
+            description: "Server-initiated unidirectional streams only allow server to send",
+            stream_type: StreamType::ServerUnidirectional,
+            initial_send_state: None, // No send side on client
+            initial_recv_state: Some(RecvStreamState::Recv),
+            events: vec![StreamEvent::AppSend],
+            expected_send_state: None,
+            expected_recv_state: Some(RecvStreamState::Recv),
+            expected_error: Some("ProtocolViolation"),
+        },
+        // STOP_SENDING interactions
+        StreamStateTestCase {
+            id: "RFC9000-3.4.15",
+            section: "3.4",
+            level: RequirementLevel::Should,
+            description: "Send stream should transition to ResetSent when peer sends STOP_SENDING",
+            stream_type: StreamType::ClientBidirectional,
+            initial_send_state: Some(SendStreamState::Ready),
+            initial_recv_state: None,
+            events: vec![StreamEvent::PeerStopSending(5)],
+            expected_send_state: Some(SendStreamState::ResetSent),
+            expected_recv_state: None,
+            expected_error: None,
+        },
+    ]
+});
 
 // ============================================================================
 // Conformance Test Runner
@@ -435,12 +420,8 @@ impl StreamStateMachine {
             StreamType::ClientBidirectional | StreamType::ServerBidirectional => {
                 (Some(SendStreamState::Ready), Some(RecvStreamState::Recv))
             }
-            StreamType::ClientUnidirectional => {
-                (Some(SendStreamState::Ready), None)
-            }
-            StreamType::ServerUnidirectional => {
-                (None, Some(RecvStreamState::Recv))
-            }
+            StreamType::ClientUnidirectional => (Some(SendStreamState::Ready), None),
+            StreamType::ServerUnidirectional => (None, Some(RecvStreamState::Recv)),
         };
 
         Self {
@@ -481,7 +462,9 @@ impl StreamStateMachine {
             StreamEvent::AppReset(_code) => {
                 if let Some(ref mut send_state) = self.send_state {
                     match *send_state {
-                        SendStreamState::Ready | SendStreamState::Send | SendStreamState::DataSent => {
+                        SendStreamState::Ready
+                        | SendStreamState::Send
+                        | SendStreamState::DataSent => {
                             *send_state = SendStreamState::ResetSent;
                             Ok(())
                         }
@@ -493,7 +476,7 @@ impl StreamStateMachine {
             }
 
             StreamEvent::AppStop(_code) => {
-                if let Some(ref mut recv_state) = self.recv_state {
+                if let Some(ref mut _recv_state) = self.recv_state {
                     // STOP_SENDING affects peer's send side, not our receive side directly
                     Ok(())
                 } else {
@@ -539,7 +522,9 @@ impl StreamStateMachine {
             StreamEvent::PeerStopSending(_code) => {
                 if let Some(ref mut send_state) = self.send_state {
                     match *send_state {
-                        SendStreamState::Ready | SendStreamState::Send | SendStreamState::DataSent => {
+                        SendStreamState::Ready
+                        | SendStreamState::Send
+                        | SendStreamState::DataSent => {
                             *send_state = SendStreamState::ResetSent;
                             Ok(())
                         }
@@ -643,12 +628,12 @@ fn run_conformance_test(test_case: &StreamStateTestCase) -> TestResult {
     } else if error.is_some() {
         TestVerdict::Fail
     } else {
-        let send_match = test_case.expected_send_state.map_or(true, |expected| {
-            state_machine.send_state == Some(expected)
-        });
-        let recv_match = test_case.expected_recv_state.map_or(true, |expected| {
-            state_machine.recv_state == Some(expected)
-        });
+        let send_match = test_case
+            .expected_send_state
+            .map_or(true, |expected| state_machine.send_state == Some(expected));
+        let recv_match = test_case
+            .expected_recv_state
+            .map_or(true, |expected| state_machine.recv_state == Some(expected));
 
         if send_match && recv_match {
             TestVerdict::Pass
@@ -678,31 +663,44 @@ mod tests {
         let mut skipped = 0;
         let mut expected_failures = 0;
 
-        for test_case in RFC9000_STREAM_TEST_CASES {
+        for test_case in RFC9000_STREAM_TEST_CASES.iter() {
             total += 1;
             let result = run_conformance_test(test_case);
 
             match result.verdict {
                 TestVerdict::Pass => {
                     passed += 1;
-                    eprintln!("{{\"id\":\"{}\",\"verdict\":\"PASS\",\"level\":\"{:?}\"}}",
-                        test_case.id, test_case.level);
+                    eprintln!(
+                        "{{\"id\":\"{}\",\"verdict\":\"PASS\",\"level\":\"{:?}\"}}",
+                        test_case.id, test_case.level
+                    );
                 }
                 TestVerdict::Fail => {
                     failed += 1;
-                    eprintln!("{{\"id\":\"{}\",\"verdict\":\"FAIL\",\"level\":\"{:?}\",\"expected_send\":\"{:?}\",\"actual_send\":\"{:?}\",\"expected_recv\":\"{:?}\",\"actual_recv\":\"{:?}\",\"error\":\"{:?}\"}}",
-                        test_case.id, test_case.level, test_case.expected_send_state, result.actual_send_state,
-                        test_case.expected_recv_state, result.actual_recv_state, result.actual_error);
+                    eprintln!(
+                        "{{\"id\":\"{}\",\"verdict\":\"FAIL\",\"level\":\"{:?}\",\"expected_send\":\"{:?}\",\"actual_send\":\"{:?}\",\"expected_recv\":\"{:?}\",\"actual_recv\":\"{:?}\",\"error\":\"{:?}\"}}",
+                        test_case.id,
+                        test_case.level,
+                        test_case.expected_send_state,
+                        result.actual_send_state,
+                        test_case.expected_recv_state,
+                        result.actual_recv_state,
+                        result.actual_error
+                    );
                 }
                 TestVerdict::Skip => {
                     skipped += 1;
-                    eprintln!("{{\"id\":\"{}\",\"verdict\":\"SKIP\",\"level\":\"{:?}\"}}",
-                        test_case.id, test_case.level);
+                    eprintln!(
+                        "{{\"id\":\"{}\",\"verdict\":\"SKIP\",\"level\":\"{:?}\"}}",
+                        test_case.id, test_case.level
+                    );
                 }
                 TestVerdict::XFail => {
                     expected_failures += 1;
-                    eprintln!("{{\"id\":\"{}\",\"verdict\":\"XFAIL\",\"level\":\"{:?}\"}}",
-                        test_case.id, test_case.level);
+                    eprintln!(
+                        "{{\"id\":\"{}\",\"verdict\":\"XFAIL\",\"level\":\"{:?}\"}}",
+                        test_case.id, test_case.level
+                    );
                 }
             }
         }
@@ -713,7 +711,10 @@ mod tests {
         eprintln!("Failed: {failed}");
         eprintln!("Skipped: {skipped}");
         eprintln!("Expected failures: {expected_failures}");
-        eprintln!("Success rate: {:.2}%", (passed as f64 / total as f64) * 100.0);
+        eprintln!(
+            "Success rate: {:.2}%",
+            (passed as f64 / total as f64) * 100.0
+        );
 
         // Hard requirement: no failures for MUST clauses
         let must_failures: usize = RFC9000_STREAM_TEST_CASES
@@ -724,18 +725,38 @@ mod tests {
             .filter(|result| matches!(result.verdict, TestVerdict::Fail))
             .count();
 
-        assert_eq!(must_failures, 0,
-            "RFC 9000 conformance FAILED: {must_failures} MUST requirements failed");
+        assert_eq!(
+            must_failures, 0,
+            "RFC 9000 conformance FAILED: {must_failures} MUST requirements failed"
+        );
     }
 
     #[test]
     fn test_stream_type_from_id() {
-        assert_eq!(StreamType::from_stream_id(0), StreamType::ClientBidirectional);
-        assert_eq!(StreamType::from_stream_id(1), StreamType::ServerBidirectional);
-        assert_eq!(StreamType::from_stream_id(2), StreamType::ClientUnidirectional);
-        assert_eq!(StreamType::from_stream_id(3), StreamType::ServerUnidirectional);
-        assert_eq!(StreamType::from_stream_id(4), StreamType::ClientBidirectional);
-        assert_eq!(StreamType::from_stream_id(7), StreamType::ServerUnidirectional);
+        assert_eq!(
+            StreamType::from_stream_id(0),
+            StreamType::ClientBidirectional
+        );
+        assert_eq!(
+            StreamType::from_stream_id(1),
+            StreamType::ServerBidirectional
+        );
+        assert_eq!(
+            StreamType::from_stream_id(2),
+            StreamType::ClientUnidirectional
+        );
+        assert_eq!(
+            StreamType::from_stream_id(3),
+            StreamType::ServerUnidirectional
+        );
+        assert_eq!(
+            StreamType::from_stream_id(4),
+            StreamType::ClientBidirectional
+        );
+        assert_eq!(
+            StreamType::from_stream_id(7),
+            StreamType::ServerUnidirectional
+        );
     }
 
     #[test]
@@ -828,9 +849,10 @@ impl ComplianceReport {
     pub fn generate() -> Self {
         let mut report = Self::default();
 
-        for test_case in RFC9000_STREAM_TEST_CASES {
+        for test_case in RFC9000_STREAM_TEST_CASES.iter() {
             let result = run_conformance_test(test_case);
-            let section_stats = report.section_stats
+            let section_stats = report
+                .section_stats
                 .entry(test_case.section.to_string())
                 .or_default();
 
@@ -869,33 +891,20 @@ impl ComplianceReport {
         md.push_str("|---------|-------------------|---------------------|------------------|-------|-------|\n");
 
         for (section, stats) in &self.section_stats {
-            let must_score = if stats.must_total > 0 {
-                (stats.must_passing as f64 / stats.must_total as f64) * 100.0
-            } else {
-                100.0
-            };
-
-            let should_score = if stats.should_total > 0 {
-                (stats.should_passing as f64 / stats.should_total as f64) * 100.0
-            } else {
-                100.0
-            };
-
-            let may_score = if stats.may_total > 0 {
-                (stats.may_passing as f64 / stats.may_total as f64) * 100.0
-            } else {
-                100.0
-            };
-
-            let total_score = ((stats.must_passing + stats.should_passing + stats.may_passing) as f64 /
-                              (stats.must_total + stats.should_total + stats.may_total) as f64) * 100.0;
+            let total_score = ((stats.must_passing + stats.should_passing + stats.may_passing)
+                as f64
+                / (stats.must_total + stats.should_total + stats.may_total) as f64)
+                * 100.0;
 
             md.push_str(&format!(
                 "| §{} | {}/{} | {}/{} | {}/{} | {} | {:.1}% |\n",
                 section,
-                stats.must_passing, stats.must_total,
-                stats.should_passing, stats.should_total,
-                stats.may_passing, stats.may_total,
+                stats.must_passing,
+                stats.must_total,
+                stats.should_passing,
+                stats.should_total,
+                stats.may_passing,
+                stats.may_total,
                 stats.xfail,
                 total_score
             ));

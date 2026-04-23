@@ -1607,7 +1607,8 @@ mod tests {
             let mut pos = 0;
             let decoded = read_packet_number(&buf, &mut pos, min_width).unwrap();
             assert_eq!(
-                decoded, packet_number,
+                u64::from(decoded),
+                packet_number,
                 "Packet number {packet_number} failed round-trip"
             );
             assert_eq!(pos, buf.len(), "Should consume all encoded bytes");
@@ -1767,7 +1768,7 @@ mod tests {
                 width: w,
             } = err
             {
-                assert_eq!(pn, packet_number);
+                assert_eq!(pn, (packet_number & 0xffff_ffff) as u32);
                 assert_eq!(w, width);
             }
         }
@@ -1907,7 +1908,7 @@ mod tests {
             // Test decode produces original value
             let mut pos = 0;
             let decoded = read_packet_number(&buf, &mut pos, width).unwrap();
-            assert_eq!(decoded, packet_number);
+            assert_eq!(u64::from(decoded), packet_number);
         }
     }
 
@@ -1988,14 +1989,18 @@ mod tests {
             let test_cases = [
                 // (largest_pn, truncated_pn, pn_len, expected_full_pn, description)
                 (0xa82f30ea, 0x9b32, 2, 0xa82f9b32, "RFC 9000 §A.2 Example 1"),
-                (0xa82f30ea, 0xac5c02, 3, 0xa82fac5c02, "RFC 9000 §A.2 Example 2"),
+                (
+                    0xa82f30ea,
+                    0xac5c02,
+                    3,
+                    0xa82fac5c02,
+                    "RFC 9000 §A.2 Example 2",
+                ),
             ];
 
             for (largest_pn, truncated_pn, pn_len, expected_full_pn, description) in test_cases {
                 let result = decode_packet_number_reconstruct(truncated_pn, pn_len, largest_pn)
-                    .unwrap_or_else(|e| {
-                        panic!("{description}: decode failed with error: {e}")
-                    });
+                    .unwrap_or_else(|e| panic!("{description}: decode failed with error: {e}"));
 
                 assert_eq!(
                     result, expected_full_pn,
@@ -2016,20 +2021,16 @@ mod tests {
                 (0x10000, 0x0000, 2, 0x10000, "Two byte wrap to next window"),
                 (0xffffff, 0x000000, 3, 0x1000000, "Three byte wrap"),
                 (0x100000000, 0x00000000, 4, 0x100000000, "Four byte wrap"),
-
                 // Test reconstruction with gaps
                 (1000, 50, 1, 1050, "Small forward gap"),
                 (1000, 200, 1, 1000 + 200, "Forward within window"),
-
                 // Test backward reconstruction
                 (1000, 950 & 0xff, 1, 950, "Backward within window"),
             ];
 
             for (largest_pn, truncated_pn, pn_len, expected_full_pn, description) in test_cases {
                 let result = decode_packet_number_reconstruct(truncated_pn, pn_len, largest_pn)
-                    .unwrap_or_else(|e| {
-                        panic!("{description}: decode failed with error: {e}")
-                    });
+                    .unwrap_or_else(|e| panic!("{description}: decode failed with error: {e}"));
 
                 assert_eq!(
                     result, expected_full_pn,
@@ -2055,7 +2056,10 @@ mod tests {
             // Test 62-bit limit enforcement (RFC 9000 §17.1)
             let large_largest = (1u64 << 61) - 1; // Just under the limit
             let result = decode_packet_number_reconstruct(0x1234, 2, large_largest);
-            assert!(result.is_ok(), "Should accept packet numbers under 62-bit limit");
+            assert!(
+                result.is_ok(),
+                "Should accept packet numbers under 62-bit limit"
+            );
 
             // Test exceeding 62-bit limit
             let too_large = (1u64 << 62) - 1; // At the limit
@@ -2068,11 +2072,7 @@ mod tests {
         /// Test compatibility with existing round-trip encoding/decoding.
         #[test]
         fn reconstruction_round_trip_compatibility() {
-            let test_cases = [
-                (0x1234, 2),
-                (0x123456, 3),
-                (0x12345678, 4),
-            ];
+            let test_cases = [(0x1234, 2), (0x123456, 3), (0x12345678, 4)];
 
             for (packet_number, width) in test_cases {
                 // Encode packet number
@@ -2084,11 +2084,9 @@ mod tests {
                 let truncated = read_packet_number(&buf, &mut pos, width).unwrap();
 
                 // Reconstruct using the original as "largest_pn"
-                let reconstructed = decode_packet_number_reconstruct(
-                    truncated,
-                    width,
-                    packet_number as u64
-                ).unwrap();
+                let reconstructed =
+                    decode_packet_number_reconstruct(truncated, width, packet_number as u64)
+                        .unwrap();
 
                 // Should recover the original packet number
                 assert_eq!(
@@ -2110,17 +2108,15 @@ mod tests {
             let pn_len = 1;
 
             // Reconstruct in each space - should give different results
-            let initial_reconstructed = decode_packet_number_reconstruct(
-                truncated_pn, pn_len, initial_largest
-            ).unwrap();
+            let initial_reconstructed =
+                decode_packet_number_reconstruct(truncated_pn, pn_len, initial_largest).unwrap();
 
-            let handshake_reconstructed = decode_packet_number_reconstruct(
-                truncated_pn, pn_len, handshake_largest
-            ).unwrap();
+            let handshake_reconstructed =
+                decode_packet_number_reconstruct(truncated_pn, pn_len, handshake_largest).unwrap();
 
-            let application_reconstructed = decode_packet_number_reconstruct(
-                truncated_pn, pn_len, application_largest
-            ).unwrap();
+            let application_reconstructed =
+                decode_packet_number_reconstruct(truncated_pn, pn_len, application_largest)
+                    .unwrap();
 
             // Results should be different due to different largest_pn contexts
             assert_ne!(

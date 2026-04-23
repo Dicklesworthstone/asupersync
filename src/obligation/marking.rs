@@ -946,11 +946,7 @@ mod tests {
                 let _ = writeln!(
                     out,
                     "| {} | {} | {} | {} | {} |",
-                    result.requirement_id,
-                    level,
-                    status,
-                    result.description,
-                    result.evidence
+                    result.requirement_id, level, status, result.description, result.evidence
                 );
             }
 
@@ -977,7 +973,10 @@ mod tests {
             let result = analyzer.analyze(&events);
             let passes = result.is_safe()
                 && result.leak_count() == 0
-                && result.timeline.last_marking().is_some_and(ObligationMarking::is_zero);
+                && result
+                    .timeline
+                    .final_marking()
+                    .is_some_and(ObligationMarking::is_zero);
 
             MarkingConformanceResult {
                 requirement_id: "VASS-001",
@@ -994,7 +993,7 @@ mod tests {
                     result.leak_count(),
                     result
                         .timeline
-                        .last_marking()
+                        .final_marking()
                         .is_some_and(ObligationMarking::is_zero)
                 ),
             }
@@ -1375,7 +1374,7 @@ mod tests {
         let rendered = format!("empty: {empty_str}\nnonempty: {nonempty_str}");
         insta::assert_snapshot!(
             "marking_display",
-            rendered,
+            &rendered,
             @r"
         empty: M = [0]
         nonempty: M = [(SendPermit, RegionId(0:0))=1]
@@ -1408,7 +1407,7 @@ mod tests {
         crate::assert_with_log!(max == 2, "max pending", 2, max);
         insta::assert_snapshot!(
             "marking_timeline_display",
-            format!("{}", result.timeline),
+            &format!("{}", result.timeline),
             @r"
         Marking Timeline (7 snapshots):
           t=0ns: M = [0] (initial)
@@ -1504,7 +1503,7 @@ mod tests {
         );
         insta::assert_snapshot!(
             "marking_analysis_result_display",
-            rendered,
+            &rendered,
             @r"
         leak: leak: 1 Ack obligation(s) in RegionId(0:0) at 15ns
         invalid: invalid at 20ns: abort(Lease, RegionId(1:0)) but marking is already zero
@@ -1703,7 +1702,7 @@ mod tests {
 
         insta::assert_snapshot!(
             "marking_vass_conformance_matrix",
-            MarkingConformanceHarness::render_matrix(&results),
+            &MarkingConformanceHarness::render_matrix(&results),
             @r"
         # Obligation Marking VASS Conformance Matrix
 

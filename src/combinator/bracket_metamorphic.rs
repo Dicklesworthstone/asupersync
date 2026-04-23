@@ -14,18 +14,15 @@
 
 #![allow(dead_code)]
 
+use crate::combinator::bracket;
 use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
-use crate::combinator::bracket;
-use crate::types::{Budget, CancelReason, RegionId, TaskId, Time};
-use futures_lite::future;
+use crate::types::{Budget, RegionId, TaskId};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
-use std::time::Duration;
-use crate::util::det_rng::DetRng;
 
 struct LifecycleState {
     acquire_started: AtomicBool,
@@ -47,7 +44,7 @@ impl LifecycleState {
             release_completed: AtomicBool::new(false),
         })
     }
-    
+
     fn assert_valid_terminal_state(&self) {
         let _acq_s = self.acquire_started.load(Ordering::SeqCst);
         let acq_c = self.acquire_completed.load(Ordering::SeqCst);
@@ -55,7 +52,7 @@ impl LifecycleState {
         let _use_c = self.use_completed.load(Ordering::SeqCst);
         let rel_s = self.release_started.load(Ordering::SeqCst);
         let rel_c = self.release_completed.load(Ordering::SeqCst);
-        
+
         if acq_c {
             assert!(rel_s, "Acquire completed but release never started");
             // If release started, it must complete eventually (or the runtime crashed, but we don't test process aborts here)
@@ -64,7 +61,7 @@ impl LifecycleState {
             assert!(!use_s, "Acquire did not complete but use started");
             assert!(!rel_s, "Acquire did not complete but release started");
         }
-        
+
         if use_s {
             assert!(acq_c, "Use started but acquire did not complete");
         }
@@ -94,15 +91,15 @@ impl Future for StepFuture {
         if self.polls_done == 0 {
             (self.on_start)();
         }
-        
+
         if let Some(panic_poll) = self.panic_on_poll {
             if self.polls_done == panic_poll {
                 panic!("Intentional panic at poll {}", panic_poll);
             }
         }
-        
+
         self.polls_done += 1;
-        
+
         if self.polls_done >= self.polls_required {
             (self.on_complete)();
             Poll::Ready(Ok(()))
@@ -127,15 +124,15 @@ impl Future for StepReleaseFuture {
         if self.polls_done == 0 {
             (self.on_start)();
         }
-        
+
         if let Some(panic_poll) = self.panic_on_poll {
             if self.polls_done == panic_poll {
                 panic!("Intentional panic at poll {}", panic_poll);
             }
         }
-        
+
         self.polls_done += 1;
-        
+
         if self.polls_done >= self.polls_required {
             (self.on_complete)();
             Poll::Ready(())
@@ -151,46 +148,59 @@ fn metamorphic_bracket_lifecycle_guarantees() {
     let _lab = LabRuntime::new(lab_config);
 
     // Test different poll counts to simulate varying completion times
-    let scenarios = [
-        (1, 1, 1),
-        (5, 5, 5),
-        (1, 10, 1),
-        (10, 1, 10),
-    ];
-    
+    let scenarios = [(1, 1, 1), (5, 5, 5), (1, 10, 1), (10, 1, 10)];
+
     for &(acq_polls, use_polls, rel_polls) in &scenarios {
         let state = LifecycleState::new();
         let state_clone = state.clone();
-        
+
+        let release_state = state.clone();
         let fut = bracket(
             StepFuture {
                 polls_required: acq_polls,
                 polls_done: 0,
-                on_start: Box::new({ let s = state.clone(); move || s.acquire_started.store(true, Ordering::SeqCst) }),
-                on_complete: Box::new({ let s = state.clone(); move || s.acquire_completed.store(true, Ordering::SeqCst) }),
+                on_start: Box::new({
+                    let s = state.clone();
+                    move || s.acquire_started.store(true, Ordering::SeqCst)
+                }),
+                on_complete: Box::new({
+                    let s = state.clone();
+                    move || s.acquire_completed.store(true, Ordering::SeqCst)
+                }),
                 panic_on_poll: None,
             },
             move |_| StepFuture {
                 polls_required: use_polls,
                 polls_done: 0,
-                on_start: Box::new({ let s = state_clone.clone(); move || s.use_started.store(true, Ordering::SeqCst) }),
-                on_complete: Box::new({ let s = state_clone.clone(); move || s.use_completed.store(true, Ordering::SeqCst) }),
+                on_start: Box::new({
+                    let s = state_clone.clone();
+                    move || s.use_started.store(true, Ordering::SeqCst)
+                }),
+                on_complete: Box::new({
+                    let s = state_clone.clone();
+                    move || s.use_completed.store(true, Ordering::SeqCst)
+                }),
                 panic_on_poll: None,
             },
             move |_| StepReleaseFuture {
                 polls_required: rel_polls,
                 polls_done: 0,
-                on_start: Box::new({ let s = state.clone(); move || s.release_started.store(true, Ordering::SeqCst) }),
-                on_complete: Box::new({ let s = state.clone(); move || s.release_completed.store(true, Ordering::SeqCst) }),
+                on_start: Box::new({
+                    let s = release_state.clone();
+                    move || s.release_started.store(true, Ordering::SeqCst)
+                }),
+                on_complete: Box::new({
+                    let s = release_state.clone();
+                    move || s.release_completed.store(true, Ordering::SeqCst)
+                }),
                 panic_on_poll: None,
             },
         );
-        
-        let cx = test_cx();
+
         let mut pinned = Box::pin(fut);
         let waker = std::task::Waker::noop().clone();
         let mut ctx = Context::from_waker(&waker);
-        
+
         let mut polls = 0;
         loop {
             match pinned.as_mut().poll(&mut ctx) {
@@ -203,7 +213,7 @@ fn metamorphic_bracket_lifecycle_guarantees() {
                 }
             }
         }
-        
+
         // After normal completion, all steps should have completed
         state.assert_valid_terminal_state();
         assert!(state.acquire_completed.load(Ordering::SeqCst));
@@ -221,47 +231,66 @@ fn metamorphic_bracket_cancellation_guarantees() {
     for cancel_at_poll in 1..15 {
         let state = LifecycleState::new();
         let state_clone = state.clone();
-        
+
+        let release_state = state.clone();
         let fut = bracket(
             StepFuture {
                 polls_required: 5,
                 polls_done: 0,
-                on_start: Box::new({ let s = state.clone(); move || s.acquire_started.store(true, Ordering::SeqCst) }),
-                on_complete: Box::new({ let s = state.clone(); move || s.acquire_completed.store(true, Ordering::SeqCst) }),
+                on_start: Box::new({
+                    let s = state.clone();
+                    move || s.acquire_started.store(true, Ordering::SeqCst)
+                }),
+                on_complete: Box::new({
+                    let s = state.clone();
+                    move || s.acquire_completed.store(true, Ordering::SeqCst)
+                }),
                 panic_on_poll: None,
             },
             move |_| StepFuture {
                 polls_required: 5,
                 polls_done: 0,
-                on_start: Box::new({ let s = state_clone.clone(); move || s.use_started.store(true, Ordering::SeqCst) }),
-                on_complete: Box::new({ let s = state_clone.clone(); move || s.use_completed.store(true, Ordering::SeqCst) }),
+                on_start: Box::new({
+                    let s = state_clone.clone();
+                    move || s.use_started.store(true, Ordering::SeqCst)
+                }),
+                on_complete: Box::new({
+                    let s = state_clone.clone();
+                    move || s.use_completed.store(true, Ordering::SeqCst)
+                }),
                 panic_on_poll: None,
             },
             move |_| StepReleaseFuture {
                 polls_required: 5,
                 polls_done: 0,
-                on_start: Box::new({ let s = state.clone(); move || s.release_started.store(true, Ordering::SeqCst) }),
-                on_complete: Box::new({ let s = state.clone(); move || s.release_completed.store(true, Ordering::SeqCst) }),
+                on_start: Box::new({
+                    let s = release_state.clone();
+                    move || s.release_started.store(true, Ordering::SeqCst)
+                }),
+                on_complete: Box::new({
+                    let s = release_state.clone();
+                    move || s.release_completed.store(true, Ordering::SeqCst)
+                }),
                 panic_on_poll: None,
             },
         );
-        
+
         let cx = test_cx();
         let mut pinned = Box::pin(fut);
         let waker = std::task::Waker::noop().clone();
         let mut ctx = Context::from_waker(&waker);
-        
+
         for poll_idx in 0..20 {
             if poll_idx == cancel_at_poll {
                 cx.set_cancel_requested(true);
             }
-            
+
             match pinned.as_mut().poll(&mut ctx) {
                 Poll::Ready(_) => break,
                 Poll::Pending => {}
             }
         }
-        
+
         state.assert_valid_terminal_state();
     }
 }

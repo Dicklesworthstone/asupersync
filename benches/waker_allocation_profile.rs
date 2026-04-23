@@ -3,10 +3,10 @@
 //! This benchmark suite profiles memory allocation patterns in the waker module,
 //! focusing on allocation-heavy operations during task waking patterns.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use asupersync::runtime::waker::{WakerState, WakeSource};
+use asupersync::runtime::waker::{WakeSource, WakerState};
 use asupersync::types::TaskId;
 use asupersync::util::ArenaIndex;
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
 use std::task::Wake;
 
@@ -72,7 +72,9 @@ fn bench_waker_creation_burst(c: &mut Criterion) {
                         let task_id = TaskId::from_arena(ArenaIndex::new(i, 0));
                         let waker = state.waker_for_source(
                             black_box(task_id),
-                            WakeSource::Io { fd: (i % 1024) as i32 }
+                            WakeSource::Io {
+                                fd: (i % 1024) as i32,
+                            },
                         );
                         wakers.push(black_box(waker));
                     }
@@ -135,7 +137,7 @@ fn bench_waker_reuse_patterns(c: &mut Criterion) {
                 .collect();
 
             for i in 0..iterations {
-                let waker = &wakers[i % pool_size];
+                let waker = &wakers[(i % pool_size) as usize];
                 waker.wake_by_ref();
             }
             black_box(state.drain_woken())
@@ -153,10 +155,10 @@ fn bench_wake_storms(c: &mut Criterion) {
     let mut group = c.benchmark_group("wake_storms");
 
     let test_cases = [
-        (10, 100, "light_storm"),      // 10 wakers, 100 operations each
-        (100, 100, "medium_storm"),    // 100 wakers, 100 operations each
-        (1000, 10, "heavy_storm"),     // 1000 wakers, 10 operations each
-        (10000, 1, "burst_storm"),     // 10000 wakers, 1 operation each
+        (10, 100, "light_storm"),   // 10 wakers, 100 operations each
+        (100, 100, "medium_storm"), // 100 wakers, 100 operations each
+        (1000, 10, "heavy_storm"),  // 1000 wakers, 10 operations each
+        (10000, 1, "burst_storm"),  // 10000 wakers, 1 operation each
     ];
 
     for (waker_count, ops_per_waker, case_name) in test_cases {
@@ -201,7 +203,7 @@ fn bench_wake_storms(c: &mut Criterion) {
                         })
                         .collect();
 
-                    for op in 0..ops_per_waker {
+                    for _op in 0..ops_per_waker {
                         for waker in &wakers {
                             waker.wake_by_ref();
                         }
@@ -290,9 +292,9 @@ fn bench_memory_pressure(c: &mut Criterion) {
     // Simulate different allocation pressures by pre-allocating ballast
     let pressure_levels = [
         (0, "no_pressure"),
-        (1_000_000, "light_pressure"),     // 1MB ballast
-        (10_000_000, "medium_pressure"),   // 10MB ballast
-        (100_000_000, "high_pressure"),    // 100MB ballast
+        (1_000_000, "light_pressure"),   // 1MB ballast
+        (10_000_000, "medium_pressure"), // 10MB ballast
+        (100_000_000, "high_pressure"),  // 100MB ballast
     ];
 
     for (ballast_bytes, pressure_name) in pressure_levels {

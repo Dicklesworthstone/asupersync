@@ -43,6 +43,8 @@ mod rwlock;
 #[cfg(test)]
 mod rwlock_lost_wakeup_test;
 pub mod semaphore;
+#[cfg(test)]
+mod semaphore_metamorphic_tests;
 
 pub use barrier::{Barrier, BarrierWaitError, BarrierWaitResult};
 pub use contended_mutex::{ContendedMutex, ContendedMutexGuard, LockMetricsSnapshot};

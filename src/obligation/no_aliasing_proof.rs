@@ -2052,7 +2052,7 @@ mod tests {
 
         insta::assert_snapshot!(
             "no_aliasing_proof_result_display",
-            format!("{result}"),
+            &format!("{result}"),
             @r"
         SendPermit No-Aliasing Proof
         ============================
@@ -2079,7 +2079,7 @@ mod tests {
         };
         insta::assert_snapshot!(
             "no_aliasing_counterexample_display",
-            format!("{ce}"),
+            &format!("{ce}"),
             @r"[duplicate-allocation] obligation ObligationId(0:0) at t=42ns: test counterexample"
         );
         crate::test_complete!("counterexample_display");
@@ -2102,7 +2102,7 @@ mod tests {
             .join("\n");
         insta::assert_snapshot!(
             "no_aliasing_lemma_display",
-            rendered,
+            &rendered,
             @r"
         Lemma 1 (Allocation Freshness)
         Lemma 2 (Transfer Exclusivity)

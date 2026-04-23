@@ -492,6 +492,7 @@ where
 }
 
 /// A stream of responses from the server.
+#[derive(Debug)]
 pub struct ResponseStream<T> {
     /// Buffered stream items.
     items: VecDeque<Result<T, Status>>,
@@ -1553,8 +1554,8 @@ mod tests {
 
     /// Universal golden assertion for this module.
     fn assert_golden(test_name: &str, actual: &str) {
-        let golden_path = std::path::Path::new("tests/golden/grpc/streaming")
-            .join(format!("{test_name}.golden"));
+        let golden_path =
+            std::path::Path::new("tests/golden/grpc/streaming").join(format!("{test_name}.golden"));
 
         // UPDATE MODE: overwrite golden with actual output
         if std::env::var("UPDATE_GOLDENS").is_ok() {
@@ -1565,13 +1566,14 @@ mod tests {
         }
 
         // COMPARE MODE: diff actual vs golden
-        let expected = std::fs::read_to_string(&golden_path)
-            .unwrap_or_else(|_| panic!(
+        let expected = std::fs::read_to_string(&golden_path).unwrap_or_else(|_| {
+            panic!(
                 "Golden file missing: {}\n\
                  Run with UPDATE_GOLDENS=1 to create it\n\
                  Then review and commit: git diff tests/golden/",
                 golden_path.display()
-            ));
+            )
+        });
 
         if actual != expected {
             // Write actual for easy diffing
@@ -1624,7 +1626,9 @@ mod tests {
         mixed_metadata.insert("content-type", "application/grpc");
         mixed_metadata.insert_bin("custom-data", Bytes::from_static(b"\x00\xFF\x42"));
         mixed_metadata.insert("grpc-timeout", "30s");
-        outputs.push(format!("=== Mixed ASCII and Binary ===\n{mixed_metadata:?}\n"));
+        outputs.push(format!(
+            "=== Mixed ASCII and Binary ===\n{mixed_metadata:?}\n"
+        ));
 
         let combined_output = outputs.join("\n");
         assert_golden("metadata_debug_formatting", &combined_output);
@@ -1640,10 +1644,12 @@ mod tests {
         let ascii_simple = MetadataValue::Ascii("hello".to_string());
         outputs.push(format!("ASCII Simple: {ascii_simple:?}"));
 
-        let ascii_complex = MetadataValue::Ascii("Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9".to_string());
+        let ascii_complex =
+            MetadataValue::Ascii("Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9".to_string());
         outputs.push(format!("ASCII Complex: {ascii_complex:?}"));
 
-        let ascii_with_special = MetadataValue::Ascii("value with spaces and symbols!@#$%".to_string());
+        let ascii_with_special =
+            MetadataValue::Ascii("value with spaces and symbols!@#$%".to_string());
         outputs.push(format!("ASCII Special Chars: {ascii_with_special:?}"));
 
         // Binary values
@@ -1675,7 +1681,9 @@ mod tests {
         metadata.insert("authorization", "Bearer secret-token");
         metadata.insert("x-trace-id", "trace-123-456");
         let request_with_metadata = Request::with_metadata(42u32, metadata);
-        outputs.push(format!("=== Request with Metadata ===\n{request_with_metadata:?}\n"));
+        outputs.push(format!(
+            "=== Request with Metadata ===\n{request_with_metadata:?}\n"
+        ));
 
         // Simple response
         let simple_response = Response::new("response data");
@@ -1685,11 +1693,11 @@ mod tests {
         let mut resp_metadata = Metadata::new();
         resp_metadata.insert("content-type", "application/grpc+proto");
         resp_metadata.insert_bin("custom-bin", Bytes::from_static(b"\x01\x02"));
-        let response_with_metadata = Response::with_metadata(
-            vec!["item1", "item2", "item3"],
-            resp_metadata
-        );
-        outputs.push(format!("=== Response with Metadata ===\n{response_with_metadata:?}\n"));
+        let response_with_metadata =
+            Response::with_metadata(vec!["item1", "item2", "item3"], resp_metadata);
+        outputs.push(format!(
+            "=== Response with Metadata ===\n{response_with_metadata:?}\n"
+        ));
 
         let combined_output = outputs.join("\n");
         assert_golden("request_response_debug_formatting", &combined_output);
@@ -1777,7 +1785,9 @@ mod tests {
         let mut populated_stream = StreamingRequest::<String>::open();
         populated_stream.push("item1".to_string()).unwrap();
         populated_stream.push("item2".to_string()).unwrap();
-        outputs.push(format!("=== Populated Stream (2 items) ===\n{populated_stream:?}\n"));
+        outputs.push(format!(
+            "=== Populated Stream (2 items) ===\n{populated_stream:?}\n"
+        ));
 
         // Stream with mixed success/error
         let mut mixed_stream = StreamingRequest::<i32>::open();
@@ -1809,19 +1819,25 @@ mod tests {
         let mut success_stream = ResponseStream::<String>::open();
         success_stream.push(Ok("response1".to_string())).unwrap();
         success_stream.push(Ok("response2".to_string())).unwrap();
-        outputs.push(format!("=== Success Response Stream ===\n{success_stream:?}\n"));
+        outputs.push(format!(
+            "=== Success Response Stream ===\n{success_stream:?}\n"
+        ));
 
         // Response stream with error
         let mut error_stream = ResponseStream::<u32>::open();
         error_stream.push(Ok(100)).unwrap();
-        error_stream.push(Err(Status::invalid_argument("bad input"))).unwrap();
+        error_stream
+            .push(Err(Status::invalid_argument("bad input")))
+            .unwrap();
         outputs.push(format!("=== Error Response Stream ===\n{error_stream:?}\n"));
 
         // Closed response stream
         let mut closed_stream = ResponseStream::<char>::open();
         closed_stream.push(Ok('A')).unwrap();
         closed_stream.close();
-        outputs.push(format!("=== Closed Response Stream ===\n{closed_stream:?}\n"));
+        outputs.push(format!(
+            "=== Closed Response Stream ===\n{closed_stream:?}\n"
+        ));
 
         let combined_output = outputs.join("\n");
         assert_golden("response_stream_state_snapshots", &combined_output);
@@ -1834,9 +1850,8 @@ mod tests {
         let mut outputs = Vec::new();
 
         // Server streaming
-        let server_streaming = ServerStreaming::<String, ResponseStream<String>>::new(
-            ResponseStream::open()
-        );
+        let server_streaming =
+            ServerStreaming::<String, ResponseStream<String>>::new(ResponseStream::open());
         outputs.push(format!("=== Server Streaming ===\n{server_streaming:?}\n"));
 
         // Client streaming
@@ -1845,7 +1860,9 @@ mod tests {
 
         // Bidirectional streaming
         let bidirectional = Bidirectional::<String, i32>::new();
-        outputs.push(format!("=== Bidirectional Streaming ===\n{bidirectional:?}\n"));
+        outputs.push(format!(
+            "=== Bidirectional Streaming ===\n{bidirectional:?}\n"
+        ));
 
         // Request sink
         let request_sink = RequestSink::<bool>::new();

@@ -5133,15 +5133,6 @@ mod tests {
         }
 
         impl TranscriptGolden {
-            const fn exact() -> Self {
-                Self {
-                    deterministic: true,
-                    platform_dependent: false,
-                    volatility: 1,
-                    strategy: "exact",
-                }
-            }
-
             const fn scrubbed() -> Self {
                 Self {
                     deterministic: false,
@@ -5153,9 +5144,21 @@ mod tests {
         }
 
         /// Core golden comparison infrastructure for decode transcripts
-        fn assert_transcript_golden(test_name: &str, actual_proof: &DecodeProof, strategy: &TranscriptGolden) {
+        fn assert_transcript_golden(
+            test_name: &str,
+            actual_proof: &DecodeProof,
+            strategy: &TranscriptGolden,
+        ) {
             let golden_path = Path::new("tests/golden/raptorq_transcripts")
                 .join(format!("{test_name}.golden.json"));
+            assert!(
+                (1..=5).contains(&strategy.volatility),
+                "golden volatility must stay on the documented 1-5 scale"
+            );
+            assert!(
+                !(strategy.deterministic && strategy.platform_dependent),
+                "platform-dependent transcripts cannot be exact deterministic goldens"
+            );
 
             // Prepare output based on strategy
             let output = match strategy.strategy {
@@ -5176,13 +5179,14 @@ mod tests {
             }
 
             // COMPARE MODE: diff actual vs golden
-            let expected = fs::read_to_string(&golden_path)
-                .unwrap_or_else(|_| panic!(
+            let expected = fs::read_to_string(&golden_path).unwrap_or_else(|_| {
+                panic!(
                     "Golden file missing: {}\n\
                      Run with UPDATE_GOLDENS=1 to create it\n\
                      Then review and commit: git diff tests/golden/",
                     golden_path.display()
-                ));
+                )
+            });
 
             if output != expected {
                 // Write actual for easy diffing
@@ -5281,7 +5285,7 @@ mod tests {
             assert_transcript_golden(
                 "systematic_success",
                 &result.proof,
-                &TranscriptGolden::scrubbed()
+                &TranscriptGolden::scrubbed(),
             );
         }
 
@@ -5295,7 +5299,6 @@ mod tests {
             let source = make_deterministic_source_data(k, symbol_size);
             let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
             let decoder = InactivationDecoder::new(k, symbol_size, seed);
-            let l = decoder.params().l;
 
             let mut received = decoder.constraint_symbols();
             received.extend(make_received_source(&decoder, &source));
@@ -5314,7 +5317,7 @@ mod tests {
             assert_transcript_golden(
                 "mixed_peeling_elimination",
                 &result.proof,
-                &TranscriptGolden::scrubbed()
+                &TranscriptGolden::scrubbed(),
             );
         }
 
@@ -5341,7 +5344,7 @@ mod tests {
             assert_transcript_golden(
                 "insufficient_symbols_failure",
                 &proof,
-                &TranscriptGolden::scrubbed()
+                &TranscriptGolden::scrubbed(),
             );
         }
 
@@ -5380,7 +5383,7 @@ mod tests {
             assert_transcript_golden(
                 "strategy_transitions",
                 &result.proof,
-                &TranscriptGolden::scrubbed()
+                &TranscriptGolden::scrubbed(),
             );
         }
 

@@ -4,10 +4,7 @@
 //! allocator behavior, focusing on scenarios where computing exact expected
 //! final states is intractable due to complex alloc/dealloc sequences.
 
-use std::collections::HashSet;
-use std::sync::atomic::Ordering;
-
-use crate::runtime::region_heap::{global_alloc_count, HeapIndex, RegionHeap};
+use crate::runtime::region_heap::{HeapIndex, RegionHeap, global_alloc_count};
 
 /// Test value type for allocator testing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,11 +33,9 @@ enum HeapOperation {
 }
 
 /// Execute a sequence of operations and track allocated indices.
-fn execute_operations(
-    heap: &mut RegionHeap,
-    operations: &[HeapOperation],
-) -> OperationResults {
-    let mut allocated_indices: std::collections::HashMap<u32, HeapIndex> = std::collections::HashMap::new();
+fn execute_operations(heap: &mut RegionHeap, operations: &[HeapOperation]) -> OperationResults {
+    let mut allocated_indices: std::collections::HashMap<u32, HeapIndex> =
+        std::collections::HashMap::new();
     let mut allocation_count = 0;
     let mut deallocation_count = 0;
     let mut reclaim_count = 0;
@@ -124,8 +119,13 @@ mod metamorphic_tests {
                 HeapOperation::Dealloc { target_id: 1 },
             ],
             vec![
-                HeapOperation::AllocMany { count: 5, base_id: 10 },
-                HeapOperation::DeallocMany { target_ids: vec![10, 12, 14] },
+                HeapOperation::AllocMany {
+                    count: 5,
+                    base_id: 10,
+                },
+                HeapOperation::DeallocMany {
+                    target_ids: vec![10, 12, 14],
+                },
             ],
             vec![
                 HeapOperation::Alloc { id: 100, size: 32 },
@@ -135,7 +135,6 @@ mod metamorphic_tests {
         ];
 
         for (i, ops) in operation_sequences.iter().enumerate() {
-            let initial_stats = heap.stats();
             let _results = execute_operations(&mut heap, ops);
             let final_stats = heap.stats();
 
@@ -179,7 +178,7 @@ mod metamorphic_tests {
 
         // Scenario 1: Single heap operations
         let idx1 = heap1.alloc(TestValue::new(1, 64));
-        let idx2 = heap1.alloc(TestValue::new(2, 128));
+        let _idx2 = heap1.alloc(TestValue::new(2, 128));
 
         let after_heap1_allocs = global_alloc_count();
         assert_eq!(
@@ -189,7 +188,7 @@ mod metamorphic_tests {
         );
 
         // Scenario 2: Multiple heap operations
-        let idx3 = heap2.alloc(TestValue::new(3, 32));
+        let _idx3 = heap2.alloc(TestValue::new(3, 32));
 
         let after_heap2_alloc = global_alloc_count();
         assert_eq!(
@@ -220,8 +219,7 @@ mod metamorphic_tests {
         heap1.reclaim_all();
         let final_global_count = global_alloc_count();
         assert_eq!(
-            final_global_count,
-            initial_global_count,
+            final_global_count, initial_global_count,
             "Global count not restored to baseline after cleanup"
         );
 
@@ -302,15 +300,26 @@ mod metamorphic_tests {
         // Original value should still be stable
         let retrieved = heap.get::<TestValue>(idx);
         assert!(retrieved.is_some(), "Access failed after other allocation");
-        assert_eq!(*retrieved.unwrap(), test_value, "Value corrupted by other allocation");
+        assert_eq!(
+            *retrieved.unwrap(),
+            test_value,
+            "Value corrupted by other allocation"
+        );
 
         // Deallocate the other value
         heap.dealloc(other_idx);
 
         // Original value should still be accessible
         let retrieved = heap.get::<TestValue>(idx);
-        assert!(retrieved.is_some(), "Access failed after other deallocation");
-        assert_eq!(*retrieved.unwrap(), test_value, "Value corrupted by other deallocation");
+        assert!(
+            retrieved.is_some(),
+            "Access failed after other deallocation"
+        );
+        assert_eq!(
+            *retrieved.unwrap(),
+            test_value,
+            "Value corrupted by other deallocation"
+        );
 
         crate::test_complete!("mr_access_stability");
     }
@@ -344,10 +353,19 @@ mod metamorphic_tests {
         // Verify remaining allocated values are still accessible
         let remaining_indices = [1, 3, 5, 7, 9];
         for &i in &remaining_indices {
-            assert!(heap.contains(indices[i]), "Remaining allocation {} not accessible", i);
+            assert!(
+                heap.contains(indices[i]),
+                "Remaining allocation {} not accessible",
+                i
+            );
             let value = heap.get::<TestValue>(indices[i]);
             assert!(value.is_some(), "Cannot access remaining value {}", i);
-            assert_eq!(value.unwrap().id, i as u32, "Value corrupted for index {}", i);
+            assert_eq!(
+                value.unwrap().id,
+                i as u32,
+                "Value corrupted for index {}",
+                i
+            );
         }
 
         crate::test_complete!("mr_free_list_integrity");
@@ -380,7 +398,11 @@ mod metamorphic_tests {
             assert!(heap.dealloc(idx), "Failed to deallocate {}", i);
 
             // Verify deallocation happened
-            assert!(!heap.contains(idx), "Index {} still accessible after dealloc", i);
+            assert!(
+                !heap.contains(idx),
+                "Index {} still accessible after dealloc",
+                i
+            );
         }
 
         // Check symmetry: state should be equivalent to initial
@@ -388,7 +410,10 @@ mod metamorphic_tests {
         let final_len = heap.len();
         let final_global = global_alloc_count();
 
-        assert_eq!(final_len, initial_len, "Heap length not symmetric after alloc/dealloc cycle");
+        assert_eq!(
+            final_len, initial_len,
+            "Heap length not symmetric after alloc/dealloc cycle"
+        );
         assert_eq!(
             final_stats.live, initial_stats.live,
             "Live count not symmetric: initial={}, final={}",
@@ -415,16 +440,37 @@ mod metamorphic_tests {
 
         // Execute complex operation sequence
         let operations = vec![
-            HeapOperation::AllocMany { count: 5, base_id: 1000 },
-            HeapOperation::Alloc { id: 2000, size: 256 },
-            HeapOperation::DeallocMany { target_ids: vec![1001, 1003] },
-            HeapOperation::AllocMany { count: 3, base_id: 3000 },
+            HeapOperation::AllocMany {
+                count: 5,
+                base_id: 1000,
+            },
+            HeapOperation::Alloc {
+                id: 2000,
+                size: 256,
+            },
+            HeapOperation::DeallocMany {
+                target_ids: vec![1001, 1003],
+            },
+            HeapOperation::AllocMany {
+                count: 3,
+                base_id: 3000,
+            },
             HeapOperation::Dealloc { target_id: 2000 },
-            HeapOperation::Alloc { id: 4000, size: 512 },
+            HeapOperation::Alloc {
+                id: 4000,
+                size: 512,
+            },
         ];
 
         let results = execute_operations(&mut heap, &operations);
         let final_stats = heap.stats();
+        assert_eq!(
+            results.allocation_count,
+            results.deallocation_count
+                + results.reclaim_count
+                + results.remaining_allocations.len(),
+            "operation accounting must explain every allocation"
+        );
 
         // MR1: Statistics conservation
         assert_eq!(
@@ -442,7 +488,11 @@ mod metamorphic_tests {
 
         // MR4: All remaining allocations should be accessible
         for (&id, &index) in &results.remaining_allocations {
-            assert!(heap.contains(index), "Remaining allocation {} not accessible", id);
+            assert!(
+                heap.contains(index),
+                "Remaining allocation {} not accessible",
+                id
+            );
             let value = heap.get::<TestValue>(index);
             assert!(value.is_some(), "Cannot retrieve remaining value {}", id);
             assert_eq!(value.unwrap().id, id, "Value corrupted for id {}", id);
@@ -489,17 +539,35 @@ mod metamorphic_tests {
         assert!(heap.get::<Vec<i32>>(vec_idx).is_some());
 
         // Type mismatches should consistently return None
-        assert!(heap.get::<u32>(string_idx).is_none(), "Type mismatch allowed for string->u32");
-        assert!(heap.get::<String>(int_idx).is_none(), "Type mismatch allowed for u32->String");
-        assert!(heap.get::<Vec<i32>>(string_idx).is_none(), "Type mismatch allowed for string->Vec");
-        assert!(heap.get::<String>(vec_idx).is_none(), "Type mismatch allowed for Vec->String");
+        assert!(
+            heap.get::<u32>(string_idx).is_none(),
+            "Type mismatch allowed for string->u32"
+        );
+        assert!(
+            heap.get::<String>(int_idx).is_none(),
+            "Type mismatch allowed for u32->String"
+        );
+        assert!(
+            heap.get::<Vec<i32>>(string_idx).is_none(),
+            "Type mismatch allowed for string->Vec"
+        );
+        assert!(
+            heap.get::<String>(vec_idx).is_none(),
+            "Type mismatch allowed for Vec->String"
+        );
 
         // Type safety should be stable across operations
-        let another_idx = heap.alloc(TestValue::new(99, 64));
+        let _another_idx = heap.alloc(TestValue::new(99, 64));
 
         // Original type checks should still fail consistently
-        assert!(heap.get::<u32>(string_idx).is_none(), "Type safety changed after other alloc");
-        assert!(heap.get::<String>(int_idx).is_none(), "Type safety changed after other alloc");
+        assert!(
+            heap.get::<u32>(string_idx).is_none(),
+            "Type safety changed after other alloc"
+        );
+        assert!(
+            heap.get::<String>(int_idx).is_none(),
+            "Type safety changed after other alloc"
+        );
 
         crate::test_complete!("mr_type_safety_invariant");
     }

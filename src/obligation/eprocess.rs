@@ -714,38 +714,41 @@ mod tests {
         let failed = harness.failed_requirements();
         if !failed.is_empty() {
             for failure in &failed {
-                eprintln!("FAILED {}: {} - {}",
-                    failure.requirement_id,
-                    failure.description,
-                    failure.evidence);
+                eprintln!(
+                    "FAILED {}: {} - {}",
+                    failure.requirement_id, failure.description, failure.evidence
+                );
             }
         }
 
         // Count MUST vs SHOULD requirements
-        let results = &harness.results;
-        let must_total = results.iter()
+        let results = harness.results();
+        let must_total = results
+            .iter()
             .filter(|r| r.level == conformance::RequirementLevel::Must)
             .count();
-        let must_pass = results.iter()
-            .filter(|r| r.level == conformance::RequirementLevel::Must &&
-                      r.status == conformance::TestStatus::Pass)
+        let must_pass = results
+            .iter()
+            .filter(|r| {
+                r.level == conformance::RequirementLevel::Must
+                    && r.status == conformance::TestStatus::Pass
+            })
             .count();
 
-        let should_total = results.iter()
+        let should_total = results
+            .iter()
             .filter(|r| r.level == conformance::RequirementLevel::Should)
             .count();
-        let should_pass = results.iter()
-            .filter(|r| r.level == conformance::RequirementLevel::Should &&
-                      r.status == conformance::TestStatus::Pass)
+        let should_pass = results
+            .iter()
+            .filter(|r| {
+                r.level == conformance::RequirementLevel::Should
+                    && r.status == conformance::TestStatus::Pass
+            })
             .count();
 
         // Log conformance summary
-        crate::assert_with_log!(
-            results.len() >= 8,
-            "all tests ran",
-            8,
-            results.len()
-        );
+        crate::assert_with_log!(results.len() >= 8, "all tests ran", 8, results.len());
 
         // MUST requirements: 100% pass rate required
         let must_score = if must_total > 0 {
@@ -776,7 +779,8 @@ mod tests {
         );
 
         // No critical mathematical failures
-        let critical_failures: Vec<_> = failed.iter()
+        let critical_failures: Vec<_> = failed
+            .iter()
             .filter(|r| r.level == conformance::RequirementLevel::Must)
             .collect();
 
@@ -829,7 +833,7 @@ mod tests {
         // Test that normalized LR has correct expectation
         let test_ages = [0.5 * mu, mu, 2.0 * mu, 10.0 * mu];
         for &age in &test_ages {
-            let ratio = age / mu;
+            let ratio: f64 = age / mu;
             let lr = ratio.max(1.0) / normalizer;
 
             // Individual LR should be ≥ 1/normalizer (when ratio=1)
@@ -887,8 +891,8 @@ mod tests {
 
             for i in 0..obs_per_sequence {
                 // Generate exponential(1/μ) observations
-                let u = ((seq * obs_per_sequence + i) as f64 + 0.5) /
-                       (num_sequences * obs_per_sequence) as f64;
+                let u = ((seq * obs_per_sequence + i) as f64 + 0.5)
+                    / (num_sequences * obs_per_sequence) as f64;
                 let x = -(config.expected_lifetime_ns as f64) * (1.0 - u).ln();
 
                 monitor.observe(x as u64);
@@ -919,7 +923,10 @@ mod tests {
             observed_alert_rate <= expected_max_rate,
             "alert rate bounded by α",
             format!("≤{:.3}", expected_max_rate),
-            format!("{:.3} ({}/{})", observed_alert_rate, alert_count, num_sequences)
+            format!(
+                "{:.3} ({}/{})",
+                observed_alert_rate, alert_count, num_sequences
+            )
         );
 
         // 3. No extreme outliers in e-values
