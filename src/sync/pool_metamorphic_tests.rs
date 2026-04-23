@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::cx::Cx;
 use crate::sync::{GenericPool, Pool, PoolConfig, PooledResource, PoolStats};
+use crate::types::Time;
 
 /// Mock resource for testing pool behavior.
 #[derive(Debug, Clone)]
@@ -122,9 +123,9 @@ async fn execute_operations(
                 };
 
                 // Race the acquire against cancellation
-                tokio::select! {
-                    result = acquire_future => {
-                        if let Ok(resource) = result {
+                futures_lite::future::race(
+                    async {
+                        if let Ok(resource) = acquire_future.await {
                             acquired_count += 1;
 
                             // Hold the resource briefly
@@ -133,11 +134,12 @@ async fn execute_operations(
                             resource.return_to_pool();
                             returned_count += 1;
                         }
-                    }
-                    _ = cancel_future => {
+                    },
+                    async {
+                        cancel_future.await;
                         cancel_count += 1;
                     }
-                }
+                ).await;
             }
         }
 
@@ -167,8 +169,9 @@ mod metamorphic_tests {
 
     /// MR1: Pool Accounting Invariant (Equivalence)
     /// Property: active + idle should always equal total
-    #[tokio::test]
-    async fn mr_pool_accounting_invariant() {
+    #[test]
+    fn mr_pool_accounting_invariant() {
+        futures_lite::future::block_on(async {
         crate::test_utils::init_test_logging();
         crate::test_phase!("mr_pool_accounting_invariant");
 
@@ -205,12 +208,14 @@ mod metamorphic_tests {
         }
 
         crate::test_complete!("mr_pool_accounting_invariant");
+        });
     }
 
     /// MR2: Cancel-Safety Invariance (Equivalence)
     /// Property: Pool stats should remain consistent despite cancellations
-    #[tokio::test]
-    async fn mr_cancel_safety_invariance() {
+    #[test]
+    fn mr_cancel_safety_invariance() {
+        futures_lite::future::block_on(async {
         crate::test_utils::init_test_logging();
         crate::test_phase!("mr_cancel_safety_invariance");
 
@@ -230,17 +235,16 @@ mod metamorphic_tests {
 
         let initial_stats = pool.stats();
 
-        tokio::select! {
-            result = acquire_future => {
-                // If acquire succeeded before cancel, return the resource
-                if let Ok(resource) = result {
+        futures_lite::future::race(
+            async {
+                if let Ok(resource) = acquire_future.await {
                     resource.return_to_pool();
                 }
+            },
+            async {
+                cancel_future.await;
             }
-            _ = cancel_future => {
-                // Cancellation occurred
-            }
-        }
+        ).await;
 
         crate::time::sleep(Time::ZERO,Time::ZERO,Duration::from_millis(50)).await;
         let final_stats = pool.stats();
@@ -250,12 +254,14 @@ mod metamorphic_tests {
             "Pool accounting broken by cancellation");
 
         crate::test_complete!("mr_cancel_safety_invariance");
+        });
     }
 
     /// MR3: Return vs Drop Equivalence (Equivalence)
     /// Property: Explicitly returning vs dropping should yield same pool state
-    #[tokio::test]
-    async fn mr_return_vs_drop_equivalence() {
+    #[test]
+    fn mr_return_vs_drop_equivalence() {
+        futures_lite::future::block_on(async {
         crate::test_utils::init_test_logging();
         crate::test_phase!("mr_return_vs_drop_equivalence");
 
@@ -288,12 +294,14 @@ mod metamorphic_tests {
         assert_eq!(stats2.active, 0, "Resource not returned properly (drop)");
 
         crate::test_complete!("mr_return_vs_drop_equivalence");
+        });
     }
 
     /// MR4: Discard vs Return Counting (Multiplicative)
     /// Property: Discarding should reduce total count compared to returning
-    #[tokio::test]
-    async fn mr_discard_vs_return_counting() {
+    #[test]
+    fn mr_discard_vs_return_counting() {
+        futures_lite::future::block_on(async {
         crate::test_utils::init_test_logging();
         crate::test_phase!("mr_discard_vs_return_counting");
 
@@ -328,12 +336,14 @@ mod metamorphic_tests {
         assert_eq!(stats_discard.active + stats_discard.idle, stats_discard.total);
 
         crate::test_complete!("mr_discard_vs_return_counting");
+        });
     }
 
     /// MR5: Hold Duration Invariance (Equivalence)
     /// Property: Pool correctness independent of hold duration
-    #[tokio::test]
-    async fn mr_hold_duration_invariance() {
+    #[test]
+    fn mr_hold_duration_invariance() {
+        futures_lite::future::block_on(async {
         crate::test_utils::init_test_logging();
         crate::test_phase!("mr_hold_duration_invariance");
 
@@ -367,12 +377,14 @@ mod metamorphic_tests {
         assert_eq!(stats_long.active, 0, "Resource not returned after long hold");
 
         crate::test_complete!("mr_hold_duration_invariance");
+        });
     }
 
     /// MR6: Composite Operation Sequence (Multiplicative Power)
     /// Property: Complex sequences should maintain all invariants
-    #[tokio::test]
-    async fn mr_composite_operation_sequence() {
+    #[test]
+    fn mr_composite_operation_sequence() {
+        futures_lite::future::block_on(async {
         crate::test_utils::init_test_logging();
         crate::test_phase!("mr_composite_operation_sequence");
 
@@ -411,5 +423,6 @@ mod metamorphic_tests {
             final_stats.total, config.max_size);
 
         crate::test_complete!("mr_composite_operation_sequence");
+        });
     }
 }
