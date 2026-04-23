@@ -6,6 +6,7 @@ pub mod negative;
 pub mod obligation_no_leak;
 pub mod outcome;
 pub mod runtime;
+pub mod structured_concurrency;
 
 use crate::{ConformanceTest, RuntimeInterface};
 
@@ -20,5 +21,6 @@ pub fn all_tests<RT: RuntimeInterface + Sync>() -> Vec<ConformanceTest<RT>> {
     tests.extend(negative::all_tests::<RT>());
     tests.extend(io::all_tests::<RT>());
     tests.extend(cancellation::all_tests::<RT>());
+    tests.extend(structured_concurrency::all_tests::<RT>());
     tests
 }
