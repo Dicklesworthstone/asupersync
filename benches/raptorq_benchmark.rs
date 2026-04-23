@@ -1681,10 +1681,10 @@ fn bench_repair_campaign(c: &mut Criterion) {
 
 /// Microbenchmark for decoder critical path operations.
 ///
-/// Focuses on hot path operations within the decoder:
-/// - Symbol ingestion and equation creation
-/// - Peeling loop iteration
-/// - Dense matrix factorization steps
+/// Exercises actual decoder hot paths with varying batch sizes:
+/// - Single symbol decode (minimal overhead)
+/// - Small batch decode (16 symbols)
+/// - Larger batch decode (64 symbols, matrix operations)
 fn bench_decoder_microbench(c: &mut Criterion) {
     let mut group = c.benchmark_group("raptorq_decoder_microbench");
     group.sample_size(100);
@@ -1705,39 +1705,34 @@ fn bench_decoder_microbench(c: &mut Criterion) {
         });
     }
 
-    // Microbench: Single symbol processing
+    // Microbench: Single symbol decode attempt
     group.throughput(Throughput::Elements(1));
-    group.bench_function("symbol_ingestion", |b| {
+    group.bench_function("symbol_decode_single", |b| {
         b.iter(|| {
-            let symbol = &test_symbols[0];
-            // Simulate the hot path of symbol processing
-            // This exercises the equation creation and constraint checking
-            std::hint::black_box(&symbol.symbol_id);
-            std::hint::black_box(&symbol.data);
+            // Exercise actual decoder hot path with single symbol
+            let result = decoder.decode(&test_symbols[0..1]);
+            std::hint::black_box(result);
         });
     });
 
-    // Microbench: Batch symbol processing
+    // Microbench: Batch symbol decode attempt
     group.throughput(Throughput::Elements(16));
-    group.bench_function("symbol_batch_16", |b| {
+    group.bench_function("symbol_decode_batch_16", |b| {
         b.iter(|| {
-            for symbol in test_symbols.iter().take(16) {
-                std::hint::black_box(&symbol.symbol_id);
-                std::hint::black_box(&symbol.data);
-            }
+            // Exercise actual decoder hot path with batch of symbols
+            let result = decoder.decode(&test_symbols[0..16]);
+            std::hint::black_box(result);
         });
     });
 
-    // Microbench: Memory layout efficiency for symbol data access
-    let large_symbol_data: Vec<Vec<u8>> = (0..k).map(|_| vec![0xCD; symbol_size]).collect();
-    group.throughput(Throughput::Bytes((symbol_size * 16) as u64));
-    group.bench_function("symbol_data_access_pattern", |b| {
+    // Microbench: Larger decode attempt to exercise matrix operations
+    let large_symbol_batch = 64.min(k);
+    group.throughput(Throughput::Elements(large_symbol_batch as u64));
+    group.bench_function("symbol_decode_batch_64", |b| {
         b.iter(|| {
-            for data in large_symbol_data.iter().take(16) {
-                // Simulate cache-friendly vs cache-unfriendly access
-                std::hint::black_box(data.as_ptr());
-                std::hint::black_box(data.len());
-            }
+            // Exercise decoder with larger batch to stress matrix operations
+            let result = decoder.decode(&test_symbols[0..large_symbol_batch]);
+            std::hint::black_box(result);
         });
     });
 

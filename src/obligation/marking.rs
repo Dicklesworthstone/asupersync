@@ -876,6 +876,259 @@ mod tests {
         )
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ConformanceRequirementLevel {
+        Must,
+        Should,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ConformanceStatus {
+        Pass,
+        Fail,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MarkingConformanceResult {
+        requirement_id: &'static str,
+        description: &'static str,
+        level: ConformanceRequirementLevel,
+        status: ConformanceStatus,
+        evidence: String,
+    }
+
+    struct MarkingConformanceHarness;
+
+    impl MarkingConformanceHarness {
+        fn run_all() -> Vec<MarkingConformanceResult> {
+            vec![
+                Self::reserve_commit_close_returns_to_zero(),
+                Self::region_close_surfaces_pending_obligations(),
+                Self::below_zero_transitions_are_invalid(),
+                Self::projection_keeps_only_marking_events(),
+            ]
+        }
+
+        fn render_matrix(results: &[MarkingConformanceResult]) -> String {
+            use std::fmt::Write;
+
+            let mut out = String::new();
+            out.push_str("# Obligation Marking VASS Conformance Matrix\n\n");
+            out.push_str("| Req ID | Level | Status | Description | Evidence |\n");
+            out.push_str("|--------|-------|--------|-------------|----------|\n");
+
+            let mut must_total = 0;
+            let mut must_pass = 0;
+            let mut should_total = 0;
+            let mut should_pass = 0;
+
+            for result in results {
+                let level = match result.level {
+                    ConformanceRequirementLevel::Must => {
+                        must_total += 1;
+                        if result.status == ConformanceStatus::Pass {
+                            must_pass += 1;
+                        }
+                        "MUST"
+                    }
+                    ConformanceRequirementLevel::Should => {
+                        should_total += 1;
+                        if result.status == ConformanceStatus::Pass {
+                            should_pass += 1;
+                        }
+                        "SHOULD"
+                    }
+                };
+                let status = match result.status {
+                    ConformanceStatus::Pass => "PASS",
+                    ConformanceStatus::Fail => "FAIL",
+                };
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} | {} | {} |",
+                    result.requirement_id,
+                    level,
+                    status,
+                    result.description,
+                    result.evidence
+                );
+            }
+
+            let _ = writeln!(out, "\nSummary:");
+            let _ = writeln!(out, "- MUST: {must_pass}/{must_total}");
+            let _ = writeln!(out, "- SHOULD: {should_pass}/{should_total}");
+            let overall = if must_pass == must_total {
+                "CONFORMANT"
+            } else {
+                "NON-CONFORMANT"
+            };
+            let _ = writeln!(out, "- Overall: {overall}");
+
+            out
+        }
+
+        fn reserve_commit_close_returns_to_zero() -> MarkingConformanceResult {
+            let events = vec![
+                reserve(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+                commit(10, o(0), r(0), ObligationKind::SendPermit),
+                close(20, r(0)),
+            ];
+            let mut analyzer = MarkingAnalyzer::new();
+            let result = analyzer.analyze(&events);
+            let passes = result.is_safe()
+                && result.leak_count() == 0
+                && result.timeline.last_marking().is_some_and(ObligationMarking::is_zero);
+
+            MarkingConformanceResult {
+                requirement_id: "VASS-001",
+                description: "reserve/commit/close returns to zero marking",
+                level: ConformanceRequirementLevel::Must,
+                status: if passes {
+                    ConformanceStatus::Pass
+                } else {
+                    ConformanceStatus::Fail
+                },
+                evidence: format!(
+                    "safe={} leaks={} final_zero={}",
+                    result.is_safe(),
+                    result.leak_count(),
+                    result
+                        .timeline
+                        .last_marking()
+                        .is_some_and(ObligationMarking::is_zero)
+                ),
+            }
+        }
+
+        fn region_close_surfaces_pending_obligations() -> MarkingConformanceResult {
+            let events = vec![
+                reserve(0, o(1), ObligationKind::SendPermit, t(0), r(0)),
+                close(10, r(0)),
+            ];
+            let mut analyzer = MarkingAnalyzer::new();
+            let result = analyzer.analyze(&events);
+            let passes = !result.is_safe()
+                && result.leak_count() == 1
+                && result.leaks[0].kind == ObligationKind::SendPermit;
+
+            MarkingConformanceResult {
+                requirement_id: "VASS-002",
+                description: "region close surfaces pending obligations as leaks",
+                level: ConformanceRequirementLevel::Must,
+                status: if passes {
+                    ConformanceStatus::Pass
+                } else {
+                    ConformanceStatus::Fail
+                },
+                evidence: format!(
+                    "safe={} leaks={} first_kind={:?}",
+                    result.is_safe(),
+                    result.leak_count(),
+                    result.leaks.first().map(|leak| leak.kind)
+                ),
+            }
+        }
+
+        fn below_zero_transitions_are_invalid() -> MarkingConformanceResult {
+            let events = vec![commit(10, o(2), r(0), ObligationKind::Ack)];
+            let mut analyzer = MarkingAnalyzer::new();
+            let result = analyzer.analyze(&events);
+            let passes = result.invalid_transitions.len() == 1 && result.is_safe();
+
+            MarkingConformanceResult {
+                requirement_id: "VASS-003",
+                description: "commit below zero is recorded as invalid transition",
+                level: ConformanceRequirementLevel::Must,
+                status: if passes {
+                    ConformanceStatus::Pass
+                } else {
+                    ConformanceStatus::Fail
+                },
+                evidence: format!(
+                    "invalid={} safe={}",
+                    result.invalid_transitions.len(),
+                    result.is_safe()
+                ),
+            }
+        }
+
+        fn projection_keeps_only_marking_events() -> MarkingConformanceResult {
+            let trace_events = vec![
+                TraceEvent::new(
+                    0,
+                    Time::ZERO,
+                    TraceEventKind::Spawn,
+                    TraceData::Task {
+                        task: t(0),
+                        region: r(0),
+                    },
+                ),
+                TraceEvent::new(
+                    1,
+                    Time::ZERO,
+                    TraceEventKind::ObligationReserve,
+                    TraceData::Obligation {
+                        obligation: o(3),
+                        task: t(0),
+                        region: r(0),
+                        kind: ObligationKind::Lease,
+                        state: crate::record::ObligationState::Reserved,
+                        duration_ns: None,
+                        abort_reason: None,
+                    },
+                ),
+                TraceEvent::new(
+                    2,
+                    Time::from_nanos(5),
+                    TraceEventKind::Poll,
+                    TraceData::Task {
+                        task: t(0),
+                        region: r(0),
+                    },
+                ),
+                TraceEvent::new(
+                    3,
+                    Time::from_nanos(10),
+                    TraceEventKind::ObligationAbort,
+                    TraceData::Obligation {
+                        obligation: o(3),
+                        task: t(0),
+                        region: r(0),
+                        kind: ObligationKind::Lease,
+                        state: crate::record::ObligationState::Aborted,
+                        duration_ns: Some(10),
+                        abort_reason: None,
+                    },
+                ),
+                TraceEvent::new(
+                    4,
+                    Time::from_nanos(20),
+                    TraceEventKind::RegionCloseBegin,
+                    TraceData::Region {
+                        region: r(0),
+                        parent: None,
+                    },
+                ),
+            ];
+            let projected = project_trace(&trace_events);
+            let mut analyzer = MarkingAnalyzer::new();
+            let result = analyzer.analyze(&projected);
+            let passes = projected.len() == 3 && result.is_safe();
+
+            MarkingConformanceResult {
+                requirement_id: "VASS-004",
+                description: "trace projection keeps only obligation and close events",
+                level: ConformanceRequirementLevel::Should,
+                status: if passes {
+                    ConformanceStatus::Pass
+                } else {
+                    ConformanceStatus::Fail
+                },
+                evidence: format!("projected={} safe={}", projected.len(), result.is_safe()),
+            }
+        }
+    }
+
     // ---- Safe traces -------------------------------------------------------
 
     #[test]
@@ -1424,6 +1677,50 @@ mod tests {
         let len = projected.len();
         crate::assert_with_log!(len == 0, "no obligation events", 0, len);
         crate::test_complete!("project_trace_ignores_non_obligation");
+    }
+
+    #[test]
+    fn marking_vass_conformance_matrix() {
+        init_test("marking_vass_conformance_matrix");
+        let results = MarkingConformanceHarness::run_all();
+        let must_total = results
+            .iter()
+            .filter(|result| result.level == ConformanceRequirementLevel::Must)
+            .count();
+        let must_pass = results
+            .iter()
+            .filter(|result| {
+                result.level == ConformanceRequirementLevel::Must
+                    && result.status == ConformanceStatus::Pass
+            })
+            .count();
+        crate::assert_with_log!(
+            must_total == must_pass,
+            "all MUST requirements pass",
+            must_total,
+            must_pass
+        );
+
+        insta::assert_snapshot!(
+            "marking_vass_conformance_matrix",
+            MarkingConformanceHarness::render_matrix(&results),
+            @r"
+        # Obligation Marking VASS Conformance Matrix
+
+        | Req ID | Level | Status | Description | Evidence |
+        |--------|-------|--------|-------------|----------|
+        | VASS-001 | MUST | PASS | reserve/commit/close returns to zero marking | safe=true leaks=0 final_zero=true |
+        | VASS-002 | MUST | PASS | region close surfaces pending obligations as leaks | safe=false leaks=1 first_kind=Some(SendPermit) |
+        | VASS-003 | MUST | PASS | commit below zero is recorded as invalid transition | invalid=1 safe=true |
+        | VASS-004 | SHOULD | PASS | trace projection keeps only obligation and close events | projected=3 safe=true |
+
+        Summary:
+        - MUST: 3/3
+        - SHOULD: 1/1
+        - Overall: CONFORMANT
+        "
+        );
+        crate::test_complete!("marking_vass_conformance_matrix");
     }
 
     #[test]
