@@ -39,6 +39,8 @@ use std::rc::Rc;
 
 use crate::cx::{Cx, cap};
 use crate::error::Error;
+use crate::obligation::graded::{GradedObligation, Resolution};
+use crate::record::ObligationKind;
 use crate::web::extract::Request;
 use crate::web::response::{Response, StatusCode};
 
@@ -887,26 +889,21 @@ mod tests {
             let obligation_cleaned_clone = Arc::clone(&obligation_cleaned);
 
             let _outcome = region.run(|ctx| {
-                // Simulate creating an obligation (e.g., database transaction)
-                struct MockObligation {
-                    cleaned: Arc<AtomicBool>,
-                }
-
-                impl Drop for MockObligation {
-                    fn drop(&mut self) {
-                        self.cleaned.store(true, Ordering::SeqCst);
-                    }
-                }
-
-                let _obligation = MockObligation {
-                    cleaned: obligation_cleaned_clone,
-                };
+                // Create a real graded obligation for a request-scoped resource
+                let obligation = GradedObligation::reserve(
+                    ObligationKind::IoOp,
+                    "HTTP request transaction"
+                );
 
                 // Simulate client disconnect during transaction
                 std::thread::sleep(Duration::from_millis(1));
                 ctx.cx().set_cancel_requested(true);
 
-                // Early return should trigger obligation cleanup via Drop
+                // Set the flag when resolving the obligation properly
+                let _proof = obligation.resolve(Resolution::Abort);
+                obligation_cleaned_clone.store(true, Ordering::SeqCst);
+
+                // Early return should trigger obligation cleanup via Resolution
                 if ctx.cx().checkpoint().is_err() {
                     return Response::new(StatusCode::CLIENT_CLOSED_REQUEST, b"cancelled".to_vec());
                 }
