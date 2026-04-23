@@ -3358,4 +3358,80 @@ mod tests {
         let analysis = PlanAnalyzer::analyze(&dag);
         insta::assert_snapshot!(format!("{}", analysis));
     }
+
+    // ------------------------------------------------------------------------
+    // Golden-artifact: canonical plan-analysis machine-readable report.
+    //
+    // The existing `golden_full_analysis_*` snapshots freeze the human-readable
+    // Display output. This complementary snapshot freezes every public accessor
+    // on `PlanAnalysis` and `NodeAnalysis` for ONE non-trivial DAG:
+    //
+    //   timeout(
+    //     join(
+    //       obl:permit,
+    //       race(
+    //         obl:lease,
+    //         normal_task,
+    //       ),
+    //       slow_task,
+    //     ),
+    //     100ms,
+    //   )
+    //
+    // covering leaf / obligation-leaf / race / join / timeout in one report.
+    // Any future change to accessor semantics surfaces as a diff.
+    // ------------------------------------------------------------------------
+    #[test]
+    fn canonical_plan_analysis_report_snapshot() {
+        let mut dag = PlanDag::new();
+        let permit = dag.leaf("obl:permit");
+        let lease = dag.leaf("obl:lease");
+        let normal = dag.leaf("normal_task");
+        let slow = dag.leaf("slow_task");
+        let inner_race = dag.race(vec![lease, normal]);
+        let join = dag.join(vec![permit, inner_race, slow]);
+        let root = dag.timeout(join, std::time::Duration::from_millis(100));
+        dag.set_root(root);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+
+        // Per-node view (sorted by PlanId index for determinism).
+        let mut by_id: Vec<_> = analysis.nodes.iter().collect();
+        by_id.sort_by_key(|(id, _)| id.index());
+        let per_node: Vec<_> = by_id
+            .into_iter()
+            .map(|(id, n)| {
+                serde_json::json!({
+                    "id": id.index(),
+                    "obligation":            format!("{}", n.obligation),
+                    "effective_obligation":  format!("{}", n.effective_obligation()),
+                    "obligation_flow":       format!("{}", n.obligation_flow),
+                    "cancel":                format!("{}", n.cancel),
+                    "budget":                format!("{}", n.budget),
+                    "cost":                  format!("{}", n.cost),
+                    "has_obligation_issues": n.has_obligation_issues(),
+                    "is_safe":               n.is_safe(),
+                })
+            })
+            .collect();
+
+        let obligation_ids: Vec<_> = analysis
+            .obligation_issues()
+            .iter()
+            .map(|n| n.id.index())
+            .collect();
+        let cancel_ids: Vec<_> = analysis.cancel_issues().iter().map(|n| n.id.index()).collect();
+
+        insta::assert_json_snapshot!(
+            "canonical_plan_analysis_report",
+            serde_json::json!({
+                "summary":           analysis.summary(),
+                "all_safe":          analysis.all_safe(),
+                "node_count":        analysis.nodes.len(),
+                "obligation_issue_ids": obligation_ids,
+                "cancel_issue_ids":     cancel_ids,
+                "per_node":          per_node,
+            })
+        );
+    }
 }
