@@ -2025,4 +2025,262 @@ mod tests {
         let cloned = result;
         assert!(cloned.is_clean());
     }
+
+    // =========================================================================
+    // Conservation-of-acquired metamorphic relation
+    //
+    // For any sequence of ledger operations, the invariant
+    //
+    //     total_acquired == total_committed + total_aborted + total_leaked + pending
+    //
+    // must hold. This catches off-by-one and miscategorization bugs across
+    // acquire / commit / abort / abort_by_id / mark_leaked / reset paths
+    // without needing an oracle for the expected pending count after a
+    // mixed-operation sequence.
+    // =========================================================================
+
+    #[track_caller]
+    fn assert_conservation(ledger: &ObligationLedger, step: &str) {
+        let s = ledger.stats();
+        let rhs = s.total_committed + s.total_aborted + s.total_leaked + s.pending;
+        assert_eq!(
+            s.total_acquired, rhs,
+            "conservation violated after {step}: \
+             acquired={} vs committed({})+aborted({})+leaked({})+pending({}) = {}",
+            s.total_acquired, s.total_committed, s.total_aborted, s.total_leaked, s.pending, rhs,
+        );
+    }
+
+    #[test]
+    fn metamorphic_conservation_of_acquired_across_mixed_operations() {
+        init_test("metamorphic_conservation_of_acquired_across_mixed_operations");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        assert_conservation(&ledger, "initial");
+
+        // ---- Pre-reset phase: exercise all token-consuming + by-id paths ----
+
+        let t1 = ledger.acquire(
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::from_nanos(1),
+        );
+        assert_conservation(&ledger, "acquire t1");
+
+        let t2 = ledger.acquire_with_context(
+            ObligationKind::Ack,
+            task,
+            region,
+            Time::from_nanos(2),
+            SourceLocation::unknown(),
+            None,
+            Some("ctx".to_string()),
+        );
+        assert_conservation(&ledger, "acquire_with_context t2");
+
+        let t3 = ledger.acquire(ObligationKind::Lease, task, region, Time::from_nanos(3));
+        assert_conservation(&ledger, "acquire t3");
+
+        let t3_id = t3.id();
+        let pre_reset_acquired = ledger.stats().total_acquired;
+        assert_eq!(pre_reset_acquired, 3);
+
+        ledger.commit(t1, Time::from_nanos(10));
+        assert_conservation(&ledger, "commit t1");
+
+        ledger.abort(
+            t2,
+            Time::from_nanos(11),
+            ObligationAbortReason::Cancel,
+        );
+        assert_conservation(&ledger, "abort t2");
+
+        // By-id resolution after original token has been dropped.
+        drop(t3);
+        ledger.abort_by_id(t3_id, Time::from_nanos(12), ObligationAbortReason::Explicit);
+        assert_conservation(&ledger, "abort_by_id t3");
+
+        let pre_reset = ledger.stats();
+        assert_eq!(pre_reset.pending, 0);
+        assert!(pre_reset.is_clean());
+        assert_eq!(
+            pre_reset.total_acquired,
+            pre_reset.total_committed + pre_reset.total_aborted + pre_reset.total_leaked,
+            "fully-resolved ledger satisfies conservation trivially with pending=0",
+        );
+
+        // ---- Reset midstream: counters zero, conservation holds trivially ----
+
+        ledger.reset();
+        assert_conservation(&ledger, "reset");
+        let post_reset = ledger.stats();
+        assert_eq!(post_reset, LedgerStats::default());
+
+        // ---- Post-reset phase: re-acquire, include mark_leaked path ----
+
+        let t4 = ledger.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
+        assert_conservation(&ledger, "post-reset acquire t4");
+
+        let t5 = ledger.acquire(ObligationKind::Ack, task, region, Time::from_nanos(1));
+        assert_conservation(&ledger, "post-reset acquire t5");
+
+        ledger.commit(t4, Time::from_nanos(5));
+        assert_conservation(&ledger, "post-reset commit t4");
+
+        let t5_id = t5.id();
+        drop(t5);
+        ledger.mark_leaked(t5_id, Time::from_nanos(6));
+        assert_conservation(&ledger, "mark_leaked t5");
+
+        let final_stats = ledger.stats();
+        assert_eq!(final_stats.total_acquired, 2);
+        assert_eq!(final_stats.total_committed, 1);
+        assert_eq!(final_stats.total_aborted, 0);
+        assert_eq!(final_stats.total_leaked, 1);
+        assert_eq!(final_stats.pending, 0);
+        assert!(!final_stats.is_clean(), "leaked obligation keeps ledger dirty");
+        assert_eq!(ledger.check_leaks().leaked.len(), 1);
+
+        crate::test_complete!("metamorphic_conservation_of_acquired_across_mixed_operations");
+    }
+
+    // --- Metamorphic: conservation-of-acquired ------------------------------
+    //
+    // MR (conservation / flow invariant):
+    //   stats.total_acquired
+    //     == stats.total_committed
+    //      + stats.total_aborted
+    //      + stats.total_leaked
+    //      + stats.pending
+    //
+    // Every acquired obligation is in exactly one of four terminal buckets —
+    // committed, aborted, leaked, or still pending — so the sum of those
+    // four counters must equal the running total of acquisitions at every
+    // observable point. reset() zeros all five fields simultaneously, so
+    // the equation stays 0 == 0 across the epoch boundary and can be driven
+    // to hold again in the new epoch.
+    //
+    // Bug classes caught:
+    //   * miscounted acquire/commit/abort/abort_by_id/mark_leaked paths
+    //     (off-by-one, skipped increment, double increment)
+    //   * mis-routing between terminal buckets (e.g. mark_leaked bumping
+    //     total_aborted instead of total_leaked)
+    //   * pending not decremented on a resolution path
+    //   * reset() leaving one of the five fields non-zero
+    //
+    // Independence: orthogonal to region-partition, permutation-invariance,
+    // and reset-generation MRs already in this module — those check
+    // geometric or temporal relations, this one checks flow conservation.
+    #[test]
+    fn metamorphic_conservation_acquired_equals_resolved_plus_pending() {
+        init_test("metamorphic_conservation_acquired_equals_resolved_plus_pending");
+        let task = make_task();
+        let region = make_region();
+
+        fn check_conservation(ledger: &ObligationLedger, step: &str) {
+            let s = ledger.stats();
+            let resolved_plus_pending = s
+                .total_committed
+                .saturating_add(s.total_aborted)
+                .saturating_add(s.total_leaked)
+                .saturating_add(s.pending);
+            assert_eq!(
+                s.total_acquired, resolved_plus_pending,
+                "conservation violated at {step}: \
+                 total_acquired={} vs committed+aborted+leaked+pending={} \
+                 (committed={}, aborted={}, leaked={}, pending={})",
+                s.total_acquired,
+                resolved_plus_pending,
+                s.total_committed,
+                s.total_aborted,
+                s.total_leaked,
+                s.pending
+            );
+        }
+
+        let mut ledger = ObligationLedger::new();
+        check_conservation(&ledger, "empty");
+
+        // Phase 1: staggered acquisitions — conservation must hold after each.
+        let mut live_tokens: Vec<ObligationToken> = Vec::new();
+        for i in 0..6 {
+            let kind = match i % 3 {
+                0 => ObligationKind::SendPermit,
+                1 => ObligationKind::Ack,
+                _ => ObligationKind::Lease,
+            };
+            let tok = ledger.acquire(kind, task, region, Time::from_nanos(10 + i));
+            live_tokens.push(tok);
+            check_conservation(&ledger, "phase1.acquire");
+        }
+        assert_eq!(ledger.stats().total_acquired, 6);
+        assert_eq!(ledger.stats().pending, 6);
+
+        // Phase 2: mixed terminal resolutions across all four paths —
+        // commit via token, abort via token, abort_by_id via id,
+        // and mark_leaked via id. Conservation must hold after each.
+        let tok_commit = live_tokens.remove(0);
+        ledger.commit(tok_commit, Time::from_nanos(100));
+        check_conservation(&ledger, "phase2.commit");
+
+        let tok_abort = live_tokens.remove(0);
+        ledger.abort(
+            tok_abort,
+            Time::from_nanos(110),
+            ObligationAbortReason::Cancel,
+        );
+        check_conservation(&ledger, "phase2.abort");
+
+        let tok_abort_by_id = live_tokens.remove(0);
+        let id_for_abort_by_id = tok_abort_by_id.id();
+        // Drop the token so only the ID path resolves the obligation.
+        drop(tok_abort_by_id);
+        ledger.abort_by_id(
+            id_for_abort_by_id,
+            Time::from_nanos(120),
+            ObligationAbortReason::Error,
+        );
+        check_conservation(&ledger, "phase2.abort_by_id");
+
+        let tok_leak = live_tokens.remove(0);
+        let id_for_leak = tok_leak.id();
+        drop(tok_leak);
+        ledger.mark_leaked(id_for_leak, Time::from_nanos(130));
+        check_conservation(&ledger, "phase2.mark_leaked");
+
+        // Two obligations remain pending — conservation must still balance.
+        assert_eq!(ledger.stats().pending, 2);
+        assert_eq!(ledger.stats().total_committed, 1);
+        assert_eq!(ledger.stats().total_aborted, 2);
+        assert_eq!(ledger.stats().total_leaked, 1);
+
+        // Phase 3: reset zeros all five counters simultaneously. Conservation
+        // must hold trivially (0 == 0) and the ledger must be clean.
+        ledger.reset();
+        check_conservation(&ledger, "phase3.reset");
+        assert_eq!(ledger.stats().total_acquired, 0);
+        assert!(ledger.stats().is_clean());
+
+        // Phase 4: re-acquire after reset and resolve one to confirm the
+        // invariant tracks across the epoch boundary (the token held across
+        // reset has been invalidated by the generation bump; any attempt to
+        // commit it would panic — see metamorphic_post_reset_* tests).
+        let post_reset = ledger.acquire(
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::from_nanos(200),
+        );
+        check_conservation(&ledger, "phase4.post_reset_acquire");
+        ledger.commit(post_reset, Time::from_nanos(210));
+        check_conservation(&ledger, "phase4.post_reset_commit");
+        assert_eq!(ledger.stats().total_acquired, 1);
+        assert_eq!(ledger.stats().total_committed, 1);
+        assert_eq!(ledger.stats().pending, 0);
+
+        crate::test_complete!("metamorphic_conservation_acquired_equals_resolved_plus_pending");
+    }
 }
