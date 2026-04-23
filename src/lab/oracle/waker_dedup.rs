@@ -33,6 +33,7 @@
 //! ```
 
 use crate::trace::distributed::TraceId;
+use crate::util::stack_trace;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -394,8 +395,7 @@ impl ViolationRecord {
     }
 
     fn capture_stack_trace() -> String {
-        // In a real implementation, this would capture the actual stack trace
-        "Stack trace capture not implemented in this preview".to_string()
+        stack_trace::capture_stack_trace()
     }
 }
 

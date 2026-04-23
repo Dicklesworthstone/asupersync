@@ -52,6 +52,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::types::{Budget, Outcome, RegionId, TaskId};
+use crate::util::stack_trace;
 
 /// Configuration for region leak detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -803,7 +804,7 @@ impl RegionLeakOracle {
                 exhaustion_state: "Unknown".to_string(),
             },
             stack_trace: if self.config.include_stack_traces {
-                Some("Stack trace capture not implemented".to_string())
+                Some(stack_trace::capture_stack_trace())
             } else {
                 None
             },

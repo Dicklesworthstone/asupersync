@@ -9,6 +9,7 @@ pub mod det_hash;
 pub mod det_rng;
 pub mod entropy;
 pub mod resource;
+pub mod stack_trace;
 
 pub use arena::{Arena, ArenaIndex};
 pub use cache::{CACHE_LINE_SIZE, CachePadded};
@@ -21,3 +22,4 @@ pub use entropy::{
 pub use resource::{
     PoolConfig, PoolExhausted, ResourceLimits, ResourceTracker, SymbolBuffer, SymbolPool,
 };
+pub use stack_trace::{StackTrace, capture_stack_trace};
