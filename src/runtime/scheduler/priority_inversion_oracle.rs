@@ -445,8 +445,8 @@ impl PriorityInversionOracle {
 
     /// Detects transitive (chain) priority inversions
     fn detect_chain_inversions(&self, original_blocked: TaskId, original_priority: Priority) {
-        let tasks = self.tasks.read();
         let resources = self.resources.read();
+        let tasks = self.tasks.read();
 
         // Build dependency graph and look for chains
         let mut visited = HashSet::new();
