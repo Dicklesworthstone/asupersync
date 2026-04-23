@@ -1701,3 +1701,10 @@ path = "fuzz_targets/trace_file_rewind_oracle.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "priority_inversion_oracle"
+path = "fuzz_targets/priority_inversion_oracle.rs"
+test = false
+doc = false
+bench = false
