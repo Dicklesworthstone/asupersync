@@ -543,4 +543,218 @@ mod tests {
         );
         crate::test_complete!("ready_chunks_flush_after_budget_on_always_ready_stream");
     }
+
+    // =========================================================================
+    // Metamorphic relations for Chunks::chunks(cap):
+    // conservation, count preservation, order, chunk-size bounds.
+    //
+    // Per-case tests cover individual scenarios (cap=1, exact divisibility,
+    // empty input). These MRs encode the *contract* across arbitrary
+    // (xs, cap) pairs — the core invariants a refactor must preserve.
+    // =========================================================================
+
+    mod chunks_count_mr {
+        use super::*;
+
+        fn drain_chunks<S>(mut stream: S) -> Vec<Vec<i32>>
+        where
+            S: Stream<Item = Vec<i32>> + Unpin,
+        {
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut out = Vec::new();
+            loop {
+                match Pin::new(&mut stream).poll_next(&mut cx) {
+                    Poll::Ready(Some(chunk)) => out.push(chunk),
+                    Poll::Ready(None) => break,
+                    Poll::Pending => {}
+                }
+            }
+            out
+        }
+
+        /// MR — Conservation: flatten(chunks(cap, xs)) == xs.
+        /// No items lost, no items duplicated, order preserved.
+        /// This is the single strongest invariant for a chunking adapter.
+        #[test]
+        fn mr_chunks_conservation_flat_equals_input() {
+            let inputs: Vec<Vec<i32>> = vec![
+                vec![],
+                vec![42],
+                (0..7).collect(),
+                (0..8).collect(),
+                (0..100).collect(),
+            ];
+            for xs in inputs {
+                for cap in 1..=8usize {
+                    let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
+                    let flat: Vec<i32> = chunks.iter().flatten().copied().collect();
+                    assert_eq!(
+                        flat, xs,
+                        "conservation violated for cap={cap}, xs.len()={}",
+                        xs.len(),
+                    );
+                }
+            }
+        }
+
+        /// MR — Count preservation: Σ chunk.len() == xs.len().
+        /// Follows from conservation but isolated as a cheap assertion
+        /// that a refactor touching Vec capacity handling would fail.
+        #[test]
+        fn mr_chunks_total_length_matches_input() {
+            for n in 0..=32usize {
+                let xs: Vec<i32> = (0..n as i32).collect();
+                for cap in 1..=8usize {
+                    let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
+                    let total: usize = chunks.iter().map(Vec::len).sum();
+                    assert_eq!(
+                        total, n,
+                        "total len {total} != input len {n} at cap={cap}",
+                    );
+                }
+            }
+        }
+
+        /// MR — Chunk-count law: ceil(xs.len() / cap) chunks for non-empty
+        /// xs; 0 chunks for empty xs.
+        #[test]
+        fn mr_chunks_count_is_div_ceil() {
+            for n in 0..=32usize {
+                let xs: Vec<i32> = (0..n as i32).collect();
+                for cap in 1..=8usize {
+                    let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
+                    let expected = if n == 0 { 0 } else { n.div_ceil(cap) };
+                    assert_eq!(
+                        chunks.len(),
+                        expected,
+                        "chunk count {} != ceil({}/{}) = {} for input len {n}",
+                        chunks.len(),
+                        n,
+                        cap,
+                        expected,
+                    );
+                }
+            }
+        }
+
+        /// MR — Chunk-size bound: every non-final chunk has len == cap; the
+        /// final chunk has len in (0, cap]. No chunk is empty.
+        #[test]
+        fn mr_chunks_size_bound_non_empty_and_at_most_cap() {
+            for n in 1..=32usize {
+                let xs: Vec<i32> = (0..n as i32).collect();
+                for cap in 1..=8usize {
+                    let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
+                    let last_idx = chunks.len().saturating_sub(1);
+                    for (i, chunk) in chunks.iter().enumerate() {
+                        assert!(!chunk.is_empty(), "empty chunk at index {i}");
+                        assert!(chunk.len() <= cap, "chunk len > cap at index {i}");
+                        if i < last_idx {
+                            assert_eq!(
+                                chunk.len(),
+                                cap,
+                                "non-final chunk {i} has len != cap",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        /// MR — Final-chunk remainder: when xs.len() is not a multiple of
+        /// cap, the last chunk's length equals xs.len() % cap; otherwise
+        /// it equals cap (exact divisibility).
+        #[test]
+        fn mr_chunks_final_chunk_length_is_remainder_or_cap() {
+            for n in 1..=32usize {
+                let xs: Vec<i32> = (0..n as i32).collect();
+                for cap in 1..=8usize {
+                    let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
+                    let last = chunks.last().expect("non-empty input has at least one chunk");
+                    let remainder = n % cap;
+                    let expected = if remainder == 0 { cap } else { remainder };
+                    assert_eq!(
+                        last.len(),
+                        expected,
+                        "final chunk len {} != expected {expected} for n={n}, cap={cap}",
+                        last.len(),
+                    );
+                }
+            }
+        }
+
+        /// MR — Order preservation: chunks[i][j] == xs[i*cap + j].
+        /// The exact positional contract — a bug that reorders or
+        /// duplicates items would pass conservation (same multiset) but
+        /// fail this law.
+        #[test]
+        fn mr_chunks_positional_order() {
+            for n in 0..=20usize {
+                let xs: Vec<i32> = (0..n as i32).collect();
+                for cap in 1..=5usize {
+                    let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
+                    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+                        for (item_idx, item) in chunk.iter().enumerate() {
+                            let expected = xs[chunk_idx * cap + item_idx];
+                            assert_eq!(
+                                *item, expected,
+                                "position (chunk={chunk_idx}, idx={item_idx}) has item {item} != expected {expected}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        /// MR — cap=1 is a singleton-lifter: chunks(1, xs) produces
+        /// exactly `xs.len()` chunks each containing one item matching xs
+        /// at the same index.
+        #[test]
+        fn mr_chunks_cap_one_is_singleton_lift() {
+            for n in 0..=16usize {
+                let xs: Vec<i32> = (0..n as i32).collect();
+                let chunks = drain_chunks(Chunks::new(iter(xs.clone()), 1));
+                assert_eq!(chunks.len(), n);
+                for (i, chunk) in chunks.iter().enumerate() {
+                    assert_eq!(chunk.as_slice(), &[xs[i]]);
+                }
+            }
+        }
+
+        /// MR — Empty input → empty output (never a lone empty chunk).
+        /// Important: a naive implementation could flush an empty `items`
+        /// vec as a chunk at end-of-stream; the spec forbids it.
+        #[test]
+        fn mr_chunks_empty_input_emits_no_chunks() {
+            for cap in 1..=8usize {
+                let chunks = drain_chunks(Chunks::new(iter(Vec::<i32>::new()), cap));
+                assert!(
+                    chunks.is_empty(),
+                    "empty input produced chunks at cap={cap}: {chunks:?}",
+                );
+            }
+        }
+
+        /// MR — cap ≥ xs.len() yields exactly one chunk equal to xs
+        /// (when xs is non-empty) or zero chunks (when xs is empty).
+        #[test]
+        fn mr_chunks_cap_at_or_above_len_yields_single_chunk() {
+            for n in 1..=8usize {
+                let xs: Vec<i32> = (0..n as i32).collect();
+                for cap in n..=(n + 4) {
+                    let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
+                    assert_eq!(
+                        chunks.len(),
+                        1,
+                        "cap={cap} >= len={n} should produce exactly one chunk",
+                    );
+                    assert_eq!(
+                        chunks[0], xs,
+                        "the single chunk must equal the full input",
+                    );
+                }
+            }
+        }
+    }
 }
