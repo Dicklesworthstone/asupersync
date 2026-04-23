@@ -30,6 +30,7 @@ use super::scenario::{FaultAction, Scenario, ValidationError};
 use crate::trace::replay::ReplayTrace;
 use crate::types::Time;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 const LAB_SCENARIO_RUNNER_ADAPTER: &str = "lab.scenario_runner";
 
@@ -509,16 +510,21 @@ impl ScenarioRunner {
 
     /// Summarize fault args for trace events.
     fn fault_args_summary(args: &BTreeMap<String, serde_json::Value>) -> String {
-        args.iter()
-            .map(|(k, v)| {
-                let val = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                format!("{k}={val}")
-            })
-            .collect::<Vec<_>>()
-            .join(",")
+        let mut summary = String::new();
+        for (index, (key, value)) in args.iter().enumerate() {
+            if index > 0 {
+                summary.push(',');
+            }
+            summary.push_str(key);
+            summary.push('=');
+            match value {
+                serde_json::Value::String(s) => summary.push_str(s),
+                other => {
+                    let _ = write!(&mut summary, "{other}");
+                }
+            }
+        }
+        summary
     }
 
     /// Build a certificate snapshot from a lab report.

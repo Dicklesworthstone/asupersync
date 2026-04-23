@@ -1778,7 +1778,6 @@ impl KafkaConsumerTrait for StubConsumer {
 pub struct KafkaClient {
     producer: KafkaProducer,
     consumer: Option<StubConsumer>,
-    config: ProducerConfig,
     backend: Box<dyn BrokerBackend>,
 }
 
@@ -1790,7 +1789,6 @@ impl KafkaClient {
         Ok(Self {
             producer,
             consumer: None,
-            config,
             backend: Box::new(StubBrokerBackend),
         })
     }
