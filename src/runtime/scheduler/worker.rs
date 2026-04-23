@@ -401,12 +401,9 @@ impl Worker {
         let poll_attempt = u32::try_from(poll_attempt).unwrap_or(u32::MAX);
 
         // Isolate the potentially panicking task poll operation
-        let poll_result = self.panic_isolator.isolate_task_execution(
-            task_id,
-            region_id,
-            poll_attempt,
-            || stored.poll(&mut cx),
-        );
+        let poll_result =
+            self.panic_isolator
+                .isolate_task_execution(task_id, region_id, poll_attempt, || stored.poll(&mut cx));
 
         match poll_result {
             PanicIsolationResult::Success(Poll::Ready(outcome)) => {

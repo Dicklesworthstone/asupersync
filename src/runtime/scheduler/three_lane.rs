@@ -9943,7 +9943,7 @@ mod tests {
                     deadline_pressure,
                     base_exceed,
                     eff_exceed,
-                    fallback
+                    fallback,
                 );
 
                 let _reward = policy
@@ -9960,14 +9960,17 @@ mod tests {
         // Verify monotonic decrease: higher pressure → lower probability mass
         for i in 1..final_probs.len() {
             assert!(
-                final_probs[i-1] > final_probs[i],
+                final_probs[i - 1] > final_probs[i],
                 "EXP3 probability mass should decrease monotonically with pressure: level_{} prob={:.4} > level_{} prob={:.4}",
-                i-1, final_probs[i-1], i, final_probs[i]
+                i - 1,
+                final_probs[i - 1],
+                i,
+                final_probs[i]
             );
         }
 
         // Verify the effect is material (not just floating point noise)
-        let total_decrease = final_probs[0] - final_probs[final_probs.len()-1];
+        let total_decrease = final_probs[0] - final_probs[final_probs.len() - 1];
         assert!(
             total_decrease > 0.15,
             "Total probability decrease should be material: {:.4} > 0.15",
@@ -9976,11 +9979,13 @@ mod tests {
 
         // Verify the decrease is smooth (no inversions in adjacent levels)
         for i in 1..final_probs.len() {
-            let decrease = final_probs[i-1] - final_probs[i];
+            let decrease = final_probs[i - 1] - final_probs[i];
             assert!(
                 decrease > 0.02,
                 "Adjacent pressure levels should show material decrease: {:.4} > 0.02 between levels {} and {}",
-                decrease, i-1, i
+                decrease,
+                i - 1,
+                i
             );
         }
     }

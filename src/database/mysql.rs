@@ -2168,7 +2168,9 @@ impl MySqlConnection {
 
         if response_data.len() < 13 {
             self.inner.closed = false;
-            return Outcome::Err(MySqlError::InvalidPacket("Prepare response too short".into()));
+            return Outcome::Err(MySqlError::InvalidPacket(
+                "Prepare response too short".into(),
+            ));
         }
 
         let mut reader = PacketReader::new(&response_data[1..]);
@@ -2426,7 +2428,9 @@ impl MySqlConnection {
         }
 
         self.inner.closed = false;
-        Outcome::Err(MySqlError::InvalidPacket("Unexpected execute response".into()))
+        Outcome::Err(MySqlError::InvalidPacket(
+            "Unexpected execute response".into(),
+        ))
     }
 
     /// Set the maximum number of rows returned from a single result set.

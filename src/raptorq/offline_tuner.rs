@@ -36,8 +36,8 @@
 //!    - Evidence linkage for audit trail
 
 use crate::raptorq::gf256::{
-    gf256_add_slice, gf256_addmul_slice, gf256_mul_slice, Gf256, Gf256ArchitectureClass,
-    Gf256ProfilePackId,
+    Gf256, Gf256ArchitectureClass, Gf256ProfilePackId, gf256_add_slice, gf256_addmul_slice,
+    gf256_mul_slice,
 };
 
 use serde::{Deserialize, Serialize};
@@ -432,8 +432,11 @@ impl OfflineTuner {
             self.format_aggregate_delta_pct(selected, baseline_id, GF256Operation::Mul);
         let addmul_delta_pct =
             self.format_aggregate_delta_pct(selected, baseline_id, GF256Operation::AddMul);
-        let targeted_addmul_avg_pct =
-            self.format_per_workload_average_delta_pct(selected, baseline_id, GF256Operation::AddMul);
+        let targeted_addmul_avg_pct = self.format_per_workload_average_delta_pct(
+            selected,
+            baseline_id,
+            GF256Operation::AddMul,
+        );
 
         Ok(ProfilePackSpec {
             schema_version: "raptorq-gf256-profile-pack-v2".to_string(),
@@ -1175,8 +1178,7 @@ mod tests {
 
     #[test]
     fn baseline_delta_reports_percentage_when_data_present() {
-        let mut tuner =
-            OfflineTuner::new(Gf256ArchitectureClass::GenericScalar, test_criteria());
+        let mut tuner = OfflineTuner::new(Gf256ArchitectureClass::GenericScalar, test_criteria());
         let candidates = tuner.generate_candidates();
         let baseline = candidates.first().expect("baseline").clone();
         let selected = candidates.last().expect("selected").clone();

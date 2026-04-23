@@ -2845,7 +2845,11 @@ mod tests {
             assertion_id: "E2E-TEST".to_string(),
             run_id: "run-1".to_string(),
             repro_command: "rch exec -- cargo test".to_string(),
-            phase_markers: vec!["encode".to_string(), "transmit".to_string(), "decode".to_string()],
+            phase_markers: vec![
+                "encode".to_string(),
+                "transmit".to_string(),
+                "decode".to_string(),
+            ],
             config: LogConfigReport {
                 symbol_size: 64,
                 max_block_size: 1024,

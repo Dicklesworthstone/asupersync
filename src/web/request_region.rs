@@ -890,10 +890,8 @@ mod tests {
 
             let _outcome = region.run(|ctx| {
                 // Create a real graded obligation for a request-scoped resource
-                let obligation = GradedObligation::reserve(
-                    ObligationKind::IoOp,
-                    "HTTP request transaction"
-                );
+                let obligation =
+                    GradedObligation::reserve(ObligationKind::IoOp, "HTTP request transaction");
 
                 // Simulate client disconnect during transaction
                 std::thread::sleep(Duration::from_millis(1));

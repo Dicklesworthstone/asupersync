@@ -15,10 +15,7 @@
 //! - CP-001: Request phase - cancel request doesn't immediately stop task
 //! - CP-002: Drain phase - task acknowledges cancel and performs cleanup
 
-use crate::{
-    ConformanceTest, RuntimeInterface,
-    TestCategory, TestMeta, TestResult, checkpoint,
-};
+use crate::{ConformanceTest, RuntimeInterface, TestCategory, TestMeta, TestResult, checkpoint};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -53,10 +50,7 @@ pub fn cp_001_request_phase_continues<RT: RuntimeInterface + Sync>() -> Conforma
         },
         |rt| {
             rt.block_on(async {
-                checkpoint(
-                    "Starting cancel request phase test",
-                    serde_json::json!({}),
-                );
+                checkpoint("Starting cancel request phase test", serde_json::json!({}));
 
                 let work_done = Arc::new(AtomicUsize::new(0));
                 let work_done_clone = work_done.clone();
@@ -65,19 +59,21 @@ pub fn cp_001_request_phase_continues<RT: RuntimeInterface + Sync>() -> Conforma
                 let long_sleep = rt.sleep(Duration::from_millis(100));
 
                 // Use timeout to simulate cancel request
-                let result = rt.timeout(Duration::from_millis(30), async move {
-                    checkpoint("Task started", serde_json::json!({}));
+                let result = rt
+                    .timeout(Duration::from_millis(30), async move {
+                        checkpoint("Task started", serde_json::json!({}));
 
-                    // Do some initial work that should complete
-                    work_done_clone.store(1, Ordering::Release);
+                        // Do some initial work that should complete
+                        work_done_clone.store(1, Ordering::Release);
 
-                    // This sleep should be interrupted by the timeout
-                    long_sleep.await;
+                        // This sleep should be interrupted by the timeout
+                        long_sleep.await;
 
-                    // Should not reach here if cancelled properly
-                    work_done_clone.store(10, Ordering::Release);
-                    "Task completed normally"
-                }).await;
+                        // Should not reach here if cancelled properly
+                        work_done_clone.store(10, Ordering::Release);
+                        "Task completed normally"
+                    })
+                    .await;
 
                 let final_work_done = work_done.load(Ordering::Acquire);
 
@@ -135,10 +131,7 @@ pub fn cp_002_drain_phase_cleanup<RT: RuntimeInterface + Sync>() -> ConformanceT
         },
         |rt| {
             rt.block_on(async {
-                checkpoint(
-                    "Starting cancel drain phase test",
-                    serde_json::json!({}),
-                );
+                checkpoint("Starting cancel drain phase test", serde_json::json!({}));
 
                 let cleanup_completed = Arc::new(AtomicBool::new(false));
                 let resource_freed = Arc::new(AtomicBool::new(false));
@@ -151,18 +144,20 @@ pub fn cp_002_drain_phase_cleanup<RT: RuntimeInterface + Sync>() -> ConformanceT
                 let cleanup_sleep = rt.sleep(Duration::from_millis(5));
 
                 // Simulate task with timeout (acting as cancel signal)
-                let result = rt.timeout(Duration::from_millis(20), async move {
-                    checkpoint("Task started with resources", serde_json::json!({}));
+                let result = rt
+                    .timeout(Duration::from_millis(20), async move {
+                        checkpoint("Task started with resources", serde_json::json!({}));
 
-                    // Simulate holding resources
-                    let _simulated_resource = "critical_resource";
+                        // Simulate holding resources
+                        let _simulated_resource = "critical_resource";
 
-                    // This should timeout (simulating cancel request)
-                    work_sleep.await;
+                        // This should timeout (simulating cancel request)
+                        work_sleep.await;
 
-                    // Should not reach here if cancelled properly
-                    "Normal completion"
-                }).await;
+                        // Should not reach here if cancelled properly
+                        "Normal completion"
+                    })
+                    .await;
 
                 // Handle timeout (cancel) by performing cleanup
                 if result.is_err() {

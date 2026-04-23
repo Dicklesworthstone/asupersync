@@ -142,8 +142,8 @@ impl PriorityShiftConfig {
 
             // Generate original priority within the configured range
             let priority_range_size = (self.priority_range.1 - self.priority_range.0) as u64;
-            let original_priority = self.priority_range.0
-                + (rng.next_u64() % (priority_range_size + 1)) as Priority;
+            let original_priority =
+                self.priority_range.0 + (rng.next_u64() % (priority_range_size + 1)) as Priority;
 
             // Apply shift, clamping to valid priority range
             let shifted_priority = Self::apply_priority_shift(original_priority, shift_value);
@@ -280,7 +280,10 @@ pub fn run_inversion_detection(
 }
 
 /// Calculate inversion severity based on priority difference.
-fn calculate_inversion_severity(high_priority: Priority, low_priority: Priority) -> InversionSeverity {
+fn calculate_inversion_severity(
+    high_priority: Priority,
+    low_priority: Priority,
+) -> InversionSeverity {
     let priority_diff = high_priority - low_priority;
     match priority_diff {
         0..=10 => InversionSeverity::Minor,
@@ -291,10 +294,7 @@ fn calculate_inversion_severity(high_priority: Priority, low_priority: Priority)
 }
 
 /// Helper function to compare severity distributions using arrays.
-fn compare_severity_distributions(
-    original: &[u64; 4],
-    shifted: &[u64; 4],
-) -> bool {
+fn compare_severity_distributions(original: &[u64; 4], shifted: &[u64; 4]) -> bool {
     original == shifted
 }
 
@@ -303,7 +303,8 @@ pub fn compare_inversion_results(
     original: &InversionResults,
     shifted: &InversionResults,
 ) -> ComparisonMetrics {
-    let inversion_count_match = original.detected_inversions.len() == shifted.detected_inversions.len();
+    let inversion_count_match =
+        original.detected_inversions.len() == shifted.detected_inversions.len();
 
     let severity_distribution_match = compare_severity_distributions(
         &original.severity_distribution,

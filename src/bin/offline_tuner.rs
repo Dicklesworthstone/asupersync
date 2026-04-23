@@ -77,7 +77,7 @@ fn reference_addmul_slice(dst: &mut [u8], src: &[u8], scalar: u8) {
 
 /// Validate mul_slice kernel against reference scalar implementation.
 fn validate_mul_slice_bit_exact(config: &ValidationConfig, verbose: bool) -> Result<(), String> {
-    use asupersync::raptorq::gf256::{gf256_mul_slice, Gf256};
+    use asupersync::raptorq::gf256::{Gf256, gf256_mul_slice};
 
     let mut reference_data = config.generate_data();
     let mut test_data = reference_data.clone();
@@ -88,7 +88,10 @@ fn validate_mul_slice_bit_exact(config: &ValidationConfig, verbose: bool) -> Res
 
     if reference_data == test_data {
         if verbose {
-            println!("  mul_slice bit-exact: size={}, scalar={}", config.size, config.scalar);
+            println!(
+                "  mul_slice bit-exact: size={}, scalar={}",
+                config.size, config.scalar
+            );
         }
         Ok(())
     } else {
@@ -96,14 +99,18 @@ fn validate_mul_slice_bit_exact(config: &ValidationConfig, verbose: bool) -> Res
             "mul_slice not bit-exact: size={}, scalar={}, first_diff={}",
             config.size,
             config.scalar,
-            reference_data.iter().zip(&test_data).position(|(a, b)| a != b).unwrap_or(0)
+            reference_data
+                .iter()
+                .zip(&test_data)
+                .position(|(a, b)| a != b)
+                .unwrap_or(0)
         ))
     }
 }
 
 /// Validate addmul_slice kernel against reference scalar implementation.
 fn validate_addmul_slice_bit_exact(config: &ValidationConfig, verbose: bool) -> Result<(), String> {
-    use asupersync::raptorq::gf256::{gf256_addmul_slice, Gf256};
+    use asupersync::raptorq::gf256::{Gf256, gf256_addmul_slice};
 
     let src_data = config.generate_data();
     let mut reference_dst = vec![0u8; config.size];
@@ -121,7 +128,10 @@ fn validate_addmul_slice_bit_exact(config: &ValidationConfig, verbose: bool) -> 
 
     if reference_dst == test_dst {
         if verbose {
-            println!("  addmul_slice bit-exact: size={}, scalar={}", config.size, config.scalar);
+            println!(
+                "  addmul_slice bit-exact: size={}, scalar={}",
+                config.size, config.scalar
+            );
         }
         Ok(())
     } else {
@@ -129,7 +139,11 @@ fn validate_addmul_slice_bit_exact(config: &ValidationConfig, verbose: bool) -> 
             "addmul_slice not bit-exact: size={}, scalar={}, first_diff={}",
             config.size,
             config.scalar,
-            reference_dst.iter().zip(&test_dst).position(|(a, b)| a != b).unwrap_or(0)
+            reference_dst
+                .iter()
+                .zip(&test_dst)
+                .position(|(a, b)| a != b)
+                .unwrap_or(0)
         ))
     }
 }
@@ -502,16 +516,50 @@ fn validate_kernels(
         println!("Using default profile pack for {:?}", arch);
     }
 
-
     // Test scenarios covering different sizes and edge cases
     let validation_scenarios = vec![
-        ValidationConfig { size: 1, scalar: 1, seed: 0, scenario: "single_byte" },
-        ValidationConfig { size: 15, scalar: 17, seed: 42, scenario: "sub_simd_odd" },
-        ValidationConfig { size: 16, scalar: 255, seed: 123, scenario: "exactly_simd" },
-        ValidationConfig { size: 17, scalar: 2, seed: 456, scenario: "just_over_simd" },
-        ValidationConfig { size: 64, scalar: 85, seed: 789, scenario: "cache_line" },
-        ValidationConfig { size: 256, scalar: 42, seed: 1011, scenario: "typical_block" },
-        ValidationConfig { size: 1024, scalar: 170, seed: 1314, scenario: "large_block" },
+        ValidationConfig {
+            size: 1,
+            scalar: 1,
+            seed: 0,
+            scenario: "single_byte",
+        },
+        ValidationConfig {
+            size: 15,
+            scalar: 17,
+            seed: 42,
+            scenario: "sub_simd_odd",
+        },
+        ValidationConfig {
+            size: 16,
+            scalar: 255,
+            seed: 123,
+            scenario: "exactly_simd",
+        },
+        ValidationConfig {
+            size: 17,
+            scalar: 2,
+            seed: 456,
+            scenario: "just_over_simd",
+        },
+        ValidationConfig {
+            size: 64,
+            scalar: 85,
+            seed: 789,
+            scenario: "cache_line",
+        },
+        ValidationConfig {
+            size: 256,
+            scalar: 42,
+            seed: 1011,
+            scenario: "typical_block",
+        },
+        ValidationConfig {
+            size: 1024,
+            scalar: 170,
+            seed: 1314,
+            scenario: "large_block",
+        },
     ];
 
     let mut total_tests = 0;
@@ -530,7 +578,10 @@ fn validate_kernels(
         // Test addmul_slice bit-exactness
         total_tests += 1;
         if let Err(e) = validate_addmul_slice_bit_exact(config, verbose) {
-            println!("FAILED: addmul_slice for scenario {}: {}", config.scenario, e);
+            println!(
+                "FAILED: addmul_slice for scenario {}: {}",
+                config.scenario, e
+            );
             failed_tests += 1;
         } else if verbose {
             println!("PASSED: addmul_slice for scenario {}", config.scenario);
@@ -541,7 +592,14 @@ fn validate_kernels(
         println!("Bit-exactness validation: PASSED ({} tests)", total_tests);
         Ok(())
     } else {
-        println!("Bit-exactness validation: FAILED ({}/{} tests failed)", failed_tests, total_tests);
-        Err(format!("Bit-exactness validation failed: {}/{} tests failed", failed_tests, total_tests).into())
+        println!(
+            "Bit-exactness validation: FAILED ({}/{} tests failed)",
+            failed_tests, total_tests
+        );
+        Err(format!(
+            "Bit-exactness validation failed: {}/{} tests failed",
+            failed_tests, total_tests
+        )
+        .into())
     }
 }

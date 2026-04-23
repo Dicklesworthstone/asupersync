@@ -730,7 +730,10 @@ impl DeferredCleanupQueue {
                 // This includes canceling any associated timeout futures
                 if self.config.enable_logging {
                     #[cfg(feature = "tracing-integration")]
-                    tracing::trace!(timer_id = timer_id, "Scheduled timeout timer and future cleanup");
+                    tracing::trace!(
+                        timer_id = timer_id,
+                        "Scheduled timeout timer and future cleanup"
+                    );
                 }
             }
             "interval" => {
@@ -761,7 +764,10 @@ impl DeferredCleanupQueue {
         // These will be processed during the next timer system maintenance cycle
         if self.config.enable_logging {
             #[cfg(feature = "tracing-integration")]
-            tracing::trace!(timer_id = timer_id, "Scheduled common timer cleanup operations");
+            tracing::trace!(
+                timer_id = timer_id,
+                "Scheduled common timer cleanup operations"
+            );
         }
     }
 
@@ -825,7 +831,10 @@ impl DeferredCleanupQueue {
                 // This includes notifying all subscribers
                 if self.config.enable_logging {
                     #[cfg(feature = "tracing-integration")]
-                    tracing::trace!(channel_id = channel_id, "Scheduled broadcast channel cleanup");
+                    tracing::trace!(
+                        channel_id = channel_id,
+                        "Scheduled broadcast channel cleanup"
+                    );
                 }
             }
             "watch" => {
@@ -856,7 +865,10 @@ impl DeferredCleanupQueue {
         // These will be processed during the next channel system maintenance cycle
         if self.config.enable_logging {
             #[cfg(feature = "tracing-integration")]
-            tracing::trace!(channel_id = channel_id, "Scheduled common channel cleanup operations");
+            tracing::trace!(
+                channel_id = channel_id,
+                "Scheduled common channel cleanup operations"
+            );
         }
     }
 
