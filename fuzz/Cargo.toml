@@ -1383,6 +1383,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "finalizer_stack_ops"
+path = "fuzz_targets/finalizer_stack_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "codec_raptorq"
 path = "fuzz_targets/codec_raptorq.rs"
 test = false
