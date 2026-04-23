@@ -2712,23 +2712,23 @@ mod tests {
         let index = region.heap_alloc(42i32).expect("heap alloc");
 
         // First call should work normally
-        let result = region.heap_with(index, |val| *val * 2);
+        let result = region.heap_with(index, |val: &i32| *val * 2);
         assert_eq!(result, Some(84));
 
         // Second call that panics should not leave flag stuck
         let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            region.heap_with(index, |_| panic!("test panic"))
+            region.heap_with(index, |_: &i32| panic!("test panic"))
         }));
         assert!(panic_result.is_err());
 
         // Third call should work normally (flag was reset by RAII guard)
-        let result = region.heap_with(index, |val| *val + 1);
+        let result = region.heap_with(index, |val: &i32| *val + 1);
         assert_eq!(result, Some(43));
 
         // Verify thread-local flag is not stuck at true
-        let result = region.heap_with(index, |val| {
+        let result = region.heap_with(index, |val: &i32| {
             // This inner call should use try_read path if flag is working correctly
-            region.heap_with(index, |inner_val| *inner_val)
+            region.heap_with(index, |inner_val: &i32| *inner_val)
         });
         assert_eq!(result, Some(Some(42)));
     }
@@ -2754,9 +2754,9 @@ mod tests {
         assert_eq!(result, Ok(4));
 
         // Verify thread-local flag is not stuck at true
-        let result = region.rref_with(&rref, |val| {
+        let result = region.rref_with(&rref, |_val: &String| {
             // This inner call should use try_read path if flag is working correctly
-            region.rref_with(&rref, |inner_val| inner_val.len())
+            region.rref_with(&rref, |inner_val: &String| inner_val.len())
         });
         assert_eq!(result, Ok(Ok(4)));
     }
