@@ -564,6 +564,46 @@ impl H3ControlState {
             }
         }
     }
+
+}
+
+/// Validate that a frame is allowed on bidirectional request/response streams.
+///
+/// Per RFC 9114 §6.1, bidirectional streams are used for request/response
+/// exchanges and should only carry DATA, HEADERS, PUSH_PROMISE, and DATAGRAM frames.
+/// Control frames like SETTINGS, GOAWAY, CANCEL_PUSH, and MAX_PUSH_ID belong
+/// on unidirectional control streams.
+pub fn validate_bidirectional_frame(frame: &H3Frame) -> Result<(), H3NativeError> {
+    match frame {
+        // Allowed on bidirectional streams per RFC 9114 §6.1
+        H3Frame::Data(_) | H3Frame::Headers(_) => Ok(()),
+
+        // PUSH_PROMISE can be sent by servers on request streams per RFC 9114 §4.6
+        H3Frame::PushPromise { .. } => Ok(()),
+
+        // DATAGRAM frames are sent on bidirectional streams per RFC 9297
+        H3Frame::Datagram { .. } => Ok(()),
+
+        // Control frames not allowed on bidirectional streams
+        H3Frame::Settings(_) => Err(H3NativeError::StreamProtocol(
+            "SETTINGS frame not allowed on bidirectional stream",
+        )),
+        H3Frame::CancelPush(_) => Err(H3NativeError::StreamProtocol(
+            "CANCEL_PUSH frame not allowed on bidirectional stream",
+        )),
+        H3Frame::Goaway(_) => Err(H3NativeError::StreamProtocol(
+            "GOAWAY frame not allowed on bidirectional stream",
+        )),
+        H3Frame::MaxPushId(_) => Err(H3NativeError::StreamProtocol(
+            "MAX_PUSH_ID frame not allowed on bidirectional stream",
+        )),
+
+        // Unknown frames should also be rejected on bidirectional streams
+        // per RFC 9114 §6.1 strict interpretation
+        H3Frame::Unknown { .. } => Err(H3NativeError::StreamProtocol(
+            "unknown frame type not allowed on bidirectional stream"
+        )),
+    }
 }
 
 /// HTTP/3 pseudo-header block (decoded representation).
@@ -1915,7 +1955,7 @@ impl H3ConnectionState {
         match kind {
             H3UniStreamType::Control => {
                 if self.control_stream_id.is_some() {
-                    return Err(H3NativeError::StreamProtocol(
+                    return Err(H3NativeError::ControlProtocol(
                         "duplicate remote control stream",
                     ));
                 }
@@ -2596,7 +2636,7 @@ mod tests {
             .expect_err("must fail");
         assert_eq!(
             err,
-            H3NativeError::StreamProtocol("duplicate remote control stream")
+            H3NativeError::ControlProtocol("duplicate remote control stream")
         );
         c.on_uni_stream_frame(3, &H3Frame::Settings(H3Settings::default()))
             .expect("original control stream remains active");
@@ -3925,6 +3965,7 @@ mod tests {
             authority: Some("[2001:db8:::1]:443".to_string()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         };
         let err = validate_request_pseudo_headers(&invalid).expect_err("must reject bad IPv6");
         assert_eq!(
@@ -3941,6 +3982,7 @@ mod tests {
             authority: Some(String::new()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         };
         let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
         assert_eq!(
@@ -3957,6 +3999,7 @@ mod tests {
             authority: Some("example.com".to_string()),
             path: Some("noslash".to_string()),
             status: None,
+            protocol: None,
         };
         let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
         assert_eq!(
@@ -3973,6 +4016,7 @@ mod tests {
             authority: Some("example.com".to_string()),
             path: Some("*".to_string()),
             status: None,
+            protocol: None,
         };
         let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
         assert_eq!(
@@ -4001,6 +4045,7 @@ mod tests {
             authority: Some("example.com".to_string()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         };
         let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
         assert_eq!(
@@ -5631,5 +5676,90 @@ mod tests {
         // In-flight frames on existing stream 4 still pass.
         c.on_request_stream_frame(4, &H3Frame::Data(vec![0xAA]))
             .expect("existing stream unaffected");
+    }
+
+    #[test]
+    fn bidirectional_frame_validation_allows_valid_frames() {
+        // DATA frames are allowed on bidirectional streams
+        let data_frame = H3Frame::Data(vec![1, 2, 3]);
+        validate_bidirectional_frame(&data_frame).expect("DATA frame should be allowed");
+
+        // HEADERS frames are allowed on bidirectional streams
+        let headers_frame = H3Frame::Headers(vec![4, 5, 6]);
+        validate_bidirectional_frame(&headers_frame).expect("HEADERS frame should be allowed");
+
+        // PUSH_PROMISE frames can be sent by servers on request streams
+        let push_promise_frame = H3Frame::PushPromise {
+            push_id: 123,
+            field_block: vec![7, 8, 9],
+        };
+        validate_bidirectional_frame(&push_promise_frame).expect("PUSH_PROMISE frame should be allowed");
+
+        // DATAGRAM frames are sent on bidirectional streams per RFC 9297
+        let datagram_frame = H3Frame::Datagram {
+            quarter_stream_id: 456,
+            payload: vec![10, 11, 12],
+        };
+        validate_bidirectional_frame(&datagram_frame).expect("DATAGRAM frame should be allowed");
+    }
+
+    #[test]
+    fn bidirectional_frame_validation_rejects_control_frames() {
+        // SETTINGS frames belong on control streams
+        let settings_frame = H3Frame::Settings(H3Settings::default());
+        let err = validate_bidirectional_frame(&settings_frame).expect_err("SETTINGS should be rejected");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("SETTINGS frame not allowed on bidirectional stream")
+        );
+
+        // CANCEL_PUSH frames belong on control streams
+        let cancel_push_frame = H3Frame::CancelPush(789);
+        let err = validate_bidirectional_frame(&cancel_push_frame).expect_err("CANCEL_PUSH should be rejected");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("CANCEL_PUSH frame not allowed on bidirectional stream")
+        );
+
+        // GOAWAY frames belong on control streams
+        let goaway_frame = H3Frame::Goaway(101);
+        let err = validate_bidirectional_frame(&goaway_frame).expect_err("GOAWAY should be rejected");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("GOAWAY frame not allowed on bidirectional stream")
+        );
+
+        // MAX_PUSH_ID frames belong on control streams
+        let max_push_id_frame = H3Frame::MaxPushId(202);
+        let err = validate_bidirectional_frame(&max_push_id_frame).expect_err("MAX_PUSH_ID should be rejected");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("MAX_PUSH_ID frame not allowed on bidirectional stream")
+        );
+    }
+
+    #[test]
+    fn bidirectional_frame_validation_rejects_unknown_frames() {
+        // Unknown frames should be rejected on bidirectional streams
+        let unknown_frame = H3Frame::Unknown {
+            frame_type: 0xDEADBEEF,
+            payload: vec![13, 14, 15],
+        };
+        let err = validate_bidirectional_frame(&unknown_frame).expect_err("Unknown frame should be rejected");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("unknown frame type not allowed on bidirectional stream")
+        );
+
+        // Another unknown frame type to verify consistent behavior
+        let unknown_frame2 = H3Frame::Unknown {
+            frame_type: 0xF00D,
+            payload: vec![],
+        };
+        let err = validate_bidirectional_frame(&unknown_frame2).expect_err("Unknown frame should be rejected");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("unknown frame type not allowed on bidirectional stream")
+        );
     }
 }
