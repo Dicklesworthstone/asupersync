@@ -1082,7 +1082,7 @@ mod tests {
     // =========================================================================
 
     /// OpenTelemetry metric descriptor.
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub struct OtelMetricDescriptor {
         pub name: String,
         pub description: String,
@@ -1090,7 +1090,7 @@ mod tests {
     }
 
     /// OpenTelemetry data point.
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub struct OtelDataPoint {
         pub timestamp_nanos: u64,
         pub value: OtelValue,
@@ -1098,7 +1098,7 @@ mod tests {
     }
 
     /// OpenTelemetry metric value types.
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub enum OtelValue {
         Counter(u64),
         Gauge(f64),
@@ -1110,23 +1110,37 @@ mod tests {
     }
 
     /// OpenTelemetry resource attributes.
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub struct OtelResource {
         pub attributes: BTreeMap<String, String>,
     }
 
     /// OpenTelemetry metric export request.
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub struct OtelMetricsRequest {
         pub resource: OtelResource,
         pub metrics: Vec<OtelMetric>,
     }
 
     /// OpenTelemetry metric.
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub struct OtelMetric {
         pub descriptor: OtelMetricDescriptor,
         pub data_points: Vec<OtelDataPoint>,
+    }
+
+    /// Deterministic transport behavior for the test-only OTEL exporter harness.
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
+    pub enum OtelTransportMode {
+        /// Simulate successful collector delivery while recording the dispatch.
+        #[default]
+        CaptureSuccess,
+        /// Simulate a network-level transport failure.
+        FailNetwork(String),
+        /// Simulate collector authentication failure.
+        FailAuth,
+        /// Simulate collector rate limiting.
+        FailRateLimit,
     }
 
     /// OpenTelemetry exporter configuration.
@@ -1137,6 +1151,7 @@ mod tests {
         pub timeout_secs: u64,
         pub compression: bool,
         pub batch_size: usize,
+        pub transport_mode: OtelTransportMode,
     }
 
     impl Default for OtelExporterConfig {
@@ -1147,8 +1162,19 @@ mod tests {
                 timeout_secs: 10,
                 compression: true,
                 batch_size: 100,
+                transport_mode: OtelTransportMode::CaptureSuccess,
             }
         }
+    }
+
+    /// Recorded request dispatch emitted by the OTEL exporter test harness.
+    #[derive(Debug, Clone)]
+    pub struct OtelDispatchRecord {
+        pub endpoint: String,
+        pub timeout_secs: u64,
+        pub headers: BTreeMap<String, String>,
+        pub body: Vec<u8>,
+        pub serialized_json: String,
     }
 
     /// OpenTelemetry metrics exporter.
@@ -1156,6 +1182,7 @@ mod tests {
     pub struct OtelMetricsExporter {
         config: OtelExporterConfig,
         resource: OtelResource,
+        dispatches: Mutex<Vec<OtelDispatchRecord>>,
     }
 
     impl OtelMetricsExporter {
@@ -1173,6 +1200,7 @@ mod tests {
                 resource: OtelResource {
                     attributes: resource_attrs,
                 },
+                dispatches: Mutex::new(Vec::new()),
             }
         }
 
@@ -1180,6 +1208,11 @@ mod tests {
         pub async fn export(&self, metrics: &Metrics) -> Result<(), OtelExportError> {
             let request = self.build_request(metrics)?;
             self.send_request(&request).await
+        }
+
+        fn serialize_request(request: &OtelMetricsRequest) -> Result<String, OtelExportError> {
+            serde_json::to_string(request)
+                .map_err(|err| OtelExportError::InvalidData(err.to_string()))
         }
 
         /// Builds OTLP request from metrics registry.
@@ -1265,17 +1298,58 @@ mod tests {
             })
         }
 
-        /// Sends request to OpenTelemetry collector (mock implementation).
-        async fn send_request(&self, _request: &OtelMetricsRequest) -> Result<(), OtelExportError> {
-            // In a real implementation, this would:
-            // 1. Serialize to OTLP protobuf or JSON
-            // 2. Apply compression if enabled
-            // 3. Add authentication headers
-            // 4. Send HTTP POST to collector endpoint
-            // 5. Handle retries and rate limiting
+        /// Returns the recorded dispatches performed by this test harness.
+        fn dispatches(&self) -> Vec<OtelDispatchRecord> {
+            self.dispatches
+                .lock()
+                .expect("dispatches mutex poisoned")
+                .clone()
+        }
 
-            // For conformance testing, we just validate the request structure
-            Ok(())
+        /// Sends request to the deterministic OTEL collector test harness.
+        async fn send_request(&self, request: &OtelMetricsRequest) -> Result<(), OtelExportError> {
+            let serialized_json = Self::serialize_request(request)?;
+            let mut headers = BTreeMap::new();
+            headers.insert("content-type".to_string(), "application/json".to_string());
+            if let Some(api_key) = &self.config.api_key {
+                headers.insert("authorization".to_string(), format!("Bearer {api_key}"));
+            }
+
+            let body = if self.config.compression {
+                use flate2::Compression;
+                use flate2::write::GzEncoder;
+
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                encoder
+                    .write_all(serialized_json.as_bytes())
+                    .map_err(|err| OtelExportError::NetworkError(err.to_string()))?;
+                headers.insert("content-encoding".to_string(), "gzip".to_string());
+                encoder
+                    .finish()
+                    .map_err(|err| OtelExportError::NetworkError(err.to_string()))?
+            } else {
+                serialized_json.as_bytes().to_vec()
+            };
+
+            self.dispatches
+                .lock()
+                .expect("dispatches mutex poisoned")
+                .push(OtelDispatchRecord {
+                    endpoint: self.config.endpoint.clone(),
+                    timeout_secs: self.config.timeout_secs,
+                    headers,
+                    body,
+                    serialized_json,
+                });
+
+            match &self.config.transport_mode {
+                OtelTransportMode::CaptureSuccess => Ok(()),
+                OtelTransportMode::FailNetwork(message) => {
+                    Err(OtelExportError::NetworkError(message.clone()))
+                }
+                OtelTransportMode::FailAuth => Err(OtelExportError::AuthError),
+                OtelTransportMode::FailRateLimit => Err(OtelExportError::RateLimited),
+            }
         }
     }
 
@@ -1548,6 +1622,7 @@ mod tests {
             timeout_secs: 30,
             compression: false,
             batch_size: 50,
+            transport_mode: OtelTransportMode::CaptureSuccess,
         };
 
         let exporter = OtelMetricsExporter::new(custom_config.clone());
@@ -1556,6 +1631,7 @@ mod tests {
         assert_eq!(exporter.config.timeout_secs, 30);
         assert!(!exporter.config.compression);
         assert_eq!(exporter.config.batch_size, 50);
+        assert_eq!(exporter.config.transport_mode, custom_config.transport_mode);
     }
 
     /// CONF-OTEL-007: Error Handling Conformance
@@ -1642,6 +1718,133 @@ mod tests {
             assert_eq!(buckets.last().unwrap().0, f64::INFINITY);
         } else {
             panic!("Expected Histogram value");
+        }
+    }
+
+    #[test]
+    fn conf_otel_serialized_request_structure_is_deterministic() {
+        let request = OtelMetricsRequest {
+            resource: OtelResource {
+                attributes: BTreeMap::from([
+                    ("service.name".to_string(), "asupersync".to_string()),
+                    ("service.version".to_string(), "0.3.1-test".to_string()),
+                ]),
+            },
+            metrics: vec![OtelMetric {
+                descriptor: OtelMetricDescriptor {
+                    name: "requests_total".to_string(),
+                    description: "Counter: requests_total".to_string(),
+                    unit: "1".to_string(),
+                },
+                data_points: vec![OtelDataPoint {
+                    timestamp_nanos: 123,
+                    value: OtelValue::Counter(7),
+                    attributes: BTreeMap::new(),
+                }],
+            }],
+        };
+
+        let serialized =
+            OtelMetricsExporter::serialize_request(&request).expect("serialize_request failed");
+        assert_eq!(
+            serialized,
+            "{\"resource\":{\"attributes\":{\"service.name\":\"asupersync\",\"service.version\":\"0.3.1-test\"}},\"metrics\":[{\"descriptor\":{\"name\":\"requests_total\",\"description\":\"Counter: requests_total\",\"unit\":\"1\"},\"data_points\":[{\"timestamp_nanos\":123,\"value\":{\"Counter\":7},\"attributes\":{}}]}]}"
+        );
+    }
+
+    #[test]
+    fn conf_otel_export_dispatch_records_headers_and_body() {
+        use flate2::read::GzDecoder;
+        use futures_lite::future::block_on;
+        use std::io::Read;
+
+        let config = OtelExporterConfig {
+            endpoint: "http://collector.test/v1/metrics".to_string(),
+            api_key: Some("test-key".to_string()),
+            timeout_secs: 3,
+            compression: true,
+            batch_size: 16,
+            transport_mode: OtelTransportMode::CaptureSuccess,
+        };
+        let exporter = OtelMetricsExporter::new(config);
+        let mut metrics = Metrics::new();
+        metrics.counter("requests_total").add(7);
+
+        block_on(exporter.export(&metrics)).expect("export should succeed");
+
+        let dispatches = exporter.dispatches();
+        assert_eq!(dispatches.len(), 1);
+        let dispatch = &dispatches[0];
+        assert_eq!(dispatch.endpoint, "http://collector.test/v1/metrics");
+        assert_eq!(dispatch.timeout_secs, 3);
+        assert_eq!(
+            dispatch.headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+        assert_eq!(
+            dispatch.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-key")
+        );
+        assert_eq!(
+            dispatch.headers.get("content-encoding").map(String::as_str),
+            Some("gzip")
+        );
+
+        let mut decoder = GzDecoder::new(dispatch.body.as_slice());
+        let mut decompressed = String::new();
+        decoder
+            .read_to_string(&mut decompressed)
+            .expect("gzip body should decode");
+        assert_eq!(decompressed, dispatch.serialized_json);
+        assert!(dispatch.serialized_json.contains("\"requests_total\""));
+    }
+
+    #[test]
+    fn conf_otel_export_transport_errors_are_not_silent() {
+        use futures_lite::future::block_on;
+
+        let cases = [
+            (
+                OtelTransportMode::FailNetwork("socket closed".to_string()),
+                OtelExportError::NetworkError("socket closed".to_string()),
+            ),
+            (OtelTransportMode::FailAuth, OtelExportError::AuthError),
+            (
+                OtelTransportMode::FailRateLimit,
+                OtelExportError::RateLimited,
+            ),
+        ];
+
+        for (transport_mode, expected) in cases {
+            let config = OtelExporterConfig {
+                transport_mode,
+                compression: false,
+                ..Default::default()
+            };
+            let exporter = OtelMetricsExporter::new(config);
+            let mut metrics = Metrics::new();
+            metrics.counter("requests_total").increment();
+
+            let err = block_on(exporter.export(&metrics)).expect_err("export should fail");
+            match (err, expected) {
+                (
+                    OtelExportError::NetworkError(actual),
+                    OtelExportError::NetworkError(expected),
+                ) => {
+                    assert_eq!(actual, expected);
+                }
+                (OtelExportError::AuthError, OtelExportError::AuthError)
+                | (OtelExportError::RateLimited, OtelExportError::RateLimited) => {}
+                (actual, expected) => {
+                    panic!("unexpected transport error: got {actual:?}, expected {expected:?}")
+                }
+            }
+
+            assert_eq!(
+                exporter.dispatches().len(),
+                1,
+                "failed dispatches should still be recorded for deterministic verification"
+            );
         }
     }
 

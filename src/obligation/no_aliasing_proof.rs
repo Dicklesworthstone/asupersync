@@ -2026,19 +2026,45 @@ mod tests {
     #[test]
     fn proof_result_display() {
         init_test("proof_result_display");
-        let events = vec![
-            reserve(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
-            commit(10, o(0), r(0), ObligationKind::SendPermit),
-        ];
+        let result = ProofResult {
+            steps: vec![
+                ProofStep {
+                    lemma: Lemma::AllocationFreshness,
+                    obligation: o(0),
+                    time: Time::ZERO,
+                    verified: true,
+                    description: "reserve".to_string(),
+                },
+                ProofStep {
+                    lemma: Lemma::ReleaseConsumption,
+                    obligation: o(0),
+                    time: Time::from_nanos(10),
+                    verified: true,
+                    description: "commit".to_string(),
+                },
+            ],
+            counterexamples: Vec::new(),
+            events_processed: 2,
+            sendpermit_events: 2,
+            peak_active_permits: 1,
+            frame_checks: 2,
+        };
 
-        let mut prover = NoAliasingProver::new();
-        let result = prover.check(&events);
-        let display = format!("{result}");
-
-        let has_title = display.contains("No-Aliasing");
-        crate::assert_with_log!(has_title, "display has title", true, has_title);
-        let has_verified = display.contains("Verified:");
-        crate::assert_with_log!(has_verified, "display has verified", true, has_verified);
+        insta::assert_snapshot!(
+            "no_aliasing_proof_result_display",
+            format!("{result}"),
+            @r"
+        SendPermit No-Aliasing Proof
+        ============================
+        Events processed:      2
+        SendPermit events:     2
+        Proof steps:           2
+        Verified steps:        2
+        Frame checks:          2
+        Peak active permits:   1
+        Verified:              true
+        "
+        );
         crate::test_complete!("proof_result_display");
     }
 
@@ -2051,9 +2077,11 @@ mod tests {
             time: Time::from_nanos(42),
             description: "test counterexample".to_string(),
         };
-        let s = format!("{ce}");
-        let has_violation = s.contains("duplicate-allocation");
-        crate::assert_with_log!(has_violation, "display has violation", true, has_violation);
+        insta::assert_snapshot!(
+            "no_aliasing_counterexample_display",
+            format!("{ce}"),
+            @r"[duplicate-allocation] obligation ObligationId(0:0) at t=42ns: test counterexample"
+        );
         crate::test_complete!("counterexample_display");
     }
 
@@ -2067,11 +2095,22 @@ mod tests {
             Lemma::ConcurrentIndependence,
             Lemma::DropSafety,
         ];
-        for lemma in &lemmas {
-            let s = format!("{lemma}");
-            let non_empty = !s.is_empty();
-            crate::assert_with_log!(non_empty, format!("{lemma:?} has display"), true, non_empty);
-        }
+        let rendered = lemmas
+            .iter()
+            .map(|lemma| lemma.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        insta::assert_snapshot!(
+            "no_aliasing_lemma_display",
+            rendered,
+            @r"
+        Lemma 1 (Allocation Freshness)
+        Lemma 2 (Transfer Exclusivity)
+        Lemma 3 (Release Consumption)
+        Lemma 4 (Concurrent Independence)
+        Lemma 5 (Drop Safety)
+        "
+        );
         crate::test_complete!("lemma_display");
     }
 
