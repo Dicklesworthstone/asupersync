@@ -27,7 +27,7 @@ use asupersync::record::distributed_region::{
     ReplicaInfo, ReplicaStatus,
 };
 use asupersync::record::region::RegionState;
-use asupersync::security::{AuthenticatedSymbol, SecurityContext};
+use asupersync::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use asupersync::types::budget::Budget;
 use asupersync::types::{Outcome, RegionId, TaskId, Time};
 use asupersync::util::DetRng;
