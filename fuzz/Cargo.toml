@@ -1743,3 +1743,10 @@ path = "fuzz_targets/quic_transport_params_tlv.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "task_cancel_witness"
+path = "fuzz_targets/task_cancel_witness.rs"
+test = false
+doc = false
+bench = false

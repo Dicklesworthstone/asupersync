@@ -255,7 +255,7 @@ impl H3Settings {
     /// Decode SETTINGS payload bytes.
     pub fn decode_payload(input: &[u8]) -> Result<Self, H3NativeError> {
         let mut settings = Self::default();
-        let mut seen_ids: Vec<u64> = Vec::new();
+        let mut seen_ids = BTreeSet::new();
         let mut pos = 0usize;
         while pos < input.len() {
             let (id, id_len) = decode_varint(input.get(pos..).ok_or(H3NativeError::UnexpectedEof)?)
@@ -266,10 +266,9 @@ impl H3Settings {
                     .map_err(|_| H3NativeError::InvalidFrame("invalid setting value varint"))?;
             pos += val_len;
 
-            if seen_ids.contains(&id) {
+            if !seen_ids.insert(id) {
                 return Err(H3NativeError::DuplicateSetting(id));
             }
-            seen_ids.push(id);
 
             match id {
                 // RFC 9114 §7.2.4.1: HTTP/2 reserved setting identifiers
@@ -2751,6 +2750,25 @@ mod tests {
         assert_eq!(
             err,
             H3NativeError::DuplicateSetting(H3_SETTING_MAX_FIELD_SECTION_SIZE)
+        );
+    }
+
+    #[test]
+    fn settings_decode_large_unique_unknown_setting_set() {
+        let mut payload = Vec::new();
+        for id in 0x40u64..0x440 {
+            encode_setting(&mut payload, id, id ^ 0x55).expect("encode unknown setting");
+        }
+
+        let decoded = H3Settings::decode_payload(&payload).expect("decode large settings set");
+        assert_eq!(decoded.unknown.len(), 1024);
+        assert_eq!(decoded.unknown.first(), Some(&UnknownSetting { id: 0x40, value: 0x15 }));
+        assert_eq!(
+            decoded.unknown.last(),
+            Some(&UnknownSetting {
+                id: 0x43f,
+                value: 0x46a,
+            })
         );
     }
 
