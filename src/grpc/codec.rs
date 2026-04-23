@@ -132,8 +132,9 @@ impl Decoder for GrpcCodec {
         };
         let length = u32::from_be_bytes([src[1], src[2], src[3], src[4]]) as usize;
 
-        // Validate message size
-        if length > self.max_decode_message_size {
+        // Validate message size (for uncompressed frames only)
+        // Compressed frames are validated after decompression in FramedCodec
+        if !compressed && length > self.max_decode_message_size {
             return Err(GrpcError::MessageTooLarge);
         }
 
