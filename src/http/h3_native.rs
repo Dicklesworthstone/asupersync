@@ -581,7 +581,6 @@ impl H3ControlState {
             }
         }
     }
-
 }
 
 /// Validate that a frame is allowed on bidirectional request/response streams.
@@ -618,7 +617,7 @@ pub fn validate_bidirectional_frame(frame: &H3Frame) -> Result<(), H3NativeError
         // Unknown frames should also be rejected on bidirectional streams
         // per RFC 9114 §6.1 strict interpretation
         H3Frame::Unknown { .. } => Err(H3NativeError::StreamProtocol(
-            "unknown frame type not allowed on bidirectional stream"
+            "unknown frame type not allowed on bidirectional stream",
         )),
     }
 }
@@ -877,7 +876,10 @@ pub fn qpack_encode_field_section(plan: &[QpackFieldPlan]) -> Result<Vec<u8>, H3
                 // Value string literal: H=0 + ValueLen(7+)
                 qpack_encode_string(&mut out, 0, 7, value)?;
             }
-            QpackFieldPlan::DynamicNameLiteral { name_index: _name_index, value: _value } => {
+            QpackFieldPlan::DynamicNameLiteral {
+                name_index: _name_index,
+                value: _value,
+            } => {
                 // Dynamic table name reference - not supported in static-only encoder
                 return Err(H3NativeError::InvalidFrame(
                     "dynamic table name references not supported in static-only encoder",
@@ -896,12 +898,100 @@ pub fn qpack_decode_field_section(
     input: &[u8],
     mode: H3QpackMode,
 ) -> Result<Vec<QpackFieldPlan>, H3NativeError> {
+    qpack_decode_field_section_with_context(input, mode, None)
+}
+
+fn qpack_decode_required_insert_count(
+    encoded_insert_count: u64,
+    total_inserts: u64,
+    max_table_capacity: usize,
+) -> Result<u64, H3NativeError> {
+    if encoded_insert_count == 0 {
+        return Ok(0);
+    }
+
+    let max_entries = (max_table_capacity / 32) as u64;
+    if max_entries == 0 {
+        return Err(H3NativeError::QpackPolicy(
+            "required insert count requires dynamic table capacity",
+        ));
+    }
+
+    let full_range = max_entries
+        .checked_mul(2)
+        .ok_or(H3NativeError::InvalidFrame(
+            "required insert count range overflow",
+        ))?;
+    if encoded_insert_count > full_range {
+        return Err(H3NativeError::InvalidFrame(
+            "required insert count exceeds qpack full range",
+        ));
+    }
+
+    let max_value = total_inserts
+        .checked_add(max_entries)
+        .ok_or(H3NativeError::InvalidFrame(
+            "required insert count exceeds addressable range",
+        ))?;
+    let max_wrapped = (max_value / full_range) * full_range;
+    let mut required_insert_count = max_wrapped + encoded_insert_count - 1;
+
+    if required_insert_count > max_value {
+        if required_insert_count <= full_range {
+            return Err(H3NativeError::InvalidFrame(
+                "required insert count decodes below zero",
+            ));
+        }
+        required_insert_count -= full_range;
+    }
+
+    if required_insert_count == 0 {
+        return Err(H3NativeError::InvalidFrame(
+            "required insert count must decode to non-zero",
+        ));
+    }
+
+    Ok(required_insert_count)
+}
+
+fn qpack_decode_base(
+    required_insert_count: u64,
+    sign: bool,
+    delta_base: u64,
+) -> Result<u64, H3NativeError> {
+    if sign {
+        required_insert_count
+            .checked_sub(delta_base + 1)
+            .ok_or(H3NativeError::InvalidFrame(
+                "delta base exceeds required insert count",
+            ))
+    } else {
+        required_insert_count
+            .checked_add(delta_base)
+            .ok_or(H3NativeError::InvalidFrame(
+                "base exceeds addressable range",
+            ))
+    }
+}
+
+fn qpack_relative_to_absolute(base: u64, relative_index: u64) -> Result<u64, H3NativeError> {
+    base.checked_sub(relative_index + 1)
+        .ok_or(H3NativeError::InvalidFrame(
+            "dynamic qpack relative index exceeds base",
+        ))
+}
+
+fn qpack_decode_field_section_with_context(
+    input: &[u8],
+    mode: H3QpackMode,
+    qpack_context: Option<&QpackContext>,
+) -> Result<Vec<QpackFieldPlan>, H3NativeError> {
     let mut pos = 0usize;
 
     // Field section prefix part 1: Required Insert Count (8-bit prefix int).
     let first = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
     pos += 1;
-    let (required_insert_count, ric_extra) = qpack_decode_prefixed_int(first, 8, &input[pos..])?;
+    let (encoded_insert_count, ric_extra) = qpack_decode_prefixed_int(first, 8, &input[pos..])?;
     pos += ric_extra;
 
     // Field section prefix part 2: S + Delta Base (7-bit prefix int).
@@ -911,22 +1001,9 @@ pub fn qpack_decode_field_section(
     let (delta_base, db_extra) = qpack_decode_prefixed_int(second, 7, &input[pos..])?;
     pos += db_extra;
 
-    // Calculate the base index for dynamic table references per RFC 9204
-    let base = if required_insert_count == 0 {
-        0
-    } else {
-        if sign {
-            // Negative delta: base = RIC - delta_base - 1
-            required_insert_count.saturating_sub(delta_base).saturating_sub(1)
-        } else {
-            // Positive delta: base = RIC + delta_base
-            required_insert_count.saturating_add(delta_base)
-        }
-    };
-
-    match mode {
+    let dynamic_base = match mode {
         H3QpackMode::StaticOnly => {
-            if required_insert_count != 0 {
+            if encoded_insert_count != 0 {
                 return Err(H3NativeError::QpackPolicy(
                     "required insert count must be zero in static-only mode",
                 ));
@@ -936,17 +1013,46 @@ pub fn qpack_decode_field_section(
                     "base must be zero in static-only mode",
                 ));
             }
+            None
         }
         H3QpackMode::DynamicTableAllowed => {
             // Dynamic table operations are permitted - validate reasonable bounds
-            if required_insert_count > 65536 {
+            if encoded_insert_count > 65536 {
                 return Err(H3NativeError::QpackPolicy(
                     "required insert count exceeds reasonable limit",
                 ));
             }
-            // Allow dynamic base calculations
+
+            let Some(context) = qpack_context else {
+                if encoded_insert_count != 0 || sign || delta_base != 0 {
+                    return Err(H3NativeError::InvalidFrame(
+                        "dynamic table context required",
+                    ));
+                }
+                None
+            };
+
+            let total_inserts = context.dynamic_table().insertion_counter();
+            let required_insert_count = qpack_decode_required_insert_count(
+                encoded_insert_count,
+                total_inserts,
+                context.max_table_capacity,
+            )?;
+            if required_insert_count > total_inserts {
+                return Err(H3NativeError::QpackPolicy(
+                    "required insert count exceeds dynamic table state",
+                ));
+            }
+
+            let base = qpack_decode_base(required_insert_count, sign, delta_base)?;
+            if base > total_inserts {
+                return Err(H3NativeError::InvalidFrame(
+                    "dynamic qpack base exceeds dynamic table state",
+                ));
+            }
+            Some(base)
         }
-    }
+    };
 
     let mut out = Vec::new();
     while pos < input.len() {
@@ -969,15 +1075,10 @@ pub fn qpack_decode_field_section(
                 }
                 out.push(QpackFieldPlan::StaticIndex(index));
             } else {
-                // Dynamic table index - calculate absolute index from base and wire index
-                let is_post_base = (b & 0x10) != 0;
-                let absolute_index = if is_post_base {
-                    // Post-base reference: absolute = base + index
-                    base.saturating_add(index)
-                } else {
-                    // Pre-base reference: absolute = base - index - 1
-                    base.saturating_sub(index).saturating_sub(1)
-                };
+                let base = dynamic_base.ok_or(H3NativeError::InvalidFrame(
+                    "dynamic table context required",
+                ))?;
+                let absolute_index = qpack_relative_to_absolute(base, index)?;
                 out.push(QpackFieldPlan::DynamicIndex(absolute_index));
             }
             continue;
@@ -1007,15 +1108,10 @@ pub fn qpack_decode_field_section(
                     value,
                 });
             } else {
-                // Dynamic table name reference - calculate absolute index from base
-                let is_post_base_name = (b & 0x08) != 0;
-                let absolute_name_index = if is_post_base_name {
-                    // Post-base name reference: absolute = base + name_index
-                    base.saturating_add(name_index)
-                } else {
-                    // Pre-base name reference: absolute = base - name_index - 1
-                    base.saturating_sub(name_index).saturating_sub(1)
-                };
+                let base = dynamic_base.ok_or(H3NativeError::InvalidFrame(
+                    "dynamic table context required",
+                ))?;
+                let absolute_name_index = qpack_relative_to_absolute(base, name_index)?;
                 out.push(QpackFieldPlan::DynamicNameLiteral {
                     name_index: absolute_name_index,
                     value,
@@ -1090,16 +1186,21 @@ pub fn qpack_plan_to_header_fields(
                         .ok_or(H3NativeError::InvalidFrame("unknown dynamic qpack index"))?;
                     out.push((name.to_string(), value.to_string()));
                 } else {
-                    return Err(H3NativeError::InvalidFrame("dynamic table context required"));
+                    return Err(H3NativeError::InvalidFrame(
+                        "dynamic table context required",
+                    ));
                 }
             }
             QpackFieldPlan::DynamicNameLiteral { name_index, value } => {
                 if let Some(context) = qpack_context {
-                    let name = qpack_dynamic_name(context.dynamic_table(), *name_index)
-                        .ok_or(H3NativeError::InvalidFrame("unknown dynamic qpack name index"))?;
+                    let name = qpack_dynamic_name(context.dynamic_table(), *name_index).ok_or(
+                        H3NativeError::InvalidFrame("unknown dynamic qpack name index"),
+                    )?;
                     out.push((name.to_string(), value.clone()));
                 } else {
-                    return Err(H3NativeError::InvalidFrame("dynamic table context required"));
+                    return Err(H3NativeError::InvalidFrame(
+                        "dynamic table context required",
+                    ));
                 }
             }
             QpackFieldPlan::Literal { name, value } => {
@@ -1122,7 +1223,7 @@ pub fn qpack_decode_request_field_section(
     mode: H3QpackMode,
     qpack_context: Option<&QpackContext>,
 ) -> Result<H3RequestHead, H3NativeError> {
-    let plan = qpack_decode_field_section(input, mode)?;
+    let plan = qpack_decode_field_section_with_context(input, mode, qpack_context)?;
     let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
     header_fields_to_request_head(&fields)
 }
@@ -1139,7 +1240,7 @@ pub fn qpack_decode_response_field_section(
     mode: H3QpackMode,
     qpack_context: Option<&QpackContext>,
 ) -> Result<H3ResponseHead, H3NativeError> {
-    let plan = qpack_decode_field_section(input, mode)?;
+    let plan = qpack_decode_field_section_with_context(input, mode, qpack_context)?;
     let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
     header_fields_to_response_head(&fields)
 }
@@ -2502,18 +2603,9 @@ impl QpackDynamicTable {
 
     /// Get an entry by absolute index (insertion_counter - insertion_id - 1).
     pub fn get_by_absolute_index(&self, absolute_index: u64) -> Option<&QpackDynamicEntry> {
-        if absolute_index < self.insertion_counter && absolute_index < self.entries.len() as u64 {
-            // Absolute index is calculated as insertion_counter - 1 - absolute_index
-            let array_index = (self.insertion_counter - 1 - absolute_index) as usize;
-            if array_index < self.entries.len() {
-                // Find entry by insertion order
-                self.entries.iter().rev().nth(array_index)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        let newest_absolute = self.insertion_counter.checked_sub(1)?;
+        let reverse_offset = newest_absolute.checked_sub(absolute_index)? as usize;
+        self.entries.iter().rev().nth(reverse_offset)
     }
 
     /// Get the number of entries in the table.
@@ -2552,7 +2644,8 @@ impl Default for QpackDynamicTable {
 ///
 /// Returns None if the index is out of bounds or the entry doesn't exist.
 pub fn qpack_dynamic_entry(table: &QpackDynamicTable, absolute_index: u64) -> Option<(&str, &str)> {
-    table.get_by_absolute_index(absolute_index)
+    table
+        .get_by_absolute_index(absolute_index)
         .map(|entry| (entry.name(), entry.value()))
 }
 
@@ -2560,7 +2653,8 @@ pub fn qpack_dynamic_entry(table: &QpackDynamicTable, absolute_index: u64) -> Op
 ///
 /// Returns None if the index is out of bounds or the entry doesn't exist.
 pub fn qpack_dynamic_name(table: &QpackDynamicTable, absolute_index: u64) -> Option<&str> {
-    table.get_by_absolute_index(absolute_index)
+    table
+        .get_by_absolute_index(absolute_index)
         .map(|entry| entry.name())
 }
 
@@ -2593,7 +2687,11 @@ impl QpackContext {
     }
 
     /// Insert a new entry into the dynamic table.
-    pub fn insert_dynamic_entry(&mut self, name: String, value: String) -> Result<u64, &'static str> {
+    pub fn insert_dynamic_entry(
+        &mut self,
+        name: String,
+        value: String,
+    ) -> Result<u64, &'static str> {
         self.dynamic_table.insert(name, value)
     }
 }
@@ -4071,8 +4169,8 @@ mod tests {
         )
         .expect("request");
         let wire = qpack_encode_request_field_section(&request).expect("encode");
-        let decoded =
-            qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly, None).expect("decode");
+        let decoded = qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly, None)
+            .expect("decode");
         assert_eq!(decoded, request);
     }
 
@@ -4087,8 +4185,8 @@ mod tests {
         )
         .expect("response");
         let wire = qpack_encode_response_field_section(&response).expect("encode");
-        let decoded =
-            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly, None).expect("decode");
+        let decoded = qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly, None)
+            .expect("decode");
         assert_eq!(decoded, response);
     }
 
@@ -4104,8 +4202,8 @@ mod tests {
             QpackFieldPlan::StaticIndex(1),  // :path /
         ];
         let wire = qpack_encode_field_section(&plan).expect("encode");
-        let err =
-            qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly, None).expect_err("fail");
+        let err = qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly, None)
+            .expect_err("fail");
         assert_eq!(
             err,
             H3NativeError::InvalidRequestPseudoHeader(
@@ -4126,8 +4224,8 @@ mod tests {
             QpackFieldPlan::StaticIndex(1),  // :path /
         ];
         let wire = qpack_encode_field_section(&plan).expect("encode");
-        let err =
-            qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly, None).expect_err("fail");
+        let err = qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly, None)
+            .expect_err("fail");
         assert_eq!(
             err,
             H3NativeError::InvalidRequestPseudoHeader("duplicate :method")
@@ -4141,8 +4239,8 @@ mod tests {
             value: "ok".to_string(),
         }];
         let wire = qpack_encode_field_section(&plan).expect("encode");
-        let err =
-            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly, None).expect_err("fail");
+        let err = qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly, None)
+            .expect_err("fail");
         assert_eq!(
             err,
             H3NativeError::InvalidResponsePseudoHeader("invalid :status value")
@@ -4166,8 +4264,8 @@ mod tests {
             value: "0200".to_string(),
         }];
         let wire = qpack_encode_field_section(&plan).expect("encode");
-        let err =
-            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly, None).expect_err("fail");
+        let err = qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly, None)
+            .expect_err("fail");
         assert_eq!(
             err,
             H3NativeError::InvalidResponsePseudoHeader("invalid :status value")
@@ -4184,8 +4282,8 @@ mod tests {
             },
         ];
         let wire = qpack_encode_field_section(&plan).expect("encode");
-        let err =
-            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly, None).expect_err("fail");
+        let err = qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly, None)
+            .expect_err("fail");
         assert_eq!(
             err,
             H3NativeError::InvalidResponsePseudoHeader(
@@ -4203,6 +4301,57 @@ mod tests {
             err,
             H3NativeError::QpackPolicy("required insert count must be zero in static-only mode")
         );
+    }
+
+    #[test]
+    fn qpack_dynamic_decode_rejects_required_insert_count_beyond_table_state() {
+        let mut context = QpackContext::new(4096);
+        context
+            .insert_dynamic_entry("x-one".to_string(), "value-1".to_string())
+            .expect("insert entry");
+
+        // Encoded Required Insert Count = 3 decodes to ReqInsertCount = 2 when
+        // MaxEntries = 128. The decoder only knows about one insert, so it must
+        // fail cleanly instead of speculatively resolving a dynamic reference.
+        let wire = [0x03u8, 0x00, 0x80];
+        let err = qpack_decode_field_section_with_context(
+            &wire,
+            H3QpackMode::DynamicTableAllowed,
+            Some(&context),
+        )
+        .expect_err("required insert count should block decode");
+        assert_eq!(
+            err,
+            H3NativeError::QpackPolicy("required insert count exceeds dynamic table state")
+        );
+    }
+
+    #[test]
+    fn qpack_dynamic_decode_resolves_relative_index_with_nonzero_ric() {
+        let mut context = QpackContext::new(4096);
+        context
+            .insert_dynamic_entry("x-old".to_string(), "old".to_string())
+            .expect("insert old entry");
+        context
+            .insert_dynamic_entry("x-middle".to_string(), "middle".to_string())
+            .expect("insert middle entry");
+        context
+            .insert_dynamic_entry("x-new".to_string(), "new".to_string())
+            .expect("insert new entry");
+
+        // EncRIC=3 => ReqInsertCount=2 with MaxEntries=128. Base=2, so dynamic
+        // relative index 0 resolves to absolute index 1 (the middle entry).
+        let wire = [0x03u8, 0x00, 0x80];
+        let plan = qpack_decode_field_section_with_context(
+            &wire,
+            H3QpackMode::DynamicTableAllowed,
+            Some(&context),
+        )
+        .expect("decode dynamic field section");
+        assert_eq!(plan, vec![QpackFieldPlan::DynamicIndex(1)]);
+
+        let fields = qpack_plan_to_header_fields(&plan, Some(&context)).expect("resolve fields");
+        assert_eq!(fields, vec![("x-middle".to_string(), "middle".to_string())]);
     }
 
     #[test]
@@ -5561,7 +5710,6 @@ mod tests {
 
     // ========== QPACK Dynamic Table Eviction Conformance Tests ==========
 
-
     #[test]
     fn qpack_conformance_dynamic_table_lru_eviction() {
         // Conformance: RFC 9204 Section 3.2 - Dynamic Table
@@ -6044,7 +6192,8 @@ mod tests {
             push_id: 123,
             field_block: vec![7, 8, 9],
         };
-        validate_bidirectional_frame(&push_promise_frame).expect("PUSH_PROMISE frame should be allowed");
+        validate_bidirectional_frame(&push_promise_frame)
+            .expect("PUSH_PROMISE frame should be allowed");
 
         // DATAGRAM frames are sent on bidirectional streams per RFC 9297
         let datagram_frame = H3Frame::Datagram {
@@ -6058,7 +6207,8 @@ mod tests {
     fn bidirectional_frame_validation_rejects_control_frames() {
         // SETTINGS frames belong on control streams
         let settings_frame = H3Frame::Settings(H3Settings::default());
-        let err = validate_bidirectional_frame(&settings_frame).expect_err("SETTINGS should be rejected");
+        let err =
+            validate_bidirectional_frame(&settings_frame).expect_err("SETTINGS should be rejected");
         assert_eq!(
             err,
             H3NativeError::StreamProtocol("SETTINGS frame not allowed on bidirectional stream")
@@ -6066,7 +6216,8 @@ mod tests {
 
         // CANCEL_PUSH frames belong on control streams
         let cancel_push_frame = H3Frame::CancelPush(789);
-        let err = validate_bidirectional_frame(&cancel_push_frame).expect_err("CANCEL_PUSH should be rejected");
+        let err = validate_bidirectional_frame(&cancel_push_frame)
+            .expect_err("CANCEL_PUSH should be rejected");
         assert_eq!(
             err,
             H3NativeError::StreamProtocol("CANCEL_PUSH frame not allowed on bidirectional stream")
@@ -6074,7 +6225,8 @@ mod tests {
 
         // GOAWAY frames belong on control streams
         let goaway_frame = H3Frame::Goaway(101);
-        let err = validate_bidirectional_frame(&goaway_frame).expect_err("GOAWAY should be rejected");
+        let err =
+            validate_bidirectional_frame(&goaway_frame).expect_err("GOAWAY should be rejected");
         assert_eq!(
             err,
             H3NativeError::StreamProtocol("GOAWAY frame not allowed on bidirectional stream")
@@ -6082,7 +6234,8 @@ mod tests {
 
         // MAX_PUSH_ID frames belong on control streams
         let max_push_id_frame = H3Frame::MaxPushId(202);
-        let err = validate_bidirectional_frame(&max_push_id_frame).expect_err("MAX_PUSH_ID should be rejected");
+        let err = validate_bidirectional_frame(&max_push_id_frame)
+            .expect_err("MAX_PUSH_ID should be rejected");
         assert_eq!(
             err,
             H3NativeError::StreamProtocol("MAX_PUSH_ID frame not allowed on bidirectional stream")
@@ -6096,7 +6249,8 @@ mod tests {
             frame_type: 0xDEADBEEF,
             payload: vec![13, 14, 15],
         };
-        let err = validate_bidirectional_frame(&unknown_frame).expect_err("Unknown frame should be rejected");
+        let err = validate_bidirectional_frame(&unknown_frame)
+            .expect_err("Unknown frame should be rejected");
         assert_eq!(
             err,
             H3NativeError::StreamProtocol("unknown frame type not allowed on bidirectional stream")
@@ -6107,7 +6261,8 @@ mod tests {
             frame_type: 0xF00D,
             payload: vec![],
         };
-        let err = validate_bidirectional_frame(&unknown_frame2).expect_err("Unknown frame should be rejected");
+        let err = validate_bidirectional_frame(&unknown_frame2)
+            .expect_err("Unknown frame should be rejected");
         assert_eq!(
             err,
             H3NativeError::StreamProtocol("unknown frame type not allowed on bidirectional stream")
