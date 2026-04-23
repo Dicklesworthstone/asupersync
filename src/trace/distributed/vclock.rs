@@ -1396,4 +1396,112 @@ mod tests {
         let dbg2 = format!("{cloned:?}");
         assert_eq!(dbg, dbg2);
     }
+
+    // ------------------------------------------------------------------------
+    // Golden-artifact: canonical VectorClock serialization snapshot.
+    //
+    // Freezes the Debug and Display string forms of VectorClock across the
+    // states that the rest of the distributed trace layer treats as wire
+    // serialization: empty, single-node, multi-node after merge, after a
+    // send/receive round-trip, and for each of the four CausalOrder verdicts.
+    //
+    // BTreeMap-backed entries guarantee deterministic iteration; node names
+    // are scrubbed so the golden never captures literal identities.
+    // ------------------------------------------------------------------------
+    #[test]
+    fn canonical_vector_clock_serialization_snapshot() {
+        let na = node("alpha-node");
+        let nb = node("beta-node");
+
+        // Empty.
+        let empty = VectorClock::new();
+
+        // Single-node, initialized to 1.
+        let single = VectorClock::for_node(&na);
+
+        // Multi-node after independent increments + merge.
+        let mut a = VectorClock::new();
+        a.increment(&na);
+        a.increment(&na);
+        let mut b = VectorClock::new();
+        b.increment(&nb);
+        let merged = a.merge(&b);
+
+        // Post-receive: A learns from B's clock and advances locally.
+        let mut c = VectorClock::new();
+        c.increment(&na);
+        let mut d = VectorClock::new();
+        d.increment(&nb);
+        d.increment(&nb);
+        c.receive(&na, &d); // merge({A:1},{B:2}) → {A:1,B:2}, incr A → {A:2,B:2}
+
+        // Four canonical CausalOrder pairs.
+        //   Before:     {A:1}       vs {A:2}
+        //   After:      {A:2}       vs {A:1}
+        //   Equal:      {A:1,B:1}   vs {A:1,B:1}
+        //   Concurrent: {A:1}       vs {B:1}
+        let before_lhs = {
+            let mut v = VectorClock::new();
+            v.increment(&na);
+            v
+        };
+        let before_rhs = {
+            let mut v = VectorClock::new();
+            v.increment(&na);
+            v.increment(&na);
+            v
+        };
+        let equal_lhs = {
+            let mut v = VectorClock::new();
+            v.increment(&na);
+            v.increment(&nb);
+            v
+        };
+        let equal_rhs = {
+            let mut v = VectorClock::new();
+            v.increment(&na);
+            v.increment(&nb);
+            v
+        };
+        let concurrent_lhs = {
+            let mut v = VectorClock::new();
+            v.increment(&na);
+            v
+        };
+        let concurrent_rhs = {
+            let mut v = VectorClock::new();
+            v.increment(&nb);
+            v
+        };
+
+        // set(n, 0) is a documented no-op; record the resulting Display to
+        // lock the invariant into the golden.
+        let mut zero_set = VectorClock::new();
+        zero_set.set(&na, 0);
+
+        insta::assert_json_snapshot!(
+            "canonical_vector_clock_serialization",
+            scrub_vclock_output(json!({
+                "states": {
+                    "empty":      { "display": empty.to_string(),  "debug": format!("{empty:?}"),  "node_count": empty.node_count(),  "is_zero": empty.is_zero() },
+                    "single":     { "display": single.to_string(), "debug": format!("{single:?}"), "node_count": single.node_count(), "is_zero": single.is_zero() },
+                    "merged":     { "display": merged.to_string(), "debug": format!("{merged:?}"), "node_count": merged.node_count(), "is_zero": merged.is_zero() },
+                    "post_receive": { "display": c.to_string(),    "debug": format!("{c:?}"),      "node_count": c.node_count(),      "is_zero": c.is_zero() },
+                    "set_zero_noop": { "display": zero_set.to_string(), "debug": format!("{zero_set:?}"), "is_zero": zero_set.is_zero() },
+                },
+                "causal_orders": [
+                    { "case": "before",     "lhs": before_lhs.to_string(),     "rhs": before_rhs.to_string(),     "verdict": format!("{:?}", before_lhs.causal_order(&before_rhs)) },
+                    { "case": "after",      "lhs": before_rhs.to_string(),     "rhs": before_lhs.to_string(),     "verdict": format!("{:?}", before_rhs.causal_order(&before_lhs)) },
+                    { "case": "equal",      "lhs": equal_lhs.to_string(),      "rhs": equal_rhs.to_string(),      "verdict": format!("{:?}", equal_lhs.causal_order(&equal_rhs)) },
+                    { "case": "concurrent", "lhs": concurrent_lhs.to_string(), "rhs": concurrent_rhs.to_string(), "verdict": format!("{:?}", concurrent_lhs.causal_order(&concurrent_rhs)) },
+                ],
+                "iter_determinism": {
+                    // BTreeMap ordering guarantees keys sort lexicographically.
+                    "merged_keys_in_order": merged.iter()
+                        .map(|(n, v)| format!("{}={}", n.as_str(), v))
+                        .collect::<Vec<_>>(),
+                }
+            }))
+        );
+    }
 }
