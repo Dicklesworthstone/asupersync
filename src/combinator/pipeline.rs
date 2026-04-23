@@ -1477,4 +1477,295 @@ mod tests {
         assert_eq!(copied, cloned);
         assert_ne!(fs, FailedStage::new(3, 5));
     }
+
+    // =========================================================================
+    // Composition laws (conformance suite).
+    //
+    // The four public pipeline constructors —
+    //     pipeline2_outcomes, pipeline3_outcomes,
+    //     pipeline_n_outcomes, pipeline_with_final
+    // — must agree on every input they can all represent. These laws encode
+    // that contract so an accidental short-circuit or failed_at mismatch in
+    // one constructor does not escape review.
+    // =========================================================================
+
+    mod composition_laws {
+        use super::super::*;
+        use crate::types::Outcome;
+        use crate::types::cancel::CancelReason;
+
+        /// Compare two PipelineResults ignoring Panicked payload identity
+        /// (PanicPayload does not implement PartialEq on the inner Any).
+        #[track_caller]
+        fn assert_same_shape<T: std::fmt::Debug + PartialEq, E: std::fmt::Debug + PartialEq>(
+            lhs: &PipelineResult<T, E>,
+            rhs: &PipelineResult<T, E>,
+        ) {
+            match (lhs, rhs) {
+                (
+                    PipelineResult::Completed {
+                        value: v1,
+                        stages_completed: s1,
+                    },
+                    PipelineResult::Completed {
+                        value: v2,
+                        stages_completed: s2,
+                    },
+                ) => {
+                    assert_eq!(v1, v2, "completed values diverge");
+                    assert_eq!(s1, s2, "stages_completed diverges");
+                }
+                (
+                    PipelineResult::Failed {
+                        error: e1,
+                        failed_at: f1,
+                    },
+                    PipelineResult::Failed {
+                        error: e2,
+                        failed_at: f2,
+                    },
+                ) => {
+                    assert_eq!(e1, e2, "failed errors diverge");
+                    assert_eq!(f1, f2, "failed_at diverges");
+                }
+                (
+                    PipelineResult::Cancelled {
+                        reason: r1,
+                        cancelled_at: f1,
+                    },
+                    PipelineResult::Cancelled {
+                        reason: r2,
+                        cancelled_at: f2,
+                    },
+                ) => {
+                    assert_eq!(r1, r2, "cancel reasons diverge");
+                    assert_eq!(f1, f2, "cancelled_at diverges");
+                }
+                (
+                    PipelineResult::Panicked {
+                        panicked_at: f1, ..
+                    },
+                    PipelineResult::Panicked {
+                        panicked_at: f2, ..
+                    },
+                ) => {
+                    assert_eq!(f1, f2, "panicked_at diverges");
+                }
+                (lhs, rhs) => panic!("variant mismatch:\n  lhs={lhs:?}\n  rhs={rhs:?}"),
+            }
+        }
+
+        /// LAW-1: `pipeline2_outcomes` and `pipeline_n_outcomes` agree on the
+        /// full 2-stage input matrix. Every Outcome shape is checked for both
+        /// stages.
+        #[test]
+        fn law_pipeline2_equiv_pipeline_n_across_outcome_matrix() {
+            fn outcomes() -> Vec<Outcome<i32, &'static str>> {
+                vec![
+                    Outcome::Ok(1),
+                    Outcome::Err("boom"),
+                    Outcome::Cancelled(CancelReason::user("test")),
+                ]
+            }
+            for o1 in outcomes() {
+                for o2 in outcomes() {
+                    let lhs = pipeline2_outcomes::<i32, &'static str>(
+                        o1.clone(),
+                        Some(o2.clone()),
+                    );
+                    let rhs = pipeline_n_outcomes::<i32, &'static str>(
+                        vec![o1.clone(), o2.clone()],
+                        2,
+                    );
+                    assert_same_shape(&lhs, &rhs);
+                }
+            }
+        }
+
+        /// LAW-2: `pipeline3_outcomes` and `pipeline_n_outcomes` agree on the
+        /// 3-stage matrix. Short-circuit means pipeline3 is only called with
+        /// None for stages after a non-Ok, so we only compare the complete
+        /// [Ok, Ok, X] and [Ok, X] branches.
+        #[test]
+        fn law_pipeline3_equiv_pipeline_n() {
+            let terminal_shapes: Vec<Outcome<i32, &'static str>> = vec![
+                Outcome::Ok(3),
+                Outcome::Err("boom"),
+                Outcome::Cancelled(CancelReason::user("test")),
+            ];
+            // All-three-stages-executed branch: [Ok, Ok, X]
+            for term in terminal_shapes.iter() {
+                let lhs = pipeline3_outcomes::<i32, &'static str>(
+                    Outcome::Ok(1),
+                    Some(Outcome::Ok(2)),
+                    Some(term.clone()),
+                );
+                let rhs = pipeline_n_outcomes::<i32, &'static str>(
+                    vec![Outcome::Ok(1), Outcome::Ok(2), term.clone()],
+                    3,
+                );
+                assert_same_shape(&lhs, &rhs);
+            }
+            // Short-circuit at stage 2: [Ok, X, None]. pipeline_n sees the
+            // 2-element vec since the third stage never ran.
+            for term in terminal_shapes.iter().filter(|o| !matches!(o, Outcome::Ok(_))) {
+                let lhs = pipeline3_outcomes::<i32, &'static str>(
+                    Outcome::Ok(1),
+                    Some(term.clone()),
+                    None,
+                );
+                let rhs = pipeline_n_outcomes::<i32, &'static str>(
+                    vec![Outcome::Ok(1), term.clone()],
+                    3,
+                );
+                assert_same_shape(&lhs, &rhs);
+            }
+        }
+
+        /// LAW-3: `pipeline_with_final` agrees with `pipeline_n_outcomes` when
+        /// the caller supplies a full run (intermediates.len() + 1 == total).
+        #[test]
+        fn law_pipeline_with_final_equiv_pipeline_n_for_complete_runs() {
+            let sample: Vec<Outcome<i32, &'static str>> = vec![
+                Outcome::Ok(10),
+                Outcome::Ok(20),
+                Outcome::Ok(30),
+            ];
+            let final_variants: Vec<Outcome<i32, &'static str>> = vec![
+                Outcome::Ok(99),
+                Outcome::Err("late"),
+                Outcome::Cancelled(CancelReason::user("test")),
+            ];
+            for final_out in final_variants {
+                let mut full = sample.clone();
+                full.push(final_out.clone());
+                let total = full.len();
+                let lhs =
+                    pipeline_with_final::<i32, &'static str>(sample.clone(), final_out, total);
+                let rhs = pipeline_n_outcomes::<i32, &'static str>(full, total);
+                assert_same_shape(&lhs, &rhs);
+            }
+        }
+
+        /// LAW-4: Short-circuit is strict — a non-Ok at index N makes the
+        /// result depend only on outcomes[..=N]. Trailing Oks in the vec are
+        /// ignored, i.e. passing them vs truncating yields the same result.
+        #[test]
+        fn law_short_circuit_ignores_trailing_outcomes() {
+            let with_trailing: Vec<Outcome<i32, &'static str>> = vec![
+                Outcome::Ok(1),
+                Outcome::Err("midway"),
+                Outcome::Ok(999),   // ignored
+                Outcome::Ok(12_345), // ignored
+            ];
+            let truncated: Vec<Outcome<i32, &'static str>> =
+                with_trailing[..2].to_vec();
+            let lhs = pipeline_n_outcomes::<i32, &'static str>(with_trailing, 5);
+            let rhs = pipeline_n_outcomes::<i32, &'static str>(truncated, 5);
+            assert_same_shape(&lhs, &rhs);
+        }
+
+        /// LAW-5: `failed_at.total_stages` is exactly the caller-supplied
+        /// total across every failure mode in every constructor, even when
+        /// the vec is shorter than total.
+        #[test]
+        fn law_failed_at_total_stages_is_preserved() {
+            for &total in &[1usize, 2, 3, 5, 10] {
+                // 2-variant: o1 fails
+                let r = pipeline2_outcomes::<i32, &'static str>(
+                    Outcome::Err("x"),
+                    None,
+                );
+                if let PipelineResult::Failed { failed_at, .. } = r {
+                    assert_eq!(failed_at.total_stages, 2);
+                }
+                // n-variant: fail at index 0 with various totals
+                let r = pipeline_n_outcomes::<i32, &'static str>(
+                    vec![Outcome::Err("x")],
+                    total.max(1),
+                );
+                if let PipelineResult::Failed { failed_at, .. } = r {
+                    assert_eq!(failed_at.total_stages, total.max(1));
+                    assert_eq!(failed_at.index, 0);
+                }
+            }
+        }
+
+        /// LAW-6: Cancel and panic precedence — a Cancelled or Panicked at
+        /// index N wins over any later Ok/Err in the vec. Distinct from a
+        /// plain Err because the failure category carries different recovery
+        /// semantics downstream.
+        #[test]
+        fn law_cancelled_and_panicked_beat_later_outcomes() {
+            let vec_with_late_ok: Vec<Outcome<i32, &'static str>> = vec![
+                Outcome::Ok(1),
+                Outcome::Cancelled(CancelReason::user("test")),
+                Outcome::Ok(2),
+            ];
+            let r = pipeline_n_outcomes::<i32, &'static str>(vec_with_late_ok, 3);
+            match r {
+                PipelineResult::Cancelled { cancelled_at, .. } => {
+                    assert_eq!(cancelled_at.index, 1);
+                    assert_eq!(cancelled_at.total_stages, 3);
+                }
+                other => panic!("expected Cancelled, got {other:?}"),
+            }
+
+            let vec_with_panic: Vec<Outcome<i32, &'static str>> = vec![
+                Outcome::Ok(1),
+                Outcome::Panicked(PanicPayload::new("boom")),
+                Outcome::Err("late"),
+            ];
+            let r = pipeline_n_outcomes::<i32, &'static str>(vec_with_panic, 3);
+            match r {
+                PipelineResult::Panicked { panicked_at, .. } => {
+                    assert_eq!(panicked_at.index, 1);
+                    assert_eq!(panicked_at.total_stages, 3);
+                }
+                other => panic!("expected Panicked, got {other:?}"),
+            }
+        }
+
+        /// LAW-7: Single-stage identity — pipeline_n_outcomes of a single Ok
+        /// equals Completed(value, 1).
+        #[test]
+        fn law_single_stage_ok_is_identity() {
+            let r = pipeline_n_outcomes::<i32, &'static str>(vec![Outcome::Ok(42)], 1);
+            match r {
+                PipelineResult::Completed {
+                    value,
+                    stages_completed,
+                } => {
+                    assert_eq!(value, 42);
+                    assert_eq!(stages_completed, 1);
+                }
+                other => panic!("expected Completed(42, 1), got {other:?}"),
+            }
+        }
+
+        /// LAW-8: Partial completion is reported honestly — all-Ok vec
+        /// shorter than total_stages yields Completed with stages_executed =
+        /// provided, NOT total_stages. Callers building incrementally must
+        /// be able to distinguish "done" from "so far so good".
+        #[test]
+        fn law_partial_completion_reports_provided_count() {
+            let r = pipeline_n_outcomes::<i32, &'static str>(
+                vec![Outcome::Ok(1), Outcome::Ok(2)],
+                5,
+            );
+            match r {
+                PipelineResult::Completed {
+                    value,
+                    stages_completed,
+                } => {
+                    assert_eq!(value, 2);
+                    assert_eq!(
+                        stages_completed, 2,
+                        "partial run must not report the full total as executed"
+                    );
+                }
+                other => panic!("expected Completed(2, 2), got {other:?}"),
+            }
+        }
+    }
 }
