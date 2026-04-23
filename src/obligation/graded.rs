@@ -1584,4 +1584,257 @@ mod tests {
         let err = scope.close().expect_err("should return leak error");
         assert_eq!(err.outstanding, 1);
     }
+
+    // ========================================================================
+    // GRADED-REFINEMENT conformance harness (Pattern 4: spec-derived)
+    //
+    // The typing judgment at the top of this module is the spec:
+    //
+    //   Γ ⊢ reserve(K)     : Obligation<K>     [+1 unit of K]
+    //   Γ, x: Obligation<K> ⊢ commit(x) : ()   [-1 unit of K]
+    //   Γ, x: Obligation<K> ⊢ abort(x)  : ()   [-1 unit of K]
+    //   Γ ⊢ scope(body) : τ   iff   Γ_exit has 0 outstanding Obligation<K>
+    //
+    // Each GRADED-REFINEMENT-N clause below mechanically verifies one
+    // refinement-boundary law implied by the judgment.
+    //
+    // Every case emits one stderr JSON-line verdict of shape:
+    //   {"id":"GRADED-REFINEMENT-N","verdict":"PASS|FAIL","level":"MUST"}
+    // so a CI harness can grep+count pass/fail without parsing panics.
+    // ========================================================================
+
+    fn emit_verdict(id: &str, pass: bool) {
+        eprintln!(
+            "{{\"id\":\"{id}\",\"verdict\":\"{}\",\"level\":\"MUST\"}}",
+            if pass { "PASS" } else { "FAIL" }
+        );
+    }
+
+    // GRADED-REFINEMENT-1: reserve(K) increases reserved count by exactly 1.
+    #[test]
+    fn conformance_graded_refinement_1_reserve_is_plus_one() {
+        init_test("GRADED-REFINEMENT-1");
+        let mut scope = GradedScope::open("L1");
+        let r0 = scope.outstanding();
+        scope.on_reserve();
+        let r1 = scope.outstanding();
+        let pass = r0 == 0 && r1 == 1;
+        emit_verdict("GRADED-REFINEMENT-1", pass);
+        // Clean up so Drop doesn't panic.
+        scope.on_resolve();
+        let _ = scope.close();
+        assert!(pass, "reserve did not increment outstanding by exactly 1");
+    }
+
+    // GRADED-REFINEMENT-2: commit(x) decreases outstanding by exactly 1.
+    #[test]
+    fn conformance_graded_refinement_2_commit_is_minus_one() {
+        init_test("GRADED-REFINEMENT-2");
+        let mut scope = GradedScope::open("L2");
+        scope.on_reserve();
+        let before = scope.outstanding();
+        let tok: ObligationToken<SendPermit> = ObligationToken::reserve("L2");
+        let _proof = tok.commit(); // consume token
+        scope.on_resolve();
+        let after = scope.outstanding();
+        let pass = before == 1 && after == 0;
+        emit_verdict("GRADED-REFINEMENT-2", pass);
+        let _ = scope.close();
+        assert!(pass, "commit did not decrement outstanding by exactly 1");
+    }
+
+    // GRADED-REFINEMENT-3: abort(x) decreases outstanding by exactly 1
+    // (symmetric with commit: the refinement sees only "resolved").
+    #[test]
+    fn conformance_graded_refinement_3_abort_is_minus_one() {
+        init_test("GRADED-REFINEMENT-3");
+        let mut scope = GradedScope::open("L3");
+        scope.on_reserve();
+        let before = scope.outstanding();
+        let tok: ObligationToken<AckKind> = ObligationToken::reserve("L3");
+        let _proof = tok.abort();
+        scope.on_resolve();
+        let after = scope.outstanding();
+        let pass = before == 1 && after == 0;
+        emit_verdict("GRADED-REFINEMENT-3", pass);
+        let _ = scope.close();
+        assert!(pass, "abort did not decrement outstanding by exactly 1");
+    }
+
+    // GRADED-REFINEMENT-4: scope close() at 0 outstanding yields a ScopeProof
+    // whose total_reserved == total_resolved.
+    #[test]
+    fn conformance_graded_refinement_4_close_clean_boundary() {
+        init_test("GRADED-REFINEMENT-4");
+        let mut scope = GradedScope::open("L4");
+        for _ in 0..7 {
+            scope.on_reserve();
+            scope.on_resolve();
+        }
+        let result = scope.close();
+        let pass = match &result {
+            Ok(p) => p.total_reserved() == 7 && p.total_resolved() == 7,
+            Err(_) => false,
+        };
+        emit_verdict("GRADED-REFINEMENT-4", pass);
+        assert!(pass, "close() at 0 outstanding did not produce matching counts");
+    }
+
+    // GRADED-REFINEMENT-5: scope close() with outstanding > 0 yields a
+    // ScopeLeakError whose fields satisfy reserved - resolved == outstanding.
+    #[test]
+    fn conformance_graded_refinement_5_close_leak_exact_accounting() {
+        init_test("GRADED-REFINEMENT-5");
+        let mut scope = GradedScope::open("L5");
+        for _ in 0..5 {
+            scope.on_reserve();
+        }
+        for _ in 0..2 {
+            scope.on_resolve();
+        }
+        let err = scope.close().expect_err("expected leak");
+        let pass = err.reserved == 5
+            && err.resolved == 2
+            && err.outstanding == err.reserved - err.resolved
+            && err.outstanding == 3;
+        emit_verdict("GRADED-REFINEMENT-5", pass);
+        assert!(pass, "leak accounting diverges from reserved - resolved");
+    }
+
+    // GRADED-REFINEMENT-6: outstanding() is a pure function of the running
+    // net of reserves vs. resolves. After any prefix of a balanced interleaving,
+    // outstanding() == (#reserves_seen - #resolves_seen) and is non-negative.
+    //
+    // Note: on_resolve() panics if called more times than on_reserve(), so the
+    // op sequence below is a valid prefix (net never goes negative).
+    #[test]
+    fn conformance_graded_refinement_6_outstanding_tracks_running_net() {
+        init_test("GRADED-REFINEMENT-6");
+        let mut scope = GradedScope::open("L6");
+        let ops = [true, true, false, true, false, false, true, true, false, false];
+        let mut net: i64 = 0;
+        let mut ok = true;
+        for reserve in ops {
+            if reserve {
+                scope.on_reserve();
+                net += 1;
+            } else {
+                scope.on_resolve();
+                net -= 1;
+            }
+            let got = i64::from(scope.outstanding());
+            if got != net || net < 0 {
+                ok = false;
+            }
+        }
+        // Balanced: outstanding must be exactly 0 at the end.
+        ok = ok && scope.outstanding() == 0 && net == 0;
+        emit_verdict("GRADED-REFINEMENT-6", ok);
+        let _ = scope.close();
+        assert!(ok, "outstanding diverged from the running net of ops");
+    }
+
+    // GRADED-REFINEMENT-7: Resolution preserves obligation kind.
+    // GradedObligation::reserve(K, _).resolve(r).kind() == K.
+    #[test]
+    fn conformance_graded_refinement_7_resolution_preserves_kind() {
+        init_test("GRADED-REFINEMENT-7");
+        let cases = [
+            (ObligationKind::SendPermit, Resolution::Commit),
+            (ObligationKind::SendPermit, Resolution::Abort),
+            (ObligationKind::Ack, Resolution::Commit),
+            (ObligationKind::Ack, Resolution::Abort),
+            (ObligationKind::Lease, Resolution::Commit),
+            (ObligationKind::Lease, Resolution::Abort),
+            (ObligationKind::IoOp, Resolution::Commit),
+            (ObligationKind::IoOp, Resolution::Abort),
+            (ObligationKind::SemaphorePermit, Resolution::Commit),
+            (ObligationKind::SemaphorePermit, Resolution::Abort),
+        ];
+        let mut pass = true;
+        for (k, r) in cases {
+            let ob = GradedObligation::reserve(k, "kind-test");
+            let proof = ob.resolve(r);
+            if proof.kind() != k || proof.resolution() != r {
+                pass = false;
+            }
+        }
+        emit_verdict("GRADED-REFINEMENT-7", pass);
+        assert!(pass, "resolution dropped kind or resolution on the floor");
+    }
+
+    // GRADED-REFINEMENT-8: Typestate ObligationToken<K> preserves K through
+    // CommittedProof<K> / AbortedProof<K>.
+    #[test]
+    fn conformance_graded_refinement_8_typestate_preserves_kind() {
+        init_test("GRADED-REFINEMENT-8");
+        let send_commit = <SendPermit as TokenKind>::obligation_kind();
+        let ack_abort = <AckKind as TokenKind>::obligation_kind();
+
+        let t1: SendPermitToken = ObligationToken::reserve("send");
+        let p1 = t1.commit();
+        let pass1 = p1.kind() == send_commit && p1.into_resolved_proof().kind() == send_commit;
+
+        let t2: AckToken = ObligationToken::reserve("ack");
+        let p2 = t2.abort();
+        let pass2 = p2.kind() == ack_abort && p2.into_resolved_proof().kind() == ack_abort;
+
+        let pass = pass1 && pass2;
+        emit_verdict("GRADED-REFINEMENT-8", pass);
+        assert!(pass, "typestate token lost kind across commit/abort");
+    }
+
+    // GRADED-REFINEMENT-9: into_raw() disarms the drop bomb AND preserves kind.
+    #[test]
+    fn conformance_graded_refinement_9_into_raw_disarms_and_preserves_kind() {
+        init_test("GRADED-REFINEMENT-9");
+        let ob = GradedObligation::reserve(ObligationKind::Lease, "raw");
+        let raw = ob.into_raw();
+        let pass_a = raw.kind == ObligationKind::Lease && raw.description == "raw";
+
+        let tok: LeaseToken = ObligationToken::reserve("raw-ts");
+        let raw2 = tok.into_raw();
+        let pass_b = raw2.kind == ObligationKind::Lease && raw2.description == "raw-ts";
+
+        // If into_raw did NOT disarm the drop bomb, the two calls above would
+        // have panicked. Reaching this point is the disarm proof.
+        let pass = pass_a && pass_b;
+        emit_verdict("GRADED-REFINEMENT-9", pass);
+        assert!(pass, "into_raw lost kind or description across the boundary");
+    }
+
+    // GRADED-REFINEMENT-10: Boundary monotonicity — scope close() returning
+    // Ok implies all ScopeProof counts are ≥ 0 and total_reserved == total_resolved;
+    // scope close() returning Err implies outstanding > 0 and
+    // reserved > resolved. Cases are disjoint and cover the boundary.
+    #[test]
+    fn conformance_graded_refinement_10_close_boundary_disjoint() {
+        init_test("GRADED-REFINEMENT-10");
+        // Clean side.
+        let mut clean = GradedScope::open("L10-clean");
+        for _ in 0..3 {
+            clean.on_reserve();
+            clean.on_resolve();
+        }
+        let clean_ok = clean.close();
+        let clean_pass = matches!(&clean_ok, Ok(p) if p.total_reserved() == 3 && p.total_resolved() == 3);
+
+        // Leaky side.
+        let mut leaky = GradedScope::open("L10-leaky");
+        for _ in 0..4 {
+            leaky.on_reserve();
+        }
+        for _ in 0..1 {
+            leaky.on_resolve();
+        }
+        let leaky_err = leaky.close();
+        let leaky_pass = matches!(
+            &leaky_err,
+            Err(e) if e.outstanding == 3 && e.reserved > e.resolved && e.reserved == 4 && e.resolved == 1
+        );
+
+        let pass = clean_pass && leaky_pass;
+        emit_verdict("GRADED-REFINEMENT-10", pass);
+        assert!(pass, "close() boundary cases are not disjoint or mis-accounted");
+    }
 }
