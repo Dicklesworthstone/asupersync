@@ -703,7 +703,7 @@ impl Connection {
         })?;
         stream.recv_data(payload_len, frame.end_stream)?;
 
-        // Auto stream-level WINDOW_UPDATE when recv window drops below 50%.
+        // Auto stream-level WINDOW_UPDATE when recv window drops below 25%.
         if stream.state().can_recv() {
             if let Some(increment) = stream.auto_window_update_increment() {
                 // Cannot call send_stream_window_update while stream is borrowed,
@@ -1860,8 +1860,8 @@ mod tests {
         conn.process_frame(headers).expect("process headers");
 
         let initial_window = settings::DEFAULT_INITIAL_WINDOW_SIZE;
-        // Send data that crosses the 50% threshold for the *stream*.
-        let payload_len = initial_window / 2 + 2;
+        // Send data that crosses the 25% threshold for the *stream*.
+        let payload_len = initial_window * 3 / 4 + 2;
         let data = Bytes::from(vec![0_u8; payload_len as usize]);
         let frame = Frame::Data(DataFrame::new(1, data, false));
         conn.process_frame(frame).expect("process data");

@@ -310,11 +310,16 @@ impl Stream {
 
     /// Check if the receive window is low enough to warrant an automatic WINDOW_UPDATE.
     ///
-    /// Returns `Some(increment)` when the recv window has dropped below 50% of
+    /// Returns `Some(increment)` when the recv window has dropped below 25% of
     /// its initial value. The increment replenishes the window back to its initial size.
+    ///
+    /// This conservative threshold (25% instead of 50%) prevents eager WINDOW_UPDATE
+    /// sending that defeats flow control backpressure and reduces risk of unbounded
+    /// memory buffering.
     #[must_use]
     pub fn auto_window_update_increment(&self) -> Option<u32> {
-        let low_watermark = self.initial_recv_window / 2;
+        // Use 25% threshold instead of 50% to be more conservative about flow control
+        let low_watermark = self.initial_recv_window / 4;
         if self.recv_window < low_watermark {
             let increment = i64::from(self.initial_recv_window) - i64::from(self.recv_window);
             u32::try_from(increment).ok().filter(|&inc| inc > 0)
@@ -963,14 +968,14 @@ mod tests {
     }
 
     #[test]
-    fn auto_window_update_triggered_when_window_below_half() {
+    fn auto_window_update_triggered_when_window_below_quarter() {
         let initial = DEFAULT_INITIAL_WINDOW_SIZE;
         let initial_i32 = i32::try_from(initial).unwrap();
         let mut stream = Stream::new(1, initial, DEFAULT_MAX_HEADER_LIST_SIZE);
         stream.send_headers(false).unwrap();
 
-        // Consume just over half to cross the watermark.
-        let consume = u32::try_from(initial_i32 / 2 + 2).unwrap();
+        // Consume just over 75% to cross the 25% watermark.
+        let consume = u32::try_from(initial_i32 * 3 / 4 + 2).unwrap();
         stream.recv_data(consume, false).unwrap();
 
         let increment = stream
@@ -991,8 +996,8 @@ mod tests {
         let mut stream = Stream::new(1, initial, DEFAULT_MAX_HEADER_LIST_SIZE);
         stream.send_headers(false).unwrap();
 
-        // Drain below the watermark.
-        let consume = u32::try_from(initial_i32 / 2 + 2).unwrap();
+        // Drain below the 25% watermark.
+        let consume = u32::try_from(initial_i32 * 3 / 4 + 2).unwrap();
         stream.recv_data(consume, false).unwrap();
 
         let increment = stream.auto_window_update_increment().unwrap();
