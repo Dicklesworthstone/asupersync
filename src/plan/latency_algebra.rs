@@ -1671,6 +1671,7 @@ pub fn backlog_bound(arrival: &ArrivalCurve, service: &ServiceCurve) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insta::assert_snapshot;
     use std::time::Duration;
 
     // Tolerance for floating-point comparisons.
@@ -1969,6 +1970,9 @@ mod tests {
         );
 
         let analysis = analyzer.analyze(&dag);
+
+        // Golden artifact: freeze latency analysis output
+        insta::assert_snapshot!(analysis.to_string());
 
         // Join should take the max (slow's delay).
         let root_delay = analysis.end_to_end_delay().unwrap();
@@ -2285,6 +2289,17 @@ mod tests {
     }
 
     #[test]
+    fn bound_contribution_display_format() {
+        let contribution = BoundContribution {
+            node_id: PlanId::new(42),
+            delay: 0.123_456_789,
+            description: "pipeline stage with high latency".to_string(),
+        };
+
+        assert_snapshot!(format!("{contribution}"));
+    }
+
+    #[test]
     fn latency_bound_display_format() {
         let bound = LatencyBound {
             delay: 0.123_456,
@@ -2297,11 +2312,7 @@ mod tests {
             }],
         };
 
-        let display = format!("{bound}");
-        assert!(display.contains("0.123456s"));
-        assert!(display.contains("42.00"));
-        assert!(display.contains("75.0%"));
-        assert!(display.contains("test node"));
+        assert_snapshot!(format!("{bound}"));
     }
 
     #[test]
@@ -2492,10 +2503,7 @@ mod tests {
         );
 
         let analysis = analyzer.analyze(&dag);
-        let display = format!("{analysis}");
-        assert!(display.contains("node[0]"));
-        assert!(display.contains("node[1]"));
-        assert!(display.contains("node[2]"));
+        assert_snapshot!(format!("{analysis}"));
     }
 
     // -----------------------------------------------------------------------
@@ -2685,5 +2693,153 @@ mod tests {
                 gh.eval(t)
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Golden artifacts for mathematical Display outputs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bound_contribution_infinite_delay() {
+        let contribution = BoundContribution {
+            node_id: PlanId::new(7),
+            delay: f64::INFINITY,
+            description: "bottleneck node with no service curve".to_string(),
+        };
+
+        assert_snapshot!(format!("{contribution}"));
+    }
+
+    #[test]
+    fn bound_contribution_zero_delay() {
+        let contribution = BoundContribution {
+            node_id: PlanId::new(0),
+            delay: 0.0,
+            description: "instant operation".to_string(),
+        };
+
+        assert_snapshot!(format!("{contribution}"));
+    }
+
+    #[test]
+    fn latency_bound_complex_provenance() {
+        let bound = LatencyBound {
+            delay: 2.345_678,
+            backlog: 1234.56,
+            utilization: 0.89,
+            provenance: vec![
+                BoundContribution {
+                    node_id: PlanId::new(1),
+                    delay: 0.5,
+                    description: "database query".to_string(),
+                },
+                BoundContribution {
+                    node_id: PlanId::new(3),
+                    delay: 1.2,
+                    description: "network request with retry".to_string(),
+                },
+                BoundContribution {
+                    node_id: PlanId::new(5),
+                    delay: 0.645_678,
+                    description: "computation pipeline".to_string(),
+                },
+            ],
+        };
+
+        assert_snapshot!(format!("{bound}"));
+    }
+
+    #[test]
+    fn latency_bound_unstable_system() {
+        let bound = LatencyBound {
+            delay: f64::INFINITY,
+            backlog: f64::INFINITY,
+            utilization: 1.5,
+            provenance: vec![BoundContribution {
+                node_id: PlanId::new(2),
+                delay: f64::INFINITY,
+                description: "overloaded service (rate > capacity)".to_string(),
+            }],
+        };
+
+        assert_snapshot!(format!("{bound}"));
+    }
+
+    #[test]
+    fn latency_analysis_complex_dag() {
+        let mut dag = PlanDag::new();
+
+        // Build a complex DAG: (a || b || c) && (d || e)
+        let a = dag.leaf("fast_cache_lookup");
+        let b = dag.leaf("slow_database_query");
+        let c = dag.leaf("post_processing");
+        let d = dag.leaf("parallel_computation");
+        let e = dag.leaf("result_aggregation");
+
+        let abc_race = dag.race(vec![a, b, c]);
+        let de_race = dag.race(vec![d, e]);
+        let final_join = dag.join(vec![abc_race, de_race]);
+
+        dag.set_root(final_join);
+
+        let mut analyzer = LatencyAnalyzer::new();
+
+        // Annotate with diverse service characteristics
+        analyzer.annotate(a, NodeCurves::new(
+            ArrivalCurve::constant_rate(100.0),
+            ServiceCurve::rate_latency(500.0, 0.001),
+        ));
+        analyzer.annotate(b, NodeCurves::new(
+            ArrivalCurve::token_bucket(50.0, 20.0),
+            ServiceCurve::rate_latency(80.0, 0.05),
+        ));
+        analyzer.annotate(c, NodeCurves::new(
+            ArrivalCurve::constant_rate(50.0),
+            ServiceCurve::rate_latency(200.0, 0.01),
+        ));
+        analyzer.annotate(d, NodeCurves::new(
+            ArrivalCurve::constant_rate(30.0),
+            ServiceCurve::rate_latency(150.0, 0.02),
+        ));
+        analyzer.annotate(e, NodeCurves::new(
+            ArrivalCurve::constant_rate(25.0),
+            ServiceCurve::rate_latency(100.0, 0.015),
+        ));
+
+        let analysis = analyzer.analyze(&dag);
+        assert_snapshot!(format!("{analysis}"));
+    }
+
+    #[test]
+    fn latency_analysis_single_node_with_annotation() {
+        let mut dag = PlanDag::new();
+        let single = dag.leaf("annotated_service");
+        dag.set_root(single);
+
+        let mut analyzer = LatencyAnalyzer::new();
+        analyzer.annotate(single, NodeCurves::new(
+            ArrivalCurve::token_bucket(75.5, 25.3),
+            ServiceCurve::rate_latency(120.7, 0.0123),
+        ));
+
+        let analysis = analyzer.analyze(&dag);
+        assert_snapshot!(format!("{analysis}"));
+    }
+
+    #[test]
+    fn latency_analysis_unannotated_leaves() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("unannotated_service_a");
+        let b = dag.leaf("unannotated_service_b");
+        let joined = dag.join(vec![a, b]);
+        dag.set_root(joined);
+
+        let analyzer = LatencyAnalyzer::with_defaults(
+            ArrivalCurve::constant_rate(10.0),
+            ServiceCurve::constant_rate(5.0), // Overloaded system
+        );
+
+        let analysis = analyzer.analyze(&dag);
+        assert_snapshot!(format!("{analysis}"));
     }
 }
