@@ -906,20 +906,25 @@ mod tests {
                 .replace("beta-node", "[NODE_B]")
         }
 
+        fn scrub_value(value: &mut Value) {
+            match value {
+                Value::String(text) => *text = scrub_node_names(text),
+                Value::Array(values) => {
+                    for entry in values {
+                        scrub_value(entry);
+                    }
+                }
+                Value::Object(map) => {
+                    for entry in map.values_mut() {
+                        scrub_value(entry);
+                    }
+                }
+                Value::Null | Value::Bool(_) | Value::Number(_) => {}
+            }
+        }
+
         let mut scrubbed = value;
-
-        if let Some(display) = scrubbed.pointer_mut("/display") {
-            if let Some(text) = display.as_str() {
-                *display = Value::String(scrub_node_names(text));
-            }
-        }
-
-        if let Some(debug) = scrubbed.pointer_mut("/debug") {
-            if let Some(text) = debug.as_str() {
-                *debug = Value::String(scrub_node_names(text));
-            }
-        }
-
+        scrub_value(&mut scrubbed);
         scrubbed
     }
 
@@ -1210,6 +1215,54 @@ mod tests {
 
         // B's events happen after A's send
         assert!(msg_clock.happens_before(tracker_b.current_clock()));
+    }
+
+    #[test]
+    fn causal_tracker_transcript_snapshot_scrubbed() {
+        let na = node("alpha-node");
+        let nb = node("beta-node");
+        let mut tracker_a = CausalTracker::new(na);
+        let mut tracker_b = CausalTracker::new(nb);
+        let node_a = tracker_a.node().as_str().to_string();
+        let node_b = tracker_b.node().as_str().to_string();
+
+        let a_local = tracker_a.record_local_event();
+        let a_send = tracker_a.on_send();
+        tracker_b.on_receive(&a_send);
+        let b_after_receive = tracker_b.current_clock().clone();
+        let b_local = tracker_b.record_local_event();
+
+        insta::assert_json_snapshot!(
+            "causal_tracker_transcript_scrubbed",
+            scrub_vclock_output(json!({
+                "steps": [
+                    {
+                        "step": "a_local",
+                        "node": node_a,
+                        "clock": a_local.to_string(),
+                    },
+                    {
+                        "step": "a_send",
+                        "node": tracker_a.node().as_str(),
+                        "clock": a_send.to_string(),
+                        "order_vs_local": format!("{:?}", a_send.causal_order(&a_local)),
+                    },
+                    {
+                        "step": "b_receive",
+                        "node": node_b,
+                        "clock": b_after_receive.to_string(),
+                        "order_vs_send": format!("{:?}", b_after_receive.causal_order(&a_send)),
+                    },
+                    {
+                        "step": "b_local",
+                        "node": tracker_b.node().as_str(),
+                        "clock": b_local.to_string(),
+                        "send_happens_before": a_send.happens_before(&b_local),
+                        "receive_happens_before": b_after_receive.happens_before(&b_local),
+                    }
+                ]
+            }))
+        );
     }
 
     #[test]
