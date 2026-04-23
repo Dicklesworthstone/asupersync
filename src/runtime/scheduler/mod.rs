@@ -16,12 +16,14 @@ pub mod global_queue;
 pub mod intrusive;
 pub mod intrusive_heap;
 pub mod invariant_monitor;
-pub mod local_queue;
 #[cfg(test)]
 pub mod lane_pressure_scaling_metamorphic;
+pub mod local_queue;
 #[cfg(test)]
 pub mod metamorphic_tests;
 pub mod priority;
+#[cfg(test)]
+pub mod priority_inversion_metamorphic;
 pub mod priority_inversion_oracle;
 pub mod stealing;
 pub mod three_lane;
