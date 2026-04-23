@@ -8,7 +8,7 @@
 
 use asupersync::cx::Cx;
 use asupersync::http::h3_native::{
-    H3ConnectionState, H3ControlState, H3Frame, H3PseudoHeaders, H3QpackMode, H3RequestHead,
+    H3ConnectionConfig, H3ConnectionState, H3ControlState, H3Frame, H3PseudoHeaders, H3QpackMode, H3RequestHead,
     H3RequestStreamState, H3ResponseHead, H3Settings, qpack_decode_request_field_section,
     qpack_decode_response_field_section, qpack_encode_request_field_section,
     qpack_encode_response_field_section, qpack_static_plan_for_request,
@@ -31,6 +31,11 @@ use asupersync::util::DetRng;
 /// Build a test Cx with infinite budget and no cancellation.
 fn test_cx() -> Cx {
     Cx::for_testing()
+}
+
+/// Default H3ConnectionConfig for tests.
+fn test_config() -> H3ConnectionConfig {
+    H3ConnectionConfig::default()
 }
 
 /// Deterministic microsecond clock starting at seed-derived offset.
@@ -405,15 +410,15 @@ fn h3_frame_encode_decode_over_stream() {
     // Decode frames from the wire buffer on the "server" side.
     let mut pos = 0;
     let (decoded_settings, consumed) =
-        H3Frame::decode(&wire[pos..]).expect("decode settings frame");
+        H3Frame::decode(&wire[pos..], &test_config()).expect("decode settings frame");
     pos += consumed;
     assert_eq!(decoded_settings, settings_frame);
 
-    let (decoded_headers, consumed) = H3Frame::decode(&wire[pos..]).expect("decode headers frame");
+    let (decoded_headers, consumed) = H3Frame::decode(&wire[pos..], &test_config()).expect("decode headers frame");
     pos += consumed;
     assert_eq!(decoded_headers, headers_frame);
 
-    let (decoded_data, consumed) = H3Frame::decode(&wire[pos..]).expect("decode data frame");
+    let (decoded_data, consumed) = H3Frame::decode(&wire[pos..], &test_config()).expect("decode data frame");
     pos += consumed;
     assert_eq!(pos, wire.len(), "all bytes consumed");
 
@@ -543,7 +548,7 @@ fn h3_request_response_lifecycle() {
 
     // Decode on the "client" side.
     let mut pos = 0;
-    let (dec_h, n) = H3Frame::decode(&resp_wire[pos..]).expect("decode resp headers");
+    let (dec_h, n) = H3Frame::decode(&resp_wire[pos..], &test_config()).expect("decode resp headers");
     pos += n;
     assert_eq!(dec_h, resp_headers);
     if let H3Frame::Headers(block) = &dec_h {
@@ -554,7 +559,7 @@ fn h3_request_response_lifecycle() {
         panic!("expected response HEADERS frame");
     }
 
-    let (dec_d, n) = H3Frame::decode(&resp_wire[pos..]).expect("decode resp data");
+    let (dec_d, n) = H3Frame::decode(&resp_wire[pos..], &test_config()).expect("decode resp data");
     pos += n;
     assert_eq!(dec_d, resp_data);
     assert_eq!(pos, resp_wire.len());
@@ -916,7 +921,7 @@ fn h3_goaway_and_connection_drain() {
     goaway.encode(&mut goaway_wire).expect("encode goaway");
 
     // Client decodes GOAWAY.
-    let (decoded_goaway, _) = H3Frame::decode(&goaway_wire).expect("decode goaway");
+    let (decoded_goaway, _) = H3Frame::decode(&goaway_wire, &test_config()).expect("decode goaway");
     client_h3
         .on_control_frame(&decoded_goaway)
         .expect("client goaway");

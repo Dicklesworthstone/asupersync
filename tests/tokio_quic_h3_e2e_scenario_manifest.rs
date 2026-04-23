@@ -13,7 +13,7 @@
 
 use asupersync::cx::Cx;
 use asupersync::http::h3_native::{
-    H3ConnectionState, H3ControlState, H3Frame, H3NativeError, H3PseudoHeaders, H3QpackMode,
+    H3ConnectionConfig, H3ConnectionState, H3ControlState, H3Frame, H3NativeError, H3PseudoHeaders, H3QpackMode,
     H3RequestHead, H3RequestStreamState, H3ResponseHead, H3Settings,
 };
 use asupersync::net::quic_native::connection::{
@@ -32,6 +32,11 @@ use asupersync::net::quic_native::transport::{
 
 fn test_cx() -> Cx {
     Cx::for_testing()
+}
+
+/// Default H3ConnectionConfig for tests.
+fn test_config() -> H3ConnectionConfig {
+    H3ConnectionConfig::default()
 }
 
 fn cancelled_cx() -> Cx {
@@ -424,7 +429,7 @@ fn eh_04_settings_with_unknown() {
     let frame = H3Frame::Settings(settings.clone());
     let mut buf = Vec::new();
     frame.encode(&mut buf).expect("encode");
-    let (decoded, _) = H3Frame::decode(&buf).expect("decode");
+    let (decoded, _) = H3Frame::decode(&buf, &test_config()).expect("decode");
     assert_eq!(decoded, H3Frame::Settings(settings));
 }
 

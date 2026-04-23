@@ -8,7 +8,7 @@
 
 use asupersync::cx::Cx;
 use asupersync::http::h3_native::{
-    H3ConnectionState, H3ControlState, H3Frame, H3NativeError, H3QpackMode, H3Settings,
+    H3ConnectionConfig, H3ConnectionState, H3ControlState, H3Frame, H3NativeError, H3QpackMode, H3Settings,
     QpackFieldPlan, qpack_decode_request_field_section, qpack_encode_field_section,
 };
 use asupersync::net::quic_core::{
@@ -27,6 +27,11 @@ use asupersync::util::DetRng;
 /// Build a test Cx with infinite budget and no cancellation.
 fn test_cx() -> Cx {
     Cx::for_testing()
+}
+
+/// Default H3ConnectionConfig for tests.
+fn test_config() -> H3ConnectionConfig {
+    H3ConnectionConfig::default()
 }
 
 /// Deterministic microsecond clock starting at seed-derived offset.
@@ -398,11 +403,11 @@ fn h3_frame_decode_truncated_data() {
     let _rng = DetRng::new(0xE6_0007);
 
     // Empty buffer.
-    let err = H3Frame::decode(&[]).expect_err("empty buffer must fail");
+    let err = H3Frame::decode(&[], &test_config()).expect_err("empty buffer must fail");
     assert_eq!(format!("{err}"), "invalid frame: frame type varint");
 
     // Single byte: frame type varint ok but no length varint.
-    let err = H3Frame::decode(&[0x00]).expect_err("no length must fail");
+    let err = H3Frame::decode(&[0x00], &test_config()).expect_err("no length must fail");
     assert_eq!(format!("{err}"), "invalid frame: frame length varint");
 
     // DATA frame (type=0x00) with length=10 but only 3 payload bytes.
@@ -412,7 +417,7 @@ fn h3_frame_decode_truncated_data() {
     // Truncate: keep only the header + 3 bytes of the 10-byte payload.
     let header_len = wire.len() - 10;
     let truncated = &wire[..header_len + 3];
-    let err = H3Frame::decode(truncated).expect_err("truncated payload must fail");
+    let err = H3Frame::decode(truncated, &test_config()).expect_err("truncated payload must fail");
     assert_eq!(format!("{err}"), "unexpected EOF");
 
     // GOAWAY frame with just the frame type and length but no stream ID payload.
@@ -422,7 +427,7 @@ fn h3_frame_decode_truncated_data() {
     // Keep only the type and length bytes.
     let payload_start = goaway_wire.len() - 1; // GOAWAY payload is 1 varint byte for value 42
     let truncated_goaway = &goaway_wire[..payload_start];
-    let err = H3Frame::decode(truncated_goaway).expect_err("truncated GOAWAY must fail");
+    let err = H3Frame::decode(truncated_goaway, &test_config()).expect_err("truncated GOAWAY must fail");
     assert_eq!(format!("{err}"), "unexpected EOF");
 }
 

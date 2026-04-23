@@ -43,6 +43,8 @@ pub enum H3NativeError {
     UnexpectedEof,
     /// Malformed frame.
     InvalidFrame(&'static str),
+    /// Frame payload exceeds maximum allowed size.
+    FrameTooLarge { payload_size: usize, max_size: usize },
     /// Duplicate setting key.
     DuplicateSetting(u64),
     /// Invalid setting value.
@@ -57,6 +59,13 @@ pub enum H3NativeError {
     InvalidRequestPseudoHeader(&'static str),
     /// Invalid response pseudo headers.
     InvalidResponsePseudoHeader(&'static str),
+    /// New request stream rejected because peer-advertised concurrency cap is full.
+    ///
+    /// Per RFC 9114 §5.1.2, an HTTP/3 endpoint MUST respect the QUIC
+    /// `initial_max_streams_bidi` / MAX_STREAMS limits. The local state machine
+    /// returns this error when a frame arrives for a previously-unseen
+    /// request-stream id while `active_request_stream_count >= max`.
+    ConcurrentStreamLimitExceeded { active: u64, limit: u64 },
 }
 
 impl fmt::Display for H3NativeError {
@@ -64,6 +73,10 @@ impl fmt::Display for H3NativeError {
         match self {
             Self::UnexpectedEof => write!(f, "unexpected EOF"),
             Self::InvalidFrame(msg) => write!(f, "invalid frame: {msg}"),
+            Self::FrameTooLarge { payload_size, max_size } => write!(
+                f,
+                "frame payload too large: {payload_size} bytes exceeds limit of {max_size} bytes"
+            ),
             Self::DuplicateSetting(id) => write!(f, "duplicate setting: 0x{id:x}"),
             Self::InvalidSettingValue(id) => write!(f, "invalid setting value: 0x{id:x}"),
             Self::ControlProtocol(msg) => write!(f, "control stream protocol violation: {msg}"),
@@ -75,6 +88,10 @@ impl fmt::Display for H3NativeError {
             Self::InvalidResponsePseudoHeader(msg) => {
                 write!(f, "invalid response pseudo-header set: {msg}")
             }
+            Self::ConcurrentStreamLimitExceeded { active, limit } => write!(
+                f,
+                "concurrent request stream limit exceeded: {active} active, limit {limit}"
+            ),
         }
     }
 }
@@ -108,6 +125,16 @@ pub struct H3ConnectionConfig {
     pub qpack_mode: H3QpackMode,
     /// Endpoint role for GOAWAY validation.
     pub endpoint_role: H3EndpointRole,
+    /// Maximum frame payload size in bytes (RFC 9114 §4.2).
+    pub max_frame_payload_size: usize,
+    /// Peer-advertised limit on concurrent client-initiated bidirectional
+    /// request streams (QUIC `initial_max_streams_bidi` / MAX_STREAMS).
+    ///
+    /// `None` disables enforcement at the HTTP/3 layer. Per RFC 9114 §5.1.2,
+    /// endpoints MUST respect QUIC concurrency limits; set this from the
+    /// transport parameter negotiated at connection start, and update it as
+    /// MAX_STREAMS frames arrive.
+    pub max_concurrent_request_streams: Option<u64>,
 }
 
 impl Default for H3ConnectionConfig {
@@ -115,6 +142,9 @@ impl Default for H3ConnectionConfig {
         Self {
             qpack_mode: H3QpackMode::StaticOnly,
             endpoint_role: H3EndpointRole::Client,
+            // 1MB default limit aligns with common HTTP/3 implementations
+            max_frame_payload_size: 1024 * 1024,
+            max_concurrent_request_streams: None,
         }
     }
 }
@@ -371,7 +401,7 @@ impl H3Frame {
     }
 
     /// Decode one frame, returning `(frame, consumed)`.
-    pub fn decode(input: &[u8]) -> Result<(Self, usize), H3NativeError> {
+    pub fn decode(input: &[u8], config: &H3ConnectionConfig) -> Result<(Self, usize), H3NativeError> {
         let (frame_type, type_len) =
             decode_varint(input).map_err(|_| H3NativeError::InvalidFrame("frame type varint"))?;
         let (len, len_len) = decode_varint(&input[type_len..])
@@ -379,6 +409,15 @@ impl H3Frame {
         let len: usize = len
             .try_into()
             .map_err(|_| H3NativeError::InvalidFrame("frame length exceeds addressable range"))?;
+
+        // RFC 9114 §4.2: Enforce maximum frame payload size limit
+        if len > config.max_frame_payload_size {
+            return Err(H3NativeError::FrameTooLarge {
+                payload_size: len,
+                max_size: config.max_frame_payload_size,
+            });
+        }
+
         let payload_start = type_len + len_len;
 
         // DATAGRAM frames (RFC 9297) are bounded: their declared length
@@ -531,6 +570,8 @@ pub struct H3PseudoHeaders {
     pub path: Option<String>,
     /// `:status`.
     pub status: Option<u16>,
+    /// `:protocol` (RFC 8441 extended CONNECT protocol).
+    pub protocol: Option<String>,
 }
 
 /// HTTP/3 request-head representation.
@@ -559,6 +600,41 @@ impl H3RequestHead {
             validate_header_value(value)?;
         }
         Ok(Self { pseudo, headers })
+    }
+
+    /// Construct and validate request head with extended CONNECT protocol support.
+    ///
+    /// When `enable_connect_protocol` is true, CONNECT requests are allowed to
+    /// include :scheme and :path pseudo-headers per RFC 8441.
+    pub fn new_with_settings(
+        pseudo: H3PseudoHeaders,
+        headers: Vec<(String, String)>,
+        enable_connect_protocol: bool,
+    ) -> Result<Self, H3NativeError> {
+        validate_request_pseudo_headers_with_settings(&pseudo, enable_connect_protocol)?;
+        for (name, value) in &headers {
+            validate_header_name(name)?;
+            if name.starts_with(':') {
+                return Err(H3NativeError::InvalidRequestPseudoHeader(
+                    "pseudo headers must not appear in regular header list",
+                ));
+            }
+            validate_header_value(value)?;
+        }
+        Ok(Self { pseudo, headers })
+    }
+
+    /// Validate CONNECT method according to RFC 8441 extended CONNECT protocol.
+    ///
+    /// This method should be called for CONNECT requests to ensure proper
+    /// validation based on whether extended CONNECT protocol is enabled.
+    pub fn validate_connect_method(&self, enable_connect_protocol: bool) -> Result<(), H3NativeError> {
+        if self.pseudo.method.as_deref() != Some("CONNECT") {
+            return Err(H3NativeError::InvalidRequestPseudoHeader(
+                "validate_connect_method called on non-CONNECT request",
+            ));
+        }
+        validate_request_pseudo_headers_with_settings(&self.pseudo, enable_connect_protocol)
     }
 }
 
@@ -1681,8 +1757,40 @@ impl H3ConnectionState {
                 "request stream id rejected after GOAWAY",
             ));
         }
+        // RFC 9114 §5.1.2: reject new streams that would exceed the
+        // peer-negotiated QUIC bidi-stream cap. Previously-seen streams
+        // (still live, or already finished) pass through unchanged so that
+        // in-flight frames and trailers can complete normally.
+        if let Some(limit) = self.config.max_concurrent_request_streams
+            && !self.request_streams.contains_key(&stream_id)
+            && !self.is_request_stream_finished(stream_id)
+            && self.request_streams.len() as u64 >= limit
+        {
+            return Err(H3NativeError::ConcurrentStreamLimitExceeded {
+                active: self.request_streams.len() as u64,
+                limit,
+            });
+        }
         let state = self.request_streams.entry(stream_id).or_default();
         state.on_frame(frame)
+    }
+
+    /// Number of currently live (non-finished) request streams. Use this with
+    /// `H3ConnectionConfig::max_concurrent_request_streams` to surface "near
+    /// limit" observability to the transport layer.
+    #[must_use]
+    pub fn active_request_stream_count(&self) -> u64 {
+        self.request_streams.len() as u64
+    }
+
+    /// Update the peer-advertised concurrent-stream cap mid-connection.
+    ///
+    /// QUIC MAX_STREAMS frames can raise the limit; the peer MUST NOT reduce
+    /// it, but we accept any value here and leave policy to the caller. The
+    /// new limit applies only to future new-stream requests — already-live
+    /// streams are never retroactively rejected.
+    pub fn set_max_concurrent_request_streams(&mut self, limit: Option<u64>) {
+        self.config.max_concurrent_request_streams = limit;
     }
 
     /// Mark request-stream end and remove it from tracking.
@@ -1917,6 +2025,17 @@ fn is_peer_initiated_unidirectional_stream_id(
 
 /// Validate request pseudo headers.
 pub fn validate_request_pseudo_headers(headers: &H3PseudoHeaders) -> Result<(), H3NativeError> {
+    validate_request_pseudo_headers_with_settings(headers, false)
+}
+
+/// Validate request pseudo headers with extended CONNECT protocol support.
+///
+/// When `enable_connect_protocol` is true, CONNECT requests are allowed to
+/// include :scheme and :path pseudo-headers per RFC 8441.
+pub fn validate_request_pseudo_headers_with_settings(
+    headers: &H3PseudoHeaders,
+    enable_connect_protocol: bool
+) -> Result<(), H3NativeError> {
     let method = headers
         .method
         .as_deref()
@@ -1943,10 +2062,44 @@ pub fn validate_request_pseudo_headers(headers: &H3PseudoHeaders) -> Result<(), 
             ));
         }
         validate_authority_form(authority)?;
-        if headers.scheme.is_some() || headers.path.is_some() {
-            return Err(H3NativeError::InvalidRequestPseudoHeader(
-                "CONNECT request must not include :scheme or :path",
-            ));
+
+        // RFC 8441 Extended CONNECT Protocol support
+        if enable_connect_protocol {
+            // Extended CONNECT: allow :scheme/:path, require :protocol
+            if let Some(protocol) = &headers.protocol {
+                validate_header_value(protocol)?;
+                if protocol.is_empty() {
+                    return Err(H3NativeError::InvalidRequestPseudoHeader(
+                        "extended CONNECT request :protocol must not be empty",
+                    ));
+                }
+            } else {
+                return Err(H3NativeError::InvalidRequestPseudoHeader(
+                    "extended CONNECT request missing :protocol",
+                ));
+            }
+
+            // Validate :scheme and :path if present (optional for extended CONNECT)
+            if let Some(scheme) = &headers.scheme {
+                validate_header_value(scheme)?;
+                validate_scheme_token(scheme)?;
+            }
+            if let Some(path) = &headers.path {
+                validate_header_value(path)?;
+                validate_path_value(path)?;
+            }
+        } else {
+            // Standard CONNECT: reject :scheme/:path/:protocol
+            if headers.scheme.is_some() || headers.path.is_some() {
+                return Err(H3NativeError::InvalidRequestPseudoHeader(
+                    "CONNECT request must not include :scheme or :path",
+                ));
+            }
+            if headers.protocol.is_some() {
+                return Err(H3NativeError::InvalidRequestPseudoHeader(
+                    "CONNECT request must not include :protocol (extended CONNECT not enabled)",
+                ));
+            }
         }
         return Ok(());
     }
@@ -2013,6 +2166,10 @@ pub fn validate_response_pseudo_headers(headers: &H3PseudoHeaders) -> Result<(),
 mod tests {
     use super::*;
 
+    fn test_config() -> H3ConnectionConfig {
+        H3ConnectionConfig::default()
+    }
+
     #[test]
     fn settings_roundtrip_and_unknown_preservation() {
         let settings = H3Settings {
@@ -2063,7 +2220,7 @@ mod tests {
         };
         let mut buf = Vec::new();
         frame.encode(&mut buf).expect("encode");
-        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        let (decoded, consumed) = H3Frame::decode(&buf, &test_config()).expect("decode");
         assert_eq!(decoded, frame);
         assert_eq!(consumed, buf.len());
     }
@@ -2141,6 +2298,110 @@ mod tests {
         assert_eq!(
             err,
             H3NativeError::InvalidResponsePseudoHeader("status must be in 100..=999")
+        );
+    }
+
+    #[test]
+    fn extended_connect_protocol_validation() {
+        // Extended CONNECT with :protocol should be valid when enabled
+        let extended_connect = H3PseudoHeaders {
+            method: Some("CONNECT".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("upstream.example:443".to_string()),
+            path: Some("/websocket".to_string()),
+            protocol: Some("websocket".to_string()),
+            ..H3PseudoHeaders::default()
+        };
+        validate_request_pseudo_headers_with_settings(&extended_connect, true)
+            .expect("valid extended connect request");
+
+        // Extended CONNECT should fail without :protocol
+        let missing_protocol = H3PseudoHeaders {
+            method: Some("CONNECT".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("upstream.example:443".to_string()),
+            path: Some("/websocket".to_string()),
+            protocol: None,
+            ..H3PseudoHeaders::default()
+        };
+        let err = validate_request_pseudo_headers_with_settings(&missing_protocol, true)
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader("extended CONNECT request missing :protocol")
+        );
+
+        // Extended CONNECT should fail with empty :protocol
+        let empty_protocol = H3PseudoHeaders {
+            method: Some("CONNECT".to_string()),
+            authority: Some("upstream.example:443".to_string()),
+            protocol: Some("".to_string()),
+            ..H3PseudoHeaders::default()
+        };
+        let err = validate_request_pseudo_headers_with_settings(&empty_protocol, true)
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader("extended CONNECT request :protocol must not be empty")
+        );
+
+        // Standard CONNECT should reject :protocol when extended CONNECT is disabled
+        let standard_connect_with_protocol = H3PseudoHeaders {
+            method: Some("CONNECT".to_string()),
+            authority: Some("upstream.example:443".to_string()),
+            protocol: Some("websocket".to_string()),
+            ..H3PseudoHeaders::default()
+        };
+        let err = validate_request_pseudo_headers_with_settings(&standard_connect_with_protocol, false)
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader("CONNECT request must not include :protocol (extended CONNECT not enabled)")
+        );
+    }
+
+    #[test]
+    fn h3_request_head_validate_connect_method() {
+        let extended_connect_head = H3RequestHead::new_with_settings(
+            H3PseudoHeaders {
+                method: Some("CONNECT".to_string()),
+                authority: Some("upstream.example:443".to_string()),
+                protocol: Some("websocket".to_string()),
+                ..H3PseudoHeaders::default()
+            },
+            vec![],
+            true,
+        ).expect("valid extended connect");
+
+        // Should validate successfully
+        extended_connect_head.validate_connect_method(true)
+            .expect("extended CONNECT validation should succeed");
+
+        // Should fail if trying to use extended features with extended CONNECT disabled
+        let err = extended_connect_head.validate_connect_method(false)
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader("CONNECT request must not include :protocol (extended CONNECT not enabled)")
+        );
+
+        // Non-CONNECT request should fail validation
+        let get_head = H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("example.com".to_string()),
+                path: Some("/".to_string()),
+                ..H3PseudoHeaders::default()
+            },
+            vec![],
+        ).expect("valid GET");
+
+        let err = get_head.validate_connect_method(false)
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader("validate_connect_method called on non-CONNECT request")
         );
     }
 
@@ -2739,7 +3000,7 @@ mod tests {
         let frame = H3Frame::Data(vec![0xCA, 0xFE]);
         let mut buf = Vec::new();
         frame.encode(&mut buf).expect("encode");
-        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        let (decoded, consumed) = H3Frame::decode(&buf, &test_config()).expect("decode");
         assert_eq!(decoded, frame);
         assert_eq!(consumed, buf.len());
     }
@@ -2749,7 +3010,7 @@ mod tests {
         let frame = H3Frame::Headers(vec![0x80, 0x81, 0x82]);
         let mut buf = Vec::new();
         frame.encode(&mut buf).expect("encode");
-        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        let (decoded, consumed) = H3Frame::decode(&buf, &test_config()).expect("decode");
         assert_eq!(decoded, frame);
         assert_eq!(consumed, buf.len());
     }
@@ -2759,7 +3020,7 @@ mod tests {
         let frame = H3Frame::CancelPush(42);
         let mut buf = Vec::new();
         frame.encode(&mut buf).expect("encode");
-        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        let (decoded, consumed) = H3Frame::decode(&buf, &test_config()).expect("decode");
         assert_eq!(decoded, frame);
         assert_eq!(consumed, buf.len());
     }
@@ -2769,7 +3030,7 @@ mod tests {
         let frame = H3Frame::Goaway(1000);
         let mut buf = Vec::new();
         frame.encode(&mut buf).expect("encode");
-        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        let (decoded, consumed) = H3Frame::decode(&buf, &test_config()).expect("decode");
         assert_eq!(decoded, frame);
         assert_eq!(consumed, buf.len());
     }
@@ -2779,7 +3040,7 @@ mod tests {
         let frame = H3Frame::MaxPushId(255);
         let mut buf = Vec::new();
         frame.encode(&mut buf).expect("encode");
-        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        let (decoded, consumed) = H3Frame::decode(&buf, &test_config()).expect("decode");
         assert_eq!(decoded, frame);
         assert_eq!(consumed, buf.len());
     }
@@ -2792,7 +3053,7 @@ mod tests {
         };
         let mut buf = Vec::new();
         frame.encode(&mut buf).expect("encode");
-        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        let (decoded, consumed) = H3Frame::decode(&buf, &test_config()).expect("decode");
         assert_eq!(decoded, frame);
         assert_eq!(consumed, buf.len());
     }
@@ -2810,7 +3071,7 @@ mod tests {
         let frame = H3Frame::Settings(settings);
         let mut buf = Vec::new();
         frame.encode(&mut buf).expect("encode");
-        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        let (decoded, consumed) = H3Frame::decode(&buf, &test_config()).expect("decode");
         assert_eq!(decoded, frame);
         assert_eq!(consumed, buf.len());
     }
@@ -2819,7 +3080,7 @@ mod tests {
 
     #[test]
     fn frame_decode_empty_input_error() {
-        let err = H3Frame::decode(&[]).expect_err("must fail on empty input");
+        let err = H3Frame::decode(&[], &test_config()).expect_err("must fail on empty input");
         assert_eq!(err, H3NativeError::InvalidFrame("frame type varint"));
     }
 
@@ -2831,7 +3092,7 @@ mod tests {
         frame.encode(&mut buf).expect("encode");
         // Truncate: remove the last 2 payload bytes.
         let truncated = &buf[..buf.len() - 2];
-        let err = H3Frame::decode(truncated).expect_err("must fail on truncated payload");
+        let err = H3Frame::decode(truncated, &test_config()).expect_err("must fail on truncated payload");
         assert_eq!(err, H3NativeError::UnexpectedEof);
     }
 
@@ -2847,7 +3108,7 @@ mod tests {
         encode_varint(payload.len() as u64, &mut buf).expect("len");
         buf.extend_from_slice(&payload);
 
-        let err = H3Frame::decode(&buf).expect_err("must fail");
+        let err = H3Frame::decode(&buf, &test_config()).expect_err("must fail");
         assert_eq!(
             err,
             H3NativeError::InvalidFrame("cancel_push trailing bytes")
@@ -2865,7 +3126,7 @@ mod tests {
         encode_varint(payload.len() as u64, &mut buf).expect("len");
         buf.extend_from_slice(&payload);
 
-        let err = H3Frame::decode(&buf).expect_err("must fail");
+        let err = H3Frame::decode(&buf, &test_config()).expect_err("must fail");
         assert_eq!(err, H3NativeError::InvalidFrame("goaway trailing bytes"));
     }
 
@@ -2880,7 +3141,7 @@ mod tests {
         encode_varint(payload.len() as u64, &mut buf).expect("len");
         buf.extend_from_slice(&payload);
 
-        let err = H3Frame::decode(&buf).expect_err("must fail");
+        let err = H3Frame::decode(&buf, &test_config()).expect_err("must fail");
         assert_eq!(
             err,
             H3NativeError::InvalidFrame("max_push_id trailing bytes")
@@ -4088,7 +4349,7 @@ mod tests {
         };
         let mut buf = Vec::new();
         frame.encode(&mut buf).expect("encode");
-        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        let (decoded, consumed) = H3Frame::decode(&buf, &test_config()).expect("decode");
         assert_eq!(decoded, frame);
         assert_eq!(consumed, buf.len());
     }
@@ -4103,7 +4364,7 @@ mod tests {
         };
         let mut buf = Vec::new();
         frame.encode(&mut buf).expect("encode");
-        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        let (decoded, consumed) = H3Frame::decode(&buf, &test_config()).expect("decode");
         assert_eq!(decoded, frame);
         assert_eq!(consumed, buf.len());
     }
@@ -4118,7 +4379,7 @@ mod tests {
         };
         let mut buf = Vec::new();
         frame.encode(&mut buf).expect("encode");
-        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        let (decoded, consumed) = H3Frame::decode(&buf, &test_config()).expect("decode");
         assert_eq!(decoded, frame);
         assert_eq!(consumed, buf.len());
     }
@@ -4144,7 +4405,7 @@ mod tests {
         assert_eq!(buf, expected, "DATAGRAM frame encoding mismatch");
 
         // Verify decode produces the same frame
-        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        let (decoded, consumed) = H3Frame::decode(&buf, &test_config()).expect("decode");
         assert_eq!(decoded, frame);
         assert_eq!(consumed, buf.len());
     }
@@ -4165,7 +4426,7 @@ mod tests {
         let expected = vec![0x30u8, 0x02, 0x00, 0xFF];
         assert_eq!(buf, expected);
 
-        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        let (decoded, consumed) = H3Frame::decode(&buf, &test_config()).expect("decode");
         assert_eq!(decoded, frame);
         assert_eq!(consumed, buf.len());
     }
@@ -4181,7 +4442,7 @@ mod tests {
         };
         let mut buf = Vec::new();
         frame.encode(&mut buf).expect("encode");
-        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        let (decoded, consumed) = H3Frame::decode(&buf, &test_config()).expect("decode");
         assert_eq!(decoded, frame);
         assert_eq!(consumed, buf.len());
     }
@@ -4289,7 +4550,7 @@ mod tests {
             frame
                 .encode(&mut buf)
                 .expect(&format!("encode quarter_stream_id={}", quarter_stream_id));
-            let (decoded, consumed) = H3Frame::decode(&buf)
+            let (decoded, consumed) = H3Frame::decode(&buf, &test_config())
                 .expect(&format!("decode quarter_stream_id={}", quarter_stream_id));
             assert_eq!(decoded, frame);
             assert_eq!(consumed, buf.len());
@@ -4304,7 +4565,7 @@ mod tests {
         encode_varint(2, &mut buf).expect("frame length");
         buf.push(0x80); // Incomplete varint (continuation bit set but no following byte)
 
-        let err = H3Frame::decode(&buf).expect_err("must reject truncated quarter_stream_id");
+        let err = H3Frame::decode(&buf, &test_config()).expect_err("must reject truncated quarter_stream_id");
         assert_eq!(err, H3NativeError::InvalidFrame("quarter stream id varint"));
     }
 
@@ -4317,7 +4578,7 @@ mod tests {
         encode_varint(5, &mut buf).expect("quarter_stream_id");
         buf.extend_from_slice(&[0x01, 0x02]); // Only 2 bytes payload, but frame claims 10 total
 
-        let err = H3Frame::decode(&buf).expect_err("must reject truncated payload");
+        let err = H3Frame::decode(&buf, &test_config()).expect_err("must reject truncated payload");
         assert_eq!(
             err,
             H3NativeError::InvalidFrame("insufficient frame payload")
@@ -5140,5 +5401,180 @@ mod tests {
             let present2 = table2.reference_entry(*id2);
             assert_eq!(present1, present2, "Eviction determinism violated");
         }
+    }
+
+    #[test]
+    fn frame_payload_size_limit_enforcement() {
+        // Test that frame payload size limits are enforced per RFC 9114 §4.2
+        let config = H3ConnectionConfig {
+            max_frame_payload_size: 100, // Very small limit for testing
+            ..Default::default()
+        };
+
+        // Create a DATA frame with payload larger than the limit
+        let large_payload = vec![0x42; 200]; // 200 bytes > 100 byte limit
+        let frame = H3Frame::Data(large_payload);
+
+        // Encode the frame
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode should succeed");
+
+        // Decode should fail due to payload size limit
+        let err = H3Frame::decode(&buf, &config).expect_err("decode must reject oversized frame");
+        match err {
+            H3NativeError::FrameTooLarge { payload_size, max_size } => {
+                assert_eq!(payload_size, 200);
+                assert_eq!(max_size, 100);
+            }
+            other => panic!("expected FrameTooLarge error, got: {:?}", other),
+        }
+
+        // Test that frames within the limit still work
+        let small_payload = vec![0x42; 50]; // 50 bytes < 100 byte limit
+        let small_frame = H3Frame::Data(small_payload.clone());
+
+        let mut small_buf = Vec::new();
+        small_frame.encode(&mut small_buf).expect("encode small frame");
+
+        let (decoded, consumed) = H3Frame::decode(&small_buf, &config).expect("decode small frame");
+        assert_eq!(decoded, small_frame);
+        assert_eq!(consumed, small_buf.len());
+    }
+
+    #[test]
+    fn frame_payload_size_limit_applies_to_all_frame_types() {
+        let config = H3ConnectionConfig {
+            max_frame_payload_size: 50,
+            ..Default::default()
+        };
+
+        // Test HEADERS frame
+        let large_headers_payload = vec![0x00; 100]; // Larger than 50-byte limit
+        let headers_frame = H3Frame::Headers(large_headers_payload);
+
+        let mut buf = Vec::new();
+        headers_frame.encode(&mut buf).expect("encode headers frame");
+
+        let err = H3Frame::decode(&buf, &config).expect_err("headers frame must be rejected");
+        assert!(matches!(err, H3NativeError::FrameTooLarge { .. }));
+
+        // Test PUSH_PROMISE frame
+        let large_field_block = vec![0x00; 100];
+        let push_promise_frame = H3Frame::PushPromise {
+            push_id: 42,
+            field_block: large_field_block,
+        };
+
+        let mut buf = Vec::new();
+        push_promise_frame.encode(&mut buf).expect("encode push promise frame");
+
+        let err = H3Frame::decode(&buf, &config).expect_err("push promise frame must be rejected");
+        assert!(matches!(err, H3NativeError::FrameTooLarge { .. }));
+    }
+
+    #[test]
+    fn concurrent_stream_limit_rejects_new_stream_once_full() {
+        let mut c = H3ConnectionState::with_config(H3ConnectionConfig {
+            max_concurrent_request_streams: Some(2),
+            ..H3ConnectionConfig::default()
+        });
+        c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+
+        // Two client-initiated bidi streams (ids 0, 4) occupy the cap.
+        c.on_request_stream_frame(0, &H3Frame::Headers(vec![1]))
+            .expect("first within limit");
+        c.on_request_stream_frame(4, &H3Frame::Headers(vec![2]))
+            .expect("second within limit");
+        assert_eq!(c.active_request_stream_count(), 2);
+
+        // Third new stream (id 8) must be rejected with the dedicated error,
+        // reporting both the current count and the negotiated limit.
+        let err = c
+            .on_request_stream_frame(8, &H3Frame::Headers(vec![3]))
+            .expect_err("third stream must exceed cap");
+        assert_eq!(
+            err,
+            H3NativeError::ConcurrentStreamLimitExceeded {
+                active: 2,
+                limit: 2,
+            }
+        );
+        // Rejection must not have created state for the rejected id.
+        assert_eq!(c.active_request_stream_count(), 2);
+    }
+
+    #[test]
+    fn concurrent_stream_limit_does_not_block_frames_on_existing_streams() {
+        let mut c = H3ConnectionState::with_config(H3ConnectionConfig {
+            max_concurrent_request_streams: Some(1),
+            ..H3ConnectionConfig::default()
+        });
+        c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+
+        c.on_request_stream_frame(0, &H3Frame::Headers(vec![1]))
+            .expect("create stream 0");
+        // Follow-up DATA on the same stream must still be accepted even
+        // though active_count == limit — the cap applies to *new* streams.
+        c.on_request_stream_frame(0, &H3Frame::Data(vec![0xAA]))
+            .expect("additional frame on existing stream");
+    }
+
+    #[test]
+    fn concurrent_stream_limit_allows_new_stream_after_finish() {
+        let mut c = H3ConnectionState::with_config(H3ConnectionConfig {
+            max_concurrent_request_streams: Some(1),
+            ..H3ConnectionConfig::default()
+        });
+        c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+
+        c.on_request_stream_frame(0, &H3Frame::Headers(vec![1]))
+            .expect("first stream");
+        c.finish_request_stream(0).expect("finish first stream");
+        // With the first stream finished, active count drops to 0 and a
+        // new stream id must be admitted.
+        c.on_request_stream_frame(4, &H3Frame::Headers(vec![2]))
+            .expect("second stream after finish");
+        assert_eq!(c.active_request_stream_count(), 1);
+    }
+
+    #[test]
+    fn concurrent_stream_limit_unbounded_by_default() {
+        let mut c = H3ConnectionState::new();
+        c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        // No cap configured — opening many streams must not error.
+        for stream_id in (0..20).map(|i| i * 4) {
+            c.on_request_stream_frame(stream_id, &H3Frame::Headers(vec![1]))
+                .expect("unbounded by default");
+        }
+        assert_eq!(c.active_request_stream_count(), 20);
+    }
+
+    #[test]
+    fn concurrent_stream_limit_runtime_update_applies_to_future_streams() {
+        let mut c = H3ConnectionState::new();
+        c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        c.on_request_stream_frame(0, &H3Frame::Headers(vec![1]))
+            .expect("first stream");
+        c.on_request_stream_frame(4, &H3Frame::Headers(vec![2]))
+            .expect("second stream");
+
+        // Tighten the cap after the fact. Already-live streams stay live,
+        // but a new stream id beyond the cap must be rejected.
+        c.set_max_concurrent_request_streams(Some(2));
+        let err = c
+            .on_request_stream_frame(8, &H3Frame::Headers(vec![3]))
+            .expect_err("third stream must exceed tightened cap");
+        assert!(matches!(
+            err,
+            H3NativeError::ConcurrentStreamLimitExceeded { active: 2, limit: 2 }
+        ));
+        // In-flight frames on existing stream 4 still pass.
+        c.on_request_stream_frame(4, &H3Frame::Data(vec![0xAA]))
+            .expect("existing stream unaffected");
     }
 }
