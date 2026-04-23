@@ -1241,6 +1241,24 @@ pub fn qpack_plan_to_header_fields(
     Ok(out)
 }
 
+fn decoded_field_section_size(fields: &[(String, String)]) -> Result<u64, H3NativeError> {
+    fields.iter().try_fold(0u64, |acc, (name, value)| {
+        let field_size = name
+            .len()
+            .checked_add(value.len())
+            .and_then(|size| size.checked_add(32))
+            .ok_or(H3NativeError::QpackPolicy(
+                "decoded field section exceeds addressable range",
+            ))?;
+        let field_size = u64::try_from(field_size).map_err(|_| {
+            H3NativeError::QpackPolicy("decoded field section exceeds addressable range")
+        })?;
+        acc.checked_add(field_size).ok_or(H3NativeError::QpackPolicy(
+            "decoded field section exceeds addressable range",
+        ))
+    })
+}
+
 /// Decode a wire-level request field section into a validated request head.
 ///
 /// This applies QPACK decode rules for the configured mode and then enforces
@@ -1271,14 +1289,9 @@ pub fn qpack_decode_request_field_section_with_limit(
     let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
 
     if let Some(max_size) = max_field_section_size {
-        let total_size: usize = fields
-            .iter()
-            .map(|(name, value)| name.len() + value.len())
-            .sum();
-
-        if total_size as u64 > max_size {
+        if decoded_field_section_size(&fields)? > max_size {
             return Err(H3NativeError::QpackPolicy(
-                "decoded field section exceeds maximum size limit"
+                "decoded field section exceeds maximum size limit",
             ));
         }
     }
@@ -1316,14 +1329,9 @@ pub fn qpack_decode_response_field_section_with_limit(
     let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
 
     if let Some(max_size) = max_field_section_size {
-        let total_size: usize = fields
-            .iter()
-            .map(|(name, value)| name.len() + value.len())
-            .sum();
-
-        if total_size as u64 > max_size {
+        if decoded_field_section_size(&fields)? > max_size {
             return Err(H3NativeError::QpackPolicy(
-                "decoded field section exceeds maximum size limit"
+                "decoded field section exceeds maximum size limit",
             ));
         }
     }
@@ -4487,6 +4495,27 @@ mod tests {
         assert_eq!(
             err,
             H3NativeError::QpackPolicy("decoded header count exceeds safety limit")
+        );
+    }
+
+    #[test]
+    fn qpack_request_decode_with_limit_rejects_oversized_field_section() {
+        let plan = vec![QpackFieldPlan::Literal {
+            name: "x-test".to_string(),
+            value: "abcdef".to_string(),
+        }];
+        let wire = qpack_encode_field_section(&plan).expect("encode");
+
+        let err = qpack_decode_request_field_section_with_limit(
+            &wire,
+            H3QpackMode::StaticOnly,
+            None,
+            Some(40),
+        )
+        .expect_err("reject oversized field section");
+        assert_eq!(
+            err,
+            H3NativeError::QpackPolicy("decoded field section exceeds maximum size limit")
         );
     }
 
