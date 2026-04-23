@@ -99,6 +99,7 @@
 use crate::channel::oneshot;
 use crate::combinator::{Either, Select};
 use crate::cx::{Cx, cap};
+use crate::record::task::TaskState;
 use crate::record::{AdmissionError, TaskRecord};
 use crate::runtime::task_handle::{JoinError, TaskHandle};
 use crate::runtime::{RegionCreateError, RuntimeState, SpawnError, StoredTask};
@@ -915,6 +916,34 @@ impl<P: Policy> Scope<'_, P> {
             Err(payload) => {
                 let reason = CancelReason::fail_fast().with_region(child_region);
                 let _ = state.cancel_request(child_region, &reason, None);
+
+                // Factory panicked after `scope.spawn(...)` returned the
+                // `(TaskHandle, StoredTask)` pair but before the StoredTask
+                // was scheduled. The matching TaskRecord is orphaned in
+                // `TaskState::Created` — no executor will ever poll it, so
+                // `region.task_count()` stays > 0 and `advance_region_state`
+                // loops forever in Closing. Rip out any such Created-state
+                // records bound to this child region so the region can reach
+                // Finalizing and the surrounding close future can complete.
+                let orphan_task_ids: Vec<TaskId> = state
+                    .tasks_iter()
+                    .filter_map(|(_, t)| {
+                        if t.owner == child_region
+                            && matches!(t.state, TaskState::Created)
+                        {
+                            Some(t.id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for task_id in orphan_task_ids {
+                    if let Some(region) = state.region(child_region) {
+                        region.remove_task(task_id);
+                    }
+                    let _ = state.remove_task(task_id);
+                }
+
                 if let Some(region) = state.region(child_region) {
                     region.begin_close(None);
                 }
@@ -3302,5 +3331,59 @@ mod tests {
             }
             other => panic!("join of panicked task must return JoinError::Panicked: {other:?}"),
         }
+    }
+
+    /// Regression: region_with_budget factory panicking AFTER scope.spawn(...)
+    /// returned — but BEFORE the StoredTask was scheduled — must not leave an
+    /// orphan TaskRecord bound to the child region. Without the panic-catch
+    /// rollback in `region_with_budget`, `region.task_count()` stays non-zero
+    /// and `advance_region_state` can never transition Closing → Finalizing.
+    ///
+    /// Bead asupersync-c7s5de.
+    #[test]
+    fn region_factory_panic_after_spawn_cleans_up_orphan_task_records() {
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let parent = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(parent, Budget::INFINITE);
+
+        let tasks_before = state.tasks_iter().count();
+
+        // Wrap the call in catch_unwind because the factory intentionally
+        // panics after spawn — resume_unwind re-raises in region_with_budget.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            block_on(scope.region_with_budget(
+                &mut state,
+                &cx,
+                Budget::INFINITE,
+                crate::types::policy::FailFast,
+                |child, state| {
+                    // Spawn a task so a TaskRecord exists in Created state,
+                    // bound to the child region.
+                    let (_handle, _stored) = child
+                        .spawn(state, &cx, |_| async { 42_i32 })
+                        .expect("spawn must succeed before the panic");
+                    // Immediately panic — StoredTask is dropped unscheduled.
+                    std::panic::panic_any("factory panic after spawn");
+                    #[allow(unreachable_code)]
+                    std::future::ready(Outcome::Ok(0_i32))
+                },
+            ))
+        }));
+
+        assert!(
+            result.is_err(),
+            "region_with_budget must re-raise the factory panic",
+        );
+
+        // Orphan TaskRecord(s) created inside the factory must have been
+        // removed by the panic-catch rollback. The task count should be
+        // back to its pre-call value.
+        let tasks_after = state.tasks_iter().count();
+        assert_eq!(
+            tasks_after, tasks_before,
+            "post-panic tasks_iter count must match pre-call count \
+             (orphan TaskRecord not cleaned up: before={tasks_before} after={tasks_after})",
+        );
     }
 }
