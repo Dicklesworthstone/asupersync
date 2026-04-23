@@ -2519,6 +2519,185 @@ mod tests {
             assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
         }
     }
+
+    // =========================================================================
+    // Cancel + spawn_blocking under shutdown metamorphic relations.
+    //
+    // Per-case tests cover:
+    //   - single spawn-after-shutdown rejection (both APIs)
+    //   - linearization race around the submission mutex
+    //   - graceful drain of pending tasks on shutdown
+    //
+    // These MRs bind the broader contract over the shutdown boundary.
+    // Each one names a concrete interleaving and verifies invariants
+    // that a refactor of the spawn path or shutdown signal must
+    // preserve.
+    // =========================================================================
+
+    mod shutdown_mr {
+        use super::*;
+
+        /// MR — All N consecutive spawns AFTER shutdown are rejected
+        /// uniformly. The rejection is not a first-post-shutdown-only
+        /// effect; it holds for the entire suffix. Task counters and
+        /// pending queue stay unchanged throughout.
+        #[test]
+        fn mr_all_spawns_after_shutdown_are_rejected_uniformly() {
+            let pool = BlockingPool::new(1, 4);
+            pool.shutdown();
+            let executed = Arc::new(AtomicI32::new(0));
+            let mut handles = Vec::new();
+            for _ in 0..8 {
+                let e = Arc::clone(&executed);
+                handles.push(pool.spawn(move || {
+                    e.fetch_add(1, Ordering::Relaxed);
+                }));
+            }
+            for (i, h) in handles.iter().enumerate() {
+                assert!(h.is_cancelled(), "spawn #{i} not cancelled post-shutdown");
+                assert!(
+                    h.wait_timeout(Duration::from_millis(100)),
+                    "spawn #{i} completion not signaled post-shutdown",
+                );
+            }
+            assert_eq!(
+                executed.load(Ordering::Relaxed),
+                0,
+                "no post-shutdown task may execute",
+            );
+            assert_eq!(pool.pending_count(), 0);
+        }
+
+        /// MR — Shutdown is idempotent. Calling shutdown() N times is
+        /// equivalent to calling it once. is_shutdown() returns true
+        /// throughout; spawn rejection semantics unchanged.
+        #[test]
+        fn mr_shutdown_is_idempotent() {
+            let pool = BlockingPool::new(0, 2);
+            for _ in 0..5 {
+                pool.shutdown();
+                assert!(pool.is_shutdown());
+            }
+            // Spawn rejection still works after N shutdowns.
+            let executed = Arc::new(AtomicBool::new(false));
+            let e = Arc::clone(&executed);
+            let handle = pool.spawn(move || {
+                e.store(true, Ordering::Relaxed);
+            });
+            assert!(handle.is_cancelled());
+            assert!(handle.wait_timeout(Duration::from_millis(100)));
+            assert!(!executed.load(Ordering::Relaxed));
+        }
+
+        /// MR — Handle obtained pre-shutdown survives as a valid handle
+        /// across the shutdown boundary. Cancelling it after shutdown
+        /// is a no-op on the completion signal state (completion was
+        /// already signaled by the running task or will be signaled by
+        /// the pre-shutdown-queued task).
+        #[test]
+        fn mr_pre_shutdown_handle_cancel_after_shutdown_is_safe() {
+            let pool = BlockingPool::new(0, 2);
+            let executed = Arc::new(AtomicBool::new(false));
+            let e = Arc::clone(&executed);
+            let handle = pool.spawn(move || {
+                // Simulate instantaneous work — the pool may or may not
+                // execute it before we shut down; either outcome is valid.
+                e.store(true, Ordering::Relaxed);
+            });
+            pool.shutdown();
+            // cancel() after shutdown must not panic and must not flip
+            // the completion signal backwards.
+            handle.cancel();
+            assert!(handle.is_cancelled());
+            // shutdown_and_wait must still drain cleanly.
+            assert!(pool.shutdown_and_wait(Duration::from_secs(2)));
+        }
+
+        /// MR — Post-shutdown spawns do not affect thread accounting.
+        /// active_threads and busy_threads observed immediately before
+        /// the post-shutdown spawn are equal to those observed
+        /// immediately after. The fast-path rejection at spawn must
+        /// not call maybe_spawn_thread().
+        #[test]
+        fn mr_post_shutdown_spawn_does_not_grow_thread_pool() {
+            let pool = BlockingPool::new(0, 4);
+            pool.shutdown();
+            // Wait for any lingering threads to exit after shutdown.
+            // With min_threads=0 and immediate shutdown, none should
+            // have been spawned, but the invariant we care about is
+            // invariance — before == after.
+            let before_active = pool.active_threads();
+            let before_busy = pool.busy_threads();
+            let before_pending = pool.pending_count();
+            for _ in 0..4 {
+                let _ = pool.spawn(|| {
+                    panic!("post-shutdown body must never run");
+                });
+            }
+            assert_eq!(pool.active_threads(), before_active);
+            assert_eq!(pool.busy_threads(), before_busy);
+            assert_eq!(pool.pending_count(), before_pending);
+        }
+
+        /// MR — is_shutdown() is a stable property once shutdown() is
+        /// called. No observed interleaving of spawns, cancels, or
+        /// queries can make is_shutdown() regress to false.
+        #[test]
+        fn mr_is_shutdown_is_sticky_true() {
+            let pool = BlockingPool::new(1, 2);
+            assert!(!pool.is_shutdown(), "fresh pool should not be shutdown");
+            pool.shutdown();
+            for _ in 0..20 {
+                // Interleave reads with rejected spawns and cancels.
+                let h = pool.spawn(|| {});
+                h.cancel();
+                assert!(pool.is_shutdown(), "is_shutdown regressed to false");
+            }
+        }
+
+        /// MR — shutdown() followed by spawn() yields a handle whose
+        /// completion signal has ALREADY fired (wait_timeout returns
+        /// true with a zero-ish timeout). This distinguishes
+        /// rejection-with-signal from rejection-that-forgets-to-signal
+        /// — the latter would hang any caller that awaits completion.
+        #[test]
+        fn mr_rejected_handle_completion_is_prepaid() {
+            let pool = BlockingPool::new(0, 2);
+            pool.shutdown();
+            for _ in 0..5 {
+                let h = pool.spawn(|| {});
+                // Any timeout — including zero — must succeed because
+                // completion was signaled synchronously inside spawn().
+                assert!(
+                    h.wait_timeout(Duration::from_millis(1)),
+                    "rejected handle completion signal not prepaid",
+                );
+                assert!(h.is_cancelled());
+            }
+        }
+
+        /// MR — BlockingPoolHandle::spawn agrees with BlockingPool::spawn
+        /// on post-shutdown rejection semantics. The two APIs must have
+        /// identical observable contract (rejection + cancellation +
+        /// prepaid completion) after shutdown.
+        #[test]
+        fn mr_pool_and_handle_api_agree_after_shutdown() {
+            let pool = BlockingPool::new(0, 2);
+            let api_handle = pool.handle();
+            pool.shutdown();
+
+            let via_pool = pool.spawn(|| panic!("must not run"));
+            let via_handle = api_handle.spawn(|| panic!("must not run"));
+
+            assert_eq!(via_pool.is_cancelled(), via_handle.is_cancelled());
+            assert!(via_pool.is_cancelled());
+            assert!(
+                via_pool.wait_timeout(Duration::from_millis(100))
+                    && via_handle.wait_timeout(Duration::from_millis(100)),
+                "one of the APIs failed to prepay completion",
+            );
+        }
+    }
 }
 
 // Metamorphic tests for blocking pool fairness properties
