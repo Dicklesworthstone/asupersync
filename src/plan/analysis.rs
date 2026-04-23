@@ -2004,9 +2004,46 @@ mod tests {
 
     #[test]
     fn display_impls() {
-        assert_eq!(format!("{}", ObligationSafety::Clean), "clean");
-        assert_eq!(format!("{}", CancelSafety::MayOrphan), "may-orphan");
-        assert_eq!(format!("{}", BudgetEffect::LEAF), "polls=[1, 1]");
+        let mut output = String::new();
+        output.push_str("--- ObligationSafety ---\n");
+        output.push_str(&format!("Clean: {}\n", ObligationSafety::Clean));
+        output.push_str(&format!("MayLeak: {}\n", ObligationSafety::MayLeak));
+        output.push_str(&format!("Leaked: {}\n", ObligationSafety::Leaked));
+        output.push_str(&format!("Unknown: {}\n", ObligationSafety::Unknown));
+        
+        output.push_str("\n--- CancelSafety ---\n");
+        output.push_str(&format!("Safe: {}\n", CancelSafety::Safe));
+        output.push_str(&format!("MayOrphan: {}\n", CancelSafety::MayOrphan));
+        output.push_str(&format!("Orphan: {}\n", CancelSafety::Orphan));
+        output.push_str(&format!("Unknown: {}\n", CancelSafety::Unknown));
+        
+        output.push_str("\n--- BudgetEffect ---\n");
+        output.push_str(&format!("LEAF: {}\n", BudgetEffect::LEAF));
+        output.push_str(&format!("Bounded: {}\n", BudgetEffect { min_polls: 2, max_polls: Some(5), has_deadline: true }));
+        output.push_str(&format!("Unbounded: {}\n", BudgetEffect { min_polls: 1, max_polls: None, has_deadline: false }));
+        
+        output.push_str("\n--- ObligationFlow ---\n");
+        output.push_str(&format!("Empty: {}\n", ObligationFlow::empty()));
+        let mut flow_complex = ObligationFlow::empty();
+        flow_complex.reserves.push("SendPermit".to_string());
+        flow_complex.must_resolve.push("SendPermit".to_string());
+        flow_complex.leak_on_cancel.push("Lease".to_string());
+        flow_complex.all_paths_resolve = false;
+        output.push_str(&format!("Complex: {}\n", flow_complex));
+        
+        output.push_str("\n--- IndependenceResult ---\n");
+        output.push_str(&format!("Independent: {}\n", IndependenceResult::Independent));
+        output.push_str(&format!("Dependent: {}\n", IndependenceResult::Dependent));
+        output.push_str(&format!("Uncertain: {}\n", IndependenceResult::Uncertain));
+        
+        output.push_str("\n--- TraceEquivalenceHint ---\n");
+        output.push_str(&format!("Atomic: {}\n", TraceEquivalenceHint::Atomic));
+        output.push_str(&format!("FullyCommutative: {}\n", TraceEquivalenceHint::FullyCommutative));
+        output.push_str(&format!("PartiallyCommutative: {}\n", TraceEquivalenceHint::PartiallyCommutative { groups: vec![vec![0, 1], vec![2, 3]] }));
+        output.push_str(&format!("Sequential: {}\n", TraceEquivalenceHint::Sequential));
+        output.push_str(&format!("Unknown: {}\n", TraceEquivalenceHint::Unknown));
+        
+        insta::assert_snapshot!("analysis_display_outputs", output);
     }
 
     // ---- Deterministic ordering ----

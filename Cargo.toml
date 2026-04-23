@@ -110,6 +110,8 @@ simd-intrinsics = []
 loom-tests = ["dep:loom"]
 # Enable Cancel-Correctness Property Oracle for cancellation protocol verification.
 cancel-correctness-oracle = []
+# Enable stack trace capture for lab oracle violations.
+lab-stack-traces = ["dep:backtrace", "dep:rustc-demangle"]
 
 [lib]
 path = "src/lib.rs"
@@ -206,6 +208,10 @@ crc32fast = "1.4"
 rdkafka = { version = "0.39", default-features = false, optional = true }
 # Systematic concurrency testing for scheduler (loom-tests feature)
 loom = { version = "0.7", optional = true }
+# Stack trace capture for lab oracle violations
+backtrace = { version = "0.3", optional = true }
+# Symbol demangling for readable stack traces
+rustc-demangle = { version = "0.1", optional = true }
 # Reactor backends use HashMap on multiple platforms.
 hashbrown = "0.17"
 # Lightweight async helpers used by web handler adapter shims.
