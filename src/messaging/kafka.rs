@@ -1641,7 +1641,7 @@ pub struct KafkaClient {
     producer: KafkaProducer,
     consumer: Option<StreamConsumer<KafkaContext>>,
     config: ProducerConfig,
-    backend: RealBrokerBackend,
+    backend: Box<dyn BrokerBackend>,
 }
 
 #[cfg(feature = "kafka")]
@@ -1653,7 +1653,7 @@ impl KafkaClient {
             producer,
             consumer: None,
             config,
-            backend: RealBrokerBackend,
+            backend: Box::new(RealBrokerBackend),
         })
     }
 
@@ -1686,7 +1686,7 @@ pub struct KafkaClient {
     producer: KafkaProducer,
     consumer: Option<StubConsumer>,
     config: ProducerConfig,
-    backend: StubBrokerBackend,
+    backend: Box<dyn BrokerBackend>,
 }
 
 #[cfg(not(feature = "kafka"))]
@@ -1698,7 +1698,7 @@ impl KafkaClient {
             producer,
             consumer: None,
             config,
-            backend: StubBrokerBackend,
+            backend: Box::new(StubBrokerBackend),
         })
     }
 
