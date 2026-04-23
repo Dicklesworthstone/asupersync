@@ -302,4 +302,123 @@ mod tests {
         set.insert(a);
         assert!(set.contains(&b));
     }
+
+    // ------------------------------------------------------------------------
+    // Golden-artifact: canonical TraceId / SymbolSpanId serialization snapshot.
+    //
+    // Three serialization forms exist per id, and two of them are
+    // intentionally lossy (they're meant for human-readable log lines, not
+    // round-trip). Freeze all of them so a change to any surface surfaces
+    // as a reviewable diff:
+    //
+    //   TraceId:
+    //     to_w3c_string()  — 32 hex chars (canonical, lossless, round-trips)
+    //     Display          — 16 hex chars (HIGH ONLY, lossy by design)
+    //     Debug            — "TraceId(<32 hex>)"
+    //
+    //   SymbolSpanId:
+    //     Display          — 8 hex chars (LOW 32 bits of u64, lossy by design)
+    //     Debug            — "SymbolSpanId(<16 hex>)"
+    //
+    // Canonical values picked to stress-test the boundaries:
+    //   - NIL (all zero)
+    //   - max (all ones)
+    //   - a fixed asymmetric pattern (differentiates high vs low)
+    //   - high-only (low == 0)   — locks in Display-is-high for TraceId
+    //   - low-only  (high == 0)  — locks in Display-drops-low for TraceId
+    //
+    // Plus the from_w3c_string error surface: four distinct rejection paths
+    // (empty, 16-char, 33-char, non-hex) locked to ensure none of them
+    // accidentally starts succeeding.
+    // ------------------------------------------------------------------------
+    #[test]
+    fn canonical_trace_id_serialization_snapshot() {
+        fn trace_row(label: &str, id: TraceId) -> serde_json::Value {
+            let w3c = id.to_w3c_string();
+            let roundtrip = TraceId::from_w3c_string(&w3c)
+                .map(|p| p == id)
+                .unwrap_or(false);
+            serde_json::json!({
+                "label":       label,
+                "high":        format!("{:#018x}", id.high()),
+                "low":         format!("{:#018x}", id.low()),
+                "as_u128":     format!("{:#034x}", id.as_u128()),
+                "is_nil":      id.is_nil(),
+                "to_w3c":      w3c,
+                "display":     format!("{id}"),
+                "debug":       format!("{id:?}"),
+                "w3c_roundtrip_ok": roundtrip,
+            })
+        }
+
+        fn span_row(label: &str, id: SymbolSpanId) -> serde_json::Value {
+            serde_json::json!({
+                "label":   label,
+                "as_u64":  format!("{:#018x}", id.as_u64()),
+                "display": format!("{id}"),
+                "debug":   format!("{id:?}"),
+            })
+        }
+
+        let trace_ids = vec![
+            trace_row("nil", TraceId::NIL),
+            trace_row("max", TraceId::new(u64::MAX, u64::MAX)),
+            trace_row(
+                "asymmetric_pattern",
+                TraceId::new(0x1234_5678_9abc_def0, 0xfedc_ba98_7654_3210),
+            ),
+            trace_row("high_only", TraceId::new(0xAAAA_AAAA_AAAA_AAAA, 0)),
+            trace_row("low_only", TraceId::new(0, 0xBBBB_BBBB_BBBB_BBBB)),
+            trace_row("new_for_test_42", TraceId::new_for_test(42)),
+            trace_row(
+                "u128_constant",
+                TraceId::from_u128(0x0001_0002_0003_0004_0005_0006_0007_0008),
+            ),
+        ];
+
+        let span_ids = vec![
+            span_row("nil", SymbolSpanId::NIL),
+            span_row("max", SymbolSpanId::new(u64::MAX)),
+            span_row("dead_beef", SymbolSpanId::new(0xDEAD_BEEF_CAFE_BABE)),
+            span_row("classic_pattern", SymbolSpanId::new(0x1234_5678_9abc_def0)),
+            span_row("new_for_test_42", SymbolSpanId::new_for_test(42)),
+            // Low-32 bits all zero — locks in that Display renders "00000000"
+            // rather than stripping leading zeros or rendering the high word.
+            span_row("high_only", SymbolSpanId::new(0xFFFF_FFFF_0000_0000)),
+        ];
+
+        // Error-surface: four distinct from_w3c_string rejection paths. Each
+        // case MUST return None. Empty string, length-16, length-33, non-hex.
+        let w3c_rejects = vec![
+            serde_json::json!({
+                "input_label": "empty",
+                "input_len":   0,
+                "rejected":    TraceId::from_w3c_string("").is_none(),
+            }),
+            serde_json::json!({
+                "input_label": "len_16",
+                "input_len":   16,
+                "rejected":    TraceId::from_w3c_string("0123456789abcdef").is_none(),
+            }),
+            serde_json::json!({
+                "input_label": "len_33",
+                "input_len":   33,
+                "rejected":    TraceId::from_w3c_string("0123456789abcdef0123456789abcdef0").is_none(),
+            }),
+            serde_json::json!({
+                "input_label": "non_hex_len_32",
+                "input_len":   32,
+                "rejected":    TraceId::from_w3c_string("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_none(),
+            }),
+        ];
+
+        insta::assert_json_snapshot!(
+            "canonical_trace_id_serialization",
+            serde_json::json!({
+                "trace_ids":       trace_ids,
+                "span_ids":        span_ids,
+                "w3c_reject_cases": w3c_rejects,
+            })
+        );
+    }
 }
