@@ -697,24 +697,21 @@ fn rearm_connect_registration(
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
-    loop {
+    std::future::poll_fn(|cx| {
         if let Some(err) = socket.take_error()? {
-            return Err(err);
+            return Poll::Ready(Err(err));
         }
 
         match socket.peer_addr() {
-            Ok(_) => return Ok(()),
+            Ok(_) => Poll::Ready(Ok(())),
             Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                // Sleep briefly to avoid busy loop when no reactor is available.
-                let now = Cx::current().map_or_else(crate::time::wall_now, |c| {
-                    c.timer_driver()
-                        .map_or_else(crate::time::wall_now, |d| d.now())
-                });
-                crate::time::sleep(now, Duration::from_millis(1)).await;
+                fallback_rewake(cx);
+                Poll::Pending
             }
-            Err(err) => return Err(err),
+            Err(err) => Poll::Ready(Err(err)),
         }
-    }
+    })
+    .await
 }
 
 #[cfg(not(target_arch = "wasm32"))]
