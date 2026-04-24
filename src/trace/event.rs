@@ -1160,7 +1160,7 @@ impl fmt::Display for TraceEventKind {
 }
 
 /// Additional data carried by a trace event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TraceData {
     /// No additional data.
     None,
@@ -1368,7 +1368,7 @@ pub enum TraceData {
 }
 
 /// A trace event in the runtime.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceEvent {
     /// Event schema version.
     pub version: u32,
