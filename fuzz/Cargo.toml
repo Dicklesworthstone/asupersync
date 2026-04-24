@@ -1757,3 +1757,10 @@ path = "fuzz_targets/task_cancel_witness.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hpack_rfc7541_edge_cases"
+path = "fuzz_targets/hpack_rfc7541_edge_cases.rs"
+test = false
+doc = false
+bench = false
