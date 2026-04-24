@@ -1,11 +1,9 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! SingleOwner invariant conformance checks (SEM-06.F1, asupersync-3cddg.6.6).
 //!
 //! Validates that:
 //!   1. The Lean theorem surface inventory includes all SingleOwner theorems.
 //!   2. The invariant status inventory records the single_owner invariant as fully_proven.
-//!   3. The traceability ledger has entries for the master dispatcher theorems.
+//!   3. The traceability ledger has entries for the top-level dispatcher theorems.
 //!   4. The step_preserves_single_owner theorem covers spawn (the only children-mutating step).
 
 use serde_json::Value;
@@ -124,7 +122,7 @@ fn single_owner_invariant_theorem_list_complete() {
     }
 }
 
-/// The traceability ledger must have rows for the master dispatcher theorems.
+/// The traceability ledger must have rows for the top-level dispatcher theorems.
 #[test]
 fn single_owner_traceability_rows_present() {
     let ledger = parse(TRACEABILITY_JSON, "traceability_ledger");
