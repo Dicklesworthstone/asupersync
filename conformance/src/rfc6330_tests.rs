@@ -167,27 +167,26 @@ impl ConformanceTest for SystematicIndexTest {
     fn run(&self, _ctx: &ConformanceContext) -> ConformanceResult {
         // Test systematic index calculation against RFC Table 2
 
-        for entry in RFC6330_SYSTEMATIC_INDEX_TABLE {
-            // Calculate expected systematic index J(K) = S + H from table entry
-            let expected_j = entry.s + entry.h;
+        for entry in RFC6330_SYSTEMATIC_INDEX_TABLE.iter() {
+            let expected_j = entry.systematic_index;
 
             // Get the calculated systematic index from our implementation
-            if let Some(actual_j) = get_systematic_index(entry.k) {
+            if let Some(actual_j) = get_systematic_index(entry.k_prime) {
                 if actual_j != expected_j {
                     return ConformanceResult::Fail {
-                        reason: format!("Systematic index mismatch for K={}", entry.k),
+                        reason: format!("Systematic index mismatch for K'={}", entry.k_prime),
                         details: Some(format!(
                             "expected J({})={}, got {} (S={}, H={}, W={})",
-                            entry.k, expected_j, actual_j, entry.s, entry.h, entry.w
+                            entry.k_prime, expected_j, actual_j, entry.s, entry.h, entry.w
                         )),
                     };
                 }
             } else {
                 return ConformanceResult::Fail {
-                    reason: format!("No systematic index found for K={}", entry.k),
+                    reason: format!("No systematic index found for K'={}", entry.k_prime),
                     details: Some(format!(
-                        "K={} should be supported according to RFC Table 2",
-                        entry.k
+                        "K'={} should be supported according to RFC Table 2",
+                        entry.k_prime
                     )),
                 };
             }
@@ -237,6 +236,29 @@ impl ConformanceTest for SystematicTupleGenerationTest {
                 return ConformanceResult::Fail {
                     reason: "Invalid test vector: K cannot be 0".to_string(),
                     details: Some(format!("Test vector: {:?}", test_vector)),
+                };
+            }
+
+            if [
+                test_vector.expected_d,
+                test_vector.expected_a,
+                test_vector.expected_b,
+                test_vector.expected_d1,
+                test_vector.expected_a1,
+                test_vector.expected_b1,
+            ]
+            .into_iter()
+            .any(|component| component == 0)
+            {
+                return ConformanceResult::Fail {
+                    reason: format!(
+                        "Invalid tuple fixture for K={}, X={}",
+                        test_vector.k, test_vector.symbol_index
+                    ),
+                    details: Some(format!(
+                        "tuple fixtures must contain canonical non-zero RFC components: {:?}",
+                        test_vector
+                    )),
                 };
             }
 
@@ -507,7 +529,7 @@ impl ConformanceTest for LookupTableV3Test {
         }
 
         // Validate some known RFC values (first few entries)
-        let expected_first_values = [1772608948u32, 3669932701, 400781334];
+        let expected_first_values = [1191369816u32, 744902811, 2539772235];
         for (i, &expected) in expected_first_values.iter().enumerate() {
             if RFC6330_V3_TABLE[i] != expected {
                 return ConformanceResult::Fail {
