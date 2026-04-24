@@ -242,7 +242,7 @@ fn mr5_fifo_fairness_ordering() {
     proptest!(|(
         num_waiters in 2usize..=6
     )| {
-        let sem = Semaphore::new(0); 
+        let sem = Semaphore::new(0);
 
         let contexts: Vec<_> = (0..num_waiters)
             .map(|_| test_cx())
@@ -261,13 +261,13 @@ fn mr5_fifo_fairness_ordering() {
 
             for (waiter_id, fut) in futures.iter_mut() {
                 if completion_order.contains(waiter_id) {
-                    continue; 
+                    continue;
                 }
 
                 if let Some(result) = poll_once(fut) {
                     prop_assert!(result.is_ok());
                     completion_order.push(*waiter_id);
-                    break; 
+                    break;
                 }
             }
         }
@@ -288,12 +288,12 @@ fn mr6_permit_conservation_stress() {
         let mut lab = LabRuntime::new(LabConfig::new(0xDEADBEEF));
         let root = lab.state.create_root_region(Budget::INFINITE);
         let sem = Arc::new(Semaphore::new(initial_permits));
-        
+
         for i in 0..num_tasks {
             let sem = Arc::clone(&sem);
             let (task_id, _) = lab.state.create_task(root, Budget::INFINITE, async move {
                 let cx = Cx::for_testing();
-                
+
                 if i % 3 == 0 {
                     let mut fut = sem.acquire(&cx, 1);
                     let _ = poll_once(&mut fut);
@@ -313,7 +313,7 @@ fn mr6_permit_conservation_stress() {
         }
 
         lab.run_until_quiescent();
-        
+
         prop_assert_eq!(
             sem.available_permits(),
             initial_permits,
@@ -326,11 +326,9 @@ fn mr6_permit_conservation_stress() {
 #[test]
 fn mr7_high_contention_fifo() {
     let num_waiters = 64;
-    let sem = Semaphore::new(0); 
-    
-    let contexts: Vec<_> = (0..num_waiters)
-        .map(|_| test_cx())
-        .collect();
+    let sem = Semaphore::new(0);
+
+    let contexts: Vec<_> = (0..num_waiters).map(|_| test_cx()).collect();
     let mut futures = Vec::new();
 
     for i in 0..num_waiters {
@@ -356,19 +354,19 @@ fn mr8_try_acquire_consistency() {
         let sem = Semaphore::new(initial_permits);
         let cx1 = test_cx();
         let cx2 = test_cx();
-        
+
         let mut fut1 = sem.acquire(&cx1, initial_permits + 1);
         prop_assert!(poll_once(&mut fut1).is_none());
-        
+
         let try_res = sem.try_acquire(1);
         prop_assert!(try_res.is_err());
-        
+
         let mut fut2 = sem.acquire(&cx2, 1);
         prop_assert!(poll_once(&mut fut2).is_none());
-        
+
         cx1.set_cancel_requested(true);
         let _ = poll_once(&mut fut1);
-        
+
         let try_res2 = sem.try_acquire(1);
         if try_res2.is_err() {
             let res2 = poll_once(&mut fut2);

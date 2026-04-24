@@ -47,6 +47,18 @@ struct StarvationTestHarness {
 
 impl StarvationTestHarness {
     fn new(worker_count: usize, cancel_streak_limit: usize) -> Self {
+        Self::new_with_steal_batch(worker_count, cancel_streak_limit, None)
+    }
+
+    /// Like `new`, but allows overriding `steal_batch_size` *before*
+    /// `take_workers()` runs — `set_steal_batch_size` iterates
+    /// `scheduler.workers`, so it is a no-op once the workers have been
+    /// moved out into `harness.workers`.
+    fn new_with_steal_batch(
+        worker_count: usize,
+        cancel_streak_limit: usize,
+        steal_batch_size: Option<usize>,
+    ) -> Self {
         let config = LabConfig::default()
             .worker_count(worker_count)
             .trace_capacity(4096)
@@ -63,6 +75,9 @@ impl StarvationTestHarness {
             false, // disable governor for deterministic testing
             1,
         );
+        if let Some(size) = steal_batch_size {
+            scheduler.set_steal_batch_size(size);
+        }
         // Take workers once at harness construction. `take_workers()` is
         // one-shot (std::mem::take) with no put-back API; doing it per call
         // would leave later simulation phases empty and silently pass.
@@ -76,6 +91,27 @@ impl StarvationTestHarness {
             task_table,
             cancel_streak_limit,
         }
+    }
+
+    /// Seed a specific worker's local `PriorityScheduler` ready lane.
+    ///
+    /// Unlike `inject_ready_burst`, which routes through the global queue,
+    /// this places tasks directly on `worker.local`, forcing other workers
+    /// to exercise the steal path to make progress.
+    fn seed_worker_local_ready(
+        &mut self,
+        worker_id: usize,
+        count: usize,
+        start_id: u32,
+        priority: u8,
+    ) -> Vec<TaskId> {
+        let mut tasks = Vec::with_capacity(count);
+        for i in 0..count {
+            let task_id = TaskId::new_for_test(start_id + i as u32, 1);
+            self.workers[worker_id].schedule_local(task_id, priority);
+            tasks.push(task_id);
+        }
+        tasks
     }
 
     /// Inject cancel tasks at high frequency to stress fairness bounds
@@ -500,6 +536,98 @@ fn mr_bounded_preemption_consistency() {
                 cancel_ratio);
         }
     });
+}
+
+/// Regression: round-robin next_task polling must dispatch every seeded ready
+/// task exactly once, even when stolen remainders transit through another
+/// worker's non-owner fast_queue.
+///
+/// br-asupersync-uguhr2 — the LocalQueue `Stealer::steal` scan path silently
+/// compacted-out tasks whose arena records were missing (the test harness
+/// registers TaskIds without populating `TaskTable`). That swallowed ready
+/// work that had been stolen from worker 0's PriorityScheduler and parked in
+/// a peer's fast_queue for a subsequent round-robin turn, causing the system
+/// to reach quiescence early with dispatches < seeded task count.
+#[test]
+fn mr_round_robin_contention_dispatches_each_task_once() {
+    proptest!(|(
+        worker_count in 2..=4usize,
+        task_count in 4..=16usize,
+        steal_batch_size in 1..=4usize,
+    )| {
+        let mut harness =
+            StarvationTestHarness::new_with_steal_batch(worker_count, 16, Some(steal_batch_size));
+
+        let seeded = harness.seed_worker_local_ready(0, task_count, 12_000, 50);
+        prop_assert_eq!(seeded.len(), task_count);
+
+        // Run enough steps for every task to reach a worker even under
+        // repeated stealing through fast_queues.
+        let stats = harness.run_scheduling_simulation(task_count * 16 + 32);
+
+        let total_dispatches: usize = stats.dispatches.iter().map(Vec::len).sum();
+        prop_assert_eq!(
+            total_dispatches,
+            task_count,
+            "round-robin steal path lost tasks: dispatched {} of {} (worker_count={}, steal_batch_size={})",
+            total_dispatches,
+            task_count,
+            worker_count,
+            steal_batch_size
+        );
+
+        // Every seeded task id should appear exactly once across all workers.
+        let mut seen = std::collections::BTreeMap::new();
+        for per_worker in &stats.dispatches {
+            for (task_id, _step) in per_worker {
+                *seen.entry(*task_id).or_insert(0usize) += 1;
+            }
+        }
+        for task_id in &seeded {
+            let observed = seen.get(task_id).copied().unwrap_or(0);
+            prop_assert_eq!(
+                observed,
+                1,
+                "task {:?} dispatched {} times (expected 1)",
+                task_id,
+                observed
+            );
+        }
+    });
+}
+
+/// Deterministic, narrow variant of `mr_round_robin_contention_dispatches_each_task_once`
+/// that pins the exact input originally reported in br-asupersync-uguhr2
+/// (worker_count=3, task_count=8, steal_batch_size=2). Kept as a plain
+/// `#[test]` so a regression is obvious without needing proptest to rediscover
+/// the shrunken seed.
+#[test]
+fn round_robin_contention_8_tasks_3_workers_batch_2_dispatches_each_once() {
+    let mut harness = StarvationTestHarness::new_with_steal_batch(3, 16, Some(2));
+    let seeded = harness.seed_worker_local_ready(0, 8, 13_000, 50);
+
+    let stats = harness.run_scheduling_simulation(256);
+    let total: usize = stats.dispatches.iter().map(Vec::len).sum();
+
+    assert_eq!(
+        total, 8,
+        "expected all 8 seeded tasks to dispatch; got {total}. br-asupersync-uguhr2: \
+         LocalQueue::Stealer::steal was silently dropping tasks with missing arena records."
+    );
+
+    let mut counts = std::collections::BTreeMap::new();
+    for per_worker in &stats.dispatches {
+        for (task_id, _) in per_worker {
+            *counts.entry(*task_id).or_insert(0usize) += 1;
+        }
+    }
+    for task_id in &seeded {
+        assert_eq!(
+            counts.get(task_id).copied().unwrap_or(0),
+            1,
+            "task {task_id:?} not dispatched exactly once"
+        );
+    }
 }
 
 #[cfg(test)]
