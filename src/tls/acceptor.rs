@@ -501,6 +501,213 @@ SrXuVI5uunTgPWuOtJOP+KM=
     }
 
     #[cfg(feature = "tls")]
+    struct ClientHelloLayout {
+        cipher_suites_len_pos: usize,
+        extensions_len_pos: usize,
+        sni_ext_len_pos: usize,
+        sni_list_len_pos: usize,
+        first_sni_entry_start: usize,
+        first_sni_entry_end: usize,
+    }
+
+    #[cfg(feature = "tls")]
+    fn set_u16(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+    }
+
+    #[cfg(feature = "tls")]
+    fn set_u24(bytes: &mut [u8], offset: usize, value: usize) {
+        bytes[offset] = ((value >> 16) & 0xff) as u8;
+        bytes[offset + 1] = ((value >> 8) & 0xff) as u8;
+        bytes[offset + 2] = (value & 0xff) as u8;
+    }
+
+    #[cfg(feature = "tls")]
+    fn adjust_u16(bytes: &mut [u8], offset: usize, delta: usize) {
+        let value = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
+        let adjusted = value
+            .checked_add(u16::try_from(delta).expect("delta fits in u16"))
+            .expect("length remains within u16");
+        set_u16(bytes, offset, adjusted);
+    }
+
+    #[cfg(feature = "tls")]
+    fn parse_client_hello_layout(bytes: &[u8]) -> ClientHelloLayout {
+        assert!(bytes.len() >= 5, "TLS record header must be present");
+        let record_len = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
+        assert!(
+            bytes.len() >= 5 + record_len,
+            "record payload must be complete"
+        );
+
+        let mut pos = 5;
+        assert_eq!(bytes[pos], 0x01, "expected ClientHello handshake");
+        pos += 4;
+        pos += 2; // legacy_version
+        pos += 32; // random
+
+        let session_id_len = bytes[pos] as usize;
+        pos += 1 + session_id_len;
+
+        let cipher_suites_len_pos = pos;
+        let cipher_suites_len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+        pos += 2 + cipher_suites_len;
+
+        let compression_methods_len = bytes[pos] as usize;
+        pos += 1 + compression_methods_len;
+
+        let extensions_len_pos = pos;
+        let extensions_len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+        pos += 2;
+        let extensions_end = pos + extensions_len;
+
+        let mut sni_ext_len_pos = None;
+        let mut sni_list_len_pos = None;
+        let mut first_sni_entry_start = None;
+        let mut first_sni_entry_end = None;
+
+        while pos + 4 <= extensions_end {
+            let ext_type = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]);
+            let ext_len_pos = pos + 2;
+            let ext_len = u16::from_be_bytes([bytes[ext_len_pos], bytes[ext_len_pos + 1]]) as usize;
+            pos += 4;
+            let ext_data_start = pos;
+            let ext_data_end = pos + ext_len;
+            assert!(ext_data_end <= extensions_end, "extension must fit");
+
+            if ext_type == 0x0000 {
+                sni_ext_len_pos = Some(ext_len_pos);
+                sni_list_len_pos = Some(ext_data_start);
+                let list_len =
+                    u16::from_be_bytes([bytes[ext_data_start], bytes[ext_data_start + 1]]) as usize;
+                let first_entry_start = ext_data_start + 2;
+                let name_len_pos = first_entry_start + 1;
+                let name_len =
+                    u16::from_be_bytes([bytes[name_len_pos], bytes[name_len_pos + 1]]) as usize;
+                let first_entry_end = first_entry_start + 3 + name_len;
+                assert!(
+                    first_entry_end <= ext_data_start + 2 + list_len,
+                    "SNI entry must fit the advertised list"
+                );
+                first_sni_entry_start = Some(first_entry_start);
+                first_sni_entry_end = Some(first_entry_end);
+                break;
+            }
+
+            pos = ext_data_end;
+        }
+
+        ClientHelloLayout {
+            cipher_suites_len_pos,
+            extensions_len_pos,
+            sni_ext_len_pos: sni_ext_len_pos.expect("ClientHello should include SNI"),
+            sni_list_len_pos: sni_list_len_pos.expect("ClientHello should include SNI list"),
+            first_sni_entry_start: first_sni_entry_start
+                .expect("ClientHello should include an SNI entry"),
+            first_sni_entry_end: first_sni_entry_end
+                .expect("ClientHello should include an SNI entry"),
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    fn make_client_hello(alpn_protocols: &[&[u8]]) -> Vec<u8> {
+        use rustls::ClientConfig;
+        use rustls::crypto::ring::default_provider;
+        use rustls::pki_types::ServerName;
+
+        let mut config = ClientConfig::builder_with_provider(Arc::new(default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("default client protocol versions")
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        config.alpn_protocols = alpn_protocols
+            .iter()
+            .map(|protocol| protocol.to_vec())
+            .collect();
+
+        let server_name = ServerName::try_from("localhost".to_string()).expect("server name");
+        let mut client =
+            rustls::ClientConnection::new(Arc::new(config), server_name).expect("client config");
+        let mut out = Vec::new();
+        client.write_tls(&mut out).expect("client hello bytes");
+        out
+    }
+
+    #[cfg(feature = "tls")]
+    fn drive_server_parse(acceptor: &TlsAcceptor, bytes: &[u8]) -> Result<(), TlsError> {
+        use std::io::Cursor;
+
+        let mut server = rustls::ServerConnection::new(Arc::clone(acceptor.config()))
+            .map_err(|err| TlsError::Configuration(err.to_string()))?;
+        let mut cursor = Cursor::new(bytes);
+
+        while (cursor.position() as usize) < bytes.len() {
+            let read = server.read_tls(&mut cursor).map_err(TlsError::Io)?;
+            if read == 0 {
+                break;
+            }
+            server
+                .process_new_packets()
+                .map_err(|err| TlsError::Handshake(err.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "tls")]
+    fn duplicate_first_sni_entry(bytes: &mut Vec<u8>) {
+        let layout = parse_client_hello_layout(bytes);
+        let duplicate = bytes[layout.first_sni_entry_start..layout.first_sni_entry_end].to_vec();
+        bytes.splice(
+            layout.first_sni_entry_end..layout.first_sni_entry_end,
+            duplicate.iter().copied(),
+        );
+
+        let delta = duplicate.len();
+        adjust_u16(bytes, layout.sni_list_len_pos, delta);
+        adjust_u16(bytes, layout.sni_ext_len_pos, delta);
+        adjust_u16(bytes, layout.extensions_len_pos, delta);
+
+        let record_len = u16::from_be_bytes([bytes[3], bytes[4]]) as usize + delta;
+        set_u16(
+            bytes,
+            3,
+            u16::try_from(record_len).expect("record length fits u16"),
+        );
+
+        let handshake_len =
+            ((bytes[6] as usize) << 16) | ((bytes[7] as usize) << 8) | bytes[8] as usize;
+        set_u24(bytes, 6, handshake_len + delta);
+    }
+
+    #[cfg(feature = "tls")]
+    fn zero_cipher_suites(bytes: &mut [u8]) {
+        let layout = parse_client_hello_layout(bytes);
+        set_u16(bytes, layout.cipher_suites_len_pos, 0);
+    }
+
+    #[cfg(feature = "tls")]
+    fn fragment_first_tls_record(bytes: &[u8]) -> Vec<u8> {
+        assert!(bytes.len() >= 6, "need a full record to fragment");
+        let payload_len = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
+        let payload = &bytes[5..5 + payload_len];
+        let split_at = payload.len() / 2;
+        assert!(
+            split_at > 0 && split_at < payload.len(),
+            "payload must split into two records"
+        );
+
+        let mut fragmented = Vec::with_capacity(bytes.len() + 5);
+        fragmented.extend_from_slice(&[bytes[0], bytes[1], bytes[2]]);
+        fragmented.extend_from_slice(&(split_at as u16).to_be_bytes());
+        fragmented.extend_from_slice(&payload[..split_at]);
+        fragmented.extend_from_slice(&[bytes[0], bytes[1], bytes[2]]);
+        fragmented.extend_from_slice(&((payload.len() - split_at) as u16).to_be_bytes());
+        fragmented.extend_from_slice(&payload[split_at..]);
+        fragmented
+    }
+
+    #[cfg(feature = "tls")]
     #[test]
     fn test_acceptor_clone_is_cheap() {
         let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
@@ -515,6 +722,50 @@ SrXuVI5uunTgPWuOtJOP+KM=
 
         // Should be very fast (Arc clone)
         assert!(elapsed.as_millis() < 100);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_duplicate_sni_client_hello_is_rejected_cleanly() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let acceptor = TlsAcceptorBuilder::new(chain, key).build().unwrap();
+
+        let mut client_hello = make_client_hello(&[b"h2"]);
+        duplicate_first_sni_entry(&mut client_hello);
+
+        let err = drive_server_parse(&acceptor, &client_hello).unwrap_err();
+        assert!(matches!(err, TlsError::Handshake(_)));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_zero_cipher_suite_list_is_rejected_cleanly() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let acceptor = TlsAcceptorBuilder::new(chain, key).build().unwrap();
+
+        let mut client_hello = make_client_hello(&[b"h2"]);
+        zero_cipher_suites(&mut client_hello);
+
+        let err = drive_server_parse(&acceptor, &client_hello).unwrap_err();
+        assert!(matches!(err, TlsError::Handshake(_)));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_fragmented_client_hello_record_is_processed() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let acceptor = TlsAcceptorBuilder::new(chain, key)
+            .alpn_h2()
+            .build()
+            .unwrap();
+
+        let client_hello = make_client_hello(&[b"h2"]);
+        let fragmented = fragment_first_tls_record(&client_hello);
+
+        drive_server_parse(&acceptor, &fragmented).expect("fragmented client hello should parse");
     }
 
     #[cfg(feature = "tls")]

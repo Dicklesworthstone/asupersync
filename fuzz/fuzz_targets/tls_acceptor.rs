@@ -13,7 +13,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use std::io::{self, Read, Write};
+use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -642,17 +642,14 @@ fn test_acceptor_operation_no_panic(
 
 /// Simplified synchronous test for accept operation
 fn test_accept_sync(acceptor: &TlsAcceptor, stream: MockTlsStream) -> Result<(), TlsError> {
-    // Since we can't run async code in a synchronous fuzzer easily,
-    // we'll test the configuration and setup logic instead
+    use std::io::Cursor;
 
-    // Validate the acceptor configuration
     if let Some(timeout) = acceptor.handshake_timeout() {
         if timeout.as_millis() > 30000 {
             return Err(TlsError::Configuration("handshake timeout too long".into()));
         }
     }
 
-    // Test for configuration errors that could cause panics
     if stream.read_data.is_empty() {
         return Err(TlsError::Io(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
@@ -660,36 +657,18 @@ fn test_accept_sync(acceptor: &TlsAcceptor, stream: MockTlsStream) -> Result<(),
         )));
     }
 
-    // Simulate basic TLS parsing without actual async execution
-    let data = &stream.read_data;
+    let mut server = rustls::ServerConnection::new(Arc::clone(acceptor.config()))
+        .map_err(|err| TlsError::Configuration(err.to_string()))?;
+    let mut cursor = Cursor::new(&stream.read_data);
 
-    // Basic TLS record validation
-    if data.len() >= 5 {
-        let content_type = data[0];
-        let version_major = data[1];
-        let version_minor = data[2];
-        let length = ((data[3] as u16) << 8) | (data[4] as u16);
-
-        // Validate basic TLS record structure
-        if content_type != 0x16 {
-            // Must be Handshake
-            return Err(TlsError::Handshake("invalid content type".into()));
+    while (cursor.position() as usize) < stream.read_data.len() {
+        let read = server.read_tls(&mut cursor).map_err(TlsError::Io)?;
+        if read == 0 {
+            break;
         }
-
-        if version_major != 3 || (version_minor != 1 && version_minor != 3 && version_minor != 4) {
-            return Err(TlsError::Handshake("unsupported protocol version".into()));
-        }
-
-        if length as usize > data.len() - 5 {
-            return Err(TlsError::Handshake("truncated record".into()));
-        }
-
-        // Check for oversized records (max TLS record size is 16KB + header)
-        if length > 16384 {
-            return Err(TlsError::Handshake("oversized record".into()));
-        }
-    } else {
-        return Err(TlsError::Handshake("truncated TLS record header".into()));
+        server
+            .process_new_packets()
+            .map_err(|err| TlsError::Handshake(err.to_string()))?;
     }
 
     Ok(())
