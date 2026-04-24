@@ -715,7 +715,14 @@ macro_rules! pipeline {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
 
     // =========================================================================
@@ -1570,14 +1577,9 @@ mod tests {
             }
             for o1 in outcomes() {
                 for o2 in outcomes() {
-                    let lhs = pipeline2_outcomes::<i32, &'static str>(
-                        o1.clone(),
-                        Some(o2.clone()),
-                    );
-                    let rhs = pipeline_n_outcomes::<i32, &'static str>(
-                        vec![o1.clone(), o2.clone()],
-                        2,
-                    );
+                    let lhs = pipeline2_outcomes::<i32, &'static str>(o1.clone(), Some(o2.clone()));
+                    let rhs =
+                        pipeline_n_outcomes::<i32, &'static str>(vec![o1.clone(), o2.clone()], 2);
                     assert_same_shape(&lhs, &rhs);
                 }
             }
@@ -1609,16 +1611,17 @@ mod tests {
             }
             // Short-circuit at stage 2: [Ok, X, None]. pipeline_n sees the
             // 2-element vec since the third stage never ran.
-            for term in terminal_shapes.iter().filter(|o| !matches!(o, Outcome::Ok(_))) {
+            for term in terminal_shapes
+                .iter()
+                .filter(|o| !matches!(o, Outcome::Ok(_)))
+            {
                 let lhs = pipeline3_outcomes::<i32, &'static str>(
                     Outcome::Ok(1),
                     Some(term.clone()),
                     None,
                 );
-                let rhs = pipeline_n_outcomes::<i32, &'static str>(
-                    vec![Outcome::Ok(1), term.clone()],
-                    3,
-                );
+                let rhs =
+                    pipeline_n_outcomes::<i32, &'static str>(vec![Outcome::Ok(1), term.clone()], 3);
                 assert_same_shape(&lhs, &rhs);
             }
         }
@@ -1627,11 +1630,8 @@ mod tests {
         /// the caller supplies a full run (intermediates.len() + 1 == total).
         #[test]
         fn law_pipeline_with_final_equiv_pipeline_n_for_complete_runs() {
-            let sample: Vec<Outcome<i32, &'static str>> = vec![
-                Outcome::Ok(10),
-                Outcome::Ok(20),
-                Outcome::Ok(30),
-            ];
+            let sample: Vec<Outcome<i32, &'static str>> =
+                vec![Outcome::Ok(10), Outcome::Ok(20), Outcome::Ok(30)];
             let final_variants: Vec<Outcome<i32, &'static str>> = vec![
                 Outcome::Ok(99),
                 Outcome::Err("late"),
@@ -1656,11 +1656,10 @@ mod tests {
             let with_trailing: Vec<Outcome<i32, &'static str>> = vec![
                 Outcome::Ok(1),
                 Outcome::Err("midway"),
-                Outcome::Ok(999),   // ignored
+                Outcome::Ok(999),    // ignored
                 Outcome::Ok(12_345), // ignored
             ];
-            let truncated: Vec<Outcome<i32, &'static str>> =
-                with_trailing[..2].to_vec();
+            let truncated: Vec<Outcome<i32, &'static str>> = with_trailing[..2].to_vec();
             let lhs = pipeline_n_outcomes::<i32, &'static str>(with_trailing, 5);
             let rhs = pipeline_n_outcomes::<i32, &'static str>(truncated, 5);
             assert_same_shape(&lhs, &rhs);
@@ -1673,18 +1672,13 @@ mod tests {
         fn law_failed_at_total_stages_is_preserved() {
             for &total in &[1usize, 2, 3, 5, 10] {
                 // 2-variant: o1 fails
-                let r = pipeline2_outcomes::<i32, &'static str>(
-                    Outcome::Err("x"),
-                    None,
-                );
+                let r = pipeline2_outcomes::<i32, &'static str>(Outcome::Err("x"), None);
                 if let PipelineResult::Failed { failed_at, .. } = r {
                     assert_eq!(failed_at.total_stages, 2);
                 }
                 // n-variant: fail at index 0 with various totals
-                let r = pipeline_n_outcomes::<i32, &'static str>(
-                    vec![Outcome::Err("x")],
-                    total.max(1),
-                );
+                let r =
+                    pipeline_n_outcomes::<i32, &'static str>(vec![Outcome::Err("x")], total.max(1));
                 if let PipelineResult::Failed { failed_at, .. } = r {
                     assert_eq!(failed_at.total_stages, total.max(1));
                     assert_eq!(failed_at.index, 0);
@@ -1750,10 +1744,8 @@ mod tests {
         /// be able to distinguish "done" from "so far so good".
         #[test]
         fn law_partial_completion_reports_provided_count() {
-            let r = pipeline_n_outcomes::<i32, &'static str>(
-                vec![Outcome::Ok(1), Outcome::Ok(2)],
-                5,
-            );
+            let r =
+                pipeline_n_outcomes::<i32, &'static str>(vec![Outcome::Ok(1), Outcome::Ok(2)], 5);
             match r {
                 PipelineResult::Completed {
                     value,

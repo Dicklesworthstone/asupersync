@@ -175,7 +175,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::stream::iter;
 
@@ -433,10 +440,7 @@ mod tests {
                     let lo = n.min(xs.len());
                     let hi = lo.saturating_add(m).min(xs.len());
                     let expected: Vec<i32> = xs[lo..hi].to_vec();
-                    assert_eq!(
-                        got, expected,
-                        "skip({n}).take({m}) != xs[{lo}..{hi}]",
-                    );
+                    assert_eq!(got, expected, "skip({n}).take({m}) != xs[{lo}..{hi}]",);
                 }
             }
         }
@@ -452,10 +456,7 @@ mod tests {
                 let suffix = drain(iter(xs.clone()).skip(n));
                 let mut joined = prefix;
                 joined.extend(suffix);
-                assert_eq!(
-                    joined, xs,
-                    "take({n}) ++ skip({n}) did not reconstruct xs",
-                );
+                assert_eq!(joined, xs, "take({n}) ++ skip({n}) did not reconstruct xs",);
             }
         }
 
@@ -525,10 +526,7 @@ mod tests {
                     let upper = m.min(xs.len());
                     let lo = n.min(upper);
                     let expected: Vec<i32> = xs[lo..upper].to_vec();
-                    assert_eq!(
-                        got, expected,
-                        "take({m}).skip({n}) != xs[{lo}..{upper}]",
-                    );
+                    assert_eq!(got, expected, "take({m}).skip({n}) != xs[{lo}..{upper}]",);
                 }
             }
         }

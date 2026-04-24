@@ -492,7 +492,14 @@ impl ObligationLedger {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::record::ObligationKind;
     use crate::util::ArenaIndex;
@@ -2092,11 +2099,7 @@ mod tests {
         ledger.commit(t1, Time::from_nanos(10));
         assert_conservation(&ledger, "commit t1");
 
-        ledger.abort(
-            t2,
-            Time::from_nanos(11),
-            ObligationAbortReason::Cancel,
-        );
+        ledger.abort(t2, Time::from_nanos(11), ObligationAbortReason::Cancel);
         assert_conservation(&ledger, "abort t2");
 
         // By-id resolution after original token has been dropped.
@@ -2142,7 +2145,10 @@ mod tests {
         assert_eq!(final_stats.total_aborted, 0);
         assert_eq!(final_stats.total_leaked, 1);
         assert_eq!(final_stats.pending, 0);
-        assert!(!final_stats.is_clean(), "leaked obligation keeps ledger dirty");
+        assert!(
+            !final_stats.is_clean(),
+            "leaked obligation keeps ledger dirty"
+        );
         assert_eq!(ledger.check_leaks().leaked.len(), 1);
 
         crate::test_complete!("metamorphic_conservation_of_acquired_across_mixed_operations");
@@ -2189,7 +2195,8 @@ mod tests {
                 .saturating_add(s.total_leaked)
                 .saturating_add(s.pending);
             assert_eq!(
-                s.total_acquired, resolved_plus_pending,
+                s.total_acquired,
+                resolved_plus_pending,
                 "conservation violated at {step}: \
                  total_acquired={} vs committed+aborted+leaked+pending={} \
                  (committed={}, aborted={}, leaked={}, pending={})",

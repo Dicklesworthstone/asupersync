@@ -1221,7 +1221,7 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
                     7 => b'o',
                     8 => b's',
                     9 => b't',
-                    _ => unreachable!(),
+                    _ => b'0',
                 };
                 result.push(sym);
                 bits -= 5;
@@ -1398,7 +1398,14 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::super::error::ErrorCode;
     use super::*;
 
@@ -3002,7 +3009,9 @@ mod tests {
 
             // Decode and verify round-trip
             let mut src = encoded.freeze();
-            let decoded = decoder.decode(&mut src).unwrap_or_else(|_| panic!("Failed to decode static table entry {}", expected_index));
+            let decoded = decoder.decode(&mut src).unwrap_or_else(|_| {
+                panic!("Failed to decode static table entry {}", expected_index)
+            });
 
             assert_eq!(decoded.len(), 1);
             assert_eq!(decoded[0].name, name);

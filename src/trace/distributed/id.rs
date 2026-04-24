@@ -150,7 +150,14 @@ impl fmt::Display for SymbolSpanId {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
 
     #[test]
@@ -336,8 +343,7 @@ mod tests {
     fn canonical_trace_id_serialization_snapshot() {
         fn trace_row(label: &str, id: TraceId) -> serde_json::Value {
             let w3c = id.to_w3c_string();
-            let roundtrip = TraceId::from_w3c_string(&w3c)
-                .is_some_and(|p| p == id);
+            let roundtrip = TraceId::from_w3c_string(&w3c).is_some_and(|p| p == id);
             serde_json::json!({
                 "label":       label,
                 "high":        format!("{:#018x}", id.high()),

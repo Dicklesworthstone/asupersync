@@ -93,7 +93,11 @@ impl Future for StepFuture {
         }
 
         if let Some(panic_poll) = self.panic_on_poll {
-            assert!(self.polls_done != panic_poll, "Intentional panic at poll {}", panic_poll);
+            assert!(
+                self.polls_done != panic_poll,
+                "Intentional panic at poll {}",
+                panic_poll
+            );
         }
 
         self.polls_done += 1;
@@ -124,7 +128,11 @@ impl Future for StepReleaseFuture {
         }
 
         if let Some(panic_poll) = self.panic_on_poll {
-            assert!(self.polls_done != panic_poll, "Intentional panic at poll {}", panic_poll);
+            assert!(
+                self.polls_done != panic_poll,
+                "Intentional panic at poll {}",
+                panic_poll
+            );
         }
 
         self.polls_done += 1;

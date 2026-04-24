@@ -64,8 +64,9 @@ fn golden_display_obligation_flow_shapes() {
     let leaf = ObligationFlow::leaf_with_obligation("obl:permit".to_string());
     let joined = ObligationFlow::leaf_with_obligation("obl:a".to_string())
         .join(ObligationFlow::leaf_with_obligation("obl:b".to_string()));
-    let raced = ObligationFlow::leaf_with_obligation("obl:winner".to_string())
-        .race(ObligationFlow::leaf_with_obligation("obl:loser".to_string()));
+    let raced = ObligationFlow::leaf_with_obligation("obl:winner".to_string()).race(
+        ObligationFlow::leaf_with_obligation("obl:loser".to_string()),
+    );
     let rendered = [
         ("empty", empty),
         ("leaf_with_obligation", leaf),

@@ -441,7 +441,14 @@ impl CancelReason {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use proptest::prelude::*;
 
@@ -1015,11 +1022,18 @@ mod tests {
         use super::*;
 
         fn outcomes_from(cases: &[QuorumCase]) -> Vec<Outcome<i32, &'static str>> {
-            cases.iter().cloned().map(QuorumCase::into_outcome).collect()
+            cases
+                .iter()
+                .cloned()
+                .map(QuorumCase::into_outcome)
+                .collect()
         }
 
         fn count_ok(cases: &[QuorumCase]) -> usize {
-            cases.iter().filter(|c| matches!(c, QuorumCase::Ok(_))).count()
+            cases
+                .iter()
+                .filter(|c| matches!(c, QuorumCase::Ok(_)))
+                .count()
         }
 
         proptest! {
@@ -1183,8 +1197,16 @@ mod tests {
             ];
             let result = quorum_outcomes(0, outcomes);
             assert!(result.quorum_met, "required=0 must always be met");
-            assert_eq!(result.success_count(), 0, "required=0 reports zero successes");
-            assert_eq!(result.failure_count(), 4, "all inputs drained into failures");
+            assert_eq!(
+                result.success_count(),
+                0,
+                "required=0 reports zero successes"
+            );
+            assert_eq!(
+                result.failure_count(),
+                4,
+                "all inputs drained into failures"
+            );
         }
 
         /// quorum_still_possible has a precise algebraic identity:

@@ -78,7 +78,7 @@ fn net_tcp_real_integration_echo_log() {
         let mut client = TcpStream::connect(addr).await?;
         let test_payload = b"integration_test_payload_123";
         client.write_all(test_payload).await?;
-        
+
         let mut response = vec![0u8; test_payload.len()];
         client.read_exact(&mut response).await?;
 
@@ -105,11 +105,6 @@ fn net_tcp_real_integration_echo_log() {
     });
 
     assert!(result.is_ok(), "test should complete successfully");
-    json_log(
-        suite,
-        "teardown",
-        "test_end",
-        r#"{"result":"pass"}"#,
-    );
+    json_log(suite, "teardown", "test_end", r#"{"result":"pass"}"#);
     test_complete!("net_tcp_real_integration_echo_log");
 }

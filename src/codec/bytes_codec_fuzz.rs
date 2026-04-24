@@ -24,8 +24,8 @@ fn arb_bytes() -> impl Strategy<Value = Vec<u8>> {
         prop::collection::vec(any::<u8>(), 1025..=65536),
         // Pathological cases
         prop::collection::vec(any::<u8>(), 65537..=1048576), // Very large
-        prop::collection::vec(Just(0u8), 0..=1024),               // All zeros
-        prop::collection::vec(Just(255u8), 0..=1024),             // All 0xFF
+        prop::collection::vec(Just(0u8), 0..=1024),          // All zeros
+        prop::collection::vec(Just(255u8), 0..=1024),        // All 0xFF
     ]
 }
 

@@ -3,8 +3,8 @@
 //! This benchmark suite profiles memory allocation patterns in the bytes module,
 //! focusing on allocation-heavy operations that dominate real-world usage.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use asupersync::bytes::{Bytes, BytesMut};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 /// Scenario A: Incremental BytesMut growth (network buffer simulation)
 ///
@@ -69,8 +69,8 @@ fn bench_bytes_mut_splitting(c: &mut Criterion) {
     let mut group = c.benchmark_group("bytes_mut_splitting");
 
     let test_cases = [
-        (8192, 512),   // 8KB buffer, split into 512-byte frames
-        (32768, 1024), // 32KB buffer, split into 1KB frames
+        (8192, 512),    // 8KB buffer, split into 512-byte frames
+        (32768, 1024),  // 32KB buffer, split into 1KB frames
         (131072, 4096), // 128KB buffer, split into 4KB frames
     ];
 
@@ -146,17 +146,13 @@ fn bench_bytes_creation(c: &mut Criterion) {
             },
         );
 
-        group.bench_with_input(
-            BenchmarkId::new("from_vec", size),
-            &size,
-            |b, &size| {
-                b.iter(|| {
-                    let test_data = vec![0u8; size];
-                    let bytes = Bytes::from(black_box(test_data));
-                    black_box(bytes)
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("from_vec", size), &size, |b, &size| {
+            b.iter(|| {
+                let test_data = vec![0u8; size];
+                let bytes = Bytes::from(black_box(test_data));
+                black_box(bytes)
+            });
+        });
 
         group.bench_with_input(
             BenchmarkId::new("freeze_bytes_mut", size),
@@ -172,23 +168,20 @@ fn bench_bytes_creation(c: &mut Criterion) {
         );
 
         // Test static bytes (no allocation) as baseline
-        group.bench_function(
-            BenchmarkId::new("from_static", size),
-            |b| {
-                // Use a smaller static slice for comparison
-                const STATIC_DATA: &[u8] = &[0u8; 1024];
-                let data = if size <= STATIC_DATA.len() {
-                    &STATIC_DATA[..size]
-                } else {
-                    STATIC_DATA
-                };
+        group.bench_function(BenchmarkId::new("from_static", size), |b| {
+            // Use a smaller static slice for comparison
+            const STATIC_DATA: &[u8] = &[0u8; 1024];
+            let data = if size <= STATIC_DATA.len() {
+                &STATIC_DATA[..size]
+            } else {
+                STATIC_DATA
+            };
 
-                b.iter(|| {
-                    let bytes = Bytes::from_static(black_box(data));
-                    black_box(bytes)
-                });
-            },
-        );
+            b.iter(|| {
+                let bytes = Bytes::from_static(black_box(data));
+                black_box(bytes)
+            });
+        });
     }
 
     group.finish();
@@ -202,7 +195,8 @@ fn bench_mixed_allocation_patterns(c: &mut Criterion) {
     let mut group = c.benchmark_group("mixed_allocation_patterns");
 
     group.bench_function("http_request_parsing", |b| {
-        let request_data = b"GET /api/data HTTP/1.1\r\nHost: example.com\r\nContent-Length: 1024\r\n\r\n";
+        let request_data =
+            b"GET /api/data HTTP/1.1\r\nHost: example.com\r\nContent-Length: 1024\r\n\r\n";
         let body_data = vec![0u8; 1024];
 
         b.iter(|| {
@@ -225,7 +219,8 @@ fn bench_mixed_allocation_patterns(c: &mut Criterion) {
 
     group.bench_function("json_streaming", |b| {
         // Simulate JSON streaming where we build up responses
-        let records = (0..100).map(|i| format!(r#"{{"id":{i},"name":"item{i}","value":{}}}"#, i * 42))
+        let records = (0..100)
+            .map(|i| format!(r#"{{"id":{i},"name":"item{i}","value":{}}}"#, i * 42))
             .collect::<Vec<_>>();
 
         b.iter(|| {

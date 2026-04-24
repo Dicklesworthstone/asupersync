@@ -178,7 +178,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::stream::{StreamExt, iter};
     use std::sync::Arc;
@@ -826,10 +833,7 @@ mod tests {
     }
 
     fn make_merge_from_vecs(vecs: Vec<Vec<i32>>) -> Merge<BoxedStream<i32>> {
-        merge(
-            vecs.into_iter()
-                .map(|v| boxed_stream(iter(v))),
-        )
+        merge(vecs.into_iter().map(|v| boxed_stream(iter(v))))
     }
 
     /// LAW — Singleton identity: `merge([s])` yields the exact same sequence
@@ -902,26 +906,19 @@ mod tests {
             (vec![7, 7], vec![7], vec![7, 7, 7]),
         ];
         for (a, b, c) in triples {
-            let flat = drain_to_sorted_vec(make_merge_from_vecs(vec![
-                a.clone(),
-                b.clone(),
-                c.clone(),
-            ]));
+            let flat =
+                drain_to_sorted_vec(make_merge_from_vecs(vec![a.clone(), b.clone(), c.clone()]));
 
             // Left-nested: merge([merge([a, b]), c])
             let ab = make_merge_from_vecs(vec![a.clone(), b.clone()]);
-            let left_nested: Merge<BoxedStream<i32>> = merge(vec![
-                boxed_stream(ab),
-                boxed_stream(iter(c.clone())),
-            ]);
+            let left_nested: Merge<BoxedStream<i32>> =
+                merge(vec![boxed_stream(ab), boxed_stream(iter(c.clone()))]);
             let left = drain_to_sorted_vec(left_nested);
 
             // Right-nested: merge([a, merge([b, c])])
             let bc = make_merge_from_vecs(vec![b.clone(), c.clone()]);
-            let right_nested: Merge<BoxedStream<i32>> = merge(vec![
-                boxed_stream(iter(a.clone())),
-                boxed_stream(bc),
-            ]);
+            let right_nested: Merge<BoxedStream<i32>> =
+                merge(vec![boxed_stream(iter(a.clone())), boxed_stream(bc)]);
             let right = drain_to_sorted_vec(right_nested);
 
             assert_eq!(
@@ -967,11 +964,7 @@ mod tests {
     #[test]
     fn law_merge_empty_is_identity() {
         init_test("law_merge_empty_is_identity");
-        let cases: Vec<Vec<i32>> = vec![
-            vec![],
-            vec![1, 2, 3],
-            vec![42, 42],
-        ];
+        let cases: Vec<Vec<i32>> = vec![vec![], vec![1, 2, 3], vec![42, 42]];
         for s in cases {
             let alone = drain_to_sorted_vec(iter(s.clone()));
             // Left identity: merge([empty, s])

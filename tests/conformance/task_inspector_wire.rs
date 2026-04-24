@@ -77,11 +77,7 @@ impl TaskInspectorWireHarness {
             let _ = writeln!(
                 out,
                 "| {} | {} | {} | {} | {} |",
-                result.requirement_id,
-                level,
-                status,
-                result.description,
-                result.evidence
+                result.requirement_id, level, status, result.description, result.evidence
             );
         }
 
@@ -155,8 +151,8 @@ impl TaskInspectorWireHarness {
     }
 
     fn enum_variant_tags_are_stable() -> WireConformanceResult {
-        let running = serde_json::to_string(&TaskStateInfo::Running)
-            .expect("running state should encode");
+        let running =
+            serde_json::to_string(&TaskStateInfo::Running).expect("running state should encode");
         let cancel_requested = serde_json::to_string(&TaskStateInfo::CancelRequested {
             reason: "deadline".to_string(),
         })

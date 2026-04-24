@@ -7,7 +7,9 @@
 //! No async runtime is required.
 
 use asupersync::cx::Cx;
-use asupersync::http::h3_native::{H3ConnectionConfig, H3ConnectionState, H3Frame, H3RequestStreamState, H3Settings};
+use asupersync::http::h3_native::{
+    H3ConnectionConfig, H3ConnectionState, H3Frame, H3RequestStreamState, H3Settings,
+};
 use asupersync::net::quic_native::{
     AckRange, NativeQuicConnection, NativeQuicConnectionConfig, PacketNumberSpace,
     QuicConnectionState, QuicTransportMachine, SentPacketMeta, StreamRole,
@@ -1317,12 +1319,14 @@ fn lab_runtime_harness_h3_request_response_under_reordered_acks() {
     );
 
     // Server processes request frames and responds successfully.
-    let (decoded_req_h, n) = H3Frame::decode(&request_wire, &test_config()).expect("decode request headers");
+    let (decoded_req_h, n) =
+        H3Frame::decode(&request_wire, &test_config()).expect("decode request headers");
     assert_eq!(decoded_req_h, req_headers);
     server_h3
         .on_request_stream_frame(stream.0, &decoded_req_h)
         .expect("server on request headers");
-    let (decoded_req_d, _) = H3Frame::decode(&request_wire[n..], &test_config()).expect("decode request body");
+    let (decoded_req_d, _) =
+        H3Frame::decode(&request_wire[n..], &test_config()).expect("decode request body");
     assert_eq!(decoded_req_d, req_body);
     server_h3
         .on_request_stream_frame(stream.0, &decoded_req_d)
@@ -1359,8 +1363,10 @@ fn lab_runtime_harness_h3_request_response_under_reordered_acks() {
         .receive_stream(&pair.cx, stream, resp_len)
         .expect("client receive response bytes");
 
-    let (decoded_resp_h, m) = H3Frame::decode(&response_wire, &test_config()).expect("decode response headers");
+    let (decoded_resp_h, m) =
+        H3Frame::decode(&response_wire, &test_config()).expect("decode response headers");
     assert_eq!(decoded_resp_h, resp_headers);
-    let (decoded_resp_d, _) = H3Frame::decode(&response_wire[m..], &test_config()).expect("decode response body");
+    let (decoded_resp_d, _) =
+        H3Frame::decode(&response_wire[m..], &test_config()).expect("decode response body");
     assert_eq!(decoded_resp_d, resp_body);
 }

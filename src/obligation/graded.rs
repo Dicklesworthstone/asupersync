@@ -860,7 +860,14 @@ impl GradedScope {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::record::ObligationKind;
 
@@ -1678,7 +1685,10 @@ mod tests {
             Err(_) => false,
         };
         emit_verdict("GRADED-REFINEMENT-4", pass);
-        assert!(pass, "close() at 0 outstanding did not produce matching counts");
+        assert!(
+            pass,
+            "close() at 0 outstanding did not produce matching counts"
+        );
     }
 
     // GRADED-REFINEMENT-5: scope close() with outstanding > 0 yields a
@@ -1712,7 +1722,9 @@ mod tests {
     fn conformance_graded_refinement_6_outstanding_tracks_running_net() {
         init_test("GRADED-REFINEMENT-6");
         let mut scope = GradedScope::open("L6");
-        let ops = [true, true, false, true, false, false, true, true, false, false];
+        let ops = [
+            true, true, false, true, false, false, true, true, false, false,
+        ];
         let mut net: i64 = 0;
         let mut ok = true;
         for reserve in ops {
@@ -1801,7 +1813,10 @@ mod tests {
         // have panicked. Reaching this point is the disarm proof.
         let pass = pass_a && pass_b;
         emit_verdict("GRADED-REFINEMENT-9", pass);
-        assert!(pass, "into_raw lost kind or description across the boundary");
+        assert!(
+            pass,
+            "into_raw lost kind or description across the boundary"
+        );
     }
 
     // GRADED-REFINEMENT-10: Boundary monotonicity — scope close() returning
@@ -1818,7 +1833,8 @@ mod tests {
             clean.on_resolve();
         }
         let clean_ok = clean.close();
-        let clean_pass = matches!(&clean_ok, Ok(p) if p.total_reserved() == 3 && p.total_resolved() == 3);
+        let clean_pass =
+            matches!(&clean_ok, Ok(p) if p.total_reserved() == 3 && p.total_resolved() == 3);
 
         // Leaky side.
         let mut leaky = GradedScope::open("L10-leaky");
@@ -1836,6 +1852,9 @@ mod tests {
 
         let pass = clean_pass && leaky_pass;
         emit_verdict("GRADED-REFINEMENT-10", pass);
-        assert!(pass, "close() boundary cases are not disjoint or mis-accounted");
+        assert!(
+            pass,
+            "close() boundary cases are not disjoint or mis-accounted"
+        );
     }
 }

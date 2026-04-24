@@ -28,7 +28,7 @@ fn format_query_execution_log(result: &QueryExecutionResult) -> String {
     log.push_str(&format!("Execution Time: {}ms\n", result.elapsed_ms));
 
     if let Some(ref err) = result.error {
-        log.push_str(&format!("Status: ERROR\n"));
+        log.push_str("Status: ERROR\n");
         log.push_str(&format!("Error: {}\n", err));
         if let Some(code) = err.code() {
             log.push_str(&format!("SQL State: {}\n", code));
@@ -36,7 +36,7 @@ fn format_query_execution_log(result: &QueryExecutionResult) -> String {
         log.push_str(&format!("Is Transient: {}\n", err.is_transient()));
         log.push_str(&format!("Is Retryable: {}\n", err.is_retryable()));
     } else {
-        log.push_str(&format!("Status: SUCCESS\n"));
+        log.push_str("Status: SUCCESS\n");
         log.push_str(&format!("Rows Returned: {}\n", result.rows.len()));
 
         if !result.columns.is_empty() {

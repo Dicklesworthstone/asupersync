@@ -212,7 +212,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::stream::StreamExt;
     use crate::stream::iter;
@@ -592,7 +599,8 @@ mod tests {
                     let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
                     let flat: Vec<i32> = chunks.iter().flatten().copied().collect();
                     assert_eq!(
-                        flat, xs,
+                        flat,
+                        xs,
                         "conservation violated for cap={cap}, xs.len()={}",
                         xs.len(),
                     );
@@ -610,10 +618,7 @@ mod tests {
                 for cap in 1..=8usize {
                     let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
                     let total: usize = chunks.iter().map(Vec::len).sum();
-                    assert_eq!(
-                        total, n,
-                        "total len {total} != input len {n} at cap={cap}",
-                    );
+                    assert_eq!(total, n, "total len {total} != input len {n} at cap={cap}",);
                 }
             }
         }
@@ -653,11 +658,7 @@ mod tests {
                         assert!(!chunk.is_empty(), "empty chunk at index {i}");
                         assert!(chunk.len() <= cap, "chunk len > cap at index {i}");
                         if i < last_idx {
-                            assert_eq!(
-                                chunk.len(),
-                                cap,
-                                "non-final chunk {i} has len != cap",
-                            );
+                            assert_eq!(chunk.len(), cap, "non-final chunk {i} has len != cap",);
                         }
                     }
                 }
@@ -673,7 +674,9 @@ mod tests {
                 let xs: Vec<i32> = (0..n).map(|x| x as i32).collect();
                 for cap in 1..=8usize {
                     let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
-                    let last = chunks.last().expect("non-empty input has at least one chunk");
+                    let last = chunks
+                        .last()
+                        .expect("non-empty input has at least one chunk");
                     let remainder = n % cap;
                     let expected = if remainder == 0 { cap } else { remainder };
                     assert_eq!(
@@ -751,10 +754,7 @@ mod tests {
                         1,
                         "cap={cap} >= len={n} should produce exactly one chunk",
                     );
-                    assert_eq!(
-                        chunks[0], xs,
-                        "the single chunk must equal the full input",
-                    );
+                    assert_eq!(chunks[0], xs, "the single chunk must equal the full input",);
                 }
             }
         }

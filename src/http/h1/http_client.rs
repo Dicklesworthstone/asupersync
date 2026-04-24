@@ -1221,7 +1221,11 @@ impl HttpClient {
                     scheme: match proxy.scheme {
                         ProxyScheme::Http => Scheme::Http,
                         ProxyScheme::Https => Scheme::Https,
-                        ProxyScheme::Socks5 => unreachable!(),
+                        ProxyScheme::Socks5 => {
+                            return Err(ClientError::InvalidUrl(
+                                "SOCKS5 proxy configuration routed to HTTP handler".to_string(),
+                            ));
+                        }
                     },
                     host: proxy.host.clone(),
                     port: proxy.port,
@@ -2418,7 +2422,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::io::AsyncWriteExt;
     use futures_lite::future::block_on;

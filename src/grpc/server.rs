@@ -802,7 +802,14 @@ pub fn err<T>(status: Status) -> Result<Response<T>, Status> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::grpc::service::ServiceDescriptor;
 
@@ -1415,9 +1422,7 @@ mod tests {
                     "GRPC-TIMEOUT-1: {input:?} must parse to {expected:?}",
                 );
             }
-            eprintln!(
-                "{{\"id\":\"GRPC-TIMEOUT-1\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-            );
+            eprintln!("{{\"id\":\"GRPC-TIMEOUT-1\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// GRPC-TIMEOUT-2 (MUST): The TimeoutValue component has at most
@@ -1433,9 +1438,7 @@ mod tests {
                     "GRPC-TIMEOUT-2: {input:?} must be rejected (>8 digits)",
                 );
             }
-            eprintln!(
-                "{{\"id\":\"GRPC-TIMEOUT-2\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-            );
+            eprintln!("{{\"id\":\"GRPC-TIMEOUT-2\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// GRPC-TIMEOUT-3 (MUST): Empty header value, no digits, or missing
@@ -1444,17 +1447,17 @@ mod tests {
         #[test]
         fn grpc_timeout_3_reject_malformed() {
             let rejected = &[
-                "",      // empty
-                "S",     // no digits
-                "100",   // missing unit
-                " 10S",  // leading whitespace
-                "10 S",  // internal space
-                "10s",   // lowercase s is not a valid unit
-                "10x",   // unknown unit
-                "-1S",   // negative
-                "1.5S",  // non-integer
-                "abc",   // non-numeric
-                "١٠S",   // non-ASCII digits (Arabic-Indic)
+                "",     // empty
+                "S",    // no digits
+                "100",  // missing unit
+                " 10S", // leading whitespace
+                "10 S", // internal space
+                "10s",  // lowercase s is not a valid unit
+                "10x",  // unknown unit
+                "-1S",  // negative
+                "1.5S", // non-integer
+                "abc",  // non-numeric
+                "١٠S",  // non-ASCII digits (Arabic-Indic)
             ];
             for input in rejected {
                 assert_eq!(
@@ -1463,9 +1466,7 @@ mod tests {
                     "GRPC-TIMEOUT-3: {input:?} must be rejected",
                 );
             }
-            eprintln!(
-                "{{\"id\":\"GRPC-TIMEOUT-3\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-            );
+            eprintln!("{{\"id\":\"GRPC-TIMEOUT-3\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// GRPC-TIMEOUT-4 (MUST): The formatter output is parseable by the
@@ -1481,9 +1482,9 @@ mod tests {
                 Duration::from_micros(250),
                 Duration::from_millis(500),
                 Duration::from_secs(30),
-                Duration::from_secs(120),   // 2 minutes
-                Duration::from_secs(3600),  // 1 hour
-                Duration::from_secs(7200),  // 2 hours
+                Duration::from_secs(120),  // 2 minutes
+                Duration::from_secs(3600), // 1 hour
+                Duration::from_secs(7200), // 2 hours
             ];
             for d in lossless {
                 let formatted = format_grpc_timeout(*d);
@@ -1495,9 +1496,7 @@ mod tests {
                     "GRPC-TIMEOUT-4: round-trip diverged for {d:?} → {formatted:?} → {parsed:?}",
                 );
             }
-            eprintln!(
-                "{{\"id\":\"GRPC-TIMEOUT-4\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-            );
+            eprintln!("{{\"id\":\"GRPC-TIMEOUT-4\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// GRPC-TIMEOUT-5 (MUST): Formatter output always fits within the
@@ -1529,9 +1528,7 @@ mod tests {
                     "GRPC-TIMEOUT-5: digits {digits:?} contains non-ASCII-digit for input {d:?}",
                 );
             }
-            eprintln!(
-                "{{\"id\":\"GRPC-TIMEOUT-5\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-            );
+            eprintln!("{{\"id\":\"GRPC-TIMEOUT-5\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// GRPC-TIMEOUT-6 (MUST): Zero duration formats as `"0n"` (or the
@@ -1549,9 +1546,7 @@ mod tests {
                 formatted, "0n",
                 "GRPC-TIMEOUT-6: zero must format as canonical \"0n\"",
             );
-            eprintln!(
-                "{{\"id\":\"GRPC-TIMEOUT-6\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-            );
+            eprintln!("{{\"id\":\"GRPC-TIMEOUT-6\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// GRPC-TIMEOUT-7 (MUST): H/M/S/m/u/n arithmetic overflow must be
@@ -1590,9 +1585,7 @@ mod tests {
                     "GRPC-TIMEOUT-7: 0{unit} must parse to ZERO",
                 );
             }
-            eprintln!(
-                "{{\"id\":\"GRPC-TIMEOUT-7\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-            );
+            eprintln!("{{\"id\":\"GRPC-TIMEOUT-7\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// GRPC-TIMEOUT-8 (MUST): The parser tolerates any byte sequence
@@ -1620,9 +1613,7 @@ mod tests {
                 // secondary — what matters is the absence of a crash.
                 let _ = parse_grpc_timeout(input);
             }
-            eprintln!(
-                "{{\"id\":\"GRPC-TIMEOUT-8\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-            );
+            eprintln!("{{\"id\":\"GRPC-TIMEOUT-8\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
     }
 }

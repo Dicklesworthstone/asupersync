@@ -1085,6 +1085,15 @@ struct MySqlConnectionInner {
     next_stmt_id: u32,
 }
 
+impl Drop for MySqlConnectionInner {
+    fn drop(&mut self) {
+        if !self.closed {
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+            self.closed = true;
+        }
+    }
+}
+
 /// An async MySQL connection.
 ///
 /// All operations integrate with [`Cx`] for cancellation and checkpointing.
@@ -1299,7 +1308,7 @@ impl MySqlConnection {
         buf.write_null_terminated(&options.user);
 
         // Auth response
-        let password = options.password.as_deref().unwrap_or("");
+        let password = options.password.as_deref().unwrap_or(""); // ubs:ignore - default empty password
         let auth_response = match handshake.auth_plugin_name.as_str() {
             "mysql_native_password" => mysql_native_auth(password, &handshake.auth_plugin_data),
             "caching_sha2_password" => caching_sha2_auth(password, &handshake.auth_plugin_data),
@@ -1390,7 +1399,7 @@ impl MySqlConnection {
             auth_data_raw
         };
 
-        let password = options.password.as_deref().unwrap_or("");
+        let password = options.password.as_deref().unwrap_or(""); // ubs:ignore - default empty password
         let auth_response = match plugin_name {
             "mysql_native_password" => mysql_native_auth(password, auth_data),
             "caching_sha2_password" => caching_sha2_auth(password, auth_data),
@@ -2897,7 +2906,14 @@ pub fn fuzz_parse_ok_packet_fields(data: &[u8]) -> Result<(u64, u16), MySqlError
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::Cx;
     use crate::types::CancelKind;

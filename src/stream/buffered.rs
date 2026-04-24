@@ -342,7 +342,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::stream::iter;
     use std::future::Future;
@@ -689,7 +696,7 @@ mod tests {
 
     mod backpressure_conformance {
         use super::*;
-        use std::future::{ready, Ready};
+        use std::future::{Ready, ready};
 
         fn drain_ready<S>(mut stream: S) -> Vec<<S as Stream>::Item>
         where
@@ -827,8 +834,7 @@ mod tests {
         fn conformance_buffered_and_unordered_agree_on_multiset() {
             for &limit in &[1usize, 2, 4, 8] {
                 let ordered_out = drain_ready(Buffered::new(ready_futures(20), limit));
-                let mut unordered_out =
-                    drain_ready(BufferUnordered::new(ready_futures(20), limit));
+                let mut unordered_out = drain_ready(BufferUnordered::new(ready_futures(20), limit));
                 unordered_out.sort_unstable();
                 let mut ordered_sorted = ordered_out.clone();
                 ordered_sorted.sort_unstable();
@@ -864,10 +870,10 @@ mod tests {
             assert_eq!(seen, 3);
             // Two additional polls after termination must still be None.
             for _ in 0..2 {
-                assert!(matches!(
-                    Pin::new(&mut buf).poll_next(&mut cx),
-                    Poll::Ready(None),
-                ), "terminal state regressed after exhaustion");
+                assert!(
+                    matches!(Pin::new(&mut buf).poll_next(&mut cx), Poll::Ready(None),),
+                    "terminal state regressed after exhaustion"
+                );
             }
         }
 

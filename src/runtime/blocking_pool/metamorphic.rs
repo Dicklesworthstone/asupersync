@@ -7,7 +7,14 @@
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::super::BlockingPool;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -520,18 +527,18 @@ mod tests {
     /// MR: side_effects(cancel_queued) == 0 AND side_effects(cancel_running) == 1
     #[test]
     fn mr_spawn_blocking_cancellation_states() {
-        use crate::runtime::{spawn_blocking, RuntimeBuilder};
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-        use std::time::Duration;
+        use crate::runtime::{RuntimeBuilder, spawn_blocking};
         use futures_lite::future;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
 
         let rt = RuntimeBuilder::new()
             .worker_threads(1)
             .blocking_threads(1, 1)
             .build()
             .unwrap();
-        
+
         let executed_queued = Arc::new(AtomicBool::new(false));
         let executed_running = Arc::new(AtomicBool::new(false));
 
@@ -550,14 +557,17 @@ mod tests {
             // Task 1: The blocker. It will consume the single blocking thread.
             // We use block_on with an async block and spawn it normally to run in the background
             // Wait, spawn_blocking just returns a future, so we must spawn it as a task to run it concurrently.
-            let _blocker_task = crate::runtime::builder::Runtime::current_handle().unwrap().spawn(async move {
-                spawn_blocking(move || {
-                    b_running.store(true, Ordering::SeqCst);
-                    while !b_release.load(Ordering::SeqCst) {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                }).await;
-            });
+            let _blocker_task = crate::runtime::builder::Runtime::current_handle()
+                .unwrap()
+                .spawn(async move {
+                    spawn_blocking(move || {
+                        b_running.store(true, Ordering::SeqCst);
+                        while !b_release.load(Ordering::SeqCst) {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                    })
+                    .await;
+                });
 
             // Wait for blocker to start
             while !blocker_running.load(Ordering::SeqCst) {
@@ -571,7 +581,9 @@ mod tests {
 
             // Poll it once to ensure it gets queued
             let mut pin_queued = Box::pin(queued_fut);
-            let waker = futures_lite::future::block_on(future::poll_fn(|cx| std::task::Poll::Ready(cx.waker().clone())));
+            let waker = futures_lite::future::block_on(future::poll_fn(|cx| {
+                std::task::Poll::Ready(cx.waker().clone())
+            }));
             let mut ctx = std::task::Context::from_waker(&waker);
             let _ = std::future::Future::poll(pin_queued.as_mut(), &mut ctx);
 
@@ -610,7 +622,7 @@ mod tests {
             !executed_queued.load(Ordering::SeqCst),
             "Queued spawn_blocking must not execute if dropped before starting (hard cancellation)"
         );
-        
+
         assert!(
             executed_running.load(Ordering::SeqCst),
             "Running spawn_blocking must run to completion even if dropped (soft cancellation)"

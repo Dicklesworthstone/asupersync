@@ -68,7 +68,9 @@ pub fn reset_waker_metrics() {
 /// Profile sentinel for waker allocation operations.
 #[inline(never)]
 fn _profile_waker_allocation() {
-    WAKER_METRICS.waker_allocations.fetch_add(1, Ordering::Relaxed);
+    WAKER_METRICS
+        .waker_allocations
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 /// Profile sentinel for waker clone operations.
@@ -80,13 +82,17 @@ fn _profile_waker_clone() {
 /// Profile sentinel for wake operations.
 #[inline(never)]
 fn _profile_wake_operation() {
-    WAKER_METRICS.wake_operations.fetch_add(1, Ordering::Relaxed);
+    WAKER_METRICS
+        .wake_operations
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 /// Profile sentinel for drain operations.
 #[inline(never)]
 fn _profile_drain_operation() {
-    WAKER_METRICS.drain_operations.fetch_add(1, Ordering::Relaxed);
+    WAKER_METRICS
+        .drain_operations
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 /// Profile sentinel for deduplication hits.
@@ -98,7 +104,9 @@ fn _profile_dedup_hit() {
 /// Profile sentinel for lock acquisitions.
 #[inline(never)]
 fn _profile_lock_acquisition() {
-    WAKER_METRICS.lock_acquisitions.fetch_add(1, Ordering::Relaxed);
+    WAKER_METRICS
+        .lock_acquisitions
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 /// Environment check for profiling instrumentation.
@@ -121,17 +129,20 @@ pub(crate) use profile;
 
 // Re-export the profiling functions for use in sibling modules
 pub(crate) use {
-    _profile_waker_allocation,
-    _profile_waker_clone,
-    _profile_wake_operation,
-    _profile_drain_operation,
-    _profile_dedup_hit,
-    _profile_lock_acquisition,
+    _profile_dedup_hit, _profile_drain_operation, _profile_lock_acquisition,
+    _profile_wake_operation, _profile_waker_allocation, _profile_waker_clone,
 };
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
 
     #[test]

@@ -126,7 +126,11 @@ static PROFILING_ENABLED: AtomicU8 = AtomicU8::new(0); // 0 = uninit, 1 = true, 
 pub fn profiling_enabled() -> bool {
     let mut val = PROFILING_ENABLED.load(Ordering::Relaxed);
     if val == 0 {
-        val = if std::env::var("BYTES_PROFILING").is_ok() { 1 } else { 2 };
+        val = if std::env::var("BYTES_PROFILING").is_ok() {
+            1
+        } else {
+            2
+        };
         PROFILING_ENABLED.store(val, Ordering::Relaxed);
     }
     val == 1

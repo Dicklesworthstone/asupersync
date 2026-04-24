@@ -43,10 +43,10 @@ use std::time::Duration;
 use rdkafka::{
     client::ClientContext,
     config::ClientConfig,
+    consumer::{Consumer, StreamConsumer},
     error::{KafkaError as RdKafkaError, RDKafkaErrorCode},
     message::{BorrowedMessage, DeliveryResult, Header, Message, OwnedHeaders},
     producer::{BaseRecord, ProducerContext, ThreadedProducer},
-    consumer::{Consumer, StreamConsumer},
 };
 #[cfg(feature = "kafka")]
 use std::future::Future;
@@ -1608,8 +1608,12 @@ pub struct RealBrokerBackend;
 
 #[cfg(feature = "kafka")]
 impl BrokerBackend for RealBrokerBackend {
-    fn is_real_broker(&self) -> bool { true }
-    fn backend_type(&self) -> &'static str { "rdkafka" }
+    fn is_real_broker(&self) -> bool {
+        true
+    }
+    fn backend_type(&self) -> &'static str {
+        "rdkafka"
+    }
 }
 
 /// Stub broker backend for testing and offline scenarios.
@@ -1618,8 +1622,12 @@ pub struct StubBrokerBackend;
 
 #[cfg(not(feature = "kafka"))]
 impl BrokerBackend for StubBrokerBackend {
-    fn is_real_broker(&self) -> bool { false }
-    fn backend_type(&self) -> &'static str { "stub" }
+    fn is_real_broker(&self) -> bool {
+        false
+    }
+    fn backend_type(&self) -> &'static str {
+        "stub"
+    }
 }
 
 /// Consumer abstraction for switching between real and stub implementations.
@@ -1717,7 +1725,8 @@ impl KafkaClient {
             if consumer.topic() != topic {
                 return Err(KafkaError::Config(format!(
                     "Consumer already exists for topic '{}', cannot create consumer for different topic '{}'",
-                    consumer.topic(), topic
+                    consumer.topic(),
+                    topic
                 )));
             }
             return Ok(consumer);
@@ -1737,9 +1746,9 @@ impl KafkaClient {
             .map_err(|e| KafkaError::Config(format!("Failed to create consumer: {}", e)))?;
 
         // Subscribe to the topic
-        rdkafka_consumer
-            .subscribe(&[topic])
-            .map_err(|e| KafkaError::Config(format!("Failed to subscribe to topic {}: {}", topic, e)))?;
+        rdkafka_consumer.subscribe(&[topic]).map_err(|e| {
+            KafkaError::Config(format!("Failed to subscribe to topic {}: {}", topic, e))
+        })?;
 
         // Wrap in TopicAwareConsumer
         self.consumer = Some(TopicAwareConsumer {
@@ -1810,21 +1819,31 @@ impl KafkaClient {
             if consumer.topic() != topic {
                 return Err(KafkaError::Config(format!(
                     "Consumer already exists for topic '{}', cannot create consumer for different topic '{}'",
-                    consumer.topic(), topic
+                    consumer.topic(),
+                    topic
                 )));
             }
             return Ok(consumer);
         }
 
         // Create new stub consumer for the topic
-        self.consumer = Some(StubConsumer { topic: topic.to_string() });
+        self.consumer = Some(StubConsumer {
+            topic: topic.to_string(),
+        });
         Ok(self.consumer.as_ref().unwrap())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     #[cfg(not(feature = "kafka"))]
     use crate::time::{TimerDriverHandle, VirtualClock};

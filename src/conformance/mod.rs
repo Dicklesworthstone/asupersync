@@ -720,7 +720,11 @@ impl ConformanceTarget for LabRuntimeTarget {
                 if state.closed {
                     std::task::Poll::Ready(())
                 } else {
-                    if !state.waiters.iter().any(|waker| waker.will_wake(cx.waker())) {
+                    if !state
+                        .waiters
+                        .iter()
+                        .any(|waker| waker.will_wake(cx.waker()))
+                    {
                         state.waiters.push(cx.waker().clone());
                     }
                     std::task::Poll::Pending
@@ -758,7 +762,14 @@ impl ConformanceTarget for LabRuntimeTarget {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use serde_json::json;
 

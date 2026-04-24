@@ -918,7 +918,14 @@ impl<T> Drop for Receiver<T> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::types::Budget;
     use crate::util::ArenaIndex;
@@ -2147,10 +2154,7 @@ pub mod backpressure_metamorphic {
             } else {
                 (rotated_sender + sender_count - normalized_rotation) % sender_count
             };
-            projections
-                .entry(sender_id)
-                .or_default()
-                .push(ordinal);
+            projections.entry(sender_id).or_default().push(ordinal);
         }
         projections
     }

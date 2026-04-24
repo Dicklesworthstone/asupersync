@@ -214,7 +214,10 @@ mod rfc9001_conformance {
         let mut machine = QuicTlsMachine::new();
         machine.on_handshake_keys_available().unwrap();
         let result = machine.on_handshake_confirmed();
-        assert!(result.is_err(), "Should not confirm handshake before 1-RTT level");
+        assert!(
+            result.is_err(),
+            "Should not confirm handshake before 1-RTT level"
+        );
 
         // Case 2: Confirm handshake at 1-RTT level
         let mut machine = QuicTlsMachine::new();
@@ -238,9 +241,9 @@ mod rfc9001_conformance {
             (CryptoLevel::Initial, false, false, false, false),
             (CryptoLevel::Initial, false, true, false, false),
             (CryptoLevel::Handshake, false, false, false, false),
-            (CryptoLevel::Handshake, false, true, true, false),  // 0-RTT allowed
+            (CryptoLevel::Handshake, false, true, true, false), // 0-RTT allowed
             (CryptoLevel::OneRtt, false, true, true, false),
-            (CryptoLevel::OneRtt, true, true, false, true),      // 1-RTT allowed
+            (CryptoLevel::OneRtt, true, true, false, true), // 1-RTT allowed
             (CryptoLevel::OneRtt, true, false, false, true),
         ];
 
@@ -252,12 +255,14 @@ mod rfc9001_conformance {
             }
 
             match level {
-                CryptoLevel::Initial => {},
-                CryptoLevel::Handshake => { machine.on_handshake_keys_available().unwrap(); },
+                CryptoLevel::Initial => {}
+                CryptoLevel::Handshake => {
+                    machine.on_handshake_keys_available().unwrap();
+                }
                 CryptoLevel::OneRtt => {
                     machine.on_handshake_keys_available().unwrap();
                     machine.on_1rtt_keys_available().unwrap();
-                },
+                }
             }
 
             if confirmed && level == CryptoLevel::OneRtt {
@@ -265,14 +270,20 @@ mod rfc9001_conformance {
             }
 
             assert_eq!(
-                machine.can_send_0rtt(), expect_0rtt,
+                machine.can_send_0rtt(),
+                expect_0rtt,
                 "0-RTT capability mismatch at level {:?}, confirmed={}, resumption={}",
-                level, confirmed, resumption
+                level,
+                confirmed,
+                resumption
             );
             assert_eq!(
-                machine.can_send_1rtt(), expect_1rtt,
+                machine.can_send_1rtt(),
+                expect_1rtt,
                 "1-RTT capability mismatch at level {:?}, confirmed={}, resumption={}",
-                level, confirmed, resumption
+                level,
+                confirmed,
+                resumption
             );
 
             // Verify against reference
@@ -285,11 +296,13 @@ mod rfc9001_conformance {
             }
 
             assert_eq!(
-                reference.can_send_0rtt(resumption), expect_0rtt,
+                reference.can_send_0rtt(resumption),
+                expect_0rtt,
                 "Reference 0-RTT mismatch"
             );
             assert_eq!(
-                reference.can_send_1rtt(), expect_1rtt,
+                reference.can_send_1rtt(),
+                expect_1rtt,
                 "Reference 1-RTT mismatch"
             );
         }
@@ -304,21 +317,33 @@ mod rfc9001_conformance {
         machine.on_1rtt_keys_available().unwrap();
 
         let result = machine.request_local_key_update();
-        assert!(result.is_err(), "Key update should fail before handshake confirmation");
+        assert!(
+            result.is_err(),
+            "Key update should fail before handshake confirmation"
+        );
 
         // Test key updates after handshake confirmation
         machine.on_handshake_confirmed().unwrap();
 
         // Test local key update flow
         let scheduled = machine.request_local_key_update().unwrap();
-        assert!(matches!(scheduled, KeyUpdateEvent::LocalUpdateScheduled { .. }));
+        assert!(matches!(
+            scheduled,
+            KeyUpdateEvent::LocalUpdateScheduled { .. }
+        ));
 
         let committed = machine.commit_local_key_update().unwrap();
-        assert!(matches!(committed, KeyUpdateEvent::LocalUpdateScheduled { .. }));
+        assert!(matches!(
+            committed,
+            KeyUpdateEvent::LocalUpdateScheduled { .. }
+        ));
 
         // Test peer key update
         let peer_update = machine.on_peer_key_phase(true).unwrap();
-        assert!(matches!(peer_update, KeyUpdateEvent::RemoteUpdateAccepted { .. }));
+        assert!(matches!(
+            peer_update,
+            KeyUpdateEvent::RemoteUpdateAccepted { .. }
+        ));
 
         // Verify against reference implementation
         let mut reference = RefKeyUpdateMachine::new();
@@ -348,7 +373,7 @@ mod rfc9001_conformance {
         // Local key update should flip local phase
         machine.request_local_key_update().unwrap();
         machine.commit_local_key_update().unwrap();
-        assert!(machine.local_key_phase());  // Now true
+        assert!(machine.local_key_phase()); // Now true
         assert!(!machine.remote_key_phase()); // Unchanged
 
         // Second local update should flip back
@@ -360,7 +385,7 @@ mod rfc9001_conformance {
         // Peer update should flip remote phase
         machine.on_peer_key_phase(true).unwrap();
         assert!(!machine.local_key_phase()); // Unchanged
-        assert!(machine.remote_key_phase());  // Now true
+        assert!(machine.remote_key_phase()); // Now true
     }
 }
 
@@ -426,6 +451,7 @@ mod property_conformance {
             let mut expected_generation = 0u64;
             let mut expected_phase = false;
 
+            #[allow(clippy::explicit_counter_loop)]
             for _ in 0..update_count { // ignore
                 expected_generation += 1;
                 expected_phase = !expected_phase;
@@ -503,7 +529,7 @@ mod differential_tests {
                 "1rtt_keys",
                 "handshake_confirmed",
                 "local_key_update_1",
-                "peer_key_update_true"
+                "peer_key_update_true",
             ],
             // Scenario 2: Handshake with resumption
             vec![
@@ -512,7 +538,7 @@ mod differential_tests {
                 "check_0rtt_allowed",
                 "1rtt_keys",
                 "handshake_confirmed",
-                "check_0rtt_disabled"
+                "check_0rtt_disabled",
             ],
             // Scenario 3: Multiple key updates
             vec![
@@ -523,7 +549,7 @@ mod differential_tests {
                 "local_key_update_2",
                 "local_key_update_3",
                 "peer_key_update_true",
-                "peer_key_update_false"
+                "peer_key_update_false",
             ],
         ];
 
@@ -536,50 +562,63 @@ mod differential_tests {
                 match *step {
                     "enable_resumption" => {
                         machine.enable_resumption();
-                    },
+                    }
                     "handshake_keys" => {
                         machine.on_handshake_keys_available().unwrap();
                         ref_crypto.advance_level(CryptoLevel::Handshake).unwrap();
-                    },
+                    }
                     "1rtt_keys" => {
                         machine.on_1rtt_keys_available().unwrap();
                         ref_crypto.advance_level(CryptoLevel::OneRtt).unwrap();
-                    },
+                    }
                     "handshake_confirmed" => {
                         machine.on_handshake_confirmed().unwrap();
                         ref_crypto.confirm_handshake().unwrap();
                         ref_key.confirm_handshake();
-                    },
+                    }
                     "check_0rtt_allowed" => {
                         assert_eq!(
                             machine.can_send_0rtt(),
                             ref_crypto.can_send_0rtt(machine.resumption_enabled()),
-                            "0-RTT capability mismatch in scenario {}", i
+                            "0-RTT capability mismatch in scenario {}",
+                            i
                         );
-                    },
+                    }
                     "check_0rtt_disabled" => {
-                        assert!(!machine.can_send_0rtt(), "0-RTT should be disabled after confirmation");
-                        assert!(!ref_crypto.can_send_0rtt(true), "Reference 0-RTT should also be disabled");
-                    },
+                        assert!(
+                            !machine.can_send_0rtt(),
+                            "0-RTT should be disabled after confirmation"
+                        );
+                        assert!(
+                            !ref_crypto.can_send_0rtt(true),
+                            "Reference 0-RTT should also be disabled"
+                        );
+                    }
                     "local_key_update_1" | "local_key_update_2" | "local_key_update_3" => {
                         let impl_scheduled = machine.request_local_key_update().unwrap();
                         let ref_scheduled = ref_key.request_local_key_update().unwrap();
-                        assert_eq!(impl_scheduled, ref_scheduled, "Local update scheduling mismatch");
+                        assert_eq!(
+                            impl_scheduled, ref_scheduled,
+                            "Local update scheduling mismatch"
+                        );
 
                         let impl_committed = machine.commit_local_key_update().unwrap();
                         let ref_committed = ref_key.commit_local_key_update().unwrap();
-                        assert_eq!(impl_committed, ref_committed, "Local update commit mismatch");
-                    },
+                        assert_eq!(
+                            impl_committed, ref_committed,
+                            "Local update commit mismatch"
+                        );
+                    }
                     "peer_key_update_true" => {
                         let impl_result = machine.on_peer_key_phase(true).unwrap();
                         let ref_result = ref_key.on_peer_key_phase(true).unwrap();
                         assert_eq!(impl_result, ref_result, "Peer update true mismatch");
-                    },
+                    }
                     "peer_key_update_false" => {
                         let impl_result = machine.on_peer_key_phase(false).unwrap();
                         let ref_result = ref_key.on_peer_key_phase(false).unwrap();
                         assert_eq!(impl_result, ref_result, "Peer update false mismatch");
-                    },
+                    }
                     _ => panic!("Unknown step: {}", step),
                 }
             }
@@ -588,12 +627,14 @@ mod differential_tests {
             assert_eq!(
                 machine.level(),
                 ref_crypto.current_level,
-                "Final crypto level mismatch in scenario {}", i
+                "Final crypto level mismatch in scenario {}",
+                i
             );
             assert_eq!(
                 machine.can_send_1rtt(),
                 ref_crypto.can_send_1rtt(),
-                "Final 1-RTT capability mismatch in scenario {}", i
+                "Final 1-RTT capability mismatch in scenario {}",
+                i
             );
         }
     }

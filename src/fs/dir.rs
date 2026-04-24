@@ -130,7 +130,14 @@ fn uring_mkdirat(path: &std::path::Path, mode: libc::mode_t) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     #[cfg(all(target_os = "linux", feature = "io-uring", unix))]
     use std::ffi::OsString;

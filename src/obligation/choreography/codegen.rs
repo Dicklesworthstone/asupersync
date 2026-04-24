@@ -722,7 +722,14 @@ impl ProjectionOutput {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::obligation::choreography::{
         example_lease_renewal, example_saga_compensation, example_two_phase_commit,
@@ -1423,8 +1430,16 @@ mod tests {
                     let a = reused.compile(&protocol, participant_name).unwrap();
                     let b = fresh_1.compile(&protocol, participant_name).unwrap();
                     let c = fresh_2.compile(&protocol, participant_name).unwrap();
-                    assert_eq!(a.render(), b.render(), "{label}/{participant_name}: reused vs fresh diverged");
-                    assert_eq!(b.render(), c.render(), "{label}/{participant_name}: two fresh instances diverged");
+                    assert_eq!(
+                        a.render(),
+                        b.render(),
+                        "{label}/{participant_name}: reused vs fresh diverged"
+                    );
+                    assert_eq!(
+                        b.render(),
+                        c.render(),
+                        "{label}/{participant_name}: two fresh instances diverged"
+                    );
                 }
             }
         }
@@ -1436,8 +1451,12 @@ mod tests {
         /// and complexity counts are identical with and without tracing.
         #[test]
         fn mr_codegen_tracing_flag_affects_only_handler() {
-            let with_tracing = ProjectionCompiler { include_tracing: true };
-            let without = ProjectionCompiler { include_tracing: false };
+            let with_tracing = ProjectionCompiler {
+                include_tracing: true,
+            };
+            let without = ProjectionCompiler {
+                include_tracing: false,
+            };
             for (label, protocol) in all_examples() {
                 for participant_name in protocol.participants.keys() {
                     let a = with_tracing.compile(&protocol, participant_name).unwrap();

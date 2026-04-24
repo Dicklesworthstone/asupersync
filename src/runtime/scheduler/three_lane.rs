@@ -4457,7 +4457,14 @@ impl Wake for ThreeLaneLocalCancelWaker {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::record::task::TaskWakeState;
     use crate::runtime::scheduler::invariant_monitor;
@@ -9572,7 +9579,9 @@ mod tests {
         let second_last = &weight_history[weight_history.len() - 2];
         let last = &weight_history[weight_history.len() - 1];
 
-        for i in 0..5 { // clippy ignore
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..5 {
+            // clippy ignore
             let change_ratio = (last[i] - second_last[i]).abs() / second_last[i];
             assert!(
                 change_ratio < 0.05,
@@ -9584,7 +9593,9 @@ mod tests {
 
         // Weights should be properly initialized (all equal initially)
         let first_weights = &weight_history[0];
-        for i in 0..5 { // clippy ignore
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..5 {
+            // clippy ignore
             assert!(
                 (first_weights[i] - 1.0).abs() < 0.001,
                 "Initial weight {} should be 1.0, got {}",

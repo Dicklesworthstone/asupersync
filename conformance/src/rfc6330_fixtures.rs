@@ -175,11 +175,11 @@ pub const RFC6330_V3_TABLE: [u32; 256] = [
 /// Based on RFC 6330 Table 2 - FEC payload ID parameters
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystematicIndexEntry {
-    pub k: u16,      // Source symbols count
-    pub n_max: u16,  // Maximum number of encoding symbols
-    pub s: u16,      // Number of LDPC symbols
-    pub h: u16,      // Number of Half symbols
-    pub w: u16,      // LT symbols count (W = S + H)
+    pub k: u16,     // Source symbols count
+    pub n_max: u16, // Maximum number of encoding symbols
+    pub s: u16,     // Number of LDPC symbols
+    pub h: u16,     // Number of Half symbols
+    pub w: u16,     // LT symbols count (W = S + H)
 }
 
 /// RFC 6330 Table 2 reference data
@@ -187,33 +187,195 @@ pub struct SystematicIndexEntry {
 /// This table defines the systematic index J(K) for each valid K value
 /// according to RFC 6330 Section 5.3.3.1.
 pub const RFC6330_SYSTEMATIC_INDEX_TABLE: &[SystematicIndexEntry] = &[
-    SystematicIndexEntry { k: 10, n_max: 254, s: 7, h: 10, w: 17 },
-    SystematicIndexEntry { k: 12, n_max: 630, s: 7, h: 10, w: 19 },
-    SystematicIndexEntry { k: 18, n_max: 682, s: 11, h: 10, w: 29 },
-    SystematicIndexEntry { k: 20, n_max: 293, s: 11, h: 10, w: 31 },
-    SystematicIndexEntry { k: 26, n_max: 80, s: 11, h: 10, w: 37 },
-    SystematicIndexEntry { k: 30, n_max: 566, s: 11, h: 10, w: 41 },
-    SystematicIndexEntry { k: 32, n_max: 860, s: 11, h: 10, w: 43 },
-    SystematicIndexEntry { k: 36, n_max: 267, s: 11, h: 10, w: 47 },
-    SystematicIndexEntry { k: 42, n_max: 822, s: 11, h: 10, w: 53 },
-    SystematicIndexEntry { k: 46, n_max: 506, s: 13, h: 10, w: 59 },
-    SystematicIndexEntry { k: 48, n_max: 589, s: 13, h: 10, w: 61 },
-    SystematicIndexEntry { k: 49, n_max: 87, s: 13, h: 10, w: 61 },
-    SystematicIndexEntry { k: 55, n_max: 520, s: 13, h: 10, w: 67 },
-    SystematicIndexEntry { k: 60, n_max: 159, s: 13, h: 10, w: 71 },
-    SystematicIndexEntry { k: 62, n_max: 235, s: 13, h: 10, w: 73 },
-    SystematicIndexEntry { k: 69, n_max: 157, s: 13, h: 10, w: 79 },
-    SystematicIndexEntry { k: 75, n_max: 502, s: 17, h: 10, w: 89 },
-    SystematicIndexEntry { k: 84, n_max: 334, s: 17, h: 10, w: 97 },
-    SystematicIndexEntry { k: 88, n_max: 583, s: 17, h: 10, w: 101 },
-    SystematicIndexEntry { k: 91, n_max: 66, s: 17, h: 10, w: 103 },
-    SystematicIndexEntry { k: 95, n_max: 352, s: 17, h: 10, w: 107 },
-    SystematicIndexEntry { k: 97, n_max: 365, s: 17, h: 10, w: 109 },
-    SystematicIndexEntry { k: 101, n_max: 562, s: 17, h: 10, w: 113 },
-    SystematicIndexEntry { k: 114, n_max: 5, s: 19, h: 10, w: 127 },
-    SystematicIndexEntry { k: 119, n_max: 603, s: 19, h: 10, w: 131 },
-    SystematicIndexEntry { k: 125, n_max: 721, s: 19, h: 10, w: 137 },
-    SystematicIndexEntry { k: 127, n_max: 28, s: 19, h: 10, w: 139 },
+    SystematicIndexEntry {
+        k: 10,
+        n_max: 254,
+        s: 7,
+        h: 10,
+        w: 17,
+    },
+    SystematicIndexEntry {
+        k: 12,
+        n_max: 630,
+        s: 7,
+        h: 10,
+        w: 19,
+    },
+    SystematicIndexEntry {
+        k: 18,
+        n_max: 682,
+        s: 11,
+        h: 10,
+        w: 29,
+    },
+    SystematicIndexEntry {
+        k: 20,
+        n_max: 293,
+        s: 11,
+        h: 10,
+        w: 31,
+    },
+    SystematicIndexEntry {
+        k: 26,
+        n_max: 80,
+        s: 11,
+        h: 10,
+        w: 37,
+    },
+    SystematicIndexEntry {
+        k: 30,
+        n_max: 566,
+        s: 11,
+        h: 10,
+        w: 41,
+    },
+    SystematicIndexEntry {
+        k: 32,
+        n_max: 860,
+        s: 11,
+        h: 10,
+        w: 43,
+    },
+    SystematicIndexEntry {
+        k: 36,
+        n_max: 267,
+        s: 11,
+        h: 10,
+        w: 47,
+    },
+    SystematicIndexEntry {
+        k: 42,
+        n_max: 822,
+        s: 11,
+        h: 10,
+        w: 53,
+    },
+    SystematicIndexEntry {
+        k: 46,
+        n_max: 506,
+        s: 13,
+        h: 10,
+        w: 59,
+    },
+    SystematicIndexEntry {
+        k: 48,
+        n_max: 589,
+        s: 13,
+        h: 10,
+        w: 61,
+    },
+    SystematicIndexEntry {
+        k: 49,
+        n_max: 87,
+        s: 13,
+        h: 10,
+        w: 61,
+    },
+    SystematicIndexEntry {
+        k: 55,
+        n_max: 520,
+        s: 13,
+        h: 10,
+        w: 67,
+    },
+    SystematicIndexEntry {
+        k: 60,
+        n_max: 159,
+        s: 13,
+        h: 10,
+        w: 71,
+    },
+    SystematicIndexEntry {
+        k: 62,
+        n_max: 235,
+        s: 13,
+        h: 10,
+        w: 73,
+    },
+    SystematicIndexEntry {
+        k: 69,
+        n_max: 157,
+        s: 13,
+        h: 10,
+        w: 79,
+    },
+    SystematicIndexEntry {
+        k: 75,
+        n_max: 502,
+        s: 17,
+        h: 10,
+        w: 89,
+    },
+    SystematicIndexEntry {
+        k: 84,
+        n_max: 334,
+        s: 17,
+        h: 10,
+        w: 97,
+    },
+    SystematicIndexEntry {
+        k: 88,
+        n_max: 583,
+        s: 17,
+        h: 10,
+        w: 101,
+    },
+    SystematicIndexEntry {
+        k: 91,
+        n_max: 66,
+        s: 17,
+        h: 10,
+        w: 103,
+    },
+    SystematicIndexEntry {
+        k: 95,
+        n_max: 352,
+        s: 17,
+        h: 10,
+        w: 107,
+    },
+    SystematicIndexEntry {
+        k: 97,
+        n_max: 365,
+        s: 17,
+        h: 10,
+        w: 109,
+    },
+    SystematicIndexEntry {
+        k: 101,
+        n_max: 562,
+        s: 17,
+        h: 10,
+        w: 113,
+    },
+    SystematicIndexEntry {
+        k: 114,
+        n_max: 5,
+        s: 19,
+        h: 10,
+        w: 127,
+    },
+    SystematicIndexEntry {
+        k: 119,
+        n_max: 603,
+        s: 19,
+        h: 10,
+        w: 131,
+    },
+    SystematicIndexEntry {
+        k: 125,
+        n_max: 721,
+        s: 19,
+        h: 10,
+        w: 137,
+    },
+    SystematicIndexEntry {
+        k: 127,
+        n_max: 28,
+        s: 19,
+        h: 10,
+        w: 139,
+    },
     // ... more entries would continue here for the full table
 ];
 
@@ -223,7 +385,7 @@ pub const RFC6330_SYSTEMATIC_INDEX_TABLE: &[SystematicIndexEntry] = &[
 /// from RFC 6330 Section 5.3.5.3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TupleTestVector {
-    pub k: u16,           // Source symbols count
+    pub k: u16,            // Source symbols count
     pub symbol_index: u32, // Encoding symbol index X
     pub expected_d: u32,   // Expected d value
     pub expected_a: u32,   // Expected a value
@@ -236,19 +398,71 @@ pub struct TupleTestVector {
 /// and symbol indices to validate tuple generation correctness.
 pub const RFC6330_TUPLE_TEST_VECTORS: &[TupleTestVector] = &[
     // K=10 test cases
-    TupleTestVector { k: 10, symbol_index: 0, expected_d: 0, expected_a: 0, expected_b: 0 },
-    TupleTestVector { k: 10, symbol_index: 1, expected_d: 1, expected_a: 1, expected_b: 1 },
-    TupleTestVector { k: 10, symbol_index: 10, expected_d: 2, expected_a: 1, expected_b: 2 },
-
+    TupleTestVector {
+        k: 10,
+        symbol_index: 0,
+        expected_d: 0,
+        expected_a: 0,
+        expected_b: 0,
+    },
+    TupleTestVector {
+        k: 10,
+        symbol_index: 1,
+        expected_d: 1,
+        expected_a: 1,
+        expected_b: 1,
+    },
+    TupleTestVector {
+        k: 10,
+        symbol_index: 10,
+        expected_d: 2,
+        expected_a: 1,
+        expected_b: 2,
+    },
     // K=48 test cases
-    TupleTestVector { k: 48, symbol_index: 0, expected_d: 0, expected_a: 0, expected_b: 0 },
-    TupleTestVector { k: 48, symbol_index: 48, expected_d: 2, expected_a: 1, expected_b: 2 },
-    TupleTestVector { k: 48, symbol_index: 100, expected_d: 3, expected_a: 2, expected_b: 4 },
-
+    TupleTestVector {
+        k: 48,
+        symbol_index: 0,
+        expected_d: 0,
+        expected_a: 0,
+        expected_b: 0,
+    },
+    TupleTestVector {
+        k: 48,
+        symbol_index: 48,
+        expected_d: 2,
+        expected_a: 1,
+        expected_b: 2,
+    },
+    TupleTestVector {
+        k: 48,
+        symbol_index: 100,
+        expected_d: 3,
+        expected_a: 2,
+        expected_b: 4,
+    },
     // K=119 test cases
-    TupleTestVector { k: 119, symbol_index: 0, expected_d: 0, expected_a: 0, expected_b: 0 },
-    TupleTestVector { k: 119, symbol_index: 119, expected_d: 2, expected_a: 1, expected_b: 2 },
-    TupleTestVector { k: 119, symbol_index: 500, expected_d: 4, expected_a: 3, expected_b: 7 },
+    TupleTestVector {
+        k: 119,
+        symbol_index: 0,
+        expected_d: 0,
+        expected_a: 0,
+        expected_b: 0,
+    },
+    TupleTestVector {
+        k: 119,
+        symbol_index: 119,
+        expected_d: 2,
+        expected_a: 1,
+        expected_b: 2,
+    },
+    TupleTestVector {
+        k: 119,
+        symbol_index: 500,
+        expected_d: 4,
+        expected_a: 3,
+        expected_b: 7,
+    },
 ];
 
 /// Helper function to get systematic index J(K) for a given K value
@@ -269,7 +483,11 @@ pub fn get_systematic_index(k: u16) -> Option<u16> {
 /// Validate that a lookup table matches the RFC reference
 ///
 /// Returns Ok(()) if all values match, or Err with details of the first mismatch.
-pub fn validate_lookup_table(actual: &[u32; 256], expected: &[u32; 256], table_name: &str) -> Result<(), String> {
+pub fn validate_lookup_table(
+    actual: &[u32; 256],
+    expected: &[u32; 256],
+    table_name: &str,
+) -> Result<(), String> {
     for (i, (&actual_val, &expected_val)) in actual.iter().zip(expected.iter()).enumerate() {
         if actual_val != expected_val {
             return Err(format!(

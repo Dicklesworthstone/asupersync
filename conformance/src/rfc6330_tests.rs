@@ -48,7 +48,10 @@ impl ConformanceTest for LookupTableV0Test {
         if RFC6330_V0_TABLE.len() != 256 {
             return ConformanceResult::Fail {
                 reason: "V0 table has incorrect length".to_string(),
-                details: Some(format!("Expected 256 entries, got {}", RFC6330_V0_TABLE.len())),
+                details: Some(format!(
+                    "Expected 256 entries, got {}",
+                    RFC6330_V0_TABLE.len()
+                )),
             };
         }
 
@@ -58,7 +61,10 @@ impl ConformanceTest for LookupTableV0Test {
             if RFC6330_V0_TABLE[i] != expected {
                 return ConformanceResult::Fail {
                     reason: format!("V0[{}] reference value incorrect", i),
-                    details: Some(format!("Expected {}, got {}", expected, RFC6330_V0_TABLE[i])),
+                    details: Some(format!(
+                        "Expected {}, got {}",
+                        expected, RFC6330_V0_TABLE[i]
+                    )),
                 };
             }
         }
@@ -105,7 +111,10 @@ impl ConformanceTest for LookupTableV1Test {
         if RFC6330_V1_TABLE.len() != 256 {
             return ConformanceResult::Fail {
                 reason: "V1 table has incorrect length".to_string(),
-                details: Some(format!("Expected 256 entries, got {}", RFC6330_V1_TABLE.len())),
+                details: Some(format!(
+                    "Expected 256 entries, got {}",
+                    RFC6330_V1_TABLE.len()
+                )),
             };
         }
 
@@ -115,7 +124,10 @@ impl ConformanceTest for LookupTableV1Test {
             if RFC6330_V1_TABLE[i] != expected {
                 return ConformanceResult::Fail {
                     reason: format!("V1[{}] reference value incorrect", i),
-                    details: Some(format!("Expected {}, got {}", expected, RFC6330_V1_TABLE[i])),
+                    details: Some(format!(
+                        "Expected {}, got {}",
+                        expected, RFC6330_V1_TABLE[i]
+                    )),
                 };
             }
         }
@@ -424,7 +436,10 @@ impl ConformanceTest for LookupTableV2Test {
         if RFC6330_V2_TABLE.len() != 256 {
             return ConformanceResult::Fail {
                 reason: "V2 table has incorrect length".to_string(),
-                details: Some(format!("Expected 256 entries, got {}", RFC6330_V2_TABLE.len())),
+                details: Some(format!(
+                    "Expected 256 entries, got {}",
+                    RFC6330_V2_TABLE.len()
+                )),
             };
         }
 
@@ -434,7 +449,10 @@ impl ConformanceTest for LookupTableV2Test {
             if RFC6330_V2_TABLE[i] != expected {
                 return ConformanceResult::Fail {
                     reason: format!("V2[{}] reference value incorrect", i),
-                    details: Some(format!("Expected {}, got {}", expected, RFC6330_V2_TABLE[i])),
+                    details: Some(format!(
+                        "Expected {}, got {}",
+                        expected, RFC6330_V2_TABLE[i]
+                    )),
                 };
             }
         }
@@ -481,7 +499,10 @@ impl ConformanceTest for LookupTableV3Test {
         if RFC6330_V3_TABLE.len() != 256 {
             return ConformanceResult::Fail {
                 reason: "V3 table has incorrect length".to_string(),
-                details: Some(format!("Expected 256 entries, got {}", RFC6330_V3_TABLE.len())),
+                details: Some(format!(
+                    "Expected 256 entries, got {}",
+                    RFC6330_V3_TABLE.len()
+                )),
             };
         }
 
@@ -491,7 +512,10 @@ impl ConformanceTest for LookupTableV3Test {
             if RFC6330_V3_TABLE[i] != expected {
                 return ConformanceResult::Fail {
                     reason: format!("V3[{}] reference value incorrect", i),
-                    details: Some(format!("Expected {}, got {}", expected, RFC6330_V3_TABLE[i])),
+                    details: Some(format!(
+                        "Expected {}, got {}",
+                        expected, RFC6330_V3_TABLE[i]
+                    )),
                 };
             }
         }

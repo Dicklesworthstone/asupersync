@@ -484,7 +484,14 @@ impl Bytes {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use proptest::prelude::*;
 
@@ -771,7 +778,10 @@ mod tests {
         let original = Bytes::copy_from_slice(b"conformance");
         let clone = original.clone();
 
-        assert!(std::ptr::eq(shared_arc_ptr(&original), shared_arc_ptr(&clone)));
+        assert!(std::ptr::eq(
+            shared_arc_ptr(&original),
+            shared_arc_ptr(&clone)
+        ));
         assert_eq!(original.start, 0);
         assert_eq!(clone.start, 0);
         assert_eq!(original.len, b"conformance".len());
@@ -785,7 +795,10 @@ mod tests {
         let original = Bytes::copy_from_slice(b"grpc-frame");
         let slice = original.slice(5..10);
 
-        assert!(std::ptr::eq(shared_arc_ptr(&original), shared_arc_ptr(&slice)));
+        assert!(std::ptr::eq(
+            shared_arc_ptr(&original),
+            shared_arc_ptr(&slice)
+        ));
         assert_eq!(original.start, 0);
         assert_eq!(slice.start, 5);
         assert_eq!(original.len, b"grpc-frame".len());
@@ -800,8 +813,14 @@ mod tests {
         let witness = working.clone();
         let prefix = working.split_to(5);
 
-        assert!(std::ptr::eq(shared_arc_ptr(&witness), shared_arc_ptr(&prefix)));
-        assert!(std::ptr::eq(shared_arc_ptr(&witness), shared_arc_ptr(&working)));
+        assert!(std::ptr::eq(
+            shared_arc_ptr(&witness),
+            shared_arc_ptr(&prefix)
+        ));
+        assert!(std::ptr::eq(
+            shared_arc_ptr(&witness),
+            shared_arc_ptr(&working)
+        ));
         assert_eq!(prefix.start, 0);
         assert_eq!(prefix.len, 5);
         assert_eq!(working.start, 5);
@@ -817,8 +836,14 @@ mod tests {
         let witness = working.clone();
         let tail = working.split_off(5);
 
-        assert!(std::ptr::eq(shared_arc_ptr(&witness), shared_arc_ptr(&tail)));
-        assert!(std::ptr::eq(shared_arc_ptr(&witness), shared_arc_ptr(&working)));
+        assert!(std::ptr::eq(
+            shared_arc_ptr(&witness),
+            shared_arc_ptr(&tail)
+        ));
+        assert!(std::ptr::eq(
+            shared_arc_ptr(&witness),
+            shared_arc_ptr(&working)
+        ));
         assert_eq!(working.start, 0);
         assert_eq!(working.len, 5);
         assert_eq!(tail.start, 5);

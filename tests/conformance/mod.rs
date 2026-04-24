@@ -30,6 +30,7 @@ pub mod trace_replay_idempotency_metamorphic;
 // pub mod mysql_auth_switch;
 pub mod mysql_stmt_prepare_execute;
 pub mod obligation_invariants;
+pub mod phase_encoding_stable;
 pub mod plan_latency;
 pub mod postgres_logical_replication;
 // TODO: SQLite conformance tests - module has unresolved dependencies

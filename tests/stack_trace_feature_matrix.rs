@@ -45,8 +45,10 @@ mod feature_matrix_tests {
         let first_is_enabled = traces[0].starts_with("Stack trace:");
         for trace in &traces {
             let is_enabled = trace.starts_with("Stack trace:");
-            assert_eq!(is_enabled, first_is_enabled,
-                "Stack trace enabled/disabled state should be consistent across calls");
+            assert_eq!(
+                is_enabled, first_is_enabled,
+                "Stack trace enabled/disabled state should be consistent across calls"
+            );
         }
 
         // All traces should be non-empty
@@ -79,8 +81,10 @@ mod feature_matrix_tests {
             .all(|t| t.contains("disabled"));
 
         // Should be either all enabled or all disabled
-        assert!(all_start_with_header || all_are_disabled,
-            "Stack trace state should be consistent across different capture contexts");
+        assert!(
+            all_start_with_header || all_are_disabled,
+            "Stack trace state should be consistent across different capture contexts"
+        );
     }
 
     fn capture_from_closure() -> String {
@@ -109,26 +113,37 @@ mod build_verification_tests {
         #[cfg(feature = "lab-stack-traces")]
         {
             let trace = capture_stack_trace();
-            assert!(trace.starts_with("Stack trace:"),
-                "With lab-stack-traces enabled, should get real stack trace");
-            assert!(trace.lines().count() > 1,
-                "Real stack trace should have multiple lines");
+            assert!(
+                trace.starts_with("Stack trace:"),
+                "With lab-stack-traces enabled, should get real stack trace"
+            );
+            assert!(
+                trace.lines().count() > 1,
+                "Real stack trace should have multiple lines"
+            );
 
             let wrapped = StackTrace::capture();
-            assert!(wrapped.frame_count() > 1,
-                "Real stack trace should have multiple frames");
+            assert!(
+                wrapped.frame_count() > 1,
+                "Real stack trace should have multiple frames"
+            );
         }
 
         #[cfg(not(feature = "lab-stack-traces"))]
         {
             // This branch runs when feature is disabled
             let trace = capture_stack_trace();
-            assert_eq!(trace, "Stack trace capture disabled (enable 'lab-stack-traces' feature)",
-                "With lab-stack-traces disabled, should get disabled message");
+            assert_eq!(
+                trace, "Stack trace capture disabled (enable 'lab-stack-traces' feature)",
+                "With lab-stack-traces disabled, should get disabled message"
+            );
 
             let wrapped = StackTrace::capture();
-            assert_eq!(wrapped.frame_count(), 1,
-                "Disabled stack trace should report 1 frame (the disabled message)");
+            assert_eq!(
+                wrapped.frame_count(),
+                1,
+                "Disabled stack trace should report 1 frame (the disabled message)"
+            );
         }
     }
 
@@ -162,9 +177,11 @@ mod build_verification_tests {
             let duration = start.elapsed();
 
             // 1000 disabled captures should complete in under 1ms
-            assert!(duration.as_millis() < 1,
+            assert!(
+                duration.as_millis() < 1,
                 "Disabled stack traces should be near zero-cost, took {}ms for 1000 captures",
-                duration.as_millis());
+                duration.as_millis()
+            );
         }
     }
 
@@ -182,9 +199,11 @@ mod build_verification_tests {
             let duration = start.elapsed();
 
             // 10 real captures should complete in under 100ms
-            assert!(duration.as_millis() < 100,
+            assert!(
+                duration.as_millis() < 100,
                 "Real stack traces should have reasonable performance, took {}ms for 10 captures",
-                duration.as_millis());
+                duration.as_millis()
+            );
         }
     }
 }

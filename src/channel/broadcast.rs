@@ -479,11 +479,11 @@ impl<T: Clone> Receiver<T> {
                     waker.clone_from(current_waker);
                 }
             } else {
-                let token = inner.wakers.insert(current_waker.clone());
+                let token = inner.wakers.insert(current_waker.clone()); // ubs:ignore - internal token
                 *waiter = Some(token);
             }
         } else {
-            let token = inner.wakers.insert(current_waker.clone());
+            let token = inner.wakers.insert(current_waker.clone()); // ubs:ignore - internal token
             *waiter = Some(token);
         }
 

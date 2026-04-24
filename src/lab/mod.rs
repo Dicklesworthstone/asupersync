@@ -168,7 +168,7 @@ pub use spork_harness::{
     SporkScenarioRunner, SporkScenarioSpec,
 };
 pub use util::{
-    capture_stack_trace, capture_stack_trace_default, capture_stack_trace_depth,
-    capture_stack_trace_minimal, StackTraceConfig,
+    StackTraceConfig, capture_stack_trace, capture_stack_trace_default, capture_stack_trace_depth,
+    capture_stack_trace_minimal,
 };
 pub use virtual_time_wheel::{ExpiredTimer, VirtualTimerHandle, VirtualTimerWheel};

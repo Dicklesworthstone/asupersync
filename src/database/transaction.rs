@@ -706,7 +706,14 @@ pub use mysql::{MySqlSavepoint, with_mysql_transaction, with_mysql_transaction_r
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     #[cfg(feature = "sqlite")]
     use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};

@@ -815,7 +815,14 @@ pub fn decode_packet_number_reconstruct(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
 
     fn reference_encode_varint_rfc9000(value: u64) -> Result<Vec<u8>, QuicCoreError> {
@@ -856,7 +863,7 @@ mod tests {
                 input[2],
                 input[3],
             ])),
-            8 => u64::from_be_bytes([
+            _ => u64::from_be_bytes([
                 first & 0x3f,
                 input[1],
                 input[2],

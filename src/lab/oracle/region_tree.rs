@@ -417,7 +417,14 @@ impl RegionTreeOracle {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::util::ArenaIndex;
     use insta::assert_snapshot;
@@ -444,9 +451,10 @@ mod tests {
             .map(|(index, region_id)| (*region_id, format!("[REGION_{index}]")))
             .collect();
 
-        let root = oracle
-            .root()
-            .map_or_else(|| "none".to_owned(), |region_id| aliases[&region_id].clone());
+        let root = oracle.root().map_or_else(
+            || "none".to_owned(),
+            |region_id| aliases[&region_id].clone(),
+        );
 
         let mut lines = vec![
             format!("scenario: {name}"),
@@ -460,9 +468,10 @@ mod tests {
                 .regions
                 .get(&region_id)
                 .expect("snapshot region should exist");
-            let parent = entry
-                .parent
-                .map_or_else(|| "none".to_owned(), |parent_id| aliases[&parent_id].clone());
+            let parent = entry.parent.map_or_else(
+                || "none".to_owned(),
+                |parent_id| aliases[&parent_id].clone(),
+            );
             let depth = oracle
                 .depth(region_id)
                 .map_or_else(|| "cycle".to_owned(), |depth| depth.to_string());

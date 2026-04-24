@@ -410,7 +410,8 @@ where
                 match self.flush_write_buf().await {
                     Ok(()) => {}
                     Err(WsError::Io(e))
-                        if e.kind() == std::io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
+                        if e.kind() == std::io::ErrorKind::Interrupted
+                            && cx.checkpoint().is_err() =>
                     {
                         continue;
                     }
@@ -549,7 +550,11 @@ where
     }
 
     /// Send a ping frame.
-    pub async fn ping(&mut self, cx: &Cx, payload: impl Into<crate::bytes::Bytes>) -> Result<(), WsError> {
+    pub async fn ping(
+        &mut self,
+        cx: &Cx,
+        payload: impl Into<crate::bytes::Bytes>,
+    ) -> Result<(), WsError> {
         if cx.checkpoint().is_err() {
             let timeout_duration = self.close_handshake.close_timeout();
             let current_time = || {
@@ -808,7 +813,14 @@ impl From<WsError> for WsAcceptError {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
     use futures_lite::future;

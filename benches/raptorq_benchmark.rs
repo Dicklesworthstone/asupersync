@@ -1262,7 +1262,9 @@ fn build_decode_received(
     let repair_start = k as u32;
     let repair_end = repair_start.saturating_add(total_repairs as u32);
     for esi in repair_start..repair_end {
-        let (cols, coefs) = decoder.repair_equation(esi).expect("repair equation should succeed in benchmark");
+        let (cols, coefs) = decoder
+            .repair_equation(esi)
+            .expect("repair equation should succeed in benchmark");
         let data = encoder.repair_symbol(esi);
         received.push(ReceivedSymbol::repair(esi, cols, coefs, data));
     }
@@ -1713,8 +1715,13 @@ fn bench_decoder_microbench(c: &mut Criterion) {
         let source = make_source(k, symbol_size, seed);
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
-        let received =
-            build_decode_received(&source, &encoder, &decoder, &drop_source_indices, extra_repair);
+        let received = build_decode_received(
+            &source,
+            &encoder,
+            &decoder,
+            &drop_source_indices,
+            extra_repair,
+        );
 
         DecoderMicrobenchCase {
             label,
@@ -1726,7 +1733,15 @@ fn bench_decoder_microbench(c: &mut Criterion) {
     };
 
     let cases = [
-        make_case("decode_source_only", 32, 1024, 0xDEC0DE01, Vec::new(), 0, None),
+        make_case(
+            "decode_source_only",
+            32,
+            1024,
+            0xDEC0DE01,
+            Vec::new(),
+            0,
+            None,
+        ),
         make_case(
             "decode_repair_heavy",
             64,

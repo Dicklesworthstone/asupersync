@@ -32,8 +32,8 @@
 //! oracle.on_waker_dropped(waker_id);
 //! ```
 
-use crate::trace::distributed::TraceId;
 use crate::lab::util::stack_trace;
+use crate::trace::distributed::TraceId;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -980,7 +980,14 @@ impl WakerDedupOracle {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use std::time::Duration;
 

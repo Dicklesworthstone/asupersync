@@ -349,7 +349,7 @@ impl Http1ClientCodec {
                         ..
                     } = old
                     else {
-                        unreachable!()
+                        return Err(HttpError::BadHeader);
                     };
 
                     return Ok(Some(Response {
@@ -376,7 +376,7 @@ impl Http1ClientCodec {
                         ..
                     } = old
                     else {
-                        unreachable!()
+                        return Err(HttpError::BadHeader);
                     };
 
                     return Ok(Some(Response {
@@ -1170,7 +1170,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::bytes::{Buf, BytesMut};
     use crate::codec::Decoder;

@@ -1670,7 +1670,14 @@ pub fn backlog_bound(arrival: &ArrivalCurve, service: &ServiceCurve) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use insta::assert_snapshot;
     use std::time::Duration;
@@ -2787,26 +2794,41 @@ mod tests {
         let mut analyzer = LatencyAnalyzer::new();
 
         // Annotate with diverse service characteristics
-        analyzer.annotate(a, NodeCurves::new(
-            ArrivalCurve::constant_rate(100.0),
-            ServiceCurve::rate_latency(500.0, 0.001),
-        ));
-        analyzer.annotate(b, NodeCurves::new(
-            ArrivalCurve::token_bucket(50.0, 20.0),
-            ServiceCurve::rate_latency(80.0, 0.05),
-        ));
-        analyzer.annotate(c, NodeCurves::new(
-            ArrivalCurve::constant_rate(50.0),
-            ServiceCurve::rate_latency(200.0, 0.01),
-        ));
-        analyzer.annotate(d, NodeCurves::new(
-            ArrivalCurve::constant_rate(30.0),
-            ServiceCurve::rate_latency(150.0, 0.02),
-        ));
-        analyzer.annotate(e, NodeCurves::new(
-            ArrivalCurve::constant_rate(25.0),
-            ServiceCurve::rate_latency(100.0, 0.015),
-        ));
+        analyzer.annotate(
+            a,
+            NodeCurves::new(
+                ArrivalCurve::constant_rate(100.0),
+                ServiceCurve::rate_latency(500.0, 0.001),
+            ),
+        );
+        analyzer.annotate(
+            b,
+            NodeCurves::new(
+                ArrivalCurve::token_bucket(50.0, 20.0),
+                ServiceCurve::rate_latency(80.0, 0.05),
+            ),
+        );
+        analyzer.annotate(
+            c,
+            NodeCurves::new(
+                ArrivalCurve::constant_rate(50.0),
+                ServiceCurve::rate_latency(200.0, 0.01),
+            ),
+        );
+        analyzer.annotate(
+            d,
+            NodeCurves::new(
+                ArrivalCurve::constant_rate(30.0),
+                ServiceCurve::rate_latency(150.0, 0.02),
+            ),
+        );
+        analyzer.annotate(
+            e,
+            NodeCurves::new(
+                ArrivalCurve::constant_rate(25.0),
+                ServiceCurve::rate_latency(100.0, 0.015),
+            ),
+        );
 
         let analysis = analyzer.analyze(&dag);
         assert_snapshot!(format!("{analysis}"));
@@ -2819,10 +2841,13 @@ mod tests {
         dag.set_root(single);
 
         let mut analyzer = LatencyAnalyzer::new();
-        analyzer.annotate(single, NodeCurves::new(
-            ArrivalCurve::token_bucket(75.5, 25.3),
-            ServiceCurve::rate_latency(120.7, 0.0123),
-        ));
+        analyzer.annotate(
+            single,
+            NodeCurves::new(
+                ArrivalCurve::token_bucket(75.5, 25.3),
+                ServiceCurve::rate_latency(120.7, 0.0123),
+            ),
+        );
 
         let analysis = analyzer.analyze(&dag);
         assert_snapshot!(format!("{analysis}"));

@@ -620,7 +620,14 @@ fn event_hash_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::monitor::DownReason;
     use crate::record::{ObligationAbortReason, ObligationKind};
@@ -688,8 +695,7 @@ mod tests {
             TraceData::Region { region, parent } => format!(
                 "region={} parent={}",
                 region.as_u64(),
-                parent
-                    .map_or_else(|| "none".to_string(), |region| region.as_u64().to_string())
+                parent.map_or_else(|| "none".to_string(), |region| region.as_u64().to_string())
             ),
             TraceData::Obligation {
                 obligation,
@@ -705,8 +711,7 @@ mod tests {
                 task.as_u64(),
                 region.as_u64(),
                 kind.as_str(),
-                duration_ns
-                    .map_or_else(|| "none".to_string(), |value| value.to_string()),
+                duration_ns.map_or_else(|| "none".to_string(), |value| value.to_string()),
                 abort_reason
                     .map_or_else(|| "none".to_string(), |reason| reason.as_str().to_string())
             ),
@@ -727,8 +732,7 @@ mod tests {
             }
             TraceData::Timer { timer_id, deadline } => format!(
                 "timer_id={timer_id} deadline={}",
-                deadline
-                    .map_or_else(|| "none".to_string(), |time| time.as_nanos().to_string())
+                deadline.map_or_else(|| "none".to_string(), |time| time.as_nanos().to_string())
             ),
             TraceData::Checkpoint {
                 sequence,

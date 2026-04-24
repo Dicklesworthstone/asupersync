@@ -323,7 +323,14 @@ fn uring_symlinkat(target: &Path, linkpath: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use futures_lite::future;
     #[cfg(all(target_os = "linux", feature = "io-uring", unix))]

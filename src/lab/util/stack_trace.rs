@@ -186,7 +186,11 @@ mod tests {
 
         // Should respect max_frames (rough check - may have fewer due to skipping)
         let frame_count = trace.matches(": ").count();
-        assert!(frame_count <= 5, "Frame count {} exceeds max 5", frame_count);
+        assert!(
+            frame_count <= 5,
+            "Frame count {} exceeds max 5",
+            frame_count
+        );
     }
 
     #[test]
@@ -243,6 +247,9 @@ mod tests_feature_disabled {
     #[test]
     fn test_disabled_feature_returns_placeholder() {
         let trace = capture_stack_trace_default();
-        assert_eq!(trace, "<stack traces disabled: enable 'lab-stack-traces' feature>");
+        assert_eq!(
+            trace,
+            "<stack traces disabled: enable 'lab-stack-traces' feature>"
+        );
     }
 }

@@ -96,7 +96,8 @@ impl StackTrace {
 
     /// Filters the stack trace to only include frames containing the given pattern.
     pub fn filter_frames(&self, pattern: &str) -> Self {
-        let filtered_lines: Vec<&str> = self.trace
+        let filtered_lines: Vec<&str> = self
+            .trace
             .lines()
             .filter(|line| line.contains(pattern))
             .collect();
@@ -121,7 +122,14 @@ impl From<StackTrace> for String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
 
     #[test]
@@ -180,7 +188,11 @@ mod tests {
         #[cfg(feature = "lab-stack-traces")]
         {
             let trace_str = trace.as_str();
-            assert!(trace_str.contains("level_1") || trace_str.contains("level_2") || trace_str.contains("level_3"));
+            assert!(
+                trace_str.contains("level_1")
+                    || trace_str.contains("level_2")
+                    || trace_str.contains("level_3")
+            );
         }
 
         // Should have multiple frames
@@ -233,7 +245,10 @@ mod tests {
         #[cfg(not(feature = "lab-stack-traces"))]
         {
             // With feature disabled, should get placeholder message
-            assert_eq!(trace, "Stack trace capture disabled (enable 'lab-stack-traces' feature)");
+            assert_eq!(
+                trace,
+                "Stack trace capture disabled (enable 'lab-stack-traces' feature)"
+            );
         }
     }
 

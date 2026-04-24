@@ -1253,7 +1253,14 @@ impl Clone for ViolationReport {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::trace::{TraceData, TraceEventKind};
     use crate::types::Budget;
@@ -1841,8 +1848,8 @@ mod tests {
             runtime.run_until_quiescent();
         });
 
-        let mut transcript = serde_json::to_value(report.to_json_summary())
-            .expect("serialize exploration report");
+        let mut transcript =
+            serde_json::to_value(report.to_json_summary()).expect("serialize exploration report");
         scrub_exploration_transcript(&mut transcript);
         assert_json_snapshot!("schedule_explorer_single_task_transcript", transcript);
     }
@@ -1868,8 +1875,8 @@ mod tests {
             runtime.run_until_quiescent();
         });
 
-        let mut transcript = serde_json::to_value(report.to_json_summary())
-            .expect("serialize exploration report");
+        let mut transcript =
+            serde_json::to_value(report.to_json_summary()).expect("serialize exploration report");
         scrub_exploration_transcript(&mut transcript);
         assert_json_snapshot!("schedule_explorer_concurrent_tasks_transcript", transcript);
     }
@@ -1915,8 +1922,8 @@ mod tests {
         });
 
         let coverage = explorer.dpor_coverage();
-        let mut transcript = serde_json::to_value(&coverage)
-            .expect("serialize dpor coverage metrics");
+        let mut transcript =
+            serde_json::to_value(&coverage).expect("serialize dpor coverage metrics");
         scrub_exploration_transcript(&mut transcript);
         assert_json_snapshot!("dpor_coverage_metrics_transcript", transcript);
     }
@@ -1961,8 +1968,7 @@ mod tests {
     #[test]
     fn golden_exploration_report_with_violations_transcript() {
         // Create a mock scenario with violations for golden testing
-        let mut violations = Vec::new();
-        violations.push(ViolationReport {
+        let violations = vec![ViolationReport {
             seed: 123,
             steps: 45,
             violations: vec![
@@ -1970,7 +1976,7 @@ mod tests {
                 InvariantViolation::ObligationLeak { leaks: Vec::new() },
             ],
             fingerprint: 9876,
-        });
+        }];
 
         let report = ExplorationReport {
             total_runs: 10,
@@ -1987,10 +1993,7 @@ mod tests {
                     (4000_u64, 2_usize),
                     (5000_u64, 1_usize),
                 ]),
-                novelty_histogram: BTreeMap::from([
-                    (0_u32, 5_usize),
-                    (1_u32, 5_usize),
-                ]),
+                novelty_histogram: BTreeMap::from([(0_u32, 5_usize), (1_u32, 5_usize)]),
                 saturation: SaturationMetrics {
                     window: 10,
                     saturated: false,
@@ -1998,16 +2001,14 @@ mod tests {
                     runs_since_last_new_class: Some(2),
                 },
             },
-            top_unexplored: vec![
-                UnexploredSeed {
-                    seed: 999,
-                    score: Some(TopologicalScore {
-                        novelty: 2,
-                        persistence_sum: 100,
-                        fingerprint: 5555,
-                    }),
-                },
-            ],
+            top_unexplored: vec![UnexploredSeed {
+                seed: 999,
+                score: Some(TopologicalScore {
+                    novelty: 2,
+                    persistence_sum: 100,
+                    fingerprint: 5555,
+                }),
+            }],
             runs: vec![
                 RunResult {
                     seed: 100,
@@ -2031,8 +2032,8 @@ mod tests {
             ],
         };
 
-        let mut transcript = serde_json::to_value(report.to_json_summary())
-            .expect("serialize violation report");
+        let mut transcript =
+            serde_json::to_value(report.to_json_summary()).expect("serialize violation report");
         scrub_exploration_transcript(&mut transcript);
         assert_json_snapshot!("exploration_report_with_violations_transcript", transcript);
     }
@@ -2047,8 +2048,7 @@ mod tests {
             runs_since_last_new_class: Some(8),
         };
 
-        let mut transcript = serde_json::to_value(&metrics)
-            .expect("serialize saturation metrics");
+        let mut transcript = serde_json::to_value(&metrics).expect("serialize saturation metrics");
         scrub_exploration_transcript(&mut transcript);
         assert_json_snapshot!("saturation_metrics_detailed_transcript", transcript);
     }
@@ -2061,20 +2061,20 @@ mod tests {
             total_runs: 25,
             new_class_discoveries: 8,
             class_run_counts: BTreeMap::from([
-                (100_u64, 5_usize),   // Frequent class
-                (200_u64, 4_usize),   // Common class
-                (300_u64, 3_usize),   // Less common
+                (100_u64, 5_usize), // Frequent class
+                (200_u64, 4_usize), // Common class
+                (300_u64, 3_usize), // Less common
                 (400_u64, 3_usize),
                 (500_u64, 2_usize),
                 (600_u64, 2_usize),
                 (700_u64, 2_usize),
-                (800_u64, 1_usize),   // Rare classes
+                (800_u64, 1_usize), // Rare classes
                 (900_u64, 1_usize),
                 (1000_u64, 2_usize),
             ]),
             novelty_histogram: BTreeMap::from([
-                (0_u32, 17_usize),    // Existing class hits
-                (1_u32, 8_usize),     // New class discoveries
+                (0_u32, 17_usize), // Existing class hits
+                (1_u32, 8_usize),  // New class discoveries
             ]),
             saturation: SaturationMetrics {
                 window: 10,
@@ -2084,8 +2084,7 @@ mod tests {
             },
         };
 
-        let mut transcript = serde_json::to_value(&coverage)
-            .expect("serialize coverage metrics");
+        let mut transcript = serde_json::to_value(&coverage).expect("serialize coverage metrics");
         scrub_exploration_transcript(&mut transcript);
         assert_json_snapshot!("coverage_trends_transcript", transcript);
     }

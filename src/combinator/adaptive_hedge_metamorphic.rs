@@ -8,8 +8,8 @@
 #![cfg(test)]
 
 use crate::combinator::adaptive_hedge::PeakEwmaHedgeController;
-use std::time::Duration;
 use crate::util::det_rng::DetRng;
+use std::time::Duration;
 
 /// Generates a sequence of random latency observations.
 fn generate_observations(seed: u64, count: usize, max_ms: u64) -> Vec<Duration> {
@@ -32,7 +32,7 @@ fn metamorphic_pointwise_monotonicity() {
     let decay = 0.95;
 
     let base_seq = generate_observations(0x1234, 100, 200);
-    
+
     // Create a dominating sequence by adding a positive offset to every element
     let offset = Duration::from_millis(20);
     let dominating_seq: Vec<Duration> = base_seq.iter().map(|d| *d + offset).collect();
@@ -50,7 +50,9 @@ fn metamorphic_pointwise_monotonicity() {
         assert!(
             delay_a >= delay_b,
             "Monotonicity violated at step {}: delay_a={:?} < delay_b={:?}",
-            i, delay_a, delay_b
+            i,
+            delay_a,
+            delay_b
         );
     }
 }
@@ -77,18 +79,21 @@ fn metamorphic_geometric_decay() {
     for step in 1..=50 {
         // Observe near-zero (sub-millisecond) to trigger decay without overriding the peak
         controller.observe(Duration::from_nanos(1));
-        
+
         expected_ms *= decay;
         let expected_clamped = expected_ms.max(min_delay.as_millis() as f64);
-        
+
         let actual_ms = controller.current_config().hedge_delay.as_millis() as f64;
-        
+
         // Allow a small epsilon for floating-point/integer truncation differences
         let diff = (actual_ms - expected_clamped).abs();
         assert!(
             diff <= 1.0,
             "Decay violated at step {}: expected roughly {}, got {} (diff: {})",
-            step, expected_clamped, actual_ms, diff
+            step,
+            expected_clamped,
+            actual_ms,
+            diff
         );
     }
 }
@@ -134,7 +139,10 @@ fn metamorphic_scale_invariance() {
         assert!(
             diff <= 1.0,
             "Scale invariance violated: base={}, scaled={}, expected={}, diff={}",
-            delay_base, delay_scaled, expected_scaled, diff
+            delay_base,
+            delay_scaled,
+            expected_scaled,
+            diff
         );
     }
 }

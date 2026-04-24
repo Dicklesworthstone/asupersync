@@ -164,7 +164,14 @@ impl FinalizerStack {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use parking_lot::Mutex;
 
@@ -192,8 +199,6 @@ mod tests {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
     }
-
-
 
     #[test]
     fn finalizer_stack_lifo_order() {
@@ -329,7 +334,8 @@ mod tests {
             format!("deadline={:?}", budget.deadline),
             format!("constants.poll_budget={}", FINALIZER_POLL_BUDGET),
             format!("constants.time_budget_ns={}", FINALIZER_TIME_BUDGET_NANOS),
-        ].join("\n")
+        ]
+        .join("\n")
     }
 
     /// Generate debug representations of finalizers for golden testing
@@ -340,7 +346,8 @@ mod tests {
         vec![
             format!("Sync: {:?}", sync_finalizer),
             format!("Async: {:?}", async_finalizer),
-        ].join("\n")
+        ]
+        .join("\n")
     }
 
     /// Generate finalizer stack states for golden testing
@@ -349,23 +356,43 @@ mod tests {
 
         // Empty stack
         let mut stack = FinalizerStack::new();
-        lines.push(format!("empty_stack: len={}, is_empty={}, escalation={:?}",
-            stack.len(), stack.is_empty(), stack.escalation()));
+        lines.push(format!(
+            "empty_stack: len={}, is_empty={}, escalation={:?}",
+            stack.len(),
+            stack.is_empty(),
+            stack.escalation()
+        ));
 
         // Stack with custom escalation
         let stack_panic = FinalizerStack::with_escalation(FinalizerEscalation::BoundedPanic);
-        lines.push(format!("panic_stack: len={}, is_empty={}, escalation={:?}",
-            stack_panic.len(), stack_panic.is_empty(), stack_panic.escalation()));
+        lines.push(format!(
+            "panic_stack: len={}, is_empty={}, escalation={:?}",
+            stack_panic.len(),
+            stack_panic.is_empty(),
+            stack_panic.escalation()
+        ));
 
         // Add finalizers and show progression
         stack.push_sync(|| {});
-        lines.push(format!("after_sync_push: len={}, is_empty={}", stack.len(), stack.is_empty()));
+        lines.push(format!(
+            "after_sync_push: len={}, is_empty={}",
+            stack.len(),
+            stack.is_empty()
+        ));
 
         stack.push_async(async {});
-        lines.push(format!("after_async_push: len={}, is_empty={}", stack.len(), stack.is_empty()));
+        lines.push(format!(
+            "after_async_push: len={}, is_empty={}",
+            stack.len(),
+            stack.is_empty()
+        ));
 
         stack.push_sync(|| {});
-        lines.push(format!("after_second_sync: len={}, is_empty={}", stack.len(), stack.is_empty()));
+        lines.push(format!(
+            "after_second_sync: len={}, is_empty={}",
+            stack.len(),
+            stack.is_empty()
+        ));
 
         // Pop operations (don't execute, just show types)
         if let Some(finalizer) = stack.pop() {
@@ -374,7 +401,11 @@ mod tests {
                 Finalizer::Async(_) => lines.push("popped: Async".to_string()),
             }
         }
-        lines.push(format!("after_first_pop: len={}, is_empty={}", stack.len(), stack.is_empty()));
+        lines.push(format!(
+            "after_first_pop: len={}, is_empty={}",
+            stack.len(),
+            stack.is_empty()
+        ));
 
         if let Some(finalizer) = stack.pop() {
             match finalizer {
@@ -382,7 +413,11 @@ mod tests {
                 Finalizer::Async(_) => lines.push("popped: Async".to_string()),
             }
         }
-        lines.push(format!("after_second_pop: len={}, is_empty={}", stack.len(), stack.is_empty()));
+        lines.push(format!(
+            "after_second_pop: len={}, is_empty={}",
+            stack.len(),
+            stack.is_empty()
+        ));
 
         if let Some(finalizer) = stack.pop() {
             match finalizer {
@@ -390,11 +425,18 @@ mod tests {
                 Finalizer::Async(_) => lines.push("popped: Async".to_string()),
             }
         }
-        lines.push(format!("after_third_pop: len={}, is_empty={}", stack.len(), stack.is_empty()));
+        lines.push(format!(
+            "after_third_pop: len={}, is_empty={}",
+            stack.len(),
+            stack.is_empty()
+        ));
 
         // Test pop from empty
         let empty_pop = stack.pop();
-        lines.push(format!("empty_pop: {}", if empty_pop.is_none() { "None" } else { "Some" }));
+        lines.push(format!(
+            "empty_pop: {}",
+            if empty_pop.is_none() { "None" } else { "Some" }
+        ));
 
         lines.join("\n")
     }
@@ -412,7 +454,8 @@ mod tests {
 
         for policy in policies {
             let is_default = policy == FinalizerEscalation::default();
-            lines.push(format!("{:?}|{}|{}|{}",
+            lines.push(format!(
+                "{:?}|{}|{}|{}",
                 policy,
                 policy.is_soft(),
                 policy.allows_continuation(),

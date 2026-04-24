@@ -5,8 +5,8 @@
 
 use crate::observability::otel::span_semantics::*;
 use opentelemetry::trace::{SpanKind, Status};
-use std::collections::HashMap;
 use serde_json::json;
+use std::collections::HashMap;
 
 // Use the existing test_span_snapshot function from the parent module
 use super::test_span_snapshot;
@@ -15,7 +15,14 @@ use super::test_span_snapshot;
 /// Tests ensure span serialization remains stable and catches format regressions.
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
 
     #[test]
@@ -41,12 +48,14 @@ mod tests {
         let mut span = TestSpan::new_with_config("db.query", SpanKind::Client, &config);
         span.set_attribute("db.system", "postgresql");
         span.set_attribute("db.operation", "select");
-        span.add_event("query.start", HashMap::from([
-            ("query_id".to_string(), "q-12345".to_string()),
-        ]));
-        span.add_event("query.result", HashMap::from([
-            ("rows_affected".to_string(), "150".to_string()),
-        ]));
+        span.add_event(
+            "query.start",
+            HashMap::from([("query_id".to_string(), "q-12345".to_string())]),
+        );
+        span.add_event(
+            "query.result",
+            HashMap::from([("rows_affected".to_string(), "150".to_string())]),
+        );
         span.set_status(Status::Ok);
         span.end();
 
@@ -62,11 +71,12 @@ mod tests {
         let config = SpanConformanceConfig::default();
         let mut span = TestSpan::new_with_config("payment.process", SpanKind::Internal, &config);
         span.set_attribute("payment.provider", "stripe");
-        span.add_event("payment.decline", HashMap::from([
-            ("decline_code".to_string(), "insufficient_funds".to_string()),
-        ]));
+        span.add_event(
+            "payment.decline",
+            HashMap::from([("decline_code".to_string(), "insufficient_funds".to_string())]),
+        );
         span.set_status(Status::Error {
-            description: "Payment declined by processor".into()
+            description: "Payment declined by processor".into(),
         });
         span.end();
 
@@ -174,9 +184,10 @@ mod tests {
         let config = SpanConformanceConfig::default();
         let mut span = TestSpan::new_with_config("long.running", SpanKind::Consumer, &config);
         span.set_attribute("consumer.group", "analytics");
-        span.add_event("message.received", HashMap::from([
-            ("message.size_bytes".to_string(), "1024".to_string()),
-        ]));
+        span.add_event(
+            "message.received",
+            HashMap::from([("message.size_bytes".to_string(), "1024".to_string())]),
+        );
         // Don't end the span - test serialization of active spans
 
         insta::with_settings!({

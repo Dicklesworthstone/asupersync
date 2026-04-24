@@ -9,8 +9,8 @@ use crate::tracing_compat::{Span, debug, info_span};
 use crate::types::rref::{RRef, RRefAccessWitness, RRefError};
 use crate::types::{Budget, CancelReason, CurveBudget, RRefAccess, RegionId, TaskId, Time};
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::cell::Cell;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 // Thread-local flag to detect reentrant calls and prevent deadlock
 thread_local! {
@@ -965,8 +965,7 @@ impl RegionRecord {
         // Check for reentrancy to prevent deadlock when closures call region methods
         if guard.is_reentrant() {
             // Already in a region access call - use try_read to avoid deadlock
-            let inner = self.inner.try_read()
-                .ok_or(RRefError::RegionClosed)?; // Assume locked means closing
+            let inner = self.inner.try_read().ok_or(RRefError::RegionClosed)?; // Assume locked means closing
             return inner
                 .heap
                 .get::<T>(rref.heap_index())
@@ -1184,7 +1183,14 @@ impl RRefAccess for RegionRecord {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::record::finalizer::Finalizer;
     use crate::util::ArenaIndex;
@@ -2551,15 +2557,24 @@ mod tests {
 
             assert!(region.begin_close(None));
             let after_close = region.state().as_u8();
-            assert!(after_close > initial_numeric, "Open→Closing should increase numeric value");
+            assert!(
+                after_close > initial_numeric,
+                "Open→Closing should increase numeric value"
+            );
 
             assert!(region.begin_drain());
             let after_drain = region.state().as_u8();
-            assert!(after_drain > after_close, "Closing→Draining should increase numeric value");
+            assert!(
+                after_drain > after_close,
+                "Closing→Draining should increase numeric value"
+            );
 
             assert!(region.begin_finalize());
             let after_finalize = region.state().as_u8();
-            assert!(after_finalize > after_drain, "Draining→Finalizing should increase numeric value");
+            assert!(
+                after_finalize > after_drain,
+                "Draining→Finalizing should increase numeric value"
+            );
 
             passed += 1;
         }
@@ -2573,8 +2588,10 @@ mod tests {
             assert_eq!(region.state(), RegionState::Closing);
 
             // Try invalid transitions (should all fail by design)
-            assert!(!region.begin_drain() || region.state() == RegionState::Closing,
-                   "Cannot transition backward");
+            assert!(
+                !region.begin_drain() || region.state() == RegionState::Closing,
+                "Cannot transition backward"
+            );
 
             // Advance to Finalizing
             assert!(region.begin_finalize());
@@ -2617,8 +2634,10 @@ mod tests {
             assert!(region.begin_finalize()); // Skip draining
             let final_numeric = region.state().as_u8(); // Finalizing = 3
 
-            assert!(final_numeric > initial_numeric,
-                   "Skip transition should preserve monotonic ordering");
+            assert!(
+                final_numeric > initial_numeric,
+                "Skip transition should preserve monotonic ordering"
+            );
 
             passed += 1;
         }
@@ -2629,7 +2648,10 @@ mod tests {
 
             // Try invalid transition from Open (should fail)
             assert!(!region.begin_drain(), "Cannot drain from Open state");
-            assert!(!region.complete_close(), "Cannot complete_close from Open state");
+            assert!(
+                !region.complete_close(),
+                "Cannot complete_close from Open state"
+            );
             assert_eq!(region.state(), RegionState::Open);
 
             // Move to Draining state
@@ -2638,7 +2660,10 @@ mod tests {
             assert_eq!(region.state(), RegionState::Draining);
 
             // Try invalid transition from Draining (should fail)
-            assert!(!region.complete_close(), "Cannot complete_close from Draining state");
+            assert!(
+                !region.complete_close(),
+                "Cannot complete_close from Draining state"
+            );
             assert_eq!(region.state(), RegionState::Draining);
 
             passed += 1;
@@ -2655,18 +2680,29 @@ mod tests {
             ];
 
             for &(state, expected_numeric) in &states {
-                assert_eq!(state.as_u8(), expected_numeric,
-                          "State {:?} should have numeric value {}", state, expected_numeric);
+                assert_eq!(
+                    state.as_u8(),
+                    expected_numeric,
+                    "State {:?} should have numeric value {}",
+                    state,
+                    expected_numeric
+                );
 
                 let decoded = RegionState::from_u8(expected_numeric).expect("valid state");
-                assert_eq!(decoded, state,
-                          "Numeric value {} should decode to {:?}", expected_numeric, state);
+                assert_eq!(
+                    decoded, state,
+                    "Numeric value {} should decode to {:?}",
+                    expected_numeric, state
+                );
             }
 
             passed += 1;
         }
 
-        println!("🧪 Metamorphic tests completed: {} passed, {} failed", passed, failed);
+        println!(
+            "🧪 Metamorphic tests completed: {} passed, {} failed",
+            passed, failed
+        );
 
         assert_eq!(failed, 0, "All metamorphic tests should pass");
         assert!(passed >= 6, "Should have at least 6 metamorphic relations");

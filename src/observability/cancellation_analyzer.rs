@@ -1008,8 +1008,7 @@ impl CancellationAnalyzer {
             return None;
         }
 
-        let baseline_avg =
-            baseline_latencies.iter().sum::<f64>() / baseline_latencies.len() as f64;
+        let baseline_avg = baseline_latencies.iter().sum::<f64>() / baseline_latencies.len() as f64;
         let recent_avg = recent_latencies.iter().sum::<f64>() / recent_latencies.len() as f64;
 
         // Detect regression if recent latency is significantly higher
@@ -1230,7 +1229,14 @@ impl CancellationAnalyzer {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::observability::cancellation_tracer::{CancellationTraceStep, TraceId};
 

@@ -16,14 +16,19 @@ struct TestMessage {
 
 #[test]
 fn test_mpsc_order_preservation_under_cancellation() {
-    let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
+    let rt = RuntimeBuilder::new()
+        .build()
+        .expect("runtime creation failed");
 
     rt.block_on(async {
         let cx = Cx::for_testing();
         let (sender, mut receiver) = mpsc::channel(10);
 
         // Send M1
-        let m1 = TestMessage { id: 1, content: "first".to_string() };
+        let m1 = TestMessage {
+            id: 1,
+            content: "first".to_string(),
+        };
         sender.send(&cx, m1.clone()).await.expect("M1 send failed");
 
         // Reserve for M2, then abort (cancel)
@@ -31,7 +36,10 @@ fn test_mpsc_order_preservation_under_cancellation() {
         permit.abort(); // Cancel M2
 
         // Send M3
-        let m3 = TestMessage { id: 3, content: "third".to_string() };
+        let m3 = TestMessage {
+            id: 3,
+            content: "third".to_string(),
+        };
         sender.send(&cx, m3.clone()).await.expect("M3 send failed");
 
         // Close sender
@@ -44,11 +52,19 @@ fn test_mpsc_order_preservation_under_cancellation() {
         }
 
         // **Metamorphic Property:** Order preserved despite cancellation
-        assert_eq!(received, vec![m1, m3],
-            "Order preservation violated: expected [M1, M3], got {:?}", received);
+        assert_eq!(
+            received,
+            vec![m1, m3],
+            "Order preservation violated: expected [M1, M3], got {:?}",
+            received
+        );
 
         // **Equivalence Relation:** cancelled messages don't appear
-        assert_eq!(received.len(), 2, "Should receive exactly 2 messages (M2 cancelled)");
+        assert_eq!(
+            received.len(),
+            2,
+            "Should receive exactly 2 messages (M2 cancelled)"
+        );
         assert_eq!(received[0].id, 1, "First message should be M1");
         assert_eq!(received[1].id, 3, "Second message should be M3");
     });
@@ -56,7 +72,9 @@ fn test_mpsc_order_preservation_under_cancellation() {
 
 #[test]
 fn test_mpsc_permit_lifecycle_conservation() {
-    let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
+    let rt = RuntimeBuilder::new()
+        .build()
+        .expect("runtime creation failed");
 
     rt.block_on(async {
         let cx = Cx::for_testing();
@@ -68,9 +86,12 @@ fn test_mpsc_permit_lifecycle_conservation() {
 
             if i % 2 == 0 {
                 // Commit: send message
-                permit.try_send(TestMessage {
-                    id: i, content: format!("msg_{}", i)
-                }).expect("send failed");
+                permit
+                    .try_send(TestMessage {
+                        id: i,
+                        content: format!("msg_{}", i),
+                    })
+                    .expect("send failed");
             } else {
                 // Abort: cancel reservation
                 permit.abort();
@@ -79,6 +100,9 @@ fn test_mpsc_permit_lifecycle_conservation() {
         }
 
         // All permits accounted for - no hanging reservations
-        assert!(sender.try_reserve().is_ok(), "Channel should accept new reservations");
+        assert!(
+            sender.try_reserve().is_ok(),
+            "Channel should accept new reservations"
+        );
     });
 }

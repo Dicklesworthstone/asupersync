@@ -487,7 +487,14 @@ impl Codec for IdentityCodec {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use std::fmt::Write;
 
@@ -883,8 +890,11 @@ mod tests {
             Ok(()) => {
                 // If encoding succeeded, the vulnerability exists!
                 // The large message was compressed and passed the size check
-                panic!("VULNERABILITY CONFIRMED: Large message ({} bytes) bypassed size limit ({} bytes) via compression",
-                       large_bytes.len(), max_size);
+                panic!(
+                    "VULNERABILITY CONFIRMED: Large message ({} bytes) bypassed size limit ({} bytes) via compression",
+                    large_bytes.len(),
+                    max_size
+                );
             }
             Err(GrpcError::MessageTooLarge) => {
                 // If encoding failed with MessageTooLarge, the size limits are working correctly

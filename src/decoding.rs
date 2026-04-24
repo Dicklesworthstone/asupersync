@@ -869,7 +869,14 @@ fn seed_for(object_id: ObjectId, sbn: u8, esi: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::encoding::EncodingPipeline;
     use crate::types::resource::{PoolConfig, SymbolPool};
@@ -1126,7 +1133,12 @@ mod tests {
             .expect("feed repair overflow");
         let expected = SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata);
         let ok = result == expected;
-        crate::assert_with_log!(ok, "repair overflow rejected as invalid metadata", expected, result);
+        crate::assert_with_log!(
+            ok,
+            "repair overflow rejected as invalid metadata",
+            expected,
+            result
+        );
 
         crate::test_complete!("reject_invalid_metadata_repair_esi_overflow_without_panicking");
     }

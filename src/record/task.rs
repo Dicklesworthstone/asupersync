@@ -116,6 +116,28 @@ impl TaskPhase {
             | (4, 4..=5)
         )
     }
+
+    /// Returns the numeric encoding for this state.
+    #[inline]
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decodes a numeric state value.
+    #[inline]
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Created),
+            1 => Some(Self::Running),
+            2 => Some(Self::CancelRequested),
+            3 => Some(Self::Cancelling),
+            4 => Some(Self::Finalizing),
+            5 => Some(Self::Completed),
+            _ => None,
+        }
+    }
 }
 
 /// Atomic task phase cell for cross-thread state checks.
@@ -130,7 +152,7 @@ impl TaskPhaseCell {
     #[must_use]
     pub fn new(phase: TaskPhase) -> Self {
         Self {
-            inner: AtomicU8::new(phase as u8),
+            inner: AtomicU8::new(phase.as_u8()),
         }
     }
 
@@ -138,18 +160,11 @@ impl TaskPhaseCell {
     #[inline]
     #[must_use]
     pub fn load(&self) -> TaskPhase {
-        match self.inner.load(Ordering::Acquire) {
-            0 => TaskPhase::Created,
-            1 => TaskPhase::Running,
-            2 => TaskPhase::CancelRequested,
-            3 => TaskPhase::Cancelling,
-            4 => TaskPhase::Finalizing,
-            5 => TaskPhase::Completed,
-            v => {
-                debug_assert!(false, "invalid TaskPhase value: {v}");
-                TaskPhase::Completed
-            }
-        }
+        let v = self.inner.load(Ordering::Acquire);
+        TaskPhase::from_u8(v).unwrap_or_else(|| {
+            debug_assert!(false, "invalid TaskPhase value: {v}");
+            TaskPhase::Completed
+        })
     }
 
     /// Stores the new phase, validating the transition in debug builds.
@@ -989,7 +1004,14 @@ impl TaskRecord {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::error::{Error, ErrorKind};
     use crate::util::ArenaIndex;
@@ -1806,7 +1828,7 @@ mod tests {
         let requested = record_cancel_requested.request_cancel(
             CancelReason::timeout()
                 .with_timestamp(Time::from_nanos(123456789))
-                .with_message("operation timeout")
+                .with_message("operation timeout"),
         );
         crate::assert_with_log!(requested, "request_cancel", true, requested);
         insta::assert_json_snapshot!(
@@ -1866,9 +1888,11 @@ mod tests {
 
         // Phase 8: Completed(Cancelled) state through full protocol
         let mut record_completed_cancelled = TaskRecord::new(task_id, region_id, budget);
-        let _ = record_completed_cancelled.request_cancel(CancelReason::linked_exit()
-            .with_region(RegionId::new_for_test(5, 1))
-            .with_task(TaskId::new_for_test(7, 2)));
+        let _ = record_completed_cancelled.request_cancel(
+            CancelReason::linked_exit()
+                .with_region(RegionId::new_for_test(5, 1))
+                .with_task(TaskId::new_for_test(7, 2)),
+        );
         let _ = record_completed_cancelled.acknowledge_cancel();
         let _ = record_completed_cancelled.cleanup_done();
         let finalized = record_completed_cancelled.finalize_done();
@@ -1876,7 +1900,8 @@ mod tests {
         insta::assert_json_snapshot!(
             "task_record_state_completed_cancelled",
             scrub_task_record_state(
-                serde_json::to_value(&record_completed_cancelled).expect("serialize completed_cancelled")
+                serde_json::to_value(&record_completed_cancelled)
+                    .expect("serialize completed_cancelled")
             )
         );
 
@@ -1896,10 +1921,8 @@ mod tests {
             CancelReason::timeout()
                 .with_timestamp(Time::from_nanos(100))
                 .with_message("request timeout"),
-            CancelReason::user("manual abort")
-                .with_timestamp(Time::from_nanos(200)),
-            CancelReason::shutdown()
-                .with_message("graceful shutdown"),
+            CancelReason::user("manual abort").with_timestamp(Time::from_nanos(200)),
+            CancelReason::shutdown().with_message("graceful shutdown"),
             CancelReason::linked_exit()
                 .with_region(RegionId::new_for_test(10, 2))
                 .with_task(TaskId::new_for_test(20, 3))
@@ -1943,9 +1966,7 @@ mod tests {
             let snapshot_name = format!("task_record_budget_{}", i);
             insta::assert_json_snapshot!(
                 snapshot_name,
-                scrub_task_record_state(
-                    serde_json::to_value(&record).expect("serialize budget")
-                )
+                scrub_task_record_state(serde_json::to_value(&record).expect("serialize budget"))
             );
         }
 
@@ -1975,29 +1996,39 @@ mod tests {
 
         // Step 3: CancelRequested
         let _ = record.request_cancel(CancelReason::shutdown().with_message("shutdown initiated"));
-        sequence.push(("cancel_requested", serde_json::to_value(&record).expect("serialize")));
+        sequence.push((
+            "cancel_requested",
+            serde_json::to_value(&record).expect("serialize"),
+        ));
 
         // Step 4: Cancelling
         let _ = record.acknowledge_cancel();
-        sequence.push(("cancelling", serde_json::to_value(&record).expect("serialize")));
+        sequence.push((
+            "cancelling",
+            serde_json::to_value(&record).expect("serialize"),
+        ));
 
         // Step 5: Finalizing
         let _ = record.cleanup_done();
-        sequence.push(("finalizing", serde_json::to_value(&record).expect("serialize")));
+        sequence.push((
+            "finalizing",
+            serde_json::to_value(&record).expect("serialize"),
+        ));
 
         // Step 6: Completed
         let _ = record.finalize_done();
-        sequence.push(("completed", serde_json::to_value(&record).expect("serialize")));
+        sequence.push((
+            "completed",
+            serde_json::to_value(&record).expect("serialize"),
+        ));
 
         // Create snapshot for complete sequence
-        let scrubbed_sequence: Vec<_> = sequence.into_iter()
+        let scrubbed_sequence: Vec<_> = sequence
+            .into_iter()
             .map(|(phase, value)| (phase, scrub_task_record_state(value)))
             .collect();
 
-        insta::assert_json_snapshot!(
-            "task_record_transition_sequence",
-            scrubbed_sequence
-        );
+        insta::assert_json_snapshot!("task_record_transition_sequence", scrubbed_sequence);
 
         crate::test_complete!("task_record_transition_sequence_snapshot");
     }

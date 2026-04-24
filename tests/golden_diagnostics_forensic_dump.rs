@@ -123,6 +123,7 @@ impl RuntimeScenarioBuilder {
         (self, obligation_id)
     }
 
+    #[allow(clippy::arc_with_non_send_sync)]
     fn build(self) -> Arc<RuntimeState> {
         Arc::new(self.state)
     }
@@ -328,7 +329,7 @@ fn forensic_dump_deadlock_scenario() {
 fn create_provenance_file() -> std::io::Result<()> {
     use std::fs;
 
-    let provenance_content = r#"# Diagnostic Forensic Dump Golden Snapshot Provenance
+    let provenance_content = r"# Diagnostic Forensic Dump Golden Snapshot Provenance
 
 ## How Golden Snapshots Are Generated
 
@@ -394,7 +395,7 @@ cargo insta accept
 #### deadlock_scenario
 - Multiple blocked tasks across regions
 - Tests deadlock detection algorithms
-"#;
+";
 
     fs::create_dir_all("tests/snapshots/diagnostics")?;
     fs::write(

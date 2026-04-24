@@ -858,7 +858,14 @@ impl DecodeProofBuilder {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
     use crate::raptorq::systematic::SystematicEncoder;
@@ -1403,7 +1410,8 @@ mod tests {
 
         // Add repair symbols
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi)
+            let (cols, coefs) = decoder
+                .repair_equation(esi)
                 .expect("repair equation should succeed with valid test parameters");
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
@@ -1792,7 +1800,8 @@ mod tests {
 
         // Add repair symbols
         for esi in (k as u32)..(l as u32) {
-            let (cols, coefs) = decoder.repair_equation(esi)
+            let (cols, coefs) = decoder
+                .repair_equation(esi)
                 .expect("repair equation should succeed with valid test parameters");
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
@@ -1836,7 +1845,8 @@ mod tests {
                     received.push(ReceivedSymbol::source(i as u32, data.clone()));
                 }
                 for esi in (k as u32)..(l as u32) {
-                    let (cols, coefs) = decoder.repair_equation(esi)
+                    let (cols, coefs) = decoder
+                        .repair_equation(esi)
                         .expect("repair equation should succeed with valid test parameters");
                     let repair_data = encoder.repair_symbol(esi);
                     received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
@@ -1890,7 +1900,8 @@ mod tests {
         }
         for offset in 0..repair_count {
             let esi = k as u32 + offset;
-            let (cols, coefs) = decoder.repair_equation(esi)
+            let (cols, coefs) = decoder
+                .repair_equation(esi)
                 .expect("repair equation should succeed with valid test parameters");
             let repair_data = encoder.repair_symbol(esi);
             original_received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
@@ -1899,9 +1910,9 @@ mod tests {
         let mut mutated_received = original_received.clone();
         let replaced_esi = k as u32 + repair_count - 1;
         let replacement_esi = replaced_esi + 10_000;
-        let (replacement_cols, replacement_coefs) =
-            decoder.repair_equation(replacement_esi)
-                .expect("repair equation should succeed with valid test parameters");
+        let (replacement_cols, replacement_coefs) = decoder
+            .repair_equation(replacement_esi)
+            .expect("repair equation should succeed with valid test parameters");
         let replacement_data = encoder.repair_symbol(replacement_esi);
         let replacement = ReceivedSymbol::repair(
             replacement_esi,

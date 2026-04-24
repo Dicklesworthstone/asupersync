@@ -1238,7 +1238,14 @@ impl PlanDag {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::test_utils::init_test_logging;
     use std::time::Duration;
@@ -2096,13 +2103,14 @@ mod tests {
         dag.set_root(outer);
 
         let before_dag = dag.clone();
-        let (_, cert) = dag.apply_rewrites_certified(
-            RewritePolicy::assume_all(),
-            &[RewriteRule::JoinAssoc],
-        );
+        let (_, cert) =
+            dag.apply_rewrites_certified(RewritePolicy::assume_all(), &[RewriteRule::JoinAssoc]);
 
         let ledger = cert.explain(&before_dag, &dag);
-        insta::assert_snapshot!("plan_certificate_join_associativity_render", ledger.render());
+        insta::assert_snapshot!(
+            "plan_certificate_join_associativity_render",
+            ledger.render()
+        );
     }
 
     #[test]
@@ -2117,13 +2125,14 @@ mod tests {
         dag.set_root(outer);
 
         let before_dag = dag.clone();
-        let (_, cert) = dag.apply_rewrites_certified(
-            RewritePolicy::assume_all(),
-            &[RewriteRule::RaceAssoc],
-        );
+        let (_, cert) =
+            dag.apply_rewrites_certified(RewritePolicy::assume_all(), &[RewriteRule::RaceAssoc]);
 
         let ledger = cert.explain(&before_dag, &dag);
-        insta::assert_snapshot!("plan_certificate_race_associativity_render", ledger.render());
+        insta::assert_snapshot!(
+            "plan_certificate_race_associativity_render",
+            ledger.render()
+        );
     }
 
     #[test]
@@ -2136,13 +2145,14 @@ mod tests {
         dag.set_root(outer_timeout);
 
         let before_dag = dag.clone();
-        let (_, cert) = dag.apply_rewrites_certified(
-            RewritePolicy::assume_all(),
-            &[RewriteRule::TimeoutMin],
-        );
+        let (_, cert) =
+            dag.apply_rewrites_certified(RewritePolicy::assume_all(), &[RewriteRule::TimeoutMin]);
 
         let ledger = cert.explain(&before_dag, &dag);
-        insta::assert_snapshot!("plan_certificate_timeout_minimization_render", ledger.render());
+        insta::assert_snapshot!(
+            "plan_certificate_timeout_minimization_render",
+            ledger.render()
+        );
     }
 
     #[test]
@@ -2155,14 +2165,15 @@ mod tests {
         dag.set_root(join);
 
         let before_dag = dag.clone();
-        let (_, cert) = dag.apply_rewrites_certified(
-            RewritePolicy::assume_all(),
-            &[RewriteRule::JoinCommute],
-        );
+        let (_, cert) =
+            dag.apply_rewrites_certified(RewritePolicy::assume_all(), &[RewriteRule::JoinCommute]);
 
         if !cert.is_identity() {
             let ledger = cert.explain(&before_dag, &dag);
-            insta::assert_snapshot!("plan_certificate_join_commutativity_render", ledger.render());
+            insta::assert_snapshot!(
+                "plan_certificate_join_commutativity_render",
+                ledger.render()
+            );
         }
     }
 
@@ -2176,14 +2187,15 @@ mod tests {
         dag.set_root(race);
 
         let before_dag = dag.clone();
-        let (_, cert) = dag.apply_rewrites_certified(
-            RewritePolicy::assume_all(),
-            &[RewriteRule::RaceCommute],
-        );
+        let (_, cert) =
+            dag.apply_rewrites_certified(RewritePolicy::assume_all(), &[RewriteRule::RaceCommute]);
 
         if !cert.is_identity() {
             let ledger = cert.explain(&before_dag, &dag);
-            insta::assert_snapshot!("plan_certificate_race_commutativity_render", ledger.render());
+            insta::assert_snapshot!(
+                "plan_certificate_race_commutativity_render",
+                ledger.render()
+            );
         }
     }
 
@@ -2196,10 +2208,8 @@ mod tests {
         let a = dag.leaf("isolated");
         dag.set_root(a);
 
-        let (_, identity_cert) = dag.apply_rewrites_certified(
-            RewritePolicy::conservative(),
-            &[RewriteRule::DedupRaceJoin],
-        );
+        let (_, identity_cert) = dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
 
         let identity_compact = identity_cert.compact().unwrap();
         insta::assert_debug_snapshot!("plan_certificate_identity_compact", identity_compact);
@@ -2245,15 +2255,11 @@ mod tests {
         let race2 = dag2.race(vec![x, y]);
         dag2.set_root(race2);
 
-        let (_, cert1) = dag1.apply_rewrites_certified(
-            RewritePolicy::conservative(),
-            &[RewriteRule::JoinAssoc],
-        );
+        let (_, cert1) =
+            dag1.apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::JoinAssoc]);
 
-        let (_, cert2) = dag2.apply_rewrites_certified(
-            RewritePolicy::conservative(),
-            &[RewriteRule::RaceAssoc],
-        );
+        let (_, cert2) =
+            dag2.apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::RaceAssoc]);
 
         let fingerprint1 = cert1.fingerprint();
         let fingerprint2 = cert2.fingerprint();
@@ -2269,7 +2275,10 @@ mod tests {
             format!("{fingerprint2:#018x}")
         );
 
-        assert_ne!(fingerprint1, fingerprint2, "Different certificates should have different fingerprints");
+        assert_ne!(
+            fingerprint1, fingerprint2,
+            "Different certificates should have different fingerprints"
+        );
     }
 
     #[test]
@@ -2288,10 +2297,8 @@ mod tests {
         // Conservative policy
         let before_dag = dag.clone();
         let mut conservative_dag = dag.clone();
-        let (_, conservative_cert) = conservative_dag.apply_rewrites_certified(
-            RewritePolicy::conservative(),
-            &[RewriteRule::DedupRaceJoin],
-        );
+        let (_, conservative_cert) = conservative_dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
 
         let conservative_ledger = conservative_cert.explain(&before_dag, &conservative_dag);
         insta::assert_snapshot!(
@@ -2301,10 +2308,8 @@ mod tests {
 
         // Permissive policy
         let mut permissive_dag = dag.clone();
-        let (_, permissive_cert) = permissive_dag.apply_rewrites_certified(
-            RewritePolicy::assume_all(),
-            &[RewriteRule::DedupRaceJoin],
-        );
+        let (_, permissive_cert) = permissive_dag
+            .apply_rewrites_certified(RewritePolicy::assume_all(), &[RewriteRule::DedupRaceJoin]);
 
         let permissive_ledger = permissive_cert.explain(&before_dag, &permissive_dag);
         insta::assert_snapshot!(
@@ -2359,16 +2364,20 @@ mod tests {
         // Capture before and after minimization
         insta::assert_snapshot!(
             "plan_certificate_before_minimization",
-            format!("steps: {}\nfingerprint: {:#018x}",
-                    cert_with_redundancy.steps.len(),
-                    cert_with_redundancy.fingerprint())
+            format!(
+                "steps: {}\nfingerprint: {:#018x}",
+                cert_with_redundancy.steps.len(),
+                cert_with_redundancy.fingerprint()
+            )
         );
 
         insta::assert_snapshot!(
             "plan_certificate_after_minimization",
-            format!("steps: {}\nfingerprint: {:#018x}",
-                    minimized.steps.len(),
-                    minimized.fingerprint())
+            format!(
+                "steps: {}\nfingerprint: {:#018x}",
+                minimized.steps.len(),
+                minimized.fingerprint()
+            )
         );
     }
 
@@ -2410,9 +2419,22 @@ mod tests {
         // Create several DAGs and capture their stable hashes
         let test_cases = [
             ("single_leaf", vec![("a", None)]),
-            ("simple_join", vec![("a", None), ("b", None), ("join_ab", Some("join"))]),
-            ("simple_race", vec![("x", None), ("y", None), ("race_xy", Some("race"))]),
-            ("nested_timeout", vec![("task", None), ("timeout_inner", Some("timeout")), ("timeout_outer", Some("timeout"))]),
+            (
+                "simple_join",
+                vec![("a", None), ("b", None), ("join_ab", Some("join"))],
+            ),
+            (
+                "simple_race",
+                vec![("x", None), ("y", None), ("race_xy", Some("race"))],
+            ),
+            (
+                "nested_timeout",
+                vec![
+                    ("task", None),
+                    ("timeout_inner", Some("timeout")),
+                    ("timeout_outer", Some("timeout")),
+                ],
+            ),
         ];
 
         let mut hash_outputs = Vec::new();
@@ -2449,9 +2471,6 @@ mod tests {
             hash_outputs.push(format!("{}: {:#018x}", name, hash.value()));
         }
 
-        insta::assert_snapshot!(
-            "plan_certificate_hash_stability",
-            hash_outputs.join("\n")
-        );
+        insta::assert_snapshot!("plan_certificate_hash_stability", hash_outputs.join("\n"));
     }
 }

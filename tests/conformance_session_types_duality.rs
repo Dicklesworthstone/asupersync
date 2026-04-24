@@ -577,9 +577,11 @@ mod tests {
             }
         }
 
-        if !failures.is_empty() {
-            panic!("Duality conformance failures:\n{}", failures.join("\n"));
-        }
+        assert!(
+            failures.is_empty(),
+            "Duality conformance failures:\n{}",
+            failures.join("\n")
+        );
 
         println!("\n{}", generate_duality_conformance_report());
     }

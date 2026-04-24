@@ -182,7 +182,14 @@ fn family_matches(family: TcpSocketFamily, addr: SocketAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use std::net::{self, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::time::Duration;
