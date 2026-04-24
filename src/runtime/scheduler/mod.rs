@@ -28,6 +28,8 @@ pub mod priority_inversion_oracle;
 pub mod stealing;
 pub mod three_lane;
 pub mod work_stealing_checker;
+#[cfg(test)]
+pub mod work_stealing_fairness_metamorphic;
 pub mod worker;
 
 pub use global_injector::GlobalInjector;
