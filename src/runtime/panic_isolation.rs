@@ -343,10 +343,7 @@ impl PanicIsolator {
         let threshold = self.config.panic_threshold_per_region?;
         let region_id = self.location_region(location)?;
         let panic_count = {
-            let guard = self
-                .region_panic_counts
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = self.region_panic_counts.lock();
             guard.get(&region_id).copied().unwrap_or(0)
         };
 
@@ -386,10 +383,7 @@ impl PanicIsolator {
         let Some(region_id) = context.region_id else {
             return;
         };
-        let mut guard = self
-            .region_panic_counts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self.region_panic_counts.lock();
         let count = guard.entry(region_id).or_insert(0);
         *count = count.saturating_add(1);
     }

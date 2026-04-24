@@ -1889,6 +1889,11 @@ impl MySqlConnection {
 
         let null_bitmap_len = (columns.len() + 7 + 2) / 8;
         let null_bitmap = reader.read_bytes(null_bitmap_len)?;
+        if (null_bitmap[0] & 0b0000_0011) != 0 {
+            return Err(MySqlError::Protocol(
+                "binary row reserved NULL-bitmap bits must be zero".to_string(),
+            ));
+        }
         let mut values = Vec::with_capacity(columns.len());
 
         for (idx, col) in columns.iter().enumerate() {
@@ -3934,6 +3939,22 @@ mod tests {
         let values = MySqlConnection::parse_binary_row(&row, &columns).expect("parse binary row");
 
         assert_eq!(values, vec![MySqlValue::Bytes(vec![0xFF, 0x00, 0xFE])]);
+    }
+
+    #[test]
+    fn binary_row_parser_rejects_reserved_null_bitmap_bits() {
+        let columns = vec![MySqlColumn {
+            column_type: column_type::MYSQL_TYPE_LONG,
+            ..test_var_string_column("id")
+        }];
+        let row = [0x00, 0x01, 123, 0, 0, 0];
+
+        let err = MySqlConnection::parse_binary_row(&row, &columns).unwrap_err();
+
+        assert!(matches!(
+            err,
+            MySqlError::Protocol(msg) if msg.contains("reserved NULL-bitmap bits")
+        ));
     }
 
     #[test]
