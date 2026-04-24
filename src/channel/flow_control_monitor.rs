@@ -534,6 +534,8 @@ pub struct FlowControlMonitor {
     deadlock_detector: DeadlockDetector,
     /// Statistics.
     stats: FlowControlStats,
+    /// Cumulative blocked time for all tasks.
+    total_blocked_time_ms: u64,
     /// Total events processed.
     total_events: AtomicU64,
 }
@@ -549,6 +551,7 @@ impl FlowControlMonitor {
             channel_states: HashMap::new(),
             deadlock_detector: DeadlockDetector::new(),
             stats: FlowControlStats::default(),
+            total_blocked_time_ms: 0,
             total_events: AtomicU64::new(0),
         }
     }
@@ -566,11 +569,25 @@ impl FlowControlMonitor {
 
         self.total_events.fetch_add(1, Ordering::Relaxed);
 
+        let current_time = match &event {
+            FlowControlEvent::ProducerBlocked { timestamp, .. } => *timestamp,
+            FlowControlEvent::ProducerUnblocked { timestamp, .. } => *timestamp,
+            FlowControlEvent::BackpressureApplied { timestamp, .. } => *timestamp,
+            FlowControlEvent::BackpressureReleased { timestamp, .. } => *timestamp,
+            FlowControlEvent::ReserveBlocked { timestamp, .. } => *timestamp,
+            FlowControlEvent::ReserveUnblocked { timestamp, .. } => *timestamp,
+            FlowControlEvent::CommitFlowControlled { timestamp, .. } => *timestamp,
+            FlowControlEvent::AbortDueToFlowControl { timestamp, .. } => *timestamp,
+        };
+
+        // Check atomicity before state update so we can see pending permits
+        self.check_atomicity(&event, current_time);
+
         // Update state based on event type
         self.update_state_from_event(&event);
 
         // Check for violations after state update
-        self.check_violations_after_event(&event);
+        self.check_violations_after_event(&event, current_time);
 
         // Store event with size limits
         self.events.push_back(event);
@@ -620,6 +637,7 @@ impl FlowControlMonitor {
                 blocked_duration_ms,
                 ..
             } => {
+                self.total_blocked_time_ms += *blocked_duration_ms;
                 if let Some(task_state) = self.task_states.get_mut(task_id) {
                     task_state.blocked_channels.remove(channel_id);
                     task_state.total_blocked_time_ms += blocked_duration_ms;
@@ -711,6 +729,7 @@ impl FlowControlMonitor {
                 blocked_duration_ms,
                 ..
             } => {
+                self.total_blocked_time_ms += *blocked_duration_ms;
                 if let Some(task_state) = self.task_states.get_mut(task_id) {
                     task_state.pending_permits.remove(permit_id);
                     task_state.blocked_channels.remove(channel_id);
@@ -757,18 +776,7 @@ impl FlowControlMonitor {
     }
 
     /// Checks for violations after processing an event.
-    fn check_violations_after_event(&mut self, event: &FlowControlEvent) {
-        let current_time = match event {
-            FlowControlEvent::ProducerBlocked { timestamp, .. } => *timestamp,
-            FlowControlEvent::ProducerUnblocked { timestamp, .. } => *timestamp,
-            FlowControlEvent::BackpressureApplied { timestamp, .. } => *timestamp,
-            FlowControlEvent::BackpressureReleased { timestamp, .. } => *timestamp,
-            FlowControlEvent::ReserveBlocked { timestamp, .. } => *timestamp,
-            FlowControlEvent::ReserveUnblocked { timestamp, .. } => *timestamp,
-            FlowControlEvent::CommitFlowControlled { timestamp, .. } => *timestamp,
-            FlowControlEvent::AbortDueToFlowControl { timestamp, .. } => *timestamp,
-        };
-
+    fn check_violations_after_event(&mut self, _event: &FlowControlEvent, current_time: Time) {
         // Check for potential deadlocks
         if self.config.enable_deadlock_prevention {
             let deadlocks = self.deadlock_detector.detect_deadlocks(current_time);
@@ -785,9 +793,6 @@ impl FlowControlMonitor {
 
         // Check for cancelled tasks that stayed blocked under flow control.
         self.check_cancellation_unblock_failures(current_time);
-
-        // Check reserve/commit/abort atomicity for two-phase sends.
-        self.check_atomicity(event, current_time);
     }
 
     /// Checks for producer starvation.
@@ -937,21 +942,12 @@ impl FlowControlMonitor {
                 permit_id,
                 ..
             } => {
-                let saw_reserve_block = self.events.iter().rev().any(|past_event| {
-                    matches!(
-                        past_event,
-                        FlowControlEvent::ReserveBlocked {
-                            channel_id: past_channel_id,
-                            task_id: past_task_id,
-                            permit_id: past_permit_id,
-                            ..
-                        } if past_channel_id == channel_id
-                            && past_task_id == task_id
-                            && past_permit_id == permit_id
-                    )
-                });
+                let has_pending_permit = self
+                    .task_states
+                    .get(task_id)
+                    .is_some_and(|task_state| task_state.pending_permits.contains(permit_id));
 
-                if !saw_reserve_block {
+                if !has_pending_permit {
                     self.record_violation(
                         FlowControlViolation::AtomicityViolation {
                             channel_id: *channel_id,
@@ -1059,12 +1055,7 @@ impl FlowControlMonitor {
 
         // Calculate average block time
         if stats.total_events > 0 {
-            let total_block_time: u64 = self
-                .task_states
-                .values()
-                .map(|state| state.total_blocked_time_ms)
-                .sum();
-            stats.avg_block_time_ms = total_block_time / stats.total_events.max(1);
+            stats.avg_block_time_ms = self.total_blocked_time_ms / stats.total_events.max(1);
         }
 
         stats
@@ -1094,18 +1085,14 @@ impl FlowControlMonitor {
                 .saturating_sub(MAX_TASK_AGE_S * 1_000_000_000),
         );
 
-        // Remove old task states for completed/cancelled tasks
+        // Remove old task states to prevent memory growth
         self.task_states.retain(|_, state| {
-            if state.blocked_channels.is_empty() {
-                if let Some(cancel_time) = state.cancel_time {
-                    cancel_time.as_nanos() >= cutoff_time.as_nanos()
-                } else {
-                    // Keep active states
-                    true
-                }
-            } else {
-                // Keep blocked states
+            if !state.blocked_channels.is_empty() || !state.pending_permits.is_empty() {
                 true
+            } else if let Some(cancel_time) = state.cancel_time {
+                cancel_time.as_nanos() >= cutoff_time.as_nanos()
+            } else {
+                false
             }
         });
 
