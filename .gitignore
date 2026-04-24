@@ -127,6 +127,9 @@ artifacts/*
 *.snap.new
 .insta.pending-snap
 
+# Per-test structured evidence (tests/_evidence/<test>.jsonl)
+tests/_evidence/*.jsonl
+
 # UBS (Ultimate Bug Scanner) output
 ubs_*.txt
 ubs_*.json
@@ -299,6 +302,7 @@ src/test_*.rs
 
 # Root-level scratch .rs files (not matching /test_*.rs pattern)
 /test.rs
+/scratch_*.rs
 
 # Root-level compiled test binaries (catch-all for names without extension)
 /test_aggregator_wrapping
