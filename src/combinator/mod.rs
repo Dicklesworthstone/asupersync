@@ -37,6 +37,8 @@ pub mod pipeline;
 pub mod quorum;
 pub mod race;
 #[cfg(test)]
+pub mod race_join_dist_metamorphic;
+#[cfg(test)]
 pub mod race_metamorphic;
 pub mod rate_limit;
 pub mod retry;
