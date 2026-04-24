@@ -1,6 +1,6 @@
 //! Per-worker local queue.
 //!
-//! Uses a lock-protected `VecDeque` for LIFO push/pop (owner) and FIFO steal (thief).
+//! Uses a lock-protected `SmallVec` for LIFO push/pop (owner) and FIFO steal (thief).
 //! The queue bounds search depth during stealing to avoid O(N) traversal overhead
 //! while maintaining hot-path LIFO locality for the owner.
 
@@ -12,8 +12,8 @@ use crate::types::TaskId;
 use crate::types::{Budget, RegionId};
 use crate::util::Arena;
 use parking_lot::Mutex;
+use smallvec::SmallVec;
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::sync::Arc;
 
 thread_local! {
@@ -66,7 +66,7 @@ impl TaskSource {
 #[derive(Debug, Clone)]
 pub struct LocalQueue {
     tasks: TaskSource,
-    inner: Arc<Mutex<VecDeque<TaskId>>>,
+    inner: Arc<Mutex<SmallVec<[TaskId; 32]>>>,
 }
 
 impl LocalQueue {
@@ -91,7 +91,7 @@ impl LocalQueue {
     fn new_with_source(tasks: TaskSource) -> Self {
         Self {
             tasks,
-            inner: Arc::new(Mutex::new(VecDeque::with_capacity(256))),
+            inner: Arc::new(Mutex::new(SmallVec::new())),
         }
     }
 
@@ -162,7 +162,7 @@ impl LocalQueue {
     #[inline]
     pub fn push(&self, task: TaskId) {
         let mut queue = self.inner.lock();
-        queue.push_back(task);
+        queue.push(task);
     }
 
     /// Pushes a task from the TLS scheduling fast path.
@@ -178,7 +178,7 @@ impl LocalQueue {
             }
             let mut queue = self.inner.lock();
             if !queue.contains(&task) {
-                queue.push_back(task);
+                queue.push(task);
             }
             true
         })
@@ -191,9 +191,7 @@ impl LocalQueue {
             return;
         }
         let mut queue = self.inner.lock();
-        for &task in tasks {
-            queue.push_back(task);
-        }
+        queue.extend_from_slice(tasks);
     }
 
     /// Pops a task from the local queue (LIFO).
@@ -201,7 +199,7 @@ impl LocalQueue {
     #[must_use]
     pub fn pop(&self) -> Option<TaskId> {
         let mut queue = self.inner.lock();
-        queue.pop_back()
+        queue.pop()
     }
 
     /// Returns true if the local queue is empty.
@@ -228,7 +226,7 @@ impl LocalQueue {
     /// mutations between separate `len()` and iteration steps.
     #[inline]
     #[must_use]
-    pub fn snapshot_tasks(&self) -> Vec<TaskId> {
+    pub fn snapshot_tasks(&self) -> SmallVec<[TaskId; 32]> {
         let queue = self.inner.lock();
         queue.iter().copied().collect()
     }
@@ -262,11 +260,29 @@ impl Drop for CurrentQueueGuard {
 #[derive(Debug, Clone)]
 pub struct Stealer {
     tasks: TaskSource,
-    inner: Arc<Mutex<VecDeque<TaskId>>>,
+    inner: Arc<Mutex<SmallVec<[TaskId; 32]>>>,
 }
 
 impl Stealer {
     const SKIPPED_LOCALS_INLINE_CAP: usize = 8;
+
+    #[inline]
+    fn compact_scanned_prefix(
+        queue: &mut SmallVec<[TaskId; 32]>,
+        kept_prefix_len: usize,
+        scanned_len: usize,
+    ) {
+        debug_assert!(kept_prefix_len <= scanned_len);
+        if kept_prefix_len == scanned_len {
+            return;
+        }
+
+        let removed = scanned_len - kept_prefix_len;
+        for idx in scanned_len..queue.len() {
+            queue[idx - removed] = queue[idx];
+        }
+        queue.truncate(queue.len() - removed);
+    }
 
     /// Returns the exact length of the queue.
     /// Uses a short-lived lock, making it suitable for Power of Two Choices sampling
@@ -286,8 +302,8 @@ impl Stealer {
 
     #[inline]
     fn steal_batch_locked(
-        src: &mut VecDeque<TaskId>,
-        dest: &mut VecDeque<TaskId>,
+        src: &mut SmallVec<[TaskId; 32]>,
+        dest: &mut SmallVec<[TaskId; 32]>,
         arena: &Arena<TaskRecord>,
     ) -> bool {
         let initial_len = src.len();
@@ -296,26 +312,27 @@ impl Stealer {
         }
         let steal_limit = (initial_len / 2).clamp(1, 256);
         let mut stolen = 0;
-        let mut i = 0;
+        let scan_limit = initial_len.min(Self::SKIPPED_LOCALS_INLINE_CAP);
+        let mut kept_prefix_len = 0;
+        let mut scanned_len = 0;
 
-        while i < src.len() && stolen < steal_limit && i < Self::SKIPPED_LOCALS_INLINE_CAP {
-            let task_id = src[i];
+        while scanned_len < scan_limit && stolen < steal_limit {
+            let task_id = src[scanned_len];
             if let Some(record) = arena.get(task_id.arena_index()) {
-                if !record.is_local() {
-                    let task = src
-                        .remove(i)
-                        .expect("index must be valid within array bounds");
-                    dest.push_back(task);
+                if record.is_local() {
+                    if kept_prefix_len != scanned_len {
+                        src[kept_prefix_len] = task_id;
+                    }
+                    kept_prefix_len += 1;
+                } else {
+                    dest.push(task_id);
                     stolen += 1;
-                    continue; // Skip incrementing i because elements shifted left
                 }
-            } else {
-                src.remove(i);
-                continue; // Skip incrementing i because elements shifted left
             }
-            i += 1;
+            scanned_len += 1;
         }
 
+        Self::compact_scanned_prefix(src, kept_prefix_len, scanned_len);
         stolen > 0
     }
 
@@ -331,23 +348,31 @@ impl Stealer {
     pub fn steal(&self) -> Option<TaskId> {
         self.tasks.with_tasks_arena_mut(|arena| {
             let mut stack = self.inner.lock();
-            let mut i = 0;
-            while i < stack.len() && i < Self::SKIPPED_LOCALS_INLINE_CAP {
-                let task_id = stack[i];
+            let scan_limit = stack.len().min(Self::SKIPPED_LOCALS_INLINE_CAP);
+            let mut kept_prefix_len = 0;
+            let mut scanned_len = 0;
+            let mut stolen = None;
+
+            while scanned_len < scan_limit {
+                let task_id = stack[scanned_len];
                 if let Some(record) = arena.get(task_id.arena_index()) {
-                    if !record.is_local() {
-                        let removed = stack.remove(i);
-                        drop(stack);
-                        return removed;
+                    if record.is_local() {
+                        if kept_prefix_len != scanned_len {
+                            stack[kept_prefix_len] = task_id;
+                        }
+                        kept_prefix_len += 1;
+                    } else {
+                        stolen = Some(task_id);
+                        scanned_len += 1;
+                        break;
                     }
-                } else {
-                    stack.remove(i);
-                    continue;
                 }
-                i += 1;
+                scanned_len += 1;
             }
+
+            Self::compact_scanned_prefix(&mut stack, kept_prefix_len, scanned_len);
             drop(stack);
-            None
+            stolen
         })
     }
 
