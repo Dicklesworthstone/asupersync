@@ -563,6 +563,14 @@ impl<T> Drop for Receiver<T> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
     use crate::runtime::yield_now;
@@ -2134,7 +2142,9 @@ mod tests {
                 };
 
                 // Send messages
-                let messages: Vec<i32> = (0..num_messages).map(|x| i32::try_from(x).unwrap()).collect();
+                let messages: Vec<i32> = (0..num_messages)
+                    .map(|x| i32::try_from(x).unwrap())
+                    .collect();
                 for &msg in &messages {
                     tx.send(&cx, msg).expect("send");
                 }
@@ -2209,7 +2219,8 @@ mod tests {
 
                 // Send overrun messages, causing lag for slow receiver
                 for i in 0..overrun {
-                    tx.sendi32::try_from(&cx, (capacity + i).unwrap()).expect("send overrun");
+                    tx.send(&cx, i32::try_from(capacity + i).unwrap())
+                        .expect("send overrun");
                 }
 
                 // METAMORPHIC RELATION: Slow receiver gets Lagged(overrun) then correct sequence
@@ -2263,8 +2274,9 @@ mod tests {
             for wraps in 1..=4usize {
                 let total_messages = capacity * (wraps + 1) + 1;
                 let expected_lag = (total_messages - capacity) as u64;
-                let expected_suffix: Vec<i32> =
-                    (i32::try_from(total_messages - capacity).unwrap()..i32::try_from(total_messages ).unwrap()).collect();
+                let expected_suffix: Vec<i32> = (i32::try_from(total_messages - capacity).unwrap()
+                    ..i32::try_from(total_messages).unwrap())
+                    .collect();
                 let expected_indices: Vec<u64> =
                     ((total_messages - capacity) as u64..total_messages as u64).collect();
 
@@ -2336,7 +2348,8 @@ mod tests {
                     format!("{perturbed:?}")
                 );
                 crate::assert_with_log!(
-                    fast_sequence == (0..i32::try_from(total_messages).unwrap()).collect::<Vec<_>>(),
+                    fast_sequence
+                        == (0..i32::try_from(total_messages).unwrap()).collect::<Vec<_>>(),
                     format!(
                         "fast receiver keeps full order (cap={}, wraps={})",
                         capacity, wraps
@@ -2389,8 +2402,11 @@ mod tests {
                 }
 
                 // METAMORPHIC RELATION: Late receiver sees subset of early receiver
-                let expected_late: Vec<i32> = (i32::try_from(split_point).unwrap()..i32::try_from(total_messages).unwrap()).collect();
-                let expected_early: Vec<i32> = (0..i32::try_from(total_messages).unwrap()).collect();
+                let expected_late: Vec<i32> = (i32::try_from(split_point).unwrap()
+                    ..i32::try_from(total_messages).unwrap())
+                    .collect();
+                let expected_early: Vec<i32> =
+                    (0..i32::try_from(total_messages).unwrap()).collect();
 
                 crate::assert_with_log!(
                     early_sequence == expected_early,
@@ -2457,7 +2473,9 @@ mod tests {
 
                 // Send some messages
                 for i in 0..3 {
-                    senders[i % num_senders].send(&cx, i32::try_from(i).unwrap()).expect("send");
+                    senders[i % num_senders]
+                        .send(&cx, i32::try_from(i).unwrap())
+                        .expect("send");
                 }
 
                 // Drop all senders except last

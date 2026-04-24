@@ -60,14 +60,20 @@ pub enum ResourceCleanupError {
         "resource leak detected in region {region_id:?}: {leak_count} resources not cleaned up"
     )]
     ResourceLeak {
+        /// Region whose close verification found leaked resources.
         region_id: RegionId,
+        /// Number of resources that failed cleanup before region close.
         leak_count: usize,
+        /// Resource type categories represented among the leaks.
         resource_types: Vec<ResourceType>,
     },
 
     /// Resource attribution failed - cannot determine owner.
     #[error("cannot attribute resource {resource_id:?} to any region")]
-    AttributionFailed { resource_id: ResourceId },
+    AttributionFailed {
+        /// Resource that could not be attributed to a region.
+        resource_id: ResourceId,
+    },
 
     /// Resource tracking is not enabled.
     #[error("resource cleanup verification is not enabled")]
@@ -76,8 +82,11 @@ pub enum ResourceCleanupError {
     /// Invalid resource state transition.
     #[error("invalid resource state transition: {resource_id:?} from {from:?} to {to:?}")]
     InvalidTransition {
+        /// Resource whose state transition was rejected.
         resource_id: ResourceId,
+        /// Current resource state.
         from: ResourceState,
+        /// Requested target resource state.
         to: ResourceState,
     },
 
@@ -86,8 +95,11 @@ pub enum ResourceCleanupError {
         "resource cleanup still pending in region {region_id:?}: {pending_count} resources not yet cleaned"
     )]
     CleanupPending {
+        /// Region whose cleanup is not yet complete.
         region_id: RegionId,
+        /// Number of resources still in cleanup.
         pending_count: usize,
+        /// Resource type categories represented among the pending resources.
         resource_types: Vec<ResourceType>,
     },
 }
@@ -156,7 +168,7 @@ pub enum ResourceState {
 impl ResourceState {
     /// Check if this is a valid state transition.
     pub fn can_transition_to(self, target: Self) -> bool {
-        use ResourceState::*;
+        use ResourceState::{Active, Allocated, Cleaned, Cleaning, Leaked};
         match (self, target) {
             (Allocated, Active) => true,
             (Allocated, Cleaned) => true,
@@ -324,14 +336,18 @@ pub struct ResourceCleanupVerifier {
     stats: RwLock<ResourceCleanupStats>,
     /// Whether verification is currently active.
     is_active: AtomicBool,
-    /// Unique verifier instance ID for debugging.
+    #[cfg(feature = "tracing-integration")]
+    instance_id: u64,
 }
 
 impl ResourceCleanupVerifier {
     /// Create a new resource cleanup verifier.
     pub fn new(config: ResourceCleanupConfig) -> Self {
-        static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
-        let instance_id = NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "tracing-integration")]
+        let instance_id = {
+            static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+            NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
+        };
 
         Self {
             config,
@@ -339,6 +355,7 @@ impl ResourceCleanupVerifier {
             region_resources: RwLock::new(HashMap::new()),
             stats: RwLock::new(ResourceCleanupStats::default()),
             is_active: AtomicBool::new(false),
+            #[cfg(feature = "tracing-integration")]
             instance_id,
         }
     }
@@ -350,6 +367,7 @@ impl ResourceCleanupVerifier {
         }
 
         self.is_active.store(true, Ordering::Release);
+        #[cfg(feature = "tracing-integration")]
         crate::tracing_compat::debug!(
             "Started resource cleanup verifier instance {}",
             self.instance_id
@@ -360,6 +378,7 @@ impl ResourceCleanupVerifier {
     /// Stop resource cleanup verification.
     pub fn stop(&self) {
         self.is_active.store(false, Ordering::Release);
+        #[cfg(feature = "tracing-integration")]
         crate::tracing_compat::debug!(
             "Stopped resource cleanup verifier instance {}",
             self.instance_id
@@ -423,7 +442,7 @@ impl ResourceCleanupVerifier {
             let mut region_resources = self.region_resources.write();
             region_resources
                 .entry(region_id)
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(resource_id);
         }
 
@@ -589,22 +608,27 @@ impl ResourceCleanupVerifier {
 
             crate::tracing_compat::error!("Resource cleanup verification failed: {}", error);
 
-            // Log details of each leaked resource
-            let resources = self.resources.read();
-            for resource_id in &leaked_resources {
-                if let Some(record) = resources.get(resource_id) {
-                    crate::tracing_compat::warn!(
-                        "Leaked resource: {:?} (type={:?}, allocated_at={:?})",
-                        resource_id,
-                        record.resource_type,
-                        record.allocated_at
-                    );
+            #[cfg(feature = "tracing-integration")]
+            {
+                // Log details of each leaked resource.
+                let resources = self.resources.read();
+                for resource_id in &leaked_resources {
+                    if let Some(record) = resources.get(resource_id) {
+                        crate::tracing_compat::warn!(
+                            "Leaked resource: {:?} (type={:?}, allocated_at={:?})",
+                            resource_id,
+                            record.resource_type,
+                            record.allocated_at
+                        );
+                    }
                 }
             }
 
-            if self.config.panic_on_leaks {
-                panic!("Resource cleanup verification failed: {}", error);
-            }
+            assert!(
+                !self.config.panic_on_leaks,
+                "Resource cleanup verification failed: {}",
+                error
+            );
 
             return Err(error);
         }
@@ -667,6 +691,14 @@ impl ResourceCleanupVerifier {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
 
     #[test]

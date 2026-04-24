@@ -612,6 +612,7 @@ impl DeferredCleanupQueue {
     }
 
     /// Clean up a waker.
+    #[allow(clippy::collapsible_match)]
     fn cleanup_waker(&self, waker_id: u64, source: &str) {
         #[cfg(not(feature = "tracing-integration"))]
         let _ = waker_id;
@@ -626,14 +627,13 @@ impl DeferredCleanupQueue {
         // Perform platform-specific waker cleanup operations
         // The actual cleanup is deferred to reduce synchronous cleanup overhead
         match source {
-            "epoll" => {
+            "epoll" if self.config.enable_logging => {
                 // Schedule deregistration of the file descriptor from epoll reactor
                 // This will be processed during the next IO driver maintenance cycle
-                if self.config.enable_logging {
-                    #[cfg(feature = "tracing-integration")]
-                    tracing::trace!(waker_id = waker_id, "Scheduled epoll waker deregistration");
-                }
+                #[cfg(feature = "tracing-integration")]
+                tracing::trace!(waker_id = waker_id, "Scheduled epoll waker deregistration");
             }
+            "epoll" => {}
             "kqueue" => {
                 // Schedule removal of the kqueue event
                 // This will be processed during the next IO driver maintenance cycle
@@ -703,6 +703,7 @@ impl DeferredCleanupQueue {
     }
 
     /// Clean up a timer.
+    #[allow(clippy::collapsible_match)]
     fn cleanup_timer(&self, timer_id: u64, timer_type: &str) {
         #[cfg(not(feature = "tracing-integration"))]
         let _ = timer_id;
@@ -772,6 +773,7 @@ impl DeferredCleanupQueue {
     }
 
     /// Clean up channel state.
+    #[allow(clippy::collapsible_match)]
     fn cleanup_channel(&self, channel_id: u64, cleanup_type: &str) {
         #[cfg(not(feature = "tracing-integration"))]
         let _ = channel_id;
@@ -848,7 +850,10 @@ impl DeferredCleanupQueue {
             "session" => {
                 // Schedule cleanup of session channel state and type checking
                 // This includes proper protocol completion handling
-                if self.config.enable_logging { #[cfg(feature = "tracing-integration")] tracing::trace!(channel_id = channel_id, "Scheduled session channel cleanup"); }
+                if self.config.enable_logging {
+                    #[cfg(feature = "tracing-integration")]
+                    tracing::trace!(channel_id = channel_id, "Scheduled session channel cleanup");
+                }
             }
             _ => {
                 #[cfg(feature = "tracing-integration")]
@@ -1050,6 +1055,14 @@ impl Default for EpochGC {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
     use std::sync::Arc;
     use std::thread;
