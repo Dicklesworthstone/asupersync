@@ -318,15 +318,26 @@ impl Stealer {
 
         while scanned_len < scan_limit && stolen < steal_limit {
             let task_id = src[scanned_len];
-            if let Some(record) = arena.get(task_id.arena_index()) {
-                if record.is_local() {
+            match arena.get(task_id.arena_index()) {
+                Some(record) if record.is_local() => {
                     if kept_prefix_len != scanned_len {
                         src[kept_prefix_len] = task_id;
                     }
                     kept_prefix_len += 1;
-                } else {
+                }
+                Some(_) => {
                     dest.push(task_id);
                     stolen += 1;
+                }
+                None => {
+                    // Task record missing (stale arena entry or pre-arena test
+                    // harness). Keep in the queue for the owner — silently
+                    // dropping here lost ready tasks in the round-robin steal
+                    // path (br-asupersync-uguhr2).
+                    if kept_prefix_len != scanned_len {
+                        src[kept_prefix_len] = task_id;
+                    }
+                    kept_prefix_len += 1;
                 }
             }
             scanned_len += 1;
@@ -355,16 +366,27 @@ impl Stealer {
 
             while scanned_len < scan_limit {
                 let task_id = stack[scanned_len];
-                if let Some(record) = arena.get(task_id.arena_index()) {
-                    if record.is_local() {
+                match arena.get(task_id.arena_index()) {
+                    Some(record) if record.is_local() => {
                         if kept_prefix_len != scanned_len {
                             stack[kept_prefix_len] = task_id;
                         }
                         kept_prefix_len += 1;
-                    } else {
+                    }
+                    Some(_) => {
                         stolen = Some(task_id);
                         scanned_len += 1;
                         break;
+                    }
+                    None => {
+                        // Task record missing (stale arena entry or pre-arena
+                        // test harness). Keep in the queue for the owner —
+                        // silently dropping here lost ready tasks in the
+                        // round-robin steal path (br-asupersync-uguhr2).
+                        if kept_prefix_len != scanned_len {
+                            stack[kept_prefix_len] = task_id;
+                        }
+                        kept_prefix_len += 1;
                     }
                 }
                 scanned_len += 1;
