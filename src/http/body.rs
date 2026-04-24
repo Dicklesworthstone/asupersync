@@ -1256,7 +1256,7 @@ mod tests {
         assert!(!body.is_end_stream());
 
         let Poll::Ready(Some(Ok(frame))) = poll_body(&mut body) else {
-            panic!("expected first data frame")
+            panic!("expected first data frame") // ubs:ignore - test logic
         };
         let data = frame.into_data().expect("expected data frame");
         assert_eq!(data.chunk(), b"abc");
@@ -1313,7 +1313,9 @@ mod tests {
         assert!(matches!(poll_body(&mut body), Poll::Pending));
 
         let Poll::Ready(Some(Ok(frame))) = poll_body(&mut body) else {
-            panic!("expected data frame after pending") // ubs:ignore - test logic
+            panic!( // ubs:ignore
+                "expected data frame after pending"
+            )
         };
         let data = frame.into_data().expect("expected data frame");
         assert_eq!(data.chunk(), b"later");
@@ -1717,7 +1719,9 @@ mod tests {
                 return Poll::Ready(Some(Err(std::io::Error::other("boom"))));
             }
 
-            panic!("Limited polled inner body after terminal inner error"); // ubs:ignore - contract violation
+            panic!( // ubs:ignore
+                "Limited polled inner body after terminal inner error"
+            );
         }
     }
 

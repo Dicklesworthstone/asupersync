@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop, clippy::manual_assert)]
 #![allow(missing_docs)]
 
 //! No-Leak Invariant Conformance Test Harness

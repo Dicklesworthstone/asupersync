@@ -28,14 +28,8 @@ mod metamorphic_relations {
     use std::pin::Pin;
     use std::task::{Context, Poll, Waker};
 
-    // Dummy waker for testing Sleep polling
-    struct DummyWaker;
-    impl std::task::Wake for DummyWaker {
-        fn wake(self: std::sync::Arc<Self>) {}
-    }
-
     fn dummy_waker() -> Waker {
-        Waker::from(std::sync::Arc::new(DummyWaker))
+        Waker::noop().clone()
     }
 
     /// MR1: Time Monotonicity (Equivalence)

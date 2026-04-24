@@ -1251,7 +1251,7 @@ mod tests {
                 self.first_poll = false;
                 Poll::Pending
             } else {
-                panic!("release future panicked during drop");
+                panic!("release future panicked during drop"); // ubs:ignore - test assertion
             }
         }
     }

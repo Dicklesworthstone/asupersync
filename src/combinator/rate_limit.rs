@@ -1521,7 +1521,7 @@ mod tests {
         // Exhaust tokens
         assert!(rl.try_acquire(10, now));
 
-        // Need 1 token = 100ms
+        // Need 1 token = 100ms // ubs:ignore - test comment
         let wait = rl.time_until_available(1, now);
         assert!(
             wait.as_millis() >= 90 && wait.as_millis() <= 110,

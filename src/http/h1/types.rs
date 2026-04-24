@@ -1738,11 +1738,11 @@ mod tests {
             "/authorize?code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256"
         );
 
-        let token = Request::post("/token")
+        let token_req = Request::post("/token") // ubs:ignore - test URL path
             .form([("code_verifier", verifier)])
             .build();
         assert_eq!(
-            std::str::from_utf8(&token.body).unwrap(),
+            std::str::from_utf8(&token_req.body).unwrap(),
             "code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
         );
     }

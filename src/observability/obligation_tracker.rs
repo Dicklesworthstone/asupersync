@@ -397,7 +397,7 @@ impl ObligationTracker {
                 });
 
             entry.count += 1;
-            if obligation.age > entry.oldest_age {
+            if obligation.age >= entry.oldest_age {
                 entry.oldest_age = obligation.age;
                 entry.primary_holder = Some(format!("{:?}", obligation.holder_task));
             }

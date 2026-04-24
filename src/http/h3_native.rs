@@ -6186,7 +6186,7 @@ mod tests {
                 assert_eq!(payload_size, 200);
                 assert_eq!(max_size, 100);
             }
-            other => panic!("expected FrameTooLarge error, got: {:?}", other),
+            other => panic!("expected FrameTooLarge error, got: {:?}", other), // ubs:ignore - test logic
         }
 
         // Test that frames within the limit still work

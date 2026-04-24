@@ -254,10 +254,10 @@ impl SymbolObligation {
             .is_none_or(|window| current_epoch >= window.start && current_epoch <= window.end)
     }
 
-    /// Returns true if this obligation has passed its deadline.
+    /// Returns true if this obligation has reached or passed its deadline.
     #[must_use]
     pub fn is_expired(&self, now: Time) -> bool {
-        self.deadline.is_some_and(|deadline| now > deadline)
+        self.deadline.is_some_and(|deadline| now >= deadline)
     }
 
     /// Commits the obligation (successful resolution).
@@ -684,7 +684,7 @@ mod tests {
         let ob = SymbolObligation::lease(oid, tid, rid, object_id, deadline, Time::ZERO);
 
         assert!(!ob.is_expired(Time::from_millis(500)));
-        assert!(!ob.is_expired(Time::from_millis(1000)));
+        assert!(ob.is_expired(Time::from_millis(1000)));
         assert!(ob.is_expired(Time::from_millis(1001)));
     }
 
@@ -870,8 +870,8 @@ mod tests {
         let aborted = tracker.abort_expired_deadlines(Time::from_millis(500));
         assert_eq!(aborted.len(), 0);
 
-        // After deadline
-        let aborted = tracker.abort_expired_deadlines(Time::from_millis(1500));
+        // At the deadline, the lease is no longer valid.
+        let aborted = tracker.abort_expired_deadlines(deadline);
         assert_eq!(aborted.len(), 1);
         assert_eq!(tracker.pending_count(), 0);
         assert!(tracker.obligations.is_empty());

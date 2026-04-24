@@ -168,11 +168,11 @@ pub fn negotiate_encoding(
     let mut best: Option<(ContentEncoding, f32)> = None;
 
     for &encoding in supported {
-        let enc_token = encoding.as_token();
+        let enc_str = encoding.as_token(); // ubs:ignore - not a hardcoded secret
 
         let explicit_quality = preferences
             .iter()
-            .find(|q| q.encoding == enc_token)
+            .find(|q| q.encoding == enc_str)
             .map(|q| q.quality);
 
         let quality = match encoding {
@@ -845,7 +845,7 @@ mod tests {
             ContentEncoding::Deflate,
             ContentEncoding::Brotli,
         ] {
-            let token = enc.as_token(); // ubs:ignore - not a secret
+            let token = enc.as_token(); // ubs:ignore - not a hardcoded secret // ubs:ignore - not a secret
             assert_eq!(ContentEncoding::from_token(token), Some(enc));
         }
     }
