@@ -50,7 +50,7 @@ pub struct Notify {
 /// unbounded Vec growth when cancelled waiters leave holes in the middle.
 #[derive(Debug)]
 struct WaiterSlab {
-    entries: Vec<WaiterEntry>,
+    entries: SmallVec<[WaiterEntry; 4]>,
     /// Free-slot indices for reuse. SmallVec<4> avoids heap allocation for
     /// the common case of few concurrent waiters.
     free_slots: SmallVec<[usize; 4]>,
@@ -78,7 +78,7 @@ impl WaiterSlab {
     #[inline]
     fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            entries: SmallVec::new(),
             free_slots: SmallVec::new(),
             active: 0,
             scan_start: 0,

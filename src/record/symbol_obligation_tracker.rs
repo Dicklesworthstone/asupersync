@@ -4,6 +4,7 @@
 //! obligation protocol ([`ObligationRecord`]). Provides epoch-aware validity
 //! windows, deadline-based expiry, and RAII guards for automatic resolution.
 
+use smallvec::{SmallVec, smallvec};
 use std::collections::HashMap;
 
 use crate::record::obligation::{
@@ -355,9 +356,9 @@ pub struct SymbolObligationTracker {
     /// Pending obligations indexed by ID.
     obligations: HashMap<ObligationId, SymbolObligation>,
     /// Index by symbol ID for fast lookup.
-    by_symbol: HashMap<SymbolId, Vec<ObligationId>>,
+    by_symbol: HashMap<SymbolId, SmallVec<[ObligationId; 2]>>,
     /// Index by object ID for decoding/encoding obligations.
-    by_object: HashMap<ObjectId, Vec<ObligationId>>,
+    by_object: HashMap<ObjectId, SmallVec<[ObligationId; 2]>>,
     /// The region this tracker belongs to.
     region_id: RegionId,
 }
@@ -380,7 +381,7 @@ impl SymbolObligationTracker {
             | SymbolObligationKind::SymbolAck { symbol_id, .. } => {
                 self.by_symbol
                     .entry(*symbol_id)
-                    .or_insert_with(|| Vec::with_capacity(2))
+                    .or_insert_with(|| smallvec![])
                     .push(id);
             }
             SymbolObligationKind::DecodingInProgress { object_id, .. }
@@ -388,7 +389,7 @@ impl SymbolObligationTracker {
             | SymbolObligationKind::SymbolLease { object_id, .. } => {
                 self.by_object
                     .entry(*object_id)
-                    .or_insert_with(|| Vec::with_capacity(2))
+                    .or_insert_with(|| smallvec![])
                     .push(id);
             }
         }

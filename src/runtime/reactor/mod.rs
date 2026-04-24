@@ -166,6 +166,8 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 pub use uring::IoUringReactor;
 
+use smallvec::SmallVec;
+
 /// Token identifying a registered source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Token(pub usize);
@@ -285,7 +287,7 @@ impl Event {
 /// ```
 #[derive(Debug)]
 pub struct Events {
-    inner: Vec<Event>,
+    inner: SmallVec<[Event; 16]>,
     capacity: usize,
 }
 
@@ -297,7 +299,7 @@ impl Events {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            inner: Vec::with_capacity(capacity),
+            inner: SmallVec::with_capacity(capacity),
             capacity,
         }
     }
@@ -314,6 +316,7 @@ impl Events {
     /// would be fatal for edge-triggered notifications).
     pub(crate) fn push(&mut self, event: Event) {
         self.inner.push(event);
+        // SmallVec::capacity() returns the current capacity (inline or heap)
         self.capacity = self.inner.capacity();
     }
 
@@ -358,7 +361,7 @@ impl<'a> IntoIterator for &'a Events {
 
 impl IntoIterator for Events {
     type Item = Event;
-    type IntoIter = std::vec::IntoIter<Event>;
+    type IntoIter = smallvec::IntoIter<[Event; 16]>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.inner.into_iter()

@@ -57,7 +57,7 @@ impl TaskTable {
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         // Use 25% of capacity for pool size to balance memory vs recycling benefits
-        let pool_size = (capacity / 4).max(64).min(512);
+        let pool_size = (capacity / 4).clamp(64, 512);
         Self {
             tasks: Arena::with_capacity(capacity),
             stored_futures: Vec::with_capacity(capacity),
