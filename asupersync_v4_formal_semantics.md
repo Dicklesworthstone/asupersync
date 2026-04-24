@@ -1101,12 +1101,23 @@ RECORD-NEW:
               created_at = τ_now, expires_at = τ_now + ttl, outcome = None }]
 
 RECORD-COMPLETE:
-  k ∈ dom(D)
+  k ∈ dom(D) ∧ τ_now < D[k].expires_at
   --------------------------------
   D'[k].outcome = Some(outcome)
 ```
 
-Eviction (periodic):
+The `τ_now < D[k].expires_at` premise is load-bearing: a record whose TTL
+has already elapsed is effectively absent from the store, even if it has
+not yet been physically evicted (see `EVICT` below). Completing such a
+record is undefined — implementations MUST fail closed and treat the key
+as `k ∉ dom(D)` rather than overwriting a stale entry. This matches the
+lazy-eviction discipline that
+[`IdempotencyStore::check`](src/remote.rs) applies on every dedup
+decision: an expired record is removed and the request is reclassified
+as `New`, so by the time `RECORD-COMPLETE` is reached the expiry guard is
+implied by construction.
+
+Eviction (periodic, plus lazy-on-access):
 
 ```
 EVICT:
@@ -1117,6 +1128,9 @@ Operational consequence:
 - A duplicate request with the same key and computation must return the
   **original** `remote_task_id` and any cached `outcome`.
 - A conflicting request with the same key but different computation is rejected.
+- A completion targeting an already-expired record is rejected (or, equivalently,
+  completes a record that is no longer in `dom(D)` after lazy eviction); the
+  caller MUST re-issue the request, which will be classified `New`.
 
 #### 3.7.2 Saga Compensation Ordering
 
