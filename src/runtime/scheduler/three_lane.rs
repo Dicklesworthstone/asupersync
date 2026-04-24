@@ -957,7 +957,7 @@ impl ThreeLaneScheduler {
                 shutdown: Arc::clone(&shutdown),
                 io_driver: io_driver.clone(),
                 timer_driver: timer_driver.clone(),
-                steal_buffer: SmallVec::new(),
+                steal_buffer: Vec::new(),
                 steal_batch_size,
                 enable_parking,
                 cancel_streak: 0,
@@ -1487,7 +1487,7 @@ pub struct ThreeLaneWorker {
     /// Timer driver for processing timer wakeups (optional).
     pub timer_driver: Option<TimerDriverHandle>,
     /// Scratch buffer for stolen tasks (avoid per-steal allocations).
-    steal_buffer: SmallVec<[(TaskId, u8); 8]>,
+    steal_buffer: Vec<(TaskId, u8)>,
     /// Maximum number of ready tasks to steal in one batch.
     steal_batch_size: usize,
     /// Whether this worker is allowed to park when idle.
