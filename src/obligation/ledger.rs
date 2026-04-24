@@ -1678,6 +1678,265 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_commit_then_abort_matches_commit_only_terminal_observables() {
+        init_test("metamorphic_commit_then_abort_matches_commit_only_terminal_observables");
+        let task = make_task();
+        let region = make_region();
+
+        let mut baseline = ObligationLedger::new();
+        let baseline_token = baseline.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
+        let baseline_id = baseline_token.id();
+        baseline.commit(baseline_token, Time::from_nanos(25));
+        let expected = observable_resolution_state(&baseline, baseline_id);
+        let expected_observation = observe_ledger(&baseline, task, region);
+
+        let mut transformed = ObligationLedger::new();
+        let transformed_token =
+            transformed.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
+        let transformed_id = transformed_token.id();
+        transformed.commit(transformed_token, Time::from_nanos(25));
+
+        for (idx, rejected) in [
+            replay_abort_attempt(
+                &mut transformed,
+                transformed_id,
+                Time::from_nanos(26),
+                ObligationAbortReason::Cancel,
+            ),
+            replay_abort_attempt(
+                &mut transformed,
+                transformed_id,
+                Time::from_nanos(30),
+                ObligationAbortReason::Explicit,
+            ),
+            replay_abort_attempt(
+                &mut transformed,
+                transformed_id,
+                Time::from_nanos(40),
+                ObligationAbortReason::Error,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            crate::assert_with_log!(rejected, "commit-then-abort rejected", idx, rejected);
+        }
+
+        crate::assert_with_log!(
+            observable_resolution_state(&transformed, transformed_id) == expected,
+            "commit terminal observables preserved",
+            expected,
+            observable_resolution_state(&transformed, transformed_id)
+        );
+        crate::assert_with_log!(
+            observe_ledger(&transformed, task, region) == expected_observation,
+            "commit ledger observation preserved",
+            expected_observation,
+            observe_ledger(&transformed, task, region)
+        );
+
+        crate::test_complete!(
+            "metamorphic_commit_then_abort_matches_commit_only_terminal_observables"
+        );
+    }
+
+    #[test]
+    fn metamorphic_double_commit_matches_single_commit_terminal_observables() {
+        init_test("metamorphic_double_commit_matches_single_commit_terminal_observables");
+        let task = make_task();
+        let region = make_region();
+
+        let mut baseline = ObligationLedger::new();
+        let baseline_token = baseline.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let baseline_id = baseline_token.id();
+        baseline.commit(baseline_token, Time::from_nanos(15));
+        let expected = observable_resolution_state(&baseline, baseline_id);
+        let expected_observation = observe_ledger(&baseline, task, region);
+
+        let mut transformed = ObligationLedger::new();
+        let transformed_token =
+            transformed.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let transformed_id = transformed_token.id();
+        transformed.commit(transformed_token, Time::from_nanos(15));
+
+        for (idx, rejected) in [
+            replay_commit_attempt(
+                &mut transformed,
+                transformed_id,
+                ObligationKind::Lease,
+                task,
+                region,
+                Time::from_nanos(16),
+            ),
+            replay_commit_attempt(
+                &mut transformed,
+                transformed_id,
+                ObligationKind::Lease,
+                task,
+                region,
+                Time::from_nanos(25),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            crate::assert_with_log!(rejected, "double-commit rejected", idx, rejected);
+        }
+
+        crate::assert_with_log!(
+            observable_resolution_state(&transformed, transformed_id) == expected,
+            "double-commit terminal observables preserved",
+            expected,
+            observable_resolution_state(&transformed, transformed_id)
+        );
+        crate::assert_with_log!(
+            observe_ledger(&transformed, task, region) == expected_observation,
+            "double-commit ledger observation preserved",
+            expected_observation,
+            observe_ledger(&transformed, task, region)
+        );
+
+        crate::test_complete!(
+            "metamorphic_double_commit_matches_single_commit_terminal_observables"
+        );
+    }
+
+    #[test]
+    fn metamorphic_abort_then_commit_matches_abort_only_terminal_observables() {
+        init_test("metamorphic_abort_then_commit_matches_abort_only_terminal_observables");
+        let task = make_task();
+        let region = make_region();
+
+        let mut baseline = ObligationLedger::new();
+        let baseline_token = baseline.acquire(ObligationKind::Ack, task, region, Time::ZERO);
+        let baseline_id = baseline_token.id();
+        baseline.abort(
+            baseline_token,
+            Time::from_nanos(35),
+            ObligationAbortReason::Explicit,
+        );
+        let expected = observable_resolution_state(&baseline, baseline_id);
+        let expected_observation = observe_ledger(&baseline, task, region);
+
+        let mut transformed = ObligationLedger::new();
+        let transformed_token = transformed.acquire(ObligationKind::Ack, task, region, Time::ZERO);
+        let transformed_id = transformed_token.id();
+        transformed.abort(
+            transformed_token,
+            Time::from_nanos(35),
+            ObligationAbortReason::Explicit,
+        );
+
+        let rejected = replay_commit_attempt(
+            &mut transformed,
+            transformed_id,
+            ObligationKind::Ack,
+            task,
+            region,
+            Time::from_nanos(36),
+        );
+        crate::assert_with_log!(rejected, "abort-then-commit rejected", true, rejected);
+        crate::assert_with_log!(
+            observable_resolution_state(&transformed, transformed_id) == expected,
+            "abort terminal observables preserved",
+            expected,
+            observable_resolution_state(&transformed, transformed_id)
+        );
+        crate::assert_with_log!(
+            observe_ledger(&transformed, task, region) == expected_observation,
+            "abort ledger observation preserved",
+            expected_observation,
+            observe_ledger(&transformed, task, region)
+        );
+
+        crate::test_complete!(
+            "metamorphic_abort_then_commit_matches_abort_only_terminal_observables"
+        );
+    }
+
+    #[test]
+    fn metamorphic_independent_commit_reordering_preserves_terminal_observables() {
+        init_test("metamorphic_independent_commit_reordering_preserves_terminal_observables");
+        let task_a = TaskId::from_arena(ArenaIndex::new(10, 0));
+        let task_b = TaskId::from_arena(ArenaIndex::new(11, 0));
+        let region_a = RegionId::from_arena(ArenaIndex::new(20, 0));
+        let region_b = RegionId::from_arena(ArenaIndex::new(21, 0));
+
+        let mut forward = ObligationLedger::new();
+        let forward_first = forward.acquire(
+            ObligationKind::SendPermit,
+            task_a,
+            region_a,
+            Time::from_nanos(1),
+        );
+        let forward_second =
+            forward.acquire(ObligationKind::Lease, task_b, region_b, Time::from_nanos(2));
+        let first_id = forward_first.id();
+        let second_id = forward_second.id();
+        forward.commit(forward_first, Time::from_nanos(10));
+        forward.commit(forward_second, Time::from_nanos(20));
+        let forward_first_state = observable_resolution_state(&forward, first_id);
+        let forward_second_state = observable_resolution_state(&forward, second_id);
+        let forward_region_a = observe_ledger(&forward, task_a, region_a);
+        let forward_region_b = observe_ledger(&forward, task_b, region_b);
+
+        let mut reversed = ObligationLedger::new();
+        let reversed_first = reversed.acquire(
+            ObligationKind::SendPermit,
+            task_a,
+            region_a,
+            Time::from_nanos(1),
+        );
+        let reversed_second =
+            reversed.acquire(ObligationKind::Lease, task_b, region_b, Time::from_nanos(2));
+        let reversed_first_id = reversed_first.id();
+        let reversed_second_id = reversed_second.id();
+        reversed.commit(reversed_second, Time::from_nanos(20));
+        reversed.commit(reversed_first, Time::from_nanos(10));
+
+        crate::assert_with_log!(
+            reversed_first_id == first_id,
+            "first obligation id stable across reorder",
+            first_id,
+            reversed_first_id
+        );
+        crate::assert_with_log!(
+            reversed_second_id == second_id,
+            "second obligation id stable across reorder",
+            second_id,
+            reversed_second_id
+        );
+        crate::assert_with_log!(
+            observable_resolution_state(&reversed, reversed_first_id) == forward_first_state,
+            "first independent obligation preserved",
+            forward_first_state,
+            observable_resolution_state(&reversed, reversed_first_id)
+        );
+        crate::assert_with_log!(
+            observable_resolution_state(&reversed, reversed_second_id) == forward_second_state,
+            "second independent obligation preserved",
+            forward_second_state,
+            observable_resolution_state(&reversed, reversed_second_id)
+        );
+        crate::assert_with_log!(
+            observe_ledger(&reversed, task_a, region_a) == forward_region_a,
+            "region A observables preserved",
+            forward_region_a,
+            observe_ledger(&reversed, task_a, region_a)
+        );
+        crate::assert_with_log!(
+            observe_ledger(&reversed, task_b, region_b) == forward_region_b,
+            "region B observables preserved",
+            forward_region_b,
+            observe_ledger(&reversed, task_b, region_b)
+        );
+
+        crate::test_complete!(
+            "metamorphic_independent_commit_reordering_preserves_terminal_observables"
+        );
+    }
+
+    #[test]
     fn commit_once_and_replayed_commit_attempts_preserve_observable_state() {
         init_test("commit_once_and_replayed_commit_attempts_preserve_observable_state");
         let mut ledger = ObligationLedger::new();

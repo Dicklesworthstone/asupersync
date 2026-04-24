@@ -40,6 +40,7 @@ pub mod kafka_record_batch_v2;
 pub mod lean_coverage_matrix;
 pub mod lean_frontier;
 pub mod logging;
+pub mod mysql_conformance;
 pub mod raptorq_rfc6330;
 pub mod report;
 pub mod rfc6330_fixtures;

@@ -29,6 +29,10 @@ path = "raptorq_rfc6330/reporting/bin/check_conformance_regression.rs"
 name = "maintain_fixtures"
 path = "raptorq_rfc6330/reporting/bin/maintain_fixtures.rs"
 
+[[bin]]
+name = "mysql_conformance_runner"
+path = "src/bin/mysql_conformance_runner.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -36,6 +40,7 @@ tempfile = "3"
 clap = { version = "4.0", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 crc32fast = "1.4"
+tokio = { version = "1.0", features = ["time"] }
 
 [dev-dependencies]
 # Runtimes can be added here for testing
