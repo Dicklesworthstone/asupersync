@@ -11,12 +11,9 @@
 //! 2. **Cancel Isolation**: Cancelled reserve operations don't affect successful send ordering
 //! 3. **Reserve/Send Atomicity**: The two-phase reserve→send is logically atomic for ordering
 
-#![cfg(test)]
-#![allow(warnings)]
-#![allow(clippy::all)]
-
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
+use futures_lite::future::block_on;
 
 /// Test: Basic FIFO preservation for sequential sends
 #[test]
@@ -44,10 +41,9 @@ fn test_mpsc_sequential_fifo_preservation() {
 /// Test: Two-phase reserve/send preserves FIFO ordering
 #[test]
 fn test_mpsc_two_phase_fifo_preservation() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
     let (sender, mut receiver) = mpsc::channel::<u64>(3);
 
-    rt.block_on(async {
+    block_on(async {
         let cx = Cx::for_testing();
 
         // Phase 1: Reserve permits
@@ -77,10 +73,9 @@ fn test_mpsc_two_phase_fifo_preservation() {
 /// Test: FIFO preservation with mixed reserve/direct send operations
 #[test]
 fn test_mpsc_mixed_operations_fifo() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
     let (sender, mut receiver) = mpsc::channel::<u64>(4);
 
-    rt.block_on(async {
+    block_on(async {
         let cx = Cx::for_testing();
 
         // Mix direct sends and reserve/send
