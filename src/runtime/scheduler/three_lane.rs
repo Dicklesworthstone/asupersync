@@ -903,10 +903,7 @@ impl ThreeLaneScheduler {
         for _ in 0..worker_count {
             parkers.push(Parker::new());
         }
-        let coordinator = Arc::new(WorkerCoordinator::new(
-            parkers.clone().into(),
-            io_driver.clone(),
-        ));
+        let coordinator = Arc::new(WorkerCoordinator::new(parkers.clone(), io_driver.clone()));
 
         // Create fast queues (O(1) VecDeque) for ready-lane fast path.
         // When a sharded TaskTable is available, back the queues directly
@@ -1013,7 +1010,7 @@ impl ThreeLaneScheduler {
             global,
             local_schedulers,
             local_ready,
-            parkers: parkers.into(),
+            parkers,
             workers,
             shutdown,
             coordinator,
