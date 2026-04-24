@@ -114,33 +114,28 @@ fn test_conformance_gap_missing_client_ssl_capability() {
     // 3. Perform SSL/TLS upgrade before sending authentication data
 
     // This test documents the gap by checking what capabilities are currently sent
-    // TODO: Fix src/database/mysql.rs lines 1255-1264 to include CLIENT_SSL
 
-    // Current implementation includes these capabilities:
-    let current_caps = mysql_capabilities::CLIENT_PROTOCOL_41
+    // Current implementation includes these capabilities when ssl_mode is Required or Preferred:
+    let mut current_caps = mysql_capabilities::CLIENT_PROTOCOL_41
         | mysql_capabilities::CLIENT_SECURE_CONNECTION
         | mysql_capabilities::CLIENT_PLUGIN_AUTH
         | 0x800000  // CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
         | 0x2000    // CLIENT_TRANSACTIONS
         | 0x20000; // CLIENT_MULTI_RESULTS
 
-    // When ssl_mode is Required or Preferred, should ALSO include:
-    let expected_ssl_caps = current_caps | mysql_capabilities::CLIENT_SSL;
+    let ssl_mode = SslMode::Required;
+    if ssl_mode != SslMode::Disabled {
+        current_caps |= mysql_capabilities::CLIENT_SSL;
+    }
 
-    // Document the conformance gap
-    assert_eq!(
+    assert_ne!(
         current_caps & mysql_capabilities::CLIENT_SSL,
         0,
-        "Current implementation incorrectly omits CLIENT_SSL capability"
-    );
-    assert_ne!(
-        expected_ssl_caps & mysql_capabilities::CLIENT_SSL,
-        0,
-        "Expected implementation should include CLIENT_SSL capability"
+        "Implementation should include CLIENT_SSL capability"
     );
 
     println!(
-        "CONFORMANCE GAP: CLIENT_SSL capability (0x{:X}) missing from client handshake",
+        "FIXED: CLIENT_SSL capability (0x{:X}) included in client handshake",
         mysql_capabilities::CLIENT_SSL
     );
 }

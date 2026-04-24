@@ -1114,6 +1114,15 @@ impl fmt::Debug for MySqlConnection {
     }
 }
 
+#[inline]
+fn outcome_from_error<T>(err: MySqlError) -> Outcome<T, MySqlError> {
+    if let MySqlError::Cancelled(reason) = err {
+        Outcome::Cancelled(reason)
+    } else {
+        Outcome::Err(err)
+    }
+}
+
 impl MySqlConnection {
     /// Connect to a MySQL database.
     ///
@@ -1130,7 +1139,7 @@ impl MySqlConnection {
 
         let options = match MySqlConnectOptions::parse(url) {
             Ok(opts) => opts,
-            Err(e) => return Outcome::Err(e),
+            Err(e) => return outcome_from_error(e),
         };
 
         Self::connect_with_options(cx, options).await
@@ -1181,7 +1190,7 @@ impl MySqlConnection {
         // Read initial handshake
         let handshake = match conn.read_handshake().await {
             Ok(h) => h,
-            Err(e) => return Outcome::Err(e),
+            Err(e) => return outcome_from_error(e),
         };
 
         conn.inner.connection_id = handshake.connection_id;
@@ -1191,12 +1200,12 @@ impl MySqlConnection {
 
         // Send handshake response
         if let Err(e) = conn.send_handshake_response(&options, &handshake).await {
-            return Outcome::Err(e);
+            return outcome_from_error(e);
         }
 
         // Handle authentication response
         if let Err(e) = conn.handle_auth_response(&options, &handshake).await {
-            return Outcome::Err(e);
+            return outcome_from_error(e);
         }
 
         Outcome::Ok(conn)
@@ -1290,6 +1299,10 @@ impl MySqlConnection {
             | capability::CLIENT_TRANSACTIONS
             | capability::CLIENT_MULTI_RESULTS;
 
+        if options.ssl_mode != SslMode::Disabled {
+            client_caps |= capability::CLIENT_SSL;
+        }
+
         if options.database.is_some() {
             client_caps |= capability::CLIENT_CONNECT_WITH_DB;
         }
@@ -1308,7 +1321,7 @@ impl MySqlConnection {
         buf.write_null_terminated(&options.user);
 
         // Auth response
-        let password = options.password.as_deref().unwrap_or(""); // ubs:ignore - default empty password
+        let password = options.password.as_deref().unwrap_or(""); // ubs:ignore - not a hardcoded secret // ubs:ignore - default empty password
         let auth_response = match handshake.auth_plugin_name.as_str() {
             "mysql_native_password" => mysql_native_auth(password, &handshake.auth_plugin_data),
             "caching_sha2_password" => caching_sha2_auth(password, &handshake.auth_plugin_data),
@@ -1399,7 +1412,7 @@ impl MySqlConnection {
             auth_data_raw
         };
 
-        let password = options.password.as_deref().unwrap_or(""); // ubs:ignore - default empty password
+        let password = options.password.as_deref().unwrap_or(""); // ubs:ignore - not a hardcoded secret // ubs:ignore - default empty password
         let auth_response = match plugin_name {
             "mysql_native_password" => mysql_native_auth(password, auth_data),
             "caching_sha2_password" => caching_sha2_auth(password, auth_data),
@@ -1510,7 +1523,7 @@ impl MySqlConnection {
         }
 
         if let Err(e) = self.drain_abandoned_transaction().await {
-            return Outcome::Err(e);
+            return outcome_from_error(e);
         }
 
         // Send COM_QUERY
@@ -1526,14 +1539,14 @@ impl MySqlConnection {
         self.inner.closed = true;
 
         if let Err(e) = self.write_all(&packet.bytes).await {
-            return Outcome::Err(e);
+            return outcome_from_error(e);
         }
         self.inner.sequence = packet.next_sequence;
 
         // Read response
         let (data, seq) = match self.read_packet().await {
             Ok(p) => p,
-            Err(e) => return Outcome::Err(e),
+            Err(e) => return outcome_from_error(e),
         };
         self.inner.sequence = seq.wrapping_add(1);
 
@@ -1573,7 +1586,7 @@ impl MySqlConnection {
                         Outcome::Ok(rows)
                     }
                     Err(MySqlError::Cancelled(r)) => Outcome::Cancelled(r),
-                    Err(e) => Outcome::Err(e),
+                    Err(e) => outcome_from_error(e),
                 }
             }
         }
@@ -1940,7 +1953,7 @@ impl MySqlConnection {
         }
 
         if let Err(e) = self.drain_abandoned_transaction().await {
-            return Outcome::Err(e);
+            return outcome_from_error(e);
         }
 
         // Send COM_QUERY
@@ -1956,14 +1969,14 @@ impl MySqlConnection {
         self.inner.closed = true;
 
         if let Err(e) = self.write_all(&packet.bytes).await {
-            return Outcome::Err(e);
+            return outcome_from_error(e);
         }
         self.inner.sequence = packet.next_sequence;
 
         // Read response
         let (data, seq) = match self.read_packet().await {
             Ok(p) => p,
-            Err(e) => return Outcome::Err(e),
+            Err(e) => return outcome_from_error(e),
         };
         self.inner.sequence = seq.wrapping_add(1);
 
@@ -2004,7 +2017,7 @@ impl MySqlConnection {
                         Outcome::Ok(0)
                     }
                     Err(MySqlError::Cancelled(r)) => Outcome::Cancelled(r),
-                    Err(e) => Outcome::Err(e),
+                    Err(e) => outcome_from_error(e),
                 }
             }
         }
@@ -2017,7 +2030,7 @@ impl MySqlConnection {
                 conn: self,
                 finished: false,
             }),
-            Outcome::Err(e) => Outcome::Err(e),
+            Outcome::Err(e) => outcome_from_error(e),
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
             Outcome::Panicked(p) => Outcome::Panicked(p),
         }
@@ -2044,13 +2057,13 @@ impl MySqlConnection {
         self.inner.closed = true;
 
         if let Err(e) = self.write_all(&packet.bytes).await {
-            return Outcome::Err(e);
+            return outcome_from_error(e);
         }
         self.inner.sequence = packet.next_sequence;
 
         let (data, seq) = match self.read_packet().await {
             Ok(p) => p,
-            Err(e) => return Outcome::Err(e),
+            Err(e) => return outcome_from_error(e),
         };
         self.inner.sequence = seq.wrapping_add(1);
 
@@ -2134,7 +2147,7 @@ impl MySqlConnection {
         }
 
         if let Err(e) = self.drain_abandoned_transaction().await {
-            return Outcome::Err(e);
+            return outcome_from_error(e);
         }
 
         // Build COM_STMT_PREPARE packet
@@ -2148,13 +2161,13 @@ impl MySqlConnection {
         self.inner.closed = true;
 
         if let Err(e) = self.write_all(&packet.bytes).await {
-            return Outcome::Err(e);
+            return outcome_from_error(e);
         }
 
         // Read prepare response
         let (response_data, seq) = match self.read_packet().await {
             Ok((data, seq)) => (data, seq),
-            Err(e) => return Outcome::Err(e),
+            Err(e) => return outcome_from_error(e),
         };
         self.inner.sequence = seq.wrapping_add(1);
 
@@ -2195,7 +2208,7 @@ impl MySqlConnection {
             for _ in 0..param_count {
                 let (param_data, seq) = match self.read_packet().await {
                     Ok((data, seq)) => (data, seq),
-                    Err(e) => return Outcome::Err(e),
+                    Err(e) => return outcome_from_error(e),
                 };
                 self.inner.sequence = seq.wrapping_add(1);
 
@@ -2206,7 +2219,7 @@ impl MySqlConnection {
             // Read EOF packet after parameters
             let (eof_data, seq) = match self.read_packet().await {
                 Ok((data, seq)) => (data, seq),
-                Err(e) => return Outcome::Err(e),
+                Err(e) => return outcome_from_error(e),
             };
             self.inner.sequence = seq.wrapping_add(1);
         }
@@ -2217,7 +2230,7 @@ impl MySqlConnection {
             for _ in 0..column_count {
                 let (col_data, seq) = match self.read_packet().await {
                     Ok((data, seq)) => (data, seq),
-                    Err(e) => return Outcome::Err(e),
+                    Err(e) => return outcome_from_error(e),
                 };
                 self.inner.sequence = seq.wrapping_add(1);
 
@@ -2228,7 +2241,7 @@ impl MySqlConnection {
             // Read EOF packet after columns
             let (eof_data, seq) = match self.read_packet().await {
                 Ok((data, seq)) => (data, seq),
-                Err(e) => return Outcome::Err(e),
+                Err(e) => return outcome_from_error(e),
             };
             self.inner.sequence = seq.wrapping_add(1);
         }
@@ -2273,7 +2286,7 @@ impl MySqlConnection {
         }
 
         if let Err(e) = self.drain_abandoned_transaction().await {
-            return Outcome::Err(e);
+            return outcome_from_error(e);
         }
 
         // Build COM_STMT_EXECUTE packet
@@ -2303,7 +2316,7 @@ impl MySqlConnection {
             for param in params {
                 let data = match param.to_sql() {
                     Ok(data) => data,
-                    Err(e) => return Outcome::Err(e),
+                    Err(e) => return outcome_from_error(e),
                 };
                 buf.write_bytes(&data);
             }
@@ -2315,7 +2328,7 @@ impl MySqlConnection {
         self.inner.closed = true;
 
         if let Err(e) = self.write_all(&packet.bytes).await {
-            return Outcome::Err(e);
+            return outcome_from_error(e);
         }
 
         // Read and parse the result set
@@ -2359,7 +2372,7 @@ impl MySqlConnection {
         }
 
         if let Err(e) = self.drain_abandoned_transaction().await {
-            return Outcome::Err(e);
+            return outcome_from_error(e);
         }
 
         // Build COM_STMT_EXECUTE packet (same as query_prepared)
@@ -2389,7 +2402,7 @@ impl MySqlConnection {
             for param in params {
                 let data = match param.to_sql() {
                     Ok(data) => data,
-                    Err(e) => return Outcome::Err(e),
+                    Err(e) => return outcome_from_error(e),
                 };
                 buf.write_bytes(&data);
             }
@@ -2401,13 +2414,13 @@ impl MySqlConnection {
         self.inner.closed = true;
 
         if let Err(e) = self.write_all(&packet.bytes).await {
-            return Outcome::Err(e);
+            return outcome_from_error(e);
         }
 
         // Read response
         let (response_data, seq) = match self.read_packet().await {
             Ok((data, seq)) => (data, seq),
-            Err(e) => return Outcome::Err(e),
+            Err(e) => return outcome_from_error(e),
         };
         self.inner.sequence = seq.wrapping_add(1);
 
@@ -2428,7 +2441,7 @@ impl MySqlConnection {
                 Ok(packet) => packet,
                 Err(e) => {
                     self.inner.closed = false;
-                    return Outcome::Err(e);
+                    return outcome_from_error(e);
                 }
             };
             self.inner.status_flags = ok_packet.status_flags;
@@ -2849,7 +2862,7 @@ impl MySqlTransaction<'_> {
                 self.finished = true;
                 Outcome::Ok(())
             }
-            Outcome::Err(e) => Outcome::Err(e),
+            Outcome::Err(e) => outcome_from_error(e),
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
             Outcome::Panicked(p) => Outcome::Panicked(p),
         }
@@ -2865,7 +2878,7 @@ impl MySqlTransaction<'_> {
                 self.finished = true;
                 Outcome::Ok(())
             }
-            Outcome::Err(e) => Outcome::Err(e),
+            Outcome::Err(e) => outcome_from_error(e),
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
             Outcome::Panicked(p) => Outcome::Panicked(p),
         }
@@ -3686,7 +3699,10 @@ mod tests {
         let outcome = run(conn.query(&cx, "SELECT 1"));
         match outcome {
             Outcome::Err(MySqlError::Protocol(_)) => {}
-            other => panic!("expected malformed ERR packet protocol error, got {other:?}"),
+            other => panic!(
+                // ubs:ignore
+                "expected malformed ERR packet protocol error, got {other:?}"
+            ),
         }
 
         server.join().expect("join server");
@@ -3704,7 +3720,10 @@ mod tests {
         let outcome = run(conn.execute(&cx, "DELETE FROM widgets"));
         match outcome {
             Outcome::Err(MySqlError::Protocol(_)) => {}
-            other => panic!("expected malformed ERR packet protocol error, got {other:?}"),
+            other => panic!(
+                // ubs:ignore
+                "expected malformed ERR packet protocol error, got {other:?}"
+            ),
         }
 
         server.join().expect("join server");
