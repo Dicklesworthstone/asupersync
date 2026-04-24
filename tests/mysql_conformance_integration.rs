@@ -6,9 +6,9 @@
 use std::process::Command;
 
 /// Tests that Docker is available for MySQL conformance testing.
-#[tokio::test]
-async fn test_docker_availability() {
-    let output = Command::new("docker").args(&["version"]).output();
+#[test]
+fn test_docker_availability() {
+    let output = Command::new("docker").args(["version"]).output();
 
     match output {
         Ok(output) => {
@@ -27,7 +27,7 @@ async fn test_docker_availability() {
 
     // Test that we can pull a MariaDB image
     let pull_result = Command::new("docker")
-        .args(&["pull", "mariadb:10.5"])
+        .args(["pull", "mariadb:10.5"])
         .status();
 
     match pull_result {
@@ -45,8 +45,8 @@ async fn test_docker_availability() {
 }
 
 /// Tests basic MySQL connection functionality.
-#[tokio::test]
-async fn test_mysql_basic_connection() {
+#[test]
+fn test_mysql_basic_connection() {
     // This would normally use our actual MySQL client implementation
     // For now, just verify the test infrastructure can start a container
 
@@ -54,14 +54,12 @@ async fn test_mysql_basic_connection() {
 
     // Cleanup any existing container
     let _ = Command::new("docker")
-        .args(&["stop", container_name])
+        .args(["stop", container_name])
         .status();
-    let _ = Command::new("docker")
-        .args(&["rm", container_name])
-        .status();
+    let _ = Command::new("docker").args(["rm", container_name]).status();
 
     // Check if Docker is available
-    let docker_check = Command::new("docker").args(&["version"]).output();
+    let docker_check = Command::new("docker").args(["version"]).output();
 
     if docker_check.is_err() || !docker_check.unwrap().status.success() {
         eprintln!("Docker not available - skipping MySQL connection test");
@@ -70,7 +68,7 @@ async fn test_mysql_basic_connection() {
 
     // Start test container
     let start_result = Command::new("docker")
-        .args(&[
+        .args([
             "run",
             "-d",
             "--name",
@@ -95,11 +93,11 @@ async fn test_mysql_basic_connection() {
             let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
             // Wait a bit for container to start
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            std::thread::sleep(std::time::Duration::from_secs(5));
 
             // Test connection
             let connection_test = Command::new("docker")
-                .args(&[
+                .args([
                     "exec",
                     &container_id,
                     "mysqladmin",
@@ -123,9 +121,9 @@ async fn test_mysql_basic_connection() {
 
             // Cleanup
             let _ = Command::new("docker")
-                .args(&["stop", &container_id])
+                .args(["stop", &container_id])
                 .status();
-            let _ = Command::new("docker").args(&["rm", &container_id]).status();
+            let _ = Command::new("docker").args(["rm", &container_id]).status();
         } else {
             eprintln!(
                 "Failed to start MySQL test container: {}",
@@ -136,27 +134,25 @@ async fn test_mysql_basic_connection() {
 }
 
 /// Tests that MySQL auth plugins can be configured.
-#[tokio::test]
-async fn test_mysql_auth_plugins() {
+#[test]
+fn test_mysql_auth_plugins() {
     let container_name = "asupersync-test-auth";
 
     // Cleanup
     let _ = Command::new("docker")
-        .args(&["stop", container_name])
+        .args(["stop", container_name])
         .status();
-    let _ = Command::new("docker")
-        .args(&["rm", container_name])
-        .status();
+    let _ = Command::new("docker").args(["rm", container_name]).status();
 
     // Check Docker availability
-    if Command::new("docker").args(&["version"]).status().is_err() {
+    if Command::new("docker").args(["version"]).status().is_err() {
         eprintln!("Docker not available - skipping auth plugin test");
         return;
     }
 
     // Start container with specific auth plugin
     let start_result = Command::new("docker")
-        .args(&[
+        .args([
             "run",
             "-d",
             "--name",
@@ -173,11 +169,11 @@ async fn test_mysql_auth_plugins() {
             let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
             // Wait for startup
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            std::thread::sleep(std::time::Duration::from_secs(5));
 
             // Test that we can query auth plugin info
             let auth_query = Command::new("docker")
-                .args(&[
+                .args([
                     "exec",
                     &container_id,
                     "mysql",
@@ -207,34 +203,32 @@ async fn test_mysql_auth_plugins() {
 
             // Cleanup
             let _ = Command::new("docker")
-                .args(&["stop", &container_id])
+                .args(["stop", &container_id])
                 .status();
-            let _ = Command::new("docker").args(&["rm", &container_id]).status();
+            let _ = Command::new("docker").args(["rm", &container_id]).status();
         }
     }
 }
 
 /// Tests SSL capabilities.
-#[tokio::test]
-async fn test_mysql_ssl_support() {
+#[test]
+fn test_mysql_ssl_support() {
     let container_name = "asupersync-test-ssl";
 
     // Cleanup
     let _ = Command::new("docker")
-        .args(&["stop", container_name])
+        .args(["stop", container_name])
         .status();
-    let _ = Command::new("docker")
-        .args(&["rm", container_name])
-        .status();
+    let _ = Command::new("docker").args(["rm", container_name]).status();
 
-    if Command::new("docker").args(&["version"]).status().is_err() {
+    if Command::new("docker").args(["version"]).status().is_err() {
         eprintln!("Docker not available - skipping SSL test");
         return;
     }
 
     // Start container
     let start_result = Command::new("docker")
-        .args(&[
+        .args([
             "run",
             "-d",
             "--name",
@@ -250,11 +244,11 @@ async fn test_mysql_ssl_support() {
             let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
             // Wait for startup
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            std::thread::sleep(std::time::Duration::from_secs(5));
 
             // Check SSL status
             let ssl_query = Command::new("docker")
-                .args(&[
+                .args([
                     "exec",
                     &container_id,
                     "mysql",
@@ -284,9 +278,9 @@ async fn test_mysql_ssl_support() {
 
             // Cleanup
             let _ = Command::new("docker")
-                .args(&["stop", &container_id])
+                .args(["stop", &container_id])
                 .status();
-            let _ = Command::new("docker").args(&["rm", &container_id]).status();
+            let _ = Command::new("docker").args(["rm", &container_id]).status();
         }
     }
 }

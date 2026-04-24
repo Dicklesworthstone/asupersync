@@ -72,14 +72,17 @@ pub struct ConformanceResult {
 /// MySQL conformance test runner.
 pub struct MySqlConformanceRunner {
     config: MySqlConformanceConfig,
-    temp_dir: TempDir,
+    _temp_dir: TempDir,
 }
 
 impl MySqlConformanceRunner {
     /// Creates a new conformance test runner.
     pub fn new(config: MySqlConformanceConfig) -> Result<Self, std::io::Error> {
         let temp_dir = TempDir::new()?;
-        Ok(Self { config, temp_dir })
+        Ok(Self {
+            config,
+            _temp_dir: temp_dir,
+        })
     }
 
     /// Runs the full MySQL conformance test suite.
@@ -125,41 +128,44 @@ impl MySqlConformanceRunner {
         let container_name = format!("asupersync-mysql-test-{}", version.replace(".", "-"));
 
         // Check if Docker is available
-        let output = Command::new("docker").args(&["version"]).output()?;
+        let output = Command::new("docker").args(["version"]).output()?;
 
         if !output.status.success() {
             return Err("Docker not available for testing".into());
         }
 
+        let image = format!("mariadb:{version}");
+
         // Pull MariaDB image
         let pull_cmd = Command::new("docker")
-            .args(&["pull", &format!("mariadb:{}", version)])
+            .args(["pull", image.as_str()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()?;
 
         if !pull_cmd.success() {
-            return Err(format!("Failed to pull mariadb:{} image", version).into());
+            return Err(format!("Failed to pull {image} image").into());
         }
 
         // Start container
+        let database_env = format!("MYSQL_DATABASE={}", self.config.test_database);
         let start_cmd = Command::new("docker")
-            .args(&[
+            .args([
                 "run",
                 "-d",
                 "--name",
-                &container_name,
+                container_name.as_str(),
                 "-e",
                 "MYSQL_ROOT_PASSWORD=testpass",
                 "-e",
-                &format!("MYSQL_DATABASE={}", self.config.test_database),
+                database_env.as_str(),
                 "-e",
                 "MYSQL_USER=testuser",
                 "-e",
                 "MYSQL_PASSWORD=testpass",
                 "-p",
                 "0:3306", // Let Docker assign port
-                &format!("mariadb:{}", version),
+                image.as_str(),
                 "--default-authentication-plugin=mysql_native_password",
             ])
             .output()?;
@@ -190,7 +196,7 @@ impl MySqlConformanceRunner {
 
         while start.elapsed() < timeout {
             let health_cmd = Command::new("docker")
-                .args(&[
+                .args([
                     "exec",
                     container_id,
                     "mysqladmin",
@@ -258,12 +264,12 @@ impl MySqlConformanceRunner {
         container_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Get container port
-        let port = self.get_container_port(container_id).await?;
+        let _port = self.get_container_port(container_id).await?;
 
         // For now, just verify we can connect using docker exec
         // In a full implementation, this would use our MySQL client
         let test_cmd = Command::new("docker")
-            .args(&[
+            .args([
                 "exec",
                 container_id,
                 "mysql",
@@ -295,7 +301,7 @@ impl MySqlConformanceRunner {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Create user with caching_sha2_password
         let create_user_cmd = Command::new("docker")
-            .args(&[
+            .args([
                 "exec",
                 container_id,
                 "mysql",
@@ -316,7 +322,7 @@ impl MySqlConformanceRunner {
 
         // Test connection with new user
         let test_cmd = Command::new("docker")
-            .args(&[
+            .args([
                 "exec",
                 container_id,
                 "mysql",
@@ -380,8 +386,9 @@ impl MySqlConformanceRunner {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // For now, just test that SSL is available
         // In full implementation, this would test actual SSL connections
+        let ssl_mode_arg = format!("--ssl-mode={ssl_mode}");
         let ssl_cmd = Command::new("docker")
-            .args(&[
+            .args([
                 "exec",
                 container_id,
                 "mysql",
@@ -390,7 +397,7 @@ impl MySqlConformanceRunner {
                 "-u",
                 "testuser",
                 "-ptestpass",
-                "--ssl-mode=PREFERRED",
+                ssl_mode_arg.as_str(),
                 "-e",
                 "SHOW STATUS LIKE 'Ssl_cipher';",
             ])
@@ -444,7 +451,7 @@ impl MySqlConformanceRunner {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Create test table
         let create_table_cmd = Command::new("docker")
-            .args(&[
+            .args([
                 "exec",
                 container_id,
                 "mysql",
@@ -453,7 +460,7 @@ impl MySqlConformanceRunner {
                 "-u",
                 "testuser",
                 "-ptestpass",
-                &self.config.test_database,
+                self.config.test_database.as_str(),
                 "-e",
                 "CREATE TABLE IF NOT EXISTS test_prep (id INT PRIMARY KEY, name VARCHAR(50));",
             ])
@@ -465,7 +472,7 @@ impl MySqlConformanceRunner {
 
         // Test basic prepared statement
         let prep_cmd = Command::new("docker")
-            .args(&[
+            .args([
                 "exec",
                 container_id,
                 "mysql",
@@ -474,7 +481,7 @@ impl MySqlConformanceRunner {
                 "-u",
                 "testuser",
                 "-ptestpass",
-                &self.config.test_database,
+                self.config.test_database.as_str(),
                 "-e",
                 "PREPARE stmt FROM 'INSERT INTO test_prep (id, name) VALUES (?, ?)'; \
                        SET @id = 1, @name = 'test'; \
@@ -523,7 +530,7 @@ impl MySqlConformanceRunner {
     async fn test_protocol_41(&self, container_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Test server version capabilities
         let version_cmd = Command::new("docker")
-            .args(&[
+            .args([
                 "exec",
                 container_id,
                 "mysql",
@@ -550,7 +557,7 @@ impl MySqlConformanceRunner {
         container_id: &str,
     ) -> Result<u16, Box<dyn std::error::Error>> {
         let port_cmd = Command::new("docker")
-            .args(&["port", container_id, "3306"])
+            .args(["port", container_id, "3306"])
             .output()?;
 
         if port_cmd.status.success() {
@@ -571,12 +578,12 @@ impl MySqlConformanceRunner {
     /// Stops and removes a container.
     async fn stop_container(&self, container_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         Command::new("docker")
-            .args(&["stop", container_id])
+            .args(["stop", container_id])
             .stdout(Stdio::null())
             .status()?;
 
         Command::new("docker")
-            .args(&["rm", container_id])
+            .args(["rm", container_id])
             .stdout(Stdio::null())
             .status()?;
 
@@ -593,9 +600,10 @@ impl MySqlConformanceRunner {
         let failed_tests = total_tests - passed_tests;
 
         report.push_str(&format!(
-            "**Summary**: {}/{} tests passed ({:.1}%)\n\n",
+            "**Summary**: {}/{} tests passed, {} failed ({:.1}%)\n\n",
             passed_tests,
             total_tests,
+            failed_tests,
             (passed_tests as f64 / total_tests as f64) * 100.0
         ));
 
