@@ -14,7 +14,6 @@
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 mod common;
 
-#[cfg(any(feature = "postgres", feature = "mysql"))]
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
