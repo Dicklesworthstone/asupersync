@@ -34,7 +34,11 @@ fn test_mpsc_sequential_fifo_preservation() {
         received.push(msg);
     }
 
-    assert_eq!(received, vec![1, 2, 3, 4, 5], "Messages should be received in FIFO order");
+    assert_eq!(
+        received,
+        vec![1, 2, 3, 4, 5],
+        "Messages should be received in FIFO order"
+    );
 }
 
 /// Test: Two-phase reserve/send preserves FIFO ordering
@@ -63,7 +67,11 @@ fn test_mpsc_two_phase_fifo_preservation() {
         received.push(msg);
     }
 
-    assert_eq!(received, vec![10, 20, 30], "Two-phase operations should preserve FIFO order");
+    assert_eq!(
+        received,
+        vec![10, 20, 30],
+        "Two-phase operations should preserve FIFO order"
+    );
 }
 
 /// Test: FIFO preservation with mixed reserve/direct send operations
@@ -91,7 +99,11 @@ fn test_mpsc_mixed_operations_fifo() {
         received.push(msg);
     }
 
-    assert_eq!(received, vec![1, 2, 3, 4], "Mixed operations should preserve FIFO order");
+    assert_eq!(
+        received,
+        vec![1, 2, 3, 4],
+        "Mixed operations should preserve FIFO order"
+    );
 }
 
 /// Test: FIFO ordering with capacity constraints
@@ -107,7 +119,7 @@ fn test_mpsc_fifo_with_capacity_limits() {
     match sender.try_send(200) {
         Err(mpsc::SendError::Full(200)) => {
             // Expected - channel is full
-        },
+        }
         other => panic!("Expected Full error, got: {:?}", other),
     }
 

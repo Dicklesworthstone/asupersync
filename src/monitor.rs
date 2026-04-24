@@ -40,6 +40,8 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde::{Deserialize, Serialize};
+
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
 use crate::types::{Outcome, RegionId, TaskId, Time};
@@ -101,7 +103,7 @@ impl std::fmt::Display for MonitorRef {
 ///
 /// Maps from the runtime's [`Outcome`] type to a monitor-specific enum
 /// that can be pattern-matched by watchers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DownReason {
     /// Process completed successfully (`Outcome::Ok`).
     Normal,

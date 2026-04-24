@@ -1658,7 +1658,12 @@ mod tests {
 
             fn next_u8(&mut self) -> u8 {
                 self.counter = self.counter.wrapping_add(1);
-                ((self.seed.wrapping_add(self.counter).wrapping_mul(1103515245).wrapping_add(12345)) >> 16) as u8
+                ((self
+                    .seed
+                    .wrapping_add(self.counter)
+                    .wrapping_mul(1103515245)
+                    .wrapping_add(12345))
+                    >> 16) as u8
             }
 
             fn next_bool(&mut self) -> bool {
@@ -1769,7 +1774,7 @@ mod tests {
 
                 // Folded header (obs-fold - obsolete but sometimes encountered)
                 request.extend_from_slice(b"X-Long-Header: first-part\r\n");
-                request.extend_from_slice(b" second-part\r\n");  // Folded continuation
+                request.extend_from_slice(b" second-part\r\n"); // Folded continuation
 
                 request.extend_from_slice(b"\r\n");
                 request
@@ -1815,7 +1820,9 @@ mod tests {
                         }
                         "chunked_encoding" | "chunked_with_trailers" | "chunked_100_continue" => {
                             // Should have chunked encoding headers
-                            let has_chunked = request.headers.iter()
+                            let has_chunked = request
+                                .headers
+                                .iter()
                                 .any(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"));
                             if has_chunked {
                                 // Validate we can parse chunked encoding structure

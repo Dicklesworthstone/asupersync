@@ -313,27 +313,12 @@ impl OfflineTuner {
     pub fn run_systematic_benchmarks(&mut self) -> Result<(), TuningError> {
         let candidates = self.generate_candidates();
 
-        println!(
-            "Starting systematic benchmarking of {} candidates across {} workloads",
-            candidates.len(),
-            self.workloads.len()
-        );
-
-        for (i, candidate) in candidates.iter().enumerate() {
-            println!(
-                "Benchmarking candidate {}/{}: {}",
-                i + 1,
-                candidates.len(),
-                candidate.candidate_id
-            );
-
+        for candidate in &candidates {
             for workload in &self.workloads {
                 let result = self.benchmark_candidate(candidate, workload)?;
                 self.benchmark_results.push(result);
             }
         }
-
-        println!("Completed {} benchmark runs", self.benchmark_results.len());
         Ok(())
     }
 

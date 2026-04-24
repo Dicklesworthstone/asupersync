@@ -2059,9 +2059,6 @@ mod tests {
                     diff <= slack,
                     "RETRY-BUDGET-1 case {i}: budget {got:?} diverged from reference {want:?} by {diff:?} (slack {slack:?})",
                 );
-                eprintln!(
-                    "{{\"id\":\"RETRY-BUDGET-1-case{i}\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",
-                );
             }
         }
 
@@ -2085,7 +2082,6 @@ mod tests {
                 );
                 prev = got;
             }
-            eprintln!("{{\"id\":\"RETRY-BUDGET-2\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// RETRY-BUDGET-3 (MUST): max_attempts = 1 yields Duration::ZERO
@@ -2107,7 +2103,6 @@ mod tests {
                     );
                 }
             }
-            eprintln!("{{\"id\":\"RETRY-BUDGET-3\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// RETRY-BUDGET-4 (MUST): total budget is bounded above by
@@ -2145,7 +2140,6 @@ mod tests {
                     "RETRY-BUDGET-4 case {i}: budget {got:?} exceeds cap {upper:?} (slack {slack:?})",
                 );
             }
-            eprintln!("{{\"id\":\"RETRY-BUDGET-4\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// RETRY-BUDGET-5 (MUST): total_delay_budget is a valid upper bound
@@ -2175,7 +2169,6 @@ mod tests {
                     "RETRY-BUDGET-5 seed={seed}: realized {realized:?} exceeds budget {budget:?}",
                 );
             }
-            eprintln!("{{\"id\":\"RETRY-BUDGET-5\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// RETRY-BUDGET-6 (MUST): total_delay_budget saturates at
@@ -2195,7 +2188,6 @@ mod tests {
                 got <= Duration::MAX,
                 "RETRY-BUDGET-6: budget must remain bounded by Duration::MAX",
             );
-            eprintln!("{{\"id\":\"RETRY-BUDGET-6\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
         /// RETRY-BUDGET-7 (MUST): validate() rejects configurations that
@@ -2262,8 +2254,6 @@ mod tests {
                     .is_ok()
             );
             assert!(RetryPolicy::immediate(5).validate().is_ok());
-
-            eprintln!("{{\"id\":\"RETRY-BUDGET-7\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
     }
 }

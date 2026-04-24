@@ -1432,6 +1432,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_decoder_source_block_params"
+path = "fuzz_targets/raptorq_decoder_source_block_params.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "bytes_codec"
 path = "fuzz_targets/bytes_codec.rs"
 test = false

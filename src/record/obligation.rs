@@ -6,6 +6,7 @@
 use crate::tracing_compat::{error, info, trace};
 use crate::types::{ObligationId, RegionId, TaskId, Time};
 use core::fmt;
+use serde::{Deserialize, Serialize};
 use std::backtrace::Backtrace;
 use std::sync::Arc;
 
@@ -49,7 +50,7 @@ impl fmt::Display for SourceLocation {
 }
 
 /// The kind of obligation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ObligationKind {
     /// A send permit for a channel.
     SendPermit,
@@ -85,7 +86,7 @@ impl fmt::Display for ObligationKind {
 }
 
 /// The reason an obligation was aborted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObligationAbortReason {
     /// Aborted due to cancellation.
     Cancel,
@@ -129,7 +130,7 @@ impl fmt::Display for ObligationAbortReason {
 /// ```
 ///
 /// All terminal states (Committed, Aborted, Leaked) are absorbing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObligationState {
     /// Obligation is reserved but not yet resolved.
     /// Blocks region close until resolved.
