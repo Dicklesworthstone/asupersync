@@ -407,7 +407,15 @@ where
             }
 
             if !self.write_buf.is_empty() {
-                self.flush_write_buf().await?;
+                match self.flush_write_buf().await {
+                    Ok(()) => {}
+                    Err(WsError::Io(e))
+                        if e.kind() == std::io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
+                    {
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
             }
 
             if let Some(frame) = self.codec.decode(&mut self.read_buf)? {
@@ -541,9 +549,48 @@ where
     }
 
     /// Send a ping frame.
-    pub async fn ping(&mut self, payload: impl Into<crate::bytes::Bytes>) -> Result<(), WsError> {
+    pub async fn ping(&mut self, cx: &Cx, payload: impl Into<crate::bytes::Bytes>) -> Result<(), WsError> {
+        if cx.checkpoint().is_err() {
+            let timeout_duration = self.close_handshake.close_timeout();
+            let current_time = || {
+                cx.timer_driver()
+                    .map_or_else(crate::time::wall_now, |driver| driver.now())
+            };
+            let _ = crate::time::timeout(
+                current_time(),
+                timeout_duration,
+                self.initiate_close(CloseReason::going_away()),
+            )
+            .await;
+            return Err(WsError::Io(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "cancelled",
+            )));
+        }
+
         let frame = Frame::ping(payload);
-        self.send_frame(frame).await
+        match self.send_frame(frame).await {
+            Err(WsError::Io(e))
+                if e.kind() == std::io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
+            {
+                let timeout_duration = self.close_handshake.close_timeout();
+                let current_time = || {
+                    cx.timer_driver()
+                        .map_or_else(crate::time::wall_now, |driver| driver.now())
+                };
+                let _ = crate::time::timeout(
+                    current_time(),
+                    timeout_duration,
+                    self.initiate_close(CloseReason::going_away()),
+                )
+                .await;
+                Err(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                )))
+            }
+            res => res,
+        }
     }
 
     /// Internal: initiate close without waiting.
