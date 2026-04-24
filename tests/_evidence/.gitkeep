@@ -1,0 +1,9 @@
+# Per-test structured evidence artifacts (br-asupersync-364340).
+#
+# Each test that uses `tests/common::TestEvidenceSink` writes one JSONL
+# file here on every run, truncating its prior contents. The files
+# themselves are gitignored (see `.gitignore`); this `.gitkeep` preserves
+# the directory so tests can assume the path exists.
+#
+# Schema: {test_name, seq, ts_unix_nanos, phase, cx_id, event, outcome, error?}
+# See `tests/common/test_evidence_harness.rs` for field definitions.

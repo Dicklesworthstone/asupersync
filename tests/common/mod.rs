@@ -14,10 +14,15 @@ pub mod coverage;
 pub mod e2e_harness;
 pub mod e2e_macros;
 pub mod payloads;
+pub mod test_evidence_harness;
 
 pub use coverage::{
     CoverageEntry, CoverageInfo, CoverageReport, InvariantTracker, assert_coverage,
     assert_coverage_threshold,
+};
+
+pub use test_evidence_harness::{
+    TestEvidenceRecord, TestEvidenceSink, TestOutcome, TestPhase, evidence_dir, read_evidence,
 };
 
 pub use asupersync::lab::{
