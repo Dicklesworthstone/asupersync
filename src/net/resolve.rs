@@ -21,6 +21,25 @@ pub async fn lookup_one<A>(addr: A) -> io::Result<SocketAddr>
 where
     A: ToSocketAddrs + Send + 'static,
 {
+    let any_ref = &addr as &dyn std::any::Any;
+    if let Some(s) = any_ref.downcast_ref::<SocketAddr>() {
+        return Ok(*s);
+    }
+    if let Some(s) = any_ref.downcast_ref::<(std::net::IpAddr, u16)>() {
+        return Ok(SocketAddr::new(s.0, s.1));
+    }
+    if let Some(s) = any_ref.downcast_ref::<(std::net::Ipv4Addr, u16)>() {
+        return Ok(SocketAddr::new(std::net::IpAddr::V4(s.0), s.1));
+    }
+    if let Some(s) = any_ref.downcast_ref::<(std::net::Ipv6Addr, u16)>() {
+        return Ok(SocketAddr::new(std::net::IpAddr::V6(s.0), s.1));
+    }
+    if let Some(s) = any_ref.downcast_ref::<Vec<SocketAddr>>() {
+        if let Some(first) = s.first() {
+            return Ok(*first);
+        }
+    }
+
     spawn_blocking_resolve(move || {
         let mut addrs = resolve_socket_addrs(addr)?;
         Ok(addrs.swap_remove(0))
@@ -38,6 +57,23 @@ pub async fn lookup_all<A>(addr: A) -> io::Result<Vec<SocketAddr>>
 where
     A: ToSocketAddrs + Send + 'static,
 {
+    let any_ref = &addr as &dyn std::any::Any;
+    if let Some(s) = any_ref.downcast_ref::<SocketAddr>() {
+        return Ok(vec![*s]);
+    }
+    if let Some(s) = any_ref.downcast_ref::<(std::net::IpAddr, u16)>() {
+        return Ok(vec![SocketAddr::new(s.0, s.1)]);
+    }
+    if let Some(s) = any_ref.downcast_ref::<(std::net::Ipv4Addr, u16)>() {
+        return Ok(vec![SocketAddr::new(std::net::IpAddr::V4(s.0), s.1)]);
+    }
+    if let Some(s) = any_ref.downcast_ref::<(std::net::Ipv6Addr, u16)>() {
+        return Ok(vec![SocketAddr::new(std::net::IpAddr::V6(s.0), s.1)]);
+    }
+    if let Some(s) = any_ref.downcast_ref::<Vec<SocketAddr>>() {
+        return Ok(s.clone());
+    }
+
     spawn_blocking_resolve(move || resolve_socket_addrs(addr)).await
 }
 

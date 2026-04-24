@@ -345,12 +345,12 @@ impl UnixDatagram {
     /// let n = socket.send_to(b"hello", "/tmp/server.sock").await?;
     /// ```
     pub async fn send_to<P: AsRef<Path>>(&mut self, buf: &[u8], path: P) -> io::Result<usize> {
-        let path = path.as_ref().to_path_buf();
+        let path_ref = path.as_ref();
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
-            match self.inner.send_to(buf, &path) {
+            match self.inner.send_to(buf, path_ref) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
