@@ -8,8 +8,8 @@
 
 use asupersync::cx::Cx;
 use asupersync::http::h3_native::{
-    H3ConnectionConfig, H3ConnectionState, H3ControlState, H3Frame, H3NativeError, H3QpackMode, H3Settings,
-    QpackFieldPlan, qpack_decode_request_field_section, qpack_encode_field_section,
+    H3ConnectionConfig, H3ConnectionState, H3ControlState, H3Frame, H3NativeError, H3QpackMode,
+    H3Settings, QpackFieldPlan, qpack_decode_request_field_section, qpack_encode_field_section,
 };
 use asupersync::net::quic_core::{
     ConnectionId, PacketHeader, QuicCoreError, TransportParameters, encode_varint,
@@ -427,7 +427,8 @@ fn h3_frame_decode_truncated_data() {
     // Keep only the type and length bytes.
     let payload_start = goaway_wire.len() - 1; // GOAWAY payload is 1 varint byte for value 42
     let truncated_goaway = &goaway_wire[..payload_start];
-    let err = H3Frame::decode(truncated_goaway, &test_config()).expect_err("truncated GOAWAY must fail");
+    let err =
+        H3Frame::decode(truncated_goaway, &test_config()).expect_err("truncated GOAWAY must fail");
     assert_eq!(format!("{err}"), "unexpected EOF");
 }
 
@@ -690,7 +691,7 @@ fn h3_qpack_request_pseudo_after_regular_header_is_rejected() {
     ];
     let wire = qpack_encode_field_section(&plan).expect("encode field section");
 
-    let err = qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly)
+    let err = qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly, None)
         .expect_err("pseudo header after regular header must fail");
     assert_eq!(
         err,

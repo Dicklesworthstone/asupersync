@@ -827,8 +827,7 @@ mod tests {
     fn make_merge_from_vecs(vecs: Vec<Vec<i32>>) -> Merge<BoxedStream<i32>> {
         merge(
             vecs.into_iter()
-                .map(|v| boxed_stream(iter(v)))
-                .collect::<Vec<_>>(),
+                .map(|v| boxed_stream(iter(v))),
         )
     }
 

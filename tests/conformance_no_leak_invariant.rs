@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 //! No-Leak Invariant Conformance Test Harness
 //!
 //! This harness systematically verifies every MUST/SHOULD clause from the
@@ -11,12 +13,10 @@
 //! **Source**: src/obligation/no_leak_proof.rs (formal proof document)
 
 use asupersync::obligation::marking::{MarkingEvent, MarkingEventKind};
-use asupersync::obligation::no_leak_proof::{
-    NoLeakProver, ProofResult, LivenessProperty, ResolutionPath
-};
+use asupersync::obligation::no_leak_proof::{LivenessProperty, NoLeakProver};
 use asupersync::record::ObligationKind;
+use asupersync::test_utils;
 use asupersync::types::{ObligationId, RegionId, TaskId, Time};
-use asupersync::util::ArenaIndex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -41,7 +41,7 @@ pub struct NoLeakConformanceTest {
     pub expected: ConformanceExpectation,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RequirementLevel {
     Must,
     Should,
@@ -71,9 +71,7 @@ pub enum ConformanceScenario {
         nested_regions: bool,
     },
     /// Ghost counter properties.
-    GhostCounter {
-        operations: Vec<CounterOperation>,
-    },
+    GhostCounter { operations: Vec<CounterOperation> },
 }
 
 #[derive(Debug, Clone)]
@@ -123,296 +121,306 @@ pub enum ConformanceExpectation {
 // ============================================================================
 
 /// Complete conformance test suite for the no-leak invariant.
-pub const NO_LEAK_CONFORMANCE_TESTS: &[NoLeakConformanceTest] = &[
-    // =====================================================================
-    // MUST-1: Eventual Resolution (Core Theorem)
-    // =====================================================================
+pub fn no_leak_conformance_tests() -> Vec<NoLeakConformanceTest> {
+    vec![
+        // =====================================================================
+        // MUST-1: Eventual Resolution (Core Theorem)
+        // =====================================================================
+        NoLeakConformanceTest {
+            id: "NL-MUST-1.1",
+            section: "Core Theorem",
+            level: RequirementLevel::Must,
+            description: "Single SendPermit obligation is eventually committed",
+            scenario: ConformanceScenario::SingleObligation {
+                kind: ObligationKind::SendPermit,
+                exit_path: ExitPath::Commit,
+            },
+            expected: ConformanceExpectation::Verified {
+                final_counter: 0,
+                properties_verified: vec![
+                    LivenessProperty::CounterIncrement,
+                    LivenessProperty::CounterDecrement,
+                    LivenessProperty::EventualResolution,
+                ],
+            },
+        },
+        NoLeakConformanceTest {
+            id: "NL-MUST-1.2",
+            section: "Core Theorem",
+            level: RequirementLevel::Must,
+            description: "Single Ack obligation is eventually aborted",
+            scenario: ConformanceScenario::SingleObligation {
+                kind: ObligationKind::Ack,
+                exit_path: ExitPath::Abort,
+            },
+            expected: ConformanceExpectation::Verified {
+                final_counter: 0,
+                properties_verified: vec![
+                    LivenessProperty::CounterIncrement,
+                    LivenessProperty::CounterDecrement,
+                    LivenessProperty::EventualResolution,
+                ],
+            },
+        },
+        NoLeakConformanceTest {
+            id: "NL-MUST-1.3",
+            section: "Core Theorem",
+            level: RequirementLevel::Must,
+            description: "Single Lease obligation resolved via Drop (leak detection)",
+            scenario: ConformanceScenario::SingleObligation {
+                kind: ObligationKind::Lease,
+                exit_path: ExitPath::Leak,
+            },
+            expected: ConformanceExpectation::Verified {
+                final_counter: 0,
+                properties_verified: vec![
+                    LivenessProperty::CounterIncrement,
+                    LivenessProperty::CounterDecrement,
+                    LivenessProperty::EventualResolution,
+                    LivenessProperty::DropPathCoverage,
+                ],
+            },
+        },
+        // =====================================================================
+        // MUST-2: Ghost Counter Properties
+        // =====================================================================
+        NoLeakConformanceTest {
+            id: "NL-MUST-2.1",
+            section: "Ghost Counter",
+            level: RequirementLevel::Must,
+            description: "Ghost counter increases on every Reserve event",
+            scenario: ConformanceScenario::GhostCounter {
+                operations: vec![
+                    CounterOperation::Reserve {
+                        obligation: 0,
+                        time: 10,
+                    },
+                    CounterOperation::Reserve {
+                        obligation: 1,
+                        time: 20,
+                    },
+                    CounterOperation::Commit {
+                        obligation: 0,
+                        time: 30,
+                    },
+                    CounterOperation::Commit {
+                        obligation: 1,
+                        time: 40,
+                    },
+                ],
+            },
+            expected: ConformanceExpectation::Verified {
+                final_counter: 0,
+                properties_verified: vec![
+                    LivenessProperty::CounterIncrement,
+                    LivenessProperty::CounterDecrement,
+                    LivenessProperty::CounterNonNegative,
+                ],
+            },
+        },
+        NoLeakConformanceTest {
+            id: "NL-MUST-2.2",
+            section: "Ghost Counter",
+            level: RequirementLevel::Must,
+            description: "Ghost counter decreases on every Resolve event",
+            scenario: ConformanceScenario::GhostCounter {
+                operations: vec![
+                    CounterOperation::Reserve {
+                        obligation: 0,
+                        time: 10,
+                    },
+                    CounterOperation::Commit {
+                        obligation: 0,
+                        time: 20,
+                    },
+                ],
+            },
+            expected: ConformanceExpectation::Verified {
+                final_counter: 0,
+                properties_verified: vec![
+                    LivenessProperty::CounterDecrement,
+                    LivenessProperty::EventualResolution,
+                ],
+            },
+        },
+        NoLeakConformanceTest {
+            id: "NL-MUST-2.3",
+            section: "Ghost Counter",
+            level: RequirementLevel::Must,
+            description: "Ghost counter never goes negative",
+            scenario: ConformanceScenario::GhostCounter {
+                operations: vec![
+                    CounterOperation::Reserve {
+                        obligation: 0,
+                        time: 10,
+                    },
+                    CounterOperation::Reserve {
+                        obligation: 1,
+                        time: 20,
+                    },
+                    CounterOperation::Commit {
+                        obligation: 0,
+                        time: 30,
+                    },
+                    CounterOperation::Abort {
+                        obligation: 1,
+                        time: 40,
+                    },
+                ],
+            },
+            expected: ConformanceExpectation::Verified {
+                final_counter: 0,
+                properties_verified: vec![LivenessProperty::CounterNonNegative],
+            },
+        },
+        // =====================================================================
+        // MUST-3: Four Exit Paths (Rust Ownership Model)
+        // =====================================================================
+        NoLeakConformanceTest {
+            id: "NL-MUST-3.1",
+            section: "Exit Paths",
+            level: RequirementLevel::Must,
+            description: "Normal path: explicit commit() resolves obligation",
+            scenario: ConformanceScenario::SingleObligation {
+                kind: ObligationKind::SendPermit,
+                exit_path: ExitPath::Commit,
+            },
+            expected: ConformanceExpectation::Verified {
+                final_counter: 0,
+                properties_verified: vec![LivenessProperty::EventualResolution],
+            },
+        },
+        NoLeakConformanceTest {
+            id: "NL-MUST-3.2",
+            section: "Exit Paths",
+            level: RequirementLevel::Must,
+            description: "Error path: explicit abort() resolves obligation",
+            scenario: ConformanceScenario::SingleObligation {
+                kind: ObligationKind::Ack,
+                exit_path: ExitPath::Abort,
+            },
+            expected: ConformanceExpectation::Verified {
+                final_counter: 0,
+                properties_verified: vec![LivenessProperty::EventualResolution],
+            },
+        },
+        NoLeakConformanceTest {
+            id: "NL-MUST-3.3",
+            section: "Exit Paths",
+            level: RequirementLevel::Must,
+            description: "Panic/cancel path: Drop impl resolves obligation",
+            scenario: ConformanceScenario::SingleObligation {
+                kind: ObligationKind::Lease,
+                exit_path: ExitPath::Leak,
+            },
+            expected: ConformanceExpectation::Verified {
+                final_counter: 0,
+                properties_verified: vec![
+                    LivenessProperty::EventualResolution,
+                    LivenessProperty::DropPathCoverage,
+                ],
+            },
+        },
+        NoLeakConformanceTest {
+            id: "NL-MUST-3.4",
+            section: "Exit Paths",
+            level: RequirementLevel::Must,
+            description: "All four exit paths covered in multi-obligation scenario",
+            scenario: ConformanceScenario::MultipleObligations {
+                obligations: vec![
+                    ObligationSetup {
+                        kind: ObligationKind::SendPermit,
+                        task: 0,
+                        region: 0,
+                        reserve_time: 10,
+                        exit_path: ExitPath::Commit,
+                        resolve_time: 50,
+                    },
+                    ObligationSetup {
+                        kind: ObligationKind::Ack,
+                        task: 1,
+                        region: 0,
+                        reserve_time: 20,
+                        exit_path: ExitPath::Abort,
+                        resolve_time: 60,
+                    },
+                    ObligationSetup {
+                        kind: ObligationKind::Lease,
+                        task: 2,
+                        region: 0,
+                        reserve_time: 30,
+                        exit_path: ExitPath::Leak,
+                        resolve_time: 70,
+                    },
+                ],
+                region_closure: true,
+            },
+            expected: ConformanceExpectation::Verified {
+                final_counter: 0,
+                properties_verified: vec![
+                    LivenessProperty::EventualResolution,
+                    LivenessProperty::DropPathCoverage,
+                    LivenessProperty::RegionQuiescence,
+                ],
+            },
+        },
+        // =====================================================================
+        // MUST-4: Task Completion
+        // =====================================================================
+        NoLeakConformanceTest {
+            id: "NL-MUST-4.1",
+            section: "Task Completion",
+            level: RequirementLevel::Must,
+            description: "Task completion implies zero pending obligations",
+            scenario: ConformanceScenario::TaskCompletion {
+                task_obligations: vec![ObligationKind::SendPermit, ObligationKind::Ack],
+                complete_before_resolve: false, // Resolve before completion
+            },
+            expected: ConformanceExpectation::Verified {
+                final_counter: 0,
+                properties_verified: vec![LivenessProperty::TaskCompletion],
+            },
+        },
+        // =====================================================================
+        // MUST-5: Region Quiescence (Structured Concurrency)
+        // =====================================================================
+        NoLeakConformanceTest {
+            id: "NL-MUST-5.1",
+            section: "Region Closure",
+            level: RequirementLevel::Must,
+            description: "Region closure implies zero pending obligations",
+            scenario: ConformanceScenario::RegionClosure {
+                cross_region_obligations: false,
+                nested_regions: false,
+            },
+            expected: ConformanceExpectation::Verified {
+                final_counter: 0,
+                properties_verified: vec![LivenessProperty::RegionQuiescence],
+            },
+        },
+        NoLeakConformanceTest {
+            id: "NL-MUST-5.2",
+            section: "Region Closure",
+            level: RequirementLevel::Must,
+            description: "Nested region closure maintains quiescence invariant",
+            scenario: ConformanceScenario::RegionClosure {
+                cross_region_obligations: false,
+                nested_regions: true,
+            },
+            expected: ConformanceExpectation::Verified {
+                final_counter: 0,
+                properties_verified: vec![LivenessProperty::RegionQuiescence],
+            },
+        },
+        // =====================================================================
+        // SHOULD Requirements
+        // =====================================================================
 
-    NoLeakConformanceTest {
-        id: "NL-MUST-1.1",
-        section: "Core Theorem",
-        level: RequirementLevel::Must,
-        description: "Single SendPermit obligation is eventually committed",
-        scenario: ConformanceScenario::SingleObligation {
-            kind: ObligationKind::SendPermit,
-            exit_path: ExitPath::Commit,
-        },
-        expected: ConformanceExpectation::Verified {
-            final_counter: 0,
-            properties_verified: vec![
-                LivenessProperty::CounterIncrement,
-                LivenessProperty::CounterDecrement,
-                LivenessProperty::EventualResolution,
-            ],
-        },
-    },
-
-    NoLeakConformanceTest {
-        id: "NL-MUST-1.2",
-        section: "Core Theorem",
-        level: RequirementLevel::Must,
-        description: "Single Ack obligation is eventually aborted",
-        scenario: ConformanceScenario::SingleObligation {
-            kind: ObligationKind::Ack,
-            exit_path: ExitPath::Abort,
-        },
-        expected: ConformanceExpectation::Verified {
-            final_counter: 0,
-            properties_verified: vec![
-                LivenessProperty::CounterIncrement,
-                LivenessProperty::CounterDecrement,
-                LivenessProperty::EventualResolution,
-            ],
-        },
-    },
-
-    NoLeakConformanceTest {
-        id: "NL-MUST-1.3",
-        section: "Core Theorem",
-        level: RequirementLevel::Must,
-        description: "Single Lease obligation resolved via Drop (leak detection)",
-        scenario: ConformanceScenario::SingleObligation {
-            kind: ObligationKind::Lease,
-            exit_path: ExitPath::Leak,
-        },
-        expected: ConformanceExpectation::Verified {
-            final_counter: 0,
-            properties_verified: vec![
-                LivenessProperty::CounterIncrement,
-                LivenessProperty::CounterDecrement,
-                LivenessProperty::EventualResolution,
-                LivenessProperty::DropPathCoverage,
-            ],
-        },
-    },
-
-    // =====================================================================
-    // MUST-2: Ghost Counter Properties
-    // =====================================================================
-
-    NoLeakConformanceTest {
-        id: "NL-MUST-2.1",
-        section: "Ghost Counter",
-        level: RequirementLevel::Must,
-        description: "Ghost counter increases on every Reserve event",
-        scenario: ConformanceScenario::GhostCounter {
-            operations: vec![
-                CounterOperation::Reserve { obligation: 0, time: 10 },
-                CounterOperation::Reserve { obligation: 1, time: 20 },
-                CounterOperation::Commit { obligation: 0, time: 30 },
-                CounterOperation::Commit { obligation: 1, time: 40 },
-            ],
-        },
-        expected: ConformanceExpectation::Verified {
-            final_counter: 0,
-            properties_verified: vec![
-                LivenessProperty::CounterIncrement,
-                LivenessProperty::CounterDecrement,
-                LivenessProperty::CounterNonNegative,
-            ],
-        },
-    },
-
-    NoLeakConformanceTest {
-        id: "NL-MUST-2.2",
-        section: "Ghost Counter",
-        level: RequirementLevel::Must,
-        description: "Ghost counter decreases on every Resolve event",
-        scenario: ConformanceScenario::GhostCounter {
-            operations: vec![
-                CounterOperation::Reserve { obligation: 0, time: 10 },
-                CounterOperation::Commit { obligation: 0, time: 20 },
-            ],
-        },
-        expected: ConformanceExpectation::Verified {
-            final_counter: 0,
-            properties_verified: vec![
-                LivenessProperty::CounterDecrement,
-                LivenessProperty::EventualResolution,
-            ],
-        },
-    },
-
-    NoLeakConformanceTest {
-        id: "NL-MUST-2.3",
-        section: "Ghost Counter",
-        level: RequirementLevel::Must,
-        description: "Ghost counter never goes negative",
-        scenario: ConformanceScenario::GhostCounter {
-            operations: vec![
-                CounterOperation::Reserve { obligation: 0, time: 10 },
-                CounterOperation::Reserve { obligation: 1, time: 20 },
-                CounterOperation::Commit { obligation: 0, time: 30 },
-                CounterOperation::Abort { obligation: 1, time: 40 },
-            ],
-        },
-        expected: ConformanceExpectation::Verified {
-            final_counter: 0,
-            properties_verified: vec![LivenessProperty::CounterNonNegative],
-        },
-    },
-
-    // =====================================================================
-    // MUST-3: Four Exit Paths (Rust Ownership Model)
-    // =====================================================================
-
-    NoLeakConformanceTest {
-        id: "NL-MUST-3.1",
-        section: "Exit Paths",
-        level: RequirementLevel::Must,
-        description: "Normal path: explicit commit() resolves obligation",
-        scenario: ConformanceScenario::SingleObligation {
-            kind: ObligationKind::SendPermit,
-            exit_path: ExitPath::Commit,
-        },
-        expected: ConformanceExpectation::Verified {
-            final_counter: 0,
-            properties_verified: vec![LivenessProperty::EventualResolution],
-        },
-    },
-
-    NoLeakConformanceTest {
-        id: "NL-MUST-3.2",
-        section: "Exit Paths",
-        level: RequirementLevel::Must,
-        description: "Error path: explicit abort() resolves obligation",
-        scenario: ConformanceScenario::SingleObligation {
-            kind: ObligationKind::Ack,
-            exit_path: ExitPath::Abort,
-        },
-        expected: ConformanceExpectation::Verified {
-            final_counter: 0,
-            properties_verified: vec![LivenessProperty::EventualResolution],
-        },
-    },
-
-    NoLeakConformanceTest {
-        id: "NL-MUST-3.3",
-        section: "Exit Paths",
-        level: RequirementLevel::Must,
-        description: "Panic/cancel path: Drop impl resolves obligation",
-        scenario: ConformanceScenario::SingleObligation {
-            kind: ObligationKind::Lease,
-            exit_path: ExitPath::Leak,
-        },
-        expected: ConformanceExpectation::Verified {
-            final_counter: 0,
-            properties_verified: vec![
-                LivenessProperty::EventualResolution,
-                LivenessProperty::DropPathCoverage,
-            ],
-        },
-    },
-
-    NoLeakConformanceTest {
-        id: "NL-MUST-3.4",
-        section: "Exit Paths",
-        level: RequirementLevel::Must,
-        description: "All four exit paths covered in multi-obligation scenario",
-        scenario: ConformanceScenario::MultipleObligations {
-            obligations: vec![
-                ObligationSetup {
-                    kind: ObligationKind::SendPermit,
-                    task: 0,
-                    region: 0,
-                    reserve_time: 10,
-                    exit_path: ExitPath::Commit,
-                    resolve_time: 50,
-                },
-                ObligationSetup {
-                    kind: ObligationKind::Ack,
-                    task: 1,
-                    region: 0,
-                    reserve_time: 20,
-                    exit_path: ExitPath::Abort,
-                    resolve_time: 60,
-                },
-                ObligationSetup {
-                    kind: ObligationKind::Lease,
-                    task: 2,
-                    region: 0,
-                    reserve_time: 30,
-                    exit_path: ExitPath::Leak,
-                    resolve_time: 70,
-                },
-            ],
-            region_closure: true,
-        },
-        expected: ConformanceExpectation::Verified {
-            final_counter: 0,
-            properties_verified: vec![
-                LivenessProperty::EventualResolution,
-                LivenessProperty::DropPathCoverage,
-                LivenessProperty::RegionQuiescence,
-            ],
-        },
-    },
-
-    // =====================================================================
-    // MUST-4: Task Completion
-    // =====================================================================
-
-    NoLeakConformanceTest {
-        id: "NL-MUST-4.1",
-        section: "Task Completion",
-        level: RequirementLevel::Must,
-        description: "Task completion implies zero pending obligations",
-        scenario: ConformanceScenario::TaskCompletion {
-            task_obligations: vec![
-                ObligationKind::SendPermit,
-                ObligationKind::Ack,
-            ],
-            complete_before_resolve: false, // Resolve before completion
-        },
-        expected: ConformanceExpectation::Verified {
-            final_counter: 0,
-            properties_verified: vec![LivenessProperty::TaskCompletion],
-        },
-    },
-
-    // =====================================================================
-    // MUST-5: Region Quiescence (Structured Concurrency)
-    // =====================================================================
-
-    NoLeakConformanceTest {
-        id: "NL-MUST-5.1",
-        section: "Region Closure",
-        level: RequirementLevel::Must,
-        description: "Region closure implies zero pending obligations",
-        scenario: ConformanceScenario::RegionClosure {
-            cross_region_obligations: false,
-            nested_regions: false,
-        },
-        expected: ConformanceExpectation::Verified {
-            final_counter: 0,
-            properties_verified: vec![LivenessProperty::RegionQuiescence],
-        },
-    },
-
-    NoLeakConformanceTest {
-        id: "NL-MUST-5.2",
-        section: "Region Closure",
-        level: RequirementLevel::Must,
-        description: "Nested region closure maintains quiescence invariant",
-        scenario: ConformanceScenario::RegionClosure {
-            cross_region_obligations: false,
-            nested_regions: true,
-        },
-        expected: ConformanceExpectation::Verified {
-            final_counter: 0,
-            properties_verified: vec![LivenessProperty::RegionQuiescence],
-        },
-    },
-
-    // =====================================================================
-    // SHOULD Requirements
-    // =====================================================================
-
-    // Note: mem::forget and Rc cycle requirements are runtime policies
-    // that cannot be tested mechanically - they are documented as
-    // architectural constraints in DISCREPANCIES.md
-
-];
+        // Note: mem::forget and Rc cycle requirements are runtime policies
+        // that cannot be tested mechanically - they are documented as
+        // architectural constraints in DISCREPANCIES.md
+    ]
+}
 
 // ============================================================================
 // Test Execution Engine
@@ -453,7 +461,10 @@ impl ConformanceTest for NoLeakConformanceTest {
         let result = prover.check(&events);
 
         match &self.expected {
-            ConformanceExpectation::Verified { final_counter, properties_verified } => {
+            ConformanceExpectation::Verified {
+                final_counter,
+                properties_verified,
+            } => {
                 if !result.is_verified() {
                     return TestResult::Fail {
                         reason: format!("Expected verification but proof failed: {:?}", result),
@@ -471,15 +482,14 @@ impl ConformanceTest for NoLeakConformanceTest {
 
                 // Verify expected properties were checked
                 for expected_prop in properties_verified {
-                    let property_verified = result.steps.iter()
+                    let property_verified = result
+                        .steps
+                        .iter()
                         .any(|step| step.property == *expected_prop && step.verified);
 
                     if !property_verified {
                         return TestResult::Fail {
-                            reason: format!(
-                                "Expected property {:?} to be verified",
-                                expected_prop
-                            ),
+                            reason: format!("Expected property {:?} to be verified", expected_prop),
                         };
                     }
                 }
@@ -487,7 +497,10 @@ impl ConformanceTest for NoLeakConformanceTest {
                 TestResult::Pass
             }
 
-            ConformanceExpectation::PropertyViolation { violated_property, reason: _ } => {
+            ConformanceExpectation::PropertyViolation {
+                violated_property,
+                reason: _,
+            } => {
                 if result.is_verified() {
                     return TestResult::Fail {
                         reason: "Expected property violation but proof verified".to_string(),
@@ -495,7 +508,9 @@ impl ConformanceTest for NoLeakConformanceTest {
                 }
 
                 // Check that the specific property was violated
-                let property_violated = result.steps.iter()
+                let property_violated = result
+                    .steps
+                    .iter()
                     .any(|step| step.property == *violated_property && !step.verified);
 
                 if property_violated {
@@ -520,17 +535,15 @@ impl ConformanceTest for NoLeakConformanceTest {
 fn generate_events_for_scenario(scenario: &ConformanceScenario) -> Vec<MarkingEvent> {
     match scenario {
         ConformanceScenario::SingleObligation { kind, exit_path } => {
-            let mut events = vec![
-                MarkingEvent::new(
-                    Time::from_nanos(10),
-                    MarkingEventKind::Reserve {
-                        obligation: o(0),
-                        kind: *kind,
-                        task: t(0),
-                        region: r(0),
-                    },
-                ),
-            ];
+            let mut events = vec![MarkingEvent::new(
+                Time::from_nanos(10),
+                MarkingEventKind::Reserve {
+                    obligation: o(0),
+                    kind: *kind,
+                    task: t(0),
+                    region: r(0),
+                },
+            )];
 
             match exit_path {
                 ExitPath::Commit => {
@@ -568,7 +581,10 @@ fn generate_events_for_scenario(scenario: &ConformanceScenario) -> Vec<MarkingEv
             events
         }
 
-        ConformanceScenario::MultipleObligations { obligations, region_closure } => {
+        ConformanceScenario::MultipleObligations {
+            obligations,
+            region_closure,
+        } => {
             let mut events = Vec::new();
 
             // Reserve all obligations
@@ -612,7 +628,8 @@ fn generate_events_for_scenario(scenario: &ConformanceScenario) -> Vec<MarkingEv
 
             // Add region closure if requested
             if *region_closure {
-                let max_resolve_time = obligations.iter()
+                let max_resolve_time = obligations
+                    .iter()
                     .map(|o| o.resolve_time)
                     .max()
                     .unwrap_or(100);
@@ -627,7 +644,10 @@ fn generate_events_for_scenario(scenario: &ConformanceScenario) -> Vec<MarkingEv
             events
         }
 
-        ConformanceScenario::TaskCompletion { task_obligations, complete_before_resolve } => {
+        ConformanceScenario::TaskCompletion {
+            task_obligations,
+            complete_before_resolve,
+        } => {
             let mut events = Vec::new();
 
             // Reserve obligations for the task
@@ -685,7 +705,10 @@ fn generate_events_for_scenario(scenario: &ConformanceScenario) -> Vec<MarkingEv
             events
         }
 
-        ConformanceScenario::RegionClosure { cross_region_obligations, nested_regions } => {
+        ConformanceScenario::RegionClosure {
+            cross_region_obligations,
+            nested_regions,
+        } => {
             let mut events = Vec::new();
 
             if *nested_regions {
@@ -749,15 +772,18 @@ fn generate_events_for_scenario(scenario: &ConformanceScenario) -> Vec<MarkingEv
 
             if *cross_region_obligations {
                 // Add obligation that spans regions (edge case)
-                events.insert(0, MarkingEvent::new(
-                    Time::from_nanos(5),
-                    MarkingEventKind::Reserve {
-                        obligation: o(1),
-                        kind: ObligationKind::Lease,
-                        task: t(1),
-                        region: r(1), // Different region
-                    },
-                ));
+                events.insert(
+                    0,
+                    MarkingEvent::new(
+                        Time::from_nanos(5),
+                        MarkingEventKind::Reserve {
+                            obligation: o(1),
+                            kind: ObligationKind::Lease,
+                            task: t(1),
+                            region: r(1), // Different region
+                        },
+                    ),
+                );
 
                 events.push(MarkingEvent::new(
                     Time::from_nanos(25),
@@ -830,15 +856,15 @@ fn generate_events_for_scenario(scenario: &ConformanceScenario) -> Vec<MarkingEv
 
 // Helper functions for creating test IDs
 fn r(n: u32) -> RegionId {
-    RegionId::from_arena(ArenaIndex::new(n, 0))
+    RegionId::new_for_test(n, 0)
 }
 
 fn t(n: u32) -> TaskId {
-    TaskId::from_arena(ArenaIndex::new(n, 0))
+    TaskId::new_for_test(n, 0)
 }
 
 fn o(n: u32) -> ObligationId {
-    ObligationId::from_arena(ArenaIndex::new(n, 0))
+    ObligationId::new_for_test(n, 0)
 }
 
 // ============================================================================
@@ -851,14 +877,15 @@ mod tests {
 
     #[test]
     fn run_all_no_leak_conformance_tests() {
-        crate::test_utils::init_test_logging();
-        crate::test_phase!("no_leak_conformance_suite");
+        test_utils::init_test_logging();
+        asupersync::test_phase!("no_leak_conformance_suite");
 
         let ctx = TestContext {};
         let mut results: BTreeMap<RequirementLevel, (u32, u32)> = BTreeMap::new();
         let mut failures = Vec::new();
+        let tests = no_leak_conformance_tests();
 
-        for test_case in NO_LEAK_CONFORMANCE_TESTS {
+        for test_case in &tests {
             let result = test_case.run(&ctx);
 
             let (passed, total) = results.entry(test_case.level).or_insert((0, 0));
@@ -867,21 +894,41 @@ mod tests {
             match result {
                 TestResult::Pass => {
                     *passed += 1;
-                    println!("✅ {} ({}): {}", test_case.id, test_case.level_str(), test_case.description);
+                    println!(
+                        "✅ {} ({}): {}",
+                        test_case.id,
+                        test_case.level_str(),
+                        test_case.description
+                    );
                 }
                 TestResult::Fail { ref reason } => {
                     failures.push((test_case.id, reason.clone()));
-                    println!("❌ {} ({}): {} - FAILED: {}",
-                             test_case.id, test_case.level_str(), test_case.description, reason);
+                    println!(
+                        "❌ {} ({}): {} - FAILED: {}",
+                        test_case.id,
+                        test_case.level_str(),
+                        test_case.description,
+                        reason
+                    );
                 }
                 TestResult::Skipped { ref reason } => {
-                    println!("⏭️  {} ({}): {} - SKIPPED: {}",
-                             test_case.id, test_case.level_str(), test_case.description, reason);
+                    println!(
+                        "⏭️  {} ({}): {} - SKIPPED: {}",
+                        test_case.id,
+                        test_case.level_str(),
+                        test_case.description,
+                        reason
+                    );
                 }
                 TestResult::ExpectedFailure { ref reason } => {
                     *passed += 1; // XFAIL counts as passing
-                    println!("🔶 {} ({}): {} - XFAIL: {}",
-                             test_case.id, test_case.level_str(), test_case.description, reason);
+                    println!(
+                        "🔶 {} ({}): {} - XFAIL: {}",
+                        test_case.id,
+                        test_case.level_str(),
+                        test_case.description,
+                        reason
+                    );
                 }
             }
         }
@@ -892,7 +939,10 @@ mod tests {
 
         for (level, (passed, total)) in &results {
             let percentage = (*passed as f64 / *total as f64) * 100.0;
-            println!("{:?} Requirements: {}/{} ({:.1}%)", level, passed, total, percentage);
+            println!(
+                "{:?} Requirements: {}/{} ({:.1}%)",
+                level, passed, total, percentage
+            );
         }
 
         let must_results = results.get(&RequirementLevel::Must).unwrap_or(&(0, 0));
@@ -901,7 +951,10 @@ mod tests {
         println!("\n🎯 MUST Clause Coverage: {:.1}%", must_score * 100.0);
 
         if must_score < 0.95 {
-            panic!("MUST clause coverage {:.1}% < 95% - NOT CONFORMANT", must_score * 100.0);
+            panic!(
+                "MUST clause coverage {:.1}% < 95% - NOT CONFORMANT",
+                must_score * 100.0
+            );
         }
 
         if !failures.is_empty() {
@@ -909,7 +962,7 @@ mod tests {
         }
 
         println!("\n✅ NO-LEAK INVARIANT CONFORMANCE: VERIFIED");
-        crate::test_complete!("no_leak_conformance_suite");
+        asupersync::test_complete!("no_leak_conformance_suite");
     }
 }
 
@@ -932,7 +985,8 @@ pub fn analyze_coverage() -> CoverageReport {
     let mut coverage = CoverageReport::new();
 
     // Count tests by requirement level
-    for test in NO_LEAK_CONFORMANCE_TESTS {
+    let tests = no_leak_conformance_tests();
+    for test in &tests {
         match test.level {
             RequirementLevel::Must => coverage.must_tests += 1,
             RequirementLevel::Should => coverage.should_tests += 1,
@@ -952,14 +1006,17 @@ pub fn analyze_coverage() -> CoverageReport {
     ];
 
     for property in all_properties {
-        let is_tested = NO_LEAK_CONFORMANCE_TESTS.iter()
-            .any(|test| {
-                if let ConformanceExpectation::Verified { properties_verified, .. } = &test.expected {
-                    properties_verified.contains(&property)
-                } else {
-                    false
-                }
-            });
+        let is_tested = tests.iter().any(|test| {
+            if let ConformanceExpectation::Verified {
+                properties_verified,
+                ..
+            } = &test.expected
+            {
+                properties_verified.contains(&property)
+            } else {
+                false
+            }
+        });
 
         if is_tested {
             coverage.properties_tested.push(property);
@@ -999,7 +1056,9 @@ impl CoverageReport {
 
     pub fn property_coverage_percentage(&self) -> f64 {
         let total_properties = self.properties_tested.len() + self.properties_untested.len();
-        if total_properties == 0 { return 100.0; }
+        if total_properties == 0 {
+            return 100.0;
+        }
         (self.properties_tested.len() as f64 / total_properties as f64) * 100.0
     }
 }

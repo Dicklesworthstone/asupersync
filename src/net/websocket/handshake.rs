@@ -1942,15 +1942,9 @@ Connection: Upgrade\n\
                 protocol_header
             );
 
-            let request = HttpRequest::parse(request_data.as_bytes()).expect(&format!(
-                "Protocol header '{}' should parse",
-                protocol_header
-            ));
+            let request = HttpRequest::parse(request_data.as_bytes()).unwrap_or_else(|_| panic!("Protocol header '{}' should parse", protocol_header));
 
-            let accept = server_chat.accept(&request).expect(&format!(
-                "Protocol negotiation should succeed for '{}'",
-                protocol_header
-            ));
+            let accept = server_chat.accept(&request).unwrap_or_else(|_| panic!("Protocol negotiation should succeed for '{}'", protocol_header));
 
             assert_eq!(
                 accept.protocol,
@@ -2104,10 +2098,7 @@ Connection: Upgrade\n\
                 status_code, status_text
             );
 
-            let response = HttpResponse::parse(response_data.as_bytes()).expect(&format!(
-                "Response with status {} should parse",
-                status_code
-            ));
+            let response = HttpResponse::parse(response_data.as_bytes()).unwrap_or_else(|_| panic!("Response with status {} should parse", status_code));
 
             let result = handshake.validate_response(&response);
             assert!(

@@ -1,3 +1,4 @@
+#![allow(clippy::cast_possible_wrap)]
 //! Two-phase broadcast channel (Async).
 //!
 //! A multi-producer, multi-consumer channel where each message is sent to all
@@ -2133,7 +2134,7 @@ mod tests {
                 };
 
                 // Send messages
-                let messages: Vec<i32> = (0..num_messages).map(|x| x as i32).collect();
+                let messages: Vec<i32> = (0..num_messages).map(|x| i32::try_from(x).unwrap()).collect();
                 for &msg in &messages {
                     tx.send(&cx, msg).expect("send");
                 }
@@ -2198,7 +2199,7 @@ mod tests {
 
                 // Send messages up to capacity
                 for i in 0..capacity {
-                    tx.send(&cx, i as i32).expect("send");
+                    tx.send(&cx, i32::try_from(i).unwrap()).expect("send");
                 }
 
                 // Fast receiver consumes all
@@ -2208,7 +2209,7 @@ mod tests {
 
                 // Send overrun messages, causing lag for slow receiver
                 for i in 0..overrun {
-                    tx.send(&cx, (capacity + i) as i32).expect("send overrun");
+                    tx.sendi32::try_from(&cx, (capacity + i).unwrap()).expect("send overrun");
                 }
 
                 // METAMORPHIC RELATION: Slow receiver gets Lagged(overrun) then correct sequence
@@ -2234,7 +2235,7 @@ mod tests {
                 let start_msg = overrun;
                 for i in 0..remaining_count {
                     let received = block_on(rx_slow.recv(&cx)).expect("post-lag recv");
-                    let expected = (start_msg + i) as i32;
+                    let expected = i32::try_from(start_msg + i).unwrap();
                     crate::assert_with_log!(
                         received == expected,
                         format!(
@@ -2263,7 +2264,7 @@ mod tests {
                 let total_messages = capacity * (wraps + 1) + 1;
                 let expected_lag = (total_messages - capacity) as u64;
                 let expected_suffix: Vec<i32> =
-                    ((total_messages - capacity) as i32..total_messages as i32).collect();
+                    (i32::try_from(total_messages - capacity).unwrap()..i32::try_from(total_messages ).unwrap()).collect();
                 let expected_indices: Vec<u64> =
                     ((total_messages - capacity) as u64..total_messages as u64).collect();
 
@@ -2335,12 +2336,12 @@ mod tests {
                     format!("{perturbed:?}")
                 );
                 crate::assert_with_log!(
-                    fast_sequence == (0..total_messages as i32).collect::<Vec<_>>(),
+                    fast_sequence == (0..i32::try_from(total_messages).unwrap()).collect::<Vec<_>>(),
                     format!(
                         "fast receiver keeps full order (cap={}, wraps={})",
                         capacity, wraps
                     ),
-                    (0..total_messages as i32).collect::<Vec<_>>(),
+                    (0..i32::try_from(total_messages).unwrap()).collect::<Vec<_>>(),
                     fast_sequence
                 );
             }
@@ -2364,7 +2365,7 @@ mod tests {
 
                 // Send first batch of messages
                 for i in 0..split_point {
-                    tx.send(&cx, i as i32).expect("send pre");
+                    tx.send(&cx, i32::try_from(i).unwrap()).expect("send pre");
                 }
 
                 // Create mid-stream receiver
@@ -2372,7 +2373,7 @@ mod tests {
 
                 // Send second batch of messages
                 for i in split_point..total_messages {
-                    tx.send(&cx, i as i32).expect("send post");
+                    tx.send(&cx, i32::try_from(i).unwrap()).expect("send post");
                 }
 
                 // Collect sequences
@@ -2388,8 +2389,8 @@ mod tests {
                 }
 
                 // METAMORPHIC RELATION: Late receiver sees subset of early receiver
-                let expected_late: Vec<i32> = (split_point as i32..total_messages as i32).collect();
-                let expected_early: Vec<i32> = (0..total_messages as i32).collect();
+                let expected_late: Vec<i32> = (i32::try_from(split_point).unwrap()..i32::try_from(total_messages).unwrap()).collect();
+                let expected_early: Vec<i32> = (0..i32::try_from(total_messages).unwrap()).collect();
 
                 crate::assert_with_log!(
                     early_sequence == expected_early,
@@ -2456,7 +2457,7 @@ mod tests {
 
                 // Send some messages
                 for i in 0..3 {
-                    senders[i % num_senders].send(&cx, i as i32).expect("send");
+                    senders[i % num_senders].send(&cx, i32::try_from(i).unwrap()).expect("send");
                 }
 
                 // Drop all senders except last
@@ -2538,7 +2539,7 @@ mod tests {
 
             // Send message and verify exactly one wake
             let wake_count_before = wake_state.wake_count();
-            tx.send(&cx, scenario as i32).expect("send");
+            tx.send(&cx, scenario).expect("send");
             let wake_count_after = wake_state.wake_count();
 
             // Should wake exactly once for single receiver
@@ -2610,8 +2611,8 @@ mod tests {
         // until the terminal `Closed` signal is observed.
         let mid_close_result = loop {
             match block_on(rx_mid.recv(&cx)) {
-                Ok(_) => continue,                     // Consume any buffered messages
-                Err(RecvError::Lagged(_)) => continue, // Acknowledge lag and retry
+                Ok(_) => (),                     // Consume any buffered messages
+                Err(RecvError::Lagged(_)) => (), // Acknowledge lag and retry
                 Err(e) => break e,
             }
         };

@@ -4,11 +4,11 @@
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
     use crate::bytes::{Bytes, BytesMut};
+    use std::time::Instant;
 
     #[cfg(feature = "test-internals")]
-    use crate::bytes::profiling::{get_allocation_metrics, reset_allocation_metrics, AllocationSnapshot};
+    use crate::bytes::profiling::{get_allocation_metrics, reset_allocation_metrics};
 
     /// Baseline test for BytesMut incremental growth patterns.
     /// This simulates network buffer growth and measures allocation behavior.
@@ -27,7 +27,10 @@ mod tests {
         }
 
         let no_prealloc_duration = start.elapsed();
-        println!("BytesMut growth (no prealloc): {:?} for 25,600 bytes", no_prealloc_duration);
+        println!(
+            "BytesMut growth (no prealloc): {:?} for 25,600 bytes",
+            no_prealloc_duration
+        );
 
         // Test Case 2: With pre-allocation (should be faster)
         let start = Instant::now();
@@ -38,7 +41,10 @@ mod tests {
         }
 
         let prealloc_duration = start.elapsed();
-        println!("BytesMut growth (with prealloc): {:?} for 25,600 bytes", prealloc_duration);
+        println!(
+            "BytesMut growth (with prealloc): {:?} for 25,600 bytes",
+            prealloc_duration
+        );
 
         #[cfg(feature = "test-internals")]
         {
@@ -68,7 +74,11 @@ mod tests {
         }
 
         let split_to_duration = start.elapsed();
-        println!("split_to operations: {:?} for {} frames", split_to_duration, frames.len());
+        println!(
+            "split_to operations: {:?} for {} frames",
+            split_to_duration,
+            frames.len()
+        );
 
         #[cfg(feature = "test-internals")]
         {
@@ -141,14 +151,17 @@ mod tests {
             request_buf.put_slice(b"\r\n"); // End headers
 
             // 2. Parse headers by splitting buffer
-            let header_end = request_buf[..].windows(4)
+            let header_end = request_buf[..]
+                .windows(4)
                 .position(|w| w == b"\r\n\r\n")
-                .unwrap_or(request_buf.len().saturating_sub(4)) + 4;
+                .unwrap_or(request_buf.len().saturating_sub(4))
+                + 4;
 
             let headers = request_buf.split_to(header_end.min(request_buf.len()));
 
             // 3. Convert to immutable Bytes for processing
             let header_bytes = headers.freeze();
+            assert!(!header_bytes.is_empty());
 
             // 4. Simulate response generation
             let mut response_buf = BytesMut::with_capacity(1024);
@@ -160,7 +173,10 @@ mod tests {
         }
 
         let workload_duration = start.elapsed();
-        println!("Realistic workload: {:?} for 100 requests", workload_duration);
+        println!(
+            "Realistic workload: {:?} for 100 requests",
+            workload_duration
+        );
 
         #[cfg(feature = "test-internals")]
         {

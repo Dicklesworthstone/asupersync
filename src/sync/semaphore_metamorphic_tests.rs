@@ -333,7 +333,7 @@ fn mr_composite_properties() {
         // Cancel an operation (should not affect state)
         let cx_cancel = Cx::for_testing();
         cx_cancel.set_cancel_requested(true);
-        let _ = sem.acquire(&cx_cancel, 1 * scale).await; // Should fail
+        let _ = sem.acquire(&cx_cancel, scale).await; // Should fail
 
         let after_cancel = sem.available_permits();
         assert_eq!(

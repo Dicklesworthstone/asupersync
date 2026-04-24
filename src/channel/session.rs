@@ -1,3 +1,4 @@
+#![allow(clippy::cast_possible_wrap)]
 //! Session-typed two-phase channels with obligation tracking.
 //!
 //! This module wraps the existing [`mpsc`](super::mpsc) and [`oneshot`](super::oneshot)

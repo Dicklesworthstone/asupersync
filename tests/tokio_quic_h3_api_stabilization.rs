@@ -39,6 +39,10 @@ fn test_cx() -> Cx {
     Cx::for_testing()
 }
 
+fn test_h3_config() -> H3ConnectionConfig {
+    H3ConnectionConfig::default()
+}
+
 fn client_config() -> NativeQuicConnectionConfig {
     NativeQuicConnectionConfig {
         role: StreamRole::Client,
@@ -168,7 +172,7 @@ fn as_04_h3_types_constructable() {
     let frame = H3Frame::Data(vec![1, 2, 3]);
     let mut buf = Vec::new();
     frame.encode(&mut buf).expect("encode frame");
-    let (decoded, _) = H3Frame::decode(&buf).expect("decode frame");
+    let (decoded, _) = H3Frame::decode(&buf, &test_h3_config()).expect("decode frame");
     assert_eq!(decoded, frame);
 }
 
@@ -310,8 +314,8 @@ fn mp_04_h3_request_lifecycle() {
 
     // QPACK encode round-trip
     let encoded = qpack_encode_request_field_section(&req).expect("encode");
-    let decoded =
-        qpack_decode_request_field_section(&encoded, H3QpackMode::StaticOnly).expect("decode");
+    let decoded = qpack_decode_request_field_section(&encoded, H3QpackMode::StaticOnly, None)
+        .expect("decode");
     assert_eq!(decoded.pseudo.method, req.pseudo.method);
     assert_eq!(decoded.pseudo.path, req.pseudo.path);
 
@@ -328,8 +332,9 @@ fn mp_04_h3_request_lifecycle() {
     )
     .expect("valid resp");
     let resp_encoded = qpack_encode_response_field_section(&resp).expect("encode resp");
-    let resp_decoded = qpack_decode_response_field_section(&resp_encoded, H3QpackMode::StaticOnly)
-        .expect("decode resp");
+    let resp_decoded =
+        qpack_decode_response_field_section(&resp_encoded, H3QpackMode::StaticOnly, None)
+            .expect("decode resp");
     assert_eq!(resp_decoded.status, 200);
 }
 

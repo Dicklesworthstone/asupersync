@@ -26,6 +26,12 @@ use asupersync::types::ObjectId;
 use asupersync::util::DetRng;
 use std::collections::{BTreeMap, BTreeSet};
 
+fn repair_equation(decoder: &InactivationDecoder, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
+    decoder
+        .repair_equation(esi)
+        .unwrap_or_else(|err| panic!("repair equation for esi={esi} failed: {err:?}"))
+}
+
 const G1_BUDGET_SCHEMA_VERSION: &str = "raptorq-g1-budget-draft-v1";
 const G3_DECISION_RECORDS_SCHEMA_VERSION: &str = "raptorq-optimization-decision-records-v1";
 const G4_ROLLOUT_POLICY_SCHEMA_VERSION: &str = "raptorq-controlled-rollout-policy-v1";
@@ -175,7 +181,7 @@ fn build_received_symbols(
     }
 
     for esi in (k as u32)..max_repair_esi {
-        let (cols, coefs) = decoder.repair_equation(esi);
+        let (cols, coefs) = repair_equation(&decoder, esi);
         let repair_data = encoder.repair_symbol(esi);
         received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
     }
@@ -211,7 +217,7 @@ fn build_decode_received(
     let repair_start = k as u32;
     let repair_end = repair_start.saturating_add(total_repairs as u32);
     for esi in repair_start..repair_end {
-        let (cols, coefs) = decoder.repair_equation(esi);
+        let (cols, coefs) = repair_equation(&decoder, esi);
         let data = encoder.repair_symbol(esi);
         received.push(ReceivedSymbol::repair(esi, cols, coefs, data));
     }
@@ -386,8 +392,8 @@ fn repair_equation_deterministic() {
     let decoder = InactivationDecoder::new(k, 32, seed);
 
     for esi in (k as u32)..(k as u32 + 20) {
-        let (cols1, coefs1) = decoder.repair_equation(esi);
-        let (cols2, coefs2) = decoder.repair_equation(esi);
+        let (cols1, coefs1) = repair_equation(&decoder, esi);
+        let (cols2, coefs2) = repair_equation(&decoder, esi);
         assert_eq!(cols1, cols2, "ESI {esi}: columns differ");
         assert_eq!(coefs1, coefs2, "ESI {esi}: coefficients differ");
     }
@@ -404,7 +410,7 @@ fn repair_equation_different_esis_differ() {
     let mut any_differ = false;
 
     for esi in (k as u32)..(k as u32 + 10) {
-        let (cols, _) = decoder.repair_equation(esi);
+        let (cols, _) = repair_equation(&decoder, esi);
         for (prev_esi, prev_cols) in &equations {
             if cols != *prev_cols {
                 any_differ = true;

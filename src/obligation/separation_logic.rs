@@ -1010,6 +1010,7 @@ impl SeparationLogicVerifier {
             MarkingEventKind::RegionClose { region } => {
                 self.verify_region_close(*region, event.time);
             }
+            MarkingEventKind::TaskComplete { .. } => {}
         }
 
         self.check_authoritative_pending_agreement(event.time);

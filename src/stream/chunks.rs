@@ -1,3 +1,4 @@
+#![allow(clippy::cast_possible_wrap)]
 //! Chunking combinators for streams.
 //!
 //! `Chunks` yields fixed-size batches, while `ReadyChunks` yields whatever is
@@ -604,7 +605,7 @@ mod tests {
         #[test]
         fn mr_chunks_total_length_matches_input() {
             for n in 0..=32usize {
-                let xs: Vec<i32> = (0..n as i32).collect();
+                let xs: Vec<i32> = (0..n).map(|x| x as i32).collect();
                 for cap in 1..=8usize {
                     let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
                     let total: usize = chunks.iter().map(Vec::len).sum();
@@ -621,7 +622,7 @@ mod tests {
         #[test]
         fn mr_chunks_count_is_div_ceil() {
             for n in 0..=32usize {
-                let xs: Vec<i32> = (0..n as i32).collect();
+                let xs: Vec<i32> = (0..n).map(|x| x as i32).collect();
                 for cap in 1..=8usize {
                     let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
                     let expected = if n == 0 { 0 } else { n.div_ceil(cap) };
@@ -643,7 +644,7 @@ mod tests {
         #[test]
         fn mr_chunks_size_bound_non_empty_and_at_most_cap() {
             for n in 1..=32usize {
-                let xs: Vec<i32> = (0..n as i32).collect();
+                let xs: Vec<i32> = (0..n).map(|x| x as i32).collect();
                 for cap in 1..=8usize {
                     let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
                     let last_idx = chunks.len().saturating_sub(1);
@@ -668,7 +669,7 @@ mod tests {
         #[test]
         fn mr_chunks_final_chunk_length_is_remainder_or_cap() {
             for n in 1..=32usize {
-                let xs: Vec<i32> = (0..n as i32).collect();
+                let xs: Vec<i32> = (0..n).map(|x| x as i32).collect();
                 for cap in 1..=8usize {
                     let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
                     let last = chunks.last().expect("non-empty input has at least one chunk");
@@ -691,7 +692,7 @@ mod tests {
         #[test]
         fn mr_chunks_positional_order() {
             for n in 0..=20usize {
-                let xs: Vec<i32> = (0..n as i32).collect();
+                let xs: Vec<i32> = (0..n).map(|x| x as i32).collect();
                 for cap in 1..=5usize {
                     let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
                     for (chunk_idx, chunk) in chunks.iter().enumerate() {
@@ -713,7 +714,7 @@ mod tests {
         #[test]
         fn mr_chunks_cap_one_is_singleton_lift() {
             for n in 0..=16usize {
-                let xs: Vec<i32> = (0..n as i32).collect();
+                let xs: Vec<i32> = (0..n).map(|x| x as i32).collect();
                 let chunks = drain_chunks(Chunks::new(iter(xs.clone()), 1));
                 assert_eq!(chunks.len(), n);
                 for (i, chunk) in chunks.iter().enumerate() {
@@ -741,7 +742,7 @@ mod tests {
         #[test]
         fn mr_chunks_cap_at_or_above_len_yields_single_chunk() {
             for n in 1..=8usize {
-                let xs: Vec<i32> = (0..n as i32).collect();
+                let xs: Vec<i32> = (0..n).map(|x| x as i32).collect();
                 for cap in n..=(n + 4) {
                     let chunks = drain_chunks(Chunks::new(iter(xs.clone()), cap));
                     assert_eq!(

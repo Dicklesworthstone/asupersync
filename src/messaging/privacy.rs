@@ -7,7 +7,7 @@
 
 use super::ir::{MetadataDisclosure, PrivacyPolicy};
 use crate::util::DetHasher;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::hash::{Hash, Hasher};

@@ -113,6 +113,11 @@ pub enum MarkingEventKind {
         /// Region that closed.
         region: RegionId,
     },
+    /// A task completed.
+    TaskComplete {
+        /// Task that completed.
+        task: TaskId,
+    },
 }
 
 /// A marking event with a timestamp.
@@ -228,6 +233,13 @@ pub fn project_trace(events: &[TraceEvent]) -> Vec<MarkingEvent> {
                 projected.push(MarkingEvent::new(
                     event.time,
                     MarkingEventKind::RegionClose { region: *region },
+                ));
+            }
+
+            (TraceEventKind::Complete, TraceData::Task { task, .. }) => {
+                projected.push(MarkingEvent::new(
+                    event.time,
+                    MarkingEventKind::TaskComplete { task: *task },
                 ));
             }
 
@@ -748,6 +760,10 @@ impl MarkingAnalyzer {
                     marking: self.marking.snapshot(),
                     cause: format!("LEAK({kind}, {region:?})"),
                 });
+            }
+
+            MarkingEventKind::TaskComplete { .. } => {
+                // Task completion does not change region/kind VASS counters.
             }
 
             MarkingEventKind::RegionClose { region } => {

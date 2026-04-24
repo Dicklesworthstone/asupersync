@@ -698,6 +698,10 @@ fn rearm_connect_registration(
 #[cfg(not(target_arch = "wasm32"))]
 async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
     std::future::poll_fn(|cx| {
+        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+
         if let Some(err) = socket.take_error()? {
             return Poll::Ready(Err(err));
         }

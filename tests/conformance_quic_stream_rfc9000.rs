@@ -1,3 +1,5 @@
+#![allow(dead_code, missing_docs)]
+
 //! QUIC Stream State Conformance Tests - RFC 9000
 //!
 //! Validates QUIC stream state machine conformance per RFC 9000 Sections 3.2 and 3.4.

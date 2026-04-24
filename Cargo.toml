@@ -38,6 +38,7 @@ default = ["test-internals", "proc-macros"]
 # module wiring still lives in `src/messaging/mod.rs` and is not fully gated
 # yet.
 messaging-fabric = []
+waker-profiling = []
 # Explicit opt-in for experimental browser-targeted builds.
 # This does not imply full wasm parity; it only enables guarded compilation paths.
 wasm-browser-preview = []
@@ -364,6 +365,7 @@ harness = false
 [[bench]]
 name = "fabric_bench"
 harness = false
+required-features = ["messaging-fabric", "test-internals"]
 
 [[bench]]
 name = "bytes_allocation_profile"

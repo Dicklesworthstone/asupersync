@@ -179,7 +179,7 @@ impl Future for TestOperation {
         {
             let mut start_time = this.start_time.lock();
             if start_time.is_none() {
-                *start_time = Some(Cx::current().map(|cx| cx.now()).unwrap_or(Time::ZERO));
+                *start_time = Some(Cx::current().map_or(Time::ZERO, |cx| cx.now()));
             }
         }
 
@@ -231,6 +231,7 @@ pub struct GlobalTimeoutState {
 }
 
 impl GlobalTimeoutState {
+    /// Create shared timeout test state with zeroed counters.
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -261,12 +262,17 @@ impl GlobalTimeoutState {
 /// Summary of timeout test execution results.
 #[derive(Debug, Clone)]
 pub struct TimeoutTestSummary {
-    #[allow(missing_docs)]
+    /// Number of times the test operation was polled.
     pub total_polls: u32,
+    /// Number of operations that completed successfully.
     pub operation_completed: u32,
+    /// Number of operations that observed cancellation.
     pub operation_cancelled: u32,
+    /// Number of timeout-triggered cancellations observed.
     pub timeouts_detected: u32,
+    /// Number of externally-triggered cancellations observed.
     pub external_cancels_detected: u32,
+    /// Whether a double-cancellation path was detected.
     pub double_cancel_detected: bool,
 }
 
@@ -352,7 +358,7 @@ mod metamorphic_timeout_nesting {
             let nested_summary = run_timeout_test(&config, |global_state| async move {
                 let operation = TestOperation::new(1, operation_ms, Arc::clone(&global_state));
 
-                let now = Cx::current().map(|cx| cx.now()).unwrap_or(Time::ZERO);
+                let now = Cx::current().map_or(Time::ZERO, |cx| cx.now());
                 let inner_timeout = timeout(now, Duration::from_millis(inner_ms), operation);
                 let nested_result =
                     timeout(now, Duration::from_millis(outer_ms), inner_timeout).await;
@@ -380,7 +386,7 @@ mod metamorphic_timeout_nesting {
             let single_summary = run_timeout_test(&single_config, |global_state| async move {
                 let operation = TestOperation::new(2, operation_ms, Arc::clone(&global_state));
 
-                let now = Cx::current().map(|cx| cx.now()).unwrap_or(Time::ZERO);
+                let now = Cx::current().map_or(Time::ZERO, |cx| cx.now());
                 let single_result =
                     timeout(now, Duration::from_millis(min_timeout), operation).await;
 

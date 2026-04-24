@@ -10,10 +10,8 @@
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
 use asupersync::runtime::builder::RuntimeBuilder;
-use asupersync::spawn;
 use proptest::prelude::*;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 
 /// A message with sequence number for order tracking
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,16 +79,6 @@ fn mr_mpsc_order_preservation_under_cancellation() {
 
             // Track what should be received (non-cancelled messages in order)
             let mut expected_order = VecDeque::new();
-            let received = Arc::new(Mutex::new(Vec::new()));
-            let received_clone = Arc::clone(&received);
-
-            // Spawn receiver task
-            let recv_handle = spawn!(&cx, async move {
-                while let Ok(msg) = receiver.recv(&cx).await {
-                    received_clone.lock().unwrap().push(msg);
-                }
-            });
-
             // Execute operations in sequence
             for operation in operations {
                 match operation {
@@ -106,7 +94,8 @@ fn mr_mpsc_order_preservation_under_cancellation() {
                             }
                         }
                     },
-                    ChannelOperation::ReserveThenCancel { .. } => {
+                    ChannelOperation::ReserveThenCancel { sequence } => {
+                        let _cancelled_sequence = sequence;
                         if let Ok(permit) = sender.reserve(&cx).await {
                             permit.abort(); // Cancel the reservation
                             // This message should NOT appear in received order
@@ -115,16 +104,17 @@ fn mr_mpsc_order_preservation_under_cancellation() {
                 }
             }
 
-            // Close sender and wait for receiver to finish
             drop(sender);
-            let _ = recv_handle.await;
 
             // Check that received messages match expected order exactly
-            let received_msgs = received.lock().unwrap().clone();
+            let mut received_msgs = Vec::new();
+            while let Ok(msg) = receiver.recv(&cx).await {
+                received_msgs.push(msg);
+            }
             let expected_msgs: Vec<_> = expected_order.into_iter().collect();
 
             prop_assert_eq!(
-                received_msgs, expected_msgs,
+                &received_msgs, &expected_msgs,
                 "MPSC order preservation violated: expected {:?}, got {:?}",
                 expected_msgs, received_msgs
             );
@@ -150,16 +140,6 @@ fn mr_mpsc_permit_lifecycle_invariant() {
         rt.block_on(async {
             let cx = Cx::for_testing();
             let (sender, mut receiver) = mpsc::channel(50);
-
-            let received = Arc::new(Mutex::new(Vec::new()));
-            let received_clone = Arc::clone(&received);
-
-            // Spawn receiver
-            let recv_handle = spawn!(&cx, async move {
-                while let Ok(msg) = receiver.recv(&cx).await {
-                    received_clone.lock().unwrap().push(msg);
-                }
-            });
 
             let mut permits_created = 0;
             let mut permits_consumed = 0;
@@ -199,7 +179,10 @@ fn mr_mpsc_permit_lifecycle_invariant() {
             }
 
             drop(sender);
-            let _ = recv_handle.await;
+            let mut _received = Vec::new();
+            while let Ok(msg) = receiver.recv(&cx).await {
+                _received.push(msg);
+            }
 
             // Every permit should be consumed
             prop_assert_eq!(
@@ -238,25 +221,6 @@ fn mr_cross_channel_order_independence() {
             // Create two independent channels
             let (sender_a, mut receiver_a) = mpsc::channel(15);
             let (sender_b, mut receiver_b) = mpsc::channel(15);
-
-            let received_a = Arc::new(Mutex::new(Vec::new()));
-            let received_b = Arc::new(Mutex::new(Vec::new()));
-
-            let received_a_clone = Arc::clone(&received_a);
-            let received_b_clone = Arc::clone(&received_b);
-
-            // Spawn independent receivers
-            let handle_a = spawn!(&cx, async move {
-                while let Ok(msg) = receiver_a.recv(&cx).await {
-                    received_a_clone.lock().unwrap().push(msg);
-                }
-            });
-
-            let handle_b = spawn!(&cx, async move {
-                while let Ok(msg) = receiver_b.recv(&cx).await {
-                    received_b_clone.lock().unwrap().push(msg);
-                }
-            });
 
             // Interleave operations on both channels
             let mut expected_a = Vec::new();
@@ -302,12 +266,17 @@ fn mr_cross_channel_order_independence() {
             // Close and wait
             drop(sender_a);
             drop(sender_b);
-            let _ = handle_a.await;
-            let _ = handle_b.await;
 
             // Verify independent ordering
-            let final_a = received_a.lock().unwrap().clone();
-            let final_b = received_b.lock().unwrap().clone();
+            let mut final_a = Vec::new();
+            while let Ok(msg) = receiver_a.recv(&cx).await {
+                final_a.push(msg);
+            }
+
+            let mut final_b = Vec::new();
+            while let Ok(msg) = receiver_b.recv(&cx).await {
+                final_b.push(msg);
+            }
 
             prop_assert_eq!(final_a, expected_a, "Channel A order violated");
             prop_assert_eq!(final_b, expected_b, "Channel B order violated");

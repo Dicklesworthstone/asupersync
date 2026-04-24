@@ -507,6 +507,9 @@ impl NoLeakProver {
             MarkingEventKind::RegionClose { region } => {
                 self.on_region_close(*region, event.time);
             }
+            MarkingEventKind::TaskComplete { task } => {
+                self.notify_task_complete(*task, event.time);
+            }
         }
     }
 

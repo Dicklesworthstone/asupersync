@@ -13,8 +13,8 @@
 
 use asupersync::cx::Cx;
 use asupersync::http::h3_native::{
-    H3ConnectionConfig, H3ConnectionState, H3ControlState, H3Frame, H3NativeError, H3PseudoHeaders, H3QpackMode,
-    H3RequestHead, H3RequestStreamState, H3ResponseHead, H3Settings,
+    H3ConnectionConfig, H3ConnectionState, H3ControlState, H3Frame, H3NativeError, H3PseudoHeaders,
+    H3QpackMode, H3RequestHead, H3RequestStreamState, H3ResponseHead, H3Settings,
 };
 use asupersync::net::quic_native::connection::{
     NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError,
@@ -464,6 +464,7 @@ fn eh_06_qpack_round_trip() {
     let decoded = asupersync::http::h3_native::qpack_decode_request_field_section(
         &encoded,
         H3QpackMode::StaticOnly,
+        None,
     )
     .expect("decode");
     assert_eq!(decoded.pseudo.method, req.pseudo.method);

@@ -156,7 +156,7 @@ impl Default for DecodingConfig {
             max_block_size: 1024 * 1024,
             repair_overhead: 1.05,
             min_overhead: 0,
-            max_buffered_symbols: 0,
+            max_buffered_symbols: 8192,
             block_timeout: Duration::from_secs(30),
             verify_auth: false,
         }
@@ -910,7 +910,7 @@ mod tests {
             max_block_size: config.max_block_size,
             repair_overhead,
             min_overhead,
-            max_buffered_symbols: 0,
+            max_buffered_symbols: 8192,
             block_timeout: Duration::from_secs(30),
             verify_auth: false,
         });
@@ -1025,7 +1025,7 @@ mod tests {
             max_block_size: config.max_block_size,
             repair_overhead: config.repair_overhead,
             min_overhead: 0,
-            max_buffered_symbols: 0,
+            max_buffered_symbols: 8192,
             block_timeout: Duration::from_secs(30),
             verify_auth: false,
         });
@@ -1054,7 +1054,7 @@ mod tests {
             max_block_size: 8,
             repair_overhead: 1.0,
             min_overhead: 0,
-            max_buffered_symbols: 0,
+            max_buffered_symbols: 8192,
             block_timeout: Duration::from_secs(30),
             verify_auth: false,
         });
@@ -1088,7 +1088,7 @@ mod tests {
             max_block_size: 16,
             repair_overhead: 1.0,
             min_overhead: 0,
-            max_buffered_symbols: 0,
+            max_buffered_symbols: 8192,
             block_timeout: Duration::from_secs(30),
             verify_auth: false,
         });
@@ -1386,7 +1386,7 @@ mod tests {
         assert_eq!(cfg.max_block_size, 1024 * 1024);
         assert!((cfg.repair_overhead - 1.05).abs() < f64::EPSILON);
         assert_eq!(cfg.min_overhead, 0);
-        assert_eq!(cfg.max_buffered_symbols, 0);
+        assert_eq!(cfg.max_buffered_symbols, 8192);
         assert_eq!(cfg.block_timeout, Duration::from_secs(30));
         assert!(!cfg.verify_auth);
     }
@@ -1715,7 +1715,7 @@ mod tests {
             max_block_size: 4096,
             repair_overhead: 1.05,
             min_overhead: 3,
-            max_buffered_symbols: 0,
+            max_buffered_symbols: 8192,
             block_timeout: Duration::from_secs(30),
             verify_auth: false,
         });
@@ -1749,7 +1749,7 @@ mod tests {
             max_block_size: 1024,
             repair_overhead: f64::INFINITY,
             min_overhead: 0,
-            max_buffered_symbols: 0,
+            max_buffered_symbols: 8192,
             block_timeout: Duration::from_secs(30),
             verify_auth: false,
         });
@@ -2051,7 +2051,7 @@ mod tests {
             max_block_size: config.max_block_size,
             repair_overhead: 1.0,
             min_overhead: 0,
-            max_buffered_symbols: 0,
+            max_buffered_symbols: 8192,
             block_timeout: Duration::from_secs(30),
             verify_auth: false,
         });
@@ -2125,7 +2125,7 @@ mod tests {
             max_block_size: config.max_block_size,
             repair_overhead: 1.0,
             min_overhead: 0,
-            max_buffered_symbols: 0,
+            max_buffered_symbols: 8192,
             block_timeout: Duration::from_secs(30),
             verify_auth: false,
         });

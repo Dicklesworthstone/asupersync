@@ -3001,10 +3001,7 @@ mod tests {
 
             // Decode and verify round-trip
             let mut src = encoded.freeze();
-            let decoded = decoder.decode(&mut src).expect(&format!(
-                "Failed to decode static table entry {}",
-                expected_index
-            ));
+            let decoded = decoder.decode(&mut src).unwrap_or_else(|_| panic!("Failed to decode static table entry {}", expected_index));
 
             assert_eq!(decoded.len(), 1);
             assert_eq!(decoded[0].name, name);

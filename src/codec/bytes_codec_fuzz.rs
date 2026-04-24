@@ -10,7 +10,6 @@ use crate::bytes::{Bytes, BytesMut};
 use crate::codec::{Decoder, Encoder};
 use proptest::prelude::*;
 use proptest::strategy::Just;
-use std::io;
 
 /// Generate arbitrary byte buffers for fuzzing
 fn arb_bytes() -> impl Strategy<Value = Vec<u8>> {
@@ -281,7 +280,7 @@ mod stress_fuzz {
         fn rapid_cycles(
             operations in prop::collection::vec(
                 prop_oneof![
-                    arb_bytes().prop_map(|d| Operation::Encode(d)),
+                    arb_bytes().prop_map(Operation::Encode),
                     Just(Operation::Decode),
                     Just(Operation::Reset)
                 ],
@@ -444,7 +443,7 @@ mod comprehensive_fuzz_runner {
 
     /// Run comprehensive fuzzing with higher iteration counts
     #[test]
-    #[ignore] // Run with --ignored for extended fuzzing
+    #[ignore = "Run with --ignored for extended fuzzing"]
     fn comprehensive_bytes_codec_fuzz() {
         // Configure for more aggressive testing
         let config = ProptestConfig {

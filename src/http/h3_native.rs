@@ -48,7 +48,9 @@ pub enum H3NativeError {
     InvalidFrame(&'static str),
     /// Frame payload exceeds maximum allowed size.
     FrameTooLarge {
+        /// Actual decoded payload size.
         payload_size: usize,
+        /// Configured maximum payload size.
         max_size: usize,
     },
     /// Duplicate setting key.
@@ -976,7 +978,11 @@ fn qpack_decode_base(
     }
 }
 
-fn qpack_relative_to_absolute(base: u64, relative_index: u64, is_post_base: bool) -> Result<u64, H3NativeError> {
+fn qpack_relative_to_absolute(
+    base: u64,
+    relative_index: u64,
+    is_post_base: bool,
+) -> Result<u64, H3NativeError> {
     if is_post_base {
         // Post-base reference: absolute = base + index
         base.checked_add(relative_index)
@@ -1086,7 +1092,9 @@ fn qpack_decode_field_section_with_context(
                 }
                 out.push(QpackFieldPlan::StaticIndex(index));
                 if out.len() > QPACK_MAX_DECODED_HEADERS {
-                    return Err(H3NativeError::QpackPolicy("decoded header count exceeds safety limit"));
+                    return Err(H3NativeError::QpackPolicy(
+                        "decoded header count exceeds safety limit",
+                    ));
                 }
             } else {
                 let base = dynamic_base.ok_or(H3NativeError::InvalidFrame(
@@ -1097,7 +1105,9 @@ fn qpack_decode_field_section_with_context(
                 let absolute_index = qpack_relative_to_absolute(base, index, is_post_base)?;
                 out.push(QpackFieldPlan::DynamicIndex(absolute_index));
                 if out.len() > QPACK_MAX_DECODED_HEADERS {
-                    return Err(H3NativeError::QpackPolicy("decoded header count exceeds safety limit"));
+                    return Err(H3NativeError::QpackPolicy(
+                        "decoded header count exceeds safety limit",
+                    ));
                 }
             }
             continue;
@@ -1127,7 +1137,9 @@ fn qpack_decode_field_section_with_context(
                     value,
                 });
                 if out.len() > QPACK_MAX_DECODED_HEADERS {
-                    return Err(H3NativeError::QpackPolicy("decoded header count exceeds safety limit"));
+                    return Err(H3NativeError::QpackPolicy(
+                        "decoded header count exceeds safety limit",
+                    ));
                 }
             } else {
                 let base = dynamic_base.ok_or(H3NativeError::InvalidFrame(
@@ -1135,13 +1147,16 @@ fn qpack_decode_field_section_with_context(
                 ))?;
                 // Dynamic table name reference - check post-base bit (bit 3)
                 let is_post_base_name = (b & 0x08) != 0;
-                let absolute_name_index = qpack_relative_to_absolute(base, name_index, is_post_base_name)?;
+                let absolute_name_index =
+                    qpack_relative_to_absolute(base, name_index, is_post_base_name)?;
                 out.push(QpackFieldPlan::DynamicNameLiteral {
                     name_index: absolute_name_index,
                     value,
                 });
                 if out.len() > QPACK_MAX_DECODED_HEADERS {
-                    return Err(H3NativeError::QpackPolicy("decoded header count exceeds safety limit"));
+                    return Err(H3NativeError::QpackPolicy(
+                        "decoded header count exceeds safety limit",
+                    ));
                 }
             }
             continue;
@@ -1158,7 +1173,9 @@ fn qpack_decode_field_section_with_context(
 
             out.push(QpackFieldPlan::Literal { name, value });
             if out.len() > QPACK_MAX_DECODED_HEADERS {
-                return Err(H3NativeError::QpackPolicy("decoded header count exceeds safety limit"));
+                return Err(H3NativeError::QpackPolicy(
+                    "decoded header count exceeds safety limit",
+                ));
             }
             continue;
         }
@@ -1253,9 +1270,10 @@ fn decoded_field_section_size(fields: &[(String, String)]) -> Result<u64, H3Nati
         let field_size = u64::try_from(field_size).map_err(|_| {
             H3NativeError::QpackPolicy("decoded field section exceeds addressable range")
         })?;
-        acc.checked_add(field_size).ok_or(H3NativeError::QpackPolicy(
-            "decoded field section exceeds addressable range",
-        ))
+        acc.checked_add(field_size)
+            .ok_or(H3NativeError::QpackPolicy(
+                "decoded field section exceeds addressable range",
+            ))
     })
 }
 
@@ -2844,7 +2862,13 @@ mod tests {
 
         let decoded = H3Settings::decode_payload(&payload).expect("decode large settings set");
         assert_eq!(decoded.unknown.len(), 1024);
-        assert_eq!(decoded.unknown.first(), Some(&UnknownSetting { id: 0x40, value: 0x15 }));
+        assert_eq!(
+            decoded.unknown.first(),
+            Some(&UnknownSetting {
+                id: 0x40,
+                value: 0x15
+            })
+        );
         assert_eq!(
             decoded.unknown.last(),
             Some(&UnknownSetting {
@@ -3086,7 +3110,7 @@ mod tests {
         let empty_protocol = H3PseudoHeaders {
             method: Some("CONNECT".to_string()),
             authority: Some("upstream.example:443".to_string()),
-            protocol: Some("".to_string()),
+            protocol: Some(String::new()),
             ..H3PseudoHeaders::default()
         };
         let err = validate_request_pseudo_headers_with_settings(&empty_protocol, true)

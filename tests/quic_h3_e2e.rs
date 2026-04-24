@@ -8,11 +8,11 @@
 
 use asupersync::cx::Cx;
 use asupersync::http::h3_native::{
-    H3ConnectionConfig, H3ConnectionState, H3ControlState, H3Frame, H3PseudoHeaders, H3QpackMode, H3RequestHead,
-    H3RequestStreamState, H3ResponseHead, H3Settings, qpack_decode_request_field_section,
-    qpack_decode_response_field_section, qpack_encode_request_field_section,
-    qpack_encode_response_field_section, qpack_static_plan_for_request,
-    qpack_static_plan_for_response,
+    H3ConnectionConfig, H3ConnectionState, H3ControlState, H3Frame, H3PseudoHeaders, H3QpackMode,
+    H3RequestHead, H3RequestStreamState, H3ResponseHead, H3Settings,
+    qpack_decode_request_field_section, qpack_decode_response_field_section,
+    qpack_encode_request_field_section, qpack_encode_response_field_section,
+    qpack_static_plan_for_request, qpack_static_plan_for_response,
 };
 use asupersync::net::quic_core::{
     ConnectionId, LongHeader, LongPacketType, PacketHeader, ShortHeader, TransportParameters,
@@ -414,11 +414,13 @@ fn h3_frame_encode_decode_over_stream() {
     pos += consumed;
     assert_eq!(decoded_settings, settings_frame);
 
-    let (decoded_headers, consumed) = H3Frame::decode(&wire[pos..], &test_config()).expect("decode headers frame");
+    let (decoded_headers, consumed) =
+        H3Frame::decode(&wire[pos..], &test_config()).expect("decode headers frame");
     pos += consumed;
     assert_eq!(decoded_headers, headers_frame);
 
-    let (decoded_data, consumed) = H3Frame::decode(&wire[pos..], &test_config()).expect("decode data frame");
+    let (decoded_data, consumed) =
+        H3Frame::decode(&wire[pos..], &test_config()).expect("decode data frame");
     pos += consumed;
     assert_eq!(pos, wire.len(), "all bytes consumed");
 
@@ -479,6 +481,7 @@ fn h3_request_response_lifecycle() {
             authority: Some("example.com".to_string()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         },
         vec![("user-agent".to_string(), "asupersync/0.2".to_string())],
     )
@@ -502,7 +505,7 @@ fn h3_request_response_lifecycle() {
         .on_request_stream_frame(request_stream_id, &headers_frame)
         .expect("server process request headers");
     let decoded_request =
-        qpack_decode_request_field_section(&request_field_block, H3QpackMode::StaticOnly)
+        qpack_decode_request_field_section(&request_field_block, H3QpackMode::StaticOnly, None)
             .expect("server qpack request decode");
     assert_eq!(decoded_request, request_head);
 
@@ -548,12 +551,14 @@ fn h3_request_response_lifecycle() {
 
     // Decode on the "client" side.
     let mut pos = 0;
-    let (dec_h, n) = H3Frame::decode(&resp_wire[pos..], &test_config()).expect("decode resp headers");
+    let (dec_h, n) =
+        H3Frame::decode(&resp_wire[pos..], &test_config()).expect("decode resp headers");
     pos += n;
     assert_eq!(dec_h, resp_headers);
     if let H3Frame::Headers(block) = &dec_h {
-        let decoded_response = qpack_decode_response_field_section(block, H3QpackMode::StaticOnly)
-            .expect("client qpack response decode");
+        let decoded_response =
+            qpack_decode_response_field_section(block, H3QpackMode::StaticOnly, None)
+                .expect("client qpack response decode");
         assert_eq!(decoded_response, response_head);
     } else {
         panic!("expected response HEADERS frame");

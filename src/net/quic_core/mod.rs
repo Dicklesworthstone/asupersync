@@ -2085,12 +2085,11 @@ mod tests {
 
                 // Reconstruct using the original as "largest_pn"
                 let reconstructed =
-                    decode_packet_number_reconstruct(truncated, width, packet_number as u64)
-                        .unwrap();
+                    decode_packet_number_reconstruct(truncated, width, packet_number).unwrap();
 
                 // Should recover the original packet number
                 assert_eq!(
-                    reconstructed, packet_number as u64,
+                    reconstructed, packet_number,
                     "Round-trip reconstruction failed for 0x{packet_number:x} width {width}"
                 );
             }

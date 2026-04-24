@@ -93,9 +93,7 @@ impl Future for StepFuture {
         }
 
         if let Some(panic_poll) = self.panic_on_poll {
-            if self.polls_done == panic_poll {
-                panic!("Intentional panic at poll {}", panic_poll);
-            }
+            assert!(self.polls_done != panic_poll, "Intentional panic at poll {}", panic_poll);
         }
 
         self.polls_done += 1;
@@ -126,9 +124,7 @@ impl Future for StepReleaseFuture {
         }
 
         if let Some(panic_poll) = self.panic_on_poll {
-            if self.polls_done == panic_poll {
-                panic!("Intentional panic at poll {}", panic_poll);
-            }
+            assert!(self.polls_done != panic_poll, "Intentional panic at poll {}", panic_poll);
         }
 
         self.polls_done += 1;
@@ -207,9 +203,7 @@ fn metamorphic_bracket_lifecycle_guarantees() {
                 Poll::Ready(_) => break,
                 Poll::Pending => {
                     polls += 1;
-                    if polls > 100 {
-                        panic!("Infinite loop detected");
-                    }
+                    assert!(polls <= 100, "Infinite loop detected");
                 }
             }
         }

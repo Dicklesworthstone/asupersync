@@ -336,8 +336,7 @@ mod tests {
         fn trace_row(label: &str, id: TraceId) -> serde_json::Value {
             let w3c = id.to_w3c_string();
             let roundtrip = TraceId::from_w3c_string(&w3c)
-                .map(|p| p == id)
-                .unwrap_or(false);
+                .is_some_and(|p| p == id);
             serde_json::json!({
                 "label":       label,
                 "high":        format!("{:#018x}", id.high()),

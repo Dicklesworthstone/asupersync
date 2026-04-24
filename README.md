@@ -911,7 +911,7 @@ The lab runtime includes dedicated failure detectors and recovery artifacts, so 
 
 ### Task Inspector and Diagnostics
 
-`src/observability/task_inspector.rs` introspects live task state: blocked reasons, obligation holdings, budget usage, and cancellation status. `src/observability/diagnostics.rs` produces structured explanations: `CancellationExplanation` traces the full cancel propagation chain, `TaskBlockedExplanation` identifies what a task is waiting on, and `ObligationLeak` pinpoints which obligation was not resolved and by whom.
+`src/observability/task_inspector.rs` introspects live task state: obligation holdings, poll counts, wait dependencies, and cancellation status. `src/observability/diagnostics.rs` produces structured explanations: `CancellationExplanation` traces the full cancel propagation chain, `TaskBlockedExplanation` identifies what a task is waiting on, and `ObligationLeak` pinpoints which obligation was not resolved and by whom.
 
 For structural runtime risk, diagnostics also maintain a spectral health monitor over the live task wait graph (`src/observability/spectral_health.rs`, `src/observability/diagnostics.rs`). It tracks the Fiedler trend and classifies early-warning severity (`none/watch/warning/critical`) using a multi-signal ensemble: autocorrelation (critical slowing), variance growth, flicker, skewness, Kendall tau, Spearman rho, Hoeffding's D, distance correlation, split-conformal lower bounds, and an anytime-valid deterioration e-process.
 
@@ -1087,7 +1087,7 @@ Payoff: catches split-brain-style saga states that evade purely pairwise conflic
 
 ### Anytime-Valid Invariant Monitoring (E-Processes, Ville's Inequality)
 
-The lab runtime can continuously monitor invariants (task leaks, obligation leaks, region quiescence) using e-processes: a supermartingale-based, anytime-valid testing framework that supports optional stopping without "peeking penalties". See `src/lab/oracle/eprocess.rs` and `src/obligation/eprocess.rs`.
+The lab runtime can continuously monitor invariants (task leaks, obligation leaks, region quiescence) using e-processes (`src/lab/oracle/eprocess.rs`). Separately, the production runtime provides an anytime-valid obligation-only leak monitor (`src/obligation/eprocess.rs`). Both use a supermartingale-based, anytime-valid testing framework that supports optional stopping without "peeking penalties".
 
 Payoff: turn long-running exploration into statistically sound monitoring, with deterministic, explainable rejection thresholds.
 

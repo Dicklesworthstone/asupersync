@@ -43,19 +43,13 @@
 //! - **Region Table** - Hooks region close events
 //! - **Observability** - Reports violations through structured logging
 
-use crate::observability::resource_accounting::ResourceAccounting;
-use crate::record::region::RegionState;
-use crate::runtime::resource_monitor::{ResourceMonitor, ResourceMonitorError};
-use crate::runtime::state_verifier::{StateTransitionVerifier, StateVerifierConfig};
-use crate::types::{RegionId, TaskId, Time};
-use crate::util::Arena;
+use crate::types::{RegionId, TaskId};
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 use thiserror::Error;
 
 /// Errors that can occur during resource cleanup verification.
@@ -85,6 +79,16 @@ pub enum ResourceCleanupError {
         resource_id: ResourceId,
         from: ResourceState,
         to: ResourceState,
+    },
+
+    /// Resource cleanup is still in progress and must be rechecked before close.
+    #[error(
+        "resource cleanup still pending in region {region_id:?}: {pending_count} resources not yet cleaned"
+    )]
+    CleanupPending {
+        region_id: RegionId,
+        pending_count: usize,
+        resource_types: Vec<ResourceType>,
     },
 }
 
@@ -155,9 +159,13 @@ impl ResourceState {
         use ResourceState::*;
         match (self, target) {
             (Allocated, Active) => true,
+            (Allocated, Cleaned) => true,
             (Active, Cleaning) => true,
+            (Active, Cleaned) => true,
             (Cleaning, Cleaned) => true,
+            (Cleaned, Cleaned) => true,
             (Active, Leaked) => true,
+            (Allocated, Leaked) => true,
             (Cleaning, Leaked) => true,
             _ => false,
         }
@@ -317,7 +325,6 @@ pub struct ResourceCleanupVerifier {
     /// Whether verification is currently active.
     is_active: AtomicBool,
     /// Unique verifier instance ID for debugging.
-    instance_id: u64,
 }
 
 impl ResourceCleanupVerifier {
@@ -488,9 +495,12 @@ impl ResourceCleanupVerifier {
             return Ok(());
         }
 
-        // Check each owned resource for proper cleanup
+        // Check each owned resource for proper cleanup. Region close may only
+        // succeed once every tracked resource is already Cleaned.
         let mut leaked_resources = Vec::new();
         let mut leaked_types = HashSet::new();
+        let mut pending_resources = Vec::new();
+        let mut pending_types = HashSet::new();
 
         {
             let mut resources = self.resources.write();
@@ -498,15 +508,15 @@ impl ResourceCleanupVerifier {
                 if let Some(record) = resources.get_mut(resource_id) {
                     match record.state {
                         ResourceState::Active => {
-                            // Resource is still active - begin cleanup process
-                            if let Err(_) = record.begin_cleanup() {
-                                record.mark_leaked().ok();
-                                leaked_resources.push(*resource_id);
-                                leaked_types.insert(record.resource_type);
-                            }
+                            // Active at region close means cleanup did not run.
+                            record.mark_leaked().ok();
+                            leaked_resources.push(*resource_id);
+                            leaked_types.insert(record.resource_type);
                         }
                         ResourceState::Cleaning => {
-                            // Resource cleanup is in progress - mark as leaked if grace period expired
+                            // Cleanup is in progress. Keep the region mapping
+                            // until a later check either observes Cleaned or
+                            // the grace period expires.
                             let grace_period = std::time::Duration::from_millis(
                                 self.config.cleanup_grace_period_ms,
                             );
@@ -515,6 +525,9 @@ impl ResourceCleanupVerifier {
                                 record.mark_leaked().ok();
                                 leaked_resources.push(*resource_id);
                                 leaked_types.insert(record.resource_type);
+                            } else {
+                                pending_resources.push(*resource_id);
+                                pending_types.insert(record.resource_type);
                             }
                         }
                         ResourceState::Leaked => {
@@ -539,15 +552,29 @@ impl ResourceCleanupVerifier {
         // Update statistics and clean up region mapping
         {
             let mut stats = self.stats.write();
-            if leaked_resources.is_empty() {
+            if leaked_resources.is_empty() && pending_resources.is_empty() {
                 stats.clean_region_closes += 1;
-            } else {
+            } else if !leaked_resources.is_empty() {
                 stats.leaked_region_closes += 1;
                 stats.total_leaked += leaked_resources.len() as u64;
+                stats.currently_tracked = stats
+                    .currently_tracked
+                    .saturating_sub(leaked_resources.len() as u64);
             }
         }
 
-        {
+        if !pending_resources.is_empty() && leaked_resources.is_empty() {
+            let error = ResourceCleanupError::CleanupPending {
+                region_id,
+                pending_count: pending_resources.len(),
+                resource_types: pending_types.into_iter().collect(),
+            };
+
+            crate::tracing_compat::debug!("Resource cleanup verification pending: {}", error);
+            return Err(error);
+        }
+
+        if pending_resources.is_empty() || !leaked_resources.is_empty() {
             let mut region_resources = self.region_resources.write();
             region_resources.remove(&region_id);
         }
@@ -648,9 +675,13 @@ mod tests {
 
         // Valid transitions
         assert!(Allocated.can_transition_to(Active));
+        assert!(Allocated.can_transition_to(Cleaned));
         assert!(Active.can_transition_to(Cleaning));
+        assert!(Active.can_transition_to(Cleaned));
         assert!(Cleaning.can_transition_to(Cleaned));
+        assert!(Cleaned.can_transition_to(Cleaned));
         assert!(Active.can_transition_to(Leaked));
+        assert!(Allocated.can_transition_to(Leaked));
         assert!(Cleaning.can_transition_to(Leaked));
 
         // Invalid transitions
@@ -661,8 +692,8 @@ mod tests {
 
     #[test]
     fn test_resource_record_lifecycle() {
-        let region_id = RegionId::new();
-        let task_id = TaskId::new();
+        let region_id = RegionId::new_ephemeral();
+        let task_id = TaskId::new_ephemeral();
 
         let mut record =
             ResourceRecord::new(ResourceType::FileDescriptor, Some(region_id), Some(task_id));
@@ -692,7 +723,7 @@ mod tests {
         verifier.start().unwrap();
         assert!(verifier.is_active());
 
-        let region_id = RegionId::new();
+        let region_id = RegionId::new_ephemeral();
 
         // Track resource allocation
         let resource_id = verifier
@@ -727,7 +758,7 @@ mod tests {
 
         verifier.start().unwrap();
 
-        let region_id = RegionId::new();
+        let region_id = RegionId::new_ephemeral();
 
         // Allocate resource but don't clean it up
         let _resource_id = verifier
@@ -754,5 +785,49 @@ mod tests {
         let stats = verifier.get_stats();
         assert_eq!(stats.total_leaked, 1);
         assert_eq!(stats.leaked_region_closes, 1);
+    }
+
+    #[test]
+    fn test_pending_cleanup_does_not_close_region_mapping() {
+        let config = ResourceCleanupConfig {
+            panic_on_leaks: false,
+            cleanup_grace_period_ms: 60_000,
+            ..Default::default()
+        };
+        let verifier = ResourceCleanupVerifier::new(config);
+        verifier.start().unwrap();
+
+        let region_id = RegionId::new_ephemeral();
+        let resource_id = verifier
+            .track_allocation(ResourceType::NetworkConnection, Some(region_id), None)
+            .unwrap();
+
+        {
+            let mut resources = verifier.resources.write();
+            resources
+                .get_mut(&resource_id)
+                .expect("tracked resource")
+                .begin_cleanup()
+                .expect("active resource can enter cleanup");
+        }
+
+        let result = verifier.verify_region_cleanup(region_id);
+        assert!(matches!(
+            result,
+            Err(ResourceCleanupError::CleanupPending {
+                pending_count: 1,
+                ..
+            })
+        ));
+
+        assert_eq!(
+            verifier.get_region_resources(region_id).len(),
+            1,
+            "pending cleanup must remain attributed for a later recheck"
+        );
+
+        verifier.track_cleanup(resource_id).unwrap();
+        verifier.verify_region_cleanup(region_id).unwrap();
+        assert!(verifier.get_region_resources(region_id).is_empty());
     }
 }

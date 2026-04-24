@@ -1350,7 +1350,7 @@ mod tests {
                                 .expect("wait for completion signal");
                             Ok(socket_set(&["10.0.0.1:80"]))
                         }
-                        other => panic!("coalesced follower must not start resolver call {other}",),
+                        other => panic!("coalesced follower must not start resolver call {other}"),
                     }
                 }),
         ));

@@ -34,6 +34,10 @@ fn test_cx() -> Cx {
     Cx::for_testing()
 }
 
+fn test_config() -> H3ConnectionConfig {
+    H3ConnectionConfig::default()
+}
+
 fn decode_hex(hex: &str) -> Vec<u8> {
     assert_eq!(hex.len() % 2, 0, "hex string length must be even");
     let mut out = Vec::with_capacity(hex.len() / 2);
@@ -332,6 +336,7 @@ fn full_request_response_cycle() {
             authority: Some("api.example.com".to_string()),
             path: Some("/upload".to_string()),
             status: None,
+            protocol: None,
         },
         vec![
             (
@@ -432,11 +437,12 @@ fn full_request_response_cycle() {
 
     // Client decodes response frames.
     let mut pos = 0;
-    let (dec_h, n) = H3Frame::decode(&resp_wire[pos..]).expect("decode resp headers");
+    let (dec_h, n) =
+        H3Frame::decode(&resp_wire[pos..], &test_config()).expect("decode resp headers");
     pos += n;
     assert_eq!(dec_h, resp_headers);
 
-    let (dec_d, n) = H3Frame::decode(&resp_wire[pos..]).expect("decode resp body");
+    let (dec_d, n) = H3Frame::decode(&resp_wire[pos..], &test_config()).expect("decode resp body");
     pos += n;
     assert_eq!(dec_d, resp_body);
     assert_eq!(pos, resp_wire.len(), "all response bytes consumed");
@@ -541,6 +547,7 @@ fn multiple_concurrent_requests() {
                 authority: Some("example.com".to_string()),
                 path: Some(paths[i].to_string()),
                 status: None,
+                protocol: None,
             },
             vec![],
         )
@@ -621,7 +628,7 @@ fn control_stream_settings_exchange() {
         .encode(&mut settings_wire)
         .expect("encode client settings");
     let (decoded_frame, consumed) =
-        H3Frame::decode(&settings_wire).expect("decode client settings");
+        H3Frame::decode(&settings_wire, &test_config()).expect("decode client settings");
     assert_eq!(decoded_frame, client_settings_frame);
     assert_eq!(consumed, settings_wire.len());
 
@@ -712,7 +719,7 @@ fn goaway_stream_acceptance_boundary() {
     goaway.encode(&mut goaway_wire).expect("encode goaway");
 
     // Client decodes and processes GOAWAY.
-    let (decoded_goaway, _) = H3Frame::decode(&goaway_wire).expect("decode goaway");
+    let (decoded_goaway, _) = H3Frame::decode(&goaway_wire, &test_config()).expect("decode goaway");
     client_h3
         .on_control_frame(&decoded_goaway)
         .expect("client goaway");
@@ -791,7 +798,8 @@ fn cancel_push_frame_handling() {
         let mut wire = Vec::new();
         frame.encode(&mut wire).expect("encode cancel_push");
 
-        let (decoded, consumed) = H3Frame::decode(&wire).expect("decode cancel_push");
+        let (decoded, consumed) =
+            H3Frame::decode(&wire, &test_config()).expect("decode cancel_push");
         assert_eq!(decoded, frame, "roundtrip mismatch for push_id={push_id}");
         assert_eq!(consumed, wire.len());
     }
@@ -840,7 +848,8 @@ fn max_push_id_frame_handling() {
         let mut wire = Vec::new();
         frame.encode(&mut wire).expect("encode max_push_id");
 
-        let (decoded, consumed) = H3Frame::decode(&wire).expect("decode max_push_id");
+        let (decoded, consumed) =
+            H3Frame::decode(&wire, &test_config()).expect("decode max_push_id");
         assert_eq!(decoded, frame, "roundtrip mismatch for max_id={max_id}");
         assert_eq!(consumed, wire.len());
     }
@@ -1088,6 +1097,7 @@ fn qpack_static_table_plan_coverage() {
                 scheme: None,
                 path: None,
                 status: None,
+                protocol: None,
             }
         } else {
             H3PseudoHeaders {
@@ -1096,6 +1106,7 @@ fn qpack_static_table_plan_coverage() {
                 authority: Some("example.com".to_string()),
                 path: Some("/".to_string()),
                 status: None,
+                protocol: None,
             }
         };
         let head = H3RequestHead::new(pseudo, vec![]).expect("valid request");
@@ -1114,6 +1125,7 @@ fn qpack_static_table_plan_coverage() {
             authority: Some("example.com".to_string()),
             path: Some("/resource".to_string()),
             status: None,
+            protocol: None,
         },
         vec![],
     )
@@ -1136,6 +1148,7 @@ fn qpack_static_table_plan_coverage() {
             authority: Some("example.com".to_string()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         },
         vec![],
     )
@@ -1151,6 +1164,7 @@ fn qpack_static_table_plan_coverage() {
             authority: Some("example.com".to_string()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         },
         vec![],
     )
@@ -1169,6 +1183,7 @@ fn qpack_static_table_plan_coverage() {
             authority: Some("example.com".to_string()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         },
         vec![],
     )
@@ -1183,6 +1198,7 @@ fn qpack_static_table_plan_coverage() {
             authority: Some("example.com".to_string()),
             path: Some("/api/v2/data".to_string()),
             status: None,
+            protocol: None,
         },
         vec![],
     )
@@ -1207,6 +1223,7 @@ fn qpack_static_table_plan_coverage() {
             authority: Some("example.com".to_string()),
             path: Some("/".to_string()),
             status: None,
+            protocol: None,
         },
         vec![
             ("accept".to_string(), "text/html".to_string()),
@@ -1378,7 +1395,7 @@ fn multi_frame_wire_sequential_decode() {
     let mut pos = 0;
     let mut decoded_frames = Vec::new();
     while pos < wire.len() {
-        let (frame, consumed) = H3Frame::decode(&wire[pos..]).expect("decode");
+        let (frame, consumed) = H3Frame::decode(&wire[pos..], &test_config()).expect("decode");
         pos += consumed;
         decoded_frames.push(frame);
     }
@@ -1488,12 +1505,14 @@ fn full_h3_lifecycle_over_quic_streams() {
 
         // Client decodes response frames.
         let mut pos = 0;
-        let (dec_h, n) = H3Frame::decode(&resp_wire[pos..]).expect("decode resp headers");
+        let (dec_h, n) =
+            H3Frame::decode(&resp_wire[pos..], &test_config()).expect("decode resp headers");
         pos += n;
         assert_eq!(dec_h, resp_headers_frame);
 
         if !resp_body.is_empty() {
-            let (dec_d, n) = H3Frame::decode(&resp_wire[pos..]).expect("decode resp data");
+            let (dec_d, n) =
+                H3Frame::decode(&resp_wire[pos..], &test_config()).expect("decode resp data");
             pos += n;
             assert_eq!(dec_d, resp_data_frame);
         }
@@ -1517,6 +1536,7 @@ fn full_h3_lifecycle_over_quic_streams() {
                 authority: Some("example.com".to_string()),
                 path: Some(path.to_string()),
                 status: None,
+                protocol: None,
             }
         };
         let req_head = H3RequestHead::new(pseudo, vec![]).expect("valid request head");
@@ -1565,7 +1585,7 @@ fn qpack_wire_field_section_roundtrip_and_header_projection() {
         qpack_decode_field_section(&wire, H3QpackMode::StaticOnly).expect("decode field section");
     assert_eq!(decoded, plan);
 
-    let projected = qpack_plan_to_header_fields(&decoded).expect("project to header fields");
+    let projected = qpack_plan_to_header_fields(&decoded, None).expect("project to header fields");
     assert_eq!(projected[0], (":method".to_string(), "GET".to_string()));
     assert_eq!(projected[1], (":scheme".to_string(), "https".to_string()));
     assert_eq!(projected[2], (":path".to_string(), "/".to_string()));
@@ -1636,7 +1656,7 @@ fn qpack_interop_capture_corpus_v1_fixtures() {
                     "{id}: decode(re-encode) must preserve plan semantics"
                 );
 
-                let projected = qpack_plan_to_header_fields(&decoded)
+                let projected = qpack_plan_to_header_fields(&decoded, None)
                     .unwrap_or_else(|e| panic!("{id}: projection failed: {e}"));
                 assert!(
                     !projected.is_empty(),

@@ -2138,7 +2138,7 @@ pub mod backpressure_metamorphic {
         } else {
             rotation % sender_count
         };
-        let mut projections = HashMap::new();
+        let mut projections: HashMap<usize, Vec<_>> = HashMap::new();
         for &value in received {
             let (rotated_sender, ordinal) = decode_sender_message(value);
             let sender_id = if sender_count == 0 {
@@ -2148,7 +2148,7 @@ pub mod backpressure_metamorphic {
             };
             projections
                 .entry(sender_id)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(ordinal);
         }
         projections
@@ -2779,7 +2779,7 @@ pub mod backpressure_metamorphic {
                     let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
                         let cx = crate::cx::Cx::for_testing();
                         let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
-                            let step_count = std::cmp::max(1, std::cmp::min(config.messages_per_sender, 12));
+                            let step_count = config.messages_per_sender.clamp(1, 12);
 
                             let (base_transcript, base_states, base_abort_count, base_final_state) =
                                 run_reserve_abort_noop_case(
@@ -3196,7 +3196,7 @@ pub mod backpressure_metamorphic {
                         for (sender_id, value) in sent {
                             sender_sequences
                                 .entry(sender_id)
-                                .or_insert_with(Vec::new)
+                                .or_default()
                                 .push(value);
                         }
 

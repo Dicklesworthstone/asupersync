@@ -262,8 +262,7 @@ pub fn get_systematic_index(k: u16) -> Option<u16> {
         .map(|entry| {
             // Calculate J(K) from the entry
             // J(K) is derived from the table position and parameters
-            let j = entry.s + entry.h;
-            j
+            entry.s + entry.h
         })
 }
 

@@ -39,8 +39,6 @@ use std::rc::Rc;
 
 use crate::cx::{Cx, cap};
 use crate::error::Error;
-use crate::obligation::graded::{GradedObligation, Resolution};
-use crate::record::ObligationKind;
 use crate::web::extract::Request;
 use crate::web::response::{Response, StatusCode};
 
@@ -444,6 +442,8 @@ fn extract_panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 mod tests {
     use super::*;
     use crate::cx::Cx;
+    use crate::obligation::graded::{GradedObligation, Resolution};
+    use crate::record::ObligationKind;
     use crate::web::extract::Request;
     use crate::web::response::StatusCode;
 

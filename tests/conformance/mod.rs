@@ -12,8 +12,8 @@ pub mod h2_alpn_negotiation_rfc7540;
 pub mod h2_connect;
 pub mod h2_priority;
 pub mod h2_rst_stream_ping_rfc9113;
-pub mod hpack_table_size;
 pub mod h2_settings_flow_continuation;
+pub mod hpack_table_size;
 // pub mod h2_stream_state_machine_rfc7540;
 // pub mod h3_rfc9114;
 // pub mod hpack_metamorphic;
@@ -30,8 +30,8 @@ pub mod trace_replay_idempotency_metamorphic;
 // pub mod mysql_auth_switch;
 pub mod mysql_stmt_prepare_execute;
 pub mod obligation_invariants;
-pub mod postgres_logical_replication;
 pub mod plan_latency;
+pub mod postgres_logical_replication;
 // TODO: SQLite conformance tests - module has unresolved dependencies
 // pub mod sqlite_prepared_statements;
 // pub mod websocket_rfc6455;
@@ -43,8 +43,9 @@ pub mod kqueue_bsd_events;
 #[cfg(feature = "quic")]
 pub mod quic_connection_migration_rfc9000;
 pub mod tcp_accept;
-pub mod websocket_extension_negotiation_rfc6455;
 pub mod timeout_deadline_harness;
+pub mod timeout_deadline_reference;
+pub mod websocket_extension_negotiation_rfc6455;
 
 // Re-export main conformance test functionality
 pub use aggregator_flush::AggregatorFlushConformanceHarness;

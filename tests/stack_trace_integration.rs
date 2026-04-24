@@ -3,11 +3,12 @@
 //! Tests the complete functionality of stack trace capture across all oracle
 //! modules, including feature flag behavior and real violation scenarios.
 
-use asupersync::lab::oracle::waker_dedup::{WakerDedupOracle, WakerDedupConfig, EnforcementMode};
-use asupersync::lab::oracle::region_leak::{RegionLeakOracle, RegionLeakConfig};
-use asupersync::lab::oracle::channel_atomicity::{ChannelAtomicityOracle, ChannelAtomicityConfig};
+use asupersync::lab::oracle::channel_atomicity::{ChannelAtomicityConfig, ChannelAtomicityOracle};
+use asupersync::lab::oracle::region_leak::{RegionLeakConfig, RegionLeakOracle};
+use asupersync::lab::oracle::waker_dedup::{EnforcementMode, WakerDedupConfig, WakerDedupOracle};
+use asupersync::types::{Budget, RegionId};
 use asupersync::util::stack_trace::{StackTrace, capture_stack_trace};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 #[cfg(test)]
 mod oracle_integration {
@@ -28,13 +29,15 @@ mod oracle_integration {
         let channel_id = asupersync::lab::oracle::waker_dedup::ChannelId(1);
 
         // Register a waker
-        oracle.on_waker_registered(waker_id, channel_id, false);
+        oracle.on_waker_registered(waker_id, channel_id, false, None);
 
         // Simulate spurious wakeup (should trigger violation)
-        oracle.on_waker_actually_woken(waker_id);
-        oracle.on_waker_actually_woken(waker_id); // Double wakeup
+        oracle.on_waker_actually_woken(waker_id, None);
+        oracle.on_waker_actually_woken(waker_id, None); // Double wakeup
 
-        let violations = oracle.get_violations();
+        let violations = oracle
+            .check_for_violations()
+            .expect("waker oracle check should succeed");
         assert!(!violations.is_empty(), "Should have detected violations");
 
         // When stack traces are enabled, violations should have stack trace information
@@ -50,23 +53,23 @@ mod oracle_integration {
     fn test_region_leak_oracle_stack_trace() {
         let config = RegionLeakConfig {
             include_stack_traces: true,
-            max_created_lifetime_ms: 10, // Very short timeout for test
+            max_creation_delay: Duration::from_millis(10), // Very short timeout for test
             ..Default::default()
         };
 
         let mut oracle = RegionLeakOracle::new(config);
 
         // Simulate a region that leaks
-        let region_id = asupersync::types::RegionId::new();
+        let region_id = RegionId::new_for_test(1, 0);
 
-        oracle.on_region_created(region_id, None);
+        oracle.on_region_created(region_id, None, None, Budget::INFINITE);
 
         // Wait longer than the timeout to trigger leak detection
         std::thread::sleep(Duration::from_millis(20));
 
-        oracle.check_violations();
-
-        let violations = oracle.get_violations();
+        let violations = oracle
+            .check_for_violations()
+            .expect("region leak oracle check should succeed");
 
         // Should detect the region leak
         if !violations.is_empty() {
@@ -90,13 +93,15 @@ mod oracle_integration {
 
         // Simulate channel atomicity violation scenario
         let reservation_id = asupersync::lab::oracle::channel_atomicity::ReservationId(1);
-        let operation_id = asupersync::lab::oracle::channel_atomicity::OperationId(1);
+        let channel_id = asupersync::lab::oracle::channel_atomicity::ChannelId(1);
 
         // Create a conflicting reservation scenario
-        oracle.on_reservation_requested(reservation_id, "test_channel", operation_id);
-        oracle.on_reservation_requested(reservation_id, "test_channel", operation_id); // Duplicate
+        oracle.on_reservation_created(reservation_id, channel_id, None);
+        oracle.on_reservation_created(reservation_id, channel_id, None); // Duplicate
 
-        let violations = oracle.get_violations();
+        let violations = oracle
+            .check_for_violations()
+            .expect("channel atomicity oracle check should succeed");
 
         if !violations.is_empty() {
             #[cfg(feature = "lab-stack-traces")]
@@ -114,7 +119,10 @@ mod oracle_integration {
 
         #[cfg(not(feature = "lab-stack-traces"))]
         {
-            assert_eq!(trace, "Stack trace capture disabled (enable 'lab-stack-traces' feature)");
+            assert_eq!(
+                trace,
+                "Stack trace capture disabled (enable 'lab-stack-traces' feature)"
+            );
         }
 
         #[cfg(feature = "lab-stack-traces")]
@@ -174,7 +182,10 @@ mod oracle_integration {
 
         #[cfg(not(feature = "lab-stack-traces"))]
         {
-            assert_eq!(trace.as_str(), "Stack trace capture disabled (enable 'lab-stack-traces' feature)");
+            assert_eq!(
+                trace.as_str(),
+                "Stack trace capture disabled (enable 'lab-stack-traces' feature)"
+            );
             assert_eq!(trace.frame_count(), 1); // Just the disabled message
         }
     }
@@ -223,23 +234,31 @@ mod oracle_integration {
         #[cfg(feature = "lab-stack-traces")]
         {
             // Real stack traces should be under 10ms on average
-            assert!(avg_duration.as_millis() < 10,
+            assert!(
+                avg_duration.as_millis() < 10,
                 "Average stack trace capture took {}ms, expected <10ms",
-                avg_duration.as_millis());
+                avg_duration.as_millis()
+            );
 
-            println!("Stack trace capture performance: {}μs per capture",
-                avg_duration.as_micros());
+            println!(
+                "Stack trace capture performance: {}μs per capture",
+                avg_duration.as_micros()
+            );
         }
 
         #[cfg(not(feature = "lab-stack-traces"))]
         {
             // Disabled stack traces should be very fast (under 100μs)
-            assert!(avg_duration.as_micros() < 100,
+            assert!(
+                avg_duration.as_micros() < 100,
                 "Average disabled stack trace took {}μs, expected <100μs",
-                avg_duration.as_micros());
+                avg_duration.as_micros()
+            );
 
-            println!("Disabled stack trace performance: {}μs per capture",
-                avg_duration.as_micros());
+            println!(
+                "Disabled stack trace performance: {}μs per capture",
+                avg_duration.as_micros()
+            );
         }
     }
 
@@ -290,7 +309,10 @@ mod oracle_integration {
         #[cfg(not(feature = "lab-stack-traces"))]
         {
             // Should still return the disabled message
-            assert_eq!(trace.as_str(), "Stack trace capture disabled (enable 'lab-stack-traces' feature)");
+            assert_eq!(
+                trace.as_str(),
+                "Stack trace capture disabled (enable 'lab-stack-traces' feature)"
+            );
         }
     }
 }

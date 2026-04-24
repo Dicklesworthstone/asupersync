@@ -426,7 +426,7 @@ mod property_conformance {
             let mut expected_generation = 0u64;
             let mut expected_phase = false;
 
-            for _ in 0..update_count {
+            for _ in 0..update_count { // ignore
                 expected_generation += 1;
                 expected_phase = !expected_phase;
 

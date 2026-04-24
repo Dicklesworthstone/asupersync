@@ -89,7 +89,7 @@ mod feature_matrix_tests {
     }
 
     fn capture_from_method() -> String {
-        Self::static_capture_method()
+        static_capture_method()
     }
 
     fn static_capture_method() -> String {
@@ -171,10 +171,10 @@ mod build_verification_tests {
     #[test]
     fn test_reasonable_performance_when_enabled() {
         // When enabled, stack traces should still have reasonable performance
-        use std::time::Instant;
 
         #[cfg(feature = "lab-stack-traces")]
         {
+            use std::time::Instant;
             let start = Instant::now();
             for _ in 0..10 {
                 let _ = capture_stack_trace();

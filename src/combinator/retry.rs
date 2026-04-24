@@ -2046,7 +2046,7 @@ mod tests {
                 let got = total_delay_budget(policy);
                 let want = reference_budget(policy);
                 let slack = Duration::from_nanos(policy.max_attempts.saturating_sub(1) as u64);
-                let diff = if got > want { got - want } else { want - got };
+                let diff = got.abs_diff(want);
                 assert!(
                     diff <= slack,
                     "RETRY-BUDGET-1 case {i}: budget {got:?} diverged from reference {want:?} by {diff:?} (slack {slack:?})",

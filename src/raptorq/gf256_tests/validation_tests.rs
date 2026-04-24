@@ -492,11 +492,10 @@ fn test_rfc6330_compliance() {
 /// Stress test with random operations to catch edge cases
 #[test]
 fn test_random_operations_stress() {
-    use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     // Use deterministic "random" based on hash for reproducible tests
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = crate::util::DetHasher::default();
     "stress_test_seed".hash(&mut hasher);
     let mut seed = hasher.finish();
 

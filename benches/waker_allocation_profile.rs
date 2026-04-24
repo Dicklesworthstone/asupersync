@@ -6,9 +6,9 @@
 use asupersync::runtime::waker::{WakeSource, WakerState};
 use asupersync::types::TaskId;
 use asupersync::util::ArenaIndex;
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::sync::Arc;
-use std::task::Wake;
 
 /// Scenario A: Waker creation burst (allocator stress test)
 ///

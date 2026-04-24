@@ -31,9 +31,15 @@ pub trait RingConformanceTest {
 pub struct RingOrderingTest;
 
 impl RingConformanceTest for RingOrderingTest {
-    fn id(&self) -> &'static str { "RC-001" }
-    fn name(&self) -> &'static str { "Ring virtual nodes must be sorted by hash" }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &'static str {
+        "RC-001"
+    }
+    fn name(&self) -> &'static str {
+        "Ring virtual nodes must be sorted by hash"
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self) -> TestResult {
         // Black-box test: verify ordering through key assignment consistency
@@ -45,19 +51,15 @@ impl RingConformanceTest for RingOrderingTest {
         // Test that key assignment is stable across many queries
         // If ring ordering were broken, assignments would be inconsistent
         let test_keys: Vec<u64> = (0..10_000).collect();
-        let baseline: Vec<_> = test_keys.iter()
-            .map(|k| ring.node_for_key(k))
-            .collect();
+        let baseline: Vec<_> = test_keys.iter().map(|k| ring.node_for_key(k)).collect();
 
         // Verify stability across multiple queries
         for _ in 0..10 {
-            let current: Vec<_> = test_keys.iter()
-                .map(|k| ring.node_for_key(k))
-                .collect();
+            let current: Vec<_> = test_keys.iter().map(|k| ring.node_for_key(k)).collect();
 
             if current != baseline {
                 return TestResult::Fail {
-                    reason: "Key assignment unstable - indicates ring ordering issue".to_string()
+                    reason: "Key assignment unstable - indicates ring ordering issue".to_string(),
                 };
             }
         }
@@ -65,7 +67,7 @@ impl RingConformanceTest for RingOrderingTest {
         // Test wraparound by ensuring high-hash keys get assigned
         if ring.node_for_key(&u64::MAX).is_none() {
             return TestResult::Fail {
-                reason: "Max hash key not assigned - ring ordering issue".to_string()
+                reason: "Max hash key not assigned - ring ordering issue".to_string(),
             };
         }
 
@@ -77,9 +79,15 @@ impl RingConformanceTest for RingOrderingTest {
 pub struct DeterministicAssignmentTest;
 
 impl RingConformanceTest for DeterministicAssignmentTest {
-    fn id(&self) -> &'static str { "RC-002" }
-    fn name(&self) -> &'static str { "Identical rings yield identical key assignments" }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &'static str {
+        "RC-002"
+    }
+    fn name(&self) -> &'static str {
+        "Identical rings yield identical key assignments"
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self) -> TestResult {
         let build_ring = || {
@@ -105,7 +113,7 @@ impl RingConformanceTest for DeterministicAssignmentTest {
                         key,
                         assignment1.unwrap_or("None"),
                         assignment2.unwrap_or("None")
-                    )
+                    ),
                 };
             }
         }
@@ -118,9 +126,15 @@ impl RingConformanceTest for DeterministicAssignmentTest {
 pub struct WraparoundConsistencyTest;
 
 impl RingConformanceTest for WraparoundConsistencyTest {
-    fn id(&self) -> &'static str { "RC-003" }
-    fn name(&self) -> &'static str { "Ring wraparound preserves consistent assignment" }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &'static str {
+        "RC-003"
+    }
+    fn name(&self) -> &'static str {
+        "Ring wraparound preserves consistent assignment"
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self) -> TestResult {
         let mut ring = HashRing::new(16);
@@ -128,16 +142,13 @@ impl RingConformanceTest for WraparoundConsistencyTest {
         ring.add_node("node-b");
 
         // Test keys that should wrap around the ring
-        let test_keys = [
-            u64::MAX - 1000, u64::MAX - 1, u64::MAX,
-            0, 1, 1000
-        ];
+        let test_keys = [u64::MAX - 1000, u64::MAX - 1, u64::MAX, 0, 1, 1000];
 
         for &key in &test_keys {
             let assignment = ring.node_for_key(&key);
             if assignment.is_none() {
                 return TestResult::Fail {
-                    reason: format!("Wraparound key {} assigned to None", key)
+                    reason: format!("Wraparound key {} assigned to None", key),
                 };
             }
 
@@ -145,7 +156,7 @@ impl RingConformanceTest for WraparoundConsistencyTest {
             for _ in 0..10 {
                 if ring.node_for_key(&key) != assignment {
                     return TestResult::Fail {
-                        reason: format!("Wraparound assignment unstable for key {}", key)
+                        reason: format!("Wraparound assignment unstable for key {}", key),
                     };
                 }
             }
@@ -159,9 +170,15 @@ impl RingConformanceTest for WraparoundConsistencyTest {
 pub struct NodeVnodeCorrelationTest;
 
 impl RingConformanceTest for NodeVnodeCorrelationTest {
-    fn id(&self) -> &'static str { "RC-004" }
-    fn name(&self) -> &'static str { "Total vnodes equals node_count × vnodes_per_node" }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &'static str {
+        "RC-004"
+    }
+    fn name(&self) -> &'static str {
+        "Total vnodes equals node_count × vnodes_per_node"
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self) -> TestResult {
         for vnodes_per_node in [0, 1, 16, 64, 256] {
@@ -182,8 +199,11 @@ impl RingConformanceTest for NodeVnodeCorrelationTest {
                     return TestResult::Fail {
                         reason: format!(
                             "Vnode correlation failed: {} nodes × {} vnodes/node = {} expected, got {}",
-                            node_count, vnodes_per_node, expected_vnodes, ring.vnode_count()
-                        )
+                            node_count,
+                            vnodes_per_node,
+                            expected_vnodes,
+                            ring.vnode_count()
+                        ),
                     };
                 }
 
@@ -191,8 +211,9 @@ impl RingConformanceTest for NodeVnodeCorrelationTest {
                     return TestResult::Fail {
                         reason: format!(
                             "Node count mismatch: expected {}, got {}",
-                            node_count, ring.node_count()
-                        )
+                            node_count,
+                            ring.node_count()
+                        ),
                     };
                 }
             }
@@ -206,9 +227,15 @@ impl RingConformanceTest for NodeVnodeCorrelationTest {
 pub struct IdempotentOperationsTest;
 
 impl RingConformanceTest for IdempotentOperationsTest {
-    fn id(&self) -> &'static str { "RC-005" }
-    fn name(&self) -> &'static str { "Add/remove operations are idempotent" }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &'static str {
+        "RC-005"
+    }
+    fn name(&self) -> &'static str {
+        "Add/remove operations are idempotent"
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self) -> TestResult {
         let mut ring = HashRing::new(32);
@@ -221,7 +248,7 @@ impl RingConformanceTest for IdempotentOperationsTest {
         // Second add should be no-op
         if ring.add_node("test-node") {
             return TestResult::Fail {
-                reason: "Duplicate add_node returned true instead of false".to_string()
+                reason: "Duplicate add_node returned true instead of false".to_string(),
             };
         }
 
@@ -229,8 +256,11 @@ impl RingConformanceTest for IdempotentOperationsTest {
             return TestResult::Fail {
                 reason: format!(
                     "Duplicate add changed state: nodes {}→{}, vnodes {}→{}",
-                    node_count, ring.node_count(), vnode_count, ring.vnode_count()
-                )
+                    node_count,
+                    ring.node_count(),
+                    vnode_count,
+                    ring.vnode_count()
+                ),
             };
         }
 
@@ -238,14 +268,14 @@ impl RingConformanceTest for IdempotentOperationsTest {
         let removed = ring.remove_node("test-node");
         if removed == 0 {
             return TestResult::Fail {
-                reason: "First remove_node returned 0".to_string()
+                reason: "First remove_node returned 0".to_string(),
             };
         }
 
         let removed2 = ring.remove_node("test-node");
         if removed2 != 0 {
             return TestResult::Fail {
-                reason: format!("Second remove_node returned {} instead of 0", removed2)
+                reason: format!("Second remove_node returned {} instead of 0", removed2),
             };
         }
 
@@ -257,24 +287,30 @@ impl RingConformanceTest for IdempotentOperationsTest {
 pub struct EmptyRingBehaviorTest;
 
 impl RingConformanceTest for EmptyRingBehaviorTest {
-    fn id(&self) -> &'static str { "RC-006" }
-    fn name(&self) -> &'static str { "Empty ring returns None for all keys" }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &'static str {
+        "RC-006"
+    }
+    fn name(&self) -> &'static str {
+        "Empty ring returns None for all keys"
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self) -> TestResult {
         let ring = HashRing::new(64);
 
         if !ring.is_empty() {
             return TestResult::Fail {
-                reason: "New ring is not empty".to_string()
+                reason: "New ring is not empty".to_string(),
             };
         }
 
-        let test_keys = [0u64, 1, u64::MAX/2, u64::MAX-1, u64::MAX];
+        let test_keys = [0u64, 1, u64::MAX / 2, u64::MAX - 1, u64::MAX];
         for &key in &test_keys {
             if ring.node_for_key(&key).is_some() {
                 return TestResult::Fail {
-                    reason: format!("Empty ring assigned key {} to node", key)
+                    reason: format!("Empty ring assigned key {} to node", key),
                 };
             }
         }
@@ -287,9 +323,15 @@ impl RingConformanceTest for EmptyRingBehaviorTest {
 pub struct MinimalRemappingTest;
 
 impl RingConformanceTest for MinimalRemappingTest {
-    fn id(&self) -> &'static str { "RC-007" }
-    fn name(&self) -> &'static str { "Adding node affects ≤ 1/(n+1) of key assignments" }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn id(&self) -> &'static str {
+        "RC-007"
+    }
+    fn name(&self) -> &'static str {
+        "Adding node affects ≤ 1/(n+1) of key assignments"
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self) -> TestResult {
         let mut ring = HashRing::new(64);
@@ -298,17 +340,20 @@ impl RingConformanceTest for MinimalRemappingTest {
         }
 
         let keys: Vec<u64> = (0..50_000u64).collect();
-        let before: Vec<_> = keys.iter()
+        let before: Vec<_> = keys
+            .iter()
             .map(|k| ring.node_for_key(k).unwrap().to_owned())
             .collect();
 
         ring.add_node("new-node");
 
-        let after: Vec<_> = keys.iter()
+        let after: Vec<_> = keys
+            .iter()
             .map(|k| ring.node_for_key(k).unwrap().to_owned())
             .collect();
 
-        let changed = before.iter()
+        let changed = before
+            .iter()
             .zip(after.iter())
             .filter(|(a, b)| a != b)
             .count();
@@ -316,12 +361,15 @@ impl RingConformanceTest for MinimalRemappingTest {
         let remap_ratio = changed as f64 / keys.len() as f64;
         let expected_max = 1.0 / 6.0; // 1/(n+1) for n=5
 
-        if remap_ratio > expected_max * 1.5 { // Allow 50% tolerance
+        if remap_ratio > expected_max * 1.5 {
+            // Allow 50% tolerance
             return TestResult::Fail {
                 reason: format!(
                     "Remapping ratio too high: {:.3} > {:.3} (expected ≤ {:.3})",
-                    remap_ratio, expected_max * 1.5, expected_max
-                )
+                    remap_ratio,
+                    expected_max * 1.5,
+                    expected_max
+                ),
             };
         }
 
@@ -333,9 +381,15 @@ impl RingConformanceTest for MinimalRemappingTest {
 pub struct UniformDistributionTest;
 
 impl RingConformanceTest for UniformDistributionTest {
-    fn id(&self) -> &'static str { "RC-008" }
-    fn name(&self) -> &'static str { "Keys distribute uniformly across nodes" }
-    fn level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn id(&self) -> &'static str {
+        "RC-008"
+    }
+    fn name(&self) -> &'static str {
+        "Keys distribute uniformly across nodes"
+    }
+    fn level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
 
     fn run(&self) -> TestResult {
         let mut ring = HashRing::new(128);
@@ -352,16 +406,18 @@ impl RingConformanceTest for UniformDistributionTest {
         let total = counts.values().sum::<usize>() as f64;
         let expected = total / counts.len() as f64;
 
-        let max_deviation = counts.values()
+        let max_deviation = counts
+            .values()
             .map(|&count| (count as f64 - expected).abs() / expected)
             .fold(0.0, f64::max);
 
-        if max_deviation > 0.20 { // Allow 20% deviation
+        if max_deviation > 0.20 {
+            // Allow 20% deviation
             return TestResult::Fail {
                 reason: format!(
                     "Distribution too skewed: max deviation {:.3} > 0.20",
                     max_deviation
-                )
+                ),
             };
         }
 
@@ -386,8 +442,13 @@ pub fn run_all_tests() -> ConformanceReport {
 
     for test in tests {
         let result = test.run();
-        println!("{{\"id\":\"{}\",\"name\":\"{}\",\"level\":\"{:?}\",\"result\":\"{:?}\"}}",
-            test.id(), test.name(), test.level(), result);
+        println!(
+            "{{\"id\":\"{}\",\"name\":\"{}\",\"level\":\"{:?}\",\"result\":\"{:?}\"}}",
+            test.id(),
+            test.name(),
+            test.level(),
+            result
+        );
 
         results.push(ConformanceTestResult {
             id: test.id().to_string(),
@@ -451,8 +512,16 @@ impl ConformanceReport {
             | MUST             | {must_total}     | {must_pass}       | 0         | {must_score:.1}% |\n\
             | SHOULD           | {should_total}     | {should_pass}       | 0         | {:.1}% |\n\n\
             **CONFORMANCE STATUS**: {}\n",
-            if should_total > 0 { (should_pass as f64 / should_total as f64) * 100.0 } else { 100.0 },
-            if must_score >= 95.0 { "COMPLIANT" } else { "NON-COMPLIANT" }
+            if should_total > 0 {
+                (should_pass as f64 / should_total as f64) * 100.0
+            } else {
+                100.0
+            },
+            if must_score >= 95.0 {
+                "COMPLIANT"
+            } else {
+                "NON-COMPLIANT"
+            }
         )
     }
 }
@@ -466,7 +535,9 @@ mod tests {
         let report = run_all_tests();
 
         // Count failures
-        let failures: Vec<_> = report.results.iter()
+        let failures: Vec<_> = report
+            .results
+            .iter()
             .filter(|r| matches!(r.result, TestResult::Fail { .. }))
             .collect();
 

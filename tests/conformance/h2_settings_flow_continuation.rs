@@ -2,10 +2,13 @@
 #![allow(clippy::all)]
 //! HTTP/2 SETTINGS, Flow Control, and CONTINUATION Frame Conformance Tests (RFC 9113)
 
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::http::h2::{
     error::{ErrorCode, H2Error},
-    frame::{Frame, FrameHeader, FrameType, SettingsFrame, WindowUpdateFrame, ContinuationFrame, parse_frame},
+    frame::{
+        ContinuationFrame, Frame, FrameHeader, FrameType, SettingsFrame, WindowUpdateFrame,
+        parse_frame,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -33,11 +36,20 @@ pub enum TestCategory {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
-pub enum RequirementLevel { Must, Should, May }
+pub enum RequirementLevel {
+    Must,
+    Should,
+    May,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
-pub enum TestVerdict { Pass, Fail, Skipped, ExpectedFailure }
+pub enum TestVerdict {
+    Pass,
+    Fail,
+    Skipped,
+    ExpectedFailure,
+}
 
 #[allow(dead_code)]
 pub struct H2SettingsFlowContinuationHarness {
@@ -46,7 +58,11 @@ pub struct H2SettingsFlowContinuationHarness {
 
 impl H2SettingsFlowContinuationHarness {
     #[allow(dead_code)]
-    pub fn new() -> Self { Self { timeout: Duration::from_secs(30) } }
+    pub fn new() -> Self {
+        Self {
+            timeout: Duration::from_secs(30),
+        }
+    }
 
     #[allow(dead_code)]
     pub fn run_all_tests(&self) -> Vec<H2SettingsConformanceResult> {
@@ -81,7 +97,7 @@ impl H2SettingsFlowContinuationHarness {
                 } else {
                     Err("Accepted invalid SETTINGS length".into())
                 }
-            }
+            },
         ));
 
         results.push(self.run_test(
@@ -104,9 +120,9 @@ impl H2SettingsFlowContinuationHarness {
                 } else {
                     Err("Accepted SETTINGS with non-zero stream ID".into())
                 }
-            }
+            },
         ));
-        
+
         results.push(self.run_test(
             "settings_ack_zero_length",
             "SETTINGS ACK frame MUST have length 0",
@@ -127,7 +143,7 @@ impl H2SettingsFlowContinuationHarness {
                 } else {
                     Err("Accepted SETTINGS ACK with non-zero length".into())
                 }
-            }
+            },
         ));
 
         results
@@ -157,7 +173,7 @@ impl H2SettingsFlowContinuationHarness {
                 } else {
                     Err("Accepted invalid WINDOW_UPDATE length".into())
                 }
-            }
+            },
         ));
 
         results.push(self.run_test(
@@ -180,7 +196,7 @@ impl H2SettingsFlowContinuationHarness {
                 } else {
                     Err("Accepted WINDOW_UPDATE with 0 increment".into())
                 }
-            }
+            },
         ));
 
         results
@@ -210,7 +226,7 @@ impl H2SettingsFlowContinuationHarness {
                 } else {
                     Err("Accepted CONTINUATION with stream ID 0".into())
                 }
-            }
+            },
         ));
 
         results
@@ -269,7 +285,9 @@ impl H2SettingsFlowContinuationHarness {
 }
 
 impl Default for H2SettingsFlowContinuationHarness {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -280,9 +298,15 @@ mod tests {
     fn test_all_h2_settings_conformance() {
         let harness = H2SettingsFlowContinuationHarness::new();
         let results = harness.run_all_tests();
-        let failures: Vec<_> = results.iter().filter(|r| r.verdict == TestVerdict::Fail).collect();
+        let failures: Vec<_> = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Fail)
+            .collect();
         if !failures.is_empty() {
-            panic!("H2 settings/flow/continuation conformance failures: {:?}", failures);
+            panic!(
+                "H2 settings/flow/continuation conformance failures: {:?}",
+                failures
+            );
         }
     }
 }

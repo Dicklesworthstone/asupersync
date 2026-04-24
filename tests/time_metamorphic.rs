@@ -6,21 +6,18 @@
 //! Oracle Problem: Cannot predict exact timing for arbitrary virtual time
 //! scenarios, but can verify relationships between inputs/outputs.
 
-use asupersync::time::{interval, Sleep, Interval, MissedTickBehavior};
+use asupersync::time::{Interval, MissedTickBehavior, Sleep};
 use asupersync::types::Time;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use std::collections::VecDeque;
 
-// Test utilities for deterministic virtual time
-fn virtual_time_source() -> impl Fn() -> Time {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static VIRTUAL_TIME: AtomicU64 = AtomicU64::new(0);
-    move || Time::from_nanos(VIRTUAL_TIME.load(Ordering::SeqCst))
+static VIRTUAL_TIME: AtomicU64 = AtomicU64::new(0);
+
+fn virtual_time_source() -> Time {
+    Time::from_nanos(VIRTUAL_TIME.load(Ordering::SeqCst))
 }
 
 fn advance_virtual_time(nanos: u64) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static VIRTUAL_TIME: AtomicU64 = AtomicU64::new(0);
     VIRTUAL_TIME.store(nanos, Ordering::SeqCst);
 }
 
@@ -58,7 +55,8 @@ mod metamorphic_relations {
             assert!(
                 t1 <= t2,
                 "Time monotonicity violated: {} > {}",
-                t1.as_nanos(), t2.as_nanos()
+                t1.as_nanos(),
+                t2.as_nanos()
             );
 
             // Sleep deadlines should respect monotonicity
@@ -84,13 +82,13 @@ mod metamorphic_relations {
         for (start_time, duration) in scenarios {
             // Run scenario 1: Start at time T
             let deadline1 = start_time.saturating_add_nanos(duration.as_nanos() as u64);
-            let sleep1 = Sleep::new(deadline1);
+            let _sleep1 = Sleep::new(deadline1);
 
             // Run scenario 2: Same relative timing offset by +1000ms
             let offset = Duration::from_millis(1000);
             let start_time2 = start_time.saturating_add_nanos(offset.as_nanos() as u64);
             let deadline2 = start_time2.saturating_add_nanos(duration.as_nanos() as u64);
-            let sleep2 = Sleep::new(deadline2);
+            let _sleep2 = Sleep::new(deadline2);
 
             // Relative timing should be equivalent
             let relative_deadline1 = deadline1.as_nanos() - start_time.as_nanos();
@@ -135,7 +133,8 @@ mod metamorphic_relations {
 
         for i in 0..5 {
             let tick_time = base_time.saturating_add_nanos((i * 100_000_000) as u64);
-            let translated_tick_time = translated_base.saturating_add_nanos((i * 100_000_000) as u64);
+            let translated_tick_time =
+                translated_base.saturating_add_nanos((i * 100_000_000) as u64);
 
             let original_tick = interval_original.tick(tick_time);
             let translated_tick = interval_translated.tick(translated_tick_time);
@@ -145,7 +144,8 @@ mod metamorphic_relations {
 
             assert_eq!(
                 original_relative, translated_relative,
-                "Interval time translation failed at tick {}", i
+                "Interval time translation failed at tick {}",
+                i
             );
         }
     }
@@ -169,9 +169,11 @@ mod metamorphic_relations {
         let chained_deadline = sleep_second.deadline();
 
         assert_eq!(
-            combined_deadline, chained_deadline,
+            combined_deadline,
+            chained_deadline,
             "Duration additivity failed: combined={}, chained={}",
-            combined_deadline.as_nanos(), chained_deadline.as_nanos()
+            combined_deadline.as_nanos(),
+            chained_deadline.as_nanos()
         );
     }
 
@@ -184,7 +186,8 @@ mod metamorphic_relations {
         let mut interval = Interval::new(start_time, period);
 
         for i in 0..10 {
-            let expected_tick_time = start_time.saturating_add_nanos((i * period.as_nanos()) as u64);
+            let expected_tick_time =
+                start_time.saturating_add_nanos((i * period.as_nanos()) as u64);
             let current_time = expected_tick_time.saturating_add_nanos(1); // Slightly after
 
             // Get interval tick
@@ -195,9 +198,12 @@ mod metamorphic_relations {
             let sleep_deadline = sleep.deadline();
 
             assert_eq!(
-                interval_tick, sleep_deadline,
+                interval_tick,
+                sleep_deadline,
                 "Sleep-Interval equivalence failed at tick {}: interval={}, sleep={}",
-                i, interval_tick.as_nanos(), sleep_deadline.as_nanos()
+                i,
+                interval_tick.as_nanos(),
+                sleep_deadline.as_nanos()
             );
         }
     }
@@ -225,10 +231,15 @@ mod metamorphic_relations {
         }
 
         // Verify all ticks align to period boundaries
+        let period_nanos = period.as_nanos() as u64;
         for &tick_time in &ticks {
             let nanos_since_start = tick_time.as_nanos() - start_time.as_nanos();
-            let aligned = (nanos_since_start % period.as_nanos()) == 0;
-            assert!(aligned, "Tick {} not aligned to period boundary", tick_time.as_nanos());
+            let aligned = (nanos_since_start % period_nanos) == 0;
+            assert!(
+                aligned,
+                "Tick {} not aligned to period boundary",
+                tick_time.as_nanos()
+            );
         }
 
         // Verify ticks are in ascending order
@@ -236,7 +247,8 @@ mod metamorphic_relations {
             assert!(
                 window[0] <= window[1],
                 "Tick ordering violated: {} > {}",
-                window[0].as_nanos(), window[1].as_nanos()
+                window[0].as_nanos(),
+                window[1].as_nanos()
             );
         }
     }
@@ -246,23 +258,29 @@ mod metamorphic_relations {
     #[test]
     fn mr_deadline_consistency() {
         let test_cases = vec![
-            (Time::from_millis(100), Time::from_millis(50)),   // now < deadline
-            (Time::from_millis(100), Time::from_millis(100)),  // now == deadline
-            (Time::from_millis(100), Time::from_millis(150)),  // now > deadline
+            (Time::from_millis(100), Time::from_millis(50)), // now < deadline
+            (Time::from_millis(100), Time::from_millis(100)), // now == deadline
+            (Time::from_millis(100), Time::from_millis(150)), // now > deadline
         ];
 
         for (deadline, now) in test_cases {
-            let mut sleep = Sleep::with_time_getter(deadline, move || now);
-            let mut context = Context::from_waker(&dummy_waker());
+            advance_virtual_time(now.as_nanos());
+            let mut sleep = Sleep::with_time_getter(deadline, virtual_time_source);
+            let my_waker = dummy_waker();
+            let mut context = Context::from_waker(&my_waker);
 
             let poll_result = Pin::new(&mut sleep).poll(&mut context);
             let should_be_ready = now >= deadline;
 
             let is_ready = matches!(poll_result, Poll::Ready(()));
             assert_eq!(
-                is_ready, should_be_ready,
+                is_ready,
+                should_be_ready,
                 "Deadline consistency failed: deadline={}, now={}, expected_ready={}, actual_ready={}",
-                deadline.as_nanos(), now.as_nanos(), should_be_ready, is_ready
+                deadline.as_nanos(),
+                now.as_nanos(),
+                should_be_ready,
+                is_ready
             );
         }
     }
@@ -286,8 +304,8 @@ mod metamorphic_relations {
             let mut previous_tick = Time::from_nanos(0);
             let call_times = vec![
                 Time::from_millis(0),
-                Time::from_millis(75),   // Between ticks
-                Time::from_millis(150),  // After multiple periods
+                Time::from_millis(75),  // Between ticks
+                Time::from_millis(150), // After multiple periods
                 Time::from_millis(200),
                 Time::from_millis(275),
             ];
@@ -298,7 +316,10 @@ mod metamorphic_relations {
                 assert!(
                     tick_time >= previous_tick,
                     "Tick ordering violated with {:?}: {} < {} at call_time={}",
-                    behavior, tick_time.as_nanos(), previous_tick.as_nanos(), call_time.as_nanos()
+                    behavior,
+                    tick_time.as_nanos(),
+                    previous_tick.as_nanos(),
+                    call_time.as_nanos()
                 );
 
                 previous_tick = tick_time;
@@ -317,7 +338,8 @@ mod metamorphic_relations {
 
         // Advance time significantly to miss multiple ticks
         let advanced_time = Time::from_millis(350); // Should have 3-4 ticks ready
-        let missed_periods = (advanced_time.as_nanos() - start_time.as_nanos()) / period.as_nanos();
+        let missed_periods =
+            (advanced_time.as_nanos() - start_time.as_nanos()) / period.as_nanos() as u64;
 
         let mut burst_ticks = Vec::new();
         let mut current_time = advanced_time;
@@ -331,15 +353,18 @@ mod metamorphic_relations {
             burst_ticks.push(tick);
             // In burst mode, we need to call tick() multiple times to get all missed ticks
             current_time = current_time.saturating_add_nanos(1); // Advance slightly
-            if burst_ticks.len() > 10 { break; } // Safety valve
+            if burst_ticks.len() > 10 {
+                break;
+            } // Safety valve
         }
 
         // Should have caught up to approximately the missed periods
-        let caught_up_periods = burst_ticks.len() as u128;
+        let caught_up_periods = burst_ticks.len() as u64;
         assert!(
             caught_up_periods >= missed_periods,
             "Burst catch-up incomplete: caught {} ticks, expected at least {} periods",
-            caught_up_periods, missed_periods
+            caught_up_periods,
+            missed_periods
         );
     }
 
@@ -353,22 +378,25 @@ mod metamorphic_relations {
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let call_times = vec![
-            Time::from_millis(150),  // Miss first tick
-            Time::from_millis(300),  // Miss again
-            Time::from_millis(450),  // Miss again
+            Time::from_millis(150), // Miss first tick
+            Time::from_millis(300), // Miss again
+            Time::from_millis(450), // Miss again
         ];
 
         for &call_time in &call_times {
-            let tick_time = interval.tick(call_time);
+            let _tick_time = interval.tick(call_time);
             let next_deadline = interval.deadline();
 
             // Under Delay behavior, next deadline should be period from call time
             let expected_next = call_time.saturating_add_nanos(period.as_nanos() as u64);
 
             assert_eq!(
-                next_deadline, expected_next,
+                next_deadline,
+                expected_next,
                 "Delay reset failed: next_deadline={}, expected={} at call_time={}",
-                next_deadline.as_nanos(), expected_next.as_nanos(), call_time.as_nanos()
+                next_deadline.as_nanos(),
+                expected_next.as_nanos(),
+                call_time.as_nanos()
             );
         }
     }

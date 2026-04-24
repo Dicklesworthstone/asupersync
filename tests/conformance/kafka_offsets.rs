@@ -58,6 +58,7 @@ async fn create_test_consumer(
         fetch_max_wait: Duration::from_millis(500),
         auto_offset_reset: Default::default(),
         isolation_level: Default::default(),
+        force_real_kafka: !use_stub,
     };
 
     let _ = config.retention_minutes;

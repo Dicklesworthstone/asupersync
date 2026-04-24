@@ -5,18 +5,16 @@
 
 #![cfg(test)]
 
-mod timeout_deadline_reference;
-
-use timeout_deadline_reference::*;
+use super::timeout_deadline_reference::*;
 use asupersync::{
     combinator::timeout::*,
-    time::deadline::*,
-    types::{Time, Budget},
     cx::Scope,
+    time::{with_deadline, with_timeout},
+    types::{Budget, Time},
     util::ArenaIndex,
 };
-use std::time::Duration;
 use proptest::prelude::*;
+use std::time::Duration;
 
 /// Convert reference time to actual time for comparison.
 fn ref_to_actual_time(ref_time: RefTime) -> Time {
@@ -57,7 +55,11 @@ fn conformance_timeout_creation() {
         (0, 0, 0),
         (0, 1, 1_000_000_000),
         (100, 5, 105_000_000_000),
-        (u64::MAX / 2, 1, (u64::MAX / 2).saturating_add(1_000_000_000)),
+        (
+            u64::MAX / 2,
+            1,
+            (u64::MAX / 2).saturating_add(1_000_000_000),
+        ),
     ];
 
     for (now_secs, timeout_secs, expected_nanos) in test_cases {
@@ -71,14 +73,16 @@ fn conformance_timeout_creation() {
             ref_timeout.deadline.as_nanos(),
             actual_timeout.deadline.as_nanos(),
             "Timeout creation mismatch for now={}, timeout={}",
-            now_secs, timeout_secs
+            now_secs,
+            timeout_secs
         );
 
         assert_eq!(
             ref_timeout.deadline.as_nanos(),
             expected_nanos,
             "Expected deadline mismatch for now={}, timeout={}",
-            now_secs, timeout_secs
+            now_secs,
+            timeout_secs
         );
     }
 }
@@ -106,9 +110,9 @@ fn conformance_duration_saturation() {
 fn conformance_expiration_logic() {
     let test_cases = [
         (100, 105, false, 5_000_000_000), // 5 seconds remaining
-        (105, 105, true, 0),               // Exactly at deadline
-        (110, 105, true, 0),               // Past deadline
-        (0, 0, true, 0),                   // Zero case
+        (105, 105, true, 0),              // Exactly at deadline
+        (110, 105, true, 0),              // Past deadline
+        (0, 0, true, 0),                  // Zero case
     ];
 
     for (now_secs, deadline_secs, should_expire, expected_remaining_nanos) in test_cases {
@@ -125,14 +129,16 @@ fn conformance_expiration_logic() {
             ref_timeout.is_expired(ref_now),
             actual_timeout.is_expired(actual_now),
             "Expiration mismatch for now={}, deadline={}",
-            now_secs, deadline_secs
+            now_secs,
+            deadline_secs
         );
 
         assert_eq!(
             ref_timeout.is_expired(ref_now),
             should_expire,
             "Expected expiration mismatch for now={}, deadline={}",
-            now_secs, deadline_secs
+            now_secs,
+            deadline_secs
         );
 
         // Test remaining time
@@ -143,14 +149,16 @@ fn conformance_expiration_logic() {
             ref_remaining.as_nanos(),
             actual_remaining.as_nanos(),
             "Remaining time mismatch for now={}, deadline={}",
-            now_secs, deadline_secs
+            now_secs,
+            deadline_secs
         );
 
         assert_eq!(
             ref_remaining.as_nanos() as u64,
             expected_remaining_nanos,
             "Expected remaining time mismatch for now={}, deadline={}",
-            now_secs, deadline_secs
+            now_secs,
+            deadline_secs
         );
     }
 }
@@ -160,10 +168,10 @@ fn conformance_expiration_logic() {
 fn conformance_effective_deadline() {
     let test_cases = [
         (10, None, 10),
-        (10, Some(5), 5),      // Existing is tighter
-        (5, Some(10), 5),      // Requested is tighter
-        (7, Some(7), 7),       // Equal deadlines
-        (0, Some(0), 0),       // Zero deadlines
+        (10, Some(5), 5), // Existing is tighter
+        (5, Some(10), 5), // Requested is tighter
+        (7, Some(7), 7),  // Equal deadlines
+        (0, Some(0), 0),  // Zero deadlines
         (u64::MAX, None, u64::MAX),
     ];
 
@@ -180,14 +188,16 @@ fn conformance_effective_deadline() {
             ref_result.as_nanos(),
             actual_result.as_nanos(),
             "Effective deadline mismatch for requested={}, existing={:?}",
-            requested_secs, existing_secs
+            requested_secs,
+            existing_secs
         );
 
         assert_eq!(
             ref_result.as_nanos(),
             expected_secs * 1_000_000_000,
             "Expected effective deadline mismatch for requested={}, existing={:?}",
-            requested_secs, existing_secs
+            requested_secs,
+            existing_secs
         );
     }
 }
@@ -198,13 +208,21 @@ fn conformance_deadline_propagation() {
     let test_cases = [
         // (initial_deadline_secs, new_deadline_secs, expected_deadline_secs, poll_quota, cost_quota, priority)
         (None, 10, Some(10), 42, Some(7), 99),
-        (Some(15), 10, Some(10), 64, None, 0),    // New is tighter
+        (Some(15), 10, Some(10), 64, None, 0), // New is tighter
         (Some(5), 10, Some(5), 32, Some(100), 200), // Existing is tighter
-        (Some(10), 10, Some(10), 1, None, 1),     // Equal deadlines
-        (None, 0, Some(0), 128, Some(0), 0),      // Zero deadline
+        (Some(10), 10, Some(10), 1, None, 1),  // Equal deadlines
+        (None, 0, Some(0), 128, Some(0), 0),   // Zero deadline
     ];
 
-    for (initial_deadline, new_deadline_secs, expected_deadline, poll_quota, cost_quota, priority) in test_cases {
+    for (
+        initial_deadline,
+        new_deadline_secs,
+        expected_deadline,
+        poll_quota,
+        cost_quota,
+        priority,
+    ) in test_cases
+    {
         // Reference implementation
         let mut ref_budget = RefBudget::new()
             .with_poll_quota(poll_quota)
@@ -244,7 +262,9 @@ fn conformance_deadline_propagation() {
             ref_result.deadline.map(|d| d.as_nanos()),
             actual_result.deadline.map(|d| d.as_nanos()),
             "Deadline mismatch for initial={:?}, new={}, expected={:?}",
-            initial_deadline, new_deadline_secs, expected_deadline
+            initial_deadline,
+            new_deadline_secs,
+            expected_deadline
         );
 
         assert_eq!(ref_result.poll_quota, actual_result.poll_quota);
@@ -257,7 +277,8 @@ fn conformance_deadline_propagation() {
             ref_result.deadline.map(|d| d.as_nanos()),
             expected_nanos,
             "Expected deadline mismatch for initial={:?}, new={}",
-            initial_deadline, new_deadline_secs
+            initial_deadline,
+            new_deadline_secs
         );
     }
 }
@@ -266,8 +287,8 @@ fn conformance_deadline_propagation() {
 #[test]
 fn conformance_timeout_from_duration() {
     let test_cases = [
-        (100, 5, 105), // Basic case
-        (0, 10, 10),   // From zero
+        (100, 5, 105),                  // Basic case
+        (0, 10, 10),                    // From zero
         (u64::MAX - 1000, 1, u64::MAX), // Near saturation
     ];
 
@@ -280,7 +301,8 @@ fn conformance_timeout_from_duration() {
         let ref_result = ref_with_timeout(ref_budget, duration, ref_now);
 
         // Actual
-        let scope = Scope::<asupersync::types::policy::FailFast>::new(test_region(), Budget::INFINITE);
+        let scope =
+            Scope::<asupersync::types::policy::FailFast>::new(test_region(), Budget::INFINITE);
         let actual_now = Time::from_secs(now_secs);
         let actual_result_scope = with_timeout(&scope, duration, actual_now);
         let actual_result = actual_result_scope.budget();
@@ -289,7 +311,8 @@ fn conformance_timeout_from_duration() {
             ref_result.deadline.map(|d| d.as_nanos()),
             actual_result.deadline.map(|d| d.as_nanos()),
             "Timeout from duration mismatch for now={}, duration={}",
-            now_secs, duration_secs
+            now_secs,
+            duration_secs
         );
 
         let expected_nanos = expected_secs * 1_000_000_000;
@@ -297,7 +320,8 @@ fn conformance_timeout_from_duration() {
             ref_result.deadline.map(|d| d.as_nanos()),
             Some(expected_nanos),
             "Expected timeout from duration mismatch for now={}, duration={}",
-            now_secs, duration_secs
+            now_secs,
+            duration_secs
         );
     }
 }

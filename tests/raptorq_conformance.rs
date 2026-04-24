@@ -14,6 +14,18 @@ use asupersync::raptorq::gf256::Gf256;
 use asupersync::raptorq::systematic::{ConstraintMatrix, SystematicEncoder, SystematicParams};
 use asupersync::util::DetRng;
 
+fn repair_equation(decoder: &InactivationDecoder, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
+    decoder
+        .repair_equation(esi)
+        .unwrap_or_else(|err| panic!("repair equation for esi={esi} failed: {err:?}"))
+}
+
+fn rfc_repair_equation(params: &SystematicParams, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
+    params
+        .rfc_repair_equation(esi)
+        .unwrap_or_else(|err| panic!("RFC repair equation for esi={esi} failed: {err:?}"))
+}
+
 // ============================================================================
 // RFC 6330 scenario harness skeleton
 // ============================================================================
@@ -41,7 +53,7 @@ fn assert_roundtrip_scenario(
 ) {
     let source = make_patterned_source(k, symbol_size);
     let encoder = SystematicEncoder::new(&source, symbol_size, seed)
-        .unwrap_or_else(|err| panic!("{} setup failed: {err:?}", scenario.id));
+        .unwrap_or_else(|| panic!("{} setup failed", scenario.id));
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
     let received = build_received_symbols(
         &encoder,
@@ -154,7 +166,7 @@ fn build_received_symbols(
 
     // Add repair symbols
     for esi in (k as u32)..max_repair_esi {
-        let (cols, coefs) = decoder.repair_equation(esi);
+        let (cols, coefs) = repair_equation(decoder, esi);
         let repair_data = encoder.repair_symbol(esi);
         received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
     }
@@ -333,7 +345,7 @@ fn contiguous_burst_loss_all_source_symbols_dropped_contract() {
     // surfaces are red in the shared worktree.
     let mut received = decoder.constraint_symbols();
     for esi in (k as u32)..((k + l * 2) as u32) {
-        let (cols, coefs) = decoder.repair_equation(esi);
+        let (cols, coefs) = repair_equation(&decoder, esi);
         let repair_data = encoder.repair_symbol(esi);
         received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
     }
@@ -360,7 +372,7 @@ fn contiguous_burst_drop_first_half_of_source_contract() {
         received.push(ReceivedSymbol::source(i as u32, sym.clone()));
     }
     for esi in (k as u32)..((k + l * 2) as u32) {
-        let (cols, coefs) = decoder.repair_equation(esi);
+        let (cols, coefs) = repair_equation(&decoder, esi);
         let repair_data = encoder.repair_symbol(esi);
         received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
     }
@@ -737,7 +749,7 @@ fn rfc_tuple_equation_degree_coverage() {
         let start_esi = k as u32;
 
         for esi in start_esi..start_esi + sample_count {
-            let (columns, coefficients) = params.rfc_repair_equation(esi);
+            let (columns, coefficients) = rfc_repair_equation(&params, esi);
             assert_eq!(
                 columns.len(),
                 coefficients.len(),
@@ -776,7 +788,7 @@ fn rfc_tuple_equation_deterministic_across_runs() {
 
     let generate = |start_esi: u32| -> Vec<Vec<usize>> {
         (start_esi..start_esi + 512)
-            .map(|esi| params.rfc_repair_equation(esi).0)
+            .map(|esi| rfc_repair_equation(&params, esi).0)
             .collect()
     };
 
@@ -1223,7 +1235,7 @@ mod pipeline_e2e {
                     });
                 }
                 SymbolKind::Repair => {
-                    let (columns, coefficients) = decoder.repair_equation(symbol.esi());
+                    let (columns, coefficients) = repair_equation(&decoder, symbol.esi());
                     received.push(ReceivedSymbol {
                         esi: symbol.esi(),
                         is_source: false,
@@ -2722,7 +2734,7 @@ mod metamorphic_property {
 
         for esi in (k as u32)..(k as u32 + 10) {
             let repair_data = encoder.repair_symbol(esi);
-            let (cols, coefs) = decoder.repair_equation(esi);
+            let (cols, coefs) = repair_equation(&decoder, esi);
 
             // Reconstruct from intermediate symbols
             let mut reconstructed = vec![0u8; symbol_size];

@@ -32,7 +32,6 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
 
 fn connect_in_progress(err: &io::Error) -> bool {
     matches!(
@@ -119,27 +118,25 @@ fn rearm_connect_registration(
 }
 
 async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
-    loop {
+    std::future::poll_fn(|cx| {
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
 
         if let Some(err) = socket.take_error()? {
-            return Err(err);
+            return Poll::Ready(Err(err));
         }
 
         match socket.peer_addr() {
-            Ok(_) => return Ok(()),
+            Ok(_) => Poll::Ready(Ok(())),
             Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                let now = Cx::current().map_or_else(crate::time::wall_now, |c| {
-                    c.timer_driver()
-                        .map_or_else(crate::time::wall_now, |d| d.now())
-                });
-                crate::time::sleep(now, Duration::from_millis(1)).await;
+                crate::net::tcp::stream::fallback_rewake(cx);
+                Poll::Pending
             }
-            Err(err) => return Err(err),
+            Err(err) => Poll::Ready(Err(err)),
         }
-    }
+    })
+    .await
 }
 
 fn nix_to_io(err: nix::Error) -> io::Error {
@@ -1259,7 +1256,7 @@ mod tests {
 
         let result = futures_lite::future::block_on(crate::time::timeout(
             crate::time::wall_now(),
-            Duration::from_millis(20),
+            std::time::Duration::from_millis(20),
             wait_for_connect_fallback(&socket),
         ));
 

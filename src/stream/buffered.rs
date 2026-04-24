@@ -708,7 +708,7 @@ mod tests {
         }
 
         fn ready_futures(n: usize) -> impl Stream<Item = Ready<usize>> + Unpin {
-            iter((0..n).map(ready).collect::<Vec<_>>())
+            iter((0..n).map(ready))
         }
 
         /// MUST-L1: `in_flight.len() ≤ limit` at every visible state. Admission
@@ -773,7 +773,7 @@ mod tests {
                             break;
                         }
                         Poll::Ready(None) => panic!("early termination at step {i}"),
-                        Poll::Pending => continue,
+                        Poll::Pending => (),
                     }
                 }
             }
@@ -857,7 +857,7 @@ mod tests {
                 match Pin::new(&mut buf).poll_next(&mut cx) {
                     Poll::Ready(Some(_)) => seen += 1,
                     Poll::Ready(None) => break,
-                    Poll::Pending => continue,
+                    Poll::Pending => (),
                 }
             }
             assert_eq!(seen, 3);

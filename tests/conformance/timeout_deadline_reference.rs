@@ -59,7 +59,7 @@ impl RefTimeout {
     }
 
     pub const fn is_expired(self, now: RefTime) -> bool {
-        now >= self.deadline
+        now.as_nanos() >= self.deadline.as_nanos()
     }
 
     pub fn remaining(self, now: RefTime) -> Duration {
@@ -86,8 +86,8 @@ pub const fn ref_effective_deadline(requested: RefTime, existing: Option<RefTime
 pub struct RefBudget {
     pub deadline: Option<RefTime>,
     pub poll_quota: u32,
-    pub cost_quota: Option<u32>,
-    pub priority: u32,
+    pub cost_quota: Option<u64>,
+    pub priority: u8,
 }
 
 impl RefBudget {
@@ -117,12 +117,12 @@ impl RefBudget {
         self
     }
 
-    pub const fn with_cost_quota(mut self, quota: u32) -> Self {
+    pub const fn with_cost_quota(mut self, quota: u64) -> Self {
         self.cost_quota = Some(quota);
         self
     }
 
-    pub const fn with_priority(mut self, priority: u32) -> Self {
+    pub const fn with_priority(mut self, priority: u8) -> Self {
         self.priority = priority;
         self
     }
@@ -150,11 +150,7 @@ pub fn ref_with_timeout(budget: RefBudget, duration: Duration, now: RefTime) -> 
 }
 
 /// Reference timeout composition law verification.
-pub fn ref_timeout_composition_law(
-    d1: Duration,
-    d2: Duration,
-    now: RefTime
-) -> (RefTime, RefTime) {
+pub fn ref_timeout_composition_law(d1: Duration, d2: Duration, now: RefTime) -> (RefTime, RefTime) {
     // timeout(d1, timeout(d2, f)) ≃ timeout(min(d1, d2), f)
 
     // Left side: nested timeouts

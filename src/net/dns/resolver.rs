@@ -3522,7 +3522,7 @@ mod tests {
         });
 
         let (ok1, ok2, ok3) = concurrent_result;
-        let async_success_count = [ok1, ok2, ok3].into_iter().filter(|x| *x).count();
+        let async_success_count = [ok1, ok2, ok3].into_iter().filter(|x| *x).count(); // array
 
         crate::assert_with_log!(
             async_success_count >= 2,
@@ -3568,7 +3568,7 @@ mod tests {
             if has_ipv6 {
                 // When IPv6 is available, modern resolvers should prefer AAAA
                 // Check if IPv6 addresses appear first (preference indication)
-                let first_is_ipv6 = addrs.first().map(|ip| ip.is_ipv6()).unwrap_or(false);
+                let first_is_ipv6 = addrs.first().is_some_and(|ip| ip.is_ipv6());
 
                 println!("Address order: {:?}", addrs);
                 println!("First address is IPv6: {}", first_is_ipv6);

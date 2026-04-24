@@ -3,9 +3,10 @@
 //! These tests complement the existing metamorphic relations in src/combinator/race.rs
 //! with specific focus on cancellation protocol correctness and drain completeness.
 
+use asupersync::CancelKind;
 use asupersync::combinator::race::*;
-use asupersync::types::{Outcome, cancel::CancelReason};
 use asupersync::types::outcome::PanicPayload;
+use asupersync::types::{Outcome, cancel::CancelReason};
 use proptest::prelude::*;
 
 /// Test data generator for complex cancellation scenarios
@@ -26,11 +27,13 @@ enum ComplexCancelCase {
 impl ComplexCancelCase {
     fn into_outcome(self) -> Outcome<i32, &'static str> {
         match self {
-            Self::RaceLost => Outcome::Cancelled(CancelReason::race_loser()),
+            Self::RaceLost => Outcome::<i32, &'static str>::Cancelled(CancelReason::race_loser()),
             Self::Timeout => Outcome::Cancelled(CancelReason::timeout()),
             Self::Shutdown => Outcome::Cancelled(CancelReason::shutdown()),
-            Self::UserCancel => Outcome::Cancelled(CancelReason::new("user_cancel")),
-            Self::NestedCancel => Outcome::Cancelled(CancelReason::new("nested_cancel")),
+            Self::UserCancel => Outcome::Cancelled(CancelReason::new(CancelKind::User)),
+            Self::NestedCancel => {
+                Outcome::Cancelled(CancelReason::new(CancelKind::ParentCancelled))
+            }
         }
     }
 }
@@ -60,7 +63,7 @@ fn metamorphic_cancel_reason_normalization() {
 
         // Create outcomes where some losers had different cancel reasons before race
         let mut pre_race_outcomes = vec![Outcome::Ok(0); branch_count];
-        let mut post_drain_outcomes = vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
+        let mut post_drain_outcomes = vec![Outcome::<i32, &'static str>::Cancelled(CancelReason::race_loser()); branch_count];
 
         // Winner always succeeds in this test
         pre_race_outcomes[winner_index] = Outcome::Ok(42);
@@ -74,7 +77,7 @@ fn metamorphic_cancel_reason_normalization() {
                 .unwrap_or(ComplexCancelCase::RaceLost);
             pre_race_outcomes[loser_idx] = pre_cancel.into_outcome();
             // Post-drain: all normalized to RaceLost
-            post_drain_outcomes[loser_idx] = Outcome::Cancelled(CancelReason::race_loser());
+            post_drain_outcomes[loser_idx] = Outcome::<i32, &'static str>::Cancelled(CancelReason::race_loser());
         }
 
         // Test that the race result only depends on post-drain state
@@ -125,7 +128,7 @@ fn metamorphic_external_cancel_cascading() {
         let winner_index = raw_winner_index % branch_count;
 
         // Winner gets cancelled externally (timeout/shutdown/user)
-        let mut outcomes = vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
+        let mut outcomes = vec![Outcome::<i32, &'static str>::Cancelled(CancelReason::race_loser()); branch_count];
         outcomes[winner_index] = external_cancel.clone().into_outcome();
 
         let result = race_all_outcomes(winner_index, outcomes);
@@ -170,7 +173,7 @@ fn metamorphic_loser_complexity_independence() {
     proptest!(|(
         branch_count in 2usize..8,
         raw_winner_index in 0usize..16,
-        simple_vs_complex in any::<bool>(),
+        _simple_vs_complex in any::<bool>(),
     )| {
         let winner_index = raw_winner_index % branch_count;
 
@@ -179,10 +182,10 @@ fn metamorphic_loser_complexity_independence() {
                 // Simulate complex loser that had to clean up resources
                 // In real scenarios this would be a task that held file handles,
                 // network connections, etc. After draining, it's still RaceLost.
-                Outcome::Cancelled(CancelReason::race_loser())
+                Outcome::<i32, &'static str>::Cancelled(CancelReason::race_loser())
             } else {
                 // Simple loser that cancelled immediately
-                Outcome::Cancelled(CancelReason::race_loser())
+                Outcome::<i32, &'static str>::Cancelled(CancelReason::race_loser())
             }
         };
 
@@ -255,7 +258,7 @@ fn metamorphic_drain_idempotency() {
         let winner_val = i32::from(winner_value);
 
         // Create drained race result
-        let mut outcomes = vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
+        let mut outcomes = vec![Outcome::<i32, &'static str>::Cancelled(CancelReason::race_loser()); branch_count];
         outcomes[winner_index] = Outcome::Ok(winner_val);
 
         // "Drain" multiple times (simulate multiple calls to race completion)
@@ -399,17 +402,17 @@ fn metamorphic_panic_vs_cancel_drain_equivalence() {
         let cancel_loser_idx = loser_indices[1];
 
         // Configuration 1: One loser panics, one gets cancelled
-        let mut mixed_outcomes = vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
+        let mut mixed_outcomes = vec![Outcome::<i32, &'static str>::Cancelled(CancelReason::race_loser()); branch_count];
         mixed_outcomes[winner_index] = Outcome::Ok(val);
         mixed_outcomes[panic_loser_idx] = Outcome::Panicked(PanicPayload::new("loser panic"));
         mixed_outcomes[cancel_loser_idx] = Outcome::Cancelled(CancelReason::timeout());
 
         // Configuration 2: All losers are cancelled (post-drain state)
-        let mut drained_outcomes = vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
+        let mut drained_outcomes = vec![Outcome::<i32, &'static str>::Cancelled(CancelReason::race_loser()); branch_count];
         drained_outcomes[winner_index] = Outcome::Ok(val);
         // All losers become RaceLost after proper draining
         for &loser_idx in &loser_indices {
-            drained_outcomes[loser_idx] = Outcome::Cancelled(CancelReason::race_loser());
+            drained_outcomes[loser_idx] = Outcome::<i32, &'static str>::Cancelled(CancelReason::race_loser());
         }
 
         let mixed_result = race_all_outcomes(winner_index, mixed_outcomes);

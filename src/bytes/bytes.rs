@@ -928,21 +928,21 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "length larger than capacity")]
     fn bytes_conformance_slice_out_of_bounds() {
         let b = Bytes::copy_from_slice(b"hello");
         let _ = b.slice(0..10);
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "length larger than capacity")]
     fn bytes_conformance_split_to_out_of_bounds() {
         let mut b = Bytes::copy_from_slice(b"hello");
         let _ = b.split_to(10);
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "length larger than capacity")]
     fn bytes_conformance_split_off_out_of_bounds() {
         let mut b = Bytes::copy_from_slice(b"hello");
         let _ = b.split_off(10);

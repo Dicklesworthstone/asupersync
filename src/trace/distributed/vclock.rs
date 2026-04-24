@@ -1052,6 +1052,7 @@ mod tests {
     fn merge_is_least_upper_bound() {
         let na = node("A");
         let nb = node("B");
+        #[allow(clippy::many_single_char_names)]
         let mut a = VectorClock::new();
         a.increment(&na);
         a.increment(&na);
@@ -1072,6 +1073,7 @@ mod tests {
     fn merge_is_commutative() {
         let na = node("A");
         let nb = node("B");
+        #[allow(clippy::many_single_char_names)]
         let mut a = VectorClock::new();
         a.increment(&na);
         let mut b = VectorClock::new();
@@ -1085,6 +1087,7 @@ mod tests {
         let na = node("A");
         let nb = node("B");
         let nc = node("C");
+        #[allow(clippy::many_single_char_names)]
         let mut a = VectorClock::new();
         a.increment(&na);
         let mut b = VectorClock::new();
@@ -1100,6 +1103,7 @@ mod tests {
     #[test]
     fn merge_is_idempotent() {
         let na = node("A");
+        #[allow(clippy::many_single_char_names)]
         let mut a = VectorClock::new();
         a.increment(&na);
         assert_eq!(a.merge(&a), a);
@@ -1109,6 +1113,7 @@ mod tests {
     fn receive_merges_and_increments() {
         let na = node("A");
         let nb = node("B");
+        #[allow(clippy::many_single_char_names)]
         let mut a = VectorClock::new();
         a.increment(&na); // A: {A:1}
 
@@ -1126,6 +1131,7 @@ mod tests {
     fn vector_clock_output_snapshot_scrubbed() {
         let na = node("alpha-node");
         let nb = node("beta-node");
+        #[allow(clippy::many_single_char_names)]
         let mut a = VectorClock::new();
         a.increment(&na);
         a.increment(&na);
@@ -1296,6 +1302,7 @@ mod tests {
     #[test]
     fn partial_order_after() {
         let na = node("A");
+        #[allow(clippy::many_single_char_names)]
         let mut a = VectorClock::new();
         a.increment(&na);
         let b = VectorClock::new();
@@ -1420,6 +1427,7 @@ mod tests {
         let single = VectorClock::for_node(&na);
 
         // Multi-node after independent increments + merge.
+        #[allow(clippy::many_single_char_names)]
         let mut a = VectorClock::new();
         a.increment(&na);
         a.increment(&na);

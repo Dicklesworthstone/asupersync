@@ -566,6 +566,7 @@ impl NoAliasingProver {
                 // Region close doesn't directly affect per-permit ownership.
                 // The SL verifier (bd-1xwvk.1) checks quiescence separately.
             }
+            MarkingEventKind::TaskComplete { .. } => {}
         }
     }
 

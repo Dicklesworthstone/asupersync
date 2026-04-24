@@ -30,7 +30,9 @@ fn build_received_symbols(
 
     let repair_upper = (l + extra_repairs) as u32;
     for esi in (k as u32)..repair_upper {
-        let (columns, coefficients) = decoder.repair_equation(esi);
+        let (columns, coefficients) = decoder
+            .repair_equation(esi)
+            .unwrap_or_else(|err| panic!("repair equation for esi={esi} failed: {err:?}"));
         let repair_data = encoder.repair_symbol(esi);
         received.push(ReceivedSymbol::repair(
             esi,

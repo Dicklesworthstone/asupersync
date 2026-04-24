@@ -445,8 +445,7 @@ mod tests {
 
         let root = oracle
             .root()
-            .map(|region_id| aliases[&region_id].clone())
-            .unwrap_or_else(|| "none".to_owned());
+            .map_or_else(|| "none".to_owned(), |region_id| aliases[&region_id].clone());
 
         let mut lines = vec![
             format!("scenario: {name}"),
@@ -462,8 +461,7 @@ mod tests {
                 .expect("snapshot region should exist");
             let parent = entry
                 .parent
-                .map(|parent_id| aliases[&parent_id].clone())
-                .unwrap_or_else(|| "none".to_owned());
+                .map_or_else(|| "none".to_owned(), |parent_id| aliases[&parent_id].clone());
             let depth = oracle
                 .depth(region_id)
                 .map_or_else(|| "cycle".to_owned(), |depth| depth.to_string());

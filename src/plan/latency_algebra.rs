@@ -2770,6 +2770,7 @@ mod tests {
         let mut dag = PlanDag::new();
 
         // Build a complex DAG: (a || b || c) && (d || e)
+        #[allow(clippy::many_single_char_names)]
         let a = dag.leaf("fast_cache_lookup");
         let b = dag.leaf("slow_database_query");
         let c = dag.leaf("post_processing");

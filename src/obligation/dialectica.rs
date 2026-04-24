@@ -464,6 +464,7 @@ impl ContractChecker {
             MarkingEventKind::RegionClose { region } => {
                 self.check_region_closure(*region, event.time);
             }
+            MarkingEventKind::TaskComplete { .. } => {}
         }
     }
 
@@ -1650,6 +1651,7 @@ mod tests {
                     MarkingEventKind::RegionClose { region } => {
                         close(event.time.as_nanos(), *region)
                     }
+                    MarkingEventKind::TaskComplete { .. } => event.clone(),
                 })
                 .collect();
 
@@ -1785,6 +1787,7 @@ mod tests {
                     MarkingEventKind::RegionClose { .. } => {
                         close(event.time.as_nanos(), r(region_offset))
                     }
+                    MarkingEventKind::TaskComplete { .. } => event.clone(),
                 })
                 .collect();
 
@@ -1866,6 +1869,7 @@ mod tests {
                     | MarkingEventKind::Abort { .. }
                     | MarkingEventKind::Leak { .. } => resolutions.push(event.clone()),
                     MarkingEventKind::RegionClose { .. } => closes.push(event.clone()),
+                    MarkingEventKind::TaskComplete { .. } => closes.push(event.clone()),
                 }
             }
 
@@ -2216,6 +2220,11 @@ mod tests {
                         let new_region = if *region == r(1) { r(2) } else { *region };
                         close(new_time.as_nanos(), new_region)
                     }
+                    MarkingEventKind::TaskComplete { .. } => {
+                        let mut new_event = event.clone();
+                        new_event.time = new_time;
+                        new_event
+                    }
                 }
             })
             .collect();
@@ -2424,7 +2433,10 @@ mod tests {
             }
         }
         emit_duality_verdict("DIALECTICA-DUALITY-9", pass);
-        assert!(pass, "state machine diverged across ObligationKind variants");
+        assert!(
+            pass,
+            "state machine diverged across ObligationKind variants"
+        );
     }
 
     // DIALECTICA-DUALITY-10: State monotonicity — (forward_taken, backward_taken)
@@ -2481,6 +2493,9 @@ mod tests {
         let viols = res.violations_for(DialecticaContract::NoPartialCommit);
         let pass = !res.is_clean() && viols.len() == 1;
         emit_duality_verdict("DIALECTICA-DUALITY-12", pass);
-        assert!(pass, "unreserved resolve did not surface a single NoPartialCommit violation");
+        assert!(
+            pass,
+            "unreserved resolve did not surface a single NoPartialCommit violation"
+        );
     }
 }

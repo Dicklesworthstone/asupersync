@@ -848,10 +848,7 @@ impl DeferredCleanupQueue {
             "session" => {
                 // Schedule cleanup of session channel state and type checking
                 // This includes proper protocol completion handling
-                if self.config.enable_logging {
-                    #[cfg(feature = "tracing-integration")]
-                    tracing::trace!(channel_id = channel_id, "Scheduled session channel cleanup");
-                }
+                if self.config.enable_logging { #[cfg(feature = "tracing-integration")] tracing::trace!(channel_id = channel_id, "Scheduled session channel cleanup"); }
             }
             _ => {
                 #[cfg(feature = "tracing-integration")]

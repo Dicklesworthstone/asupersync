@@ -40,7 +40,7 @@ impl Default for ThresholdConfig {
         Self {
             overhead_factor: 1.02,
             min_overhead: 0,
-            max_per_block: 0,
+            max_per_block: 8192,
         }
     }
 }

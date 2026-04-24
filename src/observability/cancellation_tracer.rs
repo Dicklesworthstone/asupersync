@@ -549,10 +549,9 @@ impl CancellationTracer {
 
     /// Hash function for sampling decisions.
     fn hash_entity(&self, entity: &str) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = crate::util::DetHasher::default();
         entity.hash(&mut hasher);
         hasher.finish()
     }

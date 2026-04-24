@@ -37,7 +37,7 @@ fn block_on<F: Future>(f: F) -> F::Output {
     loop {
         match pinned.as_mut().poll(&mut cx) {
             Poll::Ready(v) => return v,
-            Poll::Pending => continue,
+            Poll::Pending => (),
         }
     }
 }
@@ -79,6 +79,7 @@ impl<T: Clone> BroadcastTestHarness<T> {
         Ok(())
     }
 
+    #[allow(clippy::future_not_send)]
     async fn send_messages(&mut self, cx: &Cx, messages: &[T]) -> Result<(), SendError<T>> {
         for msg in messages {
             self.send_message(cx, msg.clone()).await?;

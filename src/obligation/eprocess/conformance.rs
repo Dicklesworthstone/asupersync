@@ -764,12 +764,12 @@ mod tests {
         assert!(matrix.contains("E-Process Martingale Conformance Matrix"));
 
         // Should categorize by requirement level
-        let must_requirements: Vec<_> = harness
+        let must_count = harness
             .results
             .iter()
             .filter(|r| r.level == RequirementLevel::Must)
-            .collect();
-        assert!(must_requirements.len() >= 4); // We have several MUST requirements
+            .count();
+        assert!(must_count >= 4); // We have several MUST requirements
     }
 
     #[test]

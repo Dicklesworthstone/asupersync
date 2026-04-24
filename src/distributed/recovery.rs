@@ -582,7 +582,7 @@ impl StateDecoder {
             max_block_size: usize::from(params.symbols_per_block) * usize::from(params.symbol_size),
             repair_overhead: 1.0,
             min_overhead: 0,
-            max_buffered_symbols: 0,
+            max_buffered_symbols: 8192,
             block_timeout: Duration::from_secs(30),
             verify_auth: self.config.verify_integrity,
         };

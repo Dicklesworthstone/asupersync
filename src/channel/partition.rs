@@ -513,10 +513,10 @@ mod tests {
             },
             Err(SendError::Disconnected(returned)) => RouteOutcome::Disconnected(returned),
             Err(SendError::Full(returned)) => {
-                panic!("unexpected full channel while routing value {returned}")
+                panic!("unexpected full channel while routing value {returned}") // ubs:ignore
             }
             Err(SendError::Cancelled(returned)) => {
-                panic!("unexpected cancellation while routing value {returned}")
+                panic!("unexpected cancellation while routing value {returned}") // ubs:ignore
             }
         }
     }

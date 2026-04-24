@@ -5,12 +5,12 @@
 
 #![cfg(feature = "test-internals")]
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
-use asupersync::trace::recorder::{TraceRecorder, RecorderConfig};
+use asupersync::trace::recorder::{RecorderConfig, TraceRecorder};
 use asupersync::trace::replay::TraceMetadata;
-use asupersync::types::{TaskId, Time, Severity, RegionId};
+use asupersync::types::{TaskId, Time};
 
 /// Mixed trace workload: typical patterns from lab runtime
 struct TraceWorkload {
@@ -49,8 +49,10 @@ fn bench_trace_emit_hotpath(c: &mut Criterion) {
     let mut group = c.benchmark_group("trace_emit_hotpath");
 
     for workload in WORKLOADS {
-        let total_events = workload.task_schedules + workload.time_advances +
-                          workload.rng_values + workload.io_events;
+        let total_events = workload.task_schedules
+            + workload.time_advances
+            + workload.rng_values
+            + workload.io_events;
 
         group.throughput(Throughput::Elements(total_events as u64));
 
@@ -60,9 +62,7 @@ fn bench_trace_emit_hotpath(c: &mut Criterion) {
             |b, wl| {
                 b.iter(|| {
                     let metadata = TraceMetadata::new(42);
-                    let config = RecorderConfig::new()
-                        .with_record_rng(true)
-                        .with_record_wakers(true);
+                    let config = RecorderConfig::enabled().with_rng(true).with_wakers(true);
                     let mut recorder = TraceRecorder::with_config(metadata, config);
 
                     // Task scheduling events (hot path)
@@ -103,7 +103,7 @@ fn bench_record_event_microbench(c: &mut Criterion) {
 
     // Micro-benchmark individual record methods
     let metadata = TraceMetadata::new(42);
-    let config = RecorderConfig::new();
+    let config = RecorderConfig::enabled();
 
     group.bench_function("record_task_scheduled", |b| {
         b.iter(|| {
@@ -148,7 +148,7 @@ fn bench_recorder_overhead(c: &mut Criterion) {
     group.bench_function("enabled_recorder_baseline", |b| {
         b.iter(|| {
             let metadata = TraceMetadata::new(42);
-            let config = RecorderConfig::new();
+            let config = RecorderConfig::enabled();
             let mut recorder = TraceRecorder::with_config(metadata, config);
 
             for i in 0..100 {

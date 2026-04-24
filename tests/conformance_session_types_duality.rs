@@ -42,35 +42,57 @@ use std::marker::PhantomData;
 /// Requirement levels from session types specification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequirementLevel {
-    Must,    // Fundamental duality property - violation = unsound
-    Should,  // Important for practical use - violation = degraded
-    May,     // Optional enhancement - violation = acceptable
+    /// Fundamental duality property; violation means the session protocol is unsound.
+    Must,
+    /// Important practical property; violation means degraded behavior.
+    Should,
+    /// Optional enhancement; violation is acceptable for conformance.
+    May,
 }
 
 /// Test category for organization
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestCategory {
-    TypeDuality,      // Type-level duality properties
-    ChoiceDuality,    // Select/Offer duality
-    EndpointDuality,  // Session endpoint pairing
-    ProtocolProgress, // End-to-end protocol execution
-    TransportBacking, // Pure vs transport-backed consistency
+    /// Type-level duality properties.
+    TypeDuality,
+    /// Select/Offer duality.
+    ChoiceDuality,
+    /// Session endpoint pairing.
+    EndpointDuality,
+    /// End-to-end protocol execution.
+    ProtocolProgress,
+    /// Pure versus transport-backed consistency.
+    TransportBacking,
 }
 
 /// Result of a duality test
 #[derive(Debug, PartialEq, Eq)]
 pub enum DualityTestResult {
+    /// Test passed.
     Pass,
-    Fail { reason: String },
-    ExpectedFailure { reason: String }, // Known limitation
+    /// Test failed unexpectedly.
+    Fail {
+        /// Human-readable failure reason.
+        reason: String,
+    },
+    /// Test hit a known limitation.
+    ExpectedFailure {
+        /// Human-readable expected-failure reason.
+        reason: String,
+    },
 }
 
 /// Individual duality test case
 pub trait DualityTest: std::marker::Send + Sync {
+    /// Stable conformance test identifier.
     fn id(&self) -> &'static str;
+    /// Category covered by this test.
     fn category(&self) -> TestCategory;
+    /// Requiredness level from the session type specification.
     fn requirement_level(&self) -> RequirementLevel;
+    /// Human-readable test description.
     fn description(&self) -> &'static str;
+    /// Execute this conformance case.
     fn run(&self) -> DualityTestResult;
 }
 
@@ -82,9 +104,15 @@ pub trait DualityTest: std::marker::Send + Sync {
 struct TypeConstructionDualityTest;
 
 impl DualityTest for TypeConstructionDualityTest {
-    fn id(&self) -> &'static str { "DL-1.1" }
-    fn category(&self) -> TestCategory { TestCategory::TypeDuality }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &'static str {
+        "DL-1.1"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::TypeDuality
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
     fn description(&self) -> &'static str {
         "Send<T, S> and Recv<T, S> must be structurally dual"
     }
@@ -108,9 +136,15 @@ impl DualityTest for TypeConstructionDualityTest {
 struct EndTypeDualityTest;
 
 impl DualityTest for EndTypeDualityTest {
-    fn id(&self) -> &'static str { "DL-1.2" }
-    fn category(&self) -> TestCategory { TestCategory::TypeDuality }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &'static str {
+        "DL-1.2"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::TypeDuality
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
     fn description(&self) -> &'static str {
         "End type must be dual to itself"
     }
@@ -130,9 +164,15 @@ impl DualityTest for EndTypeDualityTest {
 struct ChoiceDualityTest;
 
 impl DualityTest for ChoiceDualityTest {
-    fn id(&self) -> &'static str { "DL-2.1" }
-    fn category(&self) -> TestCategory { TestCategory::ChoiceDuality }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &'static str {
+        "DL-2.1"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::ChoiceDuality
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
     fn description(&self) -> &'static str {
         "Select<A, B> and Offer<A, B> must be structurally dual"
     }
@@ -156,15 +196,21 @@ impl DualityTest for ChoiceDualityTest {
 struct SendPermitEndpointDualityTest;
 
 impl DualityTest for SendPermitEndpointDualityTest {
-    fn id(&self) -> &'static str { "DL-3.1" }
-    fn category(&self) -> TestCategory { TestCategory::EndpointDuality }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &'static str {
+        "DL-3.1"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EndpointDuality
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
     fn description(&self) -> &'static str {
         "send_permit::new_session() must create dual endpoints"
     }
 
     fn run(&self) -> DualityTestResult {
-        let (sender, receiver) = send_permit::new_session::<String>(42);
+        let (sender, _receiver) = send_permit::new_session::<String>(42);
 
         // Both endpoints must share the same channel_id
         // Note: We can only test this indirectly through protocol completion
@@ -186,9 +232,15 @@ impl DualityTest for SendPermitEndpointDualityTest {
 struct LeaseEndpointDualityTest;
 
 impl DualityTest for LeaseEndpointDualityTest {
-    fn id(&self) -> &'static str { "DL-3.2" }
-    fn category(&self) -> TestCategory { TestCategory::EndpointDuality }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &'static str {
+        "DL-3.2"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EndpointDuality
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
     fn description(&self) -> &'static str {
         "lease::new_session() must create dual endpoints"
     }
@@ -213,9 +265,15 @@ impl DualityTest for LeaseEndpointDualityTest {
 struct TwoPhaseEndpointDualityTest;
 
 impl DualityTest for TwoPhaseEndpointDualityTest {
-    fn id(&self) -> &'static str { "DL-3.3" }
-    fn category(&self) -> TestCategory { TestCategory::EndpointDuality }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &'static str {
+        "DL-3.3"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EndpointDuality
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
     fn description(&self) -> &'static str {
         "two_phase::new_session() must create dual endpoints"
     }
@@ -225,7 +283,9 @@ impl DualityTest for TwoPhaseEndpointDualityTest {
 
         // Test that initiator can complete its protocol
         let initiator_proof = initiator
-            .send(two_phase::ReserveMsg { kind: ObligationKind::IoOp })
+            .send(two_phase::ReserveMsg {
+                kind: ObligationKind::IoOp,
+            })
             .select_left() // Choose Commit
             .send(two_phase::CommitMsg)
             .close();
@@ -244,9 +304,15 @@ impl DualityTest for TwoPhaseEndpointDualityTest {
 struct SendPermitProgressTest;
 
 impl DualityTest for SendPermitProgressTest {
-    fn id(&self) -> &'static str { "DL-4.1" }
-    fn category(&self) -> TestCategory { TestCategory::ProtocolProgress }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &'static str {
+        "DL-4.1"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::ProtocolProgress
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
     fn description(&self) -> &'static str {
         "SendPermit protocol must complete when both endpoints follow types"
     }
@@ -261,9 +327,11 @@ impl DualityTest for SendPermitProgressTest {
         let sender_proof = sender.close();
 
         // Receiver side: Recv(Reserve) → Select(Recv(42) | Recv(Abort)) → End
-        let receiver = receiver.recv::<send_permit::ReserveMsg>();
-        let receiver = receiver.offer_left(); // Expect Send branch
-        let receiver = receiver.recv::<i32>();
+        let (_, receiver) = receiver.recv(send_permit::ReserveMsg);
+        let Selected::Left(receiver) = receiver.offer(Branch::Left) else {
+            unreachable!("pure typestate offer must follow the simulated branch");
+        };
+        let (_, receiver) = receiver.recv(42_i32);
         let receiver_proof = receiver.close();
 
         // Both should complete with same channel_id
@@ -277,9 +345,15 @@ impl DualityTest for SendPermitProgressTest {
 struct SendPermitAbortProgressTest;
 
 impl DualityTest for SendPermitAbortProgressTest {
-    fn id(&self) -> &'static str { "DL-4.2" }
-    fn category(&self) -> TestCategory { TestCategory::ProtocolProgress }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn id(&self) -> &'static str {
+        "DL-4.2"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::ProtocolProgress
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
     fn description(&self) -> &'static str {
         "SendPermit abort path must complete when both endpoints follow types"
     }
@@ -294,9 +368,11 @@ impl DualityTest for SendPermitAbortProgressTest {
         let sender_proof = sender.close();
 
         // Receiver side: Recv(Reserve) → Select(Recv(String) | Recv(Abort)) → End
-        let receiver = receiver.recv::<send_permit::ReserveMsg>();
-        let receiver = receiver.offer_right(); // Expect Abort branch
-        let receiver = receiver.recv::<send_permit::AbortMsg>();
+        let (_, receiver) = receiver.recv(send_permit::ReserveMsg);
+        let Selected::Right(receiver) = receiver.offer(Branch::Right) else {
+            unreachable!("pure typestate offer must follow the simulated branch");
+        };
+        let (_, receiver) = receiver.recv(send_permit::AbortMsg);
         let receiver_proof = receiver.close();
 
         // Both should complete with same channel_id
@@ -314,9 +390,15 @@ impl DualityTest for SendPermitAbortProgressTest {
 struct TransportBackingConsistencyTest;
 
 impl DualityTest for TransportBackingConsistencyTest {
-    fn id(&self) -> &'static str { "DL-5.1" }
-    fn category(&self) -> TestCategory { TestCategory::TransportBacking }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Should }
+    fn id(&self) -> &'static str {
+        "DL-5.1"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::TransportBacking
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Should
+    }
     fn description(&self) -> &'static str {
         "Transport-backed channels must preserve duality properties"
     }
@@ -326,10 +408,10 @@ impl DualityTest for TransportBackingConsistencyTest {
         // can be created and have consistent structure
 
         // Pure typestate version
-        let (pure_sender, pure_receiver) = send_permit::new_session::<u64>(300);
+        let (pure_sender, _pure_receiver) = send_permit::new_session::<u64>(300);
 
         // Transport-backed version
-        let (transport_sender, transport_receiver) =
+        let (transport_sender, _transport_receiver) =
             send_permit::new_session_with_transport::<u64>(300, 10);
 
         // Both should be able to complete the protocol
@@ -363,19 +445,15 @@ pub fn all_duality_tests() -> Vec<Box<dyn DualityTest>> {
         // Type construction duality
         Box::new(TypeConstructionDualityTest),
         Box::new(EndTypeDualityTest),
-
         // Choice duality
         Box::new(ChoiceDualityTest),
-
         // Endpoint duality
         Box::new(SendPermitEndpointDualityTest),
         Box::new(LeaseEndpointDualityTest),
         Box::new(TwoPhaseEndpointDualityTest),
-
         // Protocol progress
         Box::new(SendPermitProgressTest),
         Box::new(SendPermitAbortProgressTest),
-
         // Transport backing
         Box::new(TransportBackingConsistencyTest),
     ]
@@ -397,9 +475,18 @@ pub fn generate_duality_conformance_report() -> String {
     for test in &tests {
         let result = test.run();
         let status = match &result {
-            DualityTestResult::Pass => { passed += 1; "✅ PASS" },
-            DualityTestResult::Fail { .. } => { failed += 1; "❌ FAIL" },
-            DualityTestResult::ExpectedFailure { .. } => { xfail += 1; "⚠️ XFAIL" },
+            DualityTestResult::Pass => {
+                passed += 1;
+                "✅ PASS"
+            }
+            DualityTestResult::Fail { .. } => {
+                failed += 1;
+                "❌ FAIL"
+            }
+            DualityTestResult::ExpectedFailure { .. } => {
+                xfail += 1;
+                "⚠️ XFAIL"
+            }
         };
 
         report.push_str(&format!(
@@ -426,10 +513,12 @@ pub fn generate_duality_conformance_report() -> String {
         total, passed, failed, xfail
     ));
 
-    let must_tests: Vec<_> = tests.iter()
+    let must_tests: Vec<_> = tests
+        .iter()
         .filter(|t| t.requirement_level() == RequirementLevel::Must)
         .collect();
-    let must_passed = must_tests.iter()
+    let must_passed = must_tests
+        .iter()
         .filter(|t| matches!(t.run(), DualityTestResult::Pass))
         .count();
 
@@ -441,7 +530,9 @@ pub fn generate_duality_conformance_report() -> String {
 
     report.push_str(&format!(
         "- **MUST Clause Conformance**: {:.1}% ({}/{})\n",
-        conformance_score, must_passed, must_tests.len()
+        conformance_score,
+        must_passed,
+        must_tests.len()
     ));
 
     if conformance_score < 100.0 {
@@ -473,16 +564,16 @@ mod tests {
             match result {
                 DualityTestResult::Pass => {
                     println!("  ✅ PASS");
-                },
+                }
                 DualityTestResult::Fail { ref reason } => {
                     println!("  ❌ FAIL: {}", reason);
                     if test.requirement_level() == RequirementLevel::Must {
                         failures.push(format!("{}: {}", test.id(), reason));
                     }
-                },
+                }
                 DualityTestResult::ExpectedFailure { ref reason } => {
                     println!("  ⚠️ XFAIL: {}", reason);
-                },
+                }
             }
         }
 

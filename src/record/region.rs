@@ -2541,7 +2541,7 @@ mod tests {
     /// Inline metamorphic tests for region state monotonicity.
     fn run_inline_metamorphic_tests() {
         let mut passed = 0;
-        let mut failed = 0;
+        let failed = 0;
 
         // MR1: State ordering preserved under valid transitions
         {
@@ -2672,7 +2672,7 @@ mod tests {
     }
 
     /// Property-based metamorphic testing of random valid transition sequences.
-    #[cfg(feature = "proptest")]
+    /* #[cfg(feature = "proptest")] */
     #[test]
     fn proptest_region_state_monotone() {
         use proptest::prelude::*;
@@ -2726,7 +2726,7 @@ mod tests {
         assert_eq!(result, Some(43));
 
         // Verify thread-local flag is not stuck at true
-        let result = region.heap_with(index, |val: &i32| {
+        let result = region.heap_with(index, |_val: &i32| {
             // This inner call should use try_read path if flag is working correctly
             region.heap_with(index, |inner_val: &i32| *inner_val)
         });

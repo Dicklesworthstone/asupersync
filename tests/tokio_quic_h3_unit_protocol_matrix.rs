@@ -28,6 +28,10 @@ use asupersync::net::quic_native::transport::{
     SentPacketMeta,
 };
 
+fn test_h3_config() -> H3ConnectionConfig {
+    H3ConnectionConfig::default()
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // 2.1 QUIC Core Codec (QC)
 // ═══════════════════════════════════════════════════════════════════════
@@ -566,7 +570,7 @@ fn hf_01_data_round_trip() {
     let frame = H3Frame::Data(payload.clone());
     let mut buf = Vec::new();
     frame.encode(&mut buf).expect("encode");
-    let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+    let (decoded, consumed) = H3Frame::decode(&buf, &test_h3_config()).expect("decode");
     assert_eq!(consumed, buf.len());
     assert_eq!(decoded, H3Frame::Data(payload));
 }
@@ -578,7 +582,7 @@ fn hf_02_headers_round_trip() {
     let frame = H3Frame::Headers(field_block.clone());
     let mut buf = Vec::new();
     frame.encode(&mut buf).expect("encode");
-    let (decoded, _) = H3Frame::decode(&buf).expect("decode");
+    let (decoded, _) = H3Frame::decode(&buf, &test_h3_config()).expect("decode");
     assert_eq!(decoded, H3Frame::Headers(field_block));
 }
 
@@ -596,7 +600,7 @@ fn hf_03_settings_round_trip() {
     let frame = H3Frame::Settings(settings.clone());
     let mut buf = Vec::new();
     frame.encode(&mut buf).expect("encode");
-    let (decoded, _) = H3Frame::decode(&buf).expect("decode");
+    let (decoded, _) = H3Frame::decode(&buf, &test_h3_config()).expect("decode");
     assert_eq!(decoded, H3Frame::Settings(settings));
 }
 
@@ -606,7 +610,7 @@ fn hf_04_goaway_round_trip() {
     let frame = H3Frame::Goaway(42);
     let mut buf = Vec::new();
     frame.encode(&mut buf).expect("encode");
-    let (decoded, _) = H3Frame::decode(&buf).expect("decode");
+    let (decoded, _) = H3Frame::decode(&buf, &test_h3_config()).expect("decode");
     assert_eq!(decoded, H3Frame::Goaway(42));
 }
 
@@ -616,7 +620,7 @@ fn hf_05_cancel_push_round_trip() {
     let frame = H3Frame::CancelPush(7);
     let mut buf = Vec::new();
     frame.encode(&mut buf).expect("encode");
-    let (decoded, _) = H3Frame::decode(&buf).expect("decode");
+    let (decoded, _) = H3Frame::decode(&buf, &test_h3_config()).expect("decode");
     assert_eq!(decoded, H3Frame::CancelPush(7));
 }
 
@@ -626,7 +630,7 @@ fn hf_06_max_push_id_round_trip() {
     let frame = H3Frame::MaxPushId(255);
     let mut buf = Vec::new();
     frame.encode(&mut buf).expect("encode");
-    let (decoded, _) = H3Frame::decode(&buf).expect("decode");
+    let (decoded, _) = H3Frame::decode(&buf, &test_h3_config()).expect("decode");
     assert_eq!(decoded, H3Frame::MaxPushId(255));
 }
 
@@ -639,7 +643,7 @@ fn hf_07_unknown_frame_round_trip() {
     };
     let mut buf = Vec::new();
     frame.encode(&mut buf).expect("encode");
-    let (decoded, _) = H3Frame::decode(&buf).expect("decode");
+    let (decoded, _) = H3Frame::decode(&buf, &test_h3_config()).expect("decode");
     assert_eq!(
         decoded,
         H3Frame::Unknown {

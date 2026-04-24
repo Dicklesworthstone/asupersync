@@ -4116,7 +4116,7 @@ mod tests {
                 0.0
             }
         ));
-        report.push_str("\n");
+        report.push('\n');
 
         // Individual Path Details
         report.push_str("[individual_paths]\n");
@@ -4143,7 +4143,7 @@ mod tests {
                 report.push_str(&format!("  symbols_received: {}\n", received));
                 report.push_str(&format!("  symbols_lost: {}\n", lost));
                 report.push_str(&format!("  duplicates_received: {}\n", duplicates));
-                report.push_str(&format!("  characteristics:\n"));
+                report.push_str("  characteristics:\n");
                 report.push_str(&format!(
                     "    latency_ms: {}\n",
                     path.characteristics.latency_ms
@@ -4168,7 +4168,7 @@ mod tests {
                     "    priority: {}\n",
                     path.characteristics.priority
                 ));
-                report.push_str("\n");
+                report.push('\n');
             }
         }
 
@@ -4180,7 +4180,7 @@ mod tests {
         append_u64_percentiles(&mut report, "bandwidth_bps_", &bandwidth_values);
         append_f64_percentiles(&mut report, "loss_rate_", &loss_rate_values);
         append_u32_percentiles(&mut report, "jitter_ms_", &jitter_values);
-        report.push_str("\n");
+        report.push('\n');
 
         // Aggregator Statistics
         let agg_stats = aggregator.stats();

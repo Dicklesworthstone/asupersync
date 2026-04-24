@@ -1,3 +1,4 @@
+#![allow(clippy::cast_possible_wrap)]
 //! Codec for length-prefixed framing.
 
 use crate::bytes::{BufMut, BytesMut};
@@ -960,7 +961,7 @@ mod tests {
                                     );
                                 } else {
                                     // Partial header retained, payload should be at the end
-                                    let payload_start = header_len - config.num_skip;
+                                    let payload_start = header_len.saturating_sub(config.num_skip);
                                     assert_eq!(
                                         &frame[payload_start..],
                                         &original_payload[..],
@@ -1429,7 +1430,7 @@ mod tests {
         let payload_start = if base_config.num_skip >= header_len {
             0
         } else {
-            header_len - base_config.num_skip
+            header_len.saturating_sub(base_config.num_skip)
         };
 
         assert_eq!(
@@ -1534,7 +1535,7 @@ mod tests {
                 let payload_start = if config.num_skip >= header_len {
                     0
                 } else {
-                    header_len - config.num_skip
+                    header_len.saturating_sub(config.num_skip)
                 };
 
                 assert_eq!(
@@ -1594,7 +1595,7 @@ mod tests {
             let payload_start = if config.num_skip >= header_len {
                 0
             } else {
-                header_len - config.num_skip
+                header_len.saturating_sub(config.num_skip)
             };
 
             assert_eq!(

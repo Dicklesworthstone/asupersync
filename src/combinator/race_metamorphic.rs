@@ -1,3 +1,4 @@
+#![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::all)]
 //! Metamorphic Testing: Scope.race loser-drain correctness
 //!
@@ -806,7 +807,7 @@ mod tests {
         for i in 0..branch_count {
             let polls = if i == winner_index { 2 } else { 8 + i as u32 };
             let mut future =
-                TestFuture::new(i as u32, (i * 100) as i32, polls, global_state.clone());
+                TestFuture::new(i as u32, (i as i32) * 100, polls, global_state.clone());
 
             // Make one loser panic during drain
             if i == 3 {

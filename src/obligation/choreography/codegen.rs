@@ -1391,7 +1391,7 @@ mod tests {
                 let all = c
                     .compile_all(&protocol)
                     .unwrap_or_else(|e| panic!("{label}: {e:?}"));
-                for (participant_name, _info) in &protocol.participants {
+                for participant_name in protocol.participants.keys() {
                     let single = c
                         .compile(&protocol, participant_name)
                         .unwrap_or_else(|e| panic!("{label}/{participant_name}: {e:?}"));

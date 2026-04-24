@@ -2706,7 +2706,7 @@ mod tests {
         let mut potentials = vec![1000.0];
         let mut v: f64 = 1000.0;
         // Smooth monotone drop, 10 per step, to V=0 in 100 steps.
-        while v > 0.0 {
+        while v > f64::EPSILON {
             v -= 10.0;
             potentials.push(v.max(0.0));
         }
@@ -3190,7 +3190,7 @@ mod tests {
             }
             (None, None) => { /* Both None is fine */ }
             (orig, recon) => {
-                panic!(
+                panic!( // ubs:ignore
                     "Empirical variance mismatch: orig={:?}, recon={:?}",
                     orig, recon
                 );

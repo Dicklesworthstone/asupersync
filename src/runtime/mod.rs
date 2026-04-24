@@ -138,6 +138,7 @@ pub mod region_heap;
 #[cfg(test)]
 mod region_heap_metamorphic_tests;
 pub mod region_table;
+pub mod resource_cleanup_verifier;
 pub mod resource_monitor;
 pub mod scheduler;
 pub mod sharded_state;
@@ -193,6 +194,10 @@ pub use reactor::{
 };
 pub use region_heap::{HeapIndex, HeapRef, HeapStats, RegionHeap, global_alloc_count};
 pub use region_table::{RegionCreateError, RegionTable};
+pub use resource_cleanup_verifier::{
+    ResourceCleanupConfig, ResourceCleanupError, ResourceCleanupStats, ResourceCleanupVerifier,
+    ResourceId, ResourceRecord, ResourceState, ResourceType,
+};
 pub use scheduler::Scheduler;
 pub use sharded_state::{ShardGuard, ShardedConfig, ShardedObservability, ShardedState};
 pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};

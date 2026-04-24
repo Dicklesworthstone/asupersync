@@ -688,8 +688,7 @@ mod tests {
                 "region={} parent={}",
                 region.as_u64(),
                 parent
-                    .map(|region| region.as_u64().to_string())
-                    .unwrap_or_else(|| "none".to_string())
+                    .map_or_else(|| "none".to_string(), |region| region.as_u64().to_string())
             ),
             TraceData::Obligation {
                 obligation,
@@ -706,11 +705,9 @@ mod tests {
                 region.as_u64(),
                 kind.as_str(),
                 duration_ns
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".to_string()),
+                    .map_or_else(|| "none".to_string(), |value| value.to_string()),
                 abort_reason
-                    .map(|reason| reason.as_str().to_string())
-                    .unwrap_or_else(|| "none".to_string())
+                    .map_or_else(|| "none".to_string(), |reason| reason.as_str().to_string())
             ),
             TraceData::Cancel {
                 task,
@@ -730,8 +727,7 @@ mod tests {
             TraceData::Timer { timer_id, deadline } => format!(
                 "timer_id={timer_id} deadline={}",
                 deadline
-                    .map(|time| time.as_nanos().to_string())
-                    .unwrap_or_else(|| "none".to_string())
+                    .map_or_else(|| "none".to_string(), |time| time.as_nanos().to_string())
             ),
             TraceData::Checkpoint {
                 sequence,
