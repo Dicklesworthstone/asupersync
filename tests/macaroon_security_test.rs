@@ -92,8 +92,12 @@ fn test_third_party_binding_integrity() {
 
     // Verifying t1 with bound1 should pass
     assert!(
-        t1.verify_with_discharges(&root_key, &VerificationContext::new(), &[bound1.clone()])
-            .is_ok()
+        t1.verify_with_discharges(
+            &root_key,
+            &VerificationContext::new(),
+            std::slice::from_ref(&bound1),
+        )
+        .is_ok()
     );
 
     // Verifying t2 with bound1 should FAIL (bound to t1)
