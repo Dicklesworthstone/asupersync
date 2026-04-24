@@ -51,6 +51,8 @@ pub enum MySqlError {
     Io(io::Error),
     /// Protocol error (malformed message).
     Protocol(String),
+    /// Invalid packet for the current protocol state.
+    InvalidPacket(String),
     /// Authentication failed.
     AuthenticationFailed(String),
     /// Server error response.
@@ -79,6 +81,8 @@ pub enum MySqlError {
     },
     /// Invalid connection URL.
     InvalidUrl(String),
+    /// Invalid client-side parameter input.
+    InvalidParameter(String),
     /// TLS required but not available.
     TlsRequired,
     /// Transaction already finished.
@@ -180,6 +184,7 @@ impl fmt::Display for MySqlError {
         match self {
             Self::Io(e) => write!(f, "MySQL I/O error: {e}"),
             Self::Protocol(msg) => write!(f, "MySQL protocol error: {msg}"),
+            Self::InvalidPacket(msg) => write!(f, "Invalid MySQL packet: {msg}"),
             Self::AuthenticationFailed(msg) => write!(f, "MySQL authentication failed: {msg}"),
             Self::Server {
                 code,
@@ -198,6 +203,7 @@ impl fmt::Display for MySqlError {
                 "Type conversion error for column {column}: expected {expected}, got {actual}"
             ),
             Self::InvalidUrl(msg) => write!(f, "Invalid MySQL URL: {msg}"),
+            Self::InvalidParameter(msg) => write!(f, "Invalid MySQL parameter: {msg}"),
             Self::TlsRequired => write!(f, "TLS required but not available"),
             Self::TransactionFinished => write!(f, "Transaction already finished"),
             Self::UnsupportedAuthPlugin(plugin) => {
@@ -279,6 +285,8 @@ const DEFAULT_MAX_RESULT_ROWS: usize = 1_000_000;
 const MAX_COLUMN_COUNT: u64 = 16_384;
 /// Practical limit for reassembled multi-packet payloads.
 const MAX_REASSEMBLED_PACKET_SIZE: usize = 64 * 1024 * 1024;
+/// MySQL's binary charset/collation ID in result-set metadata.
+const MYSQL_BINARY_CHARSET_ID: u16 = 63;
 
 /// MySQL column types for result set parsing.
 #[allow(dead_code, missing_docs)]
@@ -623,6 +631,10 @@ impl PacketBuffer {
 
     fn write_bytes(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
+    }
+
+    fn write_u16_le(&mut self, v: u16) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
     }
 
     fn write_u32_le(&mut self, v: u32) {
@@ -1081,8 +1093,6 @@ struct MySqlConnectionInner {
     needs_rollback: bool,
     /// Maximum number of rows to return from a result set.
     max_result_rows: usize,
-    /// Next statement ID for prepared statements.
-    next_stmt_id: u32,
 }
 
 impl Drop for MySqlConnectionInner {
@@ -1183,7 +1193,6 @@ impl MySqlConnection {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
-                next_stmt_id: 1,
             },
         };
 
@@ -1197,6 +1206,10 @@ impl MySqlConnection {
         conn.inner.charset = handshake.charset;
         conn.inner.status_flags = handshake.status_flags;
         conn.inner.server_version = handshake.server_version.clone();
+
+        if options.ssl_mode == SslMode::Required {
+            return Outcome::Err(MySqlError::TlsRequired);
+        }
 
         // Send handshake response
         if let Err(e) = conn.send_handshake_response(&options, &handshake).await {
@@ -1299,14 +1312,13 @@ impl MySqlConnection {
             | capability::CLIENT_TRANSACTIONS
             | capability::CLIENT_MULTI_RESULTS;
 
-        if options.ssl_mode != SslMode::Disabled {
-            client_caps |= capability::CLIENT_SSL;
-        }
-
         if options.database.is_some() {
             client_caps |= capability::CLIENT_CONNECT_WITH_DB;
         }
 
+        // CLIENT_SSL is only valid in the separate MySQL SSL Request packet,
+        // before TLS wraps the stream. Do not set it on the plaintext full
+        // handshake response, which already carries authentication data.
         // Runtime packet parsing decisions must use negotiated capabilities,
         // not the server-advertised superset.
         self.inner.capabilities =
@@ -1321,7 +1333,7 @@ impl MySqlConnection {
         buf.write_null_terminated(&options.user);
 
         // Auth response
-        let password = options.password.as_deref().unwrap_or(""); // ubs:ignore - not a hardcoded secret // ubs:ignore - default empty password
+        let password = options.password.as_deref().unwrap_or_default();
         let auth_response = match handshake.auth_plugin_name.as_str() {
             "mysql_native_password" => mysql_native_auth(password, &handshake.auth_plugin_data),
             "caching_sha2_password" => caching_sha2_auth(password, &handshake.auth_plugin_data),
@@ -1412,7 +1424,7 @@ impl MySqlConnection {
             auth_data_raw
         };
 
-        let password = options.password.as_deref().unwrap_or(""); // ubs:ignore - not a hardcoded secret // ubs:ignore - default empty password
+        let password = options.password.as_deref().unwrap_or_default();
         let auth_response = match plugin_name {
             "mysql_native_password" => mysql_native_auth(password, auth_data),
             "caching_sha2_password" => caching_sha2_auth(password, auth_data),
@@ -1615,65 +1627,7 @@ impl MySqlConnection {
             return Ok(Vec::new());
         }
 
-        // Read column definitions
-        let mut columns = Vec::with_capacity(column_count);
-        let mut indices = BTreeMap::new();
-
-        for i in 0..column_count {
-            let (data, seq) = self.read_packet().await?;
-            self.inner.sequence = seq.wrapping_add(1);
-
-            let mut reader = PacketReader::new(&data);
-
-            let catalog = reader.read_lenenc_str()?.to_string();
-            let schema = reader.read_lenenc_str()?.to_string();
-            let table = reader.read_lenenc_str()?.to_string();
-            let org_table = reader.read_lenenc_str()?.to_string();
-            let name = reader.read_lenenc_str()?.to_string();
-            let org_name = reader.read_lenenc_str()?.to_string();
-
-            // Fixed fields (0x0C length indicator)
-            let _ = reader.read_lenenc_int()?;
-            let charset = reader.read_u16_le()?;
-            let length = reader.read_u32_le()?;
-            let column_type = reader.read_byte()?;
-            let flags = reader.read_u16_le()?;
-            let decimals = reader.read_byte()?;
-
-            // Only store the first occurrence so duplicate column names
-            // don't silently shadow earlier columns.
-            indices.entry(name.clone()).or_insert(i);
-            columns.push(MySqlColumn {
-                catalog,
-                schema,
-                table,
-                org_table,
-                name,
-                org_name,
-                charset,
-                length,
-                column_type,
-                flags,
-                decimals,
-            });
-        }
-
-        // In CLIENT_DEPRECATE_EOF mode, there is no metadata terminator after
-        // column definitions; rows start immediately and the final terminator
-        // is an OK packet. Without DEPRECATE_EOF we still expect EOF here.
-        if Self::expects_metadata_eof(self.inner.capabilities) {
-            let (data, seq) = self.read_packet().await?;
-            self.inner.sequence = seq.wrapping_add(1);
-            if !Self::is_eof_packet(&data) {
-                return Err(MySqlError::Protocol(
-                    "expected EOF after columns".to_string(),
-                ));
-            }
-            self.inner.status_flags = Self::parse_eof_packet_status_flags(&data)?;
-        }
-
-        let columns = Arc::new(columns);
-        let indices = Arc::new(indices);
+        let (columns, indices) = self.read_result_set_columns(column_count).await?;
 
         // Read rows
         let mut rows = Vec::new();
@@ -1716,6 +1670,133 @@ impl MySqlConnection {
         }
 
         Ok(rows)
+    }
+
+    /// Read a complete binary-protocol result set from COM_STMT_EXECUTE.
+    ///
+    /// Enforces `max_result_rows` to prevent unbounded memory growth.
+    async fn read_binary_result_set(
+        &mut self,
+        cx: &Cx,
+        first_packet: &[u8],
+    ) -> Result<Vec<MySqlRow>, MySqlError> {
+        let mut reader = PacketReader::new(first_packet);
+        let column_count_raw = reader.read_lenenc_int()?;
+        if column_count_raw > MAX_COLUMN_COUNT {
+            return Err(MySqlError::Protocol(format!(
+                "column count {column_count_raw} exceeds maximum {MAX_COLUMN_COUNT}"
+            )));
+        }
+        let column_count = column_count_raw as usize;
+        let deprecate_eof = self.inner.capabilities & capability::CLIENT_DEPRECATE_EOF != 0;
+        let max_rows = self.inner.max_result_rows;
+
+        if column_count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let (columns, indices) = self.read_result_set_columns(column_count).await?;
+        let mut rows = Vec::new();
+
+        loop {
+            if cx.checkpoint().is_err() {
+                self.inner.closed = true;
+                return Err(MySqlError::Cancelled(
+                    cx.cancel_reason()
+                        .unwrap_or_else(|| crate::types::CancelReason::user("cancelled")),
+                ));
+            }
+
+            let (data, seq) = self.read_packet().await?;
+            self.inner.sequence = seq.wrapping_add(1);
+
+            if data.is_empty() {
+                continue;
+            }
+
+            match data[0] {
+                0xFF => return Err(Self::parse_error(&data)),
+                _ => {
+                    if let Some(values) =
+                        Self::parse_binary_row_or_terminator(&data, &columns, deprecate_eof)?
+                    {
+                        self.push_result_row(&mut rows, &columns, &indices, values, max_rows)?;
+                    } else {
+                        self.inner.status_flags =
+                            Self::parse_result_set_terminator_status_flags(&data)?;
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(rows)
+    }
+
+    async fn read_result_set_columns(
+        &mut self,
+        column_count: usize,
+    ) -> Result<(Arc<Vec<MySqlColumn>>, Arc<BTreeMap<String, usize>>), MySqlError> {
+        let mut columns = Vec::with_capacity(column_count);
+        let mut indices = BTreeMap::new();
+
+        for i in 0..column_count {
+            let (data, seq) = self.read_packet().await?;
+            self.inner.sequence = seq.wrapping_add(1);
+
+            let column = Self::parse_column_definition(&data)?;
+            indices.entry(column.name.clone()).or_insert(i);
+            columns.push(column);
+        }
+
+        // In CLIENT_DEPRECATE_EOF mode, there is no metadata terminator after
+        // column definitions; rows start immediately and the final terminator
+        // is an OK packet. Without DEPRECATE_EOF we still expect EOF here.
+        if Self::expects_metadata_eof(self.inner.capabilities) {
+            let (data, seq) = self.read_packet().await?;
+            self.inner.sequence = seq.wrapping_add(1);
+            if !Self::is_eof_packet(&data) {
+                return Err(MySqlError::Protocol(
+                    "expected EOF after columns".to_string(),
+                ));
+            }
+            self.inner.status_flags = Self::parse_eof_packet_status_flags(&data)?;
+        }
+
+        Ok((Arc::new(columns), Arc::new(indices)))
+    }
+
+    fn parse_column_definition(data: &[u8]) -> Result<MySqlColumn, MySqlError> {
+        let mut reader = PacketReader::new(data);
+
+        let catalog = reader.read_lenenc_str()?.to_string();
+        let schema = reader.read_lenenc_str()?.to_string();
+        let table = reader.read_lenenc_str()?.to_string();
+        let org_table = reader.read_lenenc_str()?.to_string();
+        let name = reader.read_lenenc_str()?.to_string();
+        let org_name = reader.read_lenenc_str()?.to_string();
+
+        // Fixed fields (0x0C length indicator)
+        let _ = reader.read_lenenc_int()?;
+        let charset = reader.read_u16_le()?;
+        let length = reader.read_u32_le()?;
+        let column_type = reader.read_byte()?;
+        let flags = reader.read_u16_le()?;
+        let decimals = reader.read_byte()?;
+
+        Ok(MySqlColumn {
+            catalog,
+            schema,
+            table,
+            org_table,
+            name,
+            org_name,
+            charset,
+            length,
+            column_type,
+            flags,
+            decimals,
+        })
     }
 
     fn push_result_row(
@@ -1770,6 +1851,199 @@ impl MySqlConnection {
         }
 
         Ok(values)
+    }
+
+    fn parse_binary_row_or_terminator(
+        data: &[u8],
+        columns: &[MySqlColumn],
+        deprecate_eof: bool,
+    ) -> Result<Option<Vec<MySqlValue>>, MySqlError> {
+        if Self::is_eof_packet(data) {
+            return Ok(None);
+        }
+
+        if data.first() == Some(&0x00) {
+            return Self::parse_binary_row(data, columns).map(Some);
+        }
+
+        if deprecate_eof && data.first() == Some(&0xFE) && Self::is_deprecate_eof_ok_packet(data) {
+            return Ok(None);
+        }
+
+        Err(MySqlError::Protocol(
+            "unexpected binary result-set row packet".to_string(),
+        ))
+    }
+
+    fn parse_binary_row(
+        data: &[u8],
+        columns: &[MySqlColumn],
+    ) -> Result<Vec<MySqlValue>, MySqlError> {
+        let mut reader = PacketReader::new(data);
+        let header = reader.read_byte()?;
+        if header != 0x00 {
+            return Err(MySqlError::Protocol(
+                "binary row must start with 0x00".to_string(),
+            ));
+        }
+
+        let null_bitmap_len = (columns.len() + 7 + 2) / 8;
+        let null_bitmap = reader.read_bytes(null_bitmap_len)?;
+        let mut values = Vec::with_capacity(columns.len());
+
+        for (idx, col) in columns.iter().enumerate() {
+            let bit_idx = idx + 2;
+            if (null_bitmap[bit_idx / 8] & (1 << (bit_idx % 8))) != 0 {
+                values.push(MySqlValue::Null);
+                continue;
+            }
+
+            values.push(Self::parse_binary_value(&mut reader, col)?);
+        }
+
+        if reader.remaining() != 0 {
+            return Err(MySqlError::Protocol(format!(
+                "binary row packet has {} trailing bytes",
+                reader.remaining()
+            )));
+        }
+
+        Ok(values)
+    }
+
+    fn parse_binary_value(
+        reader: &mut PacketReader<'_>,
+        col: &MySqlColumn,
+    ) -> Result<MySqlValue, MySqlError> {
+        Ok(match col.column_type {
+            column_type::MYSQL_TYPE_TINY => {
+                MySqlValue::Tiny(i8::from_le_bytes([reader.read_byte()?]))
+            }
+            column_type::MYSQL_TYPE_SHORT | column_type::MYSQL_TYPE_YEAR => {
+                MySqlValue::Short(i16::from_le_bytes(reader.read_u16_le()?.to_le_bytes()))
+            }
+            column_type::MYSQL_TYPE_LONG | column_type::MYSQL_TYPE_INT24 => {
+                MySqlValue::Long(i32::from_le_bytes(reader.read_u32_le()?.to_le_bytes()))
+            }
+            column_type::MYSQL_TYPE_LONGLONG => {
+                MySqlValue::LongLong(i64::from_le_bytes(reader.read_u64_le()?.to_le_bytes()))
+            }
+            column_type::MYSQL_TYPE_FLOAT => {
+                MySqlValue::Float(f32::from_bits(reader.read_u32_le()?))
+            }
+            column_type::MYSQL_TYPE_DOUBLE => {
+                MySqlValue::Double(f64::from_bits(reader.read_u64_le()?))
+            }
+            column_type::MYSQL_TYPE_DATE
+            | column_type::MYSQL_TYPE_DATETIME
+            | column_type::MYSQL_TYPE_TIMESTAMP => {
+                Self::parse_binary_datetime_value(reader, col.column_type)?
+            }
+            column_type::MYSQL_TYPE_TIME => Self::parse_binary_time_value(reader)?,
+            column_type::MYSQL_TYPE_NULL => MySqlValue::Null,
+            column_type::MYSQL_TYPE_VARCHAR
+            | column_type::MYSQL_TYPE_VAR_STRING
+            | column_type::MYSQL_TYPE_STRING
+            | column_type::MYSQL_TYPE_TINY_BLOB
+            | column_type::MYSQL_TYPE_MEDIUM_BLOB
+            | column_type::MYSQL_TYPE_LONG_BLOB
+            | column_type::MYSQL_TYPE_BLOB => Self::parse_binary_string_value(reader, col)?,
+            column_type::MYSQL_TYPE_GEOMETRY | column_type::MYSQL_TYPE_BIT => {
+                MySqlValue::Bytes(reader.read_lenenc_bytes()?.to_vec())
+            }
+            _ => {
+                let raw = reader.read_lenenc_bytes()?;
+                match std::str::from_utf8(raw) {
+                    Ok(s) => MySqlValue::Text(s.to_string()),
+                    Err(_) => MySqlValue::Bytes(raw.to_vec()),
+                }
+            }
+        })
+    }
+
+    fn parse_binary_string_value(
+        reader: &mut PacketReader<'_>,
+        col: &MySqlColumn,
+    ) -> Result<MySqlValue, MySqlError> {
+        let raw = reader.read_lenenc_bytes()?;
+        Self::parse_string_or_bytes_value(raw, col)
+    }
+
+    fn parse_binary_datetime_value(
+        reader: &mut PacketReader<'_>,
+        column_type: u8,
+    ) -> Result<MySqlValue, MySqlError> {
+        let len = usize::from(reader.read_byte()?);
+        let data = reader.read_bytes(len)?;
+        let mut value_reader = PacketReader::new(data);
+
+        if len == 0 {
+            return Ok(if column_type == column_type::MYSQL_TYPE_DATE {
+                MySqlValue::Text("0000-00-00".to_string())
+            } else {
+                MySqlValue::Text("0000-00-00 00:00:00".to_string())
+            });
+        }
+
+        if len != 4 && len != 7 && len != 11 {
+            return Err(MySqlError::Protocol(format!(
+                "invalid binary datetime length {len}"
+            )));
+        }
+
+        let year = value_reader.read_u16_le()?;
+        let month = value_reader.read_byte()?;
+        let day = value_reader.read_byte()?;
+        if column_type == column_type::MYSQL_TYPE_DATE || len == 4 {
+            return Ok(MySqlValue::Text(format!("{year:04}-{month:02}-{day:02}")));
+        }
+
+        let hour = value_reader.read_byte()?;
+        let minute = value_reader.read_byte()?;
+        let second = value_reader.read_byte()?;
+        if len == 7 {
+            return Ok(MySqlValue::Text(format!(
+                "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
+            )));
+        }
+
+        let micros = value_reader.read_u32_le()?;
+        Ok(MySqlValue::Text(format!(
+            "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{micros:06}"
+        )))
+    }
+
+    fn parse_binary_time_value(reader: &mut PacketReader<'_>) -> Result<MySqlValue, MySqlError> {
+        let len = usize::from(reader.read_byte()?);
+        let data = reader.read_bytes(len)?;
+        let mut value_reader = PacketReader::new(data);
+
+        if len == 0 {
+            return Ok(MySqlValue::Text("00:00:00".to_string()));
+        }
+
+        if len != 8 && len != 12 {
+            return Err(MySqlError::Protocol(format!(
+                "invalid binary time length {len}"
+            )));
+        }
+
+        let negative = value_reader.read_byte()? != 0;
+        let days = value_reader.read_u32_le()?;
+        let hour = value_reader.read_byte()?;
+        let minute = value_reader.read_byte()?;
+        let second = value_reader.read_byte()?;
+        let sign = if negative { "-" } else { "" };
+        if len == 8 {
+            return Ok(MySqlValue::Text(format!(
+                "{sign}{days} {hour:02}:{minute:02}:{second:02}"
+            )));
+        }
+
+        let micros = value_reader.read_u32_le()?;
+        Ok(MySqlValue::Text(format!(
+            "{sign}{days} {hour:02}:{minute:02}:{second:02}.{micros:06}"
+        )))
     }
 
     #[inline]
@@ -1902,38 +2176,78 @@ impl MySqlConnection {
 
     /// Parse a text format value.
     fn parse_text_value(data: &[u8], col: &MySqlColumn) -> Result<MySqlValue, MySqlError> {
-        let s = std::str::from_utf8(data)
-            .map_err(|e| MySqlError::Protocol(format!("invalid UTF-8: {e}")))?;
+        let text = match Self::parse_string_or_bytes_value(data, col)? {
+            MySqlValue::Bytes(bytes) => return Ok(MySqlValue::Bytes(bytes)),
+            MySqlValue::Text(text) => text,
+            value => {
+                return Err(MySqlError::Protocol(format!(
+                    "unexpected string parser value: {value:?}"
+                )));
+            }
+        };
 
-        let parse_err =
-            |typ: &str| MySqlError::Protocol(format!("cannot parse {typ} from text value: {s:?}"));
+        let parse_err = |typ: &str| {
+            MySqlError::Protocol(format!("cannot parse {typ} from text value: {text:?}"))
+        };
         Ok(match col.column_type {
             column_type::MYSQL_TYPE_TINY => {
-                MySqlValue::Tiny(s.parse().map_err(|_| parse_err("TINY"))?)
+                MySqlValue::Tiny(text.parse().map_err(|_| parse_err("TINY"))?)
             }
             column_type::MYSQL_TYPE_SHORT | column_type::MYSQL_TYPE_YEAR => {
-                MySqlValue::Short(s.parse().map_err(|_| parse_err("SHORT"))?)
+                MySqlValue::Short(text.parse().map_err(|_| parse_err("SHORT"))?)
             }
             column_type::MYSQL_TYPE_LONG | column_type::MYSQL_TYPE_INT24 => {
-                MySqlValue::Long(s.parse().map_err(|_| parse_err("LONG"))?)
+                MySqlValue::Long(text.parse().map_err(|_| parse_err("LONG"))?)
             }
             column_type::MYSQL_TYPE_LONGLONG => {
-                MySqlValue::LongLong(s.parse().map_err(|_| parse_err("LONGLONG"))?)
+                MySqlValue::LongLong(text.parse().map_err(|_| parse_err("LONGLONG"))?)
             }
             column_type::MYSQL_TYPE_FLOAT => {
-                MySqlValue::Float(s.parse().map_err(|_| parse_err("FLOAT"))?)
+                MySqlValue::Float(text.parse().map_err(|_| parse_err("FLOAT"))?)
             }
             column_type::MYSQL_TYPE_DOUBLE
             | column_type::MYSQL_TYPE_DECIMAL
             | column_type::MYSQL_TYPE_NEWDECIMAL => {
-                MySqlValue::Double(s.parse().map_err(|_| parse_err("DOUBLE"))?)
+                MySqlValue::Double(text.parse().map_err(|_| parse_err("DOUBLE"))?)
             }
-            column_type::MYSQL_TYPE_TINY_BLOB
-            | column_type::MYSQL_TYPE_MEDIUM_BLOB
-            | column_type::MYSQL_TYPE_LONG_BLOB
-            | column_type::MYSQL_TYPE_BLOB => MySqlValue::Bytes(data.to_vec()),
-            _ => MySqlValue::Text(s.to_string()),
+            _ => MySqlValue::Text(text),
         })
+    }
+
+    fn parse_string_or_bytes_value(
+        data: &[u8],
+        col: &MySqlColumn,
+    ) -> Result<MySqlValue, MySqlError> {
+        if Self::is_binary_payload_column(col) {
+            return Ok(MySqlValue::Bytes(data.to_vec()));
+        }
+
+        let text = std::str::from_utf8(data)
+            .map_err(|e| MySqlError::Protocol(format!("invalid UTF-8: {e}")))?;
+        Ok(MySqlValue::Text(text.to_string()))
+    }
+
+    #[inline]
+    fn is_binary_payload_column(col: &MySqlColumn) -> bool {
+        matches!(
+            col.column_type,
+            column_type::MYSQL_TYPE_GEOMETRY | column_type::MYSQL_TYPE_BIT
+        ) || (col.charset == MYSQL_BINARY_CHARSET_ID
+            && Self::is_string_like_column_type(col.column_type))
+    }
+
+    #[inline]
+    const fn is_string_like_column_type(column_type: u8) -> bool {
+        matches!(
+            column_type,
+            column_type::MYSQL_TYPE_VARCHAR
+                | column_type::MYSQL_TYPE_VAR_STRING
+                | column_type::MYSQL_TYPE_STRING
+                | column_type::MYSQL_TYPE_TINY_BLOB
+                | column_type::MYSQL_TYPE_MEDIUM_BLOB
+                | column_type::MYSQL_TYPE_LONG_BLOB
+                | column_type::MYSQL_TYPE_BLOB
+        )
     }
 
     /// Execute a command (INSERT, UPDATE, DELETE) and return affected rows.
@@ -2163,6 +2477,7 @@ impl MySqlConnection {
         if let Err(e) = self.write_all(&packet.bytes).await {
             return outcome_from_error(e);
         }
+        self.inner.sequence = packet.next_sequence;
 
         // Read prepare response
         let (response_data, seq) = match self.read_packet().await {
@@ -2172,41 +2487,50 @@ impl MySqlConnection {
         self.inner.sequence = seq.wrapping_add(1);
 
         if response_data.is_empty() {
-            self.inner.closed = false;
             return Outcome::Err(MySqlError::InvalidPacket("Empty prepare response".into()));
         }
 
         // Check for error response
         if response_data[0] == 0xff {
-            self.inner.closed = false;
-            return Outcome::Err(self.parse_error_packet(&response_data));
+            let err = Self::parse_error(&response_data);
+            if matches!(&err, MySqlError::Server { .. }) {
+                self.inner.closed = false;
+            }
+            return Outcome::Err(err);
         }
 
         // Parse prepare OK response
         if response_data[0] != 0x00 {
-            self.inner.closed = false;
             return Outcome::Err(MySqlError::InvalidPacket("Invalid prepare response".into()));
         }
 
-        if response_data.len() < 13 {
-            self.inner.closed = false;
+        if response_data.len() < 12 {
             return Outcome::Err(MySqlError::InvalidPacket(
                 "Prepare response too short".into(),
             ));
         }
 
-        let mut reader = PacketReader::new(&response_data[1..]);
-        let statement_id = reader.read_u32_le();
-        let column_count = reader.read_u16_le();
-        let param_count = reader.read_u16_le();
-        let _reserved = reader.read_u8(); // Should be 0x00
-        let _warning_count = reader.read_u16_le();
+        let parsed_header = (|| {
+            let mut reader = PacketReader::new(&response_data[1..]);
+            let statement_id = reader.read_u32_le()?;
+            let column_count = reader.read_u16_le()?;
+            let param_count = reader.read_u16_le()?;
+            let _reserved = reader.read_byte()?; // Should be 0x00
+            let _warning_count = reader.read_u16_le()?;
+            Ok((statement_id, column_count, param_count))
+        })();
+        let (statement_id, column_count, param_count) = match parsed_header {
+            Ok(header) => header,
+            Err(e) => {
+                return outcome_from_error(e);
+            }
+        };
 
         // Read parameter metadata if any
         let mut params = Vec::new();
         if param_count > 0 {
             for _ in 0..param_count {
-                let (param_data, seq) = match self.read_packet().await {
+                let (_param_data, seq) = match self.read_packet().await {
                     Ok((data, seq)) => (data, seq),
                     Err(e) => return outcome_from_error(e),
                 };
@@ -2217,7 +2541,7 @@ impl MySqlConnection {
             }
 
             // Read EOF packet after parameters
-            let (eof_data, seq) = match self.read_packet().await {
+            let (_eof_data, seq) = match self.read_packet().await {
                 Ok((data, seq)) => (data, seq),
                 Err(e) => return outcome_from_error(e),
             };
@@ -2228,7 +2552,7 @@ impl MySqlConnection {
         let mut columns = Vec::new();
         if column_count > 0 {
             for _ in 0..column_count {
-                let (col_data, seq) = match self.read_packet().await {
+                let (_col_data, seq) = match self.read_packet().await {
                     Ok((data, seq)) => (data, seq),
                     Err(e) => return outcome_from_error(e),
                 };
@@ -2239,7 +2563,7 @@ impl MySqlConnection {
             }
 
             // Read EOF packet after columns
-            let (eof_data, seq) = match self.read_packet().await {
+            let (_eof_data, seq) = match self.read_packet().await {
                 Ok((data, seq)) => (data, seq),
                 Err(e) => return outcome_from_error(e),
             };
@@ -2297,29 +2621,8 @@ impl MySqlConnection {
         buf.write_byte(0x00); // flags
         buf.write_u32_le(1); // iteration count
 
-        // Null bitmap
-        if stmt.param_count > 0 {
-            let null_bitmap_len = (stmt.param_count + 7) / 8;
-            for _ in 0..null_bitmap_len {
-                buf.write_byte(0x00);
-            }
-
-            // Send new parameter types flag
-            buf.write_byte(0x01);
-
-            // Parameter types
-            for param in params {
-                buf.write_u16_le(param.mysql_type_code() as u16);
-            }
-
-            // Parameter values
-            for param in params {
-                let data = match param.to_sql() {
-                    Ok(data) => data,
-                    Err(e) => return outcome_from_error(e),
-                };
-                buf.write_bytes(&data);
-            }
+        if let Err(e) = write_stmt_execute_params(&mut buf, params) {
+            return outcome_from_error(e);
         }
 
         let packet = buf.build_packet();
@@ -2330,18 +2633,48 @@ impl MySqlConnection {
         if let Err(e) = self.write_all(&packet.bytes).await {
             return outcome_from_error(e);
         }
+        self.inner.sequence = packet.next_sequence;
 
-        // Read and parse the result set
-        match self.read_result_set().await {
-            Ok((rows, status_flags)) => {
-                self.inner.status_flags = status_flags;
-                self.inner.closed = false;
-                Outcome::Ok(rows)
+        // Read response
+        let (response_data, seq) = match self.read_packet().await {
+            Ok((data, seq)) => (data, seq),
+            Err(e) => return outcome_from_error(e),
+        };
+        self.inner.sequence = seq.wrapping_add(1);
+
+        if response_data.is_empty() {
+            return Outcome::Err(MySqlError::InvalidPacket(
+                "Empty prepared query response".into(),
+            ));
+        }
+
+        match response_data[0] {
+            0x00 => match Self::parse_ok_packet(&response_data) {
+                Ok(ok_packet) => {
+                    self.inner.status_flags = ok_packet.status_flags;
+                    self.inner.closed = false;
+                    Outcome::Ok(Vec::new())
+                }
+                Err(e) => {
+                    self.inner.closed = false;
+                    outcome_from_error(e)
+                }
+            },
+            0xFF => {
+                let err = Self::parse_error(&response_data);
+                if matches!(&err, MySqlError::Server { .. }) {
+                    self.inner.closed = false;
+                }
+                Outcome::Err(err)
             }
-            Err(e) => {
-                self.inner.closed = false;
-                Outcome::Err(e)
-            }
+            _ => match self.read_binary_result_set(cx, &response_data).await {
+                Ok(rows) => {
+                    self.inner.closed = false;
+                    Outcome::Ok(rows)
+                }
+                Err(MySqlError::Cancelled(reason)) => Outcome::Cancelled(reason),
+                Err(e) => outcome_from_error(e),
+            },
         }
     }
 
@@ -2383,29 +2716,8 @@ impl MySqlConnection {
         buf.write_byte(0x00); // flags
         buf.write_u32_le(1); // iteration count
 
-        // Null bitmap
-        if stmt.param_count > 0 {
-            let null_bitmap_len = (stmt.param_count + 7) / 8;
-            for _ in 0..null_bitmap_len {
-                buf.write_byte(0x00);
-            }
-
-            // Send new parameter types flag
-            buf.write_byte(0x01);
-
-            // Parameter types
-            for param in params {
-                buf.write_u16_le(param.mysql_type_code() as u16);
-            }
-
-            // Parameter values
-            for param in params {
-                let data = match param.to_sql() {
-                    Ok(data) => data,
-                    Err(e) => return outcome_from_error(e),
-                };
-                buf.write_bytes(&data);
-            }
+        if let Err(e) = write_stmt_execute_params(&mut buf, params) {
+            return outcome_from_error(e);
         }
 
         let packet = buf.build_packet();
@@ -2416,6 +2728,7 @@ impl MySqlConnection {
         if let Err(e) = self.write_all(&packet.bytes).await {
             return outcome_from_error(e);
         }
+        self.inner.sequence = packet.next_sequence;
 
         // Read response
         let (response_data, seq) = match self.read_packet().await {
@@ -2425,19 +2738,21 @@ impl MySqlConnection {
         self.inner.sequence = seq.wrapping_add(1);
 
         if response_data.is_empty() {
-            self.inner.closed = false;
             return Outcome::Err(MySqlError::InvalidPacket("Empty execute response".into()));
         }
 
         // Check for error response
         if response_data[0] == 0xff {
-            self.inner.closed = false;
-            return Outcome::Err(self.parse_error_packet(&response_data));
+            let err = Self::parse_error(&response_data);
+            if matches!(&err, MySqlError::Server { .. }) {
+                self.inner.closed = false;
+            }
+            return Outcome::Err(err);
         }
 
         // Parse OK packet
         if response_data[0] == 0x00 {
-            let ok_packet = match self.parse_ok_packet(&response_data) {
+            let ok_packet = match Self::parse_ok_packet(&response_data) {
                 Ok(packet) => packet,
                 Err(e) => {
                     self.inner.closed = false;
@@ -2449,7 +2764,6 @@ impl MySqlConnection {
             return Outcome::Ok(ok_packet.affected_rows);
         }
 
-        self.inner.closed = false;
         Outcome::Err(MySqlError::InvalidPacket(
             "Unexpected execute response".into(),
         ))
@@ -2681,11 +2995,17 @@ pub trait ToSql: Sync {
 
     /// The MySQL type code for this value.
     fn mysql_type_code(&self) -> u8;
+
+    /// Whether this parameter is SQL NULL and must be represented in the
+    /// COM_STMT_EXECUTE NULL bitmap instead of the value stream.
+    fn is_null(&self) -> bool {
+        false
+    }
 }
 
 impl ToSql for bool {
     fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
-        Ok(vec![if *self { 1 } else { 0 }])
+        Ok(vec![u8::from(*self)])
     }
 
     fn mysql_type_code(&self) -> u8 {
@@ -2735,7 +3055,7 @@ impl ToSql for f64 {
 
 impl ToSql for str {
     fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
-        Ok(self.as_bytes().to_vec())
+        Ok(encode_lenenc_bytes(self.as_bytes()))
     }
 
     fn mysql_type_code(&self) -> u8 {
@@ -2755,7 +3075,7 @@ impl ToSql for String {
 
 impl ToSql for [u8] {
     fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
-        Ok(self.to_vec())
+        Ok(encode_lenenc_bytes(self))
     }
 
     fn mysql_type_code(&self) -> u8 {
@@ -2765,7 +3085,7 @@ impl ToSql for [u8] {
 
 impl ToSql for Vec<u8> {
     fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
-        Ok(self.clone())
+        self.as_slice().to_sql()
     }
 
     fn mysql_type_code(&self) -> u8 {
@@ -2787,6 +3107,10 @@ impl<T: ToSql> ToSql for Option<T> {
             None => mysql_type::MYSQL_TYPE_NULL,
         }
     }
+
+    fn is_null(&self) -> bool {
+        self.is_none()
+    }
 }
 
 impl<T: ToSql + ?Sized> ToSql for &T {
@@ -2797,6 +3121,49 @@ impl<T: ToSql + ?Sized> ToSql for &T {
     fn mysql_type_code(&self) -> u8 {
         (*self).mysql_type_code()
     }
+
+    fn is_null(&self) -> bool {
+        (*self).is_null()
+    }
+}
+
+fn write_stmt_execute_params(
+    buf: &mut PacketBuffer,
+    params: &[&dyn ToSql],
+) -> Result<(), MySqlError> {
+    if params.is_empty() {
+        return Ok(());
+    }
+
+    let mut null_bitmap = vec![0; params.len().div_ceil(8)];
+    for (idx, param) in params.iter().enumerate() {
+        if param.is_null() {
+            null_bitmap[idx / 8] |= 1 << (idx % 8);
+        }
+    }
+    buf.write_bytes(&null_bitmap);
+
+    // Always send fresh parameter type metadata with the execute packet.
+    buf.write_byte(0x01);
+    for param in params {
+        buf.write_u16_le(u16::from(param.mysql_type_code()));
+    }
+
+    for param in params {
+        if param.is_null() {
+            continue;
+        }
+        buf.write_bytes(&param.to_sql()?);
+    }
+
+    Ok(())
+}
+
+fn encode_lenenc_bytes(data: &[u8]) -> Vec<u8> {
+    let mut buf = PacketBuffer::new();
+    buf.write_lenenc_int(u64::try_from(data.len()).unwrap_or(u64::MAX));
+    buf.write_bytes(data);
+    buf.buf
 }
 
 /// MySQL type codes for protocol.
@@ -2836,6 +3203,18 @@ impl MySqlStatement {
     #[must_use]
     pub fn column_count(&self) -> u16 {
         self.column_count
+    }
+
+    /// Parameter metadata returned by the server.
+    #[must_use]
+    pub fn params(&self) -> &[MySqlColumn] {
+        &self.params
+    }
+
+    /// Result column metadata returned by the server.
+    #[must_use]
+    pub fn columns(&self) -> &[MySqlColumn] {
+        &self.columns
     }
 }
 
@@ -2982,6 +3361,18 @@ mod tests {
         }
     }
 
+    fn test_column_with_type_and_charset(
+        name: &str,
+        column_type_code: u8,
+        charset: u16,
+    ) -> MySqlColumn {
+        MySqlColumn {
+            column_type: column_type_code,
+            charset,
+            ..test_var_string_column(name)
+        }
+    }
+
     fn ok_packet_payload(affected_rows: u64, status_flags: u16) -> Vec<u8> {
         let mut buf = PacketBuffer::new();
         buf.write_byte(0x00);
@@ -3013,6 +3404,10 @@ mod tests {
     }
 
     fn column_definition_payload(name: &str) -> Vec<u8> {
+        column_definition_payload_with_type(name, column_type::MYSQL_TYPE_VAR_STRING)
+    }
+
+    fn column_definition_payload_with_type(name: &str, column_type_code: u8) -> Vec<u8> {
         let mut buf = PacketBuffer::new();
         buf.write_lenenc_int(3);
         buf.write_bytes(b"def");
@@ -3026,7 +3421,7 @@ mod tests {
         buf.write_lenenc_int(0x0C);
         buf.buf.extend_from_slice(&33u16.to_le_bytes());
         buf.write_u32_le(255);
-        buf.write_byte(column_type::MYSQL_TYPE_VAR_STRING);
+        buf.write_byte(column_type_code);
         buf.buf.extend_from_slice(&0u16.to_le_bytes());
         buf.write_byte(0);
         buf.buf
@@ -3050,7 +3445,6 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
-                next_stmt_id: 1,
             },
         }
     }
@@ -3106,7 +3500,6 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
-                next_stmt_id: 1,
             },
         };
 
@@ -3409,6 +3802,141 @@ mod tests {
     }
 
     #[test]
+    fn stmt_execute_params_marks_nulls_and_omits_null_values() {
+        let null_i32: Option<i32> = None;
+        let some_i32 = Some(7_i32);
+        let text = "ok".to_string();
+        let mut buf = PacketBuffer::new();
+
+        write_stmt_execute_params(&mut buf, &[&null_i32, &some_i32, &text])
+            .expect("encode statement parameters");
+
+        assert_eq!(buf.buf[0], 0b0000_0001, "first parameter is NULL");
+        assert_eq!(buf.buf[1], 0x01, "new-params-bound flag must be set");
+        assert_eq!(
+            &buf.buf[2..8],
+            &[
+                mysql_type::MYSQL_TYPE_NULL,
+                0,
+                mysql_type::MYSQL_TYPE_LONG,
+                0,
+                mysql_type::MYSQL_TYPE_VAR_STRING,
+                0
+            ]
+        );
+        assert_eq!(&buf.buf[8..12], &7_i32.to_le_bytes());
+        assert_eq!(&buf.buf[12..], &[2, b'o', b'k']);
+    }
+
+    #[test]
+    fn stmt_execute_params_uses_lsb_first_null_bitmap_across_bytes() {
+        let params = [
+            None,
+            Some(1_i32),
+            None,
+            Some(2_i32),
+            Some(3_i32),
+            Some(4_i32),
+            Some(5_i32),
+            Some(6_i32),
+            None,
+        ];
+        let param_refs: Vec<&dyn ToSql> = params.iter().map(|param| param as &dyn ToSql).collect();
+        let mut buf = PacketBuffer::new();
+
+        write_stmt_execute_params(&mut buf, &param_refs).expect("encode statement parameters");
+
+        assert_eq!(&buf.buf[..2], &[0b0000_0101, 0b0000_0001]);
+    }
+
+    #[test]
+    fn stmt_execute_params_length_prefixes_variable_values() {
+        let short = "abc".to_string();
+        let long = vec![b'x'; 300];
+        let mut buf = PacketBuffer::new();
+
+        write_stmt_execute_params(&mut buf, &[&short, &long]).expect("encode statement parameters");
+
+        assert_eq!(buf.buf[0], 0, "no NULL parameters");
+        assert_eq!(buf.buf[1], 0x01, "new-params-bound flag must be set");
+        assert_eq!(
+            &buf.buf[2..6],
+            &[
+                mysql_type::MYSQL_TYPE_VAR_STRING,
+                0,
+                mysql_type::MYSQL_TYPE_BLOB,
+                0
+            ]
+        );
+        assert_eq!(&buf.buf[6..10], &[3, b'a', b'b', b'c']);
+        assert_eq!(
+            &buf.buf[10..13],
+            &[0xFC, 0x2C, 0x01],
+            "300-byte value must use 0xFC length encoding"
+        );
+        assert_eq!(&buf.buf[13..], long.as_slice());
+    }
+
+    #[test]
+    fn binary_row_parser_uses_mysql_binary_row_format() {
+        let columns = vec![
+            MySqlColumn {
+                column_type: column_type::MYSQL_TYPE_LONG,
+                ..test_var_string_column("id")
+            },
+            test_var_string_column("name"),
+            MySqlColumn {
+                column_type: column_type::MYSQL_TYPE_LONG,
+                ..test_var_string_column("missing")
+            },
+        ];
+        let mut row = vec![0x00, 0b0001_0000];
+        row.extend_from_slice(&123_i32.to_le_bytes());
+        row.push(3);
+        row.extend_from_slice(b"bob");
+
+        let values = MySqlConnection::parse_binary_row(&row, &columns).expect("parse binary row");
+
+        assert_eq!(
+            values,
+            vec![
+                MySqlValue::Long(123),
+                MySqlValue::Text("bob".to_string()),
+                MySqlValue::Null
+            ]
+        );
+    }
+
+    #[test]
+    fn binary_row_parser_decodes_nonbinary_blob_as_text() {
+        let columns = vec![test_column_with_type_and_charset(
+            "payload",
+            column_type::MYSQL_TYPE_BLOB,
+            33,
+        )];
+        let mut row = vec![0x00, 0x00, 5];
+        row.extend_from_slice(b"hello");
+
+        let values = MySqlConnection::parse_binary_row(&row, &columns).expect("parse binary row");
+
+        assert_eq!(values, vec![MySqlValue::Text("hello".to_string())]);
+    }
+
+    #[test]
+    fn binary_row_parser_preserves_binary_var_string_bytes() {
+        let columns = vec![test_column_with_type_and_charset(
+            "payload",
+            column_type::MYSQL_TYPE_VAR_STRING,
+            MYSQL_BINARY_CHARSET_ID,
+        )];
+        let row = [0x00, 0x00, 3, 0xFF, 0x00, 0xFE];
+
+        let values = MySqlConnection::parse_binary_row(&row, &columns).expect("parse binary row");
+
+        assert_eq!(values, vec![MySqlValue::Bytes(vec![0xFF, 0x00, 0xFE])]);
+    }
+
+    #[test]
     fn test_packet_buffer_large_payload() {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
@@ -3497,6 +4025,59 @@ mod tests {
 
         let err = MySqlConnection::parse_text_row(&[0x00, 0x00], &columns).unwrap_err();
         assert!(matches!(err, MySqlError::Protocol(_)));
+    }
+
+    #[test]
+    fn test_parse_text_row_preserves_invalid_utf8_blob_bytes() {
+        let columns = vec![test_column_with_type_and_charset(
+            "payload",
+            column_type::MYSQL_TYPE_BLOB,
+            MYSQL_BINARY_CHARSET_ID,
+        )];
+        let row = [3, 0xFF, 0x00, 0xFE];
+
+        let values = MySqlConnection::parse_text_row(&row, &columns).expect("parse BLOB row");
+
+        assert_eq!(values, vec![MySqlValue::Bytes(vec![0xFF, 0x00, 0xFE])]);
+    }
+
+    #[test]
+    fn test_parse_text_row_decodes_nonbinary_blob_as_text() {
+        let columns = vec![test_column_with_type_and_charset(
+            "payload",
+            column_type::MYSQL_TYPE_BLOB,
+            33,
+        )];
+        let row = [5, b'h', b'e', b'l', b'l', b'o'];
+
+        let values = MySqlConnection::parse_text_row(&row, &columns).expect("parse TEXT row");
+
+        assert_eq!(values, vec![MySqlValue::Text("hello".to_string())]);
+    }
+
+    #[test]
+    fn test_parse_text_row_preserves_binary_var_string_bytes() {
+        let columns = vec![test_column_with_type_and_charset(
+            "payload",
+            column_type::MYSQL_TYPE_VAR_STRING,
+            MYSQL_BINARY_CHARSET_ID,
+        )];
+        let row = [3, 0xFF, 0x00, 0xFE];
+
+        let values =
+            MySqlConnection::parse_text_row(&row, &columns).expect("parse binary VAR_STRING row");
+
+        assert_eq!(values, vec![MySqlValue::Bytes(vec![0xFF, 0x00, 0xFE])]);
+    }
+
+    #[test]
+    fn test_parse_text_row_rejects_invalid_utf8_text() {
+        let columns = vec![test_var_string_column("payload")];
+        let row = [3, 0xFF, 0x00, 0xFE];
+
+        let err = MySqlConnection::parse_text_row(&row, &columns).unwrap_err();
+
+        assert!(matches!(err, MySqlError::Protocol(msg) if msg.contains("invalid UTF-8")));
     }
 
     #[test]
@@ -3837,7 +4418,6 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
-                next_stmt_id: 1,
             },
         };
         let cx = Cx::for_testing();
@@ -3913,7 +4493,6 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
-                next_stmt_id: 1,
             },
         };
         let cx = Cx::for_testing();
@@ -3986,7 +4565,6 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
-                next_stmt_id: 1,
             },
         };
         let cx = Cx::for_testing();
@@ -4031,6 +4609,325 @@ mod tests {
         assert!(
             conn.inner.closed,
             "dropping a query mid-result-set must keep the connection fail-closed"
+        );
+    }
+
+    #[test]
+    fn prepare_accepts_minimal_ok_packet() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let mut header = [0u8; 4];
+            stream.read_exact(&mut header).expect("read prepare header");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0u8; payload_len];
+            stream
+                .read_exact(&mut payload)
+                .expect("read prepare payload");
+            assert_eq!(payload[0], command::COM_STMT_PREPARE);
+
+            let mut response = PacketBuffer::new();
+            response.write_byte(0x00);
+            response.write_u32_le(99);
+            response.write_u16_le(0);
+            response.write_u16_le(0);
+            response.write_byte(0x00);
+            response.write_u16_le(0);
+
+            let mut packet = PacketBuffer::new();
+            packet.set_sequence(1);
+            packet.buf = response.buf;
+            let packet = packet.build_packet();
+            stream
+                .write_all(&packet.bytes)
+                .expect("write prepare OK response");
+            stream.flush().expect("flush prepare OK response");
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+            },
+        };
+        let cx = Cx::for_testing();
+
+        let outcome = run(conn.prepare(&cx, "SELECT 1"));
+        let stmt = match outcome {
+            Outcome::Ok(stmt) => stmt,
+            Outcome::Err(err) => panic!("expected prepare OK, got error: {err}"),
+            Outcome::Cancelled(reason) => panic!("expected prepare OK, got cancellation: {reason}"),
+            Outcome::Panicked(payload) => panic!("expected prepare OK, got panic: {payload:?}"),
+        };
+
+        server.join().expect("join server");
+        assert_eq!(stmt.statement_id, 99);
+        assert_eq!(stmt.param_count(), 0);
+        assert_eq!(stmt.column_count(), 0);
+        assert_eq!(conn.inner.sequence, 2);
+        assert!(!conn.inner.closed);
+    }
+
+    #[test]
+    fn empty_prepare_response_keeps_connection_closed() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let mut header = [0u8; 4];
+            stream.read_exact(&mut header).expect("read prepare header");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0u8; payload_len];
+            stream
+                .read_exact(&mut payload)
+                .expect("read prepare payload");
+            assert_eq!(payload[0], command::COM_STMT_PREPARE);
+
+            let mut packet = PacketBuffer::new();
+            packet.set_sequence(1);
+            let packet = packet.build_packet();
+            stream
+                .write_all(&packet.bytes)
+                .expect("write empty prepare response");
+            stream.flush().expect("flush empty prepare response");
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+            },
+        };
+        let cx = Cx::for_testing();
+
+        let outcome = run(conn.prepare(&cx, "SELECT 1"));
+        match outcome {
+            Outcome::Err(MySqlError::InvalidPacket(msg)) => {
+                assert!(msg.contains("Empty prepare response"));
+            }
+            Outcome::Err(err) => panic!("expected invalid packet error, got error: {err}"),
+            Outcome::Ok(_) => panic!("expected invalid packet error, got success"),
+            Outcome::Cancelled(reason) => {
+                panic!("expected invalid packet error, got cancellation: {reason}")
+            }
+            Outcome::Panicked(payload) => {
+                panic!("expected invalid packet error, got panic: {payload:?}")
+            }
+        }
+
+        server.join().expect("join server");
+        assert!(
+            conn.inner.closed,
+            "empty COM_STMT_PREPARE response must keep connection fail-closed"
+        );
+    }
+
+    #[test]
+    fn query_prepared_decodes_binary_result_rows() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let mut header = [0u8; 4];
+            stream.read_exact(&mut header).expect("read execute header");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0u8; payload_len];
+            stream
+                .read_exact(&mut payload)
+                .expect("read execute payload");
+            assert_eq!(payload[0], command::COM_STMT_EXECUTE);
+
+            let mut row = vec![0x00, 0x00];
+            row.extend_from_slice(&123_i32.to_le_bytes());
+
+            let responses = [
+                vec![0x01],
+                column_definition_payload_with_type("value", column_type::MYSQL_TYPE_LONG),
+                eof_packet_payload(0),
+                row,
+                eof_packet_payload(0),
+            ];
+
+            for (sequence, response) in responses.into_iter().enumerate() {
+                let mut packet = PacketBuffer::new();
+                packet.set_sequence((sequence + 1) as u8);
+                packet.buf = response;
+                let packet = packet.build_packet();
+                stream
+                    .write_all(&packet.bytes)
+                    .expect("write prepared result-set packet");
+            }
+            stream.flush().expect("flush prepared result-set packets");
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+            },
+        };
+        let stmt = MySqlStatement {
+            statement_id: 7,
+            param_count: 0,
+            column_count: 1,
+            params: Vec::new(),
+            columns: Vec::new(),
+        };
+        let cx = Cx::for_testing();
+
+        let outcome = run(conn.query_prepared(&cx, &stmt, &[]));
+        let rows = match outcome {
+            Outcome::Ok(rows) => rows,
+            Outcome::Err(err) => panic!("expected prepared rows, got error: {err}"),
+            Outcome::Cancelled(reason) => {
+                panic!("expected prepared rows, got cancellation: {reason}")
+            }
+            Outcome::Panicked(payload) => panic!("expected prepared rows, got panic: {payload:?}"),
+        };
+
+        server.join().expect("join server");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get_i32("value").expect("value column"), 123);
+        assert_eq!(conn.inner.sequence, 6);
+        assert!(!conn.inner.closed);
+    }
+
+    #[test]
+    fn empty_execute_prepared_response_keeps_connection_closed() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let mut header = [0u8; 4];
+            stream.read_exact(&mut header).expect("read execute header");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0u8; payload_len];
+            stream
+                .read_exact(&mut payload)
+                .expect("read execute payload");
+            assert_eq!(payload[0], command::COM_STMT_EXECUTE);
+
+            let mut packet = PacketBuffer::new();
+            packet.set_sequence(1);
+            let packet = packet.build_packet();
+            stream
+                .write_all(&packet.bytes)
+                .expect("write empty execute response");
+            stream.flush().expect("flush empty execute response");
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+            },
+        };
+        let stmt = MySqlStatement {
+            statement_id: 7,
+            param_count: 0,
+            column_count: 0,
+            params: Vec::new(),
+            columns: Vec::new(),
+        };
+        let cx = Cx::for_testing();
+
+        let outcome = run(conn.execute_prepared(&cx, &stmt, &[]));
+        match outcome {
+            Outcome::Err(MySqlError::InvalidPacket(msg)) => {
+                assert!(msg.contains("Empty execute response"));
+            }
+            other => panic!("expected invalid packet error, got {other:?}"),
+        }
+
+        server.join().expect("join server");
+        assert!(
+            conn.inner.closed,
+            "empty COM_STMT_EXECUTE response must keep connection fail-closed"
         );
     }
 

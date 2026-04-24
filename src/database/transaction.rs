@@ -610,7 +610,6 @@ mod mysql {
                     if let Err(reason) = wait_retry_delay(cx, delay).await {
                         return Outcome::Cancelled(reason);
                     }
-                    continue;
                 }
                 _ => return result,
             }
