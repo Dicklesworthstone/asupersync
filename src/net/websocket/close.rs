@@ -32,6 +32,9 @@ use super::{CloseCode, Frame, Opcode, WsError};
 use crate::bytes::Bytes;
 use std::time::Duration;
 
+const CLOSE_CODE_BYTES: usize = 2;
+const MAX_CLOSE_PAYLOAD_BYTES: usize = 125;
+
 /// Parsed close frame payload.
 ///
 /// A close frame may contain:
@@ -181,11 +184,19 @@ impl CloseReason {
     ///
     /// A parsed peer code may be valid to receive but forbidden to send
     /// (for example 1016-2999). In that case we downgrade to an empty close
-    /// frame instead of inventing a different status code.
+    /// frame instead of inventing a different status code. Overlong reason text
+    /// is dropped while preserving a sendable code, keeping this path panic-free.
     #[must_use]
     fn outbound_payload_parts(&self) -> (DropReasonText, Option<u16>, Option<&str>) {
         let code = self.outbound_wire_code();
-        let drop_text = (self.raw_code.is_some() || self.code.is_some()) && code.is_none();
+        let raw_text = self.text.as_deref();
+        let text = match (code, raw_text) {
+            (Some(_), Some(text)) if CLOSE_CODE_BYTES + text.len() <= MAX_CLOSE_PAYLOAD_BYTES => {
+                Some(text)
+            }
+            _ => None,
+        };
+        let drop_text = raw_text.is_some() && text.is_none();
         (
             if drop_text {
                 DropReasonText::Yes
@@ -193,7 +204,7 @@ impl CloseReason {
                 DropReasonText::No
             },
             code,
-            self.text.as_deref(),
+            text,
         )
     }
 
@@ -627,6 +638,32 @@ mod tests {
     }
 
     #[test]
+    fn close_reason_encode_keeps_max_length_text() {
+        let text = "a".repeat(MAX_CLOSE_PAYLOAD_BYTES - CLOSE_CODE_BYTES);
+        let reason = CloseReason::with_text(CloseCode::Normal, &text);
+
+        let encoded = reason.encode();
+        let frame = reason.to_frame();
+
+        assert_eq!(encoded.len(), MAX_CLOSE_PAYLOAD_BYTES);
+        assert_eq!(frame.payload.len(), MAX_CLOSE_PAYLOAD_BYTES);
+        assert_eq!(&encoded[..CLOSE_CODE_BYTES], &1000u16.to_be_bytes());
+        assert_eq!(&encoded[CLOSE_CODE_BYTES..], text.as_bytes());
+    }
+
+    #[test]
+    fn close_reason_encode_drops_overlong_text_without_panicking() {
+        let text = "a".repeat(MAX_CLOSE_PAYLOAD_BYTES - CLOSE_CODE_BYTES + 1);
+        let reason = CloseReason::with_text(CloseCode::Normal, &text);
+
+        let encoded = reason.encode();
+        let frame = reason.to_frame();
+
+        assert_eq!(encoded.as_ref(), &1000u16.to_be_bytes());
+        assert_eq!(frame.payload.as_ref(), &1000u16.to_be_bytes());
+    }
+
+    #[test]
     fn close_reason_roundtrip() {
         let original = CloseReason::with_text(CloseCode::Normal, "goodbye");
         let encoded = original.encode();
@@ -932,6 +969,20 @@ mod tests {
         assert_eq!(response.opcode, Opcode::Close);
         assert!(response.payload.is_empty());
         assert_eq!(handshake.state(), CloseState::CloseReceived);
+    }
+
+    #[test]
+    fn handshake_initiate_with_overlong_reason_does_not_panic() {
+        let mut handshake = CloseHandshake::new();
+        let text = "a".repeat(MAX_CLOSE_PAYLOAD_BYTES - CLOSE_CODE_BYTES + 1);
+
+        let frame = handshake
+            .initiate(CloseReason::with_text(CloseCode::Normal, &text))
+            .expect("open handshake should produce a close frame");
+
+        assert_eq!(frame.opcode, Opcode::Close);
+        assert_eq!(frame.payload.as_ref(), &1000u16.to_be_bytes());
+        assert_eq!(handshake.state(), CloseState::CloseSent);
     }
 
     #[test]
