@@ -1,0 +1,72 @@
+---
+source: tests/plan_golden.rs
+expression: output
+---
+--- BEFORE ---
+PlanDag {
+    nodes: [
+        Leaf {
+            label: "a",
+        },
+        Leaf {
+            label: "b",
+        },
+        Leaf {
+            label: "c",
+        },
+        Join {
+            children: [
+                PlanId([ID]),
+                PlanId([ID]),
+            ],
+        },
+        Join {
+            children: [
+                PlanId([ID]),
+                PlanId([ID]),
+            ],
+        },
+    ],
+    root: Some(
+        PlanId([ID]),
+    ),
+}
+--- REWRITE REPORT ---
+1. JoinAssoc: flattened nested join ([PLAN_ID] -> [PLAN_ID])
+
+--- AFTER ---
+PlanDag {
+    nodes: [
+        Leaf {
+            label: "a",
+        },
+        Leaf {
+            label: "b",
+        },
+        Leaf {
+            label: "c",
+        },
+        Join {
+            children: [
+                PlanId([ID]),
+                PlanId([ID]),
+            ],
+        },
+        Join {
+            children: [
+                PlanId([ID]),
+                PlanId([ID]),
+            ],
+        },
+        Join {
+            children: [
+                PlanId([ID]),
+                PlanId([ID]),
+                PlanId([ID]),
+            ],
+        },
+    ],
+    root: Some(
+        PlanId([ID]),
+    ),
+}

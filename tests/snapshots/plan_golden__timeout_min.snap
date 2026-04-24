@@ -1,0 +1,49 @@
+---
+source: tests/plan_golden.rs
+expression: output
+---
+--- BEFORE ---
+PlanDag {
+    nodes: [
+        Leaf {
+            label: "a",
+        },
+        Timeout {
+            child: PlanId([ID]),
+            duration: 10s,
+        },
+        Timeout {
+            child: PlanId([ID]),
+            duration: 5s,
+        },
+    ],
+    root: Some(
+        PlanId([ID]),
+    ),
+}
+--- REWRITE REPORT ---
+1. TimeoutMin: collapsed nested timeouts ([PLAN_ID] -> [PLAN_ID])
+
+--- AFTER ---
+PlanDag {
+    nodes: [
+        Leaf {
+            label: "a",
+        },
+        Timeout {
+            child: PlanId([ID]),
+            duration: 10s,
+        },
+        Timeout {
+            child: PlanId([ID]),
+            duration: 5s,
+        },
+        Timeout {
+            child: PlanId([ID]),
+            duration: 5s,
+        },
+    ],
+    root: Some(
+        PlanId([ID]),
+    ),
+}

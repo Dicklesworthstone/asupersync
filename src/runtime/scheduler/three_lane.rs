@@ -68,6 +68,7 @@ use crate::util::{CachePadded, DetHasher, DetRng};
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use std::cell::RefCell;
+use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -953,7 +954,7 @@ impl ThreeLaneScheduler {
                 shutdown: Arc::clone(&shutdown),
                 io_driver: io_driver.clone(),
                 timer_driver: timer_driver.clone(),
-                steal_buffer: Vec::with_capacity(steal_batch_size.max(1)),
+                steal_buffer: Vec::new(),
                 steal_batch_size,
                 enable_parking,
                 cancel_streak: 0,
@@ -2321,7 +2322,7 @@ impl ThreeLaneWorker {
         let fast_snapshot = super::invariant_monitor::QueueSnapshot {
             name: "fast_queue".to_string(),
             reported_depth: fast_queue_tasks.len(),
-            actual_tasks: fast_queue_tasks,
+            actual_tasks: fast_queue_tasks.to_vec(),
             priority_range: None,
             time_range: Some((current_time, current_time)),
         };
