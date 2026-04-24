@@ -1389,7 +1389,7 @@ mod tests {
     // gRPC streaming contract conformance (Pattern 4, spec-derived).
     //
     // Source: gRPC HTTP/2 protocol spec §6 "Timeout"
-    //   https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
+    //   https://grpc.github.io/grpc/core/md_doc__p_r_o_t_o_c_o_l-_h_t_t_p2.html
     //   (timeout format: TimeoutValue "H" | "M" | "S" | "m" | "u" | "n",
     //    TimeoutValue is 1..=8 ASCII digits encoded as u64).
     //
