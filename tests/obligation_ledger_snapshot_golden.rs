@@ -13,7 +13,7 @@ use insta::{Settings, assert_debug_snapshot};
 
 /// Helper to create a deterministic NodeId for testing.
 fn test_node(id: u32) -> NodeId {
-    NodeId::new(&format!("test-node-{}", id))
+    NodeId::new(format!("test-node-{}", id))
 }
 
 /// Helper to create a deterministic ObligationId for testing.
