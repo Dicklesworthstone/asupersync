@@ -697,7 +697,7 @@ fn timeout_interceptor_adds_header() {
     let value = request.metadata().get("grpc-timeout").unwrap();
     match value {
         asupersync::grpc::streaming::MetadataValue::Ascii(s) => {
-            assert_eq!(s, "5000m");
+            assert_eq!(s, "5S");
         }
         asupersync::grpc::streaming::MetadataValue::Binary(_) => panic!("expected ASCII value"),
     }
@@ -710,7 +710,7 @@ fn timeout_interceptor_preserves_existing_header() {
     request.metadata_mut().insert("grpc-timeout", "1000m");
     interceptor.intercept_request(&mut request).unwrap();
 
-    // Should keep the original 1000m, not override with 5000m
+    // Should keep the original 1000m, not override with the configured timeout.
     let value = request.metadata().get("grpc-timeout").unwrap();
     match value {
         asupersync::grpc::streaming::MetadataValue::Ascii(s) => {

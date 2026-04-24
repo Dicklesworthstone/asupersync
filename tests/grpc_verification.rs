@@ -1389,8 +1389,8 @@ fn grpc_verify_043_timeout_interceptor() {
     let mut req = Request::new(Bytes::new());
     interceptor.intercept_request(&mut req).unwrap();
     match req.metadata().get("grpc-timeout") {
-        Some(MetadataValue::Ascii(s)) => assert_eq!(s, "5000m"),
-        other => panic!("expected 5000m, got: {other:?}"),
+        Some(MetadataValue::Ascii(s)) => assert_eq!(s, "5S"),
+        other => panic!("expected 5S, got: {other:?}"),
     }
 
     // Preserves existing header

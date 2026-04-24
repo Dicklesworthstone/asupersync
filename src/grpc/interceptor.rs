@@ -20,10 +20,11 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::bytes::Bytes;
 
-use super::server::Interceptor;
+use super::server::{Interceptor, format_grpc_timeout};
 use super::status::Status;
 use super::streaming::{MetadataValue, Request, Response};
 
@@ -603,9 +604,10 @@ impl Interceptor for TimeoutInterceptor {
     fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
         // Add grpc-timeout header if not present
         if request.metadata().get("grpc-timeout").is_none() {
-            request
-                .metadata_mut()
-                .insert("grpc-timeout", format!("{}m", self.timeout_ms));
+            request.metadata_mut().insert(
+                "grpc-timeout",
+                format_grpc_timeout(Duration::from_millis(self.timeout_ms)),
+            );
         }
         Ok(())
     }
@@ -941,9 +943,23 @@ mod tests {
         interceptor.intercept_request(&mut request).unwrap();
 
         let timeout = request.metadata().get("grpc-timeout").unwrap();
-        let ok = matches!(timeout, MetadataValue::Ascii(s) if s == "5000m");
+        let ok = matches!(timeout, MetadataValue::Ascii(s) if s == "5S");
         crate::assert_with_log!(ok, "timeout header", true, ok);
         crate::test_complete!("timeout_interceptor_adds_header");
+    }
+
+    #[test]
+    fn timeout_interceptor_uses_valid_eight_digit_timeout_header() {
+        init_test("timeout_interceptor_uses_valid_eight_digit_timeout_header");
+        let interceptor = timeout_interceptor(100_000_000);
+
+        let mut request = Request::new(Bytes::new());
+        interceptor.intercept_request(&mut request).unwrap();
+
+        let timeout = request.metadata().get("grpc-timeout").unwrap();
+        let ok = matches!(timeout, MetadataValue::Ascii(s) if s == "100000S");
+        crate::assert_with_log!(ok, "large timeout header stays valid", true, ok);
+        crate::test_complete!("timeout_interceptor_uses_valid_eight_digit_timeout_header");
     }
 
     #[test]
