@@ -622,6 +622,7 @@ fn decode_rfc8187_ext_value(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
     use super::*;
 
     // ================================================================

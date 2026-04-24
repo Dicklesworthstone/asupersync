@@ -869,6 +869,7 @@ fn seed_for(object_id: ObjectId, sbn: u8, esi: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
     use super::*;
     use crate::encoding::EncodingPipeline;
     use crate::types::resource::{PoolConfig, SymbolPool};

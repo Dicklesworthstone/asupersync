@@ -3429,6 +3429,7 @@ impl crate::gen_server::GenServer for ConsumerActor {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
     use super::*;
     use crate::messaging::fabric::{
         CellTemperature, DataCapsule, NodeRole, PlacementPolicy, RepairPolicy, StewardCandidate,

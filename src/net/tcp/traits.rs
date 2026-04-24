@@ -288,7 +288,6 @@ impl<A: ToSocketAddrs + Send + 'static> TcpListenerBuilder<A> {
                     Ok(l) => return Ok(l),
                     Err(e) => {
                         last_err = Some(e);
-                        continue;
                     }
                 }
             }
@@ -386,6 +385,7 @@ impl<L: TcpListenerApi> crate::stream::Stream for IncomingStream<'_, L> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
     use super::*;
 
     #[test]

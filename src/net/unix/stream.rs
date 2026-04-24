@@ -886,6 +886,7 @@ fn recv_with_ancillary_impl(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
     use super::*;
     use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use std::io::{self, IoSlice, IoSliceMut, Read};

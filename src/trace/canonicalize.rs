@@ -620,6 +620,7 @@ fn event_hash_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
     use super::*;
     use crate::monitor::DownReason;
     use crate::record::{ObligationAbortReason, ObligationKind};

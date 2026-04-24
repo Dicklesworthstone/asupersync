@@ -69,6 +69,7 @@ impl<T: Clone> BroadcastTestHarness<T> {
         }
     }
 
+    #[allow(clippy::future_not_send)]
     async fn send_message(&mut self, cx: &Cx, message: T) -> Result<(), SendError<T>> {
         let permit = match self.sender.reserve(cx) {
             Ok(p) => p,
@@ -101,6 +102,7 @@ impl<T: Clone> BroadcastTestHarness<T> {
 /// Catches: Incorrect lag counting, off-by-one errors, message index corruption
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
     use super::*;
 
     #[test]

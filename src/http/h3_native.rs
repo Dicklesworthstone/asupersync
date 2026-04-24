@@ -627,7 +627,7 @@ pub fn validate_bidirectional_frame(frame: &H3Frame) -> Result<(), H3NativeError
 }
 
 /// HTTP/3 pseudo-header block (decoded representation).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct H3PseudoHeaders {
     /// `:method`.
     pub method: Option<String>,
@@ -641,19 +641,6 @@ pub struct H3PseudoHeaders {
     pub status: Option<u16>,
     /// `:protocol` (RFC 8441 extended CONNECT protocol).
     pub protocol: Option<String>,
-}
-
-impl Default for H3PseudoHeaders {
-    fn default() -> Self {
-        Self {
-            method: None,
-            scheme: None,
-            authority: None,
-            path: None,
-            status: None,
-            protocol: None,
-        }
-    }
 }
 
 /// HTTP/3 request-head representation.
@@ -2816,6 +2803,7 @@ impl Default for QpackContext {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
     use super::*;
 
     fn test_config() -> H3ConnectionConfig {

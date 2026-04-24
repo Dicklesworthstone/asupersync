@@ -139,6 +139,7 @@ impl Stream for ReadDir {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
     use super::*;
     use crate::stream::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -175,7 +175,6 @@ impl SystematicParams {
     ///
     /// This helper centralizes decoder/encoder tuple semantics so parity checks
     /// can use one source of truth for RFC tuple expansion.
-    #[must_use]
     pub fn rfc_repair_equation(
         &self,
         esi: u32,
@@ -1167,6 +1166,7 @@ impl SystematicEncoder {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
     use super::*;
 
     fn make_source_symbols(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {

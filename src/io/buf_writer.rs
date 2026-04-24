@@ -263,6 +263,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BufWriter<W> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
     use super::*;
 
     use std::task::Waker;

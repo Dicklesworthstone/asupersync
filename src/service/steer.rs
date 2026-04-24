@@ -304,6 +304,7 @@ impl<E: std::error::Error + 'static> std::error::Error for SteerError<E> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
     use super::*;
     use futures_lite::future::block_on;
     use std::future::{Ready, ready};
