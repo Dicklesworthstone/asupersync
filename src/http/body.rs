@@ -1313,7 +1313,8 @@ mod tests {
         assert!(matches!(poll_body(&mut body), Poll::Pending));
 
         let Poll::Ready(Some(Ok(frame))) = poll_body(&mut body) else {
-            panic!( // ubs:ignore
+            panic!(
+                // ubs:ignore
                 "expected data frame after pending"
             )
         };
@@ -1719,7 +1720,8 @@ mod tests {
                 return Poll::Ready(Some(Err(std::io::Error::other("boom"))));
             }
 
-            panic!( // ubs:ignore
+            panic!(
+                // ubs:ignore
                 "Limited polled inner body after terminal inner error"
             );
         }
