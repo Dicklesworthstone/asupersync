@@ -109,7 +109,11 @@ impl RttEstimator {
                 .map_or(sample_micros, |min| min.min(sample_micros)),
         );
         let min_rtt = self.min_rtt_micros.unwrap_or(sample_micros);
-        let adjusted = sample_micros.saturating_sub(ack_delay_micros.min(sample_micros - min_rtt));
+        let adjusted = if min_rtt.saturating_add(ack_delay_micros) < sample_micros {
+            sample_micros.saturating_sub(ack_delay_micros)
+        } else {
+            sample_micros
+        };
         self.latest_rtt_micros = Some(adjusted);
 
         match (self.smoothed_rtt_micros, self.rttvar_micros) {
@@ -1396,11 +1400,11 @@ mod tests {
         assert_eq!(rtt.smoothed_rtt_micros(), Some(50_000));
 
         // Second sample: 80_000us with ack_delay larger than (sample - min_rtt)
-        // ack_delay is clamped to min(ack_delay, sample - min_rtt) = min(1_000_000, 80_000 - 50_000) = 30_000
-        // adjusted = 80_000 - 30_000 = 50_000
+        // RFC 9002: if min_rtt + ack_delay >= sample, adjusted_rtt = sample
+        // min_rtt (50k) + ack_delay (1M) >= sample (80k), so adjusted = 80_000.
         rtt.update(80_000, 1_000_000);
-        // srtt = (7*50_000 + 50_000)/8 = 50_000 (no change since adjusted == smoothed)
-        assert_eq!(rtt.smoothed_rtt_micros(), Some(50_000));
+        // srtt = (7*50_000 + 80_000)/8 = 53_750
+        assert_eq!(rtt.smoothed_rtt_micros(), Some(53_750));
     }
 
     #[test]
