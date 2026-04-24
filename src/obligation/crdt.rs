@@ -503,7 +503,7 @@ impl fmt::Display for LinearityViolation {
 }
 
 /// Diagnostic snapshot of a CRDT ledger replica.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LedgerSnapshot {
     /// The node this snapshot is from.
     pub node: NodeId,
