@@ -11,7 +11,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = "..", features = ["compression", "tls", "postgres", "mysql", "kafka", "sqlite", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring"] }
+asupersync = { path = "..", features = ["compression", "tls", "postgres", "mysql", "sqlite", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 libc = "0.2"
@@ -223,6 +223,13 @@ bench = false
 [[bin]]
 name = "gf256_scalar_arithmetic"
 path = "fuzz_targets/gf256_scalar_arithmetic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gf256_simd_vs_scalar_reference"
+path = "fuzz_targets/gf256_simd_vs_scalar_reference.rs"
 test = false
 doc = false
 bench = false

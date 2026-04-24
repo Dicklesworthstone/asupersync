@@ -329,6 +329,7 @@ pub struct TaskRecord {
     pub total_polls: u64,
     /// Wall-clock instant when the task was created (for duration tracking).
     #[cfg(feature = "tracing-integration")]
+    #[cfg_attr(feature = "test-internals", serde(skip))]
     pub created_instant: Instant,
     /// Lab-only: last step this task was polled (for futurelock detection).
     pub last_polled_step: u64,
