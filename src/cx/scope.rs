@@ -917,9 +917,7 @@ impl<P: Policy> Scope<'_, P> {
                 let orphan_task_ids: Vec<TaskId> = state
                     .tasks_iter()
                     .filter_map(|(_, t)| {
-                        if t.owner == child_region
-                            && matches!(t.state, TaskState::Created)
-                        {
+                        if t.owner == child_region && matches!(t.state, TaskState::Created) {
                             Some(t.id)
                         } else {
                             None
@@ -1262,7 +1260,17 @@ impl<P: Policy> Scope<'_, P> {
     ) -> Result<(T, usize), JoinError> {
         let mut handles = handles;
         if handles.is_empty() {
-            return std::future::pending().await;
+            return std::future::poll_fn(|_poll_cx| {
+                if cx.checkpoint().is_err() {
+                    let reason = cx
+                        .cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("race_all cancelled"));
+                    std::task::Poll::Ready(Err(JoinError::Cancelled(reason)))
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
         }
 
         let mut futures: Vec<_> = handles
@@ -3216,10 +3224,12 @@ mod tests {
             }
         }
 
-        let notify = Arc::new(parking_lot::Mutex::new(crate::record::region::RegionCloseState {
-            closed: false,
-            waiters: Vec::new(),
-        }));
+        let notify = Arc::new(parking_lot::Mutex::new(
+            crate::record::region::RegionCloseState {
+                closed: false,
+                waiters: Vec::new(),
+            },
+        ));
         let wake_count_a = Arc::new(AtomicUsize::new(0));
         let wake_count_b = Arc::new(AtomicUsize::new(0));
         let waker_a = Waker::from(Arc::new(CountWaker(Arc::clone(&wake_count_a))));

@@ -2438,7 +2438,17 @@ impl<Caps> Cx<Caps> {
         futures: Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
     ) -> Result<T, JoinError> {
         if futures.is_empty() {
-            return std::future::pending().await;
+            return std::future::poll_fn(|_poll_cx| {
+                if self.checkpoint().is_err() {
+                    let reason = self
+                        .cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("race cancelled"));
+                    std::task::Poll::Ready(Err(JoinError::Cancelled(reason)))
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
         }
         let (res, _) = SelectAll::new(futures)
             .await

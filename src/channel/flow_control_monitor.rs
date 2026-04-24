@@ -536,6 +536,8 @@ pub struct FlowControlMonitor {
     stats: FlowControlStats,
     /// Cumulative blocked time for all tasks.
     total_blocked_time_ms: u64,
+    /// Total number of unblock events.
+    total_unblocks: u64,
     /// Total events processed.
     total_events: AtomicU64,
 }
@@ -552,6 +554,7 @@ impl FlowControlMonitor {
             deadlock_detector: DeadlockDetector::new(),
             stats: FlowControlStats::default(),
             total_blocked_time_ms: 0,
+            total_unblocks: 0,
             total_events: AtomicU64::new(0),
         }
     }
@@ -638,6 +641,7 @@ impl FlowControlMonitor {
                 ..
             } => {
                 self.total_blocked_time_ms += *blocked_duration_ms;
+                self.total_unblocks += 1;
                 if let Some(task_state) = self.task_states.get_mut(task_id) {
                     task_state.blocked_channels.remove(channel_id);
                     task_state.total_blocked_time_ms += blocked_duration_ms;
@@ -730,6 +734,7 @@ impl FlowControlMonitor {
                 ..
             } => {
                 self.total_blocked_time_ms += *blocked_duration_ms;
+                self.total_unblocks += 1;
                 if let Some(task_state) = self.task_states.get_mut(task_id) {
                     task_state.pending_permits.remove(permit_id);
                     task_state.blocked_channels.remove(channel_id);
@@ -1054,8 +1059,8 @@ impl FlowControlMonitor {
             .count() as u64;
 
         // Calculate average block time
-        if stats.total_events > 0 {
-            stats.avg_block_time_ms = self.total_blocked_time_ms / stats.total_events.max(1);
+        if self.total_unblocks > 0 {
+            stats.avg_block_time_ms = self.total_blocked_time_ms / self.total_unblocks;
         }
 
         stats
