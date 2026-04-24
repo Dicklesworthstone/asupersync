@@ -50,7 +50,7 @@ Counts are approximate (±10%) from automated `#[test]`/`#[cfg(test)]` scanning.
 | Tests (inline) | All source files above contain `#[cfg(test)]` modules |
 | Tests (integration) | `tests/cancellation_conformance.rs`, `tests/cancel_attribution.rs`, `tests/cancel_obligation_invariants.rs`, `tests/cancel_lane_fairness_bounds.rs`, `tests/cancellation_stress_e2e.rs`, `tests/property_cancellation.rs`, `tests/close_quiescence_regression.rs`, `tests/cap_obligation_compile_fail.rs` |
 | Tests (conformance) | `conformance/src/tests/cancellation.rs` (7 tests) |
-| Docs | `docs/asupersync_v4_formal_semantics.md`, `docs/cancellation-testing.md` |
+| Docs | `asupersync_v4_formal_semantics.md` (root), `docs/cancellation-testing.md` |
 | Formal | `formal/lean/Asupersync.lean` (170 theorems covering all 6 core invariants), `formal/tla/` |
 | Test count | ~1,070 |
 

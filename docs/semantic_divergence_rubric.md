@@ -202,7 +202,7 @@ the permanent machine-checked guarantee.
 
 - RT oracle: `src/lab/oracle/loser_drain.rs:90-99`
 - LEAN predicate (definition only): `formal/lean/Asupersync.lean:274`
-- FOS invariant: `docs/asupersync_v4_formal_semantics.md:1131`
+- FOS invariant: `asupersync_v4_formal_semantics.md` §INV-LOSER-DRAIN (root canonical copy; line 1131 in the now-retired `docs/` snapshot)
 
 ---
 

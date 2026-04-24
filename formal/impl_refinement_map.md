@@ -203,7 +203,7 @@ The cross-examination found no rule whose runtime implementation is fundamentall
 
 1. **`asupersync-lhsgh9`** — LAW-RACE-JOIN-DIST has no metamorphic test. Spec §7 calls it out as a speculative-execution rewrite; without a test we cannot certify rewrite-engine correctness for it. Add `combinator/race_join_dist_metamorphic.rs`.
 
-2. **`asupersync-4nw2lb`** — Two copies of the formal-semantics doc, `asupersync_v4_formal_semantics.md` (root, newer, 1773 LOC) and `docs/asupersync_v4_formal_semantics.md` (older, 1577 LOC). Future readers may pin to the stale copy. Owner decision required (RULE 1).
+2. **`asupersync-4nw2lb`** — RESOLVED. The root copy `asupersync_v4_formal_semantics.md` (1773 LOC) is the canonical formal semantics. The previously-divergent `docs/asupersync_v4_formal_semantics.md` (1577 LOC) was reduced to a redirect stub, and in-tree references in `docs/` were re-pointed to the root path.
 
 3. **`asupersync-fy12my`** — `RECORD-COMPLETE` semantics drift (minor): spec writes `D'[k].outcome = Some(outcome)` unconditionally; impl accepts it only on records that have not expired. The impl is the safer ("fail-closed") variant. Tighten spec wording rather than loosen impl.
 

@@ -5,7 +5,7 @@
 **Author**: SapphireHill
 **Date**: 2026-03-02
 **Inputs**:
-- `docs/asupersync_v4_formal_semantics.md` (FOS v4.0.0)
+- `asupersync_v4_formal_semantics.md` (FOS v4.0.0; root canonical copy)
 - `docs/semantic_contract_schema.md` (SEM-04.1, 47 rule IDs)
 - `docs/semantic_contract_glossary.md` (SEM-04.2, canonical terms)
 - `docs/semantic_contract_transitions.md` (SEM-04.3, transition rules)

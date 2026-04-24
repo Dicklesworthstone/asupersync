@@ -16,7 +16,7 @@ its precise location in the two canonical specification documents:
 
 | Document | Path | Abbreviation |
 |----------|------|-------------|
-| Formal Operational Semantics | `docs/asupersync_v4_formal_semantics.md` | FOS |
+| Formal Operational Semantics | `asupersync_v4_formal_semantics.md` (root) | FOS |
 | Design Bible (Plan v4) | `asupersync_plan_v4.md` | PV4 |
 
 Line numbers are stable as of commit `cd8068f2` (2026-03-02). Citations use the
