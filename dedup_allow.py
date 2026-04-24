@@ -1,40 +1,20 @@
-import os
+#!/usr/bin/env python3
+"""Disabled repository mutation helper.
 
-def dedup_file(filepath):
-    with open(filepath, 'r') as f:
-        lines = f.readlines()
-    
-    new_lines = []
-    seen_allow = False
-    modified = False
-    
-    for line in lines:
-        if line.startswith('#![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap'):
-            if seen_allow:
-                modified = True
-                continue
-            seen_allow = True
-        
-        # also deduplicate the #[cfg(test)] inner allow
-        if line.strip().startswith('#![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap'):
-            if seen_allow:
-                modified = True
-                continue
-            seen_allow = True
+AGENTS.md forbids script-based changes to code in this repository. This file is
+kept only as an audit artifact so historical references do not break.
+"""
 
-        new_lines.append(line)
+import sys
 
-    if modified:
-        with open(filepath, 'w') as f:
-            f.writelines(new_lines)
-        print(f"Fixed {filepath}")
 
-for root, _, files in os.walk('tests'):
-    for file in files:
-        if file.endswith('.rs'):
-            dedup_file(os.path.join(root, file))
+def main() -> int:
+    print(
+        "dedup_allow.py is disabled: AGENTS.md forbids script-based code rewrites.",
+        file=sys.stderr,
+    )
+    return 1
 
-for root, _, files in os.walk('src'):
-    for file in files:
-        if file.endswith('.rs'):
-            dedup_file(os.path.join(root, file))
+
+if __name__ == "__main__":
+    raise SystemExit(main())
