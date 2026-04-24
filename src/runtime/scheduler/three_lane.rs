@@ -67,8 +67,8 @@ use crate::types::{CxInner, TaskId, Time};
 use crate::util::{CachePadded, DetHasher, DetRng};
 use parking_lot::Mutex;
 use parking_lot::RwLock;
-use std::cell::RefCell;
 use smallvec::SmallVec;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -388,7 +388,7 @@ impl AdaptiveCancelStreakPolicy {
 /// Coordination for waking workers.
 #[derive(Debug)]
 pub(crate) struct WorkerCoordinator {
-    parkers: Vec<Parker>,
+    parkers: SmallVec<[Parker; 16]>,
     next_wake: CachePadded<AtomicUsize>,
     /// Bitmask for power-of-two worker counts (replaces IDIV with AND).
     /// `None` when the count is zero or non-power-of-two.
@@ -398,7 +398,7 @@ pub(crate) struct WorkerCoordinator {
 }
 
 impl WorkerCoordinator {
-    pub(crate) fn new(parkers: Vec<Parker>, io_driver: Option<IoDriverHandle>) -> Self {
+    pub(crate) fn new(parkers: SmallVec<[Parker; 16]>, io_driver: Option<IoDriverHandle>) -> Self {
         let count = parkers.len();
         let mask = if count > 0 && count.is_power_of_two() {
             Some(count - 1)
@@ -775,11 +775,11 @@ pub struct ThreeLaneScheduler {
     /// Per-worker local schedulers for routing pinned local tasks.
     local_schedulers: Vec<Arc<Mutex<PriorityScheduler>>>,
     /// Per-worker non-stealable queues for local (`!Send`) tasks.
-    local_ready: Vec<Arc<LocalReadyQueue>>,
+    local_ready: SmallVec<[Arc<LocalReadyQueue>; 16]>,
     /// Per-worker parkers for targeted wakeups.
-    parkers: Vec<Parker>,
+    parkers: SmallVec<[Parker; 16]>,
     /// Worker handles for thread spawning.
-    workers: Vec<ThreeLaneWorker>,
+    workers: SmallVec<[ThreeLaneWorker; 16]>,
     /// Shutdown signal.
     shutdown: Arc<AtomicBool>,
     /// Coordination for waking workers.
@@ -873,11 +873,11 @@ impl ThreeLaneScheduler {
         let enable_parking = DEFAULT_ENABLE_PARKING;
         let global = Arc::new(GlobalInjector::new());
         let shutdown = Arc::new(AtomicBool::new(false));
-        let mut workers = Vec::with_capacity(worker_count);
-        let mut parkers = Vec::with_capacity(worker_count);
+        let mut workers = SmallVec::<[ThreeLaneWorker; 16]>::with_capacity(worker_count);
+        let mut parkers = SmallVec::<[Parker; 16]>::with_capacity(worker_count);
         let mut local_schedulers: Vec<Arc<Mutex<PriorityScheduler>>> =
             Vec::with_capacity(worker_count);
-        let mut local_ready: Vec<Arc<LocalReadyQueue>> = Vec::with_capacity(worker_count);
+        let mut local_ready = SmallVec::<[Arc<LocalReadyQueue>; 16]>::with_capacity(worker_count);
         let local_scheduler_capacity = Self::initial_local_scheduler_capacity(worker_count);
 
         // Get IO driver and timer driver from runtime state
@@ -903,7 +903,10 @@ impl ThreeLaneScheduler {
         for _ in 0..worker_count {
             parkers.push(Parker::new());
         }
-        let coordinator = Arc::new(WorkerCoordinator::new(parkers.clone(), io_driver.clone()));
+        let coordinator = Arc::new(WorkerCoordinator::new(
+            parkers.clone().into(),
+            io_driver.clone(),
+        ));
 
         // Create fast queues (O(1) VecDeque) for ready-lane fast path.
         // When a sharded TaskTable is available, back the queues directly
@@ -922,7 +925,7 @@ impl ThreeLaneScheduler {
             let parker = parkers[id].clone();
 
             // Stealers: all other workers' local schedulers (excluding self)
-            let stealers: Vec<_> = local_schedulers
+            let stealers: SmallVec<[Arc<Mutex<PriorityScheduler>>; 16]> = local_schedulers
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i != id)
@@ -930,7 +933,7 @@ impl ThreeLaneScheduler {
                 .collect();
 
             // Fast stealers: O(1) steal from other workers' LocalQueues
-            let fast_stealers: Vec<_> = fast_queues
+            let fast_stealers: SmallVec<[local_queue::Stealer; 16]> = fast_queues
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i != id)
@@ -954,7 +957,7 @@ impl ThreeLaneScheduler {
                 shutdown: Arc::clone(&shutdown),
                 io_driver: io_driver.clone(),
                 timer_driver: timer_driver.clone(),
-                steal_buffer: Vec::new(),
+                steal_buffer: SmallVec::new(),
                 steal_batch_size,
                 enable_parking,
                 cancel_streak: 0,
@@ -1010,7 +1013,7 @@ impl ThreeLaneScheduler {
             global,
             local_schedulers,
             local_ready,
-            parkers,
+            parkers: parkers.into(),
             workers,
             shutdown,
             coordinator,
@@ -1418,7 +1421,7 @@ impl ThreeLaneScheduler {
 
     /// Extract workers to run them in threads.
     pub fn take_workers(&mut self) -> Vec<ThreeLaneWorker> {
-        std::mem::take(&mut self.workers)
+        std::mem::take(&mut self.workers).into_vec()
     }
 
     /// Signals all workers to shutdown.
@@ -1442,7 +1445,7 @@ pub struct ThreeLaneWorker {
     /// Local 3-lane scheduler for this worker.
     pub local: Arc<Mutex<PriorityScheduler>>,
     /// References to other workers' local schedulers for stealing.
-    pub stealers: Vec<Arc<Mutex<PriorityScheduler>>>,
+    pub stealers: SmallVec<[Arc<Mutex<PriorityScheduler>>; 16]>,
     /// O(1) local queue for ready tasks (work-stealing fast path).
     ///
     /// Ready tasks spawned/woken on the worker thread are pushed here
@@ -1450,7 +1453,7 @@ pub struct ThreeLaneWorker {
     /// O(log n)). Stealers use FIFO ordering for cache-friendliness.
     pub fast_queue: LocalQueue,
     /// Stealers for other workers' fast queues (O(1) steal).
-    fast_stealers: Vec<local_queue::Stealer>,
+    fast_stealers: SmallVec<[local_queue::Stealer; 16]>,
     /// Non-stealable queue for local (`!Send`) tasks.
     ///
     /// Local tasks are pinned to their owner worker and must never be stolen.
@@ -1460,7 +1463,7 @@ pub struct ThreeLaneWorker {
     ///
     /// Used to route local waiters to their owner worker's queue when a task
     /// completes and needs to wake a pinned waiter on a different worker.
-    all_local_ready: Vec<Arc<LocalReadyQueue>>,
+    all_local_ready: SmallVec<[Arc<LocalReadyQueue>; 16]>,
     /// Global injection queue.
     pub global: Arc<GlobalInjector>,
     /// Shared runtime state.
@@ -1484,7 +1487,7 @@ pub struct ThreeLaneWorker {
     /// Timer driver for processing timer wakeups (optional).
     pub timer_driver: Option<TimerDriverHandle>,
     /// Scratch buffer for stolen tasks (avoid per-steal allocations).
-    steal_buffer: Vec<(TaskId, u8)>,
+    steal_buffer: SmallVec<[(TaskId, u8); 8]>,
     /// Maximum number of ready tasks to steal in one batch.
     steal_batch_size: usize,
     /// Whether this worker is allowed to park when idle.
@@ -5395,7 +5398,7 @@ mod tests {
         let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
         let global = Arc::new(GlobalInjector::new());
         let parker = Parker::new();
-        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker], None));
+        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker].into(), None));
         let waker = Waker::from(Arc::new(CancelLaneWaker {
             task_id,
             default_priority: Budget::INFINITE.priority,
@@ -5431,7 +5434,7 @@ mod tests {
         let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
         let global = Arc::new(GlobalInjector::new());
         let parker = Parker::new();
-        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker], None));
+        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker].into(), None));
         let waker = Waker::from(Arc::new(ThreeLaneWaker {
             task_id,
             wake_state,
@@ -5872,7 +5875,7 @@ mod tests {
         let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
         let global = Arc::new(GlobalInjector::new());
         let parker = Parker::new();
-        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker], None));
+        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker].into(), None));
 
         // Create multiple wakers (simulating cloned wakers)
         let wakers: Vec<_> = (0..10)
@@ -6280,7 +6283,7 @@ mod tests {
     fn test_coordinator_non_power_of_two_round_robin() {
         // 3 workers is non-power-of-two, so mask = None and modulo is used.
         let parkers: Vec<Parker> = (0..3).map(|_| Parker::new()).collect();
-        let coordinator = WorkerCoordinator::new(parkers, None);
+        let coordinator = WorkerCoordinator::new(parkers.into(), None);
 
         // mask should be None for non-power-of-two count
         assert!(
@@ -6308,7 +6311,7 @@ mod tests {
     fn test_coordinator_power_of_two_uses_bitmask() {
         // 4 workers is power-of-two, so mask = Some(3)
         let parkers: Vec<Parker> = (0..4).map(|_| Parker::new()).collect();
-        let coordinator = WorkerCoordinator::new(parkers, None);
+        let coordinator = WorkerCoordinator::new(parkers.into(), None);
 
         assert_eq!(
             coordinator.mask,
@@ -6327,7 +6330,7 @@ mod tests {
     #[test]
     fn test_coordinator_single_worker() {
         let parkers = vec![Parker::new()];
-        let coordinator = WorkerCoordinator::new(parkers, None);
+        let coordinator = WorkerCoordinator::new(parkers.into(), None);
 
         // 1 is power-of-two, mask = Some(0) → always wakes slot 0
         assert_eq!(coordinator.mask, Some(0));
@@ -6340,7 +6343,7 @@ mod tests {
 
     #[test]
     fn test_coordinator_zero_workers_is_noop() {
-        let coordinator = WorkerCoordinator::new(vec![], None);
+        let coordinator = WorkerCoordinator::new(vec![].into(), None);
         assert!(coordinator.mask.is_none());
         // wake_one should be a no-op, not panic
         coordinator.wake_one();
