@@ -31,6 +31,7 @@ use crate::cx::Cx;
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
 use crate::util::det_hash::DetHashMap;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -48,7 +49,7 @@ static REMOTE_TASK_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// Nodes are opaque identifiers. The runtime does not interpret them beyond
 /// equality comparison and display. The transport layer maps `NodeId` to
 /// actual network addresses.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(String);
 
 impl NodeId {

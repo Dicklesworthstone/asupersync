@@ -33,6 +33,7 @@ use crate::remote::NodeId;
 use crate::time::{TimeSource, TimerDriverHandle, WallClock};
 use crate::types::Time;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -59,7 +60,7 @@ pub trait LogicalClock: Send + Sync {
 }
 
 /// Logical time for Lamport clocks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct LamportTime(u64);
 
 impl LamportTime {
@@ -177,7 +178,7 @@ impl LogicalClock for LamportClock {
 }
 
 /// Logical time for hybrid clocks (physical + logical).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct HybridTime {
     physical: Time,
     logical: u64,
@@ -381,7 +382,8 @@ impl LogicalClock for VectorClockHandle {
 }
 
 /// Logical time values for heterogeneous clock types.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LogicalTime {
     /// Lamport clock time.
     Lamport(LamportTime),
@@ -585,7 +587,7 @@ impl TimeSource for TimerDriverSource {
 /// - `a ≤ b` iff `∀ node: a[node] ≤ b[node]`
 /// - `a < b` (happens-before) iff `a ≤ b` and `a ≠ b`
 /// - `a ∥ b` (concurrent) iff `¬(a ≤ b)` and `¬(b ≤ a)`
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VectorClock {
     /// BTreeMap for deterministic iteration order.
     entries: BTreeMap<NodeId, u64>,
