@@ -4,7 +4,7 @@
 //! remains stable across changes to the obligation ledger implementation.
 //! Any changes to the snapshot format will be caught by insta.
 
-use asupersync::obligation::crdt::{CrdtObligationLedger, LedgerSnapshot};
+use asupersync::obligation::crdt::CrdtObligationLedger;
 use asupersync::record::ObligationKind;
 use asupersync::remote::NodeId;
 use asupersync::trace::distributed::Merge;

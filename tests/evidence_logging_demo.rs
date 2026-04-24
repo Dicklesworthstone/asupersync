@@ -6,7 +6,6 @@
 
 use asupersync::cx::Cx;
 use asupersync::test_utils::{EvidenceSink, lab_with_evidence};
-use asupersync::time::sleep;
 use std::time::Duration;
 
 #[test]
@@ -88,7 +87,7 @@ fn lab_runtime_evidence_integration() {
 
             // Use the LabRuntime for deterministic async execution
             let cx = Cx::for_testing();
-            evidence.cx_id(&format!("cx_{:?}", cx.id()));
+            evidence.cx_id(&format!("cx_{:?}", cx.task_id()));
 
             evidence.event(
                 "async_complete",

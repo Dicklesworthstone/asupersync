@@ -4,7 +4,7 @@
 //! variants remain stable across changes to the trace system.
 
 use asupersync::monitor::DownReason;
-use asupersync::record::{ObligationAbortReason, ObligationKind, ObligationState};
+use asupersync::record::{ObligationKind, ObligationState};
 use asupersync::trace::distributed::{LamportTime, LogicalTime};
 use asupersync::trace::event::{TRACE_EVENT_SCHEMA_VERSION, TraceData, TraceEvent, TraceEventKind};
 use asupersync::types::{CancelKind, CancelReason, ObligationId, RegionId, TaskId, Time};
@@ -227,8 +227,11 @@ fn create_sample_events() -> Vec<(String, TraceEvent)> {
                     region: RegionId::new_ephemeral(),
                     idle_steps: 21000,
                     held: vec![
-                        (ObligationId::new_ephemeral(), ObligationKind::SendPermit),
-                        (ObligationId::new_for_test(1, 1), ObligationKind::Ack),
+                        (
+                            ObligationId::new_for_test(22000, 1),
+                            ObligationKind::SendPermit,
+                        ),
+                        (ObligationId::new_for_test(23000, 1), ObligationKind::Ack),
                     ],
                 },
             ),
@@ -321,7 +324,7 @@ fn create_sample_events() -> Vec<(String, TraceEvent)> {
 fn normalize_event_json(mut value: Value) -> Value {
     if let Value::Object(ref mut obj) = value {
         // Ensure consistent ordering by using a BTreeMap
-        let mut sorted: BTreeMap<String, Value> =
+        let sorted: BTreeMap<String, Value> =
             obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         *obj = sorted.into_iter().collect();
     }
@@ -360,7 +363,7 @@ fn trace_event_serialization_golden_shapes() {
     for (variant_name, event_json) in &golden_data {
         let obj = event_json
             .as_object()
-            .expect(&format!("Event {variant_name} should be a JSON object"));
+            .unwrap_or_else(|| panic!("Event {variant_name} should be a JSON object"));
 
         // Every TraceEvent should have these fields
         assert!(
@@ -407,11 +410,12 @@ fn trace_event_roundtrip_serialization() {
             original_event.with_logical_time(LogicalTime::Lamport(LamportTime::from_raw(500)));
 
         // Serialize to JSON
-        let json = serde_json::to_string(&event).expect(&format!("Event {name} should serialize"));
+        let json = serde_json::to_string(&event)
+            .unwrap_or_else(|_| panic!("Event {name} should serialize"));
 
         // Deserialize back
-        let deserialized: TraceEvent =
-            serde_json::from_str(&json).expect(&format!("Event {name} should deserialize"));
+        let deserialized: TraceEvent = serde_json::from_str(&json)
+            .unwrap_or_else(|_| panic!("Event {name} should deserialize"));
 
         // Should be identical
         assert_eq!(

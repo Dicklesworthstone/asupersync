@@ -1,4 +1,6 @@
-use asupersync::plan::{PlanDag, PlanId, PlanNode, RewritePolicy, RewriteReport, RewriteRule};
+//! Golden tests for plan DAG rewrite and execution-shape snapshots.
+
+use asupersync::plan::{PlanDag, RewritePolicy, RewriteRule};
 use std::time::Duration;
 
 /// Helper to scrub PlanId indices from Debug output to keep snapshots stable
