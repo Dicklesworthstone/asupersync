@@ -237,7 +237,7 @@ pub trait Strategy: fmt::Debug + Send + Sync {
 // ─── RoundRobin ───────────────────────────────────────────────────────────
 
 /// Cycles through backends in sequential order.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RoundRobin {
     next: AtomicUsize,
 }
@@ -249,12 +249,6 @@ impl RoundRobin {
         Self {
             next: AtomicUsize::new(0),
         }
-    }
-}
-
-impl Default for RoundRobin {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

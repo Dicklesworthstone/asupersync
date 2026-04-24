@@ -1889,7 +1889,7 @@ impl RestartHistory {
 }
 
 /// Reason a restart was refused due to budget constraints.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BudgetRefusal {
     /// The sliding-window restart count was exhausted.
     WindowExhausted {
@@ -1920,8 +1920,6 @@ pub enum BudgetRefusal {
         remaining: u32,
     },
 }
-
-impl Eq for BudgetRefusal {}
 
 impl std::fmt::Display for BudgetRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2418,7 +2416,7 @@ impl RestartTrackerConfig {
 }
 
 /// Outcome of a restart evaluation by the [`RestartTracker`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestartVerdict {
     /// Restart is allowed. Includes the backoff delay (if any) and
     /// which attempt this represents.
@@ -2442,8 +2440,6 @@ impl RestartVerdict {
         matches!(self, Self::Allowed { .. })
     }
 }
-
-impl Eq for RestartVerdict {}
 
 /// Integrated restart tracker combining window counting, budget checks,
 /// intensity monitoring, and e-process storm detection.
@@ -2777,7 +2773,7 @@ pub enum SupervisionEvent {
 /// This enum captures which rule was decisive, along with the relevant
 /// parameters, so that tests and observability tooling can verify the
 /// reasoning chain without inspecting implementation details.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindingConstraint {
     /// Monotone severity: outcome is too severe for restart.
     ///
@@ -2832,8 +2828,6 @@ pub enum BindingConstraint {
         remaining: u32,
     },
 }
-
-impl Eq for BindingConstraint {}
 
 impl std::fmt::Display for BindingConstraint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -114,7 +114,7 @@ impl Default for CrashPackConfig {
 /// Description of the triggering failure.
 ///
 /// Captures which task failed, where, and what the outcome was.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FailureInfo {
     /// The task that failed.
     pub task: TaskId,
@@ -128,17 +128,6 @@ pub struct FailureInfo {
     /// Virtual time at which the failure was observed.
     pub virtual_time: Time,
 }
-
-impl PartialEq for FailureInfo {
-    fn eq(&self, other: &Self) -> bool {
-        self.task == other.task
-            && self.region == other.region
-            && self.outcome == other.outcome
-            && self.virtual_time == other.virtual_time
-    }
-}
-
-impl Eq for FailureInfo {}
 
 /// Minimal failure outcome for crash packs.
 ///

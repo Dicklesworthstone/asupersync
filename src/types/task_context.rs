@@ -20,7 +20,7 @@ pub const MAX_MASK_DEPTH: u32 = 64;
 /// - Detecting stuck/stalled tasks
 /// - Work-stealing scheduler decisions
 /// - Observability and debugging
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CheckpointState {
     /// The runtime time of the last checkpoint.
     pub last_checkpoint: Option<Time>,
@@ -28,12 +28,6 @@ pub struct CheckpointState {
     pub last_message: Option<String>,
     /// The total number of checkpoints recorded.
     pub checkpoint_count: u64,
-}
-
-impl Default for CheckpointState {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl CheckpointState {

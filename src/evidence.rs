@@ -125,7 +125,7 @@ impl fmt::Display for Verdict {
 ///
 /// Each variant carries the binding constraint: the specific rule, limit,
 /// or condition that determined the verdict.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceDetail {
     /// Supervision decision detail.
     Supervision(SupervisionDetail),
@@ -136,8 +136,6 @@ pub enum EvidenceDetail {
     /// Monitor decision detail.
     Monitor(MonitorDetail),
 }
-
-impl Eq for EvidenceDetail {}
 
 impl fmt::Display for EvidenceDetail {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -156,7 +154,7 @@ impl fmt::Display for EvidenceDetail {
 ///
 /// Maps directly to the `BindingConstraint` enum in `src/supervision.rs`
 /// but expressed in the generalized evidence schema.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SupervisionDetail {
     /// Outcome severity prevents restart (Panicked / Cancelled / Ok).
     MonotoneSeverity {
@@ -189,8 +187,6 @@ pub enum SupervisionDetail {
         constraint: String,
     },
 }
-
-impl Eq for SupervisionDetail {}
 
 impl fmt::Display for SupervisionDetail {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -281,7 +277,7 @@ impl fmt::Display for RegistryDetail {
 // -- Link detail --
 
 /// Why a link decision was made.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LinkDetail {
     /// Linked task failed; exit signal propagated.
     ExitPropagated {
@@ -304,8 +300,6 @@ pub enum LinkDetail {
     },
 }
 
-impl Eq for LinkDetail {}
-
 impl fmt::Display for LinkDetail {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -326,7 +320,7 @@ impl fmt::Display for LinkDetail {
 // -- Monitor detail --
 
 /// Why a monitor decision was made.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MonitorDetail {
     /// Down notification delivered to watcher.
     DownDelivered {
@@ -350,8 +344,6 @@ pub enum MonitorDetail {
         count: usize,
     },
 }
-
-impl Eq for MonitorDetail {}
 
 impl fmt::Display for MonitorDetail {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
