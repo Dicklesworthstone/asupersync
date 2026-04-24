@@ -331,13 +331,27 @@ impl GrpcError {
     pub fn into_status(self) -> Status {
         match self {
             Self::Status(s) => s,
-            Self::Transport(msg) => Status::unavailable(msg),
+            Self::Transport(msg) => {
+                if transport_message_implies_deadline(&msg) {
+                    Status::deadline_exceeded(msg)
+                } else {
+                    Status::unavailable(msg)
+                }
+            }
             Self::Protocol(msg) => Status::internal(format!("protocol error: {msg}")),
             Self::MessageTooLarge => Status::resource_exhausted("message too large"),
             Self::InvalidMessage(msg) => Status::invalid_argument(msg),
             Self::Compression(msg) => Status::internal(format!("compression error: {msg}")),
         }
     }
+}
+
+fn transport_message_implies_deadline(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("deadline exceeded")
+        || lower.contains("http 504")
 }
 
 impl fmt::Display for GrpcError {
@@ -698,6 +712,9 @@ mod tests {
 
         let s = GrpcError::transport("down").into_status();
         assert_eq!(s.code(), Code::Unavailable);
+
+        let s = GrpcError::transport("timed out").into_status();
+        assert_eq!(s.code(), Code::DeadlineExceeded);
 
         let s = GrpcError::protocol("bad").into_status();
         assert_eq!(s.code(), Code::Internal);
@@ -1095,6 +1112,10 @@ mod tests {
         let error_cases = vec![
             (GrpcError::MessageTooLarge, Code::ResourceExhausted),
             (GrpcError::transport("Connection failed"), Code::Unavailable),
+            (
+                GrpcError::transport("request timeout"),
+                Code::DeadlineExceeded,
+            ),
             (GrpcError::protocol("Invalid frame"), Code::Internal),
             (
                 GrpcError::invalid_message("Malformed"),

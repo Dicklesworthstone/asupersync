@@ -49,25 +49,46 @@ fn test_all_17_standard_grpc_status_codes() {
     // Test that all 17 standard gRPC status codes are correctly defined
     // with proper numeric values and string representations
 
-    assert_eq!(GRPC_STATUS_CODES.len(), 17, "Must have exactly 17 standard gRPC status codes");
+    assert_eq!(
+        GRPC_STATUS_CODES.len(),
+        17,
+        "Must have exactly 17 standard gRPC status codes"
+    );
 
     for &(code, expected_int, expected_str) in GRPC_STATUS_CODES {
         // Test numeric value encoding
-        assert_eq!(code.as_i32(), expected_int,
-            "Code {:?} should have numeric value {}", code, expected_int);
+        assert_eq!(
+            code.as_i32(),
+            expected_int,
+            "Code {:?} should have numeric value {}",
+            code,
+            expected_int
+        );
 
         // Test string representation
-        assert_eq!(code.as_str(), expected_str,
-            "Code {:?} should have string representation '{}'", code, expected_str);
+        assert_eq!(
+            code.as_str(),
+            expected_str,
+            "Code {:?} should have string representation '{}'",
+            code,
+            expected_str
+        );
 
         // Test Display trait consistency
-        assert_eq!(code.to_string(), expected_str,
-            "Code {:?} Display should match as_str()", code);
+        assert_eq!(
+            code.to_string(),
+            expected_str,
+            "Code {:?} Display should match as_str()",
+            code
+        );
 
         // Test round-trip encoding/decoding
         let decoded = Code::from_i32(expected_int);
-        assert_eq!(decoded, code,
-            "Round-trip encoding for {} should preserve code {:?}", expected_int, code);
+        assert_eq!(
+            decoded, code,
+            "Round-trip encoding for {} should preserve code {:?}",
+            expected_int, code
+        );
     }
 
     // Test that status codes 0-16 are all accounted for (no gaps)
@@ -78,8 +99,11 @@ fn test_all_17_standard_grpc_status_codes() {
     covered_codes.sort();
 
     for expected in 0..17 {
-        assert!(covered_codes.contains(&expected),
-            "Status code {} should be defined in the standard set", expected);
+        assert!(
+            covered_codes.contains(&expected),
+            "Status code {} should be defined in the standard set",
+            expected
+        );
     }
 }
 
@@ -91,10 +115,13 @@ fn test_invalid_status_codes_map_to_unknown() {
 
     for &invalid_code in &invalid_codes {
         let result = Code::from_i32(invalid_code);
-        assert_eq!(result, Code::Unknown,
-            "Invalid status code {} should map to UNKNOWN", invalid_code);
-        assert_eq!(result.as_i32(), 2,
-            "UNKNOWN should have numeric value 2");
+        assert_eq!(
+            result,
+            Code::Unknown,
+            "Invalid status code {} should map to UNKNOWN",
+            invalid_code
+        );
+        assert_eq!(result.as_i32(), 2, "UNKNOWN should have numeric value 2");
     }
 }
 
@@ -103,7 +130,11 @@ fn test_invalid_status_codes_map_to_unknown() {
 fn test_status_code_default_is_unknown() {
     // Default status code should be UNKNOWN per gRPC specification
     let default_code = Code::default();
-    assert_eq!(default_code, Code::Unknown, "Default status code should be UNKNOWN");
+    assert_eq!(
+        default_code,
+        Code::Unknown,
+        "Default status code should be UNKNOWN"
+    );
     assert_eq!(default_code.as_i32(), 2, "Default should have value 2");
 }
 
@@ -135,21 +166,18 @@ fn test_http_to_grpc_status_mapping() {
         let transport_error = GrpcError::transport(format!("HTTP {}", http_status));
         let grpc_status = transport_error.into_status();
 
-        // Transport errors should map to Unavailable by default
-        // (This tests the current implementation behavior)
-        assert_eq!(grpc_status.code(), Code::Unavailable,
-            "Transport error should map to UNAVAILABLE");
-
-        // Test that the specific mapping would be correct if implemented
-        // This documents the expected behavior per gRPC specification
         match http_status {
-            401 => assert_eq!(expected_grpc_code, Code::Unauthenticated),
-            403 => assert_eq!(expected_grpc_code, Code::PermissionDenied),
-            404 => assert_eq!(expected_grpc_code, Code::Unimplemented),
-            429 => assert_eq!(expected_grpc_code, Code::ResourceExhausted),
-            502 | 503 => assert_eq!(expected_grpc_code, Code::Unavailable),
-            504 => assert_eq!(expected_grpc_code, Code::DeadlineExceeded),
-            _ => assert_eq!(expected_grpc_code, Code::Internal),
+            504 => assert_eq!(
+                grpc_status.code(),
+                expected_grpc_code,
+                "gateway timeout transport errors should surface DEADLINE_EXCEEDED"
+            ),
+            _ => assert_eq!(
+                grpc_status.code(),
+                Code::Unavailable,
+                "transport error should map to UNAVAILABLE for HTTP {}",
+                http_status
+            ),
         }
     }
 }
@@ -171,11 +199,18 @@ fn test_grpc_error_transport_error_conversion() {
         let grpc_error = GrpcError::transport(error_msg);
         let status = grpc_error.into_status();
 
-        // Current implementation maps all transport errors to Unavailable
-        assert_eq!(status.code(), Code::Unavailable,
-            "Transport error '{}' should map to UNAVAILABLE", error_msg);
-        assert!(status.message().contains(error_msg),
-            "Status message should contain original error message");
+        assert_eq!(
+            status.code(),
+            expected_code,
+            "Transport error '{}' mapped to {:?} instead of {:?}",
+            error_msg,
+            status.code(),
+            expected_code
+        );
+        assert!(
+            status.message().contains(error_msg),
+            "Status message should contain original error message"
+        );
     }
 }
 
@@ -196,12 +231,20 @@ fn test_grpc_error_protocol_error_conversion() {
         let grpc_error = GrpcError::protocol(error_msg);
         let status = grpc_error.into_status();
 
-        assert_eq!(status.code(), Code::Internal,
-            "Protocol error '{}' should map to INTERNAL", error_msg);
-        assert!(status.message().contains("protocol error"),
-            "Status message should indicate protocol error");
-        assert!(status.message().contains(error_msg),
-            "Status message should contain original error");
+        assert_eq!(
+            status.code(),
+            Code::Internal,
+            "Protocol error '{}' should map to INTERNAL",
+            error_msg
+        );
+        assert!(
+            status.message().contains("protocol error"),
+            "Status message should indicate protocol error"
+        );
+        assert!(
+            status.message().contains(error_msg),
+            "Status message should contain original error"
+        );
     }
 }
 
@@ -215,20 +258,17 @@ const UTF8_ENCODING_TEST_CASES: &[(&str, &str)] = &[
     // Basic ASCII - no encoding needed
     ("simple message", "simple message"),
     ("error occurred", "error occurred"),
-
     // Special characters that need escaping for HTTP/2 headers
     ("message with \"quotes\"", "message with \\\"quotes\\\""),
     ("line break\nhere", "line break\\nhere"),
     ("tab\there", "tab\\there"),
     ("carriage\rreturn", "carriage\\rreturn"),
     ("backslash\\test", "backslash\\\\test"),
-
     // UTF-8 Unicode characters (should be preserved)
     ("café error", "café error"),
     ("测试 message", "测试 message"),
     ("emoji 🚀 launch", "emoji 🚀 launch"),
     ("mixed: café\n\"test\"", "mixed: café\\n\\\"test\\\""),
-
     // Edge cases
     ("", ""),
     ("only\\backslash", "only\\\\backslash"),
@@ -288,17 +328,25 @@ fn test_grpc_message_utf8_encoding() {
     for &(original, expected_escaped) in UTF8_ENCODING_TEST_CASES {
         // Test escaping
         let escaped = escape_grpc_message(original);
-        assert_eq!(escaped, expected_escaped,
-            "Escaping failed for input: '{}'", original);
+        assert_eq!(
+            escaped, expected_escaped,
+            "Escaping failed for input: '{}'",
+            original
+        );
 
         // Test round-trip: escape then unescape should recover original
         let unescaped = unescape_grpc_message(&escaped);
-        assert_eq!(unescaped, original,
-            "Round-trip failed for input: '{}'", original);
+        assert_eq!(
+            unescaped, original,
+            "Round-trip failed for input: '{}'",
+            original
+        );
 
         // Test that UTF-8 is preserved (characters remain valid)
-        assert!(escaped.chars().all(|c| c.is_ascii() || c.len_utf8() > 1),
-            "Escaped message should preserve UTF-8 encoding");
+        assert!(
+            escaped.chars().all(|c| c.is_ascii() || c.len_utf8() > 1),
+            "Escaped message should preserve UTF-8 encoding"
+        );
     }
 }
 
@@ -309,20 +357,34 @@ fn test_grpc_message_percent_encoding_edge_cases() {
 
     // Empty message
     let empty_status = Status::new(Code::NotFound, "");
-    assert_eq!(empty_status.message(), "", "Empty message should remain empty");
+    assert_eq!(
+        empty_status.message(),
+        "",
+        "Empty message should remain empty"
+    );
 
     // Very long message
     let long_message = "error ".repeat(1000);
     let status = Status::new(Code::Internal, &long_message);
-    assert_eq!(status.message(), long_message, "Long message should be preserved");
+    assert_eq!(
+        status.message(),
+        long_message,
+        "Long message should be preserved"
+    );
 
     // Message with only escape characters
     let escape_only = "\n\r\t\"\\";
     let escaped = escape_grpc_message(escape_only);
-    assert_eq!(escaped, "\\n\\r\\t\\\"\\\\", "Should escape all special characters");
+    assert_eq!(
+        escaped, "\\n\\r\\t\\\"\\\\",
+        "Should escape all special characters"
+    );
 
     let unescaped = unescape_grpc_message(&escaped);
-    assert_eq!(unescaped, escape_only, "Should recover all special characters");
+    assert_eq!(
+        unescaped, escape_only,
+        "Should recover all special characters"
+    );
 }
 
 // ============================================================================
@@ -343,10 +405,8 @@ fn test_trailer_only_response_conformance() {
         (Code::NotFound, "user not found"),
         (Code::Unauthenticated, "invalid token"),
         (Code::Unimplemented, "method not implemented"),
-
         // Success with no data
         (Code::Ok, ""),
-
         // Resource exhaustion (immediate rejection)
         (Code::ResourceExhausted, "rate limit exceeded"),
     ];
@@ -355,20 +415,31 @@ fn test_trailer_only_response_conformance() {
         let status = Status::new(code, message);
 
         // Verify status can be represented as trailer fields
-        assert_eq!(status.code().as_i32(), code.as_i32(),
-            "Status code should be preserved for trailer transmission");
-        assert_eq!(status.message(), message,
-            "Status message should be preserved for trailer transmission");
+        assert_eq!(
+            status.code().as_i32(),
+            code.as_i32(),
+            "Status code should be preserved for trailer transmission"
+        );
+        assert_eq!(
+            status.message(),
+            message,
+            "Status message should be preserved for trailer transmission"
+        );
 
         // Test trailer field generation
         let grpc_status_value = status.code().as_i32().to_string();
-        assert!(grpc_status_value.parse::<i32>().is_ok(),
-            "grpc-status trailer should be valid integer");
+        assert!(
+            grpc_status_value.parse::<i32>().is_ok(),
+            "grpc-status trailer should be valid integer"
+        );
 
         if !message.is_empty() {
             let grpc_message_value = escape_grpc_message(status.message());
-            assert!(grpc_message_value.is_ascii() || grpc_message_value.chars().all(|c| c.len_utf8() <= 4),
-                "grpc-message trailer should be valid UTF-8");
+            assert!(
+                grpc_message_value.is_ascii()
+                    || grpc_message_value.chars().all(|c| c.len_utf8() <= 4),
+                "grpc-message trailer should be valid UTF-8"
+            );
         }
 
         // Verify status is not marked as OK if it's an error
@@ -388,7 +459,11 @@ fn test_trailer_metadata_format() {
     let test_cases = vec![
         (Code::Ok, "", None),
         (Code::NotFound, "user 123 not found", None),
-        (Code::Internal, "database error", Some(b"detailed error context")),
+        (
+            Code::Internal,
+            "database error",
+            Some(b"detailed error context"),
+        ),
     ];
 
     for (code, message, details_data) in test_cases {
@@ -400,22 +475,31 @@ fn test_trailer_metadata_format() {
 
         // Test grpc-status trailer (required)
         let grpc_status = status.code().as_i32();
-        assert!(grpc_status >= 0 && grpc_status <= 16,
-            "grpc-status must be in valid range 0-16");
+        assert!(
+            grpc_status >= 0 && grpc_status <= 16,
+            "grpc-status must be in valid range 0-16"
+        );
 
         // Test grpc-message trailer (optional if empty)
         if !status.message().is_empty() {
             let escaped_message = escape_grpc_message(status.message());
-            assert!(escaped_message.len() <= 8192,
-                "grpc-message should be reasonable length for HTTP/2 header");
+            assert!(
+                escaped_message.len() <= 8192,
+                "grpc-message should be reasonable length for HTTP/2 header"
+            );
         }
 
         // Test grpc-status-details-bin trailer (optional)
         if let Some(details) = status.details() {
-            assert!(!details.is_empty(), "Details should not be empty if present");
+            assert!(
+                !details.is_empty(),
+                "Details should not be empty if present"
+            );
             // In real implementation, this would be base64 encoded for binary trailer
-            assert!(details.len() <= 65536,
-                "Status details should be reasonable size for trailer");
+            assert!(
+                details.len() <= 65536,
+                "Status details should be reasonable size for trailer"
+            );
         }
     }
 }
@@ -433,17 +517,23 @@ fn test_grpc_status_details_bin_conformance() {
     // Test cases with binary details
     let test_cases = vec![
         // Protobuf-encoded error details (simulated)
-        (Code::InvalidArgument, "validation failed",
-         b"\x08\x01\x12\x04name\x1a\x0frequired field"),
-
+        (
+            Code::InvalidArgument,
+            "validation failed",
+            b"\x08\x01\x12\x04name\x1a\x0frequired field",
+        ),
         // JSON error details
-        (Code::PermissionDenied, "access denied",
-         br#"{"resource":"users","permission":"read","subject":"user:123"}"#),
-
+        (
+            Code::PermissionDenied,
+            "access denied",
+            br#"{"resource":"users","permission":"read","subject":"user:123"}"#,
+        ),
         // Custom error context
-        (Code::Internal, "database error",
-         b"connection_pool_exhausted:timeout=30s:active=50:max=50"),
-
+        (
+            Code::Internal,
+            "database error",
+            b"connection_pool_exhausted:timeout=30s:active=50:max=50",
+        ),
         // Empty details (should be None)
         (Code::NotFound, "not found", b""),
     ];
@@ -452,29 +542,46 @@ fn test_grpc_status_details_bin_conformance() {
         if details_data.is_empty() {
             // Test status without details
             let status = Status::new(code, message);
-            assert!(status.details().is_none(),
-                "Empty details should result in None");
+            assert!(
+                status.details().is_none(),
+                "Empty details should result in None"
+            );
         } else {
             // Test status with details
             let details = Bytes::from(details_data);
             let status = Status::with_details(code, message, details.clone());
 
-            assert!(status.details().is_some(),
-                "Non-empty details should be Some");
-            assert_eq!(status.details().unwrap(), &details,
-                "Details should be preserved exactly");
+            assert!(
+                status.details().is_some(),
+                "Non-empty details should be Some"
+            );
+            assert_eq!(
+                status.details().unwrap(),
+                &details,
+                "Details should be preserved exactly"
+            );
 
             // Test details binary safety
             let details_bytes = status.details().unwrap();
-            assert_eq!(details_bytes.len(), details_data.len(),
-                "Details length should be preserved");
-            assert_eq!(details_bytes.as_ref(), details_data,
-                "Details content should be preserved");
+            assert_eq!(
+                details_bytes.len(),
+                details_data.len(),
+                "Details length should be preserved"
+            );
+            assert_eq!(
+                details_bytes.as_ref(),
+                details_data,
+                "Details content should be preserved"
+            );
         }
 
         // Test core status properties are preserved regardless of details
         assert_eq!(status.code(), code, "Code should be preserved with details");
-        assert_eq!(status.message(), message, "Message should be preserved with details");
+        assert_eq!(
+            status.message(),
+            message,
+            "Message should be preserved with details"
+        );
     }
 }
 
@@ -499,10 +606,16 @@ fn test_status_details_binary_safety() {
         let status = Status::with_details(Code::Internal, "binary test", details);
 
         let recovered_details = status.details().unwrap();
-        assert_eq!(recovered_details.as_ref(), binary_data.as_slice(),
-            "Binary data should be preserved exactly");
-        assert_eq!(recovered_details.len(), binary_data.len(),
-            "Binary data length should be preserved");
+        assert_eq!(
+            recovered_details.as_ref(),
+            binary_data.as_slice(),
+            "Binary data should be preserved exactly"
+        );
+        assert_eq!(
+            recovered_details.len(),
+            binary_data.len(),
+            "Binary data length should be preserved"
+        );
     }
 }
 
@@ -513,12 +626,9 @@ fn test_status_details_size_limits() {
 
     let size_test_cases = vec![
         // Small details
-        1,
-        // Medium details
-        1024,
-        // Large details (still reasonable for trailers)
-        16384,
-        // Very large details (may be problematic for HTTP/2 headers)
+        1, // Medium details
+        1024, // Large details (still reasonable for trailers)
+        16384, // Very large details (may be problematic for HTTP/2 headers)
         65536,
     ];
 
@@ -528,12 +638,23 @@ fn test_status_details_size_limits() {
         let status = Status::with_details(Code::Internal, "size test", details);
 
         let recovered_details = status.details().unwrap();
-        assert_eq!(recovered_details.len(), size,
-            "Details size {} should be preserved", size);
-        assert_eq!(recovered_details[0], 0x42,
-            "Details content should be preserved for size {}", size);
-        assert_eq!(recovered_details[size - 1], 0x42,
-            "Details end should be preserved for size {}", size);
+        assert_eq!(
+            recovered_details.len(),
+            size,
+            "Details size {} should be preserved",
+            size
+        );
+        assert_eq!(
+            recovered_details[0], 0x42,
+            "Details content should be preserved for size {}",
+            size
+        );
+        assert_eq!(
+            recovered_details[size - 1],
+            0x42,
+            "Details end should be preserved for size {}",
+            size
+        );
     }
 }
 
@@ -563,18 +684,32 @@ fn test_complete_grpc_status_conformance() {
 
             // Test 1: Status code conformance
             assert_eq!(status.code(), code, "Code should match");
-            assert_eq!(status.code().as_i32(), code_int, "Integer encoding should match");
-            assert_eq!(status.code().as_str(), code_str, "String encoding should match");
+            assert_eq!(
+                status.code().as_i32(),
+                code_int,
+                "Integer encoding should match"
+            );
+            assert_eq!(
+                status.code().as_str(),
+                code_str,
+                "String encoding should match"
+            );
 
             // Test 2: Message encoding conformance
             assert_eq!(status.message(), message, "Message should be preserved");
             let escaped = escape_grpc_message(status.message());
             let unescaped = unescape_grpc_message(&escaped);
-            assert_eq!(unescaped, message, "Message should survive escape round-trip");
+            assert_eq!(
+                unescaped, message,
+                "Message should survive escape round-trip"
+            );
 
             // Test 3: Trailer representation
             let trailer_status = status.code().as_i32().to_string();
-            assert!(trailer_status.parse::<i32>().is_ok(), "Status should be valid integer");
+            assert!(
+                trailer_status.parse::<i32>().is_ok(),
+                "Status should be valid integer"
+            );
 
             // Test 4: Status semantics
             if code == Code::Ok {
@@ -588,9 +723,21 @@ fn test_complete_grpc_status_conformance() {
                 let details = Bytes::from(format!("details for {}", message));
                 let detailed_status = Status::with_details(code, message, details.clone());
 
-                assert_eq!(detailed_status.code(), code, "Code should match with details");
-                assert_eq!(detailed_status.message(), message, "Message should match with details");
-                assert_eq!(detailed_status.details().unwrap(), &details, "Details should match");
+                assert_eq!(
+                    detailed_status.code(),
+                    code,
+                    "Code should match with details"
+                );
+                assert_eq!(
+                    detailed_status.message(),
+                    message,
+                    "Message should match with details"
+                );
+                assert_eq!(
+                    detailed_status.details().unwrap(),
+                    &details,
+                    "Details should match"
+                );
             }
         }
     }
@@ -605,16 +752,33 @@ fn test_grpc_status_error_conversion_chain() {
 
     // std::io::Error -> GrpcError
     let grpc_error: GrpcError = GrpcError::from(io_error);
-    assert!(matches!(grpc_error, GrpcError::Transport(_)), "IO error should become transport error");
+    assert!(
+        matches!(grpc_error, GrpcError::Transport(_)),
+        "IO error should become transport error"
+    );
 
     // GrpcError -> Status
     let status = grpc_error.into_status();
-    assert_eq!(status.code(), Code::Unavailable, "Transport error should become UNAVAILABLE");
-    assert!(status.message().contains("connection refused"), "Original message should be preserved");
+    assert_eq!(
+        status.code(),
+        Code::Unavailable,
+        "Transport error should become UNAVAILABLE"
+    );
+    assert!(
+        status.message().contains("connection refused"),
+        "Original message should be preserved"
+    );
 
     // Test direct std::io::Error -> Status conversion
     let io_error2 = std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout");
     let status2: Status = Status::from(io_error2);
-    assert_eq!(status2.code(), Code::Internal, "IO error should become INTERNAL via direct conversion");
-    assert!(status2.message().contains("timeout"), "Original message should be preserved");
+    assert_eq!(
+        status2.code(),
+        Code::Internal,
+        "IO error should become INTERNAL via direct conversion"
+    );
+    assert!(
+        status2.message().contains("timeout"),
+        "Original message should be preserved"
+    );
 }
