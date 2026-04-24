@@ -776,7 +776,26 @@ impl FlowControlMonitor {
                     .remove_dependency(*task_id, *channel_id);
             }
 
-            FlowControlEvent::CommitFlowControlled { .. } => {} // Handle other events as needed
+            FlowControlEvent::CommitFlowControlled {
+                channel_id,
+                task_id,
+                permit_id,
+                ..
+            } => {
+                if let Some(task_state) = self.task_states.get_mut(task_id) {
+                    task_state.pending_permits.remove(permit_id);
+                    task_state.blocked_channels.remove(channel_id);
+                    if task_state.blocked_channels.is_empty() {
+                        task_state.first_block_time = None;
+                    }
+                }
+
+                if let Some(channel_state) = self.channel_states.get_mut(channel_id) {
+                    channel_state.blocked_tasks.remove(task_id);
+                }
+                self.deadlock_detector
+                    .remove_dependency(*task_id, *channel_id);
+            }
         }
     }
 
@@ -1382,6 +1401,55 @@ mod tests {
                 && *violation_permit == permit_id
                 && violation_type == "commit_flow_controlled_without_pending_reserve"
         )));
+    }
+
+    #[test]
+    fn test_commit_with_pending_reserve_clears_state_without_violation() {
+        let mut monitor = FlowControlMonitor::with_defaults();
+        let task_id = TaskId::new_for_test(12, 0);
+        let channel_id = 88;
+        let permit_id = 707;
+
+        monitor.record_event(FlowControlEvent::ReserveBlocked {
+            channel_id,
+            task_id,
+            permit_id,
+            timestamp: Time::from_nanos(10_000),
+        });
+        monitor.record_event(FlowControlEvent::CommitFlowControlled {
+            channel_id,
+            task_id,
+            permit_id,
+            timestamp: Time::from_nanos(20_000),
+        });
+
+        assert!(
+            !monitor.violations().iter().any(|report| matches!(
+                &report.violation,
+                FlowControlViolation::AtomicityViolation {
+                    channel_id: violation_channel,
+                    task_id: violation_task,
+                    permit_id: violation_permit,
+                    violation_type,
+                    ..
+                } if *violation_channel == channel_id
+                    && *violation_task == task_id
+                    && *violation_permit == permit_id
+                    && violation_type == "commit_flow_controlled_without_pending_reserve"
+            )),
+            "valid commit after reserve must not be reported as an atomicity violation"
+        );
+
+        let task_state = monitor.task_states.get(&task_id).expect("task state");
+        assert!(task_state.pending_permits.is_empty());
+        assert!(task_state.blocked_channels.is_empty());
+        assert!(task_state.first_block_time.is_none());
+
+        let channel_state = monitor
+            .channel_states
+            .get(&channel_id)
+            .expect("channel state");
+        assert!(channel_state.blocked_tasks.is_empty());
     }
 
     #[test]

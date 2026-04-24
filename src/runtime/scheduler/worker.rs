@@ -159,15 +159,15 @@ impl Worker {
                 // inner lock during the blocking poll, allowing concurrent registrations.
                 if let Ok(Some(_)) =
                     io.try_turn_with(Some(Duration::from_millis(1)), |event, interest| {
-                        let io_token = event.token.0 as u64;
+                        let polling_token = event.token.0 as u64;
                         let interest_bits = interest.unwrap_or(event.ready).bits();
-                        if seen.insert(io_token) {
+                        if seen.insert(polling_token) {
                             trace.record_event(|seq| {
-                                TraceEvent::io_requested(seq, now, io_token, interest_bits)
+                                TraceEvent::io_requested(seq, now, polling_token, interest_bits)
                             });
                         }
                         trace.record_event(|seq| {
-                            TraceEvent::io_ready(seq, now, io_token, event.ready.bits())
+                            TraceEvent::io_ready(seq, now, polling_token, event.ready.bits())
                         });
                     })
                 {

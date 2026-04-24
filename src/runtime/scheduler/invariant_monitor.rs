@@ -961,7 +961,7 @@ mod tests {
                 assert_eq!(*reported_depth, 5);
                 assert_eq!(*actual_depth, 3);
             }
-            _ => panic!("Expected QueueDepthMismatch violation"),
+            _ => panic!("Expected QueueDepthMismatch violation"), // ubs:ignore - test logic
         }
     }
 

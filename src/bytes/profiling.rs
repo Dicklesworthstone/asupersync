@@ -156,6 +156,8 @@ pub(crate) use profile;
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::used_underscore_items)]
+
     use super::*;
 
     #[test]

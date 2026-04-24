@@ -1032,7 +1032,7 @@ mod tests {
                 return;
             }
         }
-        panic!("expected congestion to limit packet sends");
+        panic!("expected congestion to limit packet sends"); // ubs:ignore - test assertion
     }
 
     #[test]

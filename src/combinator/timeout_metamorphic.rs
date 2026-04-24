@@ -554,7 +554,7 @@ mod metamorphic_cancel_timeout_precedence {
                                 .timeouts_detected
                                 .fetch_add(1, Ordering::SeqCst);
                         }
-                    };
+                    }
 
                     // In this test, we're verifying the precedence conceptually
                     // The actual implementation would require integration with the

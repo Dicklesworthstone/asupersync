@@ -845,7 +845,7 @@ mod tests {
             ContentEncoding::Deflate,
             ContentEncoding::Brotli,
         ] {
-            let token = enc.as_token();
+            let token = enc.as_token(); // ubs:ignore - not a secret
             assert_eq!(ContentEncoding::from_token(token), Some(enc));
         }
     }

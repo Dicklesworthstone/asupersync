@@ -619,7 +619,7 @@ mod differential_tests {
                         let ref_result = ref_key.on_peer_key_phase(false).unwrap();
                         assert_eq!(impl_result, ref_result, "Peer update false mismatch");
                     }
-                    _ => panic!("Unknown step: {}", step),
+                    _ => panic!("Unknown step: {}", step), // ubs:ignore - test harness assertion
                 }
             }
 

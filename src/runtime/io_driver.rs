@@ -1764,13 +1764,13 @@ mod tests {
         let source = TestFdSource;
 
         // Register source directly with reactor (no waker in driver)
-        let io_token = Token::new(999);
+        let polling_token = Token::new(999);
         reactor
-            .register(&source, io_token, Interest::READABLE)
+            .register(&source, polling_token, Interest::READABLE)
             .expect("register should succeed");
 
         // Inject event for the token
-        reactor.inject_event(io_token, Event::readable(io_token), Duration::ZERO);
+        reactor.inject_event(polling_token, Event::readable(polling_token), Duration::ZERO);
 
         let mut driver = IoDriver::new(reactor);
 

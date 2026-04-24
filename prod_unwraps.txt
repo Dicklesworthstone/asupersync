@@ -1,0 +1,704 @@
+src/gen_server.rs:618: .expect("Reply::send called after reply was already consumed");
+src/gen_server.rs:642: .expect("Reply::abort called after reply was already consumed")
+src/remote.rs:1044: .expect("fresh remote receiver must accept fallback result");
+src/remote.rs:2824: .expect("pending remote task");
+src/session.rs:54: //!     ep.send(&cx, 42).await.unwrap();
+src/session.rs:81: //!     ep.recv(&cx).await.unwrap();
+src/encoding.rs:462: .expect("systematic encoder must be initialized"))
+src/epoch.rs:1396: this.a_done.take().expect("a_done missing"),
+src/epoch.rs:1397: this.b_done.take().expect("b_done missing"),
+src/supervision.rs:1449: .expect("compiled supervisor dependency index missing");
+src/supervision.rs:1608: .expect("compiled supervisor dependency index missing");
+src/supervision.rs:3134: let history = self.history.as_mut().expect("history exists for Restart");
+src/process.rs:1375: .expect("child stdin already closed")
+src/process.rs:1385: .expect("child stdin already closed")
+src/process.rs:1415: .expect("child stdin must exist while registering write interest");
+src/process.rs:1453: .expect("child stdin must exist while registering flush interest");
+src/lab/mod.rs:26: //!     .expect("create task");
+src/lab/virtual_time_wheel.rs:190: .expect("virtual timer ID space exhausted");
+src/lab/replay.rs:1910: .expect("create task");
+src/lab/replay.rs:1924: .expect("create failing obligation");
+src/lab/dual_run.rs:2639: ///     let rt = RuntimeBuilder::current_thread().build().unwrap();
+src/lab/dual_run.rs:3551: .expect("exploration class must contain at least one run"),
+src/lab/dual_run.rs:3562: .expect("exploration class must have a representative schedule hash");
+src/lab/dual_run.rs:3803: let lab_fn = self.lab_fn.expect("DualRunHarness: lab function not set");
+src/lab/dual_run.rs:3804: let live_fn = self.live_fn.expect("DualRunHarness: live function not set");
+src/lab/spork_harness.rs:16: //! let mut harness = SporkAppHarness::new(LabConfig::new(42), app).unwrap();
+src/lab/conformal.rs:688: /// let result = cal.check("queue_depth", 100.0).unwrap();
+src/lab/fuzz.rs:441: best_result.expect("best result should exist when updating best_seed"),
+src/lab/util/stack_trace.rs:99: writeln!(frame_info, "<unknown>").unwrap();
+src/lab/util/stack_trace.rs:107: write!(frame_info, "{}", demangled).unwrap();
+src/lab/util/stack_trace.rs:109: write!(frame_info, "<unknown>").unwrap();
+src/lab/util/stack_trace.rs:116: write!(frame_info, "\n        at {}:{}", filename_str, line).unwrap();
+src/lab/util/stack_trace.rs:121: writeln!(frame_info).unwrap();
+src/lab/util/stack_trace.rs:130: writeln!(output, "  ... ({} more frames)", remaining).unwrap();
+src/lab/meta/runner.rs:76: .expect("create task");
+src/lab/meta/runner.rs:94: .expect("create obligation")
+src/lab/meta/mutation.rs:345: .expect("create obligation");
+src/lab/meta/mutation.rs:350: .expect("commit obligation");
+src/lab/meta/mutation.rs:366: .expect("create obligation");
+src/lab/meta/mutation.rs:373: .expect("region must exist to be mutated")
+src/lab/oracle/priority_inversion.rs:220: let mut state = self.state.lock().unwrap();
+src/lab/oracle/priority_inversion.rs:238: let mut state = self.state.lock().unwrap();
+src/lab/oracle/priority_inversion.rs:248: let mut state = self.state.lock().unwrap();
+src/lab/oracle/priority_inversion.rs:266: let mut state = self.state.lock().unwrap();
+src/lab/oracle/priority_inversion.rs:293: let mut state = self.state.lock().unwrap();
+src/lab/oracle/priority_inversion.rs:312: let mut state = self.state.lock().unwrap();
+src/lab/oracle/priority_inversion.rs:431: let waiting_task_info = state.active_tasks.get(&waiting_task).unwrap();
+src/lab/oracle/priority_inversion.rs:434: .get(blocking_chain.last().unwrap())
+src/lab/oracle/priority_inversion.rs:435: .unwrap();
+src/lab/oracle/priority_inversion.rs:445: blocking_task: *blocking_chain.last().unwrap(),
+src/lab/oracle/priority_inversion.rs:540: let state = self.state.lock().unwrap();
+src/lab/oracle/priority_inversion.rs:547: let state = self.state.lock().unwrap();
+src/lab/oracle/priority_inversion.rs:554: let state = self.state.lock().unwrap();
+src/lab/oracle/priority_inversion.rs:560: let mut state = self.state.lock().unwrap();
+src/lab/oracle/priority_inversion.rs:572: let state = self.state.lock().unwrap();
+src/lab/oracle/region_tree.rs:229: .expect("region missing from oracle");
+src/lab/oracle/region_tree.rs:248: .expect("region missing from oracle");
+src/lab/oracle/region_tree.rs:264: .expect("region missing from oracle");
+src/lab/oracle/region_tree.rs:282: .expect("region missing from oracle");
+src/lab/oracle/region_tree.rs:371: .expect("region missing from oracle");
+src/lab/oracle/finalizer.rs:112: .expect("finalizer oracle id counter exhausted");
+src/lab/oracle/loser_drain.rs:241: .expect("unknown completion missing from oracle");
+src/lab/oracle/loser_drain.rs:255: .expect("active race missing from oracle");
+src/lab/network/network.rs:335: let next = self.queue.pop().expect("pop queued packet");
+src/lab/http/harness.rs:170: .map(|r| r.expect("response should be present"))
+src/lab/http/client.rs:94: .map(|r| r.expect("response should be present"))
+src/types/outcome.rs:621: Self::Err(e) => panic!("called `Outcome::unwrap()` on an `Err` value: {e:?}"),
+src/types/outcome.rs:623: panic!("called `Outcome::unwrap()` on a `Cancelled` value: {r:?}")
+src/types/outcome.rs:625: Self::Panicked(p) => panic!("called `Outcome::unwrap()` on a `Panicked` value: {p}"),
+src/types/wasm_abi.rs:986: let slot = u32::try_from(self.slots.len()).expect("handle table overflow");
+src/types/wasm_abi.rs:1639: .expect("symbol not in signature table");
+src/types/rref.rs:23: //! let data = region.heap_alloc(vec![1, 2, 3]).expect("heap alloc");
+src/types/rref.rs:160: /// let index = region.heap_alloc(42u32).expect("heap alloc");
+src/types/cancel.rs:638: ///     println!("Chain truncated at depth {}", reason.truncated_at_depth.unwrap());
+src/types/typed_symbol.rs:383: let header = TypedHeader::decode(symbol.data()).expect("typed symbol header missing");
+src/runtime/state.rs:2679: .expect("finalizer ID overflow");
+src/runtime/state.rs:2719: .expect("finalizer id tracking missing for region");
+src/runtime/state.rs:2720: let id = ids.pop().expect("finalizer id stack out of sync");
+src/runtime/state.rs:4888: state.task_mut(id).expect("task missing").id = id;
+src/runtime/state.rs:4892: .expect("region missing")
+src/runtime/state.rs:5430: state.regions.get_mut(idx).expect("region missing").id = id;
+src/runtime/state.rs:5434: .expect("parent missing")
+src/runtime/state.rs:7875: .expect("create obligation");
+src/runtime/state.rs:7884: .expect("task")
+src/runtime/state.rs:9637: .expect("branch cancel reason missing");
+src/runtime/state.rs:9642: .expect("leaf cancel reason missing");
+src/runtime/state.rs:9646: .expect("branch task missing")
+src/runtime/state.rs:9655: .expect("leaf task missing")
+src/runtime/kernel.rs:623: .expect("runtime kernel controller id counter exhausted");
+src/runtime/kernel.rs:772: .expect("runtime kernel snapshot id counter exhausted");
+src/runtime/kernel.rs:959: let controller = self.controllers.get_mut(&id).expect("checked above");
+src/runtime/kernel.rs:1158: .expect("ledger ID overflow");
+src/runtime/spawn_blocking.rs:300: .expect("spawn_blocking_on_thread fn missing");
+src/runtime/spawn_blocking.rs:312: .expect("spawn_blocking_on_thread fn missing");
+src/runtime/io_driver.rs:369: .expect("events should be Some during restore");
+src/runtime/io_driver.rs:466: .expect("polling guard events must exist while polling")
+src/runtime/io_driver.rs:472: .expect("polling guard events must be present")
+src/runtime/io_driver.rs:1201: started_guard = self.started_cv.wait(started_guard).expect("started wait");
+src/runtime/io_driver.rs:1283: started_guard = self.started_cv.wait(started_guard).expect("started wait");
+src/runtime/region_heap.rs:281: let index = u32::try_from(self.slots.len()).expect("region heap overflow");
+src/runtime/epoch_gc.rs:90: .expect("epoch_gc last_advance mutex poisoned");
+src/runtime/epoch_gc.rs:107: .expect("epoch_gc last_advance mutex poisoned");
+src/runtime/builder.rs:3110: ///         .expect("inside block_on");
+src/runtime/builder.rs:3240: .expect("failed to create runtime task")
+src/runtime/builder.rs:3279: .expect("failed to spawn task with cx");
+src/runtime/reactor/epoll.rs:172: NonZeroUsize::new(DEFAULT_POLL_EVENTS_CAPACITY).expect("non-zero capacity"),
+src/runtime/reactor/epoll.rs:517: NonZeroUsize::new(events.capacity().max(1)).expect("capacity >= 1");
+src/runtime/reactor/kqueue.rs:188: NonZeroUsize::new(DEFAULT_POLL_EVENTS_CAPACITY).expect("non-zero capacity"),
+src/runtime/reactor/kqueue.rs:386: let requested_capacity = NonZeroUsize::new(events.capacity().max(1)).expect("max(1)");
+src/runtime/reactor/lab.rs:329: .expect("lab reactor sequence counter exhausted");
+src/runtime/reactor/lab.rs:796: let te = inner.pending.pop().expect("pending timer array is empty");
+src/runtime/reactor/lab.rs:897: .expect("lab reactor sequence counter exhausted");
+src/runtime/reactor/windows.rs:59: NonZeroUsize::new(DEFAULT_POLL_EVENTS_CAPACITY).expect("non-zero capacity"),
+src/runtime/reactor/windows.rs:213: let requested_capacity = NonZeroUsize::new(events.capacity().max(1)).expect("max(1)");
+src/runtime/reactor/source.rs:48: let next = current.checked_add(1).expect("source ID counter overflow");
+src/runtime/scheduler/lane_pressure_scaling_metamorphic.rs:220: .unwrap()
+src/runtime/scheduler/lane_pressure_scaling_metamorphic.rs:252: let mut guard = state.lock().unwrap();
+src/runtime/scheduler/lane_pressure_scaling_metamorphic.rs:262: .expect("create task failed");
+src/runtime/scheduler/lane_pressure_scaling_metamorphic.rs:347: let baseline = baseline_certificate.unwrap();
+src/runtime/scheduler/work_stealing_checker.rs:349: match violations.last().unwrap() {
+src/runtime/scheduler/decision_contract.rs:123: .expect("scheduler loss matrix should be valid");
+src/runtime/scheduler/priority.rs:182: let old_gen = u32::try_from(existing - 1).expect("dense tag fits u32");
+src/runtime/scheduler/priority.rs:184: u32::try_from(idx).expect("idx fits u32"),
+src/runtime/scheduler/priority.rs:362: let len_u64 = u64::try_from(len).expect("len should fit in u64");
+src/runtime/scheduler/priority.rs:726: scratch.push(lane.pop().expect("popped after peek"));
+src/runtime/scheduler/priority.rs:758: scratch.push(lane.pop().expect("popped after peek"));
+src/runtime/scheduler/priority.rs:909: let entry = self.timed_lane.pop().expect("peeked entry should exist");
+src/runtime/scheduler/priority.rs:932: .expect("timed_lane peeked non-empty");
+src/runtime/scheduler/three_lane.rs:3869: let inner = cx_inner.as_ref().expect("cx_inner missing");
+src/runtime/scheduler/three_lane.rs:6871: .expect("create task")
+src/runtime/scheduler/three_lane.rs:6897: let governor = worker.governor.as_ref().expect("governor enabled");
+src/runtime/scheduler/three_lane.rs:6912: let task_id = worker.next_task().expect("ready task should dispatch");
+src/runtime/scheduler/three_lane.rs:7964: let mut worker = workers.next().expect("worker");
+src/runtime/scheduler/three_lane.rs:7970: .expect("adaptive policy enabled");
+src/runtime/scheduler/three_lane.rs:7990: .expect("timed lane should make progress under cancel flood");
+src/runtime/scheduler/three_lane.rs:7994: .expect("ready lane should make progress under cancel flood");
+src/runtime/scheduler/three_lane.rs:9853: .expect("epoch start snapshot should be present");
+src/runtime/scheduler/local_queue.rs:307: .expect("index must be valid within array bounds");
+src/runtime/scheduler/invariant_monitor.rs:670: .unwrap();
+src/runtime/scheduler/invariant_monitor.rs:674: .unwrap();
+src/runtime/scheduler/intrusive.rs:208: .expect("intrusive list broken: task removed from arena while in queue");
+src/runtime/scheduler/intrusive.rs:549: .expect("intrusive list broken: task removed from arena while in queue");
+src/transport/mock.rs:694: let pending = this.pending.take().expect("pending symbol missing");
+src/transport/mock.rs:755: .expect("pending symbol missing")
+src/transport/mock.rs:762: let pending = this.pending.take().expect("pending symbol missing");
+src/transport/mock.rs:1013: sink.send(create_symbol(i)).await.unwrap();
+src/transport/mock.rs:1015: sink.close().await.unwrap();
+src/distributed/encoding.rs:352: block: u8::try_from(block).expect("validated source block index fits in u8"),
+src/distributed/bridge.rs:767: .expect("distributed bridge snapshot sequence counter exhausted");
+src/distributed/bridge.rs:1590: bridge.apply_snapshot(snapshot).unwrap();
+src/distributed/bridge.rs:1603: .expect("bridge sequence snapshot step should be an object")
+src/distributed/recovery.rs:1529: enc.encode(snapshot, Time::ZERO).unwrap()
+src/distributed/recovery.rs:1540: let encoded = enc.encode(snapshot, Time::ZERO).unwrap();
+src/distributed/snapshot.rs:191: u32::try_from(self.tasks.len()).expect("tasks exceed u32::MAX"),
+src/distributed/snapshot.rs:202: u32::try_from(self.children.len()).expect("children exceed u32::MAX"),
+src/distributed/snapshot.rs:230: u32::try_from(self.metadata.len()).expect("metadata exceeds u32::MAX"),
+src/channel/mpsc.rs:373: .expect("position() returned a valid queue index"),
+src/channel/broadcast.rs:2066: sender.send(&cx, next_value).expect("send burst value");
+src/channel/broadcast.rs:2072: fast_sequence.push(block_on(rx.recv(&cx)).expect("fast receiver keeps up"));
+src/channel/verification_suite.rs:544: sender.send(&cx, i).unwrap();
+src/channel/verification_suite.rs:545: let value = receiver.recv(&cx).await.unwrap();
+src/channel/verification_suite.rs:601: sender.send(i).unwrap();
+src/util/stack_trace.rs:24: writeln!(&mut output, "Stack trace:").unwrap();
+src/util/stack_trace.rs:29: write!(&mut output, "  {}: ", i).unwrap();
+src/util/stack_trace.rs:33: write!(&mut output, "{}", demangled).unwrap();
+src/util/stack_trace.rs:35: write!(&mut output, "{}", name).unwrap();
+src/util/stack_trace.rs:40: write!(&mut output, " at {}:{}", filename.display(), lineno).unwrap();
+src/util/stack_trace.rs:43: writeln!(&mut output).unwrap();
+src/util/arena.rs:154: let index = u32::try_from(self.slots.len()).expect("arena overflow");
+src/util/arena.rs:196: let index = u32::try_from(self.slots.len()).expect("arena overflow");
+src/util/entropy.rs:37: getrandom::fill(dest).expect("OS entropy failed");
+src/util/entropy.rs:159: getrandom::fill(dest).expect("browser entropy failed");
+src/plan/fixtures.rs:614: let cx = crate::cx::Cx::current().expect("cx set");
+src/plan/fixtures.rs:656: .expect("join handle available"),
+src/plan/fixtures.rs:663: .expect("handle must exist")
+src/plan/fixtures.rs:705: .expect("join handle available");
+src/plan/fixtures.rs:821: let root = dag.root().expect("dag has root");
+src/plan/fixtures.rs:839: .expect("child handle available")
+src/plan/fixtures.rs:851: .expect("child handle available")
+src/plan/fixtures.rs:860: .expect("child handle available")
+src/plan/fixtures.rs:930: .expect("root handle")
+src/plan/fixtures.rs:932: .expect("root should be ready")
+src/plan/fixtures.rs:957: .expect("spawn leaf")
+src/plan/fixtures.rs:975: .expect("spawn join driver")
+src/plan/fixtures.rs:991: let cx = crate::cx::Cx::current().expect("cx set");
+src/plan/fixtures.rs:1035: .expect("spawn race driver")
+src/plan/fixtures.rs:1058: .expect("spawn timeout driver")
+src/plan/fixtures.rs:1213: let node = dag.node(id).expect("valid PlanId");
+src/plan/fixtures.rs:1406: .expect("original DAG should round-trip through extraction");
+src/plan/fixtures.rs:1424: .expect("optimized DAG should round-trip through extraction");
+src/plan/fixtures.rs:1481: let node = dag.node(id).expect("valid PlanId");
+src/plan/fixtures.rs:1843: let node = dag.node(id).expect("valid PlanId");
+src/plan/rewrite.rs:991: let shared = *intersection.iter().next().expect("len == 1");
+src/plan/mod.rs:314: u32::try_from(len).expect("egraph node arena exceeded u32::MAX entries")
+src/plan/mod.rs:911: .expect("fresh select future should not be repolled");
+src/plan/mod.rs:970: this.left_out.take().expect("left ready"),
+src/plan/mod.rs:971: this.right_out.take().expect("right ready"),
+src/plan/mod.rs:989: .expect("spawn a1");
+src/plan/mod.rs:993: .expect("spawn b");
+src/plan/mod.rs:997: .expect("spawn a2");
+src/plan/mod.rs:1001: .expect("spawn c");
+src/plan/mod.rs:1004: let cx = Cx::current().expect("cx set");
+src/plan/mod.rs:1012: .expect("fresh select future should not be repolled")
+src/plan/mod.rs:1038: .expect("spawn driver");
+src/plan/mod.rs:1047: .expect("spawn a");
+src/plan/mod.rs:1051: .expect("spawn b");
+src/plan/mod.rs:1055: .expect("spawn c");
+src/plan/mod.rs:1058: let cx = Cx::current().expect("cx set");
+src/plan/mod.rs:1075: .expect("spawn driver");
+src/plan/mod.rs:1099: .expect("driver join ok")
+src/plan/mod.rs:1100: .expect("driver ready")
+src/plan/certificate.rs:1133: let shared = *intersection.iter().next().expect("shared");
+src/io/browser_stream.rs:452: .expect("pending_read initialized");
+src/io/browser_stream.rs:554: .expect("pending_ready initialized");
+src/io/browser_stream.rs:703: .expect("pending_close initialized");
+src/messaging/nats.rs:353: write!(&mut out, "\\u{:04x}", c as u32).expect("write to String");
+src/messaging/fabric.rs:535: .expect("full routed cell must exist for publish");
+src/messaging/fabric.rs:566: .expect("prepared routed cell must exist for reservation");
+src/messaging/fabric.rs:607: .expect("prepared routed cell must exist for release");
+src/messaging/fabric.rs:611: .expect("prepared publish release must match a reserved slot");
+src/messaging/fabric.rs:634: .expect("fabric publish sequence counter exhausted");
+src/messaging/fabric.rs:642: .expect("prepared routed cell must exist for publish");
+src/messaging/fabric.rs:646: .expect("prepared publish must consume a reserved slot");
+src/messaging/fabric.rs:1042: .expect("fabric decision posterior should normalize")
+src/messaging/fabric.rs:1379: .expect("fabric routing losses should be valid"),
+src/messaging/fabric.rs:1522: .expect("fabric retry losses should be valid"),
+src/messaging/fabric.rs:1660: .expect("fabric capability losses should be valid"),
+src/messaging/fabric.rs:1803: .expect("fabric delivery-class losses should be valid"),
+src/messaging/fabric.rs:2676: Self::from_tokens(segments).expect("reply-space compaction must produce a valid pattern")
+src/messaging/fabric.rs:2783: .expect("rewritten literal-prefix morphism must stay syntactically valid"),
+src/messaging/fabric.rs:2998: .expect("shared shard cardinality limit must fit into u64");
+src/messaging/fabric.rs:3003: .expect("slot index derived from cardinality limit must fit usize");
+src/messaging/fabric.rs:3911: .expect("fabric authoritative append sequence counter exhausted");
+src/messaging/fabric.rs:8229: let partition = SubjectPattern::parse("orders.created").expect("pattern");
+src/messaging/fabric.rs:8264: &SubjectPattern::parse("orders.created").expect("pattern"),
+src/messaging/fabric.rs:8275: .expect("cold cell")
+src/messaging/fabric.rs:8280: &SubjectPattern::parse("orders.created").expect("pattern"),
+src/messaging/fabric.rs:8294: .expect("warm cell")
+src/messaging/fabric.rs:8299: &SubjectPattern::parse("orders.created").expect("pattern"),
+src/messaging/fabric.rs:8313: .expect("hot cell")
+src/messaging/fabric.rs:8394: SubjectPattern::parse("orders.created").expect("family subject"),
+src/messaging/fabric.rs:8403: subject: SubjectPattern::parse(subject).expect("capability subject"),
+src/messaging/fabric.rs:8418: subject: SubjectPattern::parse(subject).expect("interest subject"),
+src/messaging/fabric.rs:8480: .expect("blinded subject")
+src/messaging/jetstream.rs:262: write!(&mut json, "\"name\":\"{}\"", json_escape(&self.name)).expect("write to String");
+src/messaging/jetstream.rs:270: write!(&mut json, "\"{}\"", json_escape(s)).expect("write to String");
+src/messaging/jetstream.rs:276: .expect("write to String");
+src/messaging/jetstream.rs:277: write!(&mut json, ",\"storage\":\"{}\"", self.storage.as_str()).expect("write to String");
+src/messaging/jetstream.rs:278: write!(&mut json, ",\"discard\":\"{}\"", self.discard.as_str()).expect("write to String");
+src/messaging/jetstream.rs:279: write!(&mut json, ",\"num_replicas\":{}", self.replicas).expect("write to String");
+src/messaging/jetstream.rs:282: write!(&mut json, ",\"max_msgs\":{max}").expect("write to String");
+src/messaging/jetstream.rs:285: write!(&mut json, ",\"max_bytes\":{max}").expect("write to String");
+src/messaging/jetstream.rs:288: write!(&mut json, ",\"max_age\":{}", age.as_nanos()).expect("write to String");
+src/messaging/jetstream.rs:291: write!(&mut json, ",\"max_msg_size\":{size}").expect("write to String");
+src/messaging/jetstream.rs:295: .expect("write to String");
+src/messaging/jetstream.rs:1128: write!(&mut out, "\\u{:04x}", c as u32).expect("write to String");
+src/messaging/policy.rs:907: .expect("current delivery class must be canonical");
+src/messaging/policy.rs:922: .expect("current delivery class must be canonical");
+src/messaging/federation.rs:1094: .expect("runtime must exist after lazy initialization")
+src/messaging/service.rs:1222: .expect("reply obligation token must be present until resolved");
+src/messaging/service.rs:1242: .expect("reply obligation token must be present until resolved");
+src/messaging/service.rs:1746: .min_samples(usize::try_from(calibration_size).expect("u32 fits usize")),
+src/messaging/service.rs:1810: let window_size_usize = usize::try_from(*window_size).expect("u32 fits usize");
+src/messaging/service.rs:2010: u64::try_from(values.iter().filter(|value| **value).count()).expect("usize fits u64");
+src/messaging/service.rs:2011: let len = u64::try_from(values.len()).expect("usize fits u64");
+src/messaging/stream.rs:2097: .expect("clock drift")
+src/messaging/stream.rs:2102: fs::create_dir_all(&path).expect("create temp wal dir");
+src/messaging/subject.rs:78: Self::parse(pattern.as_ref()).expect("subject pattern must be syntactically valid")
+src/messaging/subject.rs:189: Self::parse(subject.as_ref()).expect("subject must be syntactically valid")
+src/messaging/subject.rs:264: Self::from_tokens(segments).expect("concrete subjects always form valid patterns")
+src/messaging/subject.rs:2549: let cx = Cx::current().expect("task cx");
+src/messaging/subject.rs:2559: cx.checkpoint().expect("checkpoint");
+src/messaging/subject.rs:2565: .expect("writer task");
+src/messaging/subject.rs:2574: let cx = Cx::current().expect("task cx");
+src/messaging/subject.rs:2575: cx.checkpoint().expect("checkpoint");
+src/messaging/subject.rs:2580: cx.checkpoint().expect("checkpoint");
+src/messaging/subject.rs:2586: .expect("reader task");
+src/messaging/subject.rs:2899: let cx = Cx::current().expect("task cx");
+src/messaging/subject.rs:2901: cx.checkpoint().expect("checkpoint");
+src/messaging/subject.rs:2903: cx.checkpoint().expect("checkpoint");
+src/messaging/subject.rs:2906: .expect("subscription task");
+src/messaging/subject.rs:2916: let cx = Cx::current().expect("task cx");
+src/messaging/subject.rs:2917: cx.checkpoint().expect("checkpoint");
+src/messaging/subject.rs:2922: cx.checkpoint().expect("checkpoint");
+src/messaging/subject.rs:2928: .expect("reader task");
+src/messaging/consumer.rs:814: .expect("assignment inserted"))
+src/messaging/consumer.rs:1064: .expect("partition summary inserted"))
+src/messaging/consumer.rs:1945: .expect("pending state must still exist after preflight");
+src/messaging/consumer.rs:2529: .expect("consumer pull decision losses should be valid");
+src/messaging/consumer.rs:2661: .expect("consumer overflow decision losses should be valid");
+src/messaging/consumer.rs:2780: .expect("consumer redelivery decision losses should be valid");
+src/messaging/consumer.rs:2845: .expect("consumer decision posterior should normalize")
+src/messaging/kafka.rs:637: .expect("single-record publish must return metadata")
+src/messaging/kafka.rs:1759: Ok(self.consumer.as_ref().unwrap())
+src/messaging/kafka.rs:1833: Ok(self.consumer.as_ref().unwrap())
+src/messaging/cut.rs:2056: Ok(self.branches.last().expect("just pushed"))
+src/messaging/cut.rs:2337: .expect("certificate");
+src/messaging/cut.rs:2349: .expect("snapshot");
+src/messaging/cut.rs:3067: .expect("certificate")
+src/messaging/control.rs:1993: .expect("control handler id counter exhausted");
+src/messaging/redis.rs:1291: self.conn.take().expect("guard already defused")
+src/messaging/redis.rs:1302: self.conn.as_ref().expect("guard defused")
+src/messaging/redis.rs:1308: self.conn.as_mut().expect("guard defused")
+src/messaging/session/obligation.rs:135: .expect("writing to String must succeed");
+src/messaging/session/obligation.rs:139: .expect("writing to String must succeed");
+src/messaging/session/obligation.rs:148: write!(description, " steps=[{steps}]").expect("writing to String must succeed");
+src/messaging/capability/tokens.rs:19: //! ).unwrap();
+src/messaging/capability/tokens.rs:35: //! let token = SessionToken::<DemoProtocol, Init>::new(42).unwrap();
+src/messaging/capability/routing.rs:191: SubjectPattern::parse(plan.source_pattern.as_str()).expect("validated morphism plan");
+src/messaging/capability/routing.rs:624: .expect("rewritten routing destination must remain syntactically valid")
+src/signal/signal.rs:177: let slot = slots.get(&kind).expect("slot just inserted").clone();
+src/signal/signal.rs:250: kind.as_raw_value().expect("windows supported signal kind")
+src/service/reconnect.rs:301: .expect("inner must be Some after successful reconnect");
+src/service/load_balance.rs:123: .expect("load metric guard must still hold the metric")
+src/service/load_balance.rs:874: .expect("discovery snapshot diverged from reconciled backend set");
+src/service/load_balance.rs:878: .expect("backend already moved during reorder"),
+src/service/load_balance.rs:968: .expect("load-balanced request must be consumed once"),
+src/service/load_balance.rs:1854: .expect("snapshot queue must be non-empty")
+src/service/buffer.rs:359: let req = request.take().expect("request missing");
+src/service/buffer.rs:444: let err = err.take().expect("polled after completion");
+src/service/hedge.rs:558: .expect("primary error must exist when primary future is gone");
+src/service/hedge.rs:577: .expect("primary error must exist when primary future is gone");
+src/service/hedge.rs:615: .expect("hedge request must exist before dispatch");
+src/service/hedge.rs:643: .expect("primary error must exist when primary future is gone");
+src/service/hedge.rs:646: .expect("hedge error must exist when hedge dispatch failed");
+src/service/layer.rs:682: poll_ready_future(service.call(request)).unwrap()
+src/service/retry.rs:302: let req = request.expect("request already taken");
+src/service/retry.rs:406: let result = result.take().expect("result should exist");
+src/service/retry.rs:701: .expect("retry delay sleep should be initialized before polling");
+src/service/retry.rs:707: .expect("retry delay policy should be present until completion"),
+src/service/discover.rs:18: //!     "10.0.0.1:8080".parse().unwrap(),
+src/service/discover.rs:19: //!     "10.0.0.2:8080".parse().unwrap(),
+src/service/discover.rs:464: .expect("dns discovery resolve generation overflow");
+src/conformance/mod.rs:21: //!         let cx = Cx::current().unwrap();
+src/conformance/mod.rs:519: .expect("LabRuntimeTarget operations must run inside LabRuntimeTarget::block_on")
+src/conformance/mod.rs:610: .expect("failed to create task");
+src/conformance/mod.rs:637: guard.take().expect("task did not complete")
+src/conformance/mod.rs:656: .expect("failed to create runtime-backed conformance task");
+src/conformance/mod.rs:674: .expect("conformance task registration dropped before delivery");
+src/conformance/mod.rs:701: .expect("failed to create runtime-backed conformance region");
+src/conformance/mod.rs:705: .expect("created region must exist")
+src/conformance/mod.rs:716: .expect("conformance region registration dropped before delivery");
+src/conformance/mod.rs:743: .expect("conformance region cancel issued before region registration completed");
+src/record/distributed_region.rs:282: .expect("distributed region config must satisfy replication/quorum invariants");
+src/record/distributed_region.rs:1302: region.add_replica(ReplicaInfo::new("r1", "addr1")).unwrap();
+src/record/distributed_region.rs:1303: region.add_replica(ReplicaInfo::new("r2", "addr2")).unwrap();
+src/record/distributed_region.rs:1304: region.activate(Time::from_secs(0)).unwrap();
+src/record/distributed_region.rs:1310: region.replica_lost("r2", Time::from_secs(5)).unwrap();
+src/record/symbolic_obligation.rs:975: .expect("symbolic obligation id overflow: arena index exhausted for obligations");
+src/record/region.rs:286: RegionState::from_u8(self.inner.load(Ordering::Acquire)).expect("invalid region state")
+src/record/region.rs:1243: .expect("trait get_with")
+src/record/region.rs:1254: .expect("trait with_witness")
+src/record/region.rs:2691: let decoded = RegionState::from_u8(expected_numeric).expect("valid state");
+src/grpc/streaming.rs:1570: std::fs::create_dir_all(golden_path.parent().unwrap()).unwrap();
+src/grpc/streaming.rs:1571: std::fs::write(&golden_path, actual).unwrap();
+src/grpc/streaming.rs:1589: std::fs::write(&actual_path, actual).unwrap();
+src/grpc/client.rs:1470: futures_lite::future::block_on(Channel::connect(uri)).unwrap()
+src/grpc/web.rs:149: .expect("gRPC trailer block exceeds 4 GiB — metadata must be bounded before encoding");
+src/net/unix/split.rs:308: .expect("combined waker initialized");
+src/net/unix/split.rs:346: .expect("combined waker initialized")
+src/net/unix/split.rs:414: .expect("combined waker initialized")
+src/net/quic/conformance/mod.rs:236: let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+src/net/quic/conformance/mod.rs:304: let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+src/net/tcp/virtual_tcp.rs:13: //! let listener = VirtualTcpListener::new("127.0.0.1:8080".parse().unwrap());
+src/net/tcp/virtual_tcp.rs:17: //!     "127.0.0.1:9000".parse().unwrap(),
+src/net/tcp/virtual_tcp.rs:18: //!     "127.0.0.1:8080".parse().unwrap(),
+src/net/tcp/virtual_tcp.rs:20: //! listener.inject_connection(server_stream, "127.0.0.1:9000".parse().unwrap());
+src/net/tcp/virtual_tcp.rs:445: /// let listener = VirtualTcpListener::new("127.0.0.1:8080".parse().unwrap());
+src/net/tcp/virtual_tcp.rs:449: ///     "127.0.0.1:9000".parse().unwrap(),
+src/net/tcp/virtual_tcp.rs:450: ///     "127.0.0.1:8080".parse().unwrap(),
+src/net/tcp/virtual_tcp.rs:452: /// listener.inject_connection(server, "127.0.0.1:9000".parse().unwrap());
+src/net/tcp/split.rs:424: .expect("combined waker initialized");
+src/net/tcp/split.rs:462: .expect("combined waker initialized")
+src/net/tcp/split.rs:536: .expect("combined waker initialized")
+src/net/quic_native/streams.rs:1753: let stream = table.stream(stream_id).expect("stream exists");
+src/net/quic_core/mod.rs:777: /// let result = decode_packet_number_reconstruct(0x9b32, 2, 0xa82f30ea).unwrap();
+src/net/dns/resolver.rs:880: let last = *bytes.last().expect("checked non-empty label");
+src/codec/length_delimited.rs:740: .unwrap();
+src/codec/length_delimited.rs:1067: let max_value = max_length_field_value(length_field_length).unwrap();
+src/stream/try_stream.rs:164: .expect("TryFold accumulator missing before completion");
+src/stream/try_stream.rs:187: .expect("TryFold accumulator missing on completion")));
+src/stream/buffered.rs:127: let mut entry = self.in_flight.pop_front().expect("front exists");
+src/stream/buffered.rs:161: let mut entry = self.in_flight.pop_front().expect("front exists");
+src/stream/buffered.rs:311: let mut fut = self.in_flight.pop_front().expect("length checked");
+src/stream/fold.rs:59: let acc = this.acc.take().expect("Fold polled after completion");
+src/stream/fold.rs:69: return Poll::Ready(this.acc.take().expect("Fold polled after completion"));
+src/stream/zip.rs:100: let item1 = this.queued1.take().expect("queued1 should have item");
+src/stream/zip.rs:101: let item2 = this.queued2.take().expect("queued2 should have item");
+src/combinator/race.rs:601: winner_outcome.expect("winner not found"),
+src/combinator/quorum.rs:367: /// let v = values.unwrap();
+src/combinator/bulkhead.rs:490: let entry = queue.remove(idx).expect("entry must exist");
+src/combinator/bulkhead.rs:497: let entry = queue.remove(idx).expect("entry must exist");
+src/combinator/bulkhead.rs:515: let entry = queue.remove(idx).expect("entry must exist");
+src/combinator/bulkhead.rs:1787: let held = bh.try_acquire(1).expect("seed permit must exist");
+src/combinator/bulkhead.rs:1794: let entry_id = bh.enqueue(1, now).expect("queue should have capacity");
+src/combinator/bulkhead.rs:1820: .expect("survivor should not reject")
+src/combinator/bulkhead.rs:1821: .expect("survivor should be granted in FIFO order");
+src/combinator/join.rs:421: first_panic_index: panic_index.expect("panic index missing"),
+src/combinator/circuit_breaker.rs:2130: let permit = cb.should_allow(opened_at).expect("closed call should pass");
+src/combinator/circuit_breaker.rs:2153: .expect("recovery probe should be allowed");
+src/combinator/pipeline.rs:428: .expect("non-Ok should return Some result")
+src/combinator/pipeline.rs:499: .expect("non-Ok should return Some result")
+src/combinator/pipeline.rs:571: last_ok_value.expect("at least one outcome was provided"),
+src/combinator/pipeline.rs:579: last_ok_value.expect("at least one outcome was provided"),
+src/combinator/hedge.rs:492: let backup_outcome = backup_outcome.expect("backup_outcome required when backup_spawned");
+src/combinator/hedge.rs:493: let winner = winner.expect("winner required when backup_spawned");
+src/combinator/hedge.rs:625: if Pin::new(this.timer.as_mut().expect("timer initialized")).poll(cx) == Poll::Ready(())
+src/combinator/rate_limit.rs:774: let entry = queue.remove(idx).expect("must exist");
+src/combinator/rate_limit.rs:796: let entry = queue.remove(idx).expect("must exist");
+src/combinator/select.rs:14: //! match Select::new(f1, f2).await.expect("fresh select future") {
+src/combinator/map_reduce.rs:352: first_panic_index: panic_index.expect("panic index missing"),
+src/combinator/map_reduce.rs:364: let (_, first) = iter.next().expect("already checked non-empty");
+src/combinator/bracket.rs:140: .expect("release_fn consumed twice");
+src/combinator/bracket.rs:145: .expect("resource_for_release missing");
+src/combinator/bracket.rs:195: let use_fn = this.use_fn.take().expect("use_fn consumed twice");
+src/combinator/bracket.rs:254: match this.state.use_result.take().expect("use_result missing") {
+src/combinator/retry.rs:1553: .unwrap_or_else(|| expected.checked_sub(actual).unwrap());
+src/security/tag.rs:35: HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+src/security/tag.rs:62: HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+src/security/key.rs:65: let mut mac = HmacSha256::new_from_slice(&self.bytes).expect("HMAC accepts any key length");
+src/cx/registry.rs:319: .expect("NamePermit::commit called on already-resolved permit");
+src/cx/registry.rs:602: .expect("watch ref overflow");
+src/cx/registry.rs:795: .expect("permit identity overflow");
+src/cx/registry.rs:1095: .expect("queue was verified to be non-empty");
+src/cx/macaroon.rs:151: u16::try_from(pb.len()).expect("ResourceScope pattern exceeds u16::MAX bytes");
+src/cx/macaroon.rs:168: u16::try_from(kb.len()).expect("Custom caveat key exceeds u16::MAX bytes");
+src/cx/macaroon.rs:170: u16::try_from(vb.len()).expect("Custom caveat value exceeds u16::MAX bytes");
+src/cx/macaroon.rs:863: let len = u16::try_from(data.len()).expect("macaroon field exceeds u16::MAX bytes");
+src/cx/macaroon.rs:879: u16::try_from(self.caveats.len()).expect("macaroon caveat count exceeds u16::MAX");
+src/cx/macaroon.rs:1195: let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+src/cx/scope.rs:173: let state = this.state.take().expect("polled after ready");
+src/cx/scope.rs:1312: .expect("winner index must have a ready result");
+src/web/debug.rs:31: //! server.start().expect("failed to start debug server");
+src/web/session.rs:186: getrandom::fill(&mut buf).expect("OS entropy source unavailable");
+src/web/handler.rs:274: .expect("handler runtime should be initialized after set")
+src/fs/vfs.rs:550: vfs.write(&path, b"generic vfs").await.unwrap();
+src/fs/vfs.rs:551: vfs.read_to_string(&path).await.unwrap()
+src/sync/contended_mutex.rs:215: self.guard.as_ref().expect("guard used after drop")
+src/sync/contended_mutex.rs:221: self.guard.as_mut().expect("guard used after drop")
+src/sync/pool.rs:469: self.resource.as_ref().expect("resource taken")
+src/sync/pool.rs:475: self.resource.as_mut().expect("resource taken")
+src/sync/pool.rs:867: let id = self.waiter_id.expect("waiter_id assigned above");
+src/sync/once_cell.rs:210: return self.value.get().expect("value should be set");
+src/sync/once_cell.rs:226: let f = init_fn.take().expect("init closure available");
+src/sync/once_cell.rs:236: return self.value.get().expect("just initialized");
+src/sync/once_cell.rs:239: return self.value.get().expect("already initialized");
+src/sync/once_cell.rs:246: return self.value.get().expect("should be initialized after wait");
+src/sync/once_cell.rs:274: return self.value.get().expect("value should be set");
+src/sync/once_cell.rs:290: let f = init_fn.take().expect("init closure available");
+src/sync/once_cell.rs:303: return self.value.get().expect("just initialized");
+src/sync/once_cell.rs:306: return self.value.get().expect("already initialized");
+src/sync/once_cell.rs:319: return self.value.get().expect("should be initialized after wait");
+src/sync/once_cell.rs:346: return Ok(self.value.get().expect("value should be set"));
+src/sync/once_cell.rs:369: let f = init_fn.take().expect("init closure available");
+src/sync/once_cell.rs:377: return Ok(self.value.get().expect("just initialized"));
+src/sync/once_cell.rs:388: return Ok(self.value.get().expect("already initialized"));
+src/sync/once_cell.rs:399: return Ok(self.value.get().expect("should be initialized"));
+src/sync/semaphore.rs:2783: .expect("first waiter should wake after first permit")
+src/sync/semaphore.rs:2784: .expect("first waiter should acquire permit");
+src/sync/semaphore.rs:2805: .expect("third waiter should wake after second permit")
+src/sync/semaphore.rs:2806: .expect("third waiter should acquire permit");
+src/sync/semaphore.rs:2865: .expect("second waiter should wake after head cancellation")
+src/sync/semaphore.rs:2866: .expect("second waiter should acquire permit");
+src/sync/semaphore.rs:2874: .expect("third waiter should wake after second permit")
+src/sync/semaphore.rs:2875: .expect("third waiter should acquire permit");
+src/sync/semaphore.rs:2907: .expect("second waiter should wake once head waiter cancels")
+src/sync/semaphore.rs:2908: .expect("second waiter should acquire queued permit");
+src/sync/semaphore.rs:2916: .expect("third waiter should wake after second permit")
+src/sync/semaphore.rs:2917: .expect("third waiter should acquire permit");
+src/audit/ambient.rs:388: .unwrap()
+src/bytes/bytes.rs:154: Bound::Excluded(&n) => n.checked_add(1).expect("range start overflow"),
+src/bytes/bytes.rs:159: Bound::Included(&n) => n.checked_add(1).expect("range end overflow"),
+src/bytes/bytes_mut.rs:275: Bound::Excluded(&n) => n.checked_add(1).expect("range start overflow"),
+src/bytes/bytes_mut.rs:280: Bound::Included(&n) => n.checked_add(1).expect("range end overflow"),
+src/server/connection.rs:67: /// let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+src/server/mod.rs:40: //!     # let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+src/raptorq/gf256.rs:1996: u64::from_ne_bytes(dst[0..8].try_into().expect("expected")),
+src/raptorq/gf256.rs:1997: u64::from_ne_bytes(dst[8..16].try_into().expect("expected")),
+src/raptorq/gf256.rs:1998: u64::from_ne_bytes(dst[16..24].try_into().expect("expected")),
+src/raptorq/gf256.rs:1999: u64::from_ne_bytes(dst[24..32].try_into().expect("expected")),
+src/raptorq/gf256.rs:2002: u64::from_ne_bytes(src[0..8].try_into().expect("expected")),
+src/raptorq/gf256.rs:2003: u64::from_ne_bytes(src[8..16].try_into().expect("expected")),
+src/raptorq/gf256.rs:2004: u64::from_ne_bytes(src[16..24].try_into().expect("expected")),
+src/raptorq/gf256.rs:2005: u64::from_ne_bytes(src[24..32].try_into().expect("expected")),
+src/raptorq/gf256.rs:2019: let d_arr: [u8; 8] = dst.try_into().expect("expected");
+src/raptorq/gf256.rs:2020: let s_arr: [u8; 8] = src.try_into().expect("slice must be 8 bytes");
+src/raptorq/gf256.rs:2594: let d_word = u64::from_ne_bytes(d_chunk[..].try_into().expect("slice must be 8 bytes"));
+src/raptorq/gf256.rs:2662: let d_arr_a: [u8; 8] = d_chunk_a[..].try_into().expect("slice must be 8 bytes");
+src/raptorq/gf256.rs:2663: let d_arr_b: [u8; 8] = d_chunk_b[..].try_into().expect("slice must be 8 bytes");
+src/raptorq/gf256.rs:2711: let d_arr: [u8; 8] = d_chunk[..].try_into().expect("slice must be 8 bytes");
+src/raptorq/decision_contract.rs:165: .expect("RaptorQ G7 loss matrix should be valid");
+src/raptorq/decision_contract.rs:167: .expect("RaptorQ G7 fallback policy should be valid");
+src/raptorq/decision_contract.rs:385: normalized[index] = u16::try_from(base).expect("permille base fits into u16");
+src/raptorq/decision_contract.rs:391: .expect("permille remainder fits into usize");
+src/raptorq/decision_contract.rs:422: .expect("normalized posterior permille should convert to Posterior")
+src/raptorq/proof.rs:847: received: self.received.expect("received must be set before build"),
+src/raptorq/proof.rs:850: outcome: self.outcome.expect("outcome must be set before build"),
+src/raptorq/systematic.rs:151: .expect("RFC table invariant violated: W < S");
+src/raptorq/systematic.rs:154: .expect("RFC table invariant violated: W > L");
+src/raptorq/systematic.rs:183: .expect("RFC systematic padding delta must fit in u32");
+src/raptorq/systematic.rs:436: if best.is_none() || deg < best.expect("best solution must exist").2 {
+src/raptorq/systematic.rs:1040: .checked_add(u32::try_from(i).expect("repair count exceeds u32"))
+src/raptorq/systematic.rs:1041: .expect("repair ESI overflow");
+src/raptorq/systematic.rs:1067: .checked_add(u32::try_from(count).expect("repair count exceeds u32"))
+src/raptorq/systematic.rs:1068: .expect("repair ESI cursor overflow");
+src/raptorq/systematic.rs:1130: let (columns, coefficients) = self.params.rfc_repair_equation(esi).unwrap();
+src/raptorq/decoder.rs:1462: let solution = state.solved[*col].as_ref().expect("solution must exist");
+src/raptorq/decoder.rs:2482: self.repair_equation(esi).unwrap()
+src/raptorq/regression.rs:404: json_string(report.schema_version).expect("schema version should serialize");
+src/raptorq/regression.rs:405: let replay_ref = json_string(report.replay_ref).expect("replay ref should serialize");
+src/raptorq/regression.rs:406: let metric = json_string(&result.metric).expect("metric should serialize");
+src/raptorq/regression.rs:408: .expect("regime state should serialize");
+src/raptorq/regression.rs:409: let verdict = json_string(result.verdict.label()).expect("verdict should serialize");
+src/raptorq/offline_tuner.rs:803: latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+src/trace/crashpack.rs:39: //! .expect("crash pack builder should have failure metadata");
+src/trace/crashpack.rs:3347: .expect("crash pack builder should have failure metadata")
+src/trace/recorder.rs:397: let dropped = events.pop_front().expect("events not empty");
+src/trace/recorder.rs:694: let metadata = self.metadata.clone().expect("metadata must exist");
+src/trace/recorder.rs:698: .expect("events must exist");
+src/trace/compat.rs:937: file.write_all(super::TRACE_MAGIC).expect("write magic");
+src/trace/compat.rs:939: .expect("write version");
+src/trace/compat.rs:940: file.write_all(&0u16.to_le_bytes()).expect("write flags");
+src/trace/compat.rs:941: file.write_all(&[0u8]).expect("write compression byte");
+src/trace/compat.rs:944: let meta_bytes = rmp_serde::to_vec(&metadata).expect("serialize metadata");
+src/trace/compat.rs:946: .expect("write meta len");
+src/trace/compat.rs:947: file.write_all(&meta_bytes).expect("write metadata");
+src/trace/streaming.rs:547: .expect("event was peeked so must exist")
+src/trace/event.rs:818: serde_json::to_string(&held).expect("futurelock held obligations serialize")
+src/trace/replay.rs:42: //! let bytes = trace.to_bytes().expect("serialize");
+src/trace/replay.rs:45: //! let loaded = ReplayTrace::from_bytes(&bytes).expect("deserialize");
+src/trace/causality.rs:146: let lt_a = ev_a.logical_time.as_ref().expect("logical_time must exist");
+src/trace/causality.rs:147: let lt_b = ev_b.logical_time.as_ref().expect("logical_time must exist");
+src/trace/causality.rs:189: .expect("logical_time must exist");
+src/trace/causality.rs:193: .expect("logical_time must exist");
+src/trace/geodesic.rs:1502: .expect("chosen must be available");
+src/trace/divergence.rs:21: //! println!("{}", report.to_json().unwrap());
+src/trace/divergence.rs:701: let expected = expected.expect("checked above");
+src/trace/format.rs:485: format_trace(buffer, &mut s).expect("writing to Vec should not fail");
+src/trace/format.rs:486: String::from_utf8(s).expect("trace should be valid UTF-8")
+src/trace/tla_export.rs:20: //! std::fs::write("MyTest.tla", module.to_string()).unwrap();
+src/trace/distributed/vclock.rs:114: .expect("Lamport clock overflowed while ticking");
+src/trace/distributed/vclock.rs:135: .expect("Lamport clock overflowed while merging a received time");
+src/trace/distributed/vclock.rs:254: .expect("Hybrid clock logical counter overflowed while ticking");
+src/trace/distributed/vclock.rs:275: .expect("Hybrid clock logical counter overflowed while merging equal physical time")
+src/trace/distributed/vclock.rs:277: state.logical.checked_add(1).expect(
+src/trace/distributed/vclock.rs:281: sender.logical.checked_add(1).expect(
+src/trace/distributed/vclock.rs:622: .expect("Vector clock counter overflowed while incrementing");
+src/trace/distributed/crdt.rs:243: *s = s.checked_add(1).expect("ORSet sequence counter overflow");
+src/observability/task_inspector.rs:717: writeln!(&mut output, "Task Inspector").expect("expected");
+src/observability/task_inspector.rs:727: .expect("expected");
+src/observability/task_inspector.rs:733: writeln!(&mut output, "  {region_id:?}: {count} tasks").expect("expected");
+src/observability/task_inspector.rs:750: .expect("expected");
+src/observability/task_inspector.rs:779: writeln!(&mut output, "Task {task_id:?} not found").expect("expected");
+src/observability/task_inspector.rs:784: writeln!(&mut output, "Task Inspector: {task_id:?}").expect("expected");
+src/observability/task_inspector.rs:787: writeln!(&mut output, "State:         {}", task.state.name()).expect("expected");
+src/observability/task_inspector.rs:788: writeln!(&mut output, "Phase:         {:?}", task.phase).expect("expected");
+src/observability/task_inspector.rs:789: writeln!(&mut output, "Region:        {:?}", task.region_id).expect("expected");
+src/observability/task_inspector.rs:790: writeln!(&mut output, "Age:           {:.3}s", task.age.as_secs_f64()).expect("expected");
+src/observability/task_inspector.rs:791: writeln!(&mut output, "Poll count:    {}", task.poll_count).expect("expected");
+src/observability/task_inspector.rs:793: .expect("write should not fail on String");
+src/observability/task_inspector.rs:794: writeln!(&mut output, "Wake pending:  {}", task.wake_pending).expect("expected");
+src/observability/task_inspector.rs:801: writeln!(&mut output, "  {ob_id:?}").expect("write should not fail on String");
+src/observability/task_inspector.rs:810: writeln!(&mut output, "  {waiter_id:?}").expect("write should not fail on String");
+src/observability/task_inspector.rs:1236: &serde_json::to_string_pretty(region_id).expect("region id should encode"),
+src/observability/task_inspector.rs:1243: &serde_json::to_string_pretty(task_id).expect("task id should encode"),
+src/observability/task_inspector.rs:1250: &serde_json::to_string_pretty(obligation_id).expect("obligation id should encode"),
+src/observability/obligation_tracker.rs:547: writeln!(&mut output, "Obligation Tracker").expect("expected");
+src/observability/obligation_tracker.rs:553: .expect("write should not fail on String");
+src/observability/obligation_tracker.rs:570: .expect("write should not fail on String");
+src/observability/obligation_tracker.rs:586: .expect("write should not fail on String");
+src/observability/obligation_tracker.rs:589: .expect("write should not fail on String");
+src/observability/cancellation_debt_monitor.rs:289: let mut pending = self.pending_work.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:306: let mut pending = self.pending_work.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:326: let mut stats = self.processing_stats.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:347: let mut pending = self.pending_work.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:369: let mut stats = self.processing_stats.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:384: let pending = self.pending_work.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:419: let mut stats = self.processing_stats.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:432: let alert_level = *self.current_alert_level.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:449: let pending = self.pending_work.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:466: let pending = self.pending_work.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:489: let alerts = self.recent_alerts.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:496: let mut alerts = self.recent_alerts.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:506: let mut pending = self.pending_work.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:539: let mut current_level = self.current_alert_level.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:649: let stats = self.processing_stats.lock().unwrap();
+src/observability/cancellation_debt_monitor.rs:695: let mut alerts = self.recent_alerts.lock().unwrap();
+src/observability/debt_runtime_integration.rs:73: let mut shutdown = self.shutdown.lock().unwrap();
+src/observability/debt_runtime_integration.rs:282: let should_shutdown = *shutdown.lock().unwrap();
+src/observability/otel.rs:42: //! let exporter = exporter().with_registry(registry.clone()).build().unwrap();
+src/observability/otel.rs:1723: //! run_span_conformance_tests().expect("All span semantic tests should pass");
+src/observability/otel.rs:2164: if duration.is_zero() && span.end_time.unwrap() < start_time {
+src/observability/otel.rs:2238: if child.parent_context.unwrap() != parent.context {
+src/observability/otel.rs:2567: TraceState::from_key_value([("vendor", "upstream")]).expect("valid trace state");
+src/observability/otel.rs:2616: TraceState::from_key_value([("vendor", "upstream")]).expect("valid trace state");
+src/observability/metrics.rs:260: .expect("summary values mutex poisoned")
+src/observability/metrics.rs:305: .expect("summary values mutex poisoned")
+src/observability/metrics.rs:1305: .expect("dispatches mutex poisoned")
+src/observability/metrics.rs:1338: .expect("dispatches mutex poisoned")
+src/observability/structured_cancellation_analyzer.rs:274: let alerts = self.alerts.lock().unwrap();
+src/observability/structured_cancellation_analyzer.rs:280: let mut alerts = self.alerts.lock().unwrap();
+src/observability/structured_cancellation_analyzer.rs:287: let stats = self.stats.lock().unwrap();
+src/observability/structured_cancellation_analyzer.rs:301: let mut real_time_stats = self.stats.lock().unwrap();
+src/observability/structured_cancellation_analyzer.rs:315: let mut real_time_stats = self.stats.lock().unwrap();
+src/observability/structured_cancellation_analyzer.rs:409: let mut alerts = self.alerts.lock().unwrap();
+src/observability/structured_cancellation_analyzer.rs:421: let mut stats = self.stats.lock().unwrap();
+src/observability/structured_cancellation_analyzer.rs:463: let mut last_cleanup = self.last_cleanup.lock().unwrap();
+src/observability/structured_cancellation_analyzer.rs:514: let mut time = self.deterministic_time.lock().unwrap();
+src/database/pool.rs:431: let valid = self.manager.is_valid(guard.conn.as_ref().unwrap());
+src/database/pool.rs:441: let valid_conn = guard.conn.take().unwrap();
+src/database/pool.rs:703: self.conn.as_ref().expect("connection already taken")
+src/database/pool.rs:708: self.conn.as_mut().expect("connection already taken")
+src/database/pool.rs:943: .is_valid(cx, guard.conn.as_mut().unwrap())
+src/database/pool.rs:957: let conn = guard.conn.take().unwrap();
+src/database/pool.rs:1161: self.conn.as_ref().expect("connection already taken")
+src/database/pool.rs:1166: self.conn.as_mut().expect("connection already taken")
+src/database/postgres.rs:4342: let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+src/database/postgres.rs:4343: let addr = listener.local_addr().expect("local_addr");
+src/database/postgres.rs:4344: let std_stream = std::net::TcpStream::connect(addr).expect("connect");
+src/database/postgres.rs:4345: let _accepted = listener.accept().expect("accept");
+src/database/postgres.rs:4346: let stream = crate::net::TcpStream::from_std(std_stream).expect("from_std");
+src/database/postgres.rs:4365: let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+src/database/postgres.rs:4366: let addr = listener.local_addr().expect("local_addr");
+src/database/postgres.rs:4367: let std_stream = std::net::TcpStream::connect(addr).expect("connect");
+src/database/postgres.rs:4368: let (peer_stream, _) = listener.accept().expect("accept");
+src/database/postgres.rs:4369: let stream = crate::net::TcpStream::from_std(std_stream).expect("from_std");
+src/database/postgres.rs:4389: let len = i32::try_from(body.len() + 4).expect("test backend message length fits");
+src/database/sqlite.rs:2094: let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+src/database/sqlite.rs:2121: .unwrap()
+src/database/sqlite.rs:2138: .unwrap()
+src/database/sqlite.rs:2177: let count = rows[0].get_idx(0).unwrap().as_integer().unwrap();
+src/database/transaction.rs:993: let cx = Cx::current().expect("lab runtime should install a current Cx");
+src/database/transaction.rs:1085: .expect("name column should be present")
+src/database/transaction.rs:1089: conn.close().unwrap();
+src/time/wheel.rs:498: .expect("timer duration was clamped but still exceeded maximum")
+src/time/wheel.rs:807: let entry = self.overflow.pop().expect("peeked entry missing");
+src/time/wheel.rs:866: let entry = self.overflow.pop().expect("peeked entry missing");
+src/time/sleep.rs:55: .expect("completed implies fallback exists")
+src/time/sleep.rs:67: .expect("finished implies fallback exists")
+src/obligation/ledger.rs:243: .expect("obligation ledger index overflow within current generation; reset required");
+src/obligation/ledger.rs:480: .expect("obligation ledger generation overflow");
+src/obligation/ledger.rs:1666: let record = ledger.get(id).expect("record exists");
+src/obligation/saga.rs:797: .expect("evidence entry is valid")
+src/obligation/no_aliasing_proof.rs:1121: .expect("obligation must be active")
+src/obligation/graded.rs:312: .expect("on_reserve overflowed outstanding obligation count");
+src/obligation/graded.rs:331: .expect("on_resolve overflowed resolved obligation count");
+src/obligation/graded.rs:546: .expect("toy channel occupancy overflowed");
+src/obligation/graded.rs:551: .expect("toy channel reserved permit count overflowed");
+src/obligation/graded.rs:567: .expect("commit_send requires an outstanding reservation");
+src/obligation/graded.rs:579: .expect("abort_send requires an outstanding reservation");
+src/obligation/lyapunov.rs:1815: .expect("create task");
+src/obligation/lyapunov.rs:2080: .expect("create task");
+src/obligation/separation_logic.rs:620: .expect("reserve judgment holder pending overflow");
+src/obligation/separation_logic.rs:623: .expect("reserve judgment region pending overflow");
+src/obligation/separation_logic.rs:669: .expect("commit judgment requires positive holder pending count");
+src/obligation/separation_logic.rs:672: .expect("commit judgment requires positive region pending count");
+src/obligation/choreography/pipeline.rs:40: //! let output = pipeline.generate(&example_two_phase_commit()).expect("pipeline failed");
+src/obligation/choreography/pipeline.rs:336: "{pad}cx.checkpoint().expect(\"cancelled before send {action}\");"
+src/obligation/choreography/pipeline.rs:361: "{pad}cx.checkpoint().expect(\"cancelled before recv {action}\");"
+src/obligation/choreography/pipeline.rs:381: "{pad}cx.checkpoint().expect(\"cancelled at choice point\");"
+src/obligation/choreography/pipeline.rs:406: "{pad}cx.checkpoint().expect(\"cancelled at offer point\");"
+src/obligation/choreography/pipeline.rs:433: "{pad}    cx.checkpoint().expect(\"cancelled in loop {label}\");"
+src/obligation/choreography/pipeline.rs:674: "    cx.checkpoint().expect(\"cancelled before start\");"
+src/obligation/choreography/pipeline.rs:698: writeln!(code, "        .expect(\"valid evidence\");").ok();
+src/obligation/choreography/mod.rs:53: //!                     .expect("comm interactions accept continuations"),
+src/obligation/choreography/mod.rs:56: //!                     .expect("comm interactions accept continuations"),
+src/obligation/choreography/mod.rs:58: //!             .expect("comm interactions accept continuations"),
+src/obligation/choreography/mod.rs:1540: .expect("comm interactions accept continuations"),
+src/obligation/choreography/mod.rs:1549: .expect("comm interactions accept continuations"),
+src/obligation/choreography/mod.rs:1551: .expect("comm interactions accept continuations"),
+src/obligation/choreography/mod.rs:1599: .expect("comm interactions accept continuations"),
+src/obligation/choreography/mod.rs:1608: .expect("comm interactions accept continuations"),
+src/obligation/choreography/mod.rs:1611: .expect("comm interactions accept continuations"),
+src/cli/completion.rs:848: generate_completions(shell, &SnapshotCompletable, &mut buf).unwrap();
+src/cli/completion.rs:849: scrub_completion_script(&String::from_utf8(buf).unwrap())
+src/cli/doctor/mod.rs:15105: .expect("baseline failure fixture exists")
+src/cli/doctor/mod.rs:15111: .expect("happy fixture exists")
+src/cli/doctor/mod.rs:16377: .expect("profile existence checked above");
+src/http/pool.rs:446: .expect("http connection pool id counter exhausted");
+src/http/body.rs:1345: self.checkpoints.lock().unwrap().push(event);
+src/http/body.rs:1347: *self.pending_waker.lock().unwrap() = Some(cx.waker().clone());
+src/http/body.rs:1358: self.checkpoints.lock().unwrap().push(event);
+src/http/body.rs:1375: self.checkpoints.lock().unwrap().push(event);
+src/http/body.rs:1383: self.checkpoints.lock().unwrap().push(event);
+src/http/h1/server.rs:423: .expect("reject expectation should build a response");
+src/http/h1/server.rs:448: .expect("continue expectation should build a response");
+src/http/h1/server.rs:603: .expect("expectation action should build a response");
+src/http/h1/types.rs:1019: write!(out, "%{byte:02X}").expect("write to string shouldn't fail");
+src/http/h1/http_client.rs:2349: .expect("in-memory string write cannot fail");
+src/http/h1/http_client.rs:2351: .expect("in-memory string write cannot fail");
+src/http/h1/http_client.rs:2353: write!(&mut request, "User-Agent: {ua}\r\n").expect("in-memory string write cannot fail");
+src/http/h1/http_client.rs:2356: write!(&mut request, "{name}: {value}\r\n").expect("in-memory string write cannot fail");
+src/http/h2/connection.rs:1355: .expect("send_len already clamped to u32 range");
+src/http/h2/stream.rs:176: i32::try_from(initial_window_size).expect("initial window size exceeds i32");
+src/http/h2/stream.rs:178: i32::try_from(DEFAULT_INITIAL_WINDOW_SIZE).expect("default window size exceeds i32");
+src/bin/quic_conformance_report.rs:95: println!("{}", serde_json::to_string_pretty(&report).unwrap());
+src/bin/asupersync.rs:4121: .expect("built-in differential profile must resolve")
+src/bin/asupersync.rs:4171: .expect("phase1-core profile manifest entry must exist");
+src/bin/asupersync.rs:4456: .expect("differential execution always has an initial attempt")
+src/bin/asupersync.rs:5224: .expect("differential policy resolution requires an initial attempt");
+src/bin/asupersync.rs:5536: i64::try_from(value).expect("sync differential counters should fit in i64")
+src/bin/asupersync.rs:5584: let held = semaphore.try_acquire(1).expect("seeded semaphore permit");
+src/bin/asupersync.rs:5628: let held = semaphore.try_acquire(1).expect("seeded semaphore permit");
+src/bin/asupersync.rs:5648: .expect("create lab semaphore task");

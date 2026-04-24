@@ -1,0 +1,27 @@
+{
+  "project": "/data/projects/asupersync/src",
+  "timestamp": "2026-04-23 22:17:19",
+  "scanners": [
+    {
+      "language": "rust",
+      "project": "/data/projects/asupersync/src",
+      "files": 663,
+      "critical": 1417,
+      "warning": 65121,
+      "info": 23943,
+      "timestamp": "2026-04-23 22:17:19"
+    }
+  ],
+  "totals": {
+    "critical": 1417,
+    "warning": 65121,
+    "info": 23943,
+    "files": 663
+  },
+  "generated_at": "2026-04-23 22:17:19",
+  "git": {
+    "repository": "https://github.com/Dicklesworthstone/asupersync",
+    "commit": "523adc2bab302f5f488d020ca479a13a8172f38c",
+    "blob_base": "https://github.com/Dicklesworthstone/asupersync/blob/523adc2bab302f5f488d020ca479a13a8172f38c"
+  }
+}
