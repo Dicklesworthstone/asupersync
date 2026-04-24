@@ -368,6 +368,193 @@ mod tests {
     }
 
     // =========================================================================
+    // Golden display-surface coverage: every decision branch × reason combo.
+    //
+    // These snapshots freeze the exact textual output of the perf-gate display
+    // surfaces so any drift in scoring, reason wording, or formatting is caught
+    // via `cargo insta review`. Organized by decision bucket.
+    // =========================================================================
+
+    #[test]
+    fn opportunity_score_display_boundary_snapshots() {
+        // Min, exact threshold, max — brackets of the valid input domain.
+        let min = OpportunityScore::new(1.0, 0.2, 5.0).unwrap(); // 0.04
+        let threshold = OpportunityScore::new(2.0, 1.0, 1.0).unwrap(); // 2.00
+        let max = OpportunityScore::new(5.0, 1.0, 1.0).unwrap(); // 5.00
+        let rendered = format!("min:       {min}\nthreshold: {threshold}\nmax:       {max}");
+        insta::assert_snapshot!(rendered, @r"
+        min:       Impact=1.0 × Confidence=0.2 / Effort=5.0 = 0.04
+        threshold: Impact=2.0 × Confidence=1.0 / Effort=1.0 = 2.00
+        max:       Impact=5.0 × Confidence=1.0 / Effort=1.0 = 5.00
+        ");
+    }
+
+    #[test]
+    fn gate_result_implement_full_reasons_snapshot() {
+        // Impact=3, Confidence=0.9 (≥0.8), Effort=1 (≤2) — all three Implement
+        // reason branches fire: threshold, high confidence, low effort.
+        let result = OpportunityScore::new(3.0, 0.9, 1.0).unwrap().evaluate();
+        insta::assert_snapshot!(
+            format!("{result}"),
+            @r###"score=2.70 decision=IMPLEMENT reason="score meets threshold (>= 2.0)" reason="high confidence from profiling evidence" reason="low implementation effort""###
+        );
+    }
+
+    #[test]
+    fn gate_result_implement_high_confidence_only_snapshot() {
+        // confidence≥0.8 but effort>2 — only the confidence extra reason fires.
+        // Note: threshold-only (no extras) is unreachable within the input
+        // domain — score≥2 with conf<0.8 forces effort<2, which triggers the
+        // low-effort branch.
+        let result = OpportunityScore::new(5.0, 1.0, 2.5).unwrap().evaluate();
+        insta::assert_snapshot!(
+            format!("{result}"),
+            @r###"score=2.00 decision=IMPLEMENT reason="score meets threshold (>= 2.0)" reason="high confidence from profiling evidence""###
+        );
+    }
+
+    #[test]
+    fn gate_result_implement_low_effort_only_snapshot() {
+        // effort≤2 but confidence<0.8 — only the effort extra reason fires.
+        let result = OpportunityScore::new(4.0, 0.7, 1.0).unwrap().evaluate();
+        insta::assert_snapshot!(
+            format!("{result}"),
+            @r###"score=2.80 decision=IMPLEMENT reason="score meets threshold (>= 2.0)" reason="low implementation effort""###
+        );
+    }
+
+    #[test]
+    fn gate_result_needs_evidence_both_reasons_snapshot() {
+        // 4×0.4/1 = 1.6 → NeedsEvidence. confidence<0.6 AND impact≥3 — both
+        // extra reasons fire.
+        let result = OpportunityScore::new(4.0, 0.4, 1.0).unwrap().evaluate();
+        insta::assert_snapshot!(
+            format!("{result}"),
+            @r###"score=1.60 decision=NEEDS_EVIDENCE reason="score below threshold but promising (1.0–2.0)" reason="needs profiling data to increase confidence" reason="high potential impact justifies further investigation""###
+        );
+    }
+
+    #[test]
+    fn gate_result_needs_evidence_high_impact_only_snapshot() {
+        // 3×0.6/1 = 1.8 → NeedsEvidence. confidence=0.6 (not <0.6) so only
+        // high-impact reason fires.
+        let result = OpportunityScore::new(3.0, 0.6, 1.0).unwrap().evaluate();
+        insta::assert_snapshot!(
+            format!("{result}"),
+            @r###"score=1.80 decision=NEEDS_EVIDENCE reason="score below threshold but promising (1.0–2.0)" reason="high potential impact justifies further investigation""###
+        );
+    }
+
+    #[test]
+    fn gate_result_needs_evidence_low_confidence_only_snapshot() {
+        // 2×0.5/1 = 1.0 → NeedsEvidence (≥1.0). impact<3 so high-impact branch
+        // doesn't fire; confidence<0.6 so only that reason fires.
+        let result = OpportunityScore::new(2.0, 0.5, 1.0).unwrap().evaluate();
+        insta::assert_snapshot!(
+            format!("{result}"),
+            @r###"score=1.00 decision=NEEDS_EVIDENCE reason="score below threshold but promising (1.0–2.0)" reason="needs profiling data to increase confidence""###
+        );
+    }
+
+    #[test]
+    fn gate_result_needs_evidence_minimal_snapshot() {
+        // 2×0.8/1 = 1.6 → NeedsEvidence. impact<3 AND confidence≥0.6 — only
+        // the baseline "below threshold but promising" reason fires.
+        let result = OpportunityScore::new(2.0, 0.8, 1.0).unwrap().evaluate();
+        insta::assert_snapshot!(
+            format!("{result}"),
+            @r###"score=1.60 decision=NEEDS_EVIDENCE reason="score below threshold but promising (1.0–2.0)""###
+        );
+    }
+
+    #[test]
+    fn gate_result_reject_both_reasons_snapshot() {
+        // 2×0.3/4 = 0.15 → Reject. impact≤2 AND effort≥4 — both extra reasons.
+        let result = OpportunityScore::new(2.0, 0.3, 4.0).unwrap().evaluate();
+        insta::assert_snapshot!(
+            format!("{result}"),
+            @r###"score=0.15 decision=REJECT reason="score below 1.0 — not worthwhile" reason="low expected impact" reason="high implementation effort relative to gain""###
+        );
+    }
+
+    #[test]
+    fn gate_result_reject_low_impact_only_snapshot() {
+        // 2×0.3/3 = 0.2 → Reject. impact≤2 but effort<4 — only low-impact reason.
+        let result = OpportunityScore::new(2.0, 0.3, 3.0).unwrap().evaluate();
+        insta::assert_snapshot!(
+            format!("{result}"),
+            @r###"score=0.20 decision=REJECT reason="score below 1.0 — not worthwhile" reason="low expected impact""###
+        );
+    }
+
+    #[test]
+    fn gate_result_reject_high_effort_only_snapshot() {
+        // 3×0.3/4 = 0.225 → Reject. impact>2 AND effort≥4 — only high-effort reason.
+        let result = OpportunityScore::new(3.0, 0.3, 4.0).unwrap().evaluate();
+        insta::assert_snapshot!(
+            format!("{result}"),
+            @r###"score=0.22 decision=REJECT reason="score below 1.0 — not worthwhile" reason="high implementation effort relative to gain""###
+        );
+    }
+
+    #[test]
+    fn gate_result_reject_minimal_snapshot() {
+        // 3×0.3/3 = 0.3 → Reject. impact>2 AND effort<4 — only the baseline
+        // "below 1.0 — not worthwhile" reason fires.
+        let result = OpportunityScore::new(3.0, 0.3, 3.0).unwrap().evaluate();
+        insta::assert_snapshot!(
+            format!("{result}"),
+            @r###"score=0.30 decision=REJECT reason="score below 1.0 — not worthwhile""###
+        );
+    }
+
+    #[test]
+    fn gate_result_max_score_snapshot() {
+        // Upper-bound of the input domain: 5×1.0/1 = 5.00.
+        let result = OpportunityScore::new(5.0, 1.0, 1.0).unwrap().evaluate();
+        insta::assert_snapshot!(
+            format!("{result}"),
+            @r###"score=5.00 decision=IMPLEMENT reason="score meets threshold (>= 2.0)" reason="high confidence from profiling evidence" reason="low implementation effort""###
+        );
+    }
+
+    #[test]
+    fn gate_result_min_score_snapshot() {
+        // Lower-bound: 1×0.2/5 = 0.04. impact≤2 AND effort≥4 — both reject reasons.
+        let result = OpportunityScore::new(1.0, 0.2, 5.0).unwrap().evaluate();
+        insta::assert_snapshot!(
+            format!("{result}"),
+            @r###"score=0.04 decision=REJECT reason="score below 1.0 — not worthwhile" reason="low expected impact" reason="high implementation effort relative to gain""###
+        );
+    }
+
+    #[test]
+    fn perf_gate_docs_example_matrix_snapshot() {
+        // Freezes the exact display output for the canonical docs-quoted
+        // opportunity matrix entries so README/benchmarking doc drift is caught.
+        let examples = [
+            ("Pre-size BinaryHeap lanes  ", (3.0_f64, 0.8_f64, 1.0_f64)),
+            ("Arena-backed task nodes    ", (4.0, 0.6, 3.0)),
+            ("Intrusive queues           ", (4.0, 0.6, 4.0)),
+            ("Reuse steal_batch Vec      ", (2.0, 1.0, 1.0)),
+            ("SIMD for RaptorQ GF ops    ", (5.0, 0.4, 3.0)),
+        ];
+        let mut out = String::new();
+        for (label, (i, c, e)) in examples {
+            let s = OpportunityScore::new(i, c, e).unwrap();
+            let r = s.evaluate();
+            out.push_str(&format!("{label} | {s} | decision={}\n", r.decision));
+        }
+        insta::assert_snapshot!(out, @r"
+        Pre-size BinaryHeap lanes   | Impact=3.0 × Confidence=0.8 / Effort=1.0 = 2.40 | decision=IMPLEMENT
+        Arena-backed task nodes     | Impact=4.0 × Confidence=0.6 / Effort=3.0 = 0.80 | decision=REJECT
+        Intrusive queues            | Impact=4.0 × Confidence=0.6 / Effort=4.0 = 0.60 | decision=REJECT
+        Reuse steal_batch Vec       | Impact=2.0 × Confidence=1.0 / Effort=1.0 = 2.00 | decision=IMPLEMENT
+        SIMD for RaptorQ GF ops     | Impact=5.0 × Confidence=0.4 / Effort=3.0 = 0.67 | decision=REJECT
+        ");
+    }
+
+    // =========================================================================
     // Input Validation Tests
     // =========================================================================
 
