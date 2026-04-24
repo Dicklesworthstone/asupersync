@@ -65,6 +65,8 @@
 
 pub mod authenticated;
 pub mod context;
+#[cfg(test)]
+mod cryptographic_boundary_tests;
 pub mod error;
 pub mod key;
 pub mod tag;
