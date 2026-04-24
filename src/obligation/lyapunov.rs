@@ -309,41 +309,45 @@ impl StateSnapshot {
                 deadline_pressure += term;
             }
         }
-        // -- Obligation scan: one pass to collect totals + per-kind breakdown. --
-        let mut pending_obligations: u32 = 0;
-        let mut obligation_age_sum_ns: u64 = 0;
-        let mut pending_send_permits: u32 = 0;
-        let mut pending_acks: u32 = 0;
-        let mut pending_leases: u32 = 0;
-        let mut pending_io_ops: u32 = 0;
+        // -- Obligation counters (O(1), br-asupersync-xxcss5) --
+        // Previously this block scanned the entire obligation arena on every
+        // governor snapshot. `ObligationTable` now maintains pending counters
+        // per kind plus a running sum of `reserved_at.as_nanos()`, so
+        // `from_runtime_state` is no longer linear in the live obligation
+        // count and drops the 18% snapshot-allocation contribution flagged in
+        // the bead description.
+        #[allow(clippy::cast_possible_truncation)]
+        let pending_obligations: u32 = state.pending_obligation_count() as u32;
+        // Age sum: Σ (now - reserved_at) = now * pending - Σ reserved_at.
+        // All three operands are in nanoseconds; do the arithmetic in `u128`
+        // so overflow is impossible even under worst-case long-running
+        // deterministic replay, then truncate to `u64` for the snapshot
+        // field. Saturation keeps the snapshot well-defined if the sum ever
+        // underflows (e.g., if a replay rewinds `now`).
+        let now_ns = u128::from(now.as_nanos());
+        let pending_reserved_at_sum = state.pending_obligation_reserved_at_sum_ns();
+        let total_pending_nanos = now_ns.saturating_mul(u128::from(pending_obligations));
+        let obligation_age_sum_ns: u64 = total_pending_nanos
+            .saturating_sub(pending_reserved_at_sum)
+            .min(u128::from(u64::MAX)) as u64;
 
-        for (_, obligation) in state.obligations_iter() {
-            if !obligation.is_pending() {
-                continue;
-            }
-            pending_obligations = pending_obligations.saturating_add(1);
-            obligation_age_sum_ns =
-                obligation_age_sum_ns.saturating_add(now.duration_since(obligation.reserved_at));
-
-            match obligation.kind {
-                ObligationKind::SendPermit => {
-                    pending_send_permits = pending_send_permits.saturating_add(1);
-                }
-                ObligationKind::Ack => {
-                    pending_acks = pending_acks.saturating_add(1);
-                }
-                ObligationKind::Lease => {
-                    pending_leases = pending_leases.saturating_add(1);
-                }
-                ObligationKind::IoOp => {
-                    pending_io_ops = pending_io_ops.saturating_add(1);
-                }
-                ObligationKind::SemaphorePermit => {
-                    // Count semaphore permits as part of synchronization obligations
-                    pending_leases = pending_leases.saturating_add(1);
-                }
-            }
-        }
+        #[allow(clippy::cast_possible_truncation)]
+        let pending_send_permits: u32 =
+            state.pending_obligation_count_for_kind(ObligationKind::SendPermit) as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let pending_acks: u32 = state.pending_obligation_count_for_kind(ObligationKind::Ack) as u32;
+        // Match the old aggregation: `Lease` and `SemaphorePermit` share the
+        // `pending_leases` bucket because the governor treats them as the
+        // same class of synchronization obligation.
+        #[allow(clippy::cast_possible_truncation)]
+        let pending_leases: u32 = (state
+            .pending_obligation_count_for_kind(ObligationKind::Lease)
+            .saturating_add(
+                state.pending_obligation_count_for_kind(ObligationKind::SemaphorePermit),
+            )) as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let pending_io_ops: u32 =
+            state.pending_obligation_count_for_kind(ObligationKind::IoOp) as u32;
         // -- Region scan: one pass for draining count. --
         let mut draining_regions: u32 = 0;
         for (_, region) in state.regions_iter() {

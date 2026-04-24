@@ -90,6 +90,10 @@ pub struct ObligationCreateArgs {
     pub acquire_backtrace: Option<Arc<Backtrace>>,
 }
 
+/// Number of variants in [`ObligationKind`] — sized at compile time so we can
+/// stash per-kind counters in a fixed array without boxing.
+const OBLIGATION_KIND_COUNT: usize = 5;
+
 /// Encapsulates the obligation arena for resource tracking operations.
 ///
 /// Provides both low-level arena access and domain-level methods for
@@ -112,6 +116,35 @@ pub struct ObligationTable {
     /// Maintained incrementally: +1 on create, -1 on commit/abort/leak.
     /// This turns `pending_count()` from an O(arena_capacity) scan to O(1).
     cached_pending: usize,
+    /// Per-kind pending counts, indexed by [`kind_index`]. Supports O(1)
+    /// Lyapunov snapshots (br-asupersync-xxcss5): the governor's per-kind
+    /// obligation breakdown no longer iterates the arena each snapshot.
+    pending_by_kind: [usize; OBLIGATION_KIND_COUNT],
+    /// Running sum of `reserved_at.as_nanos()` over currently pending
+    /// obligations. Combined with the virtual-time `now` at snapshot time,
+    /// `obligation_age_sum_ns = now.as_nanos().saturating_mul(pending) -
+    /// pending_reserved_at_sum_ns` yields the total age in nanoseconds without
+    /// scanning the arena. `u128` is wide enough that a billion-obligation,
+    /// century-long runtime still fits.
+    pending_reserved_at_sum_ns: u128,
+}
+
+/// Stable index for `ObligationKind` in the per-kind counter array.
+///
+/// `SemaphorePermit` is bucketed with `Lease` in the governor snapshot to
+/// match the existing `StateSnapshot::from_runtime_state` aggregation, so we
+/// still give it a distinct counter slot here to keep the running sum
+/// book-keeping simple.
+#[inline]
+#[must_use]
+const fn kind_index(kind: ObligationKind) -> usize {
+    match kind {
+        ObligationKind::SendPermit => 0,
+        ObligationKind::Ack => 1,
+        ObligationKind::Lease => 2,
+        ObligationKind::IoOp => 3,
+        ObligationKind::SemaphorePermit => 4,
+    }
 }
 
 impl ObligationTable {
@@ -122,6 +155,8 @@ impl ObligationTable {
             obligations: Arena::new(),
             by_holder: Vec::with_capacity(32),
             cached_pending: 0,
+            pending_by_kind: [0; OBLIGATION_KIND_COUNT],
+            pending_reserved_at_sum_ns: 0,
         }
     }
 
@@ -135,7 +170,31 @@ impl ObligationTable {
             obligations: Arena::with_capacity(capacity),
             by_holder: Vec::with_capacity(capacity.max(32)),
             cached_pending: 0,
+            pending_by_kind: [0; OBLIGATION_KIND_COUNT],
+            pending_reserved_at_sum_ns: 0,
         }
+    }
+
+    /// Atomically bump the pending counters for a newly-created obligation.
+    #[inline]
+    fn note_pending_added(&mut self, kind: ObligationKind, reserved_at: Time) {
+        self.cached_pending += 1;
+        self.pending_by_kind[kind_index(kind)] += 1;
+        self.pending_reserved_at_sum_ns = self
+            .pending_reserved_at_sum_ns
+            .saturating_add(u128::from(reserved_at.as_nanos()));
+    }
+
+    /// Atomically decrement the pending counters when an obligation leaves the
+    /// `Reserved` state (commit / abort / leak / removal-while-pending).
+    #[inline]
+    fn note_pending_removed(&mut self, kind: ObligationKind, reserved_at: Time) {
+        self.cached_pending = self.cached_pending.saturating_sub(1);
+        let slot = &mut self.pending_by_kind[kind_index(kind)];
+        *slot = slot.saturating_sub(1);
+        self.pending_reserved_at_sum_ns = self
+            .pending_reserved_at_sum_ns
+            .saturating_sub(u128::from(reserved_at.as_nanos()));
     }
 
     // =========================================================================
@@ -159,6 +218,8 @@ impl ObligationTable {
     pub fn insert(&mut self, mut record: ObligationRecord) -> ArenaIndex {
         let is_pending = record.is_pending();
         let holder = record.holder;
+        let kind = record.kind;
+        let reserved_at = record.reserved_at;
         let idx = self.obligations.insert_with(|idx| {
             // The arena slot defines the canonical obligation ID. Normalize the
             // stored record so low-level callers cannot desynchronize `record.id`
@@ -168,7 +229,7 @@ impl ObligationTable {
         });
         self.push_holder_id(holder, ObligationId::from_arena(idx));
         if is_pending {
-            self.cached_pending += 1;
+            self.note_pending_added(kind, reserved_at);
         }
         idx
     }
@@ -203,12 +264,18 @@ impl ObligationTable {
             record.id = ObligationId::from_arena(idx);
             record
         });
-        if let Some(record) = self.obligations.get(idx) {
-            let holder = record.holder;
-            let is_pending = record.is_pending();
+        let note = self.obligations.get(idx).map(|record| {
+            (
+                record.holder,
+                record.kind,
+                record.reserved_at,
+                record.is_pending(),
+            )
+        });
+        if let Some((holder, kind, reserved_at, is_pending)) = note {
             self.push_holder_id(holder, ObligationId::from_arena(idx));
             if is_pending {
-                self.cached_pending += 1;
+                self.note_pending_added(kind, reserved_at);
             }
         }
         idx
@@ -219,7 +286,7 @@ impl ObligationTable {
     pub fn remove(&mut self, index: ArenaIndex) -> Option<ObligationRecord> {
         let record = self.obligations.remove(index)?;
         if record.is_pending() {
-            self.cached_pending = self.cached_pending.saturating_sub(1);
+            self.note_pending_removed(record.kind, record.reserved_at);
         }
         let ob_id = ObligationId::from_arena(index);
         let slot = record.holder.arena_index().index() as usize;
@@ -308,7 +375,11 @@ impl ObligationTable {
         };
         let ob_id = ObligationId::from_arena(idx);
         self.push_holder_id(holder, ob_id);
-        self.cached_pending += 1;
+        let reserved_at = self
+            .obligations
+            .get(idx)
+            .map_or(now, |record| record.reserved_at);
+        self.note_pending_added(kind, reserved_at);
         ob_id
     }
 
@@ -335,15 +406,18 @@ impl ObligationTable {
             return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
         }
 
+        let kind = record.kind;
+        let reserved_at = record.reserved_at;
         let duration = record.commit(now);
-        self.cached_pending = self.cached_pending.saturating_sub(1);
-        Ok(ObligationCommitInfo {
+        let info = ObligationCommitInfo {
             id: record.id,
             holder: record.holder,
             region: record.region,
-            kind: record.kind,
+            kind,
             duration,
-        })
+        };
+        self.note_pending_removed(kind, reserved_at);
+        Ok(info)
     }
 
     /// Aborts an obligation, transitioning it from Reserved to Aborted.
@@ -370,16 +444,19 @@ impl ObligationTable {
             return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
         }
 
+        let kind = record.kind;
+        let reserved_at = record.reserved_at;
         let duration = record.abort(now, reason);
-        self.cached_pending = self.cached_pending.saturating_sub(1);
-        Ok(ObligationAbortInfo {
+        let info = ObligationAbortInfo {
             id: record.id,
             holder: record.holder,
             region: record.region,
-            kind: record.kind,
+            kind,
             duration,
             reason,
-        })
+        };
+        self.note_pending_removed(kind, reserved_at);
+        Ok(info)
     }
 
     /// Marks an obligation as leaked, transitioning it from Reserved to Leaked.
@@ -403,18 +480,21 @@ impl ObligationTable {
             return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
         }
 
+        let kind = record.kind;
+        let reserved_at = record.reserved_at;
         let duration = record.mark_leaked(now);
-        self.cached_pending = self.cached_pending.saturating_sub(1);
-        Ok(ObligationLeakInfo {
+        let info = ObligationLeakInfo {
             id: record.id,
             holder: record.holder,
             region: record.region,
-            kind: record.kind,
+            kind,
             duration,
             acquired_at: record.acquired_at,
             acquire_backtrace: record.acquire_backtrace.clone(),
             description: record.description.clone(),
-        })
+        };
+        self.note_pending_removed(kind, reserved_at);
+        Ok(info)
     }
 
     /// Returns obligation IDs held by a specific task (O(1) lookup via index).
@@ -498,6 +578,27 @@ impl ObligationTable {
     #[must_use]
     pub fn pending_count(&self) -> usize {
         self.cached_pending
+    }
+
+    /// Returns the pending count for a specific [`ObligationKind`].
+    ///
+    /// O(1) — maintained incrementally alongside `cached_pending`
+    /// (br-asupersync-xxcss5). The Lyapunov governor reads these counters
+    /// instead of iterating the arena on every snapshot.
+    #[inline]
+    #[must_use]
+    pub fn pending_count_for_kind(&self, kind: ObligationKind) -> usize {
+        self.pending_by_kind[kind_index(kind)]
+    }
+
+    /// Returns the running sum of `reserved_at.as_nanos()` across all pending
+    /// obligations. Combined with the current virtual time, yields the total
+    /// obligation age in O(1) — see
+    /// [`StateSnapshot::from_runtime_state`](crate::obligation::lyapunov::StateSnapshot::from_runtime_state).
+    #[inline]
+    #[must_use]
+    pub fn pending_reserved_at_sum_ns(&self) -> u128 {
+        self.pending_reserved_at_sum_ns
     }
 
     /// Collects IDs of pending obligations held by a specific task.
@@ -1074,5 +1175,107 @@ mod tests {
         assert!(table.is_empty());
         assert_eq!(table.len(), 0);
         assert_eq!(table.pending_count(), 0);
+    }
+
+    /// Regression for br-asupersync-xxcss5: per-kind pending counters and the
+    /// running reserved_at sum stay consistent with the arena across
+    /// create/commit/abort/leak/remove, so the Lyapunov governor can read
+    /// them directly instead of scanning obligations on every snapshot.
+    #[test]
+    fn incremental_counters_track_all_mutations() {
+        let mut table = ObligationTable::new();
+        let task_a = test_task_id(10);
+        let task_b = test_task_id(11);
+        let region = test_region_id(3);
+
+        let send = table.create(ObligationCreateArgs {
+            kind: ObligationKind::SendPermit,
+            holder: task_a,
+            region,
+            now: Time::from_nanos(100),
+            description: None,
+            acquired_at: SourceLocation::unknown(),
+            acquire_backtrace: None,
+        });
+        let ack = table.create(ObligationCreateArgs {
+            kind: ObligationKind::Ack,
+            holder: task_a,
+            region,
+            now: Time::from_nanos(150),
+            description: None,
+            acquired_at: SourceLocation::unknown(),
+            acquire_backtrace: None,
+        });
+        let lease = table.create(ObligationCreateArgs {
+            kind: ObligationKind::Lease,
+            holder: task_b,
+            region,
+            now: Time::from_nanos(200),
+            description: None,
+            acquired_at: SourceLocation::unknown(),
+            acquire_backtrace: None,
+        });
+        let sem = table.create(ObligationCreateArgs {
+            kind: ObligationKind::SemaphorePermit,
+            holder: task_b,
+            region,
+            now: Time::from_nanos(250),
+            description: None,
+            acquired_at: SourceLocation::unknown(),
+            acquire_backtrace: None,
+        });
+
+        assert_eq!(table.pending_count(), 4);
+        assert_eq!(table.pending_count_for_kind(ObligationKind::SendPermit), 1);
+        assert_eq!(table.pending_count_for_kind(ObligationKind::Ack), 1);
+        assert_eq!(table.pending_count_for_kind(ObligationKind::Lease), 1);
+        assert_eq!(
+            table.pending_count_for_kind(ObligationKind::SemaphorePermit),
+            1
+        );
+        assert_eq!(table.pending_count_for_kind(ObligationKind::IoOp), 0);
+        assert_eq!(table.pending_reserved_at_sum_ns(), 100 + 150 + 200 + 250);
+
+        // Commit → pending count & kind bucket decrement, and reserved_at sum
+        // loses exactly the committed obligation's nanos.
+        table.commit(send, Time::from_nanos(300)).unwrap();
+        assert_eq!(table.pending_count(), 3);
+        assert_eq!(table.pending_count_for_kind(ObligationKind::SendPermit), 0);
+        assert_eq!(table.pending_reserved_at_sum_ns(), 150 + 200 + 250);
+
+        // Abort decrements the Ack bucket.
+        table
+            .abort(ack, Time::from_nanos(400), ObligationAbortReason::Cancel)
+            .unwrap();
+        assert_eq!(table.pending_count(), 2);
+        assert_eq!(table.pending_count_for_kind(ObligationKind::Ack), 0);
+        assert_eq!(table.pending_reserved_at_sum_ns(), 200 + 250);
+
+        // Mark-leaked decrements the Lease bucket.
+        table.mark_leaked(lease, Time::from_nanos(500)).unwrap();
+        assert_eq!(table.pending_count(), 1);
+        assert_eq!(table.pending_count_for_kind(ObligationKind::Lease), 0);
+        assert_eq!(table.pending_reserved_at_sum_ns(), 250);
+
+        // Removing a still-pending obligation must also decrement.
+        let removed = table.remove(sem.arena_index()).unwrap();
+        assert_eq!(removed.kind, ObligationKind::SemaphorePermit);
+        assert_eq!(table.pending_count(), 0);
+        assert_eq!(
+            table.pending_count_for_kind(ObligationKind::SemaphorePermit),
+            0
+        );
+        assert_eq!(table.pending_reserved_at_sum_ns(), 0);
+
+        // Per-kind counters must bottom out at zero on saturating_sub paths.
+        for kind in [
+            ObligationKind::SendPermit,
+            ObligationKind::Ack,
+            ObligationKind::Lease,
+            ObligationKind::IoOp,
+            ObligationKind::SemaphorePermit,
+        ] {
+            assert_eq!(table.pending_count_for_kind(kind), 0);
+        }
     }
 }

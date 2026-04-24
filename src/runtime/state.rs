@@ -2039,6 +2039,26 @@ impl RuntimeState {
         self.obligations.pending_count()
     }
 
+    /// Returns the pending obligation count for a specific kind.
+    ///
+    /// O(1) — maintained incrementally in `ObligationTable`
+    /// (br-asupersync-xxcss5). Lets the Lyapunov governor build a state
+    /// snapshot without iterating the obligation arena.
+    #[inline]
+    #[must_use]
+    pub fn pending_obligation_count_for_kind(&self, kind: crate::record::ObligationKind) -> usize {
+        self.obligations.pending_count_for_kind(kind)
+    }
+
+    /// Returns the sum of `reserved_at.as_nanos()` across all pending
+    /// obligations. Combined with virtual-time `now`, yields the total
+    /// pending-obligation age in O(1).
+    #[inline]
+    #[must_use]
+    pub fn pending_obligation_reserved_at_sum_ns(&self) -> u128 {
+        self.obligations.pending_reserved_at_sum_ns()
+    }
+
     /// Returns true if the runtime is quiescent (no live work).
     ///
     /// A runtime is quiescent when:
