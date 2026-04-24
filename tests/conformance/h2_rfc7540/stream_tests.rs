@@ -5,8 +5,32 @@
 //! Tests stream lifecycle and state management requirements from RFC 7540 Section 5.
 
 use super::*;
-use asupersync::http::h2::frame::FrameType;
+use asupersync::bytes::Bytes;
+use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::frame::{
+    ContinuationFrame, FrameHeader, FrameType, HeadersFrame, PriorityFrame, headers_flags,
+};
 use asupersync::http::h2::stream::StreamState;
+
+fn priority_header(stream_id: u32) -> FrameHeader {
+    FrameHeader {
+        length: 5,
+        frame_type: FrameType::Priority as u8,
+        flags: 0,
+        stream_id,
+    }
+}
+
+fn priority_payload(dependency: u32, weight: u8, exclusive: bool) -> Bytes {
+    let mut bytes = dependency.to_be_bytes();
+    if exclusive {
+        bytes[0] |= 0x80;
+    }
+    let mut payload = Vec::with_capacity(5);
+    payload.extend_from_slice(&bytes);
+    payload.push(weight);
+    Bytes::from(payload)
+}
 
 /// Run all stream conformance tests.
 #[allow(dead_code)]
@@ -29,45 +53,59 @@ pub fn run_stream_tests() -> Vec<H2ConformanceResult> {
 #[allow(dead_code)]
 fn test_stream_id_requirements() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
-        // Stream IDs initiated by client MUST be odd
-        let client_streams = [1, 3, 5, 101, 999, 0x7FFFFFFD];
-        for stream_id in &client_streams {
+        for stream_id in [1, 3, 5, 101, 999, 0x7FFF_FFFD] {
             if stream_id % 2 == 0 {
-                return Err(format!("Client stream ID {} should be odd", stream_id));
+                return Err(format!("Client stream ID {stream_id} should be odd"));
             }
         }
 
-        // Stream IDs initiated by server MUST be even
-        let server_streams = [2, 4, 6, 100, 1000, 0x7FFFFFFE];
-        for stream_id in &server_streams {
+        for stream_id in [2, 4, 6, 100, 1000, 0x7FFF_FFFE] {
             if stream_id % 2 != 0 {
-                return Err(format!("Server stream ID {} should be even", stream_id));
+                return Err(format!("Server stream ID {stream_id} should be even"));
             }
         }
 
-        // Stream ID 0 is reserved for connection-level frames
-        // It should not be used for stream-specific frames
-        let connection_level_frames = [
-            FrameType::Settings,
-            FrameType::Ping,
-            FrameType::GoAway,
-            FrameType::WindowUpdate, // Can be connection or stream level
-        ];
+        let headers_err = HeadersFrame::parse(
+            &FrameHeader {
+                length: 0,
+                frame_type: FrameType::Headers as u8,
+                flags: headers_flags::END_HEADERS,
+                stream_id: 0,
+            },
+            Bytes::new(),
+        )
+        .unwrap_err();
+        if headers_err.code != ErrorCode::ProtocolError {
+            return Err(format!(
+                "HEADERS with stream ID 0 should be PROTOCOL_ERROR, got {:?}",
+                headers_err
+            ));
+        }
 
-        // Stream-specific frames should not use stream ID 0
-        let stream_frames = [
-            FrameType::Data,
-            FrameType::Headers,
-            FrameType::Priority,
-            FrameType::RstStream,
-            FrameType::PushPromise,
-            FrameType::Continuation,
-        ];
+        let priority_err =
+            PriorityFrame::parse(&priority_header(0), &priority_payload(0, 16, false)).unwrap_err();
+        if priority_err.code != ErrorCode::ProtocolError {
+            return Err(format!(
+                "PRIORITY with stream ID 0 should be PROTOCOL_ERROR, got {:?}",
+                priority_err
+            ));
+        }
 
-        // This is a logical validation - actual frame validation would be in frame processing
-        for frame_type in &stream_frames {
-            // These frame types should reject stream ID 0
-            // (This would be validated in the actual frame processing logic)
+        let continuation_err = ContinuationFrame::parse(
+            &FrameHeader {
+                length: 0,
+                frame_type: FrameType::Continuation as u8,
+                flags: 0,
+                stream_id: 0,
+            },
+            Bytes::new(),
+        )
+        .unwrap_err();
+        if continuation_err.code != ErrorCode::ProtocolError {
+            return Err(format!(
+                "CONTINUATION with stream ID 0 should be PROTOCOL_ERROR, got {:?}",
+                continuation_err
+            ));
         }
 
         Ok(())
@@ -250,27 +288,47 @@ fn test_stream_concurrency_limits() -> H2ConformanceResult {
 #[allow(dead_code)]
 fn test_stream_dependency_validation() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
-        // Test stream dependency rules
-
-        // A stream cannot depend on itself
-        let self_dependency_cases = [1, 5, 100, 999];
-        for stream_id in &self_dependency_cases {
-            // Priority frame with stream_id == dependent_stream_id should be rejected
-            // This would be validated in priority frame processing
+        for stream_id in [1, 5, 100, 999] {
+            let err = PriorityFrame::parse(
+                &priority_header(stream_id),
+                &priority_payload(stream_id, 16, false),
+            )
+            .unwrap_err();
+            if err.code != ErrorCode::ProtocolError {
+                return Err(format!(
+                    "self-dependent PRIORITY on stream {stream_id} should be PROTOCOL_ERROR, got {:?}",
+                    err
+                ));
+            }
+            if err.stream_id != Some(stream_id) {
+                return Err(format!(
+                    "self-dependent PRIORITY on stream {stream_id} should be stream-scoped, got {:?}",
+                    err.stream_id
+                ));
+            }
         }
 
-        // Dependencies should form a tree (no cycles)
-        // Example: Stream 1 depends on 3, Stream 3 depends on 5, Stream 5 depends on 1 (cycle)
-        let dependency_chain = [(1, 3), (3, 5), (5, 1)]; // Creates a cycle
-
-        // Cycle detection would be part of priority tree management
-        // Here we validate the logical requirement exists
-
-        // Stream 0 is the root of the dependency tree
-        let root_stream = 0u32;
-
-        // All streams that don't specify a dependency depend on stream 0
-        // This is the default root dependency
+        for (stream_id, dependency, exclusive) in [(1, 0, false), (3, 1, false), (5, 3, true)] {
+            let parsed = PriorityFrame::parse(
+                &priority_header(stream_id),
+                &priority_payload(dependency, 32, exclusive),
+            )
+            .map_err(|err| {
+                format!("valid PRIORITY parse failed for stream {stream_id}: {err:?}")
+            })?;
+            if parsed.priority.dependency != dependency {
+                return Err(format!(
+                    "stream {stream_id} dependency parsed as {}, expected {}",
+                    parsed.priority.dependency, dependency
+                ));
+            }
+            if parsed.priority.exclusive != exclusive {
+                return Err(format!(
+                    "stream {stream_id} exclusive bit parsed as {}, expected {}",
+                    parsed.priority.exclusive, exclusive
+                ));
+            }
+        }
 
         Ok(())
     });
@@ -289,38 +347,51 @@ fn test_stream_dependency_validation() -> H2ConformanceResult {
 #[allow(dead_code)]
 fn test_stream_priority_inheritance() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
-        // Test stream priority and weight validation
-
-        // Stream weight must be 1-256 (encoded as 0-255)
-        let valid_weights = [1, 16, 128, 256];
-        for weight in &valid_weights {
-            let encoded_weight = weight - 1; // 1-256 encoded as 0-255
-            if encoded_weight > 255 {
+        for encoded_weight in [0u8, 15, 127, 255] {
+            let parsed = PriorityFrame::parse(
+                &priority_header(7),
+                &priority_payload(0, encoded_weight, true),
+            )
+            .map_err(|err| format!("valid PRIORITY parse failed: {err:?}"))?;
+            if parsed.priority.weight != encoded_weight {
                 return Err(format!(
-                    "Weight {} encodes to {}, max is 255",
-                    weight, encoded_weight
+                    "encoded priority weight {} parsed as {}",
+                    encoded_weight, parsed.priority.weight
                 ));
             }
         }
 
-        // Invalid weights (should be clamped or rejected)
-        let invalid_weights = [0, 257, 1000];
-        for weight in &invalid_weights {
-            // These should be handled appropriately by the implementation
-            if *weight == 0 {
-                // 0 is invalid (minimum weight is 1)
-            } else if *weight > 256 {
-                // Above 256 is invalid (maximum weight is 256)
-            }
+        let headers = HeadersFrame::parse(
+            &FrameHeader {
+                length: 8,
+                frame_type: FrameType::Headers as u8,
+                flags: headers_flags::PRIORITY | headers_flags::END_HEADERS,
+                stream_id: 11,
+            },
+            priority_payload(1, 200, true).slice(..),
+        )
+        .map_err(|err| format!("HEADERS priority parse failed: {err:?}"))?;
+        let priority = headers
+            .priority
+            .ok_or_else(|| "HEADERS priority flag should yield a priority spec".to_string())?;
+        if !priority.exclusive || priority.dependency != 1 || priority.weight != 200 {
+            return Err(format!(
+                "HEADERS priority parsed incorrectly: exclusive={} dependency={} weight={}",
+                priority.exclusive, priority.dependency, priority.weight
+            ));
         }
 
-        // Exclusive flag behavior
-        let exclusive_flag_tests = [(true, "exclusive dependency"), (false, "shared dependency")];
-
-        for (exclusive, description) in &exclusive_flag_tests {
-            // Exclusive dependencies become the sole child of their parent
-            // Non-exclusive dependencies share the parent with siblings
-            // This affects resource allocation calculations
+        match PriorityFrame::parse(&priority_header(9), &Bytes::from_static(&[0, 0, 0, 0])) {
+            Err(H2Error {
+                code: ErrorCode::FrameSizeError,
+                stream_id: Some(9),
+                ..
+            }) => {}
+            other => {
+                return Err(format!(
+                    "short PRIORITY frame should be stream-scoped FRAME_SIZE_ERROR, got {other:?}"
+                ));
+            }
         }
 
         Ok(())
