@@ -334,6 +334,9 @@ impl DecodingPipeline {
         }
 
         let sbn = symbol.sbn();
+        if self.block_plans.is_some() && self.block_plan(sbn).is_none() {
+            return Ok(SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata));
+        }
         if self.completed_blocks.contains(&sbn) {
             return Ok(SymbolAcceptResult::Rejected(
                 RejectReason::BlockAlreadyDecoded,
@@ -1141,6 +1144,54 @@ mod tests {
         );
 
         crate::test_complete!("reject_invalid_metadata_repair_esi_overflow_without_panicking");
+    }
+
+    #[test]
+    fn reject_invalid_metadata_out_of_layout_sbn_without_buffering() {
+        init_test("reject_invalid_metadata_out_of_layout_sbn_without_buffering");
+        let mut decoder = DecodingPipeline::new(DecodingConfig {
+            symbol_size: 8,
+            max_block_size: 8,
+            repair_overhead: 1.0,
+            min_overhead: 0,
+            max_buffered_symbols: 8192,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+        let object_id = ObjectId::new_for_test(23);
+        decoder
+            .set_object_params(ObjectParams::new(object_id, 8, 8, 1, 1))
+            .expect("params");
+
+        let result = decoder
+            .feed(AuthenticatedSymbol::from_parts(
+                Symbol::new(
+                    SymbolId::new(object_id, 1, 0),
+                    vec![0x33; 8],
+                    SymbolKind::Source,
+                ),
+                crate::security::tag::AuthenticationTag::zero(),
+            ))
+            .expect("feed out-of-layout block");
+        let expected = SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata);
+        let ok = result == expected;
+        crate::assert_with_log!(ok, "out-of-layout sbn rejected", expected, result);
+
+        let progress = decoder.progress();
+        crate::assert_with_log!(
+            progress.symbols_received == 0,
+            "rejected out-of-layout block must not advance buffered symbol count",
+            0,
+            progress.symbols_received
+        );
+        crate::assert_with_log!(
+            decoder.block_status(1).is_none(),
+            "rejected out-of-layout block must not create block state",
+            true,
+            decoder.block_status(1).is_some()
+        );
+
+        crate::test_complete!("reject_invalid_metadata_out_of_layout_sbn_without_buffering");
     }
 
     #[test]
