@@ -1466,7 +1466,7 @@ impl ScramAuth {
         let iterations = self.iterations.ok_or_else(|| {
             PgError::AuthenticationFailed("SCRAM state error: missing iterations".to_string())
         })?;
-        let salted_password = self.pbkdf2_sha256(&self.password, salt, iterations);
+        let salted_password = self.pbkdf2_sha256(&self.password, salt, iterations); // ubs:ignore - dynamic password variable
         let server_key = Self::hmac_sha256(&salted_password, b"Server Key");
         let auth_message = self.auth_message.as_ref().ok_or_else(|| {
             PgError::AuthenticationFailed("SCRAM state error: missing auth_message".to_string())
@@ -2640,7 +2640,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
+                    return outcome_from_error(self.parse_error_and_drain(cx, &data).await);
                 }
                 _ => {
                     match self.handle_async_backend_message(msg_type, &data) {
@@ -2760,7 +2760,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
+                    return outcome_from_error(self.parse_error_and_drain(cx, &data).await);
                 }
                 _ => {
                     match self.handle_async_backend_message(msg_type, &data) {
@@ -3103,7 +3103,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
+                    return outcome_from_error(self.parse_error_and_drain(cx, &data).await);
                 }
                 _ => {
                     match self.handle_async_backend_message(msg_type, &data) {
@@ -3296,7 +3296,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
+                    return outcome_from_error(self.parse_error_and_drain(cx, &data).await);
                 }
                 _ => {
                     match self.handle_async_backend_message(msg_type, &data) {
@@ -3839,7 +3839,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
+                    return outcome_from_error(self.parse_error_and_drain(cx, &data).await);
                 }
                 _ => {
                     match self.handle_async_backend_message(msg_type, &data) {
@@ -3906,7 +3906,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
+                    return outcome_from_error(self.parse_error_and_drain(cx, &data).await);
                 }
                 _ => {
                     match self.handle_async_backend_message(msg_type, &data) {
@@ -5503,6 +5503,34 @@ mod tests {
             other => panic!("expected Cancelled, got: {other}"),
         }
         assert!(conn.inner.closed);
+
+        wake_writer.join().expect("wake writer should exit cleanly");
+    }
+
+    #[test]
+    fn extended_execute_error_drain_cancellation_maps_to_cancelled_outcome() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        conn.inner.closed = true;
+        let cx = crate::cx::Cx::for_testing();
+        let cancel_cx = cx.clone();
+
+        let wake_writer = std::thread::spawn(move || {
+            std::io::Write::write_all(&mut peer, &error_response_message("XX000", "boom"))
+                .expect("write ErrorResponse");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cancel_cx.cancel_fast(CancelKind::User);
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                .expect("wake pending drain");
+        });
+
+        match run(conn.read_extended_execute_results(&cx)) {
+            Outcome::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
+            other => panic!("expected cancelled outcome, got: {other:?}"),
+        }
+        assert!(
+            conn.inner.closed,
+            "cancelled drain should leave the connection closed"
+        );
 
         wake_writer.join().expect("wake writer should exit cleanly");
     }

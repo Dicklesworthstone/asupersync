@@ -170,7 +170,7 @@ fn json_escape_into(buf: &mut String, s: &str) {
 // ─── HealthCheck ─────────────────────────────────────────────────────────────
 
 /// A named health check function.
-type CheckFn = Box<dyn Fn() -> HealthStatus + Send + Sync>;
+type CheckFn = Arc<dyn Fn() -> HealthStatus + Send + Sync>;
 
 /// Configurable health check system.
 ///
@@ -224,7 +224,7 @@ impl HealthCheck {
         name: impl Into<String>,
         f: impl Fn() -> HealthStatus + Send + Sync + 'static,
     ) -> Self {
-        self.inner.checks.lock().push((name.into(), Box::new(f)));
+        self.inner.checks.lock().push((name.into(), Arc::new(f)));
         self
     }
 
@@ -245,29 +245,23 @@ impl HealthCheck {
     /// Run all health checks and return the aggregated response.
     #[must_use]
     pub fn run_checks(&self) -> HealthResponse {
-        let (overall, results) = {
-            let checks = self.inner.checks.lock();
-            let mut results = BTreeMap::new();
-            let mut overall = HealthStatus::Healthy;
+        let checks = self.inner.checks.lock().clone();
+        let mut results = BTreeMap::new();
+        let mut overall = HealthStatus::Healthy;
 
-            for (name, check_fn) in checks.iter() {
-                let status = check_fn();
-                match (&overall, &status) {
-                    (HealthStatus::Healthy, HealthStatus::Degraded(_)) => {
-                        overall = HealthStatus::Degraded("one or more checks degraded".to_string());
-                    }
-                    (_, HealthStatus::Unhealthy(_)) => {
-                        overall =
-                            HealthStatus::Unhealthy("one or more checks unhealthy".to_string());
-                    }
-                    _ => {}
+        for (name, check_fn) in checks {
+            let status = check_fn();
+            match (&overall, &status) {
+                (HealthStatus::Healthy, HealthStatus::Degraded(_)) => {
+                    overall = HealthStatus::Degraded("one or more checks degraded".to_string());
                 }
-                results.insert(name.clone(), status);
+                (_, HealthStatus::Unhealthy(_)) => {
+                    overall = HealthStatus::Unhealthy("one or more checks unhealthy".to_string());
+                }
+                _ => {}
             }
-            drop(checks);
-
-            (overall, results)
-        };
+            results.insert(name, status);
+        }
 
         HealthResponse {
             status: overall,
@@ -343,9 +337,18 @@ impl Default for HealthCheck {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::super::handler::Handler;
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     // ================================================================
     // HealthStatus
@@ -522,6 +525,31 @@ mod tests {
 
         let result = hc.run_checks();
         assert!(matches!(result.status, HealthStatus::Unhealthy(_)));
+    }
+
+    #[test]
+    fn health_check_callbacks_run_without_registry_lock() {
+        let observed_unlocked = Arc::new(AtomicBool::new(false));
+        let hc = HealthCheck::new();
+        let probe = hc.clone();
+        let observed = Arc::clone(&observed_unlocked);
+
+        let hc = hc.check("registry", move || {
+            let lock_available = probe.inner.checks.try_lock().is_some();
+            observed.store(lock_available, Ordering::SeqCst);
+            if lock_available {
+                HealthStatus::Healthy
+            } else {
+                HealthStatus::Unhealthy("registry lock held during callback".into())
+            }
+        });
+
+        let result = hc.run_checks();
+        assert!(
+            observed_unlocked.load(Ordering::SeqCst),
+            "health checks must not execute while the registry mutex is held"
+        );
+        assert_eq!(result.status, HealthStatus::Healthy);
     }
 
     // ================================================================
