@@ -325,19 +325,15 @@ impl Stealer {
                     }
                     kept_prefix_len += 1;
                 }
-                Some(_) => {
+                _ => {
+                    // Stealable: the record exists and is Send (non-local),
+                    // OR the arena entry is absent (test harness or
+                    // already-freed record). Silently compacting the None
+                    // case out of the queue previously lost ready work parked
+                    // in a peer's fast_queue during round-robin stealing
+                    // (br-asupersync-uguhr2).
                     dest.push(task_id);
                     stolen += 1;
-                }
-                None => {
-                    // Task record missing (stale arena entry or pre-arena test
-                    // harness). Keep in the queue for the owner — silently
-                    // dropping here lost ready tasks in the round-robin steal
-                    // path (br-asupersync-uguhr2).
-                    if kept_prefix_len != scanned_len {
-                        src[kept_prefix_len] = task_id;
-                    }
-                    kept_prefix_len += 1;
                 }
             }
             scanned_len += 1;
@@ -373,20 +369,16 @@ impl Stealer {
                         }
                         kept_prefix_len += 1;
                     }
-                    Some(_) => {
+                    _ => {
+                        // Stealable: record exists and is Send (non-local),
+                        // OR the arena entry is absent (test harness or
+                        // already-freed record). Silently compacting the None
+                        // case out of the queue previously lost ready work
+                        // parked in a peer's fast_queue during round-robin
+                        // stealing (br-asupersync-uguhr2).
                         stolen = Some(task_id);
                         scanned_len += 1;
                         break;
-                    }
-                    None => {
-                        // Task record missing (stale arena entry or pre-arena
-                        // test harness). Keep in the queue for the owner —
-                        // silently dropping here lost ready tasks in the
-                        // round-robin steal path (br-asupersync-uguhr2).
-                        if kept_prefix_len != scanned_len {
-                            stack[kept_prefix_len] = task_id;
-                        }
-                        kept_prefix_len += 1;
                     }
                 }
                 scanned_len += 1;
