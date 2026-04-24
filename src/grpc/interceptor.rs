@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use crate::bytes::Bytes;
 
-use super::server::{Interceptor, format_grpc_timeout};
+use super::server::{Interceptor, format_grpc_timeout, parse_grpc_timeout};
 use super::status::Status;
 use super::streaming::{MetadataValue, Request, Response};
 
@@ -602,13 +602,15 @@ impl TimeoutInterceptor {
 
 impl Interceptor for TimeoutInterceptor {
     fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
-        // Add grpc-timeout header if not present
-        if request.metadata().get("grpc-timeout").is_none() {
-            request.metadata_mut().insert(
-                "grpc-timeout",
-                format_grpc_timeout(Duration::from_millis(self.timeout_ms)),
-            );
-        }
+        let timeout_value = match request.metadata().get("grpc-timeout") {
+            Some(MetadataValue::Ascii(value)) if parse_grpc_timeout(value).is_some() => {
+                value.clone()
+            }
+            _ => format_grpc_timeout(Duration::from_millis(self.timeout_ms)),
+        };
+        request
+            .metadata_mut()
+            .insert_or_replace("grpc-timeout", timeout_value);
         Ok(())
     }
 
@@ -976,6 +978,34 @@ mod tests {
         let ok = matches!(timeout, MetadataValue::Ascii(s) if s == "1000m");
         crate::assert_with_log!(ok, "timeout header", true, ok);
         crate::test_complete!("timeout_interceptor_preserves_existing");
+    }
+
+    #[test]
+    fn timeout_interceptor_repairs_malformed_existing_header() {
+        init_test("timeout_interceptor_repairs_malformed_existing_header");
+        let interceptor = timeout_interceptor(5000);
+
+        let mut request = Request::new(Bytes::new());
+        request.metadata_mut().insert("grpc-timeout", "bogus");
+
+        interceptor.intercept_request(&mut request).unwrap();
+
+        let timeout = request.metadata().get("grpc-timeout").unwrap();
+        let ok = matches!(timeout, MetadataValue::Ascii(s) if s == "5S");
+        crate::assert_with_log!(ok, "malformed timeout repaired", true, ok);
+
+        let timeout_count = request
+            .metadata()
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("grpc-timeout"))
+            .count();
+        crate::assert_with_log!(
+            timeout_count == 1,
+            "repaired timeout replaces invalid duplicate",
+            1,
+            timeout_count
+        );
+        crate::test_complete!("timeout_interceptor_repairs_malformed_existing_header");
     }
 
     #[test]

@@ -430,10 +430,16 @@ impl<C: Codec> GrpcClient<C> {
     }
 
     fn apply_channel_metadata_defaults(&self, metadata: &mut Metadata) {
-        if metadata.get("grpc-timeout").is_none()
-            && let Some(timeout) = self.channel.config.timeout
-        {
-            metadata.insert("grpc-timeout", encode_grpc_timeout(timeout));
+        let timeout_value = match metadata.get("grpc-timeout") {
+            Some(super::streaming::MetadataValue::Ascii(existing))
+                if super::server::parse_grpc_timeout(existing).is_some() =>
+            {
+                Some(existing.clone())
+            }
+            _ => self.channel.config.timeout.map(encode_grpc_timeout),
+        };
+        if let Some(timeout_value) = timeout_value {
+            metadata.insert_or_replace("grpc-timeout", timeout_value);
         }
 
         if metadata.get("grpc-encoding").is_none()
@@ -1522,6 +1528,36 @@ mod tests {
             }
             other => panic!("expected grpc-timeout metadata, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn grpc_client_repairs_malformed_timeout_before_building_outbound_metadata() {
+        let channel = futures_lite::future::block_on(
+            Channel::builder("http://loopback:80")
+                .timeout(Duration::from_secs(2))
+                .connect(),
+        )
+        .expect("channel");
+        let client = GrpcClient::new(channel);
+        let mut request = Request::new(Bytes::new());
+        request.metadata_mut().insert("grpc-timeout", "bogus");
+
+        let metadata = client
+            .build_outbound_metadata(&request, "/pkg.Service/Method")
+            .expect("metadata");
+
+        match metadata.get("grpc-timeout") {
+            Some(super::super::streaming::MetadataValue::Ascii(value)) => {
+                assert_eq!(value, "2S");
+            }
+            other => panic!("expected repaired grpc-timeout metadata, got: {other:?}"),
+        }
+
+        let timeout_count = metadata
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("grpc-timeout"))
+            .count();
+        assert_eq!(timeout_count, 1);
     }
 
     #[test]

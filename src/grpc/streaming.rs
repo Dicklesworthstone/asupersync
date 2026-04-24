@@ -216,6 +216,24 @@ impl Metadata {
         true
     }
 
+    /// Insert an ASCII value, replacing any existing entries for the same key.
+    ///
+    /// Returns `false` when the metadata key is invalid and the entry is
+    /// rejected. CR/LF are stripped from ASCII values to prevent header or
+    /// trailer injection when metadata is encoded onto the wire.
+    pub fn insert_or_replace(&mut self, key: impl Into<String>, value: impl Into<String>) -> bool {
+        let key = key.into();
+        let Some(key) = normalize_metadata_key(&key, false) else {
+            return false;
+        };
+        let value = value.into();
+        let sanitized = sanitize_metadata_ascii_value(&value).into_owned();
+        self.entries
+            .retain(|(existing_key, _)| !existing_key.eq_ignore_ascii_case(&key));
+        self.entries.push((key, MetadataValue::Ascii(sanitized)));
+        true
+    }
+
     /// Insert a binary value.
     ///
     /// Returns `false` when the metadata key is invalid and the entry is
@@ -770,6 +788,28 @@ mod tests {
             _ => panic!("expected ascii value"),
         }
         crate::test_complete!("test_metadata_get_prefers_latest_value");
+    }
+
+    #[test]
+    fn test_metadata_insert_or_replace_removes_older_values() {
+        init_test("test_metadata_insert_or_replace_removes_older_values");
+        let mut metadata = Metadata::new();
+        metadata.insert("grpc-timeout", "bogus");
+        metadata.insert_or_replace("grpc-timeout", "5S");
+
+        match metadata.get("grpc-timeout") {
+            Some(MetadataValue::Ascii(v)) => {
+                crate::assert_with_log!(v == "5S", "replaced value", "5S", v);
+            }
+            _ => panic!("expected ascii value"),
+        }
+
+        let timeout_count = metadata
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("grpc-timeout"))
+            .count();
+        crate::assert_with_log!(timeout_count == 1, "single timeout entry", 1, timeout_count);
+        crate::test_complete!("test_metadata_insert_or_replace_removes_older_values");
     }
 
     #[test]

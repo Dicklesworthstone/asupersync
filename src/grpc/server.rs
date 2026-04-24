@@ -590,7 +590,7 @@ impl CallContext {
                 .map_or(parent_remaining, |child| child.min(parent_remaining)),
             Some(super::streaming::MetadataValue::Binary(_)) | None => parent_remaining,
         };
-        metadata.insert("grpc-timeout", format_grpc_timeout(effective));
+        metadata.insert_or_replace("grpc-timeout", format_grpc_timeout(effective));
         true
     }
 
@@ -1189,6 +1189,16 @@ mod tests {
             true,
             metadata.get("grpc-timeout").is_some()
         );
+        let timeout_count = metadata
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("grpc-timeout"))
+            .count();
+        crate::assert_with_log!(
+            timeout_count == 1,
+            "propagation keeps a single grpc-timeout entry",
+            1,
+            timeout_count
+        );
         crate::test_complete!(
             "test_call_context_propagate_timeout_to_clamps_existing_child_timeout"
         );
@@ -1213,6 +1223,40 @@ mod tests {
             metadata.get("grpc-timeout").is_some()
         );
         crate::test_complete!("test_call_context_propagate_timeout_to_inserts_when_absent");
+    }
+
+    #[test]
+    fn test_call_context_propagate_timeout_to_repairs_malformed_child_timeout() {
+        init_test("test_call_context_propagate_timeout_to_repairs_malformed_child_timeout");
+        let now = std::time::Instant::now();
+        let ctx = CallContext::with_deadline(now + std::time::Duration::from_secs(5));
+        let mut metadata = Metadata::new();
+        metadata.insert("grpc-timeout", "bogus");
+
+        let wrote = ctx.propagate_timeout_to_at(&mut metadata, now);
+        crate::assert_with_log!(wrote, "propagation writes repaired timeout", true, wrote);
+        crate::assert_with_log!(
+            matches!(
+                metadata.get("grpc-timeout"),
+                Some(crate::grpc::MetadataValue::Ascii(value)) if value == "5S"
+            ),
+            "malformed child timeout replaced with parent deadline",
+            true,
+            metadata.get("grpc-timeout").is_some()
+        );
+        let timeout_count = metadata
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("grpc-timeout"))
+            .count();
+        crate::assert_with_log!(
+            timeout_count == 1,
+            "repaired child timeout does not leave duplicates",
+            1,
+            timeout_count
+        );
+        crate::test_complete!(
+            "test_call_context_propagate_timeout_to_repairs_malformed_child_timeout"
+        );
     }
 
     #[test]
