@@ -440,19 +440,40 @@ mod tests {
 
         // Test various tampering scenarios
         let tampering_patterns: Vec<(&str, Box<dyn Fn(&mut [u8; 32])>)> = vec![
-            ("flip_first_bit", Box::new(|bytes: &mut [u8; 32]| bytes[0] ^= 0x01)),
-            ("flip_last_bit", Box::new(|bytes: &mut [u8; 32]| bytes[31] ^= 0x01)),
-            ("flip_middle_byte", Box::new(|bytes: &mut [u8; 32]| bytes[16] ^= 0xFF)),
-            ("zero_first_half", Box::new(|bytes: &mut [u8; 32]| {
-                bytes[..16].fill(0);
-            })),
-            ("zero_last_half", Box::new(|bytes: &mut [u8; 32]| bytes[16..].fill(0))),
-            ("all_ones", Box::new(|bytes: &mut [u8; 32]| bytes.fill(0xFF))),
-            ("increment_all", Box::new(|bytes: &mut [u8; 32]| {
-                for byte in bytes.iter_mut() {
-                    *byte = byte.wrapping_add(1);
-                }
-            })),
+            (
+                "flip_first_bit",
+                Box::new(|bytes: &mut [u8; 32]| bytes[0] ^= 0x01),
+            ),
+            (
+                "flip_last_bit",
+                Box::new(|bytes: &mut [u8; 32]| bytes[31] ^= 0x01),
+            ),
+            (
+                "flip_middle_byte",
+                Box::new(|bytes: &mut [u8; 32]| bytes[16] ^= 0xFF),
+            ),
+            (
+                "zero_first_half",
+                Box::new(|bytes: &mut [u8; 32]| {
+                    bytes[..16].fill(0);
+                }),
+            ),
+            (
+                "zero_last_half",
+                Box::new(|bytes: &mut [u8; 32]| bytes[16..].fill(0)),
+            ),
+            (
+                "all_ones",
+                Box::new(|bytes: &mut [u8; 32]| bytes.fill(0xFF)),
+            ),
+            (
+                "increment_all",
+                Box::new(|bytes: &mut [u8; 32]| {
+                    for byte in bytes.iter_mut() {
+                        *byte = byte.wrapping_add(1);
+                    }
+                }),
+            ),
         ];
 
         for (name, tamper_fn) in tampering_patterns {
@@ -466,7 +487,7 @@ mod tests {
             );
 
             // Also test via SecurityContext
-            let ctx = SecurityContext::new(key.clone());
+            let ctx = SecurityContext::new(key);
             let mut tampered_auth_symbol =
                 AuthenticatedSymbol::from_parts(symbol.clone(), tampered_tag);
 
