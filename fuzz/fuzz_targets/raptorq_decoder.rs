@@ -17,16 +17,23 @@ use asupersync::raptorq::gf256::Gf256;
 use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::types::ObjectId;
 
-const MAX_K: usize = 32;
-const MAX_SYMBOL_SIZE: usize = 256;
+const MAX_SOURCE_BYTES: usize = 64 * 1024;
+const LARGE_K_THRESHOLD: usize = 1024;
+const SMALL_K_CANDIDATES: &[usize] = &[1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33];
+const MEDIUM_K_CANDIDATES: &[usize] = &[63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512, 513];
+const LARGE_K_CANDIDATES: &[usize] = &[1023, 1024, 1025, 2047, 2048, 2049];
+const SMALL_SYMBOL_SIZE_CANDIDATES: &[usize] =
+    &[1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256];
+const LARGE_SYMBOL_SIZE_CANDIDATES: &[usize] = &[1, 2, 3, 4, 8, 16, 32];
 const MAX_MUTATIONS: usize = 32;
 const MAX_PACKET_BYTES: usize = 4096;
 const MAX_EXTRA_REPAIRS: usize = 8;
+const MAX_MISSING_SOURCES: usize = 64;
 
 #[derive(Debug, Arbitrary)]
 struct DecoderPacketInput {
-    k: u8,
-    symbol_size: u16,
+    k_selector: u16,
+    symbol_size_selector: u16,
     seed: u64,
     extra_repairs: u8,
     missing_sources: Vec<u8>,
@@ -70,12 +77,57 @@ enum PacketReorder {
 
 impl DecoderPacketInput {
     fn normalize(&mut self) {
-        self.k = ((self.k as usize % MAX_K) + 1) as u8;
-        self.symbol_size = ((self.symbol_size as usize % MAX_SYMBOL_SIZE) + 1) as u16;
+        let k = select_k_candidate(self.k_selector as usize);
+        self.k_selector = u16::try_from(k).expect("fuzz K candidates fit in u16");
+
+        let symbol_size =
+            select_symbol_size_candidate(self.symbol_size_selector as usize, k, MAX_SOURCE_BYTES);
+        self.symbol_size_selector =
+            u16::try_from(symbol_size).expect("fuzz symbol-size candidates fit in u16");
+
         self.extra_repairs = (self.extra_repairs as usize % (MAX_EXTRA_REPAIRS + 1)) as u8;
         self.packet_bytes.truncate(MAX_PACKET_BYTES);
         self.mutations.truncate(MAX_MUTATIONS);
+        self.missing_sources.truncate(MAX_MISSING_SOURCES);
     }
+}
+
+fn select_k_candidate(selector: usize) -> usize {
+    let candidates = match selector % 8 {
+        0 | 1 => LARGE_K_CANDIDATES,
+        2 | 3 | 4 => MEDIUM_K_CANDIDATES,
+        _ => SMALL_K_CANDIDATES,
+    };
+    candidates[(selector / 8) % candidates.len()]
+}
+
+fn clamp_symbol_size_to_source_budget(
+    candidates: &[usize],
+    selected: usize,
+    k: usize,
+    max_source_bytes: usize,
+) -> usize {
+    let max_symbol_size = (max_source_bytes / k.max(1)).max(1);
+    if selected <= max_symbol_size {
+        return selected;
+    }
+
+    candidates
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate <= max_symbol_size)
+        .max()
+        .unwrap_or(1)
+}
+
+fn select_symbol_size_candidate(selector: usize, k: usize, max_source_bytes: usize) -> usize {
+    let candidates = if k >= LARGE_K_THRESHOLD {
+        LARGE_SYMBOL_SIZE_CANDIDATES
+    } else {
+        SMALL_SYMBOL_SIZE_CANDIDATES
+    };
+    let selected = candidates[selector % candidates.len()];
+    clamp_symbol_size_to_source_budget(candidates, selected, k, max_source_bytes)
 }
 
 fn build_source_block(
@@ -114,7 +166,7 @@ fn build_valid_packets(
 ) -> Vec<ReceivedSymbol> {
     let k = source.len();
     let mut missing = vec![false; k];
-    let missing_cap = (k / 2).max(1);
+    let missing_cap = (k / 8).clamp(1, MAX_MISSING_SOURCES);
 
     for &index in missing_sources.iter().take(missing_cap) {
         missing[index as usize % k] = true;
@@ -177,9 +229,7 @@ fn apply_mutations(packets: &mut Vec<ReceivedSymbol>, mutations: &[PacketMutatio
             MutationKind::ExtendPayload { extra, fill } => {
                 let packet = &mut packets[idx];
                 let growth = (extra as usize % 16).saturating_add(1);
-                packet
-                    .data
-                    .extend(std::iter::repeat_n(fill, growth));
+                packet.data.extend(std::iter::repeat_n(fill, growth));
             }
             MutationKind::TogglePacketKind => {
                 let packet = &mut packets[idx];
@@ -314,8 +364,8 @@ fuzz_target!(|data: &[u8]| {
     };
     input.normalize();
 
-    let k = input.k as usize;
-    let symbol_size = input.symbol_size as usize;
+    let k = input.k_selector as usize;
+    let symbol_size = input.symbol_size_selector as usize;
     let source = build_source_block(&input.packet_bytes, k, symbol_size, input.seed);
     let Some(encoder) = SystematicEncoder::new(&source, symbol_size, input.seed) else {
         return;
@@ -337,7 +387,13 @@ fuzz_target!(|data: &[u8]| {
     };
     let object_id = ObjectId::from_u128(input.object_id);
 
-    assert_decode_consensus(&decoder, &baseline_received, &source, baseline_batch, object_id);
+    assert_decode_consensus(
+        &decoder,
+        &baseline_received,
+        &source,
+        baseline_batch,
+        object_id,
+    );
 
     let baseline_result = decoder
         .decode(&baseline_received)
@@ -404,8 +460,35 @@ fuzz_target!(|data: &[u8]| {
 
 #[cfg(test)]
 mod tests {
-    use super::{MutationKind, PacketMutation, apply_mutations};
+    use super::{
+        LARGE_K_CANDIDATES, LARGE_K_THRESHOLD, LARGE_SYMBOL_SIZE_CANDIDATES, MutationKind,
+        PacketMutation, SMALL_K_CANDIDATES, SMALL_SYMBOL_SIZE_CANDIDATES, apply_mutations,
+        select_k_candidate, select_symbol_size_candidate,
+    };
     use asupersync::raptorq::decoder::ReceivedSymbol;
+
+    #[test]
+    fn k_selector_can_reach_large_rfc_boundary_profiles() {
+        let k = select_k_candidate(0);
+        assert!(k >= LARGE_K_THRESHOLD);
+        assert!(LARGE_K_CANDIDATES.contains(&k));
+    }
+
+    #[test]
+    fn symbol_size_selector_keeps_large_k_targets_within_budget() {
+        let symbol_size = select_symbol_size_candidate(6, 2048, 64 * 1024);
+        assert!(symbol_size <= 32);
+        assert!(LARGE_SYMBOL_SIZE_CANDIDATES.contains(&symbol_size));
+        assert!(2048usize.saturating_mul(symbol_size) <= 64 * 1024);
+    }
+
+    #[test]
+    fn symbol_size_selector_preserves_small_block_edge_sizes() {
+        let symbol_size = select_symbol_size_candidate(15, 16, 64 * 1024);
+        assert_eq!(symbol_size, 256);
+        assert!(SMALL_SYMBOL_SIZE_CANDIDATES.contains(&symbol_size));
+        assert!(SMALL_K_CANDIDATES.contains(&select_k_candidate(63)));
+    }
 
     #[test]
     fn duplicate_with_payload_corruption_keeps_metadata_and_changes_payload() {
@@ -423,7 +506,11 @@ mod tests {
             }],
         );
 
-        assert_eq!(packets.len(), 2, "mutation should append a duplicate packet");
+        assert_eq!(
+            packets.len(),
+            2,
+            "mutation should append a duplicate packet"
+        );
         assert_eq!(packets[0].esi, packets[1].esi);
         assert_eq!(packets[0].is_source, packets[1].is_source);
         assert_eq!(packets[0].columns, packets[1].columns);
