@@ -1,3 +1,5 @@
+//! Security regression tests for macaroon signatures, caveats, and replay controls.
+
 use asupersync::cx::macaroon::{
     CaveatPredicate, MacaroonToken, VerificationContext, VerificationError,
 };
@@ -147,9 +149,7 @@ fn test_macaroon_layering_deep_nesting() {
 #[test]
 fn test_max_discharge_depth_enforced() {
     let root_key = root_key();
-    let mut current_key = root_key;
     let mut token = MacaroonToken::mint(&root_key, "depth_test", "loc");
-    let mut discharges = Vec::new();
 
     // Create a chain of 33 nested TP caveats (MAX is 32)
     for i in 0..33 {
@@ -172,6 +172,52 @@ fn test_max_discharge_depth_enforced() {
 }
 
 #[test]
+fn test_third_party_bad_signature_rejection() {
+    let root_key = root_key();
+    let caveat_key = AuthKey::from_seed(444);
+
+    let token = MacaroonToken::mint(&root_key, "cap", "loc").add_third_party_caveat(
+        "tp",
+        "check",
+        &caveat_key,
+    );
+
+    let discharge = MacaroonToken::mint(&caveat_key, "check", "tp");
+    let bound = token.bind_for_request(&discharge);
+
+    // Tamper with bound signature
+    let mut binary = bound.to_binary();
+    let sig_pos = binary.len() - 32;
+    binary[sig_pos] ^= 0xFF;
+    let tampered_bound = MacaroonToken::from_binary(&binary).unwrap();
+
+    let ctx = VerificationContext::new();
+    let result = token.verify_with_discharges(&root_key, &ctx, &[tampered_bound]);
+    assert!(result.is_err());
+    // Should be DischargeInvalid or InvalidSignature depending on implementation details
+}
+
+#[test]
+fn test_third_party_wrong_id_rejection() {
+    let root_key = root_key();
+    let caveat_key = AuthKey::from_seed(555);
+
+    let token = MacaroonToken::mint(&root_key, "cap", "loc").add_third_party_caveat(
+        "tp",
+        "check_id",
+        &caveat_key,
+    );
+
+    // Discharge has wrong identifier
+    let discharge = MacaroonToken::mint(&caveat_key, "WRONG_ID", "tp");
+    let bound = token.bind_for_request(&discharge);
+
+    let ctx = VerificationContext::new();
+    let result = token.verify_with_discharges(&root_key, &ctx, &[bound]);
+    assert!(result.is_err());
+}
+
+#[test]
 fn test_constant_time_signature_comparison_logic() {
     let sig1 = asupersync::cx::macaroon::MacaroonSignature::from_bytes([0xAA; 32]);
     let sig2 = asupersync::cx::macaroon::MacaroonSignature::from_bytes([0xAA; 32]);
@@ -180,7 +226,6 @@ fn test_constant_time_signature_comparison_logic() {
     assert!(sig1 == sig2);
     assert!(sig1 != sig3);
 
-    // Ensure it doesn't short-circuit (logic check)
     let mut binary_bad = [0xAA; 32];
     binary_bad[31] = 0xAB;
     let sig4 = asupersync::cx::macaroon::MacaroonSignature::from_bytes(binary_bad);

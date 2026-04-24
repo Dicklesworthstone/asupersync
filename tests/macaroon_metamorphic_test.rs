@@ -1,6 +1,6 @@
-use asupersync::cx::macaroon::{
-    CaveatPredicate, MacaroonToken, VerificationContext, VerificationError,
-};
+//! Metamorphic security tests for macaroon attenuation behavior.
+
+use asupersync::cx::macaroon::{CaveatPredicate, MacaroonToken, VerificationContext};
 use asupersync::security::key::AuthKey;
 
 fn root_key() -> AuthKey {
