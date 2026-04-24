@@ -210,7 +210,7 @@ impl fmt::Display for Severity {
 ///
 /// Forms a severity lattice where worse outcomes dominate:
 /// `Ok < Err < Cancelled < Panicked`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Outcome<T, E> {
     /// Success with a value.
     Ok(T),
@@ -220,30 +220,6 @@ pub enum Outcome<T, E> {
     Cancelled(CancelReason),
     /// The operation panicked.
     Panicked(PanicPayload),
-}
-
-impl<T, E> PartialEq for Outcome<T, E>
-where
-    T: PartialEq,
-    E: PartialEq,
-{
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Ok(a), Self::Ok(b)) => a == b,
-            (Self::Err(a), Self::Err(b)) => a == b,
-            (Self::Cancelled(a), Self::Cancelled(b)) => a == b,
-            (Self::Panicked(a), Self::Panicked(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
-impl<T, E> Eq for Outcome<T, E>
-where
-    T: Eq,
-    E: Eq,
-{
 }
 
 impl<T, E> Outcome<T, E> {
