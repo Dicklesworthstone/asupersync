@@ -1002,6 +1002,60 @@ impl TaskRecord {
     }
 }
 
+impl crate::util::Recyclable for TaskRecord {
+    /// Resets the TaskRecord to a clean state for reuse in the object pool.
+    ///
+    /// This method clears all runtime state while preserving the core structure
+    /// to enable efficient recycling. The reset record can be reused for a new
+    /// task by calling the appropriate initialization methods.
+    fn reset(&mut self) {
+        // Reset core task state
+        self.state = TaskState::Created;
+        self.phase.store(TaskPhase::Created);
+
+        // Reset context and waker state
+        self.cx_inner = None;
+        self.cx = None;
+
+        // Reset timing and metrics
+        self.created_at = Time::ZERO;
+        self.polls_remaining = 0;
+        self.total_polls = 0;
+        #[cfg(feature = "tracing-integration")]
+        {
+            self.created_instant = std::time::Instant::now();
+        }
+        self.last_polled_step = 0;
+
+        // Clear collections
+        self.waiters.clear();
+
+        // Reset cached wakers
+        self.cached_waker = None;
+        self.cached_cancel_waker = None;
+
+        // Reset cancellation state
+        self.cancel_epoch = 0;
+
+        // Reset locality state
+        self.is_local = false;
+        self.pinned_worker = None;
+
+        // Reset intrusive queue state
+        self.next_in_queue = None;
+        self.prev_in_queue = None;
+        self.queue_tag = 0;
+
+        // Reset intrusive heap state
+        self.heap_index = None;
+        self.sched_priority = 0;
+        self.sched_generation = 0;
+
+        // Create new wake_state (Arc allocation, but necessary for dedup)
+        self.wake_state = std::sync::Arc::new(TaskWakeState::new());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
