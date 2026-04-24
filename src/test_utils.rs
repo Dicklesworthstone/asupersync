@@ -366,3 +366,171 @@ impl std::fmt::Display for TestError {
         write!(f, "TestError: {}", self.0)
     }
 }
+
+// ============================================================================
+// Evidence Logging for Structured Test Analysis
+// ============================================================================
+
+use crate::test_logging::{TestEvent, TestLogLevel};
+use std::path::PathBuf;
+
+/// Evidence sink for capturing structured JSON events during test execution.
+///
+/// Automatically writes test events to `tests/_evidence/<test_name>.jsonl`
+/// for post-hoc analysis, flake pattern detection, and regression tracking.
+///
+/// # Example
+/// ```
+/// use asupersync::test_utils::EvidenceSink;
+///
+/// let evidence = EvidenceSink::for_test("my_test");
+/// evidence.phase("setup");
+/// evidence.event("task_spawn", &[("task_id", "1"), ("name", "worker")]);
+/// evidence.outcome("passed");
+/// evidence.save().unwrap();
+/// ```
+pub struct EvidenceSink {
+    logger: NdjsonLogger,
+    test_name: String,
+    current_phase: String,
+}
+
+impl EvidenceSink {
+    /// Create a new evidence sink for the given test.
+    ///
+    /// Uses a default seed and subsystem. Call `with_context()` for custom configuration.
+    pub fn for_test(test_name: &str) -> Self {
+        let ctx = TestContext::new(test_name, DEFAULT_TEST_SEED);
+        let logger = NdjsonLogger::enabled(TestLogLevel::Info, Some(ctx));
+
+        Self {
+            logger,
+            test_name: test_name.to_string(),
+            current_phase: "init".to_string(),
+        }
+    }
+
+    /// Create evidence sink with custom test context.
+    pub fn with_context(test_name: &str, ctx: TestContext) -> Self {
+        let logger = NdjsonLogger::enabled(TestLogLevel::Info, Some(ctx));
+
+        Self {
+            logger,
+            test_name: test_name.to_string(),
+            current_phase: "init".to_string(),
+        }
+    }
+
+    /// Record a test phase transition.
+    ///
+    /// Phase examples: "setup", "execution", "teardown", "validation"
+    pub fn phase(&mut self, phase: &str) {
+        self.current_phase = phase.to_string();
+        self.logger.log(TestEvent::Custom {
+            category: "test",
+            message: format!(
+                "phase_transition: phase={} test_name={}",
+                phase, self.test_name
+            ),
+        });
+    }
+
+    /// Record a structured event with key-value data.
+    ///
+    /// Event examples: "task_spawn", "region_close", "obligation_leak", "cancel_request"
+    pub fn event(&self, event: &str, data: &[(&str, &str)]) {
+        let data_str = data
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .chain(std::iter::once(format!("phase={}", self.current_phase)))
+            .chain(std::iter::once(format!("test_name={}", self.test_name)))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        self.logger.log(TestEvent::Custom {
+            category: "evidence",
+            message: format!("{}: {}", event, data_str),
+        });
+    }
+
+    /// Record test outcome: "passed", "failed", "skipped", or "error".
+    pub fn outcome(&self, outcome: &str) {
+        self.logger.log(TestEvent::Custom {
+            category: "test",
+            message: format!(
+                "outcome: outcome={} test_name={} final_phase={}",
+                outcome, self.test_name, self.current_phase
+            ),
+        });
+    }
+
+    /// Record a context ID from the async runtime.
+    ///
+    /// Useful for correlating events with specific execution contexts.
+    pub fn cx_id(&self, cx_id: &str) {
+        self.logger.log(TestEvent::Custom {
+            category: "runtime",
+            message: format!(
+                "cx_active: cx_id={} phase={} test_name={}",
+                cx_id, self.current_phase, self.test_name
+            ),
+        });
+    }
+
+    /// Save evidence to `tests/_evidence/<test_name>.jsonl`.
+    ///
+    /// Creates the evidence directory if it doesn't exist.
+    pub fn save(&self) -> std::io::Result<PathBuf> {
+        let evidence_dir = std::path::Path::new("tests/_evidence");
+        std::fs::create_dir_all(evidence_dir)?;
+
+        let file_path = evidence_dir.join(format!("{}.jsonl", self.test_name));
+        self.logger.write_ndjson_file(&file_path)?;
+        Ok(file_path)
+    }
+
+    /// Access the underlying NDJSON logger for advanced usage.
+    pub fn logger(&self) -> &NdjsonLogger {
+        &self.logger
+    }
+}
+
+/// Enhanced test phase macro that automatically logs to evidence.
+///
+/// Usage: `evidence_phase!(evidence_sink, "setup");`
+#[macro_export]
+macro_rules! evidence_phase {
+    ($sink:expr, $phase:expr) => {
+        $sink.phase($phase);
+        tracing::info!(phase = %$phase, "TEST PHASE: {}", $phase);
+    };
+}
+
+/// Helper to create and configure evidence sink for LabRuntime tests.
+///
+/// Integrates with the existing lab runtime helpers while adding structured logging.
+pub fn lab_with_evidence<F, T>(test_name: &str, f: F) -> (T, EvidenceSink)
+where
+    F: FnOnce(&LabRuntime, &mut EvidenceSink) -> T,
+{
+    let mut evidence = EvidenceSink::for_test(test_name);
+    evidence.phase("lab_setup");
+
+    let result = lab_with_config(|runtime| {
+        evidence.event(
+            "lab_start",
+            &[
+                ("seed", &runtime.config().seed.to_string()),
+                ("deterministic", "true"),
+            ],
+        );
+
+        let result = f(runtime, &mut evidence);
+
+        evidence.phase("lab_complete");
+        result
+    });
+
+    evidence.outcome("passed");
+    (result, evidence)
+}
