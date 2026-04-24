@@ -5,9 +5,9 @@
 
 use asupersync::monitor::DownReason;
 use asupersync::record::{ObligationAbortReason, ObligationKind, ObligationState};
-use asupersync::trace::distributed::LogicalTime;
+use asupersync::trace::distributed::{LamportTime, LogicalTime};
 use asupersync::trace::event::{TRACE_EVENT_SCHEMA_VERSION, TraceData, TraceEvent, TraceEventKind};
-use asupersync::types::{CancelReason, ObligationId, RegionId, TaskId, Time};
+use asupersync::types::{CancelKind, CancelReason, ObligationId, RegionId, TaskId, Time};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -33,8 +33,8 @@ fn create_sample_events() -> Vec<(String, TraceEvent)> {
                 base_time,
                 TraceEventKind::Spawn,
                 TraceData::Task {
-                    task: TaskId(100),
-                    region: RegionId(200),
+                    task: TaskId::new_ephemeral(),
+                    region: RegionId::new_ephemeral(),
                 },
             ),
         ),
@@ -45,8 +45,8 @@ fn create_sample_events() -> Vec<(String, TraceEvent)> {
                 base_time,
                 TraceEventKind::RegionCreated,
                 TraceData::Region {
-                    region: RegionId(300),
-                    parent: Some(RegionId(400)),
+                    region: RegionId::new_ephemeral(),
+                    parent: Some(RegionId::new_ephemeral()),
                 },
             ),
         ),
@@ -57,10 +57,10 @@ fn create_sample_events() -> Vec<(String, TraceEvent)> {
                 base_time,
                 TraceEventKind::ObligationReserve,
                 TraceData::Obligation {
-                    obligation: ObligationId(500),
-                    task: TaskId(600),
-                    region: RegionId(700),
-                    kind: ObligationKind::Permit,
+                    obligation: ObligationId::new_for_test(1, 1),
+                    task: TaskId::new_ephemeral(),
+                    region: RegionId::new_ephemeral(),
+                    kind: ObligationKind::SendPermit,
                     state: ObligationState::Reserved,
                     duration_ns: Some(1_000_000),
                     abort_reason: None,
@@ -74,9 +74,9 @@ fn create_sample_events() -> Vec<(String, TraceEvent)> {
                 base_time,
                 TraceEventKind::CancelRequest,
                 TraceData::Cancel {
-                    task: TaskId(800),
-                    region: RegionId(900),
-                    reason: CancelReason::Budget,
+                    task: TaskId::new_ephemeral(),
+                    region: RegionId::new_ephemeral(),
+                    reason: CancelReason::new(CancelKind::CostBudget),
                 },
             ),
         ),
@@ -91,9 +91,9 @@ fn create_sample_events() -> Vec<(String, TraceEvent)> {
                     job_id: 1000,
                     decision_seq: 2000,
                     replay_hash: 3000,
-                    task: TaskId(4000),
-                    region: RegionId(5000),
-                    obligation: ObligationId(6000),
+                    task: TaskId::new_ephemeral(),
+                    region: RegionId::new_ephemeral(),
+                    obligation: ObligationId::new_for_test(1, 1),
                 },
             ),
         ),
@@ -104,8 +104,8 @@ fn create_sample_events() -> Vec<(String, TraceEvent)> {
                 base_time,
                 TraceEventKind::RegionCancelled,
                 TraceData::RegionCancel {
-                    region: RegionId(7000),
-                    reason: CancelReason::Parent,
+                    region: RegionId::new_ephemeral(),
+                    reason: CancelReason::new(CancelKind::ParentCancelled),
                 },
             ),
         ),
@@ -223,12 +223,12 @@ fn create_sample_events() -> Vec<(String, TraceEvent)> {
                 base_time,
                 TraceEventKind::FuturelockDetected,
                 TraceData::Futurelock {
-                    task: TaskId(19000),
-                    region: RegionId(20000),
+                    task: TaskId::new_ephemeral(),
+                    region: RegionId::new_ephemeral(),
                     idle_steps: 21000,
                     held: vec![
-                        (ObligationId(22000), ObligationKind::Permit),
-                        (ObligationId(23000), ObligationKind::Ack),
+                        (ObligationId::new_ephemeral(), ObligationKind::SendPermit),
+                        (ObligationId::new_for_test(1, 1), ObligationKind::Ack),
                     ],
                 },
             ),
@@ -241,9 +241,9 @@ fn create_sample_events() -> Vec<(String, TraceEvent)> {
                 TraceEventKind::MonitorCreated,
                 TraceData::Monitor {
                     monitor_ref: 24000,
-                    watcher: TaskId(25000),
-                    watcher_region: RegionId(26000),
-                    monitored: TaskId(27000),
+                    watcher: TaskId::new_ephemeral(),
+                    watcher_region: RegionId::new_ephemeral(),
+                    monitored: TaskId::new_ephemeral(),
                 },
             ),
         ),
@@ -255,8 +255,8 @@ fn create_sample_events() -> Vec<(String, TraceEvent)> {
                 TraceEventKind::DownDelivered,
                 TraceData::Down {
                     monitor_ref: 28000,
-                    watcher: TaskId(29000),
-                    monitored: TaskId(30000),
+                    watcher: TaskId::new_ephemeral(),
+                    monitored: TaskId::new_ephemeral(),
                     completion_vt: Time::from_nanos(31_000_000_000),
                     reason: DownReason::Normal,
                 },
@@ -270,10 +270,10 @@ fn create_sample_events() -> Vec<(String, TraceEvent)> {
                 TraceEventKind::LinkCreated,
                 TraceData::Link {
                     link_ref: 32000,
-                    task_a: TaskId(33000),
-                    region_a: RegionId(34000),
-                    task_b: TaskId(35000),
-                    region_b: RegionId(36000),
+                    task_a: TaskId::new_ephemeral(),
+                    region_a: RegionId::new_ephemeral(),
+                    task_b: TaskId::new_ephemeral(),
+                    region_b: RegionId::new_ephemeral(),
                 },
             ),
         ),
@@ -285,10 +285,10 @@ fn create_sample_events() -> Vec<(String, TraceEvent)> {
                 TraceEventKind::ExitDelivered,
                 TraceData::Exit {
                     link_ref: 37000,
-                    from: TaskId(38000),
-                    to: TaskId(39000),
+                    from: TaskId::new_ephemeral(),
+                    to: TaskId::new_ephemeral(),
                     failure_vt: Time::from_nanos(40_000_000_000),
-                    reason: DownReason::Cancel,
+                    reason: DownReason::Cancelled(CancelReason::new(CancelKind::User)),
                 },
             ),
         ),
@@ -309,7 +309,7 @@ fn create_sample_events() -> Vec<(String, TraceEvent)> {
                 TraceEventKind::ChaosInjection,
                 TraceData::Chaos {
                     kind: "cancel".to_string(),
-                    task: Some(TaskId(41000)),
+                    task: Some(TaskId::new_ephemeral()),
                     detail: "injected cancellation for testing".to_string(),
                 },
             ),
@@ -335,7 +335,8 @@ fn trace_event_serialization_golden_shapes() {
 
     for (name, event) in events {
         // Add logical time to test that field as well
-        let event_with_logical = event.with_logical_time(LogicalTime::new(1000, 2000));
+        let event_with_logical =
+            event.with_logical_time(LogicalTime::Lamport(LamportTime::from_raw(1000)));
 
         let serialized =
             serde_json::to_value(&event_with_logical).expect("TraceEvent should serialize to JSON");
@@ -402,7 +403,8 @@ fn trace_event_roundtrip_serialization() {
     let events = create_sample_events();
 
     for (name, original_event) in events {
-        let event = original_event.with_logical_time(LogicalTime::new(500, 1000));
+        let event =
+            original_event.with_logical_time(LogicalTime::Lamport(LamportTime::from_raw(500)));
 
         // Serialize to JSON
         let json = serde_json::to_string(&event).expect(&format!("Event {name} should serialize"));
