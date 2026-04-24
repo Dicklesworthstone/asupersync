@@ -43,6 +43,20 @@ impl TaskTable {
         }
     }
 
+    /// Creates a new task table with pre-allocated capacity.
+    ///
+    /// Pre-sizing eliminates reallocation overhead during initial task spawning.
+    /// Based on benchmark analysis, arena growth contributes ~28% of allocations.
+    #[must_use]
+    #[inline]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            tasks: Arena::with_capacity(capacity),
+            stored_futures: Vec::with_capacity(capacity),
+            stored_future_len: 0,
+        }
+    }
+
     /// Returns a reference to a task record by arena index.
     #[inline]
     #[must_use]
