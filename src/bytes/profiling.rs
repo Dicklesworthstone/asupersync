@@ -108,6 +108,7 @@ fn _profile_split_to_copy(bytes_copied: usize) {
 }
 
 /// Profile sentinel for freeze operations.
+#[allow(clippy::used_underscore_items)]
 #[inline(never)]
 fn _profile_freeze_operation() {
     ALLOCATION_METRICS
