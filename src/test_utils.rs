@@ -103,20 +103,18 @@ pub fn test_lab_from_context(ctx: &TestContext) -> LabRuntime {
     LabRuntime::new(LabConfig::new(ctx.seed))
 }
 
-/// Run async test code with a lab runtime.
+/// Create a lab runtime and hand it to a closure for deterministic execution.
 ///
-/// Creates a default lab runtime and runs the provided closure using the regular runtime.
-/// This is commonly used for channel stress tests and other lab-based testing.
-pub fn lab_with_config<F, Fut, R>(_f: F) -> R
+/// This is the escape hatch for tests that need direct control over a [`LabRuntime`].
+/// Callers can configure the runtime, drive it with
+/// [`crate::conformance::LabRuntimeTarget::block_on`], or step it manually.
+pub fn lab_with_config<F, R>(f: F) -> R
 where
-    F: FnOnce(LabRuntime) -> Fut,
-    Fut: Future<Output = R>,
+    F: FnOnce(&mut LabRuntime) -> R,
 {
     init_test_logging();
-    let _lab = test_lab();
-    // FIXME: LabRuntime should have a block_on method or similar
-    // For now, use a simple pattern - this needs to be properly implemented
-    todo!("LabRuntime block_on method needs to be implemented")
+    let mut lab = test_lab();
+    f(&mut lab)
 }
 
 /// Create a [`TestContext`] for a unit test with the default seed.
@@ -197,6 +195,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::conformance::{ConformanceTarget, LabRuntimeTarget};
     use futures_lite::future;
 
     #[test]
@@ -212,6 +211,18 @@ mod tests {
             || std::future::ready(7_u8),
         ));
         assert_eq!(value, 7);
+    }
+
+    #[test]
+    fn lab_with_config_exposes_a_usable_lab_runtime() {
+        let (seed, value) = lab_with_config(|runtime| {
+            let seed = runtime.config().seed;
+            let value = LabRuntimeTarget::block_on(runtime, async { 42_u8 });
+            (seed, value)
+        });
+
+        assert_eq!(seed, DEFAULT_TEST_SEED);
+        assert_eq!(value, 42);
     }
 }
 
