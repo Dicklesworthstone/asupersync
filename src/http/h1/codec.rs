@@ -1643,8 +1643,6 @@ mod tests {
     /// trailers, 100-continue, HEAD body suppression, and fold pipelining.
     #[test]
     fn grammar_based_http11_features_fuzz() {
-        use std::collections::HashMap;
-
         /// HTTP/1.1 grammar-based test generator
         struct Http11Grammar {
             seed: u64,
@@ -1680,7 +1678,7 @@ mod tests {
                 let mut request = Vec::new();
 
                 // Request line
-                let method = self.next_choice(&[b"POST", b"PUT", b"PATCH"]);
+                let method = self.next_choice::<&[u8]>(&[b"POST", b"PUT", b"PATCH"]);
                 request.extend_from_slice(method);
                 request.extend_from_slice(b" /test HTTP/1.1\r\n");
 
@@ -1712,8 +1710,9 @@ mod tests {
 
                 // Trailers (grammar condition)
                 if self.next_bool() {
-                    let trailer_names = [b"X-Checksum", b"X-Final-Status", b"X-Processing-Time"];
-                    let trailer_name = self.next_choice(&trailer_names);
+                    let trailer_names: &[&[u8]] =
+                        &[b"X-Checksum", b"X-Final-Status", b"X-Processing-Time"];
+                    let trailer_name = self.next_choice(trailer_names);
                     request.extend_from_slice(trailer_name);
                     request.extend_from_slice(b": test-value\r\n");
                 }
@@ -1749,7 +1748,7 @@ mod tests {
                 requests.extend_from_slice(b"\r\n");
 
                 // Second request (pipelined)
-                let second_method = self.next_choice(&[b"GET", b"HEAD", b"POST"]);
+                let second_method = self.next_choice::<&[u8]>(&[b"GET", b"HEAD", b"POST"]);
                 requests.extend_from_slice(second_method);
                 requests.extend_from_slice(b" /second HTTP/1.1\r\n");
                 requests.extend_from_slice(b"Host: example.com\r\n");
@@ -1872,7 +1871,7 @@ mod tests {
             let mut request = Vec::new();
 
             // Grammar: Method selection
-            let method = combined_grammar.next_choice(&[b"GET", b"HEAD", b"POST", b"PUT"]);
+            let method = combined_grammar.next_choice::<&[u8]>(&[b"GET", b"HEAD", b"POST", b"PUT"]);
             request.extend_from_slice(method);
             request.extend_from_slice(b" /combined HTTP/1.1\r\n");
 
