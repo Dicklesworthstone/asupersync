@@ -622,7 +622,7 @@ fn run_conformance_test(test_case: &StreamStateTestCase) -> TestResult {
 
     // Check results
     let verdict = if let Some(expected_error) = test_case.expected_error {
-        if error.as_ref().map(|s| s.as_str()) == Some(expected_error) {
+        if error.as_deref() == Some(expected_error) {
             TestVerdict::Pass
         } else {
             TestVerdict::Fail
@@ -632,10 +632,10 @@ fn run_conformance_test(test_case: &StreamStateTestCase) -> TestResult {
     } else {
         let send_match = test_case
             .expected_send_state
-            .map_or(true, |expected| state_machine.send_state == Some(expected));
+            .is_none_or(|expected| state_machine.send_state == Some(expected));
         let recv_match = test_case
             .expected_recv_state
-            .map_or(true, |expected| state_machine.recv_state == Some(expected));
+            .is_none_or(|expected| state_machine.recv_state == Some(expected));
 
         if send_match && recv_match {
             TestVerdict::Pass

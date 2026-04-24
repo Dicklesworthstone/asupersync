@@ -932,7 +932,8 @@ mod tests {
                                 progress = true;
                             }
                             Poll::Ready(Some(Err(err))) => {
-                                panic!( // ubs:ignore - test logic
+                                panic!(
+                                    // ubs:ignore - test logic
                                     "TW-FAIRNESS unexpected stream error on endpoint {}: {err:?}",
                                     index + 1
                                 );

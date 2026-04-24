@@ -585,7 +585,7 @@ fn decode_long_header(input: &[u8]) -> Result<(PacketHeader, usize), QuicCoreErr
         ));
     }
 
-    let token = if matches!(packet_type, LongPacketType::Initial) { // ubs:ignore - not a secret
+    let token = if matches!(packet_type, LongPacketType::Initial) {
         let (token_len, consumed) = decode_varint(&input[pos..])?;
         pos += consumed;
         let token_len = token_len as usize;

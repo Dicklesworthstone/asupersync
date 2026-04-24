@@ -746,7 +746,7 @@ mod tests {
     }
 
     fn block_on<F: Future>(f: F) -> F::Output {
-        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let waker = Waker::noop().clone();
         let mut cx = Context::from_waker(&waker);
         let mut pinned = Box::pin(f);
         loop {
@@ -759,13 +759,6 @@ mod tests {
 
     #[derive(Debug)]
     struct NonClone(i32);
-
-    #[derive(Debug)]
-    struct TestNoopWaker;
-
-    impl std::task::Wake for TestNoopWaker {
-        fn wake(self: std::sync::Arc<Self>) {}
-    }
 
     struct CountWaker(Arc<AtomicUsize>);
 
@@ -1284,7 +1277,7 @@ mod tests {
         let (_tx, mut rx) = channel::<i32>();
         let inner = Arc::clone(&rx.inner);
 
-        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let waker = Waker::noop().clone();
         let mut task_cx = Context::from_waker(&waker);
         let mut fut = Box::pin(rx.recv(&cx));
 
@@ -1348,7 +1341,7 @@ mod tests {
         let (tx, mut rx) = channel::<i32>();
         let inner = Arc::clone(&rx.inner);
 
-        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let waker = Waker::noop().clone();
         let mut task_cx = Context::from_waker(&waker);
         let mut fut = Box::pin(rx.recv(&cx));
 
@@ -1393,7 +1386,7 @@ mod tests {
         let (tx, mut rx) = channel::<i32>();
         let inner = Arc::clone(&rx.inner);
 
-        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let waker = Waker::noop().clone();
         let mut task_cx = Context::from_waker(&waker);
         let mut fut = Box::pin(rx.recv(&cx));
 
@@ -1435,7 +1428,7 @@ mod tests {
 
         tx.send(&cx, 7).expect("send should succeed");
 
-        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let waker = Waker::noop().clone();
         let mut task_cx = Context::from_waker(&waker);
         let mut fut = Box::pin(rx.recv_uninterruptible());
 
@@ -1464,7 +1457,7 @@ mod tests {
         let (tx, mut rx) = channel::<i32>();
         drop(tx);
 
-        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let waker = Waker::noop().clone();
         let mut task_cx = Context::from_waker(&waker);
         let mut fut = Box::pin(rx.recv_uninterruptible());
 
@@ -1494,7 +1487,7 @@ mod tests {
         let (tx, mut rx) = channel::<i32>();
         let inner = Arc::clone(&rx.inner);
 
-        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let waker = Waker::noop().clone();
         let mut task_cx = Context::from_waker(&waker);
         let mut fut = Box::pin(rx.recv(&cx));
 
@@ -1521,7 +1514,7 @@ mod tests {
         let (tx, mut rx) = channel::<i32>();
         let inner = Arc::clone(&rx.inner);
 
-        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let waker = Waker::noop().clone();
         let mut task_cx = Context::from_waker(&waker);
         let mut fut = Box::pin(rx.recv(&cx));
 
@@ -1551,7 +1544,7 @@ mod tests {
 
         // Poll recv to register a waker, then drop the future.
         // RecvFuture::Drop now clears the stale waker (correct behavior).
-        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let waker = Waker::noop().clone();
         let mut task_cx = Context::from_waker(&waker);
         let mut fut = Box::pin(rx.recv(&cx));
         let poll = fut.as_mut().poll(&mut task_cx);
@@ -1634,7 +1627,7 @@ mod tests {
         let (tx, mut rx) = channel::<i32>();
         let inner = Arc::clone(&rx.inner);
 
-        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let waker = Waker::noop().clone();
         let mut task_cx = Context::from_waker(&waker);
 
         {

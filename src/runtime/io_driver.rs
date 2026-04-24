@@ -1770,7 +1770,11 @@ mod tests {
             .expect("register should succeed");
 
         // Inject event for the token
-        reactor.inject_event(polling_token, Event::readable(polling_token), Duration::ZERO);
+        reactor.inject_event(
+            polling_token,
+            Event::readable(polling_token),
+            Duration::ZERO,
+        );
 
         let mut driver = IoDriver::new(reactor);
 

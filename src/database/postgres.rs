@@ -6792,7 +6792,7 @@ mod tests {
 
             // Message length (excluding type byte)
             let length = 1 + 2 + (format_codes.len() * 2) as u32; // format + count + codes
-            buf.extend_from_slice(&(length as u32).to_be_bytes());
+            buf.extend_from_slice(&length.to_be_bytes());
 
             // Overall format (0 = text, 1 = binary)
             buf.push(overall_format);

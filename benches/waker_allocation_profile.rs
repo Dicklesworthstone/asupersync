@@ -73,7 +73,7 @@ fn bench_waker_creation_burst(c: &mut Criterion) {
                         let waker = state.waker_for_source(
                             black_box(task_id),
                             WakeSource::Io {
-                                fd: (i % 1024) as i32,
+                                fd: (i % 1024).cast_signed(),
                             },
                         );
                         wakers.push(black_box(waker));
