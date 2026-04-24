@@ -402,31 +402,40 @@ fn verify_minimality_pass<F>(
 where
     F: FnMut(&ReplayTrace) -> bool,
 {
-    let indices: Vec<usize> = keep.iter().copied().collect();
     let mut result = keep.clone();
-    let mut is_minimal = true;
 
-    for &idx in &indices {
-        let max_evals = config.max_evaluations;
-        if max_evals > 0 && stats.oracle_calls >= max_evals {
-            is_minimal = false;
-            break;
+    loop {
+        let indices: Vec<usize> = result.iter().copied().collect();
+        let mut removed_this_pass = false;
+
+        for idx in indices {
+            if !result.contains(&idx) {
+                continue;
+            }
+
+            let max_evals = config.max_evaluations;
+            if max_evals > 0 && stats.oracle_calls >= max_evals {
+                return (result, false);
+            }
+
+            let candidate: BTreeSet<usize> =
+                result.iter().filter(|&&i| i != idx).copied().collect();
+            if candidate.is_empty() {
+                continue;
+            }
+
+            stats.oracle_calls += 1;
+            if run_oracle_subset(events, metadata, &candidate, oracle) {
+                result = candidate;
+                stats.events_pruned_minimality += 1;
+                removed_this_pass = true;
+            }
         }
 
-        let candidate: BTreeSet<usize> = result.iter().filter(|&&i| i != idx).copied().collect();
-        if candidate.is_empty() {
-            continue;
-        }
-
-        stats.oracle_calls += 1;
-        if run_oracle_subset(events, metadata, &candidate, oracle) {
-            // This event wasn't necessary — remove it.
-            result = candidate;
-            is_minimal = false; // Found a non-minimal event, may need another pass.
+        if !removed_this_pass {
+            return (result, true);
         }
     }
-
-    (result, is_minimal)
 }
 
 // =============================================================================
@@ -565,7 +574,6 @@ where
 
     // Phase 3: Minimality verification.
     let (keep, minimality_verified) = if config.verify_minimality {
-        let before = keep.len();
         let (result, verified) = verify_minimality_pass(
             &trace.events,
             &trace.metadata,
@@ -574,7 +582,6 @@ where
             &mut stats,
             config,
         );
-        stats.events_pruned_minimality = before - result.len();
         stats.minimality_verified = verified;
         (result, verified)
     } else {
@@ -1016,6 +1023,43 @@ mod tests {
         // Should find exactly 2 critical events.
         assert_eq!(result.minimized_event_count, 2);
         assert!(oracle(&result.minimized));
+    }
+
+    #[test]
+    fn minimality_verification_revisits_earlier_events_after_later_removal() {
+        let events: Vec<ReplayEvent> = (0..3)
+            .map(|i| ReplayEvent::TaskScheduled {
+                task: tid(i),
+                at_tick: i,
+            })
+            .collect();
+
+        let metadata = meta();
+        let mut oracle = |t: &ReplayTrace| -> bool {
+            let scheduled: BTreeSet<u64> = t
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    ReplayEvent::TaskScheduled { task, .. } => Some(task.0),
+                    _ => None,
+                })
+                .collect();
+
+            scheduled == BTreeSet::from([0, 1, 2])
+                || scheduled == BTreeSet::from([0, 2])
+                || scheduled == BTreeSet::from([2])
+        };
+
+        let keep = BTreeSet::from([0, 1, 2]);
+        let mut stats = MinimizationStats::default();
+        let config = DeltaDebugConfig::default();
+
+        let (result, verified) =
+            verify_minimality_pass(&events, &metadata, &keep, &mut oracle, &mut stats, &config);
+
+        assert_eq!(result, BTreeSet::from([2]));
+        assert_eq!(stats.events_pruned_minimality, 2);
+        assert!(verified);
     }
 
     #[test]
