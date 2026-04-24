@@ -1515,11 +1515,11 @@ Similar goals to Kotlin coroutines, Swift structured concurrency, and Java's Pro
 
 ### Can I use this with existing async Rust code?
 
-Asupersync has its own runtime with explicit capabilities. For code that needs to interop with external async libraries, we provide boundary adapters that preserve our cancel-correctness guarantees.
+Asupersync has its own runtime with explicit capabilities. For code that needs to interop with external async libraries, we provide boundary adapters that preserve our cancel-correctness guarantees. Those boundary surfaces are intentionally lane-scoped: some are fully supported today, some remain preview-public or guarded-canary, and some remain bridge-only. The canonical live support matrix is in [`docs/integration.md`](./docs/integration.md) and [`docs/WASM.md`](./docs/WASM.md).
 
 ### Is this production-ready?
 
-Asupersync is active development software with a fully implemented runtime surface (deterministic kernel, parallel scheduler, TCP/HTTP/TLS/WebSocket, database clients, distributed runtime primitives, actor/supervision model, and deterministic verification harnesses). It is a strong fit for internal systems where correctness guarantees and deterministic debugging are primary requirements.
+Asupersync is active development software with a fully implemented core runtime surface (deterministic kernel, parallel scheduler, TCP/HTTP/TLS/WebSocket, database clients, distributed runtime primitives, actor/supervision model, and deterministic verification harnesses). Phase 6 hardening is still active for release gates and external-boundary/browser adapter maturity, so shipped support is lane-specific rather than blanket-GA across every adapter surface; use [`docs/integration.md`](./docs/integration.md) and [`docs/WASM.md`](./docs/WASM.md) as the live source of truth for support class and rollout posture. It is a strong fit for internal systems where correctness guarantees and deterministic debugging are primary requirements.
 
 ### How do I report bugs?
 
