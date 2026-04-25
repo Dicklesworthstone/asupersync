@@ -123,6 +123,45 @@ mod tests {
         }
     }
 
+    /// Entropy source that deterministically emits every byte value in order.
+    #[derive(Debug)]
+    struct IncrementingEntropy {
+        counter: std::sync::atomic::AtomicUsize,
+    }
+
+    impl IncrementingEntropy {
+        fn new() -> Self {
+            Self {
+                counter: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl EntropySource for IncrementingEntropy {
+        fn fill_bytes(&self, dest: &mut [u8]) {
+            let start = self
+                .counter
+                .fetch_add(dest.len(), std::sync::atomic::Ordering::Relaxed);
+            for (offset, byte) in dest.iter_mut().enumerate() {
+                *byte = start.wrapping_add(offset) as u8;
+            }
+        }
+
+        fn next_u64(&self) -> u64 {
+            let mut bytes = [0u8; 8];
+            self.fill_bytes(&mut bytes);
+            u64::from_le_bytes(bytes)
+        }
+
+        fn fork(&self, _task_id: crate::types::TaskId) -> std::sync::Arc<dyn EntropySource> {
+            std::sync::Arc::new(Self::new())
+        }
+
+        fn source_id(&self) -> &'static str {
+            "incrementing"
+        }
+    }
+
     /// Helper to extract mask key from encoded frame buffer.
     fn extract_mask_key(encoded: &[u8]) -> Option<[u8; 4]> {
         if encoded.len() < 2 {
@@ -455,14 +494,17 @@ mod tests {
     #[test]
     fn client_uses_fresh_mask_keys() {
         // RFC 6455 §5.3: Each frame MUST use fresh unpredictable masking-key.
-        let mut codec = FrameCodec::client();
+        let codec = FrameCodec::client();
+        let entropy = IncrementingEntropy::new();
         let mut used_keys = std::collections::HashSet::new();
 
         // Generate multiple frames and verify each uses different mask key
         for i in 0..20 {
             let frame = Frame::text(format!("message {i}"));
             let mut buf = BytesMut::new();
-            codec.encode(frame, &mut buf).unwrap();
+            codec
+                .encode_with_entropy(&frame, &mut buf, &entropy)
+                .unwrap();
 
             let mask_key = extract_mask_key(&buf).expect("Frame should have mask key");
             assert!(
@@ -476,15 +518,20 @@ mod tests {
 
     #[test]
     fn mask_keys_have_sufficient_entropy() {
-        // RFC 6455 §5.3: Masking keys must be derived from strong source of entropy.
-        let mut codec = FrameCodec::client();
+        // RFC 6455 §5.3: masking keys must be read from the entropy source,
+        // not reused or synthesized from frame data. Use a deterministic source
+        // here; statistical tests against OS entropy are inherently flaky.
+        let codec = FrameCodec::client();
+        let entropy = IncrementingEntropy::new();
         let mut key_bytes = Vec::new();
 
         // Collect mask key bytes from multiple frames
         for i in 0..100 {
             let frame = Frame::binary(vec![i as u8; 10]);
             let mut buf = BytesMut::new();
-            codec.encode(frame, &mut buf).unwrap();
+            codec
+                .encode_with_entropy(&frame, &mut buf, &entropy)
+                .unwrap();
 
             let mask_key = extract_mask_key(&buf).expect("Frame should have mask key");
             key_bytes.extend_from_slice(&mask_key);
@@ -499,10 +546,9 @@ mod tests {
         // Count how many different byte values we see
         let unique_bytes = byte_counts.iter().filter(|&&count| count > 0).count();
 
-        // With 400 random bytes (100 frames * 4 bytes), we expect good coverage
-        assert!(
-            unique_bytes >= 200, // At least 78% of possible byte values
-            "Poor entropy in mask keys: only {unique_bytes}/256 byte values seen"
+        assert_eq!(
+            unique_bytes, 256,
+            "mask-key generation did not consume all bytes supplied by the entropy source"
         );
     }
 

@@ -1219,10 +1219,7 @@ mod tests {
             .unwrap();
         snapshot.push_str(&render_wire_hex("server_binary_len_126", &binary_len_126));
 
-        assert_snapshot!(
-            "websocket_frame_wire_bytes",
-            &snapshot,
-            @r"
+        assert_snapshot!(&snapshot, @r"
         server_text_hi:
         81 02 48 69
         client_text_hi_masked:

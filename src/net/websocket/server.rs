@@ -460,7 +460,7 @@ where
                     return Ok(None);
                 }
 
-                let n = match self.read_more().await {
+                let n = match self.read_more(cx).await {
                     Ok(n) => n,
                     Err(WsError::Io(e))
                         if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
@@ -528,7 +528,7 @@ where
                     let remaining =
                         std::time::Duration::from_nanos(deadline.duration_since(time_now));
 
-                    match crate::time::timeout(time_now, remaining, self.read_more()).await {
+                    match crate::time::timeout(time_now, remaining, self.read_more(cx)).await {
                         Ok(Ok(n)) => {
                             if n == 0 {
                                 self.close_handshake.force_close(CloseReason::going_away());
@@ -712,7 +712,7 @@ where
     }
 
     /// Internal: read more data into buffer.
-    async fn read_more(&mut self) -> Result<usize, WsError> {
+    async fn read_more(&mut self, cx: &Cx) -> Result<usize, WsError> {
         // Ensure we have space
         if self.read_buf.capacity() - self.read_buf.len() < 4096 {
             self.read_buf.reserve(8192);
@@ -720,7 +720,7 @@ where
 
         // Create a temporary buffer for reading
         let mut temp = [0u8; 4096];
-        let n = read_some_io(&mut self.io, &mut temp, self.close_handshake.is_open()).await?;
+        let n = read_some_io(cx, &mut self.io, &mut temp, self.close_handshake.is_open()).await?;
 
         if n > 0 {
             self.read_buf.extend_from_slice(&temp[..n]);
@@ -732,21 +732,22 @@ where
 
 /// Read some bytes from an I/O stream.
 async fn read_some_io<IO: AsyncRead + Unpin>(
+    cx: &Cx,
     io: &mut IO,
     buf: &mut [u8],
     is_open: bool,
 ) -> Result<usize, WsError> {
     use std::future::poll_fn;
 
-    poll_fn(|cx| {
-        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+    poll_fn(|poll_cx| {
+        if is_open && cx.checkpoint().is_err() {
             return Poll::Ready(Err(WsError::Io(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",
             ))));
         }
         let mut read_buf = ReadBuf::new(buf);
-        match Pin::new(&mut *io).poll_read(cx, &mut read_buf) {
+        match Pin::new(&mut *io).poll_read(poll_cx, &mut read_buf) {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
             Poll::Ready(Err(e)) => Poll::Ready(Err(WsError::Io(e))),
             Poll::Pending => Poll::Pending,
@@ -844,6 +845,7 @@ mod tests {
         read_pos: usize,
         written: Vec<u8>,
         fail_writes: bool,
+        pending_first_read: bool,
         write_behavior: WriteBehavior,
         pending_first_flush: bool,
         flush_calls: usize,
@@ -860,6 +862,7 @@ mod tests {
                 read_pos: 0,
                 written: Vec::new(),
                 fail_writes: false,
+                pending_first_read: false,
                 write_behavior: WriteBehavior::Immediate,
                 pending_first_flush: false,
                 flush_calls: 0,
@@ -868,6 +871,11 @@ mod tests {
 
         fn with_write_failure(mut self) -> Self {
             self.fail_writes = true;
+            self
+        }
+
+        fn with_pending_first_read(mut self) -> Self {
+            self.pending_first_read = true;
             self
         }
 
@@ -912,6 +920,11 @@ mod tests {
             _cx: &mut std::task::Context<'_>,
             buf: &mut ReadBuf<'_>,
         ) -> Poll<io::Result<()>> {
+            if self.pending_first_read {
+                self.pending_first_read = false;
+                _cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             let remaining = &self.read_data[self.read_pos..];
             let to_read = remaining.len().min(buf.remaining());
             buf.put_slice(&remaining[..to_read]);
@@ -1382,6 +1395,58 @@ mod tests {
                 ws.io.written,
                 encode_server_frame(Frame::close(Some(1000), None)),
                 "retrying close after a cancelled recv must not append a second close frame"
+            );
+        });
+    }
+
+    #[test]
+    fn recv_mid_read_cancel_uses_explicit_cx_without_ambient_current() {
+        future::block_on(async {
+            let accept = AcceptResponse {
+                accept_key: String::new(),
+                protocol: None,
+                extensions: Vec::new(),
+            };
+            let read_data = encode_client_frame(Frame::binary(vec![1, 2, 3]));
+            let mut ws = ServerWebSocket::from_upgraded(
+                TestIo::with_read_data(read_data).with_pending_first_read(),
+                WebSocketConfig::default(),
+                accept,
+                &[],
+            );
+            let cx = Cx::for_testing();
+            assert!(
+                Cx::current().is_none(),
+                "regression must not rely on ambient Cx::current()"
+            );
+
+            let mut recv = Box::pin(ws.recv(&cx));
+            let waker = std::task::Waker::noop().clone();
+            let mut poll_cx = std::task::Context::from_waker(&waker);
+
+            assert!(
+                matches!(recv.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "first receive poll should park in the transport read"
+            );
+
+            cx.set_cancel_requested(true);
+            let err = match recv.as_mut().poll(&mut poll_cx) {
+                Poll::Ready(Err(err)) => err,
+                other => panic!("expected cancelled receive error, got {other:?}"),
+            };
+            drop(recv);
+
+            assert!(
+                matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::Interrupted),
+                "expected interrupted receive after explicit Cx cancellation, got {err:?}"
+            );
+            assert_eq!(
+                ws.io.read_pos, 0,
+                "cancelled server recv must not consume transport bytes after pending read"
+            );
+            assert!(
+                ws.read_buf.is_empty(),
+                "cancelled server recv must not seed the websocket read buffer"
             );
         });
     }

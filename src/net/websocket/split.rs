@@ -509,7 +509,7 @@ where
                 }
 
                 // Need more data - read from socket
-                let n = self.read_more().await?;
+                let n = self.read_more(cx).await?;
                 if n == 0 {
                     // EOF - connection closed
                     self.shared
@@ -609,12 +609,12 @@ where
     }
 
     /// Internal: read more data into buffer.
-    async fn read_more(&self) -> Result<usize, WsError> {
+    async fn read_more(&self, cx: &Cx) -> Result<usize, WsError> {
         use std::future::poll_fn;
 
         let is_open = self.shared.lock().close_handshake.is_open();
         poll_fn(|poll_cx| {
-            if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if is_open && cx.checkpoint().is_err() {
                 return Poll::Ready(Err(WsError::Io(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "cancelled",
@@ -790,6 +790,7 @@ mod tests {
         read_pos: usize,
         written: Vec<u8>,
         fail_writes: bool,
+        pending_first_read: bool,
         pending_first_write: bool,
         partial_first_write_len: Option<usize>,
         pending_after_partial_write: bool,
@@ -802,6 +803,7 @@ mod tests {
                 read_pos: 0,
                 written: Vec::new(),
                 fail_writes: false,
+                pending_first_read: false,
                 pending_first_write: false,
                 partial_first_write_len: None,
                 pending_after_partial_write: false,
@@ -810,6 +812,11 @@ mod tests {
 
         fn with_write_failure(mut self) -> Self {
             self.fail_writes = true;
+            self
+        }
+
+        fn with_pending_first_read(mut self) -> Self {
+            self.pending_first_read = true;
             self
         }
 
@@ -845,6 +852,11 @@ mod tests {
             _cx: &mut std::task::Context<'_>,
             buf: &mut ReadBuf<'_>,
         ) -> Poll<io::Result<()>> {
+            if self.pending_first_read {
+                self.pending_first_read = false;
+                _cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             let remaining = &self.read_data[self.read_pos..];
             let to_read = remaining.len().min(buf.remaining());
             buf.put_slice(&remaining[..to_read]);
@@ -1541,6 +1553,56 @@ mod tests {
                 encode_client_frame_with_entropy(&Frame::close(Some(1000), None), entropy.as_ref()),
                 "retrying close after a cancelled recv must not append a second close frame"
             );
+        });
+    }
+
+    #[test]
+    fn read_half_mid_read_cancel_uses_explicit_cx_without_ambient_current() {
+        future::block_on(async {
+            let read_data = encode_server_frame(Frame::binary(vec![1, 2, 3]));
+            let ws = WebSocket::from_upgraded(
+                TestIo::new(read_data).with_pending_first_read(),
+                WebSocketConfig::default(),
+            );
+            let (mut read, write) = ws.split();
+            let cx = test_cx_with_entropy(Arc::new(FixedEntropy([0x46, 0xD0, 0x1B, 0x0A])));
+            assert!(
+                Cx::current().is_none(),
+                "regression must not rely on ambient Cx::current()"
+            );
+
+            let mut recv = Box::pin(read.recv(&cx));
+            let waker = std::task::Waker::noop().clone();
+            let mut poll_cx = Context::from_waker(&waker);
+
+            assert!(
+                matches!(recv.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "first receive poll should park in the transport read"
+            );
+
+            cx.set_cancel_requested(true);
+            let err = match recv.as_mut().poll(&mut poll_cx) {
+                Poll::Ready(Err(err)) => err,
+                other => panic!("expected cancelled receive error, got {other:?}"),
+            };
+            drop(recv);
+
+            assert!(
+                matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::Interrupted),
+                "expected interrupted receive after explicit Cx cancellation, got {err:?}"
+            );
+            {
+                let shared = read.shared.lock();
+                assert_eq!(
+                    shared.io.read_pos, 0,
+                    "cancelled split recv must not consume transport bytes after pending read"
+                );
+                assert!(
+                    shared.read_buf.is_empty(),
+                    "cancelled split recv must not seed the websocket read buffer"
+                );
+            }
+            drop(write);
         });
     }
 
