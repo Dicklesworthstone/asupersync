@@ -41,12 +41,7 @@ use std::time::Duration;
 
 #[inline]
 fn duration_as_nanos_u64_saturating(duration: Duration) -> u64 {
-    let nanos = duration.as_nanos();
-    if nanos > u128::from(u64::MAX) {
-        u64::MAX
-    } else {
-        nanos as u64
-    }
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
 /// Behavior for handling missed ticks in an [`Interval`].
