@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Integration coverage for empty-session middleware behavior.
 
 use asupersync::web::extract::Request;
@@ -16,7 +14,7 @@ impl Handler for EmptyHandler {
 }
 
 #[test]
-fn test_dos_empty_session() {
+fn empty_untouched_session_does_not_allocate_or_set_cookie() {
     let store = MemoryStore::new();
     let layer = SessionLayer::new(store.clone());
     let middleware = layer.wrap(EmptyHandler);
@@ -24,13 +22,14 @@ fn test_dos_empty_session() {
     let req = Request::new("GET", "/");
     let resp = middleware.call(req);
 
+    assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(
         store.len(),
         0,
         "Store should not save empty untouched sessions"
     );
     assert!(
-        !resp.headers.contains_key("set-cookie"),
+        resp.header_value("set-cookie").is_none(),
         "Should not set cookie for empty untouched sessions"
     );
 }
