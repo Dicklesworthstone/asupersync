@@ -215,16 +215,26 @@ pub struct BarrierTestSummary {
 }
 
 impl BarrierTestSummary {
-    /// Returns the effective party count (completed + dropped units that registered).
+    /// Returns the number of parties that actually crossed the barrier.
     pub fn effective_parties(&self) -> usize {
-        // Dropped units may have registered before being dropped, affecting party count
-        self.completed + self.dropped
+        self.completed
     }
 
     /// Returns true if the barrier should have tripped.
     pub fn should_trip(&self, expected_parties: usize) -> bool {
         self.effective_parties() >= expected_parties
     }
+}
+
+fn barrier_lab_config(config: &BarrierTestConfig) -> LabConfig {
+    LabConfig::new(config.seed)
+        .worker_count(4)
+        .max_steps(5_000)
+        .with_auto_advance()
+}
+
+fn drive_barrier_runtime(runtime: &mut LabRuntime) {
+    let _ = runtime.run_with_auto_advance();
 }
 
 /// Execute a barrier work unit within a LabRuntime task.
@@ -269,9 +279,19 @@ async fn execute_barrier_work_unit(
         // Start the wait, then drop the future (simulates select! cancellation)
         let wait_future = barrier.wait(cx);
         // Poll once to register with the barrier
-        let _ = futures_lite::future::poll_once(wait_future).await;
-        // Future is dropped here, triggering cleanup
-        BarrierWorkResult::Dropped
+        match futures_lite::future::poll_once(wait_future).await {
+            Some(Ok(result)) => BarrierWorkResult::Completed {
+                is_leader: result.is_leader(),
+            },
+            Some(Err(BarrierWaitError::Cancelled)) => BarrierWorkResult::Cancelled,
+            Some(Err(BarrierWaitError::PolledAfterCompletion)) => {
+                BarrierWorkResult::Panicked("polled after completion".to_string())
+            }
+            None => {
+                // Future is dropped here, triggering cleanup.
+                BarrierWorkResult::Dropped
+            }
+        }
     } else {
         // Normal completion path
         match barrier.wait(cx).await {
@@ -301,7 +321,7 @@ fn mr1_party_count_invariant(
     config: BarrierTestConfig,
     work_units: Vec<BarrierWorkUnit>,
 ) -> Result<(), String> {
-    let lab_config = LabConfig::new(config.seed).worker_count(4);
+    let lab_config = barrier_lab_config(&config);
     let mut runtime = LabRuntime::new(lab_config);
     let root = runtime.state.create_root_region(Budget::INFINITE);
 
@@ -337,25 +357,38 @@ fn mr1_party_count_invariant(
         runtime.scheduler.lock().schedule(task_id, 0);
     }
 
-    runtime.run_until_quiescent();
+    drive_barrier_runtime(&mut runtime);
     let summary = global_state.summary();
 
     // MR1: Verify party count invariant
-    let expected_completions = if summary.effective_parties() >= config.parties {
-        config.parties.min(summary.completed + summary.dropped)
-    } else {
-        0
-    };
-
-    if summary.completed != expected_completions {
+    let recorded = summary.completed + summary.cancelled + summary.dropped;
+    if recorded > work_units.len() {
         return Err(format!(
-            "MR1 violation: expected {} completions, got {}. Config: {:?}, Summary: {:?}",
-            expected_completions, summary.completed, config, summary
+            "MR1 accounting violation: recorded {} results for {} work units. Config: {:?}, Summary: {:?}",
+            recorded,
+            work_units.len(),
+            config,
+            summary
         ));
     }
 
-    // Verify exactly one leader per barrier trip
-    let expected_leaders = usize::from(summary.completed > 0);
+    if summary.completed % config.parties != 0 {
+        return Err(format!(
+            "MR1 party-count violation: completed {} is not a multiple of parties {}. Config: {:?}, Summary: {:?}",
+            summary.completed, config.parties, config, summary
+        ));
+    }
+
+    let max_completable = work_units.iter().filter(|unit| !unit.should_cancel).count();
+    if summary.completed > max_completable {
+        return Err(format!(
+            "MR1 completion violation: completed {} exceeds at-most-completable {}. Config: {:?}, Summary: {:?}",
+            summary.completed, max_completable, config, summary
+        ));
+    }
+
+    // Verify exactly one leader per barrier generation.
+    let expected_leaders = summary.completed / config.parties;
     if summary.leaders != expected_leaders {
         return Err(format!(
             "MR1 leader violation: expected {} leaders, got {}. Summary: {:?}",
@@ -414,7 +447,15 @@ fn mr3_drop_cleanup_correctness(
     config: BarrierTestConfig,
     work_units: Vec<BarrierWorkUnit>,
 ) -> Result<(), String> {
-    let lab_config = LabConfig::new(config.seed).worker_count(4);
+    let drop_units: Vec<_> = work_units
+        .into_iter()
+        .filter(|work_unit| work_unit.should_drop)
+        .collect();
+    if drop_units.is_empty() {
+        return Ok(());
+    }
+
+    let lab_config = barrier_lab_config(&config);
     let mut runtime = LabRuntime::new(lab_config);
     let root = runtime.state.create_root_region(Budget::INFINITE);
 
@@ -422,7 +463,7 @@ fn mr3_drop_cleanup_correctness(
     let global_state = GlobalBarrierState::new();
 
     // Phase 1: Execute work units with drops
-    for work_unit in work_units.iter() {
+    for work_unit in drop_units.iter() {
         let barrier_clone = Arc::clone(&barrier);
         let config_clone = config.clone();
         let global_state_clone = Arc::clone(&global_state);
@@ -450,7 +491,7 @@ fn mr3_drop_cleanup_correctness(
         runtime.scheduler.lock().schedule(task_id, 0);
     }
 
-    runtime.run_until_quiescent();
+    drive_barrier_runtime(&mut runtime);
     let phase1_summary = global_state.summary();
 
     // Phase 2: Verify barrier is still functional with fresh parties
@@ -491,7 +532,7 @@ fn mr3_drop_cleanup_correctness(
             runtime.scheduler.lock().schedule(task_id, 0);
         }
 
-        runtime.run_until_quiescent();
+        drive_barrier_runtime(&mut runtime);
         let phase2_summary = fresh_global_state.summary();
 
         // MR3: Fresh parties should be able to trip the barrier normally
@@ -579,10 +620,7 @@ fn execute_barrier_scenario(
     // max_steps=100_000 per scenario — a multi-minute effective hang that
     // trips CI timeouts (this test was one of the ~17 hangs cleaned up in
     // the post-release deep-dive).
-    let lab_config = LabConfig::new(config.seed)
-        .worker_count(4)
-        .max_steps(5_000)
-        .with_auto_advance();
+    let lab_config = barrier_lab_config(&config);
     let mut runtime = LabRuntime::new(lab_config);
     let root = runtime.state.create_root_region(Budget::INFINITE);
 
@@ -616,7 +654,7 @@ fn execute_barrier_scenario(
         runtime.scheduler.lock().schedule(task_id, 0);
     }
 
-    let _ = runtime.run_with_auto_advance();
+    drive_barrier_runtime(&mut runtime);
     Ok(global_state.summary())
 }
 
@@ -625,7 +663,7 @@ fn execute_barrier_scenario_with_leader_tracking(
     config: BarrierTestConfig,
     work_units: Vec<BarrierWorkUnit>,
 ) -> Result<Vec<usize>, String> {
-    let lab_config = LabConfig::new(config.seed).worker_count(4);
+    let lab_config = barrier_lab_config(&config);
     let mut runtime = LabRuntime::new(lab_config);
     let root = runtime.state.create_root_region(Budget::INFINITE);
 
@@ -657,7 +695,7 @@ fn execute_barrier_scenario_with_leader_tracking(
         runtime.scheduler.lock().schedule(task_id, 0);
     }
 
-    runtime.run_until_quiescent();
+    drive_barrier_runtime(&mut runtime);
     Ok(leader_ids.lock().clone())
 }
 

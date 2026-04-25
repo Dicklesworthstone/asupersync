@@ -32,6 +32,8 @@ mod barrier;
 mod contended_mutex;
 mod mutex;
 mod notify;
+#[cfg(test)]
+mod notify_bug_test;
 
 mod once_cell;
 #[cfg(test)]
@@ -66,6 +68,7 @@ pub use semaphore::{
 };
 #[cfg(test)]
 mod barrier_metamorphic;
+#[cfg(test)]
 mod mutex_deadlock_test;
 #[cfg(test)]
 mod mutex_metamorphic;

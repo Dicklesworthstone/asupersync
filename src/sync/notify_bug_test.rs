@@ -1,18 +1,21 @@
-#![allow(clippy::all)]
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
-use asupersync::sync::Notify;
 
-fn noop_waker() -> Waker { std::task::Waker::noop().clone() }
+use crate::sync::Notify;
+
+fn noop_waker() -> Waker {
+    std::task::Waker::noop().clone()
+}
+
 fn poll_once<F: Future + Unpin>(fut: &mut F) -> Poll<F::Output> {
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     Pin::new(fut).poll(&mut cx)
 }
 
-fn main() {
+#[test]
+fn dropping_broadcast_woken_waiter_does_not_wake_late_waiter() {
     let notify = Notify::new();
     let mut fut1 = notify.notified();
     assert!(poll_once(&mut fut1).is_pending());
