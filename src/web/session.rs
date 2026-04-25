@@ -118,7 +118,7 @@ impl SessionData {
 /// In-memory session store. Data is lost on process restart.
 ///
 /// Suitable for development and single-process deployments.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct MemoryStore {
     sessions: Arc<Mutex<HashMap<String, SessionData>>>,
 }
@@ -142,12 +142,6 @@ impl MemoryStore {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.sessions.lock().is_empty()
-    }
-}
-
-impl Default for MemoryStore {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
