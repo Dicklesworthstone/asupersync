@@ -265,7 +265,7 @@ impl CancellationAnalyzer {
     /// Perform deep performance analysis on a set of traces.
     #[must_use]
     pub fn analyze_performance(&self, traces: &[CancellationTrace]) -> PerformanceAnalysis {
-        if traces.len() < self.config.min_sample_size {
+        if traces.is_empty() || traces.len() < self.config.min_sample_size {
             return self.create_insufficient_data_analysis(traces.len());
         }
 
@@ -414,9 +414,10 @@ impl CancellationAnalyzer {
 
             // Calculate impact as percentage of total cancellation time
             let total_time_contribution = stats.mean * timings.len() as f64;
-            let impact_percentage = (total_time_contribution / total_trace_time_ms) * 100.0;
+            let impact_fraction = total_time_contribution / total_trace_time_ms;
+            let impact_percentage = impact_fraction * 100.0;
 
-            if impact_percentage > self.config.bottleneck_threshold {
+            if impact_fraction > self.config.bottleneck_threshold {
                 let confidence = if stats.count >= 50 && stats.std_dev < stats.mean {
                     0.9 // High confidence
                 } else if stats.count >= 20 {
@@ -858,7 +859,6 @@ impl CancellationAnalyzer {
                     }
                 })
             })
-            .filter(|&x| x > 0.0)
             .collect::<Vec<f64>>();
 
         let recent_throughput = recent_traces
@@ -872,7 +872,6 @@ impl CancellationAnalyzer {
                     }
                 })
             })
-            .filter(|&x| x > 0.0)
             .collect::<Vec<f64>>();
 
         if early_throughput.is_empty() || recent_throughput.is_empty() {
@@ -1307,6 +1306,56 @@ mod tests {
 
         assert_eq!(analysis.traces_analyzed, 0);
         assert!(!analysis.recommendations.is_empty()); // Should have "collect more data" recommendation
+    }
+
+    #[test]
+    fn test_empty_input_is_insufficient_even_with_zero_min_sample_size() {
+        let analyzer = CancellationAnalyzer::new(AnalyzerConfig {
+            min_sample_size: 0,
+            ..AnalyzerConfig::default()
+        });
+        let analysis = analyzer.analyze_performance(&[]);
+
+        assert_eq!(analysis.traces_analyzed, 0);
+        assert!(
+            analysis
+                .cleanup_analysis
+                .cleanup_efficiency
+                .success_rate
+                .is_finite()
+        );
+        assert_eq!(
+            analysis.cleanup_analysis.cleanup_efficiency.success_rate,
+            0.0
+        );
+        assert!(!analysis.recommendations.is_empty());
+    }
+
+    #[test]
+    fn test_bottleneck_threshold_is_fraction_not_percentage_points() {
+        let analyzer = CancellationAnalyzer::default();
+        let base_time = SystemTime::UNIX_EPOCH;
+        let traces = (0..10)
+            .map(|i| {
+                test_trace(
+                    i,
+                    base_time + Duration::from_secs(i as u64),
+                    Duration::from_millis(100),
+                    2,
+                    vec![
+                        test_step("minor".to_string(), Duration::from_millis(1)),
+                        test_step("major".to_string(), Duration::from_millis(20)),
+                    ],
+                    Vec::new(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let bottlenecks = analyzer.identify_bottlenecks(&traces);
+
+        assert_eq!(bottlenecks.len(), 1);
+        assert_eq!(bottlenecks[0].entity_id, "major");
+        assert!((bottlenecks[0].impact_percentage - 20.0).abs() < f64::EPSILON);
     }
 
     #[test]
