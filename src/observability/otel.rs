@@ -377,24 +377,16 @@ pub trait MetricsExporter: Send + Sync {
 }
 
 /// Exporter that writes to stdout (for debugging).
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct StdoutExporter {
     prefix: String,
-}
-
-impl Default for StdoutExporter {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl StdoutExporter {
     /// Create a new stdout exporter.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            prefix: String::new(),
-        }
+        Self::default()
     }
 
     /// Create with a prefix for each line.
@@ -1364,17 +1356,15 @@ mod tests {
         let tracker = Arc::new(CardinalityTracker::new());
         let barrier = Arc::new(Barrier::new(8));
 
-        let handles: Vec<_> = (0..8)
-            .map(|i| {
-                let tracker = Arc::clone(&tracker);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    let labels = [KeyValue::new("id", i.to_string())];
-                    barrier.wait();
-                    !tracker.check_and_record("test", &labels, 1)
-                })
+        let handles: [_; 8] = std::array::from_fn(|i| {
+            let tracker = Arc::clone(&tracker);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let labels = [KeyValue::new("id", i.to_string())];
+                barrier.wait();
+                !tracker.check_and_record("test", &labels, 1)
             })
-            .collect();
+        });
 
         let accepted = handles
             .into_iter()
