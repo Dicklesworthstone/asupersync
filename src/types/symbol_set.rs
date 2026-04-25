@@ -129,15 +129,10 @@ impl SymbolSet {
     #[inline]
     #[must_use]
     pub fn with_memory_budget(config: ThresholdConfig, budget_bytes: usize) -> Self {
-        Self {
-            symbols: HashMap::new(),
-            block_counts: HashMap::new(),
-            total_count: 0,
-            total_bytes: 0,
-            memory_budget: Some(budget_bytes),
-            memory_remaining: budget_bytes,
-            threshold_config: config,
-        }
+        let mut set = Self::with_config(config);
+        set.memory_budget = Some(budget_bytes);
+        set.memory_remaining = budget_bytes;
+        set
     }
 
     /// Inserts a symbol into the set.
