@@ -264,10 +264,10 @@ fn default_delay_max_ms() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Network simulation configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkSection {
     /// Preset network conditions.
-    #[serde(default = "default_network_preset")]
+    #[serde(default)]
     pub preset: NetworkPreset,
 
     /// Per-link overrides (key = "alice->bob").
@@ -275,24 +275,12 @@ pub struct NetworkSection {
     pub links: BTreeMap<String, LinkConditions>,
 }
 
-impl Default for NetworkSection {
-    fn default() -> Self {
-        Self {
-            preset: NetworkPreset::Ideal,
-            links: BTreeMap::new(),
-        }
-    }
-}
-
-fn default_network_preset() -> NetworkPreset {
-    NetworkPreset::Ideal
-}
-
 /// Named network condition presets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkPreset {
     /// No latency, loss, or corruption.
+    #[default]
     Ideal,
     /// ~1ms latency.
     Local,
