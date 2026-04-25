@@ -686,9 +686,7 @@ impl GeneralizedLedger {
     /// Create an empty ledger.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Append an evidence record.
