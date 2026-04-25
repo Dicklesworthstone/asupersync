@@ -24,6 +24,13 @@ impl DetHasher {
         self.state = self.state.wrapping_mul(Self::MULTIPLIER);
         self.state ^= u64::from(byte);
     }
+
+    #[inline]
+    fn mix_bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.mix_byte(byte);
+        }
+    }
 }
 
 impl Default for DetHasher {
@@ -36,9 +43,7 @@ impl Default for DetHasher {
 impl Hasher for DetHasher {
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.mix_byte(byte);
-        }
+        self.mix_bytes(bytes);
     }
 
     #[inline]
@@ -48,39 +53,22 @@ impl Hasher for DetHasher {
 
     #[inline]
     fn write_u16(&mut self, i: u16) {
-        let bytes = i.to_le_bytes();
-        self.mix_byte(bytes[0]);
-        self.mix_byte(bytes[1]);
+        self.mix_bytes(&i.to_le_bytes());
     }
 
     #[inline]
     fn write_u32(&mut self, i: u32) {
-        let bytes = i.to_le_bytes();
-        self.mix_byte(bytes[0]);
-        self.mix_byte(bytes[1]);
-        self.mix_byte(bytes[2]);
-        self.mix_byte(bytes[3]);
+        self.mix_bytes(&i.to_le_bytes());
     }
 
     #[inline]
     fn write_u64(&mut self, i: u64) {
-        let bytes = i.to_le_bytes();
-        self.mix_byte(bytes[0]);
-        self.mix_byte(bytes[1]);
-        self.mix_byte(bytes[2]);
-        self.mix_byte(bytes[3]);
-        self.mix_byte(bytes[4]);
-        self.mix_byte(bytes[5]);
-        self.mix_byte(bytes[6]);
-        self.mix_byte(bytes[7]);
+        self.mix_bytes(&i.to_le_bytes());
     }
 
     #[inline]
     fn write_u128(&mut self, i: u128) {
-        let bytes = i.to_le_bytes();
-        for &byte in &bytes {
-            self.mix_byte(byte);
-        }
+        self.mix_bytes(&i.to_le_bytes());
     }
 
     #[inline]
