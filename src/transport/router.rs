@@ -991,7 +991,7 @@ impl RouteKey {
 }
 
 /// The routing table for symbol dispatch.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RoutingTable {
     /// Routes by key.
     routes: RwLock<HashMap<RouteKey, RoutingEntry>>,
@@ -1007,11 +1007,7 @@ impl RoutingTable {
     /// Creates a new routing table.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            routes: RwLock::new(HashMap::new()),
-            default_route: RwLock::new(None),
-            endpoints: RwLock::new(HashMap::new()),
-        }
+        Self::default()
     }
 
     /// Registers an endpoint.
@@ -1141,12 +1137,6 @@ impl RoutingTable {
         let routes = self.routes.read().len();
         let default = usize::from(self.default_route.read().is_some());
         routes + default
-    }
-}
-
-impl Default for RoutingTable {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
