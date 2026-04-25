@@ -1,24 +1,17 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Regression test for lost wakeups in the mutex waiter baton-passing path.
 
 use asupersync::cx::Cx;
 use asupersync::sync::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
-
-fn noop_waker() -> Waker {
-    std::task::Waker::noop().clone()
-}
+use std::task::{Context, Poll};
 
 fn poll_once<T, F>(future: &mut F) -> Option<T>
 where
     F: Future<Output = T> + Unpin,
 {
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
+    let waker = std::task::Waker::noop();
+    let mut cx = Context::from_waker(waker);
     match Pin::new(future).poll(&mut cx) {
         Poll::Ready(v) => Some(v),
         Poll::Pending => None,
@@ -26,45 +19,49 @@ where
 }
 
 #[test]
-fn mutex_waiter_chain_does_not_lose_wakeup() {
+fn mutex_waiter_baton_chain_reaches_tail_waiter() {
     let cx = Cx::for_testing();
     let mutex = Mutex::new(0u32);
 
-    // Hold lock
     let mut fut_hold = mutex.lock(&cx);
     let guard = poll_once(&mut fut_hold).unwrap().unwrap();
 
-    // Queue W1, W2, W3
     let mut fut1 = mutex.lock(&cx);
-    let _ = poll_once(&mut fut1);
+    assert!(poll_once(&mut fut1).is_none());
 
     let mut fut2 = mutex.lock(&cx);
-    let _ = poll_once(&mut fut2);
+    assert!(poll_once(&mut fut2).is_none());
 
     let mut fut3 = mutex.lock(&cx);
-    let _ = poll_once(&mut fut3);
+    assert!(poll_once(&mut fut3).is_none());
 
     assert_eq!(mutex.waiters(), 3);
 
-    // Unlock wakes W1 and pops it from the queue
     drop(guard);
 
     assert_eq!(mutex.waiters(), 2);
 
-    // W1 drops, it is no longer in the queue but it passes baton to W2
     drop(fut1);
 
-    assert_eq!(mutex.waiters(), 2);
+    assert_eq!(
+        mutex.waiters(),
+        1,
+        "dropping W1 should pass the baton through W2 and leave only W3 queued"
+    );
 
-    // W2 drops. Removes itself. Regression target: baton must continue to W3.
     drop(fut2);
 
-    assert_eq!(mutex.waiters(), 1);
+    assert_eq!(
+        mutex.waiters(),
+        0,
+        "dropping W2 should pass the baton to W3 and remove it from the queue"
+    );
 
-    // Now W3 polls. It should acquire the lock since lock is free!
-    let res = poll_once(&mut fut3);
-    assert!(
-        res.is_some(),
+    let tail_guard = poll_once(&mut fut3)
+        .expect("tail waiter should be woken")
+        .expect("tail waiter lock acquisition should succeed");
+    assert_eq!(
+        *tail_guard, 0,
         "lost wakeup: W3 stayed pending with free lock"
     );
 }

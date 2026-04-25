@@ -1,55 +1,46 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
-#![allow(missing_docs)]
+//! Regression coverage for MPSC sender FIFO fairness.
 
 use asupersync::channel::mpsc;
+use asupersync::channel::mpsc::SendError;
 use asupersync::cx::Cx;
-use std::thread;
-use std::time::Duration;
-
-fn test_cx() -> Cx {
-    Cx::for_testing()
-}
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll, Waker};
 
 #[test]
-fn test_mpsc_fifo_starvation() {
-    // Capacity 1
+fn waiting_sender_keeps_fifo_position_against_later_try_send() {
     let (tx, mut rx) = mpsc::channel::<i32>(1);
-    let cx = test_cx();
+    let cx = Cx::for_testing();
 
-    // Fill the channel
     tx.try_send(1).expect("first send");
 
-    let tx_a = tx.clone();
-    let cx_a = cx;
+    let waker = Waker::noop();
+    let mut task_cx = Context::from_waker(waker);
+    let mut sender_a = tx.reserve(&cx);
+    assert!(matches!(
+        Pin::new(&mut sender_a).poll(&mut task_cx),
+        Poll::Pending
+    ));
 
-    // Sender A: waits for capacity
-    let handle_a = thread::spawn(move || {
-        // This will block until rx receives
-        futures_lite::future::block_on(tx_a.send(&cx_a, 2)).expect("A send");
-    });
-
-    // Give A time to block and enter the wait queue
-    thread::sleep(Duration::from_millis(50));
-
-    // Receiver pops one, freeing a slot.
-    // In buggy impl: this wakes A but also clears the queue.
     let val = rx.try_recv().expect("recv 1");
     assert_eq!(val, 1);
 
-    // Sync to ensure Recv has processed (and cleared queue) but A hasn't claimed yet
-    // Hard to guarantee exact interleaving with threads, but...
-    // If we are fast enough, B can steal.
-
-    // Sender B: tries to send immediately
     let result_b = tx.try_send(3);
-
-    // In a fair FIFO channel, B should fail (Full) because A is waiting.
-    // In the buggy channel, B succeeds because A was removed from queue upon wake.
     assert!(
-        result_b.is_err(),
-        "FIFO violation: Sender B stole the slot while Sender A was waiting!"
+        matches!(result_b, Err(SendError::Full(3))),
+        "later try_send must not steal capacity from the queued waiter, got {result_b:?}"
     );
 
-    handle_a.join().unwrap();
+    let permit_a = match Pin::new(&mut sender_a).poll(&mut task_cx) {
+        Poll::Ready(Ok(permit)) => permit,
+        other => panic!("queued sender should claim the freed slot, got {other:?}"),
+    };
+    permit_a.send(2);
+
+    assert_eq!(
+        rx.try_recv().expect("sender A commit"),
+        2,
+        "oldest queued sender should commit before a later try_send"
+    );
+    assert!(rx.is_empty());
 }

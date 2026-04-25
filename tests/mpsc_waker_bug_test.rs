@@ -1,6 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
-#![allow(missing_docs)]
 //! Tests for mpsc waker bug — ensures unpolled Recv drop does not clear registered wakers.
 
 use asupersync::channel::mpsc;
@@ -16,7 +13,7 @@ impl std::task::Wake for TrackWaker {
 }
 
 #[test]
-fn test_mpsc_recv_drop_clears_waker_erroneously() {
+fn dropping_unpolled_recv_preserves_registered_waker_and_message() {
     let (tx, mut rx) = mpsc::channel::<i32>(10);
     let cx = asupersync::Cx::for_testing();
 
@@ -27,6 +24,7 @@ fn test_mpsc_recv_drop_clears_waker_erroneously() {
     // 1. Manually poll rx to register the waker
     let poll = rx.poll_recv(&cx, &mut ctx);
     assert!(poll.is_pending());
+    assert!(rx.is_empty());
 
     // 2. Create a Recv future, but DON'T poll it!
     let f = rx.recv(&cx);
@@ -43,4 +41,10 @@ fn test_mpsc_recv_drop_clears_waker_erroneously() {
         woken.load(Ordering::SeqCst),
         "Waker was lost due to unpolled Recv drop"
     );
+    assert_eq!(
+        rx.try_recv().expect("sent value must remain queued"),
+        42,
+        "unpolled Recv drop must not consume or discard the next message"
+    );
+    assert!(rx.is_empty());
 }

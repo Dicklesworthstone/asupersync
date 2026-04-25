@@ -1,31 +1,31 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
-//! Test for once cell set bug.
+//! Regression tests for `OnceCell::set` during in-flight initialization.
+
 use asupersync::sync::OnceCell;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
 
 #[test]
-fn test_once_cell_set_while_initializing() {
+fn set_fails_immediately_while_blocking_initializer_is_in_flight() {
     let cell = Arc::new(OnceCell::<u32>::new());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
 
-    // Thread 1: Start initializing, but take a while
     let cell_clone = Arc::clone(&cell);
     let handle = thread::spawn(move || {
         let res = cell_clone.get_or_init_blocking(|| {
-            thread::sleep(Duration::from_millis(50));
+            entered_tx
+                .send(())
+                .expect("initializer should report entry");
+            release_rx.recv().expect("initializer should be released");
             42
         });
         assert_eq!(*res, 42);
     });
 
-    // Give Thread 1 time to enter INITIALIZING state
-    thread::sleep(Duration::from_millis(10));
+    entered_rx
+        .recv()
+        .expect("initializer should reach INITIALIZING state");
 
-    // Thread 2: Try to set while initialization is in flight.
-    // The API is fail-closed and must return Err immediately rather than
-    // blocking the thread.
     let set_result = cell.set(99);
     assert_eq!(
         set_result,
@@ -33,31 +33,41 @@ fn test_once_cell_set_while_initializing() {
         "set should fail immediately while another thread initializes"
     );
 
+    release_tx
+        .send(())
+        .expect("initializer release should send");
     handle.join().unwrap();
 
-    // After the initializer finishes, the stored value is visible.
-    let get_result = cell.get();
-    assert_eq!(get_result, Some(&42));
+    assert_eq!(cell.get(), Some(&42));
 }
 
 #[test]
-fn test_once_cell_set_while_initializing_cancelled() {
+fn set_can_succeed_after_in_flight_blocking_initializer_panics() {
     let cell = Arc::new(OnceCell::<u32>::new());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
 
-    // Thread 1: Start initializing, but panic (simulate cancellation)
     let cell_clone = Arc::clone(&cell);
     let handle = thread::spawn(move || {
-        let _ = std::panic::catch_unwind(|| {
+        let panic_result = std::panic::catch_unwind(|| {
             cell_clone.get_or_init_blocking(|| {
-                thread::sleep(Duration::from_millis(50));
+                entered_tx
+                    .send(())
+                    .expect("initializer should report entry");
+                release_rx.recv().expect("initializer should be released");
                 panic!("cancelled");
             });
         });
+        assert!(
+            panic_result.is_err(),
+            "initializer should panic so the cell resets to UNINIT"
+        );
     });
 
-    thread::sleep(Duration::from_millis(10));
+    entered_rx
+        .recv()
+        .expect("initializer should reach INITIALIZING state");
 
-    // While initialization is still in flight, set() must fail immediately.
     let in_flight_set_result = cell.set(99);
     assert_eq!(
         in_flight_set_result,
@@ -65,10 +75,11 @@ fn test_once_cell_set_while_initializing_cancelled() {
         "set should fail immediately while initialization is in progress"
     );
 
+    release_tx
+        .send(())
+        .expect("initializer release should send");
     handle.join().unwrap();
 
-    // Once the panicking initializer unwinds, the cell returns to UNINIT and a
-    // subsequent set() can safely succeed with no data loss.
     let set_result = cell.set(99);
     assert_eq!(set_result, Ok(()), "set should succeed after cancellation");
     assert_eq!(cell.get(), Some(&99), "cell should contain 99");

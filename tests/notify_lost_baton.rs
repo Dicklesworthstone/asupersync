@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Regression test for Notify baton handoff after mixed single/broadcast wakeups.
 
 use asupersync::sync::Notify;
@@ -17,7 +15,7 @@ fn poll_once<F: Future + Unpin>(fut: &mut F) -> Poll<F::Output> {
 }
 
 #[test]
-fn notify_one_lost_if_polled_after_broadcast() {
+fn cancelled_notify_one_waiter_passes_exactly_one_baton_after_broadcast() {
     let notify = Notify::new();
 
     let mut waiter_a = notify.notified();
@@ -31,6 +29,11 @@ fn notify_one_lost_if_polled_after_broadcast() {
 
     // broadcast wakes B
     notify.notify_waiters();
+    assert_eq!(
+        poll_once(&mut waiter_b),
+        Poll::Ready(()),
+        "broadcast waiter should be ready"
+    );
 
     // C starts waiting
     let mut waiter_c = notify.notified();
@@ -40,5 +43,12 @@ fn notify_one_lost_if_polled_after_broadcast() {
     drop(waiter_a);
 
     // Now C should be ready because A passed the baton to it.
-    assert_eq!(poll_once(&mut waiter_c), Poll::Ready(()), "Baton was lost!");
+    assert_eq!(poll_once(&mut waiter_c), Poll::Ready(()), "baton was lost");
+
+    let mut waiter_d = notify.notified();
+    assert_eq!(
+        poll_once(&mut waiter_d),
+        Poll::Pending,
+        "baton handoff should not create an extra stored token"
+    );
 }

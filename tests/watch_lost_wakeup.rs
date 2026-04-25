@@ -1,6 +1,4 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
-#![allow(missing_docs)]
+//! Regression test for watch-channel waiter replacement after a pending future is dropped.
 
 use asupersync::channel::watch::channel;
 use asupersync::cx::Cx;
@@ -32,7 +30,7 @@ impl std::task::Wake for CountingWaker {
 }
 
 #[test]
-fn test_watch_lost_wakeup() {
+fn dropped_changed_future_does_not_steal_replacement_wakeup() {
     let cx = Cx::for_testing();
 
     let (tx, mut rx) = channel(0);
@@ -55,18 +53,14 @@ fn test_watch_lost_wakeup() {
 
     tx.send(1).unwrap();
 
-    println!(
-        "Waker 1 wakes: {}",
-        waker1_arc.wakes.load(AtomicOrdering::Acquire)
+    assert_eq!(
+        waker1_arc.wakes.load(AtomicOrdering::Acquire),
+        0,
+        "dropped waiter should be removed before send"
     );
-    println!(
-        "Waker 2 wakes: {}",
-        waker2_arc.wakes.load(AtomicOrdering::Acquire)
-    );
-
     assert_eq!(
         waker2_arc.wakes.load(AtomicOrdering::Acquire),
         1,
-        "waker 2 was not woken! Lost wakeup!"
+        "replacement waiter should be woken exactly once"
     );
 }

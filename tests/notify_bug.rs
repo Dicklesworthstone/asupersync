@@ -1,7 +1,4 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Regression test for notify spurious wakeup detection.
-#![allow(missing_docs)]
 
 use asupersync::sync::Notify;
 use std::future::Future;
@@ -18,20 +15,32 @@ fn poll_once<F: Future + Unpin>(fut: &mut F) -> Poll<F::Output> {
 }
 
 #[test]
-fn test_notify_bug() {
+fn dropping_broadcast_woken_waiter_does_not_wake_late_waiter() {
     let notify = Notify::new();
     let mut fut1 = notify.notified();
     assert!(poll_once(&mut fut1).is_pending());
+    assert_eq!(notify.waiter_count(), 1);
 
     notify.notify_waiters();
+    assert_eq!(
+        notify.waiter_count(),
+        0,
+        "broadcast should mark the original waiter inactive"
+    );
 
     let mut fut2 = notify.notified();
     assert!(poll_once(&mut fut2).is_pending());
+    assert_eq!(notify.waiter_count(), 1);
 
     drop(fut1);
+    assert_eq!(
+        notify.waiter_count(),
+        1,
+        "dropping a broadcast-woken waiter must not remove a late waiter"
+    );
 
-    // If fut2 is now ready, it means the drop of a broadcast-woken waiter
-    // spuriously woke fut2!
-    let is_ready = poll_once(&mut fut2).is_ready();
-    assert!(!is_ready, "Spurious wakeup detected!");
+    assert!(
+        poll_once(&mut fut2).is_pending(),
+        "dropping a broadcast-woken waiter must not spuriously wake a late waiter"
+    );
 }

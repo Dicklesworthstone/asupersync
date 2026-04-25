@@ -1,6 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
-#![allow(missing_docs)]
 //! Watch channel leak tests.
 
 use asupersync::channel::watch::channel;
@@ -11,40 +8,54 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Waker};
 
-struct DummyWaker {
-    count: Arc<AtomicUsize>,
+struct DropCountingWaker {
+    drops: Arc<AtomicUsize>,
 }
 
-impl std::task::Wake for DummyWaker {
+impl std::task::Wake for DropCountingWaker {
     fn wake(self: Arc<Self>) {
-        // no-op
+        drop(self);
     }
 }
 
-impl Drop for DummyWaker {
+impl Drop for DropCountingWaker {
     fn drop(&mut self) {
-        self.count.fetch_add(1, Ordering::SeqCst);
+        self.drops.fetch_add(1, Ordering::AcqRel);
     }
 }
 
 #[test]
-fn test_watch_waker_leak() {
+fn dropped_pending_changed_future_releases_registered_waker() {
     let cx = Cx::for_testing();
-    let (_tx, mut rx) = channel(0);
+    let (tx, mut rx) = channel(0);
 
-    let drop_count = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
 
     {
-        let waker_arc = Arc::new(DummyWaker {
-            count: drop_count.clone(),
+        let waker_arc = Arc::new(DropCountingWaker {
+            drops: Arc::clone(&drops),
         });
         let waker = Waker::from(waker_arc);
         let mut task_cx = Context::from_waker(&waker);
 
         let mut fut = rx.changed(&cx);
         assert!(Pin::new(&mut fut).poll(&mut task_cx).is_pending());
-    } // fut is dropped here
+    }
 
-    // Waker should be dropped when fut is dropped!
-    assert_eq!(drop_count.load(Ordering::SeqCst), 1, "Waker leaked!");
+    assert_eq!(
+        drops.load(Ordering::Acquire),
+        1,
+        "dropped pending changed future must remove its registered waker"
+    );
+
+    assert!(
+        tx.send(1).is_ok(),
+        "send should succeed after waiter cleanup"
+    );
+    let mut task_cx = Context::from_waker(Waker::noop());
+    let mut fut = rx.changed(&cx);
+    assert!(
+        Pin::new(&mut fut).poll(&mut task_cx).is_ready(),
+        "receiver should remain usable after pending future cleanup"
+    );
 }
