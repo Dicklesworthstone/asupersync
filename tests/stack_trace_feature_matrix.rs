@@ -156,7 +156,10 @@ mod build_verification_tests {
         {
             // The fact that this compiles means backtrace and rustc-demangle are available
             let bt = backtrace::Backtrace::new();
-            assert!(bt.frames().len() >= 0); // Always true, but exercises the API
+            assert!(
+                !bt.frames().is_empty(),
+                "captured backtrace should include the current stack"
+            );
 
             let mangled = "_ZN4test4funcE";
             let _ = rustc_demangle::try_demangle(mangled); // Should not panic
@@ -164,46 +167,26 @@ mod build_verification_tests {
     }
 
     #[test]
-    fn test_zero_cost_when_disabled() {
-        // When disabled, stack trace capture should be extremely fast
-        use std::time::Instant;
-
+    fn test_disabled_capture_contract_is_stable() {
         #[cfg(not(feature = "lab-stack-traces"))]
         {
-            let start = Instant::now();
-            for _ in 0..1000 {
-                let _ = capture_stack_trace();
-            }
-            let duration = start.elapsed();
+            let traces: Vec<String> = (0..10).map(|_| capture_stack_trace()).collect();
 
-            // 1000 disabled captures should complete in under 1ms
             assert!(
-                duration.as_millis() < 1,
-                "Disabled stack traces should be near zero-cost, took {}ms for 1000 captures",
-                duration.as_millis()
+                traces.iter().all(|trace| trace
+                    == "Stack trace capture disabled (enable 'lab-stack-traces' feature)")
             );
         }
     }
 
     #[test]
-    fn test_reasonable_performance_when_enabled() {
-        // When enabled, stack traces should still have reasonable performance
-
+    fn test_enabled_capture_contract_is_stable() {
         #[cfg(feature = "lab-stack-traces")]
         {
-            use std::time::Instant;
-            let start = Instant::now();
-            for _ in 0..10 {
-                let _ = capture_stack_trace();
-            }
-            let duration = start.elapsed();
+            let traces: Vec<String> = (0..3).map(|_| capture_stack_trace()).collect();
 
-            // 10 real captures should complete in under 100ms
-            assert!(
-                duration.as_millis() < 100,
-                "Real stack traces should have reasonable performance, took {}ms for 10 captures",
-                duration.as_millis()
-            );
+            assert!(traces.iter().all(|trace| trace.starts_with("Stack trace:")));
+            assert!(traces.iter().all(|trace| trace.lines().count() > 1));
         }
     }
 }

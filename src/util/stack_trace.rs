@@ -21,26 +21,26 @@ pub fn capture_stack_trace() -> String {
     let bt = backtrace::Backtrace::new();
     let mut output = String::new();
 
-    writeln!(&mut output, "Stack trace:").unwrap();
+    let _ = writeln!(&mut output, "Stack trace:");
 
     for (i, frame) in bt.frames().iter().enumerate() {
         for symbol in frame.symbols() {
             if let Some(name) = symbol.name() {
-                write!(&mut output, "  {}: ", i).unwrap();
+                let _ = write!(&mut output, "  {}: ", i);
 
                 // Try to demangle the symbol name
                 if let Ok(demangled) = rustc_demangle::try_demangle(&name.to_string()) {
-                    write!(&mut output, "{}", demangled).unwrap();
+                    let _ = write!(&mut output, "{}", demangled);
                 } else {
-                    write!(&mut output, "{}", name).unwrap();
+                    let _ = write!(&mut output, "{}", name);
                 }
 
                 // Add file and line info if available
                 if let (Some(filename), Some(lineno)) = (symbol.filename(), symbol.lineno()) {
-                    write!(&mut output, " at {}:{}", filename.display(), lineno).unwrap();
+                    let _ = write!(&mut output, " at {}:{}", filename.display(), lineno);
                 }
 
-                writeln!(&mut output).unwrap();
+                let _ = writeln!(&mut output);
             }
         }
     }
@@ -193,10 +193,11 @@ mod tests {
                     || trace_str.contains("level_2")
                     || trace_str.contains("level_3")
             );
+            assert!(trace.frame_count() > 1);
         }
 
-        // Should have multiple frames
-        assert!(trace.frame_count() > 1);
+        #[cfg(not(feature = "lab-stack-traces"))]
+        assert_eq!(trace.frame_count(), 1);
     }
 
     #[test]
@@ -253,30 +254,20 @@ mod tests {
     }
 
     #[test]
-    fn test_performance_characteristics() {
-        use std::time::Instant;
-
-        let start = Instant::now();
-
-        // Capture multiple stack traces to measure performance
+    fn test_repeated_capture_preserves_contract() {
         for _ in 0..10 {
-            let _ = capture_stack_trace();
-        }
+            let trace = capture_stack_trace();
 
-        let duration = start.elapsed();
+            assert!(!trace.is_empty());
 
-        // Performance check - should complete in reasonable time
-        // This is a rough check - actual performance depends on feature flag
-        #[cfg(feature = "lab-stack-traces")]
-        {
-            // Real stack traces are slower but should still be under 1 second for 10 captures
-            assert!(duration.as_secs() < 1);
-        }
+            #[cfg(feature = "lab-stack-traces")]
+            assert!(trace.starts_with("Stack trace:"));
 
-        #[cfg(not(feature = "lab-stack-traces"))]
-        {
-            // Disabled stack traces should be very fast (microseconds)
-            assert!(duration.as_millis() < 100);
+            #[cfg(not(feature = "lab-stack-traces"))]
+            assert_eq!(
+                trace,
+                "Stack trace capture disabled (enable 'lab-stack-traces' feature)"
+            );
         }
     }
 

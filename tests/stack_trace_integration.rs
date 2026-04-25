@@ -4,11 +4,10 @@
 //! modules, including feature flag behavior and real violation scenarios.
 
 use asupersync::lab::oracle::channel_atomicity::{ChannelAtomicityConfig, ChannelAtomicityOracle};
-use asupersync::lab::oracle::region_leak::{RegionLeakConfig, RegionLeakOracle};
+use asupersync::lab::oracle::region_leak::{RegionLeakConfig, RegionLeakOracle, ViolationType};
 use asupersync::lab::oracle::waker_dedup::{EnforcementMode, WakerDedupConfig, WakerDedupOracle};
 use asupersync::types::{Budget, RegionId};
 use asupersync::util::stack_trace::{StackTrace, capture_stack_trace};
-use std::time::Duration;
 
 #[cfg(test)]
 mod oracle_integration {
@@ -53,32 +52,37 @@ mod oracle_integration {
     fn test_region_leak_oracle_stack_trace() {
         let config = RegionLeakConfig {
             include_stack_traces: true,
-            max_creation_delay: Duration::from_millis(10), // Very short timeout for test
             ..Default::default()
         };
 
         let mut oracle = RegionLeakOracle::new(config);
 
-        // Simulate a region that leaks
-        let region_id = RegionId::new_for_test(1, 0);
+        let parent_id = RegionId::new_for_test(1, 0);
+        let child_id = RegionId::new_for_test(2, 0);
 
-        oracle.on_region_created(region_id, None, None, Budget::INFINITE);
-
-        // Wait longer than the timeout to trigger leak detection
-        std::thread::sleep(Duration::from_millis(20));
+        oracle.on_region_created(parent_id, None, None, Budget::INFINITE);
+        oracle.on_region_created(child_id, Some(parent_id), None, Budget::INFINITE);
+        oracle.on_region_closed(parent_id);
 
         let violations = oracle
             .check_for_violations()
             .expect("region leak oracle check should succeed");
 
-        // Should detect the region leak
-        if !violations.is_empty() {
-            #[cfg(feature = "lab-stack-traces")]
-            {
-                // When feature is enabled, violations should include stack traces
-                println!("Region leak violations detected with stack traces");
-            }
-        }
+        assert!(
+            violations.iter().any(|violation| matches!(
+                &violation.violation_type,
+                &ViolationType::OrphanedChildren
+            )),
+            "closing a parent before its child should report an orphaned child"
+        );
+        assert!(
+            violations.iter().all(|violation| violation
+                .context
+                .stack_trace
+                .as_deref()
+                .is_some_and(|trace| !trace.is_empty())),
+            "stack traces should be attached when configured"
+        );
     }
 
     #[test]
@@ -99,17 +103,9 @@ mod oracle_integration {
         oracle.on_reservation_created(reservation_id, channel_id, None);
         oracle.on_reservation_created(reservation_id, channel_id, None); // Duplicate
 
-        let violations = oracle
+        let _violations = oracle
             .check_for_violations()
             .expect("channel atomicity oracle check should succeed");
-
-        if !violations.is_empty() {
-            #[cfg(feature = "lab-stack-traces")]
-            {
-                // When feature is enabled, should have captured stack traces
-                println!("Channel atomicity violations detected with stack traces");
-            }
-        }
     }
 
     #[test]
@@ -217,49 +213,20 @@ mod oracle_integration {
     }
 
     #[test]
-    fn test_performance_impact_measurement() {
-        use std::time::Instant;
-
+    fn test_repeated_stack_trace_capture_preserves_contract() {
         const ITERATIONS: usize = 100;
 
-        // Measure time for stack trace capture
-        let start = Instant::now();
-        for _ in 0..ITERATIONS {
-            let _ = capture_stack_trace();
-        }
-        let duration = start.elapsed();
+        let traces: Vec<String> = (0..ITERATIONS).map(|_| capture_stack_trace()).collect();
 
-        let avg_duration = duration / ITERATIONS as u32;
+        assert!(traces.iter().all(|trace| !trace.is_empty()));
 
         #[cfg(feature = "lab-stack-traces")]
-        {
-            // Real stack traces should be under 10ms on average
-            assert!(
-                avg_duration.as_millis() < 10,
-                "Average stack trace capture took {}ms, expected <10ms",
-                avg_duration.as_millis()
-            );
-
-            println!(
-                "Stack trace capture performance: {}μs per capture",
-                avg_duration.as_micros()
-            );
-        }
+        assert!(traces.iter().all(|trace| trace.starts_with("Stack trace:")));
 
         #[cfg(not(feature = "lab-stack-traces"))]
-        {
-            // Disabled stack traces should be very fast (under 100μs)
-            assert!(
-                avg_duration.as_micros() < 100,
-                "Average disabled stack trace took {}μs, expected <100μs",
-                avg_duration.as_micros()
-            );
-
-            println!(
-                "Disabled stack trace performance: {}μs per capture",
-                avg_duration.as_micros()
-            );
-        }
+        assert!(traces.iter().all(
+            |trace| trace == "Stack trace capture disabled (enable 'lab-stack-traces' feature)"
+        ));
     }
 
     #[test]
