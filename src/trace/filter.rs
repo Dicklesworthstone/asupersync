@@ -554,6 +554,7 @@ impl TraceFilter {
 ///         .sample_rate(0.1))
 ///     .build();
 /// ```
+#[derive(Default)]
 pub struct FilterBuilder {
     filter: TraceFilter,
 }
@@ -605,12 +606,6 @@ impl FilterBuilder {
     #[must_use]
     pub fn build(self) -> TraceFilter {
         self.filter
-    }
-}
-
-impl Default for FilterBuilder {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

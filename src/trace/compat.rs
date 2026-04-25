@@ -569,6 +569,7 @@ pub trait TraceMigration: Send + Sync {
 }
 
 /// Chains multiple migrations to transform traces across version gaps.
+#[derive(Default)]
 pub struct TraceMigrator {
     migrations: Vec<Box<dyn TraceMigration>>,
 }
@@ -651,12 +652,6 @@ impl TraceMigrator {
     #[must_use]
     pub fn can_migrate(&self, from: u32, to: u32) -> bool {
         self.find_migration_path(from, to).is_some()
-    }
-}
-
-impl Default for TraceMigrator {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
