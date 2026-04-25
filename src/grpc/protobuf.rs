@@ -97,10 +97,7 @@ impl<T, U> ProstCodec<T, U> {
     /// Create a new codec with default settings.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
-            _marker: PhantomData,
-        }
+        Self::with_max_size(DEFAULT_MAX_MESSAGE_SIZE)
     }
 
     /// Create a new codec with a custom maximum message size.
@@ -412,24 +409,18 @@ mod tests {
     fn test_prost_codec_unknown_fields() {
         init_test("test_prost_codec_unknown_fields");
 
-        // Encode a message with more fields
-        let mut full_codec: ProstCodec<NestedMessage, NestedMessage> = ProstCodec::new();
-        let nested = NestedMessage {
-            inner: Some(TestMessage {
-                name: "test".to_string(),
-                value: 99,
-            }),
-            items: vec!["x".to_string()],
+        let mut codec: ProstCodec<TestMessage, TestMessage> = ProstCodec::new();
+        let message = TestMessage {
+            name: "test".to_string(),
+            value: 99,
         };
-        let encoded = full_codec.encode(&nested).unwrap();
 
-        // Decode with a simpler message type that doesn't know about all fields
-        // prost silently ignores unknown fields by default
-        let mut simple_codec: ProstCodec<NestedMessage, TestMessage> = ProstCodec::new();
-        let result = simple_codec.decode(&encoded);
-        // This should succeed - unknown fields are ignored
-        let ok = result.is_ok();
-        crate::assert_with_log!(ok, "unknown fields ignored", true, ok);
+        let mut encoded = codec.encode(&message).unwrap().to_vec();
+        encoded.extend_from_slice(&[0x98, 0x06, 0x7B]); // field 99, varint 123
+
+        let decoded = codec.decode(&Bytes::from(encoded)).unwrap();
+        let ok = decoded.name == "test" && decoded.value == 99;
+        crate::assert_with_log!(ok, "unknown field ignored", true, ok);
         crate::test_complete!("test_prost_codec_unknown_fields");
     }
 
