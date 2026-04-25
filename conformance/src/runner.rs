@@ -75,7 +75,7 @@ impl RunConfig {
 }
 
 /// Summary of a test run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunSummary {
     /// Total number of tests executed.
     pub total: usize,
@@ -107,12 +107,6 @@ impl RunSummary {
     /// Check if all tests passed.
     pub fn all_passed(&self) -> bool {
         self.failed == 0
-    }
-}
-
-impl Default for RunSummary {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -275,7 +269,7 @@ impl ComparisonStatus {
 }
 
 /// Summary of a comparison run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ComparisonSummary {
     /// Total tests compared.
     pub total: usize,
@@ -330,12 +324,6 @@ impl ComparisonSummary {
         }
         self.total += 1;
         self.results.push(result);
-    }
-}
-
-impl Default for ComparisonSummary {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
