@@ -120,9 +120,7 @@ impl Default for WorkStealingChecker {
 }
 
 impl WorkStealingChecker {
-    /// Creates a new work-stealing correctness checker.
-    #[must_use]
-    pub fn new() -> Self {
+    fn with_enabled(enabled: bool) -> Self {
         Self {
             task_owners: Arc::new(RwLock::new(HashMap::new())),
             executing_tasks: Arc::new(RwLock::new(HashMap::new())),
@@ -130,22 +128,20 @@ impl WorkStealingChecker {
             stats: Arc::new(RwLock::new(StealingStats::default())),
             sequence_counter: AtomicU64::new(0),
             task_sequences: Arc::new(RwLock::new(HashMap::new())),
-            enabled: true,
+            enabled,
         }
+    }
+
+    /// Creates a new work-stealing correctness checker.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_enabled(true)
     }
 
     /// Creates a disabled checker (no-op for production).
     #[must_use]
     pub fn disabled() -> Self {
-        Self {
-            task_owners: Arc::new(RwLock::new(HashMap::new())),
-            executing_tasks: Arc::new(RwLock::new(HashMap::new())),
-            violations: Arc::new(RwLock::new(Vec::new())),
-            stats: Arc::new(RwLock::new(StealingStats::default())),
-            sequence_counter: AtomicU64::new(0),
-            task_sequences: Arc::new(RwLock::new(HashMap::new())),
-            enabled: false,
-        }
+        Self::with_enabled(false)
     }
 
     /// Records that a task was queued by a worker.
