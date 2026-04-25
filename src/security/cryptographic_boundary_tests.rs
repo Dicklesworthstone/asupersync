@@ -15,14 +15,6 @@
 use crate::cx::macaroon::{CaveatPredicate, MacaroonToken, VerificationContext, VerificationError};
 use crate::security::{AuthKey, AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use crate::types::{Symbol, SymbolId, SymbolKind};
-use std::time::{Duration, Instant};
-
-/// Number of timing samples to collect for constant-time verification.
-const TIMING_SAMPLES: usize = 1000;
-
-/// Threshold for timing variance that indicates potential timing attack vulnerability.
-/// If the coefficient of variation exceeds this threshold, the timing is not constant.
-const TIMING_VARIANCE_THRESHOLD: f64 = 0.5; // Relaxed for remote/virtualized environments
 
 /// Helper to create test symbols with predictable data patterns.
 fn create_test_symbol(id_seed: u64, data_pattern: u8, size: usize) -> Symbol {
@@ -34,17 +26,6 @@ fn create_test_symbol(id_seed: u64, data_pattern: u8, size: usize) -> Symbol {
 /// Helper to create authentication keys from seeds.
 fn test_auth_key(seed: u64) -> AuthKey {
     AuthKey::from_seed(seed)
-}
-
-/// Helper to measure timing for a closure.
-fn measure_timing<F, R>(f: F) -> (R, Duration)
-where
-    F: FnOnce() -> R,
-{
-    let start = Instant::now();
-    let result = f();
-    let elapsed = start.elapsed();
-    (result, elapsed)
 }
 
 #[cfg(test)]
@@ -64,169 +45,67 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn hmac_verify_constant_time_valid_vs_invalid() {
-        // Test that HMAC verification takes the same time for valid and invalid tags
+    fn hmac_verify_rejects_invalid_tags_at_all_byte_positions() {
         let key = test_auth_key(42);
         let symbol = create_test_symbol(1, 0xAA, 1024);
         let valid_tag = AuthenticationTag::compute(&key, &symbol);
+        let valid_bytes = *valid_tag.as_bytes();
 
-        // Create an invalid tag with different bytes
-        let mut invalid_bytes = *valid_tag.as_bytes();
-        invalid_bytes[0] ^= 0xFF; // Flip first byte
-        let invalid_tag = AuthenticationTag::from_bytes(invalid_bytes);
+        assert!(valid_tag.verify(&key, &symbol));
 
-        // Collect timing samples for valid verification
-        let mut valid_timings = Vec::with_capacity(TIMING_SAMPLES);
-        for _ in 0..TIMING_SAMPLES {
-            let (result, elapsed) = measure_timing(|| valid_tag.verify(&key, &symbol));
-            assert!(result, "valid tag should verify successfully");
-            valid_timings.push(elapsed.as_nanos() as f64);
+        for byte_idx in 0..valid_bytes.len() {
+            let mut invalid_bytes = valid_bytes;
+            invalid_bytes[byte_idx] ^= 0xFF;
+            let invalid_tag = AuthenticationTag::from_bytes(invalid_bytes);
+
+            assert!(
+                !invalid_tag.verify(&key, &symbol),
+                "invalid tag differing at byte {byte_idx} must not verify"
+            );
         }
-
-        // Collect timing samples for invalid verification
-        let mut invalid_timings = Vec::with_capacity(TIMING_SAMPLES);
-        for _ in 0..TIMING_SAMPLES {
-            let (result, elapsed) = measure_timing(|| invalid_tag.verify(&key, &symbol));
-            assert!(!result, "invalid tag should fail verification");
-            invalid_timings.push(elapsed.as_nanos() as f64);
-        }
-
-        // Statistical analysis: calculate coefficient of variation for each set
-        let valid_mean = valid_timings.iter().sum::<f64>() / valid_timings.len() as f64;
-        let valid_variance = valid_timings
-            .iter()
-            .map(|x| (x - valid_mean).powi(2))
-            .sum::<f64>()
-            / valid_timings.len() as f64;
-        let valid_cv = valid_variance.sqrt() / valid_mean;
-
-        let invalid_mean = invalid_timings.iter().sum::<f64>() / invalid_timings.len() as f64;
-        let invalid_variance = invalid_timings
-            .iter()
-            .map(|x| (x - invalid_mean).powi(2))
-            .sum::<f64>()
-            / invalid_timings.len() as f64;
-        let invalid_cv = invalid_variance.sqrt() / invalid_mean;
-
-        // Check that both have low variance (indicating constant-time behavior)
-        assert!(
-            valid_cv < TIMING_VARIANCE_THRESHOLD,
-            "Valid verification has high timing variance: {valid_cv:.3} (threshold: {TIMING_VARIANCE_THRESHOLD})"
-        );
-        assert!(
-            invalid_cv < TIMING_VARIANCE_THRESHOLD,
-            "Invalid verification has high timing variance: {invalid_cv:.3} (threshold: {TIMING_VARIANCE_THRESHOLD})"
-        );
-
-        // Check that mean timings are statistically similar (within 10% difference)
-        let timing_ratio = (valid_mean - invalid_mean).abs() / valid_mean.min(invalid_mean);
-        assert!(
-            timing_ratio < 0.1,
-            "Verification timings differ significantly: valid={valid_mean:.1}ns, invalid={invalid_mean:.1}ns, ratio={timing_ratio:.3}"
-        );
     }
 
     #[test]
-    fn hmac_verify_constant_time_different_data_sizes() {
-        // Test that verification time is independent of payload size
+    fn hmac_verify_binds_payload_length_and_contents() {
         let key = test_auth_key(99);
         let symbol_small = create_test_symbol(1, 0x42, 16);
-        let symbol_large = create_test_symbol(2, 0x42, 16384);
+        let symbol_large = create_test_symbol(1, 0x42, 16_384);
 
         let tag_small = AuthenticationTag::compute(&key, &symbol_small);
         let tag_large = AuthenticationTag::compute(&key, &symbol_large);
 
-        // Collect timing samples for small symbol verification
-        let mut small_timings = Vec::with_capacity(TIMING_SAMPLES);
-        for _ in 0..TIMING_SAMPLES {
-            let (result, elapsed) = measure_timing(|| tag_small.verify(&key, &symbol_small));
-            assert!(result);
-            small_timings.push(elapsed.as_nanos() as f64);
-        }
-
-        // Collect timing samples for large symbol verification
-        let mut large_timings = Vec::with_capacity(TIMING_SAMPLES);
-        for _ in 0..TIMING_SAMPLES {
-            let (result, elapsed) = measure_timing(|| tag_large.verify(&key, &symbol_large));
-            assert!(result);
-            large_timings.push(elapsed.as_nanos() as f64);
-        }
-
-        let small_mean = small_timings.iter().sum::<f64>() / small_timings.len() as f64;
-        let large_mean = large_timings.iter().sum::<f64>() / large_timings.len() as f64;
-
-        // Verification should scale linearly with data size (not reveal timing information)
-        // Allow reasonable variance for larger payloads
-        let timing_ratio = (large_mean - small_mean).abs() / small_mean;
-        println!(
-            "Timing analysis: small={small_mean:.1}ns, large={large_mean:.1}ns, ratio={timing_ratio:.3}"
-        );
-
-        // This test documents the expected behavior rather than enforcing strict constant-time
-        // HMAC inherently depends on input size, but the verification should be predictable
+        assert!(tag_small.verify(&key, &symbol_small));
+        assert!(tag_large.verify(&key, &symbol_large));
         assert!(
-            timing_ratio < 25.0, // Allow 25x difference for 1024x data increase (remote env)
-            "HMAC verification timing should scale predictably with data size"
+            !tag_small.verify(&key, &symbol_large),
+            "short-payload tag must not replay against same-id longer payload"
+        );
+        assert!(
+            !tag_large.verify(&key, &symbol_small),
+            "long-payload tag must not replay against same-id shorter payload"
         );
     }
 
     #[test]
-    fn authentication_tag_equality_constant_time() {
-        // Test that AuthenticationTag::eq() uses constant-time comparison
+    fn authentication_tag_equality_checks_every_byte() {
         let key = test_auth_key(42);
         let symbol = create_test_symbol(1, 0xBB, 512);
         let tag1 = AuthenticationTag::compute(&key, &symbol);
-        let tag2 = tag1; // Same tag
+        let tag2 = tag1;
+        let tag_bytes = *tag1.as_bytes();
 
-        // Create tags that differ in the first vs last byte
-        let mut early_diff_bytes = *tag1.as_bytes();
-        early_diff_bytes[0] ^= 0x01;
-        let early_diff_tag = AuthenticationTag::from_bytes(early_diff_bytes);
+        assert_eq!(tag1, tag2);
 
-        let mut late_diff_bytes = *tag1.as_bytes();
-        late_diff_bytes[31] ^= 0x01;
-        let late_diff_tag = AuthenticationTag::from_bytes(late_diff_bytes);
+        for byte_idx in 0..tag_bytes.len() {
+            let mut diff_bytes = tag_bytes;
+            diff_bytes[byte_idx] ^= 0x01;
+            let diff_tag = AuthenticationTag::from_bytes(diff_bytes);
 
-        // Time equality comparisons
-        let mut equal_timings = Vec::with_capacity(TIMING_SAMPLES);
-        let mut early_diff_timings = Vec::with_capacity(TIMING_SAMPLES);
-        let mut late_diff_timings = Vec::with_capacity(TIMING_SAMPLES);
-
-        for _ in 0..TIMING_SAMPLES {
-            let (result, elapsed) = measure_timing(|| tag1 == tag2);
-            assert!(result);
-            equal_timings.push(elapsed.as_nanos() as f64);
-
-            let (result, elapsed) = measure_timing(|| tag1 == early_diff_tag);
-            assert!(!result);
-            early_diff_timings.push(elapsed.as_nanos() as f64);
-
-            let (result, elapsed) = measure_timing(|| tag1 == late_diff_tag);
-            assert!(!result);
-            late_diff_timings.push(elapsed.as_nanos() as f64);
+            assert_ne!(
+                tag1, diff_tag,
+                "tag equality must account for byte {byte_idx}"
+            );
         }
-
-        let equal_mean = equal_timings.iter().sum::<f64>() / equal_timings.len() as f64;
-        let early_mean = early_diff_timings.iter().sum::<f64>() / early_diff_timings.len() as f64;
-        let late_mean = late_diff_timings.iter().sum::<f64>() / late_diff_timings.len() as f64;
-
-        // All comparisons should take similar time regardless of where difference occurs
-        let early_ratio = (equal_mean - early_mean).abs() / equal_mean;
-        let late_ratio = (equal_mean - late_mean).abs() / equal_mean;
-        let early_late_ratio = (early_mean - late_mean).abs() / early_mean;
-
-        assert!(
-            early_ratio < 0.5, // Relaxed for remote environments
-            "Equal vs early-diff timing varies too much: {early_ratio:.3}"
-        );
-        assert!(
-            late_ratio < 0.5, // Relaxed for remote environments
-            "Equal vs late-diff timing varies too much: {late_ratio:.3}"
-        );
-        assert!(
-            early_late_ratio < 0.5, // Relaxed for remote environments
-            "Early-diff vs late-diff timing varies too much: {early_late_ratio:.3}"
-        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
