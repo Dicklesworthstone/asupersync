@@ -1,10 +1,10 @@
-#![allow(clippy::all)]
 //! Golden artifact tests for HTTP/2 frame serialization.
 //!
 //! These tests verify that frame serialization produces deterministic binary output
 //! that matches expected golden artifacts. This ensures protocol compliance and
 //! prevents regressions in frame encoding logic.
 
+use super::error::ErrorCode;
 use super::frame::*;
 use crate::bytes::{Bytes, BytesMut};
 
@@ -26,7 +26,7 @@ impl FrameGoldenTester {
 
     /// Convert bytes to hex string manually.
     fn to_hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{:02x}", b)).collect()
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// Parse hex string to bytes manually.
@@ -47,14 +47,13 @@ impl FrameGoldenTester {
         let actual_hex = Self::to_hex(&actual_bytes);
 
         if self.update_golden {
-            println!("GOLDEN UPDATE {}: {}", test_name, actual_hex);
+            println!("GOLDEN UPDATE {test_name}: {actual_hex}");
             return;
         }
 
         assert_eq!(
             actual_hex, expected_hex,
-            "Frame serialization mismatch for {}\nExpected: {}\nActual:   {}",
-            test_name, expected_hex, actual_hex
+            "Frame serialization mismatch for {test_name}\nExpected: {expected_hex}\nActual:   {actual_hex}",
         );
     }
 
@@ -66,15 +65,20 @@ impl FrameGoldenTester {
         let actual_hex = Self::to_hex(&actual_bytes);
 
         if self.update_golden {
-            println!("HEADER GOLDEN UPDATE {}: {}", test_name, actual_hex);
+            println!("HEADER GOLDEN UPDATE {test_name}: {actual_hex}");
             return;
         }
 
         assert_eq!(
             actual_hex, expected_hex,
-            "Frame header serialization mismatch for {}\nExpected: {}\nActual:   {}",
-            test_name, expected_hex, actual_hex
+            "Frame header serialization mismatch for {test_name}\nExpected: {expected_hex}\nActual:   {actual_hex}",
         );
+    }
+}
+
+impl Default for FrameGoldenTester {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -235,14 +239,115 @@ fn test_ping_frame_golden_ack() {
     tester.assert_frame_golden(&frame, "ping_ack", "000008060100000000fedcba9876543210");
 }
 
-/*
-// NOTE: These tests are temporarily disabled due to API mismatches.
-// They demonstrate the intended golden test patterns for HTTP/2 frames.
-// TODO: Fix frame constructor APIs to match actual implementation.
+// ============================================================================
+// Control Frame Golden Tests
+// ============================================================================
 
-// RST_STREAM, WINDOW_UPDATE, GOAWAY, and PRIORITY frame tests would go here
-// but require investigation of the actual frame constructor APIs.
-*/
+#[test]
+fn test_priority_frame_golden_non_exclusive() {
+    let tester = FrameGoldenTester::new();
+
+    let frame = Frame::Priority(PriorityFrame {
+        stream_id: 3,
+        priority: PrioritySpec {
+            exclusive: false,
+            dependency: 1,
+            weight: 16,
+        },
+    });
+
+    // Golden: PRIORITY frame, stream 3, dependency 1, non-exclusive, weight 16.
+    tester.assert_frame_golden(
+        &frame,
+        "priority_non_exclusive",
+        "0000050200000000030000000110",
+    );
+}
+
+#[test]
+fn test_priority_frame_golden_exclusive() {
+    let tester = FrameGoldenTester::new();
+
+    let frame = Frame::Priority(PriorityFrame {
+        stream_id: 5,
+        priority: PrioritySpec {
+            exclusive: true,
+            dependency: 3,
+            weight: 255,
+        },
+    });
+
+    // Golden: exclusive PRIORITY sets the high bit on the 31-bit dependency.
+    tester.assert_frame_golden(&frame, "priority_exclusive", "00000502000000000580000003ff");
+}
+
+#[test]
+fn test_rst_stream_frame_golden_cancel() {
+    let tester = FrameGoldenTester::new();
+
+    let frame = Frame::RstStream(RstStreamFrame::new(1, ErrorCode::Cancel));
+
+    // Golden: RST_STREAM frame, stream 1, CANCEL error code 0x8.
+    tester.assert_frame_golden(&frame, "rst_stream_cancel", "00000403000000000100000008");
+}
+
+#[test]
+fn test_goaway_frame_golden_empty_debug() {
+    let tester = FrameGoldenTester::new();
+
+    let frame = Frame::GoAway(GoAwayFrame::new(3, ErrorCode::NoError));
+
+    // Golden: GOAWAY frame, last_stream_id 3, NO_ERROR, no debug data.
+    tester.assert_frame_golden(
+        &frame,
+        "goaway_empty_debug",
+        "0000080700000000000000000300000000",
+    );
+}
+
+#[test]
+fn test_goaway_frame_golden_with_debug() {
+    let tester = FrameGoldenTester::new();
+
+    let mut goaway = GoAwayFrame::new(7, ErrorCode::EnhanceYourCalm);
+    goaway.debug_data = Bytes::from_static(b"calm");
+    let frame = Frame::GoAway(goaway);
+
+    // Golden: GOAWAY frame with debug payload "calm".
+    tester.assert_frame_golden(
+        &frame,
+        "goaway_with_debug",
+        "00000c070000000000000000070000000b63616c6d",
+    );
+}
+
+#[test]
+fn test_window_update_frame_golden_connection() {
+    let tester = FrameGoldenTester::new();
+
+    let frame = Frame::WindowUpdate(WindowUpdateFrame::new(0, 65_535));
+
+    // Golden: connection-level WINDOW_UPDATE with increment 65535.
+    tester.assert_frame_golden(
+        &frame,
+        "window_update_connection",
+        "0000040800000000000000ffff",
+    );
+}
+
+#[test]
+fn test_window_update_frame_golden_stream_max_increment() {
+    let tester = FrameGoldenTester::new();
+
+    let frame = Frame::WindowUpdate(WindowUpdateFrame::new(1, 0x7fff_ffff));
+
+    // Golden: stream-level WINDOW_UPDATE with maximum 31-bit increment.
+    tester.assert_frame_golden(
+        &frame,
+        "window_update_stream_max_increment",
+        "0000040800000000017fffffff",
+    );
+}
 
 // ============================================================================
 // Complex Frame Golden Tests (Semantic Patterns)
@@ -253,7 +358,7 @@ fn test_basic_frame_sequence_golden() {
     let tester = FrameGoldenTester::new();
 
     // Test a simple sequence of frames
-    let frames = vec![
+    let frames = [
         // 1. SETTINGS frame (connection setup)
         Frame::Settings(SettingsFrame::new(Vec::new())),
         // 2. DATA frame (request body)
@@ -302,7 +407,7 @@ fn test_unknown_frame_golden() {
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
         let actual_hex = FrameGoldenTester::to_hex(&buf);
-        println!("UNKNOWN FRAME GOLDEN UPDATE: {}", actual_hex);
+        println!("UNKNOWN FRAME GOLDEN UPDATE: {actual_hex}");
     } else {
         // Simplified test - just verify it encodes without error
         let mut buf = BytesMut::new();
