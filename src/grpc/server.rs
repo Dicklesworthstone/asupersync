@@ -65,6 +65,7 @@ impl Default for ServerConfig {
 }
 
 /// Builder for configuring a gRPC server.
+#[derive(Default)]
 pub struct ServerBuilder {
     /// Server configuration.
     config: ServerConfig,
@@ -222,12 +223,6 @@ impl ServerBuilder {
             config: self.config,
             services: self.services,
         }
-    }
-}
-
-impl Default for ServerBuilder {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
