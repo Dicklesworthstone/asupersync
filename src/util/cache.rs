@@ -44,7 +44,7 @@ pub const CACHE_LINE_SIZE: usize = 64;
 /// For small types (e.g., `u64`, `AtomicUsize`), this wastes some memory
 /// in exchange for eliminating false sharing entirely.
 #[repr(C, align(64))]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct CachePadded<T> {
     value: T,
 }
@@ -78,13 +78,6 @@ impl<T> DerefMut for CachePadded<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {
         &mut self.value
-    }
-}
-
-impl<T: Default> Default for CachePadded<T> {
-    #[inline]
-    fn default() -> Self {
-        Self::new(T::default())
     }
 }
 
