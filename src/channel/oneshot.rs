@@ -24,7 +24,8 @@
 //!
 //! - If cancelled during reserve: sender is consumed, receiver sees Closed
 //! - If cancelled after reserve but before send: permit drop aborts cleanly
-//! - The commit operation (`send`) cannot fail
+//! - The commit operation (`send`) either delivers the value or returns it in
+//!   `SendError::Disconnected` if the receiver has already closed
 //!
 //! # Example
 //!
@@ -36,7 +37,7 @@
 //!
 //! // Two-phase send pattern (explicit reserve)
 //! let permit = tx.reserve(&cx);
-//! permit.send(42);
+//! permit.send(42)?;
 //!
 //! // Or convenience method
 //! // tx.send(42);  // reserve + send in one step

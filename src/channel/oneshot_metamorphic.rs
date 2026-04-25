@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! Metamorphic Testing: Oneshot channel send-receive commutativity
 //!
 //! This module implements metamorphic relations (MRs) to verify that oneshot
@@ -11,10 +10,10 @@
 //!   semantically equivalent to never reserving
 //! - **MR2 (Send Atomicity)**: send() success always delivers exactly once,
 //!   never partial
-//! - **MR3 (Receiver Drop Detection)**: receiver dropped before send causes
-//!   send().is_err() with SendError containing the original value
-//! - **MR4 (Cancel Invariant Preservation)**: concurrent cancel of receiver
-//!   during send() preserves channel invariants
+//! - **MR3 (Receiver Drop Detection)**: receiver dropped before send returns
+//!   `SendError` containing the original value
+//! - **MR4 (Cancel Invariant Preservation)**: cancellation interleavings
+//!   preserve channel invariants without wall-clock scheduling
 //!
 //! # Property Coverage
 //!
@@ -24,18 +23,11 @@
 //! - Value delivery is atomic (all-or-nothing)
 //! - Error handling preserves original values for recovery
 
-#![allow(dead_code)]
-
+use crate::Cx;
 use crate::channel::oneshot::{self, RecvError, SendError, TryRecvError};
-use crate::types::Budget;
-use crate::util::ArenaIndex;
-use crate::{Cx, RegionId, TaskId};
 use proptest::prelude::*;
 use std::future::Future;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::{Context, Poll, Waker};
-use std::time::Duration;
+use std::task::{Context, Poll};
 
 /// Test data structure for channel operations
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,18 +47,14 @@ impl TestValue {
     }
 }
 
-/// Create a test context with unique identifiers
-fn create_test_context(region_id: u32, task_id: u32) -> Cx {
-    Cx::new(
-        RegionId::from_arena(ArenaIndex::new(region_id, 0)),
-        TaskId::from_arena(ArenaIndex::new(task_id, 0)),
-        Budget::INFINITE,
-    )
+/// Create a capability context for deterministic channel tests.
+fn create_test_context(_region_id: u32, _task_id: u32) -> Cx {
+    Cx::for_testing()
 }
 
 /// Block on a future using a simple polling loop
 fn block_on<F: Future>(f: F) -> F::Output {
-    let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+    let waker = std::task::Waker::noop().clone();
     let mut cx = Context::from_waker(&waker);
     let mut pinned = Box::pin(f);
     loop {
@@ -75,25 +63,6 @@ fn block_on<F: Future>(f: F) -> F::Output {
             Poll::Pending => std::thread::yield_now(),
         }
     }
-}
-
-#[derive(Debug)]
-struct TestNoopWaker;
-
-impl std::task::Wake for TestNoopWaker {
-    fn wake(self: std::sync::Arc<Self>) {}
-}
-
-struct CountWaker(Arc<AtomicUsize>);
-
-impl std::task::Wake for CountWaker {
-    fn wake(self: std::sync::Arc<Self>) {
-        self.0.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-fn counting_waker(counter: Arc<AtomicUsize>) -> Waker {
-    Waker::from(Arc::new(CountWaker(counter)))
 }
 
 /// **MR1: Permit Drop Equivalence**
@@ -317,107 +286,60 @@ fn mr3_receiver_drop_detection() {
 
 /// **MR4: Cancel Invariant Preservation**
 ///
-/// Concurrent cancellation of the receiver during send operations must
-/// preserve channel invariants and not leave the channel in an inconsistent state.
+/// Cancellation interleaved with send operations must preserve channel invariants
+/// and not leave the channel in an inconsistent state.
 ///
-/// **Property**: concurrent(cancel(recv), send(v)) → consistent_final_state
+/// **Property**: ordered interleavings of cancel(recv) and send(v) converge to a
+/// consistent final state.
 #[test]
 fn mr4_cancel_invariant_preservation() {
     proptest!(|(
         test_id in 0u64..1000,
         data in "[a-zA-Z0-9]{1,20}",
-        sequence in 0u32..100,
-        cancel_delay_ms in 0u64..50,
-        send_delay_ms in 0u64..50
+        sequence in 0u32..100
     )| {
         let value = TestValue::new(test_id, data, sequence);
 
-        // Use standard thread-based concurrency for this test
-        // since LabRuntime doesn't easily support concurrent operations
-        let (tx, mut rx) = oneshot::channel();
+        // Interleaving 1: value is sent before the receive context is cancelled.
+        // Ready data wins over cancellation, preserving at-most-once delivery.
+        let (tx_before_cancel, mut rx_before_cancel) = oneshot::channel();
         let cx_send = create_test_context(1, 1);
         let cx_recv = create_test_context(1, 2);
+        tx_before_cancel
+            .send(&cx_send, value.clone())
+            .expect("receiver is alive");
+        cx_recv.set_cancel_requested(true);
+        let recv_after_cancel = block_on(rx_before_cancel.recv(&cx_recv));
+        prop_assert_eq!(recv_after_cancel, Ok(value.clone()));
 
-        let send_result = Arc::new(std::sync::Mutex::new(None));
-        let recv_result = Arc::new(std::sync::Mutex::new(None));
-        let cancel_happened = Arc::new(AtomicBool::new(false));
+        // Interleaving 2: the receive future observes cancellation before any
+        // value is available. The receiver remains usable, so a later send can
+        // still be received through a fresh, uncancelled context.
+        let (tx_after_cancel, mut rx_after_cancel) = oneshot::channel();
+        let cancel_cx = create_test_context(2, 1);
+        cancel_cx.set_cancel_requested(true);
+        let cancelled = block_on(rx_after_cancel.recv(&cancel_cx));
+        prop_assert_eq!(cancelled, Err(RecvError::Cancelled));
 
-        let send_result_clone = Arc::clone(&send_result);
-        let recv_result_clone = Arc::clone(&recv_result);
-        let cancel_happened_clone = Arc::clone(&cancel_happened);
+        let cx_send_after_cancel = create_test_context(2, 2);
+        tx_after_cancel
+            .send(&cx_send_after_cancel, value.clone())
+            .expect("receiver remains alive after recv cancellation");
+        let retry_cx = create_test_context(2, 3);
+        let retried = block_on(rx_after_cancel.recv(&retry_cx));
+        prop_assert_eq!(retried, Ok(value.clone()));
 
-        // Spawn sender thread
-        let value_for_send = value.clone();
-        let send_handle = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(send_delay_ms));
-
-            let result = block_on(async {
-                tx.send(&cx_send, value_for_send)
-            });
-
-            *send_result_clone.lock().unwrap() = Some(result);
-        });
-
-        // Spawn receiver thread
-        let recv_handle = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(cancel_delay_ms));
-
-            // Cancel the receive context
-            cx_recv.set_cancel_requested(true);
-            cancel_happened_clone.store(true, Ordering::SeqCst);
-
-            let result = block_on(async {
-                rx.recv(&cx_recv).await
-            });
-
-            *recv_result_clone.lock().unwrap() = Some(result);
-        });
-
-        // Wait for both threads to complete
-        let _ = send_handle.join();
-        let _ = recv_handle.join();
-
-        let send_result = send_result.lock().unwrap().take().unwrap();
-        let recv_result = recv_result.lock().unwrap().take().unwrap();
-        let cancel_occurred = cancel_happened.load(Ordering::SeqCst);
-
-        // MR4.1: Verify invariant preservation based on timing
-        match (&send_result, &recv_result) {
-            (Ok(()), Ok(received_value)) => {
-                // Both succeeded - send happened before cancel
-                prop_assert_eq!(received_value, &value,
-                    "Received value should match sent value when both succeed");
+        // Interleaving 3: dropping the receiver before send returns the
+        // original value to the sender instead of losing it.
+        let (tx_after_drop, rx_after_drop) = oneshot::channel();
+        let cx_send_after_drop = create_test_context(3, 1);
+        drop(rx_after_drop);
+        match tx_after_drop.send(&cx_send_after_drop, value.clone()) {
+            Err(SendError::Disconnected(returned_value)) => {
+                prop_assert_eq!(returned_value, value);
             }
-            (Ok(()), Err(RecvError::Cancelled)) => {
-                // Send succeeded but recv was cancelled - this is valid
-                // The value was sent but the receiver was cancelled before receiving it
-                prop_assert!(cancel_occurred, "Cancel should have been signaled");
-            }
-            (Err(SendError::Disconnected(returned_value)), _) => {
-                // Send failed because receiver was cancelled/dropped
-                prop_assert_eq!(returned_value, &value,
-                    "Failed send should return original value");
-                prop_assert!(cancel_occurred, "Cancel should have been signaled for failed send");
-            }
-            (Ok(()), Err(RecvError::Closed)) => {
-                // This shouldn't happen in our test setup
-                prop_assert!(false, "Unexpected combination: send success + recv closed");
-            }
-            (Ok(()), Err(RecvError::PolledAfterCompletion)) => {
-                // This shouldn't happen in our test setup
-                prop_assert!(false, "Unexpected PolledAfterCompletion error");
-            }
+            Ok(()) => prop_assert!(false, "send should fail when receiver is dropped"),
         }
-
-        // MR4.2: No matter what happened, the original value should be preserved somewhere
-        let value_preserved = match (&send_result, &recv_result) {
-            (Ok(()), Ok(received_value)) => received_value == &value,
-            (Err(SendError::Disconnected(returned_value)), _) => returned_value == &value,
-            _ => true, // Other cases don't involve value transfer
-        };
-
-        prop_assert!(value_preserved,
-            "Original value must be preserved in success or error path");
     });
 }
 
@@ -459,10 +381,10 @@ fn mr_composite_abort_vs_send_fail_equivalence() {
                     if returned_value == value {
                         Ok("send_failed")
                     } else {
-                        Err(format!("Send failed but returned wrong value"))
+                        Err("Send failed but returned wrong value".to_string())
                     }
                 }
-                Ok(()) => Err(format!("Send should have failed")),
+                Ok(()) => Err("Send should have failed".to_string()),
             }
         });
 
@@ -600,7 +522,5 @@ mod tests {
             Err(SendError::Disconnected(returned)) => assert_eq!(returned, value),
             _ => panic!("Should have returned disconnected error"),
         }
-
-        println!("All metamorphic relations verified successfully!");
     }
 }
