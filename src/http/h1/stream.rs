@@ -60,6 +60,14 @@ impl BodyKind {
             Self::Chunked => None,
         }
     }
+
+    fn size_hint(&self) -> SizeHint {
+        match self {
+            Self::Empty => SizeHint::with_exact(0),
+            Self::ContentLength(n) => SizeHint::with_exact(*n),
+            Self::Chunked => SizeHint::default(),
+        }
+    }
 }
 
 /// State machine for reading chunked bodies.
@@ -103,18 +111,13 @@ impl IncomingBody {
         capacity: usize,
     ) -> (IncomingBodyWriter, Self) {
         let (tx, rx) = mpsc::channel(capacity);
-        let size_hint = match kind {
-            BodyKind::Empty => SizeHint::with_exact(0),
-            BodyKind::ContentLength(n) => SizeHint::with_exact(n),
-            BodyKind::Chunked => SizeHint::default(),
-        };
         let done = kind.is_empty();
         let body = Self {
             receiver: rx,
             cx: cx.clone(),
             done,
             received: 0,
-            size_hint,
+            size_hint: kind.size_hint(),
             kind,
         };
         let writer = IncomingBodyWriter::new(tx, kind);
@@ -637,16 +640,11 @@ impl OutgoingBody {
         capacity: usize,
     ) -> (OutgoingBodySender, Self) {
         let (tx, rx) = mpsc::channel(capacity);
-        let size_hint = match kind {
-            BodyKind::Empty => SizeHint::with_exact(0),
-            BodyKind::ContentLength(n) => SizeHint::with_exact(n),
-            BodyKind::Chunked => SizeHint::default(),
-        };
         let body = Self {
             receiver: rx,
             cx: cx.clone(),
             done: kind.is_empty(),
-            size_hint,
+            size_hint: kind.size_hint(),
             kind,
         };
         let sender = OutgoingBodySender::new(tx, kind);
