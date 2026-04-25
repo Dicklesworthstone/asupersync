@@ -1,6 +1,5 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
-#![allow(missing_docs)]
+//! Regression test for supervision oracle restart-limit escalation handling.
+
 use asupersync::actor::ActorId;
 use asupersync::lab::oracle::actor::*;
 use asupersync::supervision::{EscalationPolicy, RestartPolicy};
@@ -14,7 +13,7 @@ fn t(nanos: u64) -> Time {
 }
 
 #[test]
-fn test_oracle_bug() {
+fn one_for_all_escalation_after_restart_limit_passes_without_sibling_restarts() {
     let mut oracle = SupervisionOracle::new();
     oracle.register_supervisor(
         actor(0),
@@ -34,8 +33,8 @@ fn test_oracle_bug() {
     oracle.on_child_failed(actor(0), actor(1), t(30), "error2".into());
     oracle.on_escalation(actor(0), actor(99), t(50), "limit".into());
 
-    // Because it did not restart, restart_count is 0!
-    // And it will trigger OneForAllNotFollowed instead!
-    let res = oracle.check(t(100));
-    println!("{res:?}");
+    assert!(
+        oracle.check(t(100)).is_ok(),
+        "supervisor-originated escalation should close the second failure window"
+    );
 }
