@@ -1179,7 +1179,7 @@ impl fmt::Display for LatencyAnalysis {
 ///
 /// [`annotate`]: LatencyAnalyzer::annotate
 /// [`analyze`]: LatencyAnalyzer::analyze
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LatencyAnalyzer {
     /// Curve annotations for leaf nodes.
     annotations: BTreeMap<usize, NodeCurves>,
@@ -1193,11 +1193,7 @@ impl LatencyAnalyzer {
     /// Creates a new latency analyzer with no annotations.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            annotations: BTreeMap::new(),
-            default_arrival: None,
-            default_service: None,
-        }
+        Self::default()
     }
 
     /// Creates a new analyzer with default curves for unannotated leaves.
@@ -1207,11 +1203,10 @@ impl LatencyAnalyzer {
     /// similar characteristics.
     #[must_use]
     pub fn with_defaults(arrival: ArrivalCurve, service: ServiceCurve) -> Self {
-        Self {
-            annotations: BTreeMap::new(),
-            default_arrival: Some(arrival),
-            default_service: Some(service),
-        }
+        let mut analyzer = Self::new();
+        analyzer.default_arrival = Some(arrival);
+        analyzer.default_service = Some(service);
+        analyzer
     }
 
     /// Annotates a leaf node with arrival and service curves.
@@ -1620,12 +1615,6 @@ impl LatencyAnalyzer {
             effective_service: child_result.effective_service,
             contributions,
         }
-    }
-}
-
-impl Default for LatencyAnalyzer {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
