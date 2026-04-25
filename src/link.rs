@@ -218,9 +218,7 @@ impl LinkExitBatch {
     /// Creates an empty batch.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
+        Self::default()
     }
 
     fn push(
@@ -318,11 +316,7 @@ impl LinkSet {
     /// Creates an empty link set.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            records: BTreeMap::new(),
-            task_index: BTreeMap::new(),
-            region_index: BTreeMap::new(),
-        }
+        Self::default()
     }
 
     /// Establishes a bidirectional link between two tasks with default
@@ -713,9 +707,7 @@ impl ExitBatch {
     /// Creates an empty batch.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Adds an exit signal to the batch with its failure virtual time.
