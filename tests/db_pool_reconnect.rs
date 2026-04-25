@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! E2E Database Pool Reconnection Tests
 //!
 //! Tests database pool reconnection behavior under network faults using
@@ -15,21 +13,25 @@
 mod common;
 
 use std::process::Command;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
-
-use asupersync::cx::Cx;
 #[cfg(any(feature = "postgres", feature = "mysql"))]
-use asupersync::database::pool::{ConnectionManager, DbPool, DbPoolConfig};
+use std::sync::Arc;
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+use std::time::Duration;
+
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+use asupersync::database::pool::{ConnectionManager, DbPoolConfig};
 
 // ─── Docker Container Management ─────────────────────────────────────────────
 
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 struct TestContainer {
     name: String,
     port: u16,
 }
 
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 impl TestContainer {
     fn new(name: &str) -> Self {
         Self {
@@ -44,6 +46,7 @@ impl TestContainer {
     }
 }
 
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 impl Drop for TestContainer {
     fn drop(&mut self) {
         self.cleanup();
@@ -54,17 +57,18 @@ fn check_docker_available() -> bool {
     Command::new("docker")
         .args(["version"])
         .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|out| out.status.success())
 }
 
 // ─── Network Fault Injection ─────────────────────────────────────────────────
 
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 struct IptablesRule {
     port: u16,
     applied: bool,
 }
 
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 impl IptablesRule {
     fn new(port: u16) -> Self {
         Self {
@@ -97,13 +101,10 @@ impl IptablesRule {
             self.applied = true;
             println!("Applied iptables rule blocking port {}", self.port);
         } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!(
-                    "Failed to apply iptables rule: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-            ));
+            return Err(std::io::Error::other(format!(
+                "Failed to apply iptables rule: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
         }
 
         Ok(())
@@ -144,6 +145,7 @@ impl IptablesRule {
     }
 }
 
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 impl Drop for IptablesRule {
     fn drop(&mut self) {
         let _ = self.remove_block();
@@ -159,7 +161,7 @@ mod postgres_tests {
     use asupersync::database::postgres::{PgConnection, PgError};
 
     struct PgTestManager {
-        url: String,
+        _url: String,
     }
 
     impl ConnectionManager for PgTestManager {
@@ -252,7 +254,7 @@ mod postgres_tests {
                 ])
                 .output();
 
-            if ready_check.map(|o| o.status.success()).unwrap_or(false) {
+            if ready_check.is_ok_and(|o| o.status.success()) {
                 println!(
                     "PostgreSQL container ready on port {} (attempt {})",
                     port, attempt
@@ -283,7 +285,7 @@ mod postgres_tests {
         };
 
         // Configure pool with aggressive reconnect settings
-        let config = DbPoolConfig {
+        let _config = DbPoolConfig {
             min_idle: 1,
             max_size: 5,
             validate_on_checkout: true,
@@ -292,8 +294,8 @@ mod postgres_tests {
             connection_timeout: Duration::from_secs(5),
         };
 
-        let manager = PgTestManager {
-            url: format!(
+        let _manager = PgTestManager {
+            _url: format!(
                 "postgres://testuser:testpass@localhost:{}/asupersync_test",
                 container.port
             ),
@@ -332,7 +334,7 @@ mod mysql_tests {
     use asupersync::database::pool::ConnectionManager;
 
     struct MySqlTestManager {
-        url: String,
+        _url: String,
     }
 
     impl ConnectionManager for MySqlTestManager {
@@ -421,7 +423,7 @@ mod mysql_tests {
                 ])
                 .output();
 
-            if ready_check.map(|o| o.status.success()).unwrap_or(false) {
+            if ready_check.is_ok_and(|o| o.status.success()) {
                 println!(
                     "MySQL container ready on port {} (attempt {})",
                     port, attempt
@@ -448,7 +450,7 @@ mod mysql_tests {
             }
         };
 
-        let config = DbPoolConfig {
+        let _config = DbPoolConfig {
             min_idle: 1,
             max_size: 5,
             validate_on_checkout: true,
@@ -457,8 +459,8 @@ mod mysql_tests {
             connection_timeout: Duration::from_secs(5),
         };
 
-        let manager = MySqlTestManager {
-            url: format!(
+        let _manager = MySqlTestManager {
+            _url: format!(
                 "mysql://testuser:testpass@localhost:{}/asupersync_test",
                 container.port
             ),
@@ -524,16 +526,19 @@ fn test_reconnect_infrastructure() {
 // ─── Mock Connection Manager for Basic Pool Tests ────────────────────────────
 
 #[derive(Debug)]
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 struct MockConnection {
-    id: usize,
-    fail_next: Arc<AtomicUsize>,
+    _id: usize,
+    _fail_next: Arc<AtomicUsize>,
 }
 
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 struct MockConnectionManager {
     fail_count: Arc<AtomicUsize>,
     connect_count: Arc<AtomicUsize>,
 }
 
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 impl MockConnectionManager {
     fn new() -> Self {
         Self {
@@ -551,6 +556,7 @@ impl MockConnectionManager {
     }
 }
 
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 impl ConnectionManager for MockConnectionManager {
     type Connection = MockConnection;
     type Error = std::io::Error;
@@ -569,8 +575,8 @@ impl ConnectionManager for MockConnectionManager {
         }
 
         Ok(MockConnection {
-            id: attempt,
-            fail_next: Arc::new(AtomicUsize::new(0)),
+            _id: attempt,
+            _fail_next: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -585,9 +591,10 @@ impl ConnectionManager for MockConnectionManager {
 
 /// Test pool behavior under simulated connection failures
 #[test]
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 fn test_pool_circuit_breaker_behavior() {
     let manager = MockConnectionManager::new();
-    let config = DbPoolConfig {
+    let _config = DbPoolConfig {
         min_idle: 2,
         max_size: 5,
         validate_on_checkout: true,

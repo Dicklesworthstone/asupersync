@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Compile-time PartialEq smoke test for `InvariantViolation`.
 
 use asupersync::lab::runtime::InvariantViolation;

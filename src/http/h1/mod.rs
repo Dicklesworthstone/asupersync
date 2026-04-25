@@ -22,6 +22,8 @@ pub mod stream;
 pub mod types;
 
 #[cfg(test)]
+mod obs_text_test;
+#[cfg(test)]
 mod request_line_tests;
 
 pub use client::{ClientIncomingBody, ClientStreamingResponse, Http1Client, Http1ClientCodec};

@@ -487,7 +487,7 @@ impl SubjectSchema {
 }
 
 /// Latency estimate with median and tail percentiles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RawLatencyEstimate")]
 pub struct LatencyEstimate {
     /// Median steady-state latency.
@@ -496,12 +496,6 @@ pub struct LatencyEstimate {
     pub p99: Duration,
     /// p999 latency.
     pub p999: Duration,
-}
-
-impl Default for LatencyEstimate {
-    fn default() -> Self {
-        Self::zero()
-    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -560,7 +554,7 @@ impl LatencyEstimate {
 }
 
 /// CPU-cost estimate per message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RawCpuEstimate")]
 pub struct CpuEstimate {
     /// Typical per-message CPU budget in microseconds.
@@ -616,14 +610,8 @@ impl From<RawCpuEstimate> for CpuEstimate {
     }
 }
 
-impl Default for CpuEstimate {
-    fn default() -> Self {
-        Self::new(0, 0)
-    }
-}
-
 /// Byte-cost estimate with bounded range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RawByteEstimate")]
 pub struct ByteEstimate {
     /// Minimum expected bytes.
@@ -692,14 +680,8 @@ impl From<RawByteEstimate> for ByteEstimate {
     }
 }
 
-impl Default for ByteEstimate {
-    fn default() -> Self {
-        Self::new(0, 0, 0)
-    }
-}
-
 /// Duration estimate for restore or handoff operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RawDurationEstimate")]
 pub struct DurationEstimate {
     /// Minimum expected duration.
@@ -754,14 +736,8 @@ impl From<RawDurationEstimate> for DurationEstimate {
     }
 }
 
-impl Default for DurationEstimate {
-    fn default() -> Self {
-        Self::new(Duration::ZERO, Duration::ZERO, Duration::ZERO)
-    }
-}
-
 /// Multidimensional FABRIC feature cost envelope.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct CostVector {
     /// Steady-state latency envelope.
     pub steady_state_latency: LatencyEstimate,
@@ -777,12 +753,6 @@ pub struct CostVector {
     pub evidence_bytes: ByteEstimate,
     /// Restore or handoff latency envelope.
     pub restore_handoff_time: DurationEstimate,
-}
-
-impl Default for CostVector {
-    fn default() -> Self {
-        Self::zero()
-    }
 }
 
 impl CostVector {
