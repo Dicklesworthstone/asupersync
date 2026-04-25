@@ -169,7 +169,7 @@ impl Default for TimerNode {
 }
 
 /// A slot in the timer wheel containing a doubly-linked list of timer nodes.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct TimerSlot {
     /// Head of the linked list (sentinel-free, nullable).
     head: Cell<Option<NonNull<TimerNode>>>,
@@ -310,12 +310,6 @@ impl TimerSlot {
         }
 
         (wakers, removed_count)
-    }
-}
-
-impl Default for TimerSlot {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
