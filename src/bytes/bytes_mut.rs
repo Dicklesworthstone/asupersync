@@ -40,7 +40,7 @@ impl BytesMut {
     #[inline]
     #[must_use]
     pub fn new() -> Self {
-        Self { data: Vec::new() }
+        Self::default()
     }
 
     /// Create a `BytesMut` with the given capacity.
@@ -365,18 +365,14 @@ impl From<&[u8]> for BytesMut {
 impl From<&str> for BytesMut {
     #[inline]
     fn from(s: &str) -> Self {
-        Self {
-            data: s.as_bytes().to_vec(),
-        }
+        Self::from(s.as_bytes())
     }
 }
 
 impl From<String> for BytesMut {
     #[inline]
     fn from(s: String) -> Self {
-        Self {
-            data: s.into_bytes(),
-        }
+        Self::from(s.into_bytes())
     }
 }
 
