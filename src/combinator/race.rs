@@ -27,9 +27,11 @@
 //!
 //! # Outcome Semantics
 //!
-//! The winner's outcome is returned directly. The loser is cancelled and
-//! drained, but its outcome is not part of the race result (it's tracked
-//! for invariant verification only).
+//! The winner's outcome drives ordinary success, error, and cancellation.
+//! Losers are cancelled and drained before returning. Non-panicking loser
+//! outcomes are retained for invariant verification; loser panics are surfaced
+//! by fail-fast conversion helpers so drained branch panics are not silently
+//! swallowed.
 
 use core::fmt;
 use std::future::Future;
@@ -481,8 +483,10 @@ pub fn race2_outcomes<T, E>(
 
 /// Converts race outcomes to a Result for fail-fast handling.
 ///
-/// If the winner succeeded, returns `Ok` with the value.
-/// If the winner failed (error, cancelled, or panicked), returns `Err`.
+/// If neither branch panicked and the winner succeeded, returns `Ok` with the value.
+/// If the winner failed (error or cancellation), returns `Err`.
+/// If either branch panicked, returns `Err` so drained loser panics are not
+/// silently swallowed.
 ///
 /// # Example
 /// ```
@@ -606,9 +610,10 @@ pub fn race_all_outcomes<T, E>(
 
 /// Converts a race-all result to a Result for fail-fast handling.
 ///
-/// If the winner succeeded, returns `Ok` with the value.
+/// If no branch panicked and the winner succeeded, returns `Ok` with the value.
 /// If the winner failed, returns `Err` with a `RaceAllError` that includes
-/// the winner's index for debugging.
+/// the winner's index for debugging. Panicked losers also return `Err` with
+/// their branch index, because drain-time panics must remain observable.
 ///
 /// # Example
 /// ```

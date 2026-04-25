@@ -229,8 +229,7 @@ mod mr_run_once {
         let a2 = A::new(polls).run();
         let (left, _, _) = join2_outcomes::<u32, u32, TestErr>(a1, b);
         let (right, _, _) = join2_outcomes::<u32, u32, TestErr>(a2, c);
-        let (w, _, l) =
-            race2_outcomes::<(u32, u32), TestErr>(RaceWinner::First, left, right);
+        let (w, _, l) = race2_outcomes::<(u32, u32), TestErr>(RaceWinner::First, left, right);
         max_sev(w.severity(), l.severity())
     }
 
