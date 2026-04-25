@@ -5,7 +5,7 @@
 //! repeated allocation/deallocation cycles.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 /// A thread-safe object pool for recycling expensive-to-construct objects.
 #[derive(Debug)]
@@ -26,29 +26,34 @@ impl<T> Pool<T> {
         }
     }
 
+    fn lock_storage(&self) -> MutexGuard<'_, VecDeque<T>> {
+        self.storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Attempts to retrieve a recycled object from the pool.
     ///
     /// Returns `None` if the pool is empty.
     pub fn try_get(&self) -> Option<T> {
-        self.storage.lock().ok()?.pop_front()
+        self.lock_storage().pop_front()
     }
 
     /// Returns an object to the pool for recycling.
     ///
     /// Objects are silently dropped if the pool is at capacity.
     pub fn put(&self, item: T) {
-        if let Ok(mut storage) = self.storage.lock() {
-            if storage.len() < self.max_size {
-                storage.push_front(item);
-            }
-            // Silently drop if pool is full
+        let mut storage = self.lock_storage();
+        if storage.len() < self.max_size {
+            storage.push_front(item);
         }
+        // Silently drop if pool is full
     }
 
     /// Returns the current number of objects in the pool.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.storage.lock().map_or(0, |storage| storage.len())
+        self.lock_storage().len()
     }
 
     /// Returns true if the pool is empty.
@@ -59,9 +64,7 @@ impl<T> Pool<T> {
 
     /// Clears all objects from the pool.
     pub fn clear(&self) {
-        if let Ok(mut storage) = self.storage.lock() {
-            storage.clear();
-        }
+        self.lock_storage().clear();
     }
 }
 
@@ -130,6 +133,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[derive(Debug, PartialEq)]
     struct TestObject {
@@ -176,6 +180,28 @@ mod tests {
         pool.put(TestObject::new(3)); // Should be dropped
 
         assert_eq!(pool.len(), 2);
+    }
+
+    #[test]
+    fn pool_recovers_after_poisoned_lock() {
+        let pool = Arc::new(Pool::new(2));
+        let poisoned_pool = Arc::clone(&pool);
+
+        let poison_result = std::panic::catch_unwind(move || {
+            let _guard = match poisoned_pool.storage.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            std::panic::panic_any("poison pool mutex for regression test");
+        });
+
+        assert!(poison_result.is_err());
+
+        pool.put(TestObject::new(7));
+
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool.try_get().map(|object| object.value), Some(7));
+        assert!(pool.is_empty());
     }
 
     #[test]
