@@ -563,9 +563,7 @@ impl FilterBuilder {
     /// Creates a new filter builder.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            filter: TraceFilter::new(),
-        }
+        Self::default()
     }
 
     /// Includes the given event kinds.
