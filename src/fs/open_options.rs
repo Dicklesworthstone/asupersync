@@ -25,7 +25,7 @@ use std::path::Path;
 ///     .open("example.txt")
 ///     .await?;
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct OpenOptions {
     read: bool,
@@ -46,18 +46,7 @@ impl OpenOptions {
     /// All options are initially set to `false`.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            read: false,
-            write: false,
-            append: false,
-            truncate: false,
-            create: false,
-            create_new: false,
-            #[cfg(unix)]
-            mode: None,
-            #[cfg(unix)]
-            custom_flags: None,
-        }
+        Self::default()
     }
 
     /// Sets the option for read access.
@@ -172,12 +161,6 @@ impl OpenOptions {
         }
 
         opts
-    }
-}
-
-impl Default for OpenOptions {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
