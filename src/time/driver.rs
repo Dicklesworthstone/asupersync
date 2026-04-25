@@ -292,11 +292,7 @@ impl VirtualClock {
     /// Creates a new virtual clock starting at time zero.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            now: AtomicU64::new(0),
-            paused: AtomicBool::new(false),
-            frozen_at: AtomicU64::new(0),
-        }
+        Self::default()
     }
 
     /// Creates a virtual clock starting at the given time.
