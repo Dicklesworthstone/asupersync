@@ -312,7 +312,7 @@ impl TriggerConfig {
 }
 
 /// Multi-dimensional resource pressure tracking.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ResourcePressure {
     /// Per-resource measurements.
     measurements: RwLock<HashMap<ResourceType, ResourceMeasurement>>,
@@ -407,12 +407,6 @@ impl ResourcePressure {
             .max()
             .copied()
             .unwrap_or(DegradationLevel::None)
-    }
-}
-
-impl Default for ResourcePressure {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
