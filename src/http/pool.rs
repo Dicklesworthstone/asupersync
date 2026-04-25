@@ -264,19 +264,13 @@ pub struct PoolStats {
 }
 
 /// Tracks connections for a single host.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct HostPool {
     /// Connections for this host (by connection ID).
     connections: HashMap<u64, PooledConnectionMeta>,
 }
 
 impl HostPool {
-    fn new() -> Self {
-        Self {
-            connections: HashMap::new(),
-        }
-    }
-
     fn connection_count(&self) -> usize {
         self.connections.len()
     }
@@ -447,7 +441,7 @@ impl Pool {
 
         let meta = PooledConnectionMeta::new(id, now, http_version);
 
-        let host_pool = self.hosts.entry(key).or_insert_with(HostPool::new);
+        let host_pool = self.hosts.entry(key).or_default();
         host_pool.connections.insert(id, meta);
 
         self.stats.connections_created += 1;
