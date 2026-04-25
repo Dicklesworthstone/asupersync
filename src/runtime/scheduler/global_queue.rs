@@ -17,9 +17,7 @@ impl GlobalQueue {
     #[inline]
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            inner: SegQueue::new(),
-        }
+        Self::default()
     }
 
     /// Pushes a task to the global queue.
