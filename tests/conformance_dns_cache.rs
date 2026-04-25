@@ -1,6 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
-#![cfg(any())]
 //! Conformance tests for DNS cache TTL eviction and NXDOMAIN negative caching.
 //!
 //! These tests verify the expected behavior and contracts for the DNS cache,
@@ -10,33 +7,33 @@
 //! The tests cover both positive and negative caching scenarios with various
 //! TTL configurations and capacity constraints.
 
-use asupersync::net::dns::cache::{CacheConfig, DnsCache};
-use asupersync::net::dns::error::DnsError;
-use asupersync::net::dns::lookup::LookupIp;
+use asupersync::net::dns::{CacheConfig, DnsCache, DnsError, LookupIp};
 use asupersync::types::Time;
+use std::cell::Cell;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Test time source for deterministic cache testing
-static TEST_TIME: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static TEST_TIME: Cell<u64> = const { Cell::new(0) };
+}
 
 fn test_time() -> Time {
-    Time::from_nanos(TEST_TIME.load(Ordering::SeqCst))
+    Time::from_nanos(TEST_TIME.with(Cell::get))
 }
 
 fn advance_time_by(duration: Duration) {
-    let nanos = duration.as_nanos() as u64;
-    TEST_TIME.fetch_add(nanos, Ordering::SeqCst);
+    let nanos = duration.as_nanos().min(u128::from(u64::MAX)) as u64;
+    TEST_TIME.with(|time| time.set(time.get().saturating_add(nanos)));
 }
 
 fn set_test_time(nanos: u64) {
-    TEST_TIME.store(nanos, Ordering::SeqCst);
+    TEST_TIME.with(|time| time.set(nanos));
 }
 
 /// Helper to create a test lookup result
-fn create_test_lookup(host: &str, ip: IpAddr, ttl: Duration) -> LookupIp {
-    LookupIp::new(host.to_string(), vec![ip], ttl)
+fn create_test_lookup(_host: &str, ip: IpAddr, ttl: Duration) -> LookupIp {
+    LookupIp::new(vec![ip], ttl)
 }
 
 /// Conformance test contracts for DNS cache behavior
@@ -184,8 +181,8 @@ fn test_ttl_clamping_min_max() {
     let long_lookup = create_test_lookup("long.com", ip, Duration::from_secs(7200)); // Above max_ttl
     cache.cache_positive_result("long.com", &long_lookup);
 
-    // Should be expired after max_ttl even though original was longer
-    advance_time_by(Duration::from_secs(1700)); // Total ~32 minutes, past max_ttl
+    // Should be expired after max_ttl from long.com insertion even though original was longer.
+    advance_time_by(Duration::from_secs(1801));
     assert!(cache.get_cached_ip("long.com").is_none());
 }
 
@@ -215,8 +212,9 @@ fn test_nxdomain_negative_caching() {
 
     let (size, hits, misses, evictions, hit_rate) = cache.get_statistics();
     assert_eq!(size, 1);
-    assert_eq!(hits, 1);
-    assert_eq!(misses, 1); // The get_ip call was a "miss" for positive results
+    assert_eq!(hits, 2);
+    assert_eq!(misses, 0);
+    assert_eq!(evictions, 0);
     assert!(hit_rate > 0.0);
 
     // Advance time past negative TTL
@@ -226,6 +224,8 @@ fn test_nxdomain_negative_caching() {
     assert!(cache.get_cached_result("nonexistent.com").is_none());
     let (size, hits, misses, evictions, _) = cache.get_statistics();
     assert_eq!(size, 0);
+    assert_eq!(hits, 2);
+    assert_eq!(misses, 1);
     assert_eq!(evictions, 1);
 }
 
@@ -355,7 +355,7 @@ fn test_case_insensitive_host_matching() {
     let config = CacheConfig::default();
     let cache = DnsCache::create_cache(config, test_time);
 
-    let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let lookup = create_test_lookup("Example.COM", ip, Duration::from_secs(300));
 
     // Cache with mixed case

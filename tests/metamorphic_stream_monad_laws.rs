@@ -1,7 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
-#![allow(missing_docs)]
-#![cfg(any())]
 //! Metamorphic tests for stream combinator monad laws.
 //!
 //! Tests mathematical properties of stream combinators to ensure they satisfy
@@ -11,8 +7,6 @@
 use asupersync::stream::{Stream, StreamExt, iter};
 use asupersync::test_utils;
 use proptest::prelude::*;
-use std::collections::VecDeque;
-use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
@@ -24,17 +18,28 @@ fn noop_waker() -> Waker {
     Waker::noop().clone()
 }
 
-/// Helper to collect all items from a stream.
-async fn collect_stream<S>(mut stream: S) -> Vec<S::Item>
+fn stream_law_config() -> ProptestConfig {
+    ProptestConfig {
+        cases: 50,
+        max_shrink_iters: 500,
+        timeout: 3000,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    }
+}
+
+/// Synchronously collect all items from a stream.
+fn collect_stream_sync<S>(stream: S) -> Vec<S::Item>
 where
-    S: Stream + Unpin,
+    S: Stream,
 {
     let mut items = Vec::new();
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
+    let mut stream = Box::pin(stream);
 
     loop {
-        match Pin::new(&mut stream).poll_next(&mut cx) {
+        match stream.as_mut().poll_next(&mut cx) {
             Poll::Ready(Some(item)) => items.push(item),
             Poll::Ready(None) => break,
             Poll::Pending => panic!("Stream returned Pending in test"),
@@ -43,22 +48,13 @@ where
     items
 }
 
-/// Synchronously collect all items from a stream.
-fn collect_stream_sync<S>(mut stream: S) -> Vec<S::Item>
+/// Helper function to create a flat-map like operation for streams.
+/// Since the public API has no `flat_map`, this local helper models the law.
+fn flat_map<S, F, Out>(stream: S, f: F) -> FlatMapStream<S, F, Out>
 where
     S: Stream + Unpin,
-{
-    futures_lite::future::block_on(collect_stream(stream))
-}
-
-/// Helper function to create a flat-map like operation for streams.
-/// Since there's no built-in flatten, we use then + chain approach.
-fn flat_map<S, F, Out>(stream: S, f: F) -> impl Stream<Item = Out::Item>
-where
-    S: Stream + 'static,
-    F: FnMut(S::Item) -> Out + 'static,
-    Out: Stream + 'static,
-    Out::Item: 'static,
+    F: FnMut(S::Item) -> Out,
+    Out: Stream + Unpin,
 {
     FlatMapStream::new(stream, f)
 }
@@ -68,7 +64,6 @@ struct FlatMapStream<S, F, Out> {
     source: S,
     mapper: F,
     current: Option<Out>,
-    buffer: VecDeque<Out>,
     done: bool,
 }
 
@@ -78,7 +73,6 @@ impl<S, F, Out> FlatMapStream<S, F, Out> {
             source,
             mapper,
             current: None,
-            buffer: VecDeque::new(),
             done: false,
         }
     }
@@ -94,52 +88,34 @@ where
 {
     type Item = Out::Item;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = &mut *self;
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
 
         if this.done {
             return Poll::Ready(None);
         }
 
-        // Return buffered item if any
-        if let Some(item) = this.buffer.pop_front() {
-            return Poll::Ready(Some(item));
-        }
+        loop {
+            if let Some(current) = &mut this.current {
+                match Pin::new(current).poll_next(cx) {
+                    Poll::Ready(Some(item)) => return Poll::Ready(Some(item)),
+                    Poll::Ready(None) => {
+                        this.current = None;
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
 
-        // Poll current inner stream
-        if let Some(current) = &mut this.current {
-            match Pin::new(current).poll_next(cx) {
-                Poll::Ready(Some(item)) => return Poll::Ready(Some(item)),
+            match Pin::new(&mut this.source).poll_next(cx) {
+                Poll::Ready(Some(item)) => {
+                    this.current = Some((this.mapper)(item));
+                }
                 Poll::Ready(None) => {
-                    this.current = None;
+                    this.done = true;
+                    return Poll::Ready(None);
                 }
                 Poll::Pending => return Poll::Pending,
             }
-        }
-
-        // Get next item from source stream
-        match Pin::new(&mut this.source).poll_next(cx) {
-            Poll::Ready(Some(item)) => {
-                let mut inner_stream = (this.mapper)(item);
-                // Collect all items from inner stream immediately (for testing)
-                let mut items = Vec::new();
-                while let Poll::Ready(Some(inner_item)) = Pin::new(&mut inner_stream).poll_next(cx)
-                {
-                    items.push(inner_item);
-                }
-                this.buffer.extend(items);
-                if let Some(first) = this.buffer.pop_front() {
-                    Poll::Ready(Some(first))
-                } else {
-                    // Inner stream was empty, try next item
-                    self.poll_next(cx)
-                }
-            }
-            Poll::Ready(None) => {
-                this.done = true;
-                Poll::Ready(None)
-            }
-            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -229,6 +205,8 @@ fn arb_test_predicate() -> impl Strategy<Value = TestPredicate> {
 /// MR1: Functor Identity Law
 /// s.map(id) == s
 proptest! {
+    #![proptest_config(stream_law_config())]
+
     #[test]
     fn mr1_functor_identity(data in arb_int_vec()) {
         test_utils::init_test_logging();
@@ -250,6 +228,8 @@ proptest! {
 /// MR2: Functor Composition Law
 /// s.map(f).map(g) == s.map(|x| g(f(x)))
 proptest! {
+    #![proptest_config(stream_law_config())]
+
     #[test]
     fn mr2_functor_composition(
         data in arb_small_int_vec(),
@@ -279,18 +259,20 @@ proptest! {
 /// MR3: Left Identity Law (simplified for streams)
 /// iter([a]).then(f) behaves like f(a)
 proptest! {
+    #![proptest_config(stream_law_config())]
+
     #[test]
     fn mr3_left_identity(
-        value in any::<i32>(),
+        value in -1000i32..=1000,
         multiplier in 1i32..=5
     ) {
         test_utils::init_test_logging();
         asupersync::test_phase!("mr3_left_identity");
 
         // Create function that maps value to a small stream
-        let f = |x: i32| iter((0..multiplier).map(move |i| x + i).collect::<Vec<_>>());
+        let f = |x: i32| iter(0..multiplier).map(move |i| x + i);
 
-        let left = collect_stream_sync(iter(vec![value]).then(|x| f(x)));
+        let left = collect_stream_sync(flat_map(iter(vec![value]), f));
         let right = collect_stream_sync(f(value));
 
         prop_assert_eq!(left, right,
@@ -303,6 +285,8 @@ proptest! {
 /// MR4: Right Identity Law (simplified)
 /// s.then(|x| iter([x])) == s
 proptest! {
+    #![proptest_config(stream_law_config())]
+
     #[test]
     fn mr4_right_identity(data in arb_int_vec()) {
         test_utils::init_test_logging();
@@ -328,6 +312,8 @@ proptest! {
 /// MR5: Chain Associativity
 /// (s1.chain(s2)).chain(s3) == s1.chain(s2.chain(s3))
 proptest! {
+    #![proptest_config(stream_law_config())]
+
     #[test]
     fn mr5_chain_associativity(
         data1 in arb_small_int_vec(),
@@ -353,6 +339,8 @@ proptest! {
 /// MR6: Chain Identity (Empty Stream)
 /// s.chain(empty) == s and empty.chain(s) == s
 proptest! {
+    #![proptest_config(stream_law_config())]
+
     #[test]
     fn mr6_chain_identity(data in arb_int_vec()) {
         test_utils::init_test_logging();
@@ -366,9 +354,9 @@ proptest! {
         let result2 = collect_stream_sync(stream2);
         let result3 = collect_stream_sync(stream3);
 
-        prop_assert_eq!(result1, result2,
+        prop_assert_eq!(&result1, &result2,
             "Right chain identity violated: s⋅ε ≠ s");
-        prop_assert_eq!(result1, result3,
+        prop_assert_eq!(&result1, &result3,
             "Left chain identity violated: ε⋅s ≠ s");
 
         asupersync::test_complete!("mr6_chain_identity");
@@ -382,6 +370,8 @@ proptest! {
 /// MR7: Filter Composition
 /// s.filter(p1).filter(p2) == s.filter(|x| p1(x) && p2(x))
 proptest! {
+    #![proptest_config(stream_law_config())]
+
     #[test]
     fn mr7_filter_composition(
         data in arb_small_int_vec(),
@@ -407,6 +397,8 @@ proptest! {
 /// MR8: Filter Identity
 /// s.filter(always_true) == s
 proptest! {
+    #![proptest_config(stream_law_config())]
+
     #[test]
     fn mr8_filter_identity(data in arb_int_vec()) {
         test_utils::init_test_logging();
@@ -428,6 +420,8 @@ proptest! {
 /// MR9: Filter Annihilation
 /// s.filter(always_false) == empty
 proptest! {
+    #![proptest_config(stream_law_config())]
+
     #[test]
     fn mr9_filter_annihilation(data in arb_int_vec()) {
         test_utils::init_test_logging();
@@ -450,6 +444,8 @@ proptest! {
 /// MR10: Take/Skip Duality
 /// s.take(n).chain(s.skip(n)) == s (for deterministic streams)
 proptest! {
+    #![proptest_config(stream_law_config())]
+
     #[test]
     fn mr10_take_skip_duality(
         data in arb_small_int_vec(),
@@ -474,6 +470,8 @@ proptest! {
 /// MR11: Take Idempotence
 /// s.take(n).take(m) == s.take(min(n, m))
 proptest! {
+    #![proptest_config(stream_law_config())]
+
     #[test]
     fn mr11_take_idempotence(
         data in arb_small_int_vec(),
@@ -499,6 +497,8 @@ proptest! {
 /// MR12: Skip Composition
 /// s.skip(n).skip(m) == s.skip(n + m)
 proptest! {
+    #![proptest_config(stream_law_config())]
+
     #[test]
     fn mr12_skip_composition(
         data in arb_small_int_vec(),
@@ -528,6 +528,8 @@ proptest! {
 /// MR13: Map/Filter Commutativity (when safe)
 /// s.map(f).filter(p) == s.filter(|x| p(&f(x))).map(f) (if f is injective and p is compatible)
 proptest! {
+    #![proptest_config(stream_law_config())]
+
     #[test]
     fn mr13_map_filter_interaction(data in arb_small_int_vec()) {
         test_utils::init_test_logging();
@@ -557,6 +559,8 @@ proptest! {
 /// MR14: Fold Associativity (for associative operations)
 /// s.fold(init, op) where op is associative should be consistent
 proptest! {
+    #![proptest_config(stream_law_config())]
+
     #[test]
     fn mr14_fold_sum_associativity(data in arb_small_int_vec()) {
         test_utils::init_test_logging();
@@ -610,22 +614,4 @@ fn mr15_empty_stream_laws() {
     assert_eq!(skipped, Vec::<i32>::new());
 
     asupersync::test_complete!("mr15_empty_stream_laws");
-}
-
-// ============================================================================
-// Property-Based Test Configuration
-// ============================================================================
-
-#[cfg(test)]
-mod proptest_config {
-    use super::*;
-
-    proptest! {
-        #![proptest_config(ProptestConfig {
-            cases: 50,
-            max_shrink_iters: 500,
-            timeout: 3000,
-            .. ProptestConfig::default()
-        })]
-    }
 }
