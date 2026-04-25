@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 
 /// A proof-carrying trace certificate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TraceCertificate {
     /// Incremental hash of all events.
     event_hash: u64,
@@ -507,12 +507,6 @@ fn hash_obligation_abort_reason<H: Hasher>(hasher: &mut H, reason: Option<Obliga
         Some(ObligationAbortReason::Cancel) => 1_u8.hash(hasher),
         Some(ObligationAbortReason::Error) => 2_u8.hash(hasher),
         Some(ObligationAbortReason::Explicit) => 3_u8.hash(hasher),
-    }
-}
-
-impl Default for TraceCertificate {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

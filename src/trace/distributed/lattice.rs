@@ -193,7 +193,7 @@ impl fmt::Display for LeaseLatticeState {
 /// Each replica independently merges observations. The map itself forms
 /// a join-semilattice: merging two maps yields the componentwise join
 /// of each obligation's state.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ObligationLattice {
     obligations: BTreeMap<ObligationId, ObligationEntry>,
 }
@@ -300,12 +300,6 @@ impl ObligationLattice {
     #[must_use]
     pub fn has_conflicts(&self) -> bool {
         self.obligations.values().any(|e| e.state.is_conflict())
-    }
-}
-
-impl Default for ObligationLattice {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

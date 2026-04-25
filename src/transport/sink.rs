@@ -654,6 +654,7 @@ impl SymbolSink for ChannelSink {
 }
 
 /// Sink that collects symbols into a Vec.
+#[derive(Default)]
 pub struct CollectingSink {
     symbols: Vec<AuthenticatedSymbol>,
 }
@@ -677,12 +678,6 @@ impl CollectingSink {
     #[must_use]
     pub fn into_symbols(self) -> Vec<AuthenticatedSymbol> {
         self.symbols
-    }
-}
-
-impl Default for CollectingSink {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
