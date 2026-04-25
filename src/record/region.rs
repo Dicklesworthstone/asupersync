@@ -185,7 +185,7 @@ impl RegionState {
 /// - **`resolve_obligation` uses `saturating_sub`**: so an unpaired
 ///   resolve (e.g. from a double-drop) bottoms out at zero rather
 ///   than wrapping.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegionLimits {
     /// Maximum number of live child regions.
     pub max_children: Option<usize>,
@@ -227,12 +227,6 @@ impl RegionLimits {
     pub fn without_curve_budget(mut self) -> Self {
         self.curve_budget = None;
         self
-    }
-}
-
-impl Default for RegionLimits {
-    fn default() -> Self {
-        Self::UNLIMITED
     }
 }
 
