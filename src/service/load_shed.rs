@@ -155,7 +155,7 @@ impl<S> LoadShed<S> {
 }
 
 /// Error returned when a request is shed due to overload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Overloaded(());
 
 impl Overloaded {
@@ -163,12 +163,6 @@ impl Overloaded {
     #[must_use]
     pub const fn new() -> Self {
         Self(())
-    }
-}
-
-impl Default for Overloaded {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

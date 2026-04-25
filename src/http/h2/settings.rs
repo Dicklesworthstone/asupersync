@@ -220,7 +220,7 @@ impl Settings {
 }
 
 /// Builder for configuring HTTP/2 settings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SettingsBuilder {
     settings: Settings,
 }
@@ -306,12 +306,6 @@ impl SettingsBuilder {
     #[must_use]
     pub fn build(self) -> Settings {
         self.settings
-    }
-}
-
-impl Default for SettingsBuilder {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
