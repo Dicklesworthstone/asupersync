@@ -91,7 +91,7 @@ pub enum InsertResult {
 }
 
 /// A collection of symbols with threshold tracking.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SymbolSet {
     symbols: HashMap<SymbolId, Symbol>,
     block_counts: HashMap<u8, BlockProgress>,
@@ -416,12 +416,6 @@ impl SymbolSet {
         if let Some(budget) = self.memory_budget {
             self.memory_remaining = self.memory_remaining.saturating_add(size).min(budget);
         }
-    }
-}
-
-impl Default for SymbolSet {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
