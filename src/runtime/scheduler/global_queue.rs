@@ -72,6 +72,10 @@ mod tests {
         TaskId::new_for_test(id, 0)
     }
 
+    fn task_range(range: std::ops::Range<usize>) -> impl Iterator<Item = TaskId> {
+        range.map(|i| task(i as u32))
+    }
+
     fn drain_all(queue: &GlobalQueue) -> Vec<TaskId> {
         std::iter::from_fn(|| queue.pop()).collect()
     }
@@ -343,9 +347,8 @@ mod tests {
                 .collect();
             let remaining = drain_all(&queue);
 
-            let expected_stolen: Vec<_> = (0..steal_prefix).map(|i| task(i as u32)).collect();
-            let expected_remaining: Vec<_> =
-                (steal_prefix..total).map(|i| task(i as u32)).collect();
+            let expected_stolen = task_range(0..steal_prefix).collect::<Vec<_>>();
+            let expected_remaining = task_range(steal_prefix..total).collect::<Vec<_>>();
 
             prop_assert_eq!(
                 stolen,
@@ -366,7 +369,7 @@ mod tests {
             first_stealer_is_a in any::<bool>(),
         ) {
             let queue = GlobalQueue::new();
-            let expected: Vec<_> = (0..total).map(|i| task(i as u32)).collect();
+            let expected = task_range(0..total).collect::<Vec<_>>();
 
             for task_id in &expected {
                 queue.push(*task_id);
@@ -428,9 +431,8 @@ mod tests {
             // later resumes draining the shared global queue.
             let resumed_drain = drain_all(&queue);
 
-            let expected_stolen: Vec<_> = (0..taken_before_cancel).map(|i| task(i as u32)).collect();
-            let expected_suffix: Vec<_> =
-                (taken_before_cancel..total).map(|i| task(i as u32)).collect();
+            let expected_stolen = task_range(0..taken_before_cancel).collect::<Vec<_>>();
+            let expected_suffix = task_range(taken_before_cancel..total).collect::<Vec<_>>();
             let total_observed = stolen_before_cancel.len() + resumed_drain.len();
 
             prop_assert_eq!(
@@ -463,8 +465,8 @@ mod tests {
             let (step_prefix, step_suffix) =
                 run_cancelled_steal_schedule(total, cancel_after, &[1]);
 
-            let expected_prefix: Vec<_> = (0..cancel_after).map(|i| task(i as u32)).collect();
-            let expected_suffix: Vec<_> = (cancel_after..total).map(|i| task(i as u32)).collect();
+            let expected_prefix = task_range(0..cancel_after).collect::<Vec<_>>();
+            let expected_suffix = task_range(cancel_after..total).collect::<Vec<_>>();
 
             prop_assert_eq!(
                 bulk_prefix,
@@ -494,11 +496,10 @@ mod tests {
             migrated_len in 1usize..32,
         ) {
             let queue = GlobalQueue::new();
-            let ready_base = 0u32;
             let migrated_base = 10_000u32;
 
-            for i in 0..ready_len {
-                queue.push(task(ready_base + i as u32));
+            for task_id in task_range(0..ready_len) {
+                queue.push(task_id);
             }
 
             // Simulate a worker spilling its local queue into the shared global queue.
@@ -507,10 +508,8 @@ mod tests {
             }
 
             let drained = drain_all(&queue);
-            let expected: Vec<_> = (0..ready_len)
-                .map(|i| task(ready_base + i as u32))
-                .chain((0..migrated_len).map(|i| task(migrated_base + i as u32)))
-                .collect();
+            let mut expected = task_range(0..ready_len).collect::<Vec<_>>();
+            expected.extend((0..migrated_len).map(|i| task(migrated_base + i as u32)));
 
             prop_assert_eq!(
                 drained,
@@ -537,10 +536,8 @@ mod tests {
             queue.push(yielded);
 
             let drained = drain_all(&queue);
-            let expected: Vec<_> = (1..total)
-                .map(|i| task(i as u32))
-                .chain(std::iter::once(task(0)))
-                .collect();
+            let mut expected = task_range(1..total).collect::<Vec<_>>();
+            expected.push(task(0));
 
             prop_assert_eq!(
                 yielded,
