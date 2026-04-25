@@ -587,7 +587,7 @@ impl TimeSource for TimerDriverSource {
 /// - `a ≤ b` iff `∀ node: a[node] ≤ b[node]`
 /// - `a < b` (happens-before) iff `a ≤ b` and `a ≠ b`
 /// - `a ∥ b` (concurrent) iff `¬(a ≤ b)` and `¬(b ≤ a)`
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VectorClock {
     /// BTreeMap for deterministic iteration order.
     entries: BTreeMap<NodeId, u64>,
@@ -733,12 +733,6 @@ impl VectorClock {
     /// Returns an iterator over (node, counter) pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&NodeId, &u64)> {
         self.entries.iter()
-    }
-}
-
-impl Default for VectorClock {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

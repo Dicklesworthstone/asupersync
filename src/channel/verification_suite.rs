@@ -80,7 +80,7 @@ pub struct VerificationResult {
 }
 
 /// Results for a category of tests.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CategoryResult {
     /// Number of tests in this category.
     pub test_count: usize,
@@ -94,19 +94,6 @@ pub struct CategoryResult {
     pub violations: u64,
     /// Details of failures.
     pub failure_details: Vec<String>,
-}
-
-impl Default for CategoryResult {
-    fn default() -> Self {
-        Self {
-            test_count: 0,
-            passed_count: 0,
-            total_messages: 0,
-            avg_throughput: 0.0,
-            violations: 0,
-            failure_details: Vec::new(),
-        }
-    }
 }
 
 /// Main verification suite runner.

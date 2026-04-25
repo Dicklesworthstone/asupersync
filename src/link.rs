@@ -200,7 +200,7 @@ pub enum LinkExitAction {
 /// Ordering is by `(exit_vt, source_tid, target_tid, link_ref_id, kind)` where
 /// `kind` is a stable discriminator to make ordering deterministic when keys
 /// otherwise tie.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct LinkExitBatch {
     entries: Vec<LinkExitBatchEntry>,
 }
@@ -259,12 +259,6 @@ impl LinkExitBatch {
     }
 }
 
-impl Default for LinkExitBatch {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 fn action_kind_rank(a: &LinkExitAction) -> u8 {
     match a {
         LinkExitAction::CancelPeer { .. } => 0,
@@ -313,7 +307,7 @@ struct LinkRecord {
 /// Since links are bidirectional, each link appears in `task_index` for both
 /// task_a and task_b, and in `region_index` for both region_a and region_b
 /// (unless they share a region).
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct LinkSet {
     records: BTreeMap<LinkRef, LinkRecord>,
     task_index: BTreeMap<TaskId, Vec<LinkRef>>,
@@ -680,12 +674,6 @@ impl LinkSet {
     }
 }
 
-impl Default for LinkSet {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 fn linked_exit_cancel_reason(exit_reason: &DownReason) -> CancelReason {
     let base = CancelReason::new(CancelKind::LinkedExit).with_message("link exit");
     match exit_reason {
@@ -707,7 +695,7 @@ fn linked_exit_cancel_reason(exit_reason: &DownReason) -> CancelReason {
 /// **Contract (EXIT-BATCH)**: When multiple exit signals become ready
 /// in a single scheduler step, they are sorted before enqueue. The
 /// receiver gets them in sorted order.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ExitBatch {
     entries: Vec<ExitBatchEntry>,
 }
@@ -760,12 +748,6 @@ impl ExitBatch {
             vt_cmp.then_with(|| a.signal.from.cmp(&b.signal.from))
         });
         self.entries.into_iter().map(|e| e.signal).collect()
-    }
-}
-
-impl Default for ExitBatch {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

@@ -218,7 +218,7 @@ struct MonitorRecord {
 /// - `by_ref`: MonitorRef → MonitorRecord (primary)
 /// - `by_monitored`: TaskId → Vec<MonitorRef> (find watchers of a terminated task)
 /// - `by_watcher_region`: RegionId → Vec<MonitorRef> (region-close cleanup)
-#[derive(Debug)]
+#[derive(Debug, Default)]
 #[allow(clippy::struct_field_names)]
 pub struct MonitorSet {
     by_ref: BTreeMap<MonitorRef, MonitorRecord>,
@@ -372,12 +372,6 @@ impl MonitorSet {
     }
 }
 
-impl Default for MonitorSet {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ============================================================================
 // DownBatch — deterministic delivery ordering
 // ============================================================================
@@ -392,7 +386,7 @@ impl Default for MonitorSet {
 /// **Contract (DOWN-BATCH)**: When multiple down notifications become ready
 /// in a single scheduler step, they are sorted before enqueue. The watcher
 /// receives them in sorted order.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct DownBatch {
     entries: Vec<DownBatchEntry>,
 }
@@ -449,12 +443,6 @@ impl DownBatch {
                 .then_with(|| a.notification.monitor_ref.cmp(&b.notification.monitor_ref))
         });
         self.entries.into_iter().map(|e| e.notification).collect()
-    }
-}
-
-impl Default for DownBatch {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

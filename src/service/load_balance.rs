@@ -386,7 +386,7 @@ impl Strategy for PickFirst {
 ///
 /// This provides near-optimal load distribution with O(1) selection,
 /// avoiding the thundering-herd problem of pure random selection.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct PowerOfTwoChoices {
     counter: AtomicUsize,
 }
@@ -410,12 +410,6 @@ impl PowerOfTwoChoices {
             .wrapping_add(1);
         let folded = hash ^ (hash >> 32);
         (folded as usize) % n
-    }
-}
-
-impl Default for PowerOfTwoChoices {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

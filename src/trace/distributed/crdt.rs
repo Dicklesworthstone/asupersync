@@ -33,7 +33,7 @@ pub trait Merge {
 ///
 /// Each replica maintains its own monotonically increasing count.
 /// The global value is the sum across all replicas.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GCounter {
     counts: BTreeMap<NodeId, u64>,
 }
@@ -71,12 +71,6 @@ impl GCounter {
     }
 }
 
-impl Default for GCounter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Merge for GCounter {
     fn merge(&mut self, other: &Self) {
         for (node, &count) in &other.counts {
@@ -95,7 +89,7 @@ impl Merge for GCounter {
 ///
 /// Supports both increment and decrement by maintaining two [`GCounter`]s
 /// internally: one for increments and one for decrements.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PNCounter {
     positive: GCounter,
     negative: GCounter,
@@ -125,12 +119,6 @@ impl PNCounter {
     #[must_use]
     pub fn value(&self) -> i128 {
         i128::from(self.positive.value()) - i128::from(self.negative.value())
-    }
-}
-
-impl Default for PNCounter {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
