@@ -393,9 +393,7 @@ impl PowerOfTwoChoices {
     /// Create a new P2C strategy.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            counter: AtomicUsize::new(0),
-        }
+        Self::default()
     }
 
     /// Simple deterministic scatter using a counter-based hash.
