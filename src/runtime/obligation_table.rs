@@ -661,18 +661,7 @@ impl ObligationTable {
     /// Collects IDs of pending obligations held by a specific task.
     #[must_use]
     pub fn pending_obligation_ids_for_task(&self, task_id: TaskId) -> Vec<ObligationId> {
-        let mut ids: Vec<ObligationId> = self
-            .ids_for_holder(task_id)
-            .iter()
-            .copied()
-            .filter(|id| {
-                self.obligations
-                    .get(id.arena_index())
-                    .is_some_and(ObligationRecord::is_pending)
-            })
-            .collect();
-        ids.sort_unstable();
-        ids
+        self.sorted_pending_ids_for_holder(task_id).into_vec()
     }
 
     /// Collects IDs of pending obligations in a specific region.
