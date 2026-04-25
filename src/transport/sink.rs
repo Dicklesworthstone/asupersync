@@ -663,9 +663,7 @@ impl CollectingSink {
     /// Creates an empty collecting sink.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            symbols: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Returns the collected symbols.
