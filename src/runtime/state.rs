@@ -1687,6 +1687,10 @@ impl RuntimeState {
                     acquire_backtrace,
                 });
 
+        // Reserving an obligation increments the owning region's pending count,
+        // so the region-table epoch must advance alongside the obligation table.
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
+
         // Register obligation with cancel protocol validator
         {
             let mut validator = self.cancel_protocol_validator.lock();
@@ -9482,13 +9486,19 @@ mod tests {
                     child_ids.push(child_id);
                 }
 
-                // Close all children first
+                // Close all children through RuntimeState so parent-child indexes
+                // are cleaned up the same way production close cascades do.
                 for &child_id in &child_ids {
-                    let state = &mut runtime.state;
-                    let child = state.regions.get_mut(child_id.arena_index()).unwrap();
-                    let _ = child.begin_close(None);
-                    let _ = child.begin_finalize();
-                    let _ = child.complete_close();
+                    {
+                        let state = &mut runtime.state;
+                        let child = state.regions.get_mut(child_id.arena_index()).unwrap();
+                        let _ = child.begin_close(None);
+                    }
+                    runtime.state.advance_region_state(child_id);
+                    prop_assert!(
+                        runtime.state.region_was_closed(child_id),
+                        "child should close through RuntimeState cleanup"
+                    );
                 }
 
                 // Verify children are closed but parent is still open
@@ -9506,18 +9516,18 @@ mod tests {
                     let state = &mut runtime.state;
                     let parent = state.regions.get_mut(parent_id.arena_index()).unwrap();
                     let _ = parent.begin_close(None);
-                    let _ = parent.begin_finalize();
-                    let _ = parent.complete_close();
                 }
-
-                let parent_outcome_after = RegionCloseOutcome::from_region(&runtime, parent_id);
+                runtime.state.advance_region_state(parent_id);
 
                 // Metamorphic relation: Parent close should succeed after all children are closed
-                prop_assert!(parent_outcome_after.is_some());
-                if let Some(outcome) = parent_outcome_after {
-                    prop_assert_eq!(outcome.final_state, crate::record::region::RegionState::Closed);
-                    prop_assert_eq!(outcome.child_count, 0, "Closed parent should have no children");
-                }
+                prop_assert!(
+                    runtime.state.region_was_closed(parent_id),
+                    "parent should close once child indexes are empty"
+                );
+                prop_assert!(
+                    runtime.state.regions.get(parent_id.arena_index()).is_none(),
+                    "closed parent should be removed from the region table"
+                );
             });
         }
 
