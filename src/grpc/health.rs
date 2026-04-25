@@ -104,7 +104,7 @@ impl HealthCheckRequest {
 }
 
 /// Response from health check.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HealthCheckResponse {
     /// The serving status.
     pub status: ServingStatus,
@@ -115,14 +115,6 @@ impl HealthCheckResponse {
     #[must_use]
     pub fn new(status: ServingStatus) -> Self {
         Self { status }
-    }
-}
-
-impl Default for HealthCheckResponse {
-    fn default() -> Self {
-        Self {
-            status: ServingStatus::Unknown,
-        }
     }
 }
 
