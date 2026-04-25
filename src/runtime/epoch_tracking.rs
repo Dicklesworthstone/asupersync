@@ -16,9 +16,8 @@
 use crate::types::{RegionId, TaskId};
 use crate::util::CachePadded;
 use crossbeam_queue::SegQueue;
-use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Shared `Instant` origin used to serialize monotonic timestamps into a
@@ -35,6 +34,18 @@ fn instant_to_nanos(t: Instant) -> u64 {
     t.saturating_duration_since(time_origin())
         .as_nanos()
         .min(u64::MAX as u128) as u64
+}
+
+/// Convert a serialized nanosecond counter back to an [`Instant`].
+fn nanos_to_instant(nanos: u64) -> Instant {
+    time_origin()
+        .checked_add(Duration::from_nanos(nanos))
+        .unwrap_or_else(Instant::now)
+}
+
+fn next_pin_debug_id() -> u64 {
+    static NEXT_PIN_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_PIN_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 // ============================================================================
@@ -172,7 +183,7 @@ impl GlobalEpochCounter {
                 .compare_exchange(last, now_nanos, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                return self.advance_epoch(now);
+                return Some(self.advance_epoch());
             }
         }
     }
@@ -182,8 +193,7 @@ impl GlobalEpochCounter {
         let now = Instant::now();
         self.last_advance
             .store(instant_to_nanos(now), Ordering::Release);
-        self.advance_epoch(now)
-            .unwrap_or_else(|| self.current_epoch())
+        self.advance_epoch()
     }
 
     /// Check if advancement is needed due to memory pressure.
@@ -196,19 +206,17 @@ impl GlobalEpochCounter {
         EpochStats {
             current_epoch: self.current_epoch(),
             advance_count: self.advance_count.load(Ordering::Relaxed),
-            last_advance: Instant::now(), // Simplified: use current time
-            active_pins: 0,               // Filled by coordinator
-            min_pinned_epoch: 0,          // Filled by coordinator
+            last_advance: nanos_to_instant(self.last_advance.load(Ordering::Acquire)),
+            active_pins: 0,      // Filled by coordinator
+            min_pinned_epoch: 0, // Filled by coordinator
         }
     }
 
     #[cold]
-    fn advance_epoch(&self, _now: Instant) -> Option<u64> {
-        // Simplified: just advance the epoch without timestamp tracking
-        // This is a temporary fix to get compilation working
+    fn advance_epoch(&self) -> u64 {
         let new_epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         self.advance_count.fetch_add(1, Ordering::Relaxed);
-        Some(new_epoch)
+        new_epoch
     }
 }
 impl std::fmt::Debug for GlobalEpochCounter {
@@ -230,8 +238,12 @@ pub struct LocalEpochPin {
     pinned_epoch: AtomicU64,
     /// Whether this pin is currently active.
     is_active: AtomicBool,
-    /// Thread ID for debugging.
-    thread_id: u64,
+    /// Number of live guards for this pin.
+    pin_depth: AtomicUsize,
+    /// Serializes pin/unpin state transitions while keeping readers lock-free.
+    state_lock: Mutex<()>,
+    /// Stable identifier for debug output.
+    debug_id: u64,
     /// Reference to global epoch counter.
     global: Arc<GlobalEpochCounter>,
     /// Statistics for this pin.
@@ -244,7 +256,9 @@ impl LocalEpochPin {
         Self {
             pinned_epoch: AtomicU64::new(0),
             is_active: AtomicBool::new(false),
-            thread_id: 0, // Simplified: use 0 as placeholder
+            pin_depth: AtomicUsize::new(0),
+            state_lock: Mutex::new(()),
+            debug_id: next_pin_debug_id(),
             global,
             stats: LocalEpochStats::default(),
         }
@@ -253,13 +267,25 @@ impl LocalEpochPin {
     /// Pin the current epoch, preventing its cleanup.
     #[inline]
     pub fn pin(&self) -> EpochGuard<'_> {
-        let epoch = self.global.current_epoch();
-        self.pinned_epoch.store(epoch, Ordering::Release);
-        self.is_active.store(true, Ordering::Release);
+        let _state = self
+            .state_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_depth = self.pin_depth.fetch_add(1, Ordering::AcqRel);
+        let epoch = if previous_depth == 0 {
+            let epoch = self.global.current_epoch();
+            self.pinned_epoch.store(epoch, Ordering::Release);
+            self.stats
+                .pin_start
+                .store(instant_to_nanos(Instant::now()).max(1), Ordering::Release);
+            self.is_active.store(true, Ordering::Release);
+            epoch
+        } else {
+            self.pinned_epoch.load(Ordering::Acquire)
+        };
 
         // Update statistics
         self.stats.pin_count.fetch_add(1, Ordering::Relaxed);
-        self.stats.pin_start.store(0u64, Ordering::Relaxed); // Simplified: placeholder
 
         EpochGuard { pin: self, epoch }
     }
@@ -274,9 +300,9 @@ impl LocalEpochPin {
         }
     }
 
-    /// Get thread ID for this pin.
-    pub fn thread_id(&self) -> u64 {
-        self.thread_id
+    /// Get the stable debug ID for this pin.
+    pub fn debug_id(&self) -> u64 {
+        self.debug_id
     }
 
     /// Get statistics for this pin.
@@ -292,18 +318,25 @@ impl LocalEpochPin {
     /// Unpin the current epoch.
     #[inline]
     fn unpin(&self) {
-        self.is_active.store(false, Ordering::Release);
-
+        let _state = self
+            .state_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Update statistics
         self.stats.unpin_count.fetch_add(1, Ordering::Relaxed);
-        let now = 0u64; // Simplified: placeholder
-        let start = self.stats.pin_start.load(Ordering::Relaxed);
-        if start > 0 {
-            let duration = now - start;
+        let previous_depth = self.pin_depth.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous_depth > 0);
+
+        if previous_depth == 1 {
+            self.is_active.store(false, Ordering::Release);
+            let now = instant_to_nanos(Instant::now());
+            let start = self.stats.pin_start.swap(0, Ordering::AcqRel);
+            let duration = now.saturating_sub(start);
             let _ = self
                 .stats
                 .max_pin_duration
                 .fetch_max(duration, Ordering::Relaxed);
+            self.pinned_epoch.store(0, Ordering::Release);
         }
     }
 }
@@ -311,7 +344,7 @@ impl LocalEpochPin {
 impl std::fmt::Debug for LocalEpochPin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LocalEpochPin")
-            .field("thread_id", &self.thread_id)
+            .field("debug_id", &self.debug_id)
             .field("pinned_epoch", &self.pinned_epoch())
             .field("is_active", &self.is_active.load(Ordering::Relaxed))
             .finish()
@@ -759,6 +792,65 @@ mod tests {
         // Drop guard to unpin
         drop(guard);
         assert_eq!(pin.pinned_epoch(), None);
+    }
+
+    #[test]
+    fn nested_epoch_pins_remain_active_until_outermost_guard_drops() {
+        let epoch = Arc::new(GlobalEpochCounter::new(EpochConfig::default()));
+        let pin = LocalEpochPin::new(epoch.clone());
+
+        let outer = pin.pin();
+        let outer_epoch = outer.epoch();
+        epoch.force_advance();
+
+        let inner = pin.pin();
+        assert_eq!(
+            inner.epoch(),
+            outer_epoch,
+            "nested pins must retain the oldest active epoch",
+        );
+
+        drop(inner);
+        assert_eq!(
+            pin.pinned_epoch(),
+            Some(outer_epoch),
+            "dropping an inner guard must not publish a false safe point",
+        );
+
+        drop(outer);
+        assert_eq!(pin.pinned_epoch(), None);
+    }
+
+    #[test]
+    fn local_pin_stats_record_outermost_pin_duration() {
+        let epoch = Arc::new(GlobalEpochCounter::new(EpochConfig::default()));
+        let pin = LocalEpochPin::new(epoch);
+
+        let guard = pin.pin();
+        thread::sleep(Duration::from_millis(1));
+        drop(guard);
+
+        let stats = pin.stats();
+        assert_eq!(stats.pin_count.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.unpin_count.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.pin_start.load(Ordering::Relaxed), 0);
+        assert!(
+            stats.max_pin_duration.load(Ordering::Relaxed) > 0,
+            "pin duration should be measured instead of left at the placeholder value",
+        );
+    }
+
+    #[test]
+    fn global_stats_report_recorded_last_advance_time() {
+        let epoch = GlobalEpochCounter::new(EpochConfig::default());
+
+        epoch.force_advance();
+        thread::sleep(Duration::from_millis(5));
+
+        assert!(
+            epoch.stats().last_advance.elapsed() >= Duration::from_millis(2),
+            "last_advance should be the stored advancement time, not the stats sample time",
+        );
     }
 
     #[test]
