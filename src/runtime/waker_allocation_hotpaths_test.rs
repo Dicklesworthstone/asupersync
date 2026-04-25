@@ -1,194 +1,136 @@
 //! Test demonstrating waker allocation hot paths.
 //!
-//! This test serves as a baseline measurement for profiling waker allocation patterns.
+//! These tests intentionally assert deterministic behavior instead of printing
+//! timing measurements. Performance baselines belong in benches or artifacts;
+//! unit tests should fail on semantic regressions.
 
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
-    use crate::runtime::waker::{WakerState, WakeSource};
-    use crate::types::TaskId;
-    use crate::util::ArenaIndex;
-    use std::time::Instant;
-    use std::sync::Arc;
+use super::{WakeSource, WakerState};
+use crate::types::TaskId;
+use crate::util::ArenaIndex;
+use std::sync::Arc;
+
+#[cfg(feature = "waker-profiling")]
+use super::waker_profiling::{get_waker_metrics, profiling_enabled, reset_waker_metrics};
+
+#[cfg(feature = "waker-profiling")]
+fn lock_metrics() -> std::sync::MutexGuard<'static, ()> {
+    static METRICS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    METRICS_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn task_id(n: u32) -> TaskId {
+    TaskId::from_arena(ArenaIndex::new(n, 0))
+}
+
+#[test]
+fn hotpath_waker_creation_drains_every_unique_task_once() {
+    #[cfg(feature = "waker-profiling")]
+    let _metrics_guard = lock_metrics();
+    #[cfg(feature = "waker-profiling")]
+    reset_waker_metrics();
+
+    const TASK_COUNT: u32 = 128;
+    let state = Arc::new(WakerState::new());
+    let wakers: Vec<_> = (0..TASK_COUNT)
+        .map(|i| state.waker_for(task_id(i)))
+        .collect();
+
+    for waker in &wakers {
+        waker.wake_by_ref();
+    }
+
+    let woken = state.drain_woken();
+    let expected: Vec<_> = (0..TASK_COUNT).map(task_id).collect();
+    assert_eq!(woken, expected);
+    assert!(!state.has_woken());
 
     #[cfg(feature = "waker-profiling")]
-    use crate::runtime::waker_profiling::{get_waker_metrics, reset_waker_metrics};
+    if profiling_enabled() {
+        let metrics = get_waker_metrics();
+        assert_eq!(metrics.waker_allocations, u64::from(TASK_COUNT));
+        assert_eq!(metrics.wake_operations, u64::from(TASK_COUNT));
+        assert_eq!(metrics.drain_operations, 1);
+        assert_eq!(metrics.dedup_hits, 0);
+    }
+}
 
-    fn task_id(n: u32) -> TaskId {
-        TaskId::from_arena(ArenaIndex::new(n, 0))
+#[test]
+fn hotpath_repeated_wakes_are_deduplicated_until_drain() {
+    #[cfg(feature = "waker-profiling")]
+    let _metrics_guard = lock_metrics();
+    #[cfg(feature = "waker-profiling")]
+    reset_waker_metrics();
+
+    const WAKE_COUNT: u32 = 128;
+    let state = Arc::new(WakerState::new());
+    let waker = state.waker_for(task_id(1));
+
+    for _ in 0..WAKE_COUNT {
+        waker.wake_by_ref();
     }
 
-    /// Baseline test for waker creation patterns.
-    /// This measures allocation behavior under different creation scenarios.
-    #[test]
-    fn hotpath_waker_creation() {
-        #[cfg(feature = "waker-profiling")]
-        reset_waker_metrics();
+    assert_eq!(state.drain_woken(), vec![task_id(1)]);
+    assert!(state.drain_woken().is_empty());
 
-        let start = Instant::now();
+    #[cfg(feature = "waker-profiling")]
+    if profiling_enabled() {
+        let metrics = get_waker_metrics();
+        assert_eq!(metrics.waker_allocations, 1);
+        assert_eq!(metrics.wake_operations, u64::from(WAKE_COUNT));
+        assert_eq!(metrics.dedup_hits, u64::from(WAKE_COUNT - 1));
+        assert_eq!(metrics.drain_operations, 2);
+    }
+}
 
-        // Test Case 1: Burst waker creation
-        let state = Arc::new(WakerState::new());
-        let mut wakers = Vec::with_capacity(1000);
+#[test]
+fn hotpath_cloned_wakers_share_the_same_task_slot() {
+    #[cfg(feature = "waker-profiling")]
+    let _metrics_guard = lock_metrics();
+    #[cfg(feature = "waker-profiling")]
+    reset_waker_metrics();
 
-        for i in 0..1000 {
-            let waker = state.waker_for(task_id(i));
-            wakers.push(waker);
-        }
+    let state = Arc::new(WakerState::new());
+    let waker = state.waker_for(task_id(7));
+    let clones: Vec<_> = (0..16).map(|_| waker.clone()).collect();
 
-        let creation_duration = start.elapsed();
-        println!("Waker creation (1000 wakers): {:?}", creation_duration);
-
-        // Test Case 2: Use all wakers
-        let start = Instant::now();
-        for waker in &wakers {
-            waker.wake_by_ref();
-        }
-        let wake_duration = start.elapsed();
-        println!("Waker wake operations (1000): {:?}", wake_duration);
-
-        // Test Case 3: Drain results
-        let start = Instant::now();
-        let woken = state.drain_woken();
-        let drain_duration = start.elapsed();
-        println!("Drain woken ({}): {:?}", woken.len(), drain_duration);
-
-        #[cfg(feature = "waker-profiling")]
-        {
-            let metrics = get_waker_metrics();
-            println!("Waker allocation metrics: {:?}", metrics);
-        }
+    for cloned_waker in &clones {
+        cloned_waker.wake_by_ref();
     }
 
-    /// Baseline test for waker reuse patterns.
-    #[test]
-    fn hotpath_waker_reuse() {
-        #[cfg(feature = "waker-profiling")]
-        reset_waker_metrics();
+    assert_eq!(state.drain_woken(), vec![task_id(7)]);
 
-        let state = Arc::new(WakerState::new());
+    #[cfg(feature = "waker-profiling")]
+    if profiling_enabled() {
+        let metrics = get_waker_metrics();
+        assert_eq!(metrics.waker_allocations, 1);
+        assert_eq!(metrics.wake_operations, 16);
+        assert_eq!(metrics.dedup_hits, 15);
+    }
+}
 
-        // Test Case 1: Create once, use many times
-        let start = Instant::now();
-        let waker = state.waker_for(task_id(1));
+#[test]
+fn hotpath_wake_source_types_preserve_task_identity() {
+    #[cfg(feature = "waker-profiling")]
+    let _metrics_guard = lock_metrics();
+    #[cfg(feature = "waker-profiling")]
+    reset_waker_metrics();
 
-        for _ in 0..1000 {
-            waker.wake_by_ref();
-            let _woken = state.drain_woken();
-        }
+    let state = Arc::new(WakerState::new());
+    let wakers = [
+        state.waker_for_source(task_id(1), WakeSource::Timer),
+        state.waker_for_source(task_id(2), WakeSource::Io { fd: 42 }),
+        state.waker_for_source(task_id(3), WakeSource::Explicit),
+        state.waker_for(task_id(4)),
+    ];
 
-        let reuse_duration = start.elapsed();
-        println!("Waker reuse (1000 ops): {:?}", reuse_duration);
-
-        // Test Case 2: Clone waker and use clones
-        let start = Instant::now();
-        let mut cloned_wakers = Vec::with_capacity(100);
-
-        for _ in 0..100 {
-            cloned_wakers.push(waker.clone());
-        }
-
-        for cloned_waker in &cloned_wakers {
-            cloned_waker.wake_by_ref();
-        }
-        let _final_woken = state.drain_woken();
-
-        let clone_duration = start.elapsed();
-        println!("Waker cloning and use (100 clones): {:?}", clone_duration);
-
-        #[cfg(feature = "waker-profiling")]
-        {
-            let metrics = get_waker_metrics();
-            println!("Reuse allocation metrics: {:?}", metrics);
-        }
+    for waker in &wakers {
+        waker.wake_by_ref();
     }
 
-    /// Baseline test for wake storm scenarios.
-    #[test]
-    fn hotpath_wake_storms() {
-        #[cfg(feature = "waker-profiling")]
-        reset_waker_metrics();
-
-        let start = Instant::now();
-
-        // Create many wakers for different tasks
-        let state = Arc::new(WakerState::new());
-        let wakers: Vec<_> = (0..100)
-            .map(|i| state.waker_for(task_id(i)))
-            .collect();
-
-        // Wake storm: all wakers fire multiple times
-        for _ in 0..10 {
-            for waker in &wakers {
-                waker.wake_by_ref();
-            }
-        }
-
-        let storm_duration = start.elapsed();
-        println!("Wake storm (100 wakers × 10 rounds): {:?}", storm_duration);
-
-        let woken = state.drain_woken();
-        println!("Final woken count: {}", woken.len());
-
-        #[cfg(feature = "waker-profiling")]
-        {
-            let metrics = get_waker_metrics();
-            println!("Wake storm metrics: {:?}", metrics);
-        }
-    }
-
-    /// Test for different wake source types allocation patterns.
-    #[test]
-    fn hotpath_wake_source_types() {
-        #[cfg(feature = "waker-profiling")]
-        reset_waker_metrics();
-
-        let state = Arc::new(WakerState::new());
-
-        let start = Instant::now();
-
-        // Create wakers with different source types
-        let timer_wakers: Vec<_> = (0..250)
-            .map(|i| state.waker_for_source(task_id(i), WakeSource::Timer))
-            .collect();
-
-        let io_wakers: Vec<_> = (250..500)
-            .map(|i| state.waker_for_source(
-                task_id(i),
-                WakeSource::Io { fd: (i % 100) as i32 }
-            ))
-            .collect();
-
-        let explicit_wakers: Vec<_> = (500..750)
-            .map(|i| state.waker_for_source(task_id(i), WakeSource::Explicit))
-            .collect();
-
-        let unknown_wakers: Vec<_> = (750..1000)
-            .map(|i| state.waker_for(task_id(i)))
-            .collect();
-
-        let creation_duration = start.elapsed();
-        println!("Mixed source type creation (1000 wakers): {:?}", creation_duration);
-
-        // Use all wakers
-        let start = Instant::now();
-        for waker in timer_wakers.iter()
-            .chain(io_wakers.iter())
-            .chain(explicit_wakers.iter())
-            .chain(unknown_wakers.iter())
-        {
-            waker.wake_by_ref();
-        }
-        let wake_duration = start.elapsed();
-        println!("Mixed source wake operations: {:?}", wake_duration);
-
-        let woken = state.drain_woken();
-        println!("Mixed source woken count: {}", woken.len());
-
-        #[cfg(feature = "waker-profiling")]
-        {
-            let final_metrics = get_waker_metrics();
-            println!("Mixed source metrics: {:?}", final_metrics);
-        }
-    }
+    assert_eq!(
+        state.drain_woken(),
+        vec![task_id(1), task_id(2), task_id(3), task_id(4)]
+    );
 }

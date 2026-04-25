@@ -13,9 +13,14 @@ use std::sync::Arc;
 use std::task::{Wake, Waker};
 
 #[cfg(feature = "waker-profiling")]
+#[path = "waker_profiling.rs"]
 mod waker_profiling;
 #[cfg(feature = "waker-profiling")]
 use waker_profiling::profile;
+
+#[cfg(test)]
+#[path = "waker_allocation_hotpaths_test.rs"]
+mod waker_allocation_hotpaths_test;
 
 /// Source attribution for wake events.
 ///
@@ -84,7 +89,7 @@ impl WakerState {
     #[must_use]
     pub fn waker_for_source(self: &Arc<Self>, task: TaskId, source: WakeSource) -> Waker {
         #[cfg(feature = "waker-profiling")]
-        profile!(waker_profiling::_profile_waker_allocation);
+        profile!(waker_profiling::profile_waker_allocation);
 
         Waker::from(Arc::new(TaskWaker {
             state: Arc::clone(self),
@@ -97,11 +102,11 @@ impl WakerState {
     #[inline]
     pub fn drain_woken(&self) -> Vec<TaskId> {
         #[cfg(feature = "waker-profiling")]
-        profile!(waker_profiling::_profile_drain_operation);
+        profile!(waker_profiling::profile_drain_operation);
 
         let mut drained: Vec<_> = {
             #[cfg(feature = "waker-profiling")]
-            profile!(waker_profiling::_profile_lock_acquisition);
+            profile!(waker_profiling::profile_lock_acquisition);
             let mut woken = self.woken.lock();
             woken.drain().collect()
         };
@@ -121,10 +126,10 @@ impl WakerState {
     #[inline]
     fn wake(&self, task: TaskId, source: WakeSource) {
         #[cfg(feature = "waker-profiling")]
-        profile!(waker_profiling::_profile_wake_operation);
+        profile!(waker_profiling::profile_wake_operation);
 
         #[cfg(feature = "waker-profiling")]
-        profile!(waker_profiling::_profile_lock_acquisition);
+        profile!(waker_profiling::profile_lock_acquisition);
         let mut woken = self.woken.lock();
 
         if woken.insert(task) {
@@ -135,7 +140,7 @@ impl WakerState {
             );
         } else {
             #[cfg(feature = "waker-profiling")]
-            profile!(waker_profiling::_profile_dedup_hit);
+            profile!(waker_profiling::profile_dedup_hit);
         }
     }
 }

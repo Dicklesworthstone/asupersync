@@ -4,14 +4,11 @@
 //! and performance characteristics of waker operations.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
 
 /// Global waker allocation metrics for profiling.
 pub struct WakerMetrics {
     /// Total waker allocations (Arc<TaskWaker>)
     pub waker_allocations: AtomicU64,
-    /// Total waker clones
-    pub waker_clones: AtomicU64,
     /// Total wake operations
     pub wake_operations: AtomicU64,
     /// Total drain operations
@@ -24,7 +21,6 @@ pub struct WakerMetrics {
 
 static WAKER_METRICS: WakerMetrics = WakerMetrics {
     waker_allocations: AtomicU64::new(0),
-    waker_clones: AtomicU64::new(0),
     wake_operations: AtomicU64::new(0),
     drain_operations: AtomicU64::new(0),
     dedup_hits: AtomicU64::new(0),
@@ -32,10 +28,10 @@ static WAKER_METRICS: WakerMetrics = WakerMetrics {
 };
 
 /// Snapshot of waker allocation metrics at a point in time.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WakerMetricsSnapshot {
     pub waker_allocations: u64,
-    pub waker_clones: u64,
     pub wake_operations: u64,
     pub drain_operations: u64,
     pub dedup_hits: u64,
@@ -43,11 +39,11 @@ pub struct WakerMetricsSnapshot {
 }
 
 /// Returns current waker allocation metrics.
+#[cfg(test)]
 #[inline]
 pub fn get_waker_metrics() -> WakerMetricsSnapshot {
     WakerMetricsSnapshot {
         waker_allocations: WAKER_METRICS.waker_allocations.load(Ordering::Relaxed),
-        waker_clones: WAKER_METRICS.waker_clones.load(Ordering::Relaxed),
         wake_operations: WAKER_METRICS.wake_operations.load(Ordering::Relaxed),
         drain_operations: WAKER_METRICS.drain_operations.load(Ordering::Relaxed),
         dedup_hits: WAKER_METRICS.dedup_hits.load(Ordering::Relaxed),
@@ -56,9 +52,9 @@ pub fn get_waker_metrics() -> WakerMetricsSnapshot {
 }
 
 /// Resets waker allocation metrics to zero.
+#[cfg(test)]
 pub fn reset_waker_metrics() {
     WAKER_METRICS.waker_allocations.store(0, Ordering::Relaxed);
-    WAKER_METRICS.waker_clones.store(0, Ordering::Relaxed);
     WAKER_METRICS.wake_operations.store(0, Ordering::Relaxed);
     WAKER_METRICS.drain_operations.store(0, Ordering::Relaxed);
     WAKER_METRICS.dedup_hits.store(0, Ordering::Relaxed);
@@ -67,21 +63,15 @@ pub fn reset_waker_metrics() {
 
 /// Profile sentinel for waker allocation operations.
 #[inline(never)]
-fn _profile_waker_allocation() {
+pub(super) fn profile_waker_allocation() {
     WAKER_METRICS
         .waker_allocations
         .fetch_add(1, Ordering::Relaxed);
 }
 
-/// Profile sentinel for waker clone operations.
-#[inline(never)]
-fn _profile_waker_clone() {
-    WAKER_METRICS.waker_clones.fetch_add(1, Ordering::Relaxed);
-}
-
 /// Profile sentinel for wake operations.
 #[inline(never)]
-fn _profile_wake_operation() {
+pub(super) fn profile_wake_operation() {
     WAKER_METRICS
         .wake_operations
         .fetch_add(1, Ordering::Relaxed);
@@ -89,7 +79,7 @@ fn _profile_wake_operation() {
 
 /// Profile sentinel for drain operations.
 #[inline(never)]
-fn _profile_drain_operation() {
+pub(super) fn profile_drain_operation() {
     WAKER_METRICS
         .drain_operations
         .fetch_add(1, Ordering::Relaxed);
@@ -97,13 +87,13 @@ fn _profile_drain_operation() {
 
 /// Profile sentinel for deduplication hits.
 #[inline(never)]
-fn _profile_dedup_hit() {
+pub(super) fn profile_dedup_hit() {
     WAKER_METRICS.dedup_hits.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Profile sentinel for lock acquisitions.
 #[inline(never)]
-fn _profile_lock_acquisition() {
+pub(super) fn profile_lock_acquisition() {
     WAKER_METRICS
         .lock_acquisitions
         .fetch_add(1, Ordering::Relaxed);
@@ -119,19 +109,13 @@ pub fn profiling_enabled() -> bool {
 /// Macro for conditional profiling instrumentation.
 macro_rules! profile {
     ($sentinel:expr) => {
-        if crate::runtime::waker_profiling::profiling_enabled() {
+        if $crate::runtime::waker::waker_profiling::profiling_enabled() {
             $sentinel();
         }
     };
 }
 
 pub(crate) use profile;
-
-// Re-export the profiling functions for use in sibling modules
-pub(crate) use {
-    _profile_dedup_hit, _profile_drain_operation, _profile_lock_acquisition,
-    _profile_wake_operation, _profile_waker_allocation, _profile_waker_clone,
-};
 
 #[cfg(test)]
 mod tests {
@@ -154,10 +138,10 @@ mod tests {
         assert_eq!(initial.wake_operations, 0);
 
         // Simulate some operations
-        _profile_waker_allocation();
-        _profile_wake_operation();
-        _profile_dedup_hit();
-        _profile_lock_acquisition();
+        profile_waker_allocation();
+        profile_wake_operation();
+        profile_dedup_hit();
+        profile_lock_acquisition();
 
         let after = get_waker_metrics();
         assert_eq!(after.waker_allocations, 1);
