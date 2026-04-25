@@ -563,22 +563,12 @@ struct StubBrokerState {
 }
 
 #[cfg(not(feature = "kafka"))]
-#[derive(Debug)]
 /// Harness-only deterministic in-process broker shared by the fallback
 /// producer and consumer paths when the real Kafka feature is disabled.
+#[derive(Debug, Default)]
 struct StubBroker {
     state: Mutex<StubBrokerState>,
     notify: Notify,
-}
-
-#[cfg(not(feature = "kafka"))]
-impl Default for StubBroker {
-    fn default() -> Self {
-        Self {
-            state: Mutex::new(StubBrokerState::default()),
-            notify: Notify::new(),
-        }
-    }
 }
 
 #[cfg(not(feature = "kafka"))]
