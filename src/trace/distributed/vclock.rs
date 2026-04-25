@@ -597,9 +597,7 @@ impl VectorClock {
     /// Creates an empty vector clock (all components zero).
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            entries: BTreeMap::new(),
-        }
+        Self::default()
     }
 
     /// Creates a vector clock with a single node initialized to 1.
