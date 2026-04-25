@@ -809,7 +809,7 @@ mod tests {
             cancel_reason: "User(test)".to_string(),
             cancel_kind: "User".to_string(),
             timestamp: std::time::SystemTime::UNIX_EPOCH + elapsed_since_prev,
-            elapsed_since_start: elapsed_since_prev * (u32::from(step_id) + 1),
+            elapsed_since_start: elapsed_since_prev * (step_id + 1),
             elapsed_since_prev,
             depth,
             parent_entity: parent_entity.map(str::to_string),

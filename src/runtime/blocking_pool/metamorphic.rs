@@ -94,6 +94,32 @@ mod tests {
         )
     }
 
+    fn sorted_completed_task_ids(
+        pool: &BlockingPool,
+        task_ids: &[usize],
+        delay: Duration,
+    ) -> Vec<usize> {
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let mut handles = Vec::with_capacity(task_ids.len());
+
+        for &task_id in task_ids {
+            let completed = Arc::clone(&completed);
+            let handle = pool.spawn(move || {
+                std::thread::sleep(delay);
+                completed.lock().unwrap().push(task_id);
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.wait();
+        }
+
+        let mut result = completed.lock().unwrap().clone();
+        result.sort_unstable();
+        result
+    }
+
     /// Metamorphic Relation 1: FIFO Ordering Preservation
     ///
     /// Property: If tasks T1, T2, ..., Tn are submitted in order, they should
@@ -147,53 +173,13 @@ mod tests {
 
         let task_ids = vec![1, 2, 3, 4, 5, 6, 7, 8];
 
-        // Test original order
-        let original_completed = {
-            let completed = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let mut handles = Vec::new();
+        let original_completed =
+            sorted_completed_task_ids(&pool, &task_ids, Duration::from_millis(50));
 
-            for &task_id in &task_ids {
-                let completed = Arc::clone(&completed);
-                let handle = pool.spawn(move || {
-                    std::thread::sleep(Duration::from_millis(50)); // Simulate work
-                    completed.lock().unwrap().push(task_id);
-                });
-                handles.push(handle);
-            }
-
-            for handle in handles {
-                handle.wait();
-            }
-
-            let mut result = completed.lock().unwrap().clone();
-            result.sort_unstable();
-            result
-        };
-
-        // Test reversed order
-        let reversed_completed = {
-            let completed = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let mut handles = Vec::new();
-            let mut reversed_ids = task_ids.clone();
-            reversed_ids.reverse();
-
-            for &task_id in &reversed_ids {
-                let completed = Arc::clone(&completed);
-                let handle = pool.spawn(move || {
-                    std::thread::sleep(Duration::from_millis(50)); // Simulate work
-                    completed.lock().unwrap().push(task_id);
-                });
-                handles.push(handle);
-            }
-
-            for handle in handles {
-                handle.wait();
-            }
-
-            let mut result = completed.lock().unwrap().clone();
-            result.sort_unstable();
-            result
-        };
+        let mut reversed_ids = task_ids.clone();
+        reversed_ids.reverse();
+        let reversed_completed =
+            sorted_completed_task_ids(&pool, &reversed_ids, Duration::from_millis(50));
 
         assert_eq!(
             original_completed, reversed_completed,
@@ -215,53 +201,13 @@ mod tests {
     fn mr_thread_scaling_consistency() {
         let tasks = vec![10, 20, 30, 40, 50];
 
-        // Test with minimal threads
-        let minimal_results = {
-            let pool = BlockingPool::new(1, 1);
-            let results = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let mut handles = Vec::new();
+        let minimal_pool = BlockingPool::new(1, 1);
+        let minimal_results =
+            sorted_completed_task_ids(&minimal_pool, &tasks, Duration::from_millis(30));
 
-            for &task_id in &tasks {
-                let results = Arc::clone(&results);
-                let handle = pool.spawn(move || {
-                    std::thread::sleep(Duration::from_millis(30));
-                    results.lock().unwrap().push(task_id);
-                });
-                handles.push(handle);
-            }
-
-            for handle in handles {
-                handle.wait();
-            }
-
-            let mut result = results.lock().unwrap().clone();
-            result.sort_unstable();
-            result
-        };
-
-        // Test with many threads
-        let maximal_results = {
-            let pool = BlockingPool::new(tasks.len(), tasks.len());
-            let results = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let mut handles = Vec::new();
-
-            for &task_id in &tasks {
-                let results = Arc::clone(&results);
-                let handle = pool.spawn(move || {
-                    std::thread::sleep(Duration::from_millis(30));
-                    results.lock().unwrap().push(task_id);
-                });
-                handles.push(handle);
-            }
-
-            for handle in handles {
-                handle.wait();
-            }
-
-            let mut result = results.lock().unwrap().clone();
-            result.sort_unstable();
-            result
-        };
+        let maximal_pool = BlockingPool::new(tasks.len(), tasks.len());
+        let maximal_results =
+            sorted_completed_task_ids(&maximal_pool, &tasks, Duration::from_millis(30));
 
         assert_eq!(
             minimal_results, maximal_results,
@@ -553,7 +499,8 @@ mod tests {
         let running_task_started = Arc::new(AtomicBool::new(false));
         let r_started = Arc::clone(&running_task_started);
 
-        rt.block_on(async move {
+        let request_cx = rt.request_cx_with_budget(crate::types::Budget::INFINITE);
+        rt.block_on_with_cx(request_cx, async move {
             // Task 1: The blocker. It will consume the single blocking thread.
             // We use block_on with an async block and spawn it normally to run in the background
             // Wait, spawn_blocking just returns a future, so we must spawn it as a task to run it concurrently.
@@ -613,10 +560,12 @@ mod tests {
 
             // Drop it AFTER it starts
             drop(pin_running);
-
-            // Give the background thread time to finish Task 3
-            crate::time::sleep(crate::types::Time::ZERO, Duration::from_millis(100)).await;
         });
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !executed_running.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
 
         assert!(
             !executed_queued.load(Ordering::SeqCst),
