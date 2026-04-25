@@ -108,9 +108,10 @@ repro_*.rs
 # Agent coordination config
 .agent-mail.yaml
 
-# Claude local settings and worktrees
+# Claude local settings, worktrees, and per-session lock files
 .claude/settings.local.json
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 
 # Profiling artifacts directory (callgrind, cachegrind, etc.)
 artifacts/
@@ -126,6 +127,20 @@ artifacts/*
 # committed — only accepted `.snap` files go into git.
 *.snap.new
 .insta.pending-snap
+
+# Refactor artifact bulk dumps (per-run baselines that are too large
+# and too transient to commit; the small ledger.md / isomorphism.md
+# descriptor files in each refactor/artifacts/<run>/ dir are still
+# tracked and explain what landed).
+refactor/artifacts/**/tests_before.txt
+refactor/artifacts/**/tests_after.txt
+refactor/artifacts/**/lint_before.txt
+refactor/artifacts/**/lint_after.txt
+refactor/artifacts/**/slop_scan.md
+# Specific already-merged refactor run (work landed in c09e33092
+# "refactor: derive Outcome equality"). The ledger / isomorphism
+# notes are preserved in the commit message itself.
+refactor/artifacts/20260424T2312Z-isomorphic-simplification/
 
 # Per-test structured evidence (tests/_evidence/<test>.jsonl)
 tests/_evidence/*.jsonl
