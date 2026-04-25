@@ -2012,7 +2012,7 @@ struct H3PushStreamState {
 }
 
 /// Lightweight HTTP/3 connection mapping state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct H3ConnectionState {
     config: H3ConnectionConfig,
     control: H3ControlState,
@@ -2028,17 +2028,11 @@ pub struct H3ConnectionState {
     goaway_id: Option<u64>,
 }
 
-impl Default for H3ConnectionState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl H3ConnectionState {
     /// Construct default state.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_config(H3ConnectionConfig::default())
+        Self::default()
     }
 
     /// Construct state for a local HTTP/3 client.
