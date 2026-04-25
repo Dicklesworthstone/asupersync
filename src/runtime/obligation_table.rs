@@ -189,13 +189,60 @@ impl ObligationTable {
     /// `Reserved` state (commit / abort / leak / removal-while-pending).
     #[inline]
     fn note_pending_removed(&mut self, kind: ObligationKind, reserved_at: Time) {
+        debug_assert!(
+            self.cached_pending > 0,
+            "pending counter underflow removing {kind:?} obligation reserved at {reserved_at:?}"
+        );
+        let kind_slot = kind_index(kind);
+        debug_assert!(
+            self.pending_by_kind[kind_slot] > 0,
+            "per-kind pending counter underflow removing {kind:?} obligation reserved at {reserved_at:?}"
+        );
+        debug_assert!(
+            self.pending_reserved_at_sum_ns >= u128::from(reserved_at.as_nanos()),
+            "pending reserved-at sum underflow removing {kind:?} obligation reserved at {reserved_at:?}"
+        );
+
         self.cached_pending = self.cached_pending.saturating_sub(1);
-        let slot = &mut self.pending_by_kind[kind_index(kind)];
+        let slot = &mut self.pending_by_kind[kind_slot];
         *slot = slot.saturating_sub(1);
         self.pending_reserved_at_sum_ns = self
             .pending_reserved_at_sum_ns
             .saturating_sub(u128::from(reserved_at.as_nanos()));
     }
+
+    #[cfg(debug_assertions)]
+    fn debug_assert_pending_counters_match(&self) {
+        let mut pending = 0usize;
+        let mut by_kind = [0usize; OBLIGATION_KIND_COUNT];
+        let mut reserved_at_sum = 0u128;
+
+        for (_, record) in self.obligations.iter() {
+            if record.is_pending() {
+                pending += 1;
+                by_kind[kind_index(record.kind)] += 1;
+                reserved_at_sum =
+                    reserved_at_sum.saturating_add(u128::from(record.reserved_at.as_nanos()));
+            }
+        }
+
+        debug_assert_eq!(
+            self.cached_pending, pending,
+            "pending counter drift: cached count no longer matches arena scan"
+        );
+        debug_assert_eq!(
+            self.pending_by_kind, by_kind,
+            "pending counter drift: per-kind cached counts no longer match arena scan"
+        );
+        debug_assert_eq!(
+            self.pending_reserved_at_sum_ns, reserved_at_sum,
+            "pending counter drift: cached reserved-at sum no longer matches arena scan"
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    fn debug_assert_pending_counters_match(&self) {}
 
     // =========================================================================
     // Low-level arena access
@@ -231,6 +278,7 @@ impl ObligationTable {
         if is_pending {
             self.note_pending_added(kind, reserved_at);
         }
+        self.debug_assert_pending_counters_match();
         idx
     }
 
@@ -278,6 +326,7 @@ impl ObligationTable {
                 self.note_pending_added(kind, reserved_at);
             }
         }
+        self.debug_assert_pending_counters_match();
         idx
     }
 
@@ -304,6 +353,7 @@ impl ObligationTable {
                 }
             }
         }
+        self.debug_assert_pending_counters_match();
         Some(record)
     }
 
@@ -380,6 +430,7 @@ impl ObligationTable {
             .get(idx)
             .map_or(now, |record| record.reserved_at);
         self.note_pending_added(kind, reserved_at);
+        self.debug_assert_pending_counters_match();
         ob_id
     }
 
@@ -417,6 +468,7 @@ impl ObligationTable {
             duration,
         };
         self.note_pending_removed(kind, reserved_at);
+        self.debug_assert_pending_counters_match();
         Ok(info)
     }
 
@@ -456,6 +508,7 @@ impl ObligationTable {
             reason,
         };
         self.note_pending_removed(kind, reserved_at);
+        self.debug_assert_pending_counters_match();
         Ok(info)
     }
 
@@ -494,6 +547,7 @@ impl ObligationTable {
             description: record.description.clone(),
         };
         self.note_pending_removed(kind, reserved_at);
+        self.debug_assert_pending_counters_match();
         Ok(info)
     }
 
@@ -577,6 +631,7 @@ impl ObligationTable {
     #[inline]
     #[must_use]
     pub fn pending_count(&self) -> usize {
+        self.debug_assert_pending_counters_match();
         self.cached_pending
     }
 
@@ -588,6 +643,7 @@ impl ObligationTable {
     #[inline]
     #[must_use]
     pub fn pending_count_for_kind(&self, kind: ObligationKind) -> usize {
+        self.debug_assert_pending_counters_match();
         self.pending_by_kind[kind_index(kind)]
     }
 
@@ -598,6 +654,7 @@ impl ObligationTable {
     #[inline]
     #[must_use]
     pub fn pending_reserved_at_sum_ns(&self) -> u128 {
+        self.debug_assert_pending_counters_match();
         self.pending_reserved_at_sum_ns
     }
 
@@ -1277,5 +1334,27 @@ mod tests {
         ] {
             assert_eq!(table.pending_count_for_kind(kind), 0);
         }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "pending counter underflow")]
+    fn pending_counter_underflow_is_not_silent_in_debug() {
+        let mut table = ObligationTable::new();
+        table.note_pending_removed(ObligationKind::Ack, Time::ZERO);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "pending counter drift")]
+    fn pending_counter_scan_catches_cached_count_drift_in_debug() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(12);
+        let region = test_region_id(4);
+
+        make_obligation(&mut table, ObligationKind::SendPermit, task, region);
+        table.cached_pending = 0;
+
+        table.debug_assert_pending_counters_match();
     }
 }
