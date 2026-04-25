@@ -345,10 +345,7 @@ impl NextjsBootstrapState {
                 self.handle_hydration_mismatch(reason);
                 Ok(())
             }
-            BootstrapCommand::Recover { action } => {
-                self.apply_recovery(action);
-                Ok(())
-            }
+            BootstrapCommand::Recover { action } => self.handle_recover(action),
             BootstrapCommand::Navigate { nav, route_segment } => {
                 self.handle_navigation(nav, route_segment);
                 Ok(())
@@ -409,7 +406,11 @@ impl NextjsBootstrapState {
     }
 
     fn handle_cancel_bootstrap(&mut self, reason: String) {
-        self.snapshot.cancellation_count = self.snapshot.cancellation_count.saturating_add(1);
+        if self.snapshot.runtime_initialized {
+            self.invalidate_runtime_scope("cancel_bootstrap_scope_reset");
+        } else {
+            self.snapshot.cancellation_count = self.snapshot.cancellation_count.saturating_add(1);
+        }
         self.snapshot.runtime_failure_count = self.snapshot.runtime_failure_count.saturating_add(1);
         self.force_transition(NextjsBootstrapPhase::RuntimeFailed);
         self.snapshot.last_error = Some(reason);
@@ -418,9 +419,26 @@ impl NextjsBootstrapState {
     fn handle_hydration_mismatch(&mut self, reason: String) {
         self.snapshot.hydration_mismatch_count =
             self.snapshot.hydration_mismatch_count.saturating_add(1);
+        if self.snapshot.runtime_initialized {
+            self.invalidate_runtime_scope("hydration_mismatch_scope_reset");
+        }
         self.snapshot.runtime_failure_count = self.snapshot.runtime_failure_count.saturating_add(1);
         self.force_transition(NextjsBootstrapPhase::RuntimeFailed);
         self.snapshot.last_error = Some(reason);
+    }
+
+    fn handle_recover(
+        &mut self,
+        action: BootstrapRecoveryAction,
+    ) -> Result<(), NextjsBootstrapError> {
+        if self.snapshot.phase != NextjsBootstrapPhase::RuntimeFailed {
+            return Err(NextjsBootstrapError::InvalidCommand {
+                command: "recover",
+                phase: self.snapshot.phase,
+            });
+        }
+        self.apply_recovery(action);
+        Ok(())
     }
 
     fn handle_navigation(&mut self, nav: NextjsNavigationType, route_segment: String) {
@@ -716,5 +734,94 @@ mod tests {
         assert_eq!(snapshot.runtime_reinit_required_count, 1);
         assert_eq!(snapshot.cancellation_count, 1);
         assert_eq!(snapshot.last_invalidated_scope_generation, Some(1));
+    }
+
+    #[test]
+    fn explicit_cancel_after_runtime_ready_invalidates_runtime_scope() {
+        let mut state = NextjsBootstrapState::new();
+        state
+            .apply(BootstrapCommand::BeginHydration)
+            .expect("begin hydration");
+        state
+            .apply(BootstrapCommand::CompleteHydration)
+            .expect("complete hydration");
+        state
+            .apply(BootstrapCommand::InitializeRuntime)
+            .expect("init runtime");
+
+        state
+            .apply(BootstrapCommand::CancelBootstrap {
+                reason: "route boundary cancelled".to_string(),
+            })
+            .expect("cancel after runtime");
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.phase, NextjsBootstrapPhase::RuntimeFailed);
+        assert!(!snapshot.runtime_initialized);
+        assert_eq!(snapshot.cancellation_count, 1);
+        assert_eq!(snapshot.scope_invalidation_count, 1);
+        assert_eq!(snapshot.runtime_reinit_required_count, 1);
+        assert_eq!(snapshot.last_invalidated_scope_generation, Some(1));
+        assert_eq!(
+            snapshot.last_error.as_deref(),
+            Some("route boundary cancelled")
+        );
+    }
+
+    #[test]
+    fn hydration_mismatch_after_runtime_ready_invalidates_runtime_scope() {
+        let mut state = NextjsBootstrapState::new();
+        state
+            .apply(BootstrapCommand::BeginHydration)
+            .expect("begin hydration");
+        state
+            .apply(BootstrapCommand::CompleteHydration)
+            .expect("complete hydration");
+        state
+            .apply(BootstrapCommand::InitializeRuntime)
+            .expect("init runtime");
+
+        state
+            .apply(BootstrapCommand::HydrationMismatch {
+                reason: "client/server tree diverged".to_string(),
+            })
+            .expect("mismatch after runtime");
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.phase, NextjsBootstrapPhase::RuntimeFailed);
+        assert!(!snapshot.runtime_initialized);
+        assert_eq!(snapshot.hydration_mismatch_count, 1);
+        assert_eq!(snapshot.runtime_failure_count, 1);
+        assert_eq!(snapshot.cancellation_count, 1);
+        assert_eq!(snapshot.scope_invalidation_count, 1);
+        assert_eq!(snapshot.runtime_reinit_required_count, 1);
+        assert_eq!(snapshot.last_invalidated_scope_generation, Some(1));
+        assert_eq!(
+            snapshot.last_error.as_deref(),
+            Some("client/server tree diverged")
+        );
+    }
+
+    #[test]
+    fn recovery_commands_require_failure_state() {
+        let mut state = NextjsBootstrapState::new();
+        let err = state
+            .apply(BootstrapCommand::Recover {
+                action: BootstrapRecoveryAction::RetryRuntimeInit,
+            })
+            .expect_err("fresh bootstrap state cannot recover");
+
+        assert_eq!(
+            err,
+            NextjsBootstrapError::InvalidCommand {
+                command: "recover",
+                phase: NextjsBootstrapPhase::ServerRendered
+            }
+        );
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.phase, NextjsBootstrapPhase::ServerRendered);
+        assert_eq!(snapshot.environment, NextjsRenderEnvironment::ClientSsr);
+        assert!(!snapshot.runtime_initialized);
+        assert_eq!(snapshot.runtime_init_attempts, 0);
     }
 }

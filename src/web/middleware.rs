@@ -717,11 +717,6 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             return resp;
         }
 
-        // Skip compression for small bodies.
-        if resp.body.len() < self.config.min_body_size {
-            return resp;
-        }
-
         let available_encodings: Vec<_> = self
             .config
             .supported
@@ -730,7 +725,26 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             .filter(|encoding| compression_encoding_available(*encoding))
             .collect();
 
-        let Some(encoding) = negotiate_encoding(accept_encoding.as_deref(), &available_encodings)
+        let identity_acceptable =
+            negotiate_encoding(accept_encoding.as_deref(), &[ContentEncoding::Identity])
+                == Some(ContentEncoding::Identity);
+
+        let body_below_minimum = resp.body.len() < self.config.min_body_size;
+        if body_below_minimum && identity_acceptable {
+            return resp;
+        }
+
+        let candidate_encodings = if body_below_minimum {
+            available_encodings
+                .iter()
+                .copied()
+                .filter(|encoding| *encoding != ContentEncoding::Identity)
+                .collect::<Vec<_>>()
+        } else {
+            available_encodings
+        };
+
+        let Some(encoding) = negotiate_encoding(accept_encoding.as_deref(), &candidate_encodings)
         else {
             if accept_encoding.is_some() {
                 return Response::new(
@@ -748,18 +762,36 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
         }
 
         let Some(mut compressor) = make_compressor(encoding) else {
+            if !identity_acceptable {
+                return Response::new(
+                    StatusCode::from_u16(406),
+                    b"No acceptable response encoding".to_vec(),
+                );
+            }
             return resp;
         };
 
         let mut compressed = Vec::new();
         if compressor.compress(&resp.body, &mut compressed).is_err() {
+            if !identity_acceptable {
+                return Response::new(
+                    StatusCode::from_u16(406),
+                    b"No acceptable response encoding".to_vec(),
+                );
+            }
             return resp;
         }
         if compressor.finish(&mut compressed).is_err() {
+            if !identity_acceptable {
+                return Response::new(
+                    StatusCode::from_u16(406),
+                    b"No acceptable response encoding".to_vec(),
+                );
+            }
             return resp;
         }
 
-        if compressed.len() >= resp.body.len() {
+        if compressed.len() >= resp.body.len() && identity_acceptable {
             append_vary_header(&mut resp, "accept-encoding");
             return resp;
         }
@@ -2544,6 +2576,20 @@ mod tests {
         let resp = mw.call(req);
         assert_eq!(resp.status, StatusCode::OK);
         assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    #[test]
+    fn compression_rejects_small_body_when_identity_is_unacceptable() {
+        let config = CompressionConfig {
+            min_body_size: 1000,
+            ..Default::default()
+        };
+        let mw = CompressionMiddleware::new(FnHandler::new(ok_handler), config);
+        let req = make_request().with_header("Accept-Encoding", "identity;q=0, *;q=0");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status.as_u16(), 406);
+        assert_eq!(resp.body.as_ref(), b"No acceptable response encoding");
     }
 
     #[test]

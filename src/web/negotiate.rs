@@ -309,6 +309,9 @@ fn format_error_response(mut resp: Response, accept: &str, expose_details: bool)
     let message = error_message_from_response(&resp, expose_details);
     let (body, content_type) = format_error_body(resp.status, &message, format);
     resp.body = body.into_bytes().into();
+    let _ = resp.remove_header("content-length");
+    let _ = resp.remove_header("content-encoding");
+    let _ = resp.remove_header("etag");
     resp.set_header("content-type", content_type);
     resp
 }
@@ -447,6 +450,14 @@ mod tests {
         Response::new(StatusCode::BAD_REQUEST, b"missing tenant\nline 2".to_vec())
             .header("x-request-id", "req-123")
             .header("content-type", "text/plain; charset=utf-8")
+    }
+
+    fn stale_representation_headers_handler() -> Response {
+        Response::new(StatusCode::BAD_REQUEST, b"old body".to_vec())
+            .header("content-length", "8")
+            .header("content-encoding", "gzip")
+            .header("etag", "\"old-body\"")
+            .header("x-request-id", "req-456")
     }
 
     // ====================================================================
@@ -787,6 +798,28 @@ mod tests {
         assert!(body.contains("<html>"));
         assert!(body.contains("400"));
         assert!(!body.contains("missing tenant"));
+    }
+
+    #[test]
+    fn error_handler_removes_stale_representation_headers_when_rewriting_body() {
+        let mw = ErrorHandlerMiddleware::new(
+            FnHandler::new(stale_representation_headers_handler),
+            ErrorHandlerConfig::default(),
+        );
+        let resp = mw.call(make_request_accepting("application/json"));
+
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp.headers.get("x-request-id").unwrap(), "req-456");
+        assert_eq!(
+            resp.headers.get("content-type").unwrap(),
+            "application/json"
+        );
+        assert!(!resp.headers.contains_key("content-length"));
+        assert!(!resp.headers.contains_key("content-encoding"));
+        assert!(!resp.headers.contains_key("etag"));
+        let body = std::str::from_utf8(&resp.body).unwrap();
+        assert!(body.contains("\"status\":400"));
+        assert!(body.contains("Bad Request"));
     }
 
     #[test]

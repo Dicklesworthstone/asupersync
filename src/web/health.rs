@@ -110,6 +110,11 @@ impl HealthResponse {
         let mut buf = String::from("{\"status\":\"");
         buf.push_str(self.status.as_str());
         buf.push('"');
+        if let Some(detail) = self.status.detail() {
+            buf.push_str(",\"detail\":\"");
+            json_escape_into(&mut buf, detail);
+            buf.push('"');
+        }
 
         if !self.checks.is_empty() {
             buf.push_str(",\"checks\":{");
@@ -412,8 +417,21 @@ mod tests {
         };
         let json = resp.to_json();
         assert!(json.contains(r#""status":"degraded""#));
+        assert!(json.contains(r#""detail":"one or more checks degraded""#));
         assert!(json.contains(r#""db":{"status":"healthy"}"#));
         assert!(json.contains(r#""cache":{"status":"degraded","detail":"high latency"}"#));
+    }
+
+    #[test]
+    fn health_response_top_level_detail_json() {
+        let resp = HealthResponse {
+            status: HealthStatus::Unhealthy("error: \"bad\"\nretry".into()),
+            checks: BTreeMap::new(),
+        };
+        assert_eq!(
+            resp.to_json(),
+            r#"{"status":"unhealthy","detail":"error: \"bad\"\nretry"}"#
+        );
     }
 
     #[test]
@@ -429,6 +447,7 @@ mod tests {
             checks,
         };
         let json = resp.to_json();
+        assert!(json.contains(r#""detail":"fail""#));
         assert!(json.contains(r#"\"bad\""#));
     }
 

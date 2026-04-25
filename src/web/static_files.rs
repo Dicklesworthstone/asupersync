@@ -21,7 +21,10 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 use super::handler::Handler;
 use super::response::{Response, StatusCode};
@@ -154,8 +157,13 @@ impl StaticFiles {
             return Response::empty(StatusCode::PAYLOAD_TOO_LARGE);
         }
 
-        // Generate ETag from size + modified time.
-        let etag = generate_etag(&metadata);
+        // Read file contents before generating the ETag. Strong ETags must be
+        // content-derived, not just metadata-derived.
+        let Ok(body) = std::fs::read(path) else {
+            return Response::empty(StatusCode::INTERNAL_SERVER_ERROR);
+        };
+
+        let etag = generate_etag(&body);
 
         // Check If-None-Match.
         if let Some(client_etag) = if_none_match {
@@ -165,11 +173,6 @@ impl StaticFiles {
                     .header("cache-control", format!("public, max-age={}", self.max_age));
             }
         }
-
-        // Read file contents.
-        let Ok(body) = std::fs::read(path) else {
-            return Response::empty(StatusCode::INTERNAL_SERVER_ERROR);
-        };
 
         let mime = guess_mime(path);
 
@@ -219,19 +222,16 @@ impl Handler for StaticFilesHandler {
 
 // ─── ETag ───────────────────────────────────────────────────────────────────
 
-/// Generate an ETag from file metadata (size + mtime).
-fn generate_etag(metadata: &std::fs::Metadata) -> String {
-    use std::time::UNIX_EPOCH;
-
-    let size = metadata.len();
-    let mtime = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_secs());
-
-    // Strong ETag: combine size and mtime.
-    format!("\"{size:x}-{mtime:x}\"")
+/// Generate a strong ETag from the exact response body bytes.
+fn generate_etag(body: &[u8]) -> String {
+    let digest = Sha256::digest(body);
+    let mut etag = String::with_capacity(2 + digest.len() * 2);
+    etag.push('"');
+    for &byte in &digest {
+        let _ = write!(etag, "{byte:02x}");
+    }
+    etag.push('"');
+    etag
 }
 
 /// Check if a client ETag matches the server ETag.
@@ -560,6 +560,17 @@ mod tests {
     #[test]
     fn etag_no_match() {
         assert!(!etag_matches("\"abc\"", "\"def\""));
+    }
+
+    #[test]
+    fn strong_etag_changes_for_same_length_content() {
+        let first = generate_etag(b"abc");
+        let second = generate_etag(b"abd");
+
+        assert_ne!(
+            first, second,
+            "strong ETags must change when same-length content changes"
+        );
     }
 
     // ================================================================
