@@ -197,6 +197,7 @@ pub struct DbPool<M: ConnectionManager> {
     stats: PoolStatCounters,
 }
 
+#[derive(Default)]
 #[allow(clippy::struct_field_names)]
 struct PoolStatCounters {
     total_acquisitions: AtomicU64,
@@ -204,18 +205,6 @@ struct PoolStatCounters {
     total_discards: AtomicU64,
     total_timeouts: AtomicU64,
     total_validation_failures: AtomicU64,
-}
-
-impl Default for PoolStatCounters {
-    fn default() -> Self {
-        Self {
-            total_acquisitions: AtomicU64::new(0),
-            total_creates: AtomicU64::new(0),
-            total_discards: AtomicU64::new(0),
-            total_timeouts: AtomicU64::new(0),
-            total_validation_failures: AtomicU64::new(0),
-        }
-    }
 }
 
 impl fmt::Debug for PoolStatCounters {
