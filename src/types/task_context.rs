@@ -35,11 +35,7 @@ impl CheckpointState {
     #[inline]
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            last_checkpoint: None,
-            last_message: None,
-            checkpoint_count: 0,
-        }
+        Self::default()
     }
 
     /// Records a checkpoint without a message.
