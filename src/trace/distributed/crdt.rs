@@ -410,9 +410,7 @@ impl<V: Ord + Clone> Merge for MVRegister<V> {
     fn merge(&mut self, other: &Self) {
         // Collect all entries from both sides, then remove dominated ones.
         let mut combined: Vec<(V, BTreeMap<NodeId, u64>)> = self.entries.iter().cloned().collect();
-        for entry in &other.entries {
-            combined.push(entry.clone());
-        }
+        combined.extend(other.entries.iter().cloned());
 
         // Remove entries dominated by any other entry.
         let mut kept = BTreeSet::new();
