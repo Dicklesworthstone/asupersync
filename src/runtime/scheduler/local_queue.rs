@@ -445,6 +445,19 @@ mod tests {
         TaskId::new_for_test(id, 0)
     }
 
+    fn push_task_range(queue: &LocalQueue, range: std::ops::Range<usize>) {
+        for id in range {
+            queue.push(task(id as u32));
+        }
+    }
+
+    fn push_task_chunks(queue: &LocalQueue, split: usize, total: usize) {
+        let prefix: Vec<_> = (0..split).map(|id| task(id as u32)).collect();
+        let suffix: Vec<_> = (split..total).map(|id| task(id as u32)).collect();
+        queue.push_many(&prefix);
+        queue.push_many(&suffix);
+    }
+
     fn queue(max_task_id: u32) -> LocalQueue {
         LocalQueue::new_for_test(max_task_id)
     }
@@ -727,9 +740,7 @@ mod tests {
     fn concurrent_owner_and_stealers_preserve_tasks() {
         let total: usize = 512;
         let queue = Arc::new(LocalQueue::new_for_test((total - 1) as u32));
-        for id in 0..total {
-            queue.push(task(id as u32));
-        }
+        push_task_range(&queue, 0..total);
 
         let counts: Arc<Vec<AtomicUsize>> =
             Arc::new((0..total).map(|_| AtomicUsize::new(0)).collect());
@@ -1076,14 +1087,8 @@ mod tests {
             let individual = queue(max_task_id);
             let chunked = queue(max_task_id);
 
-            for id in 0..total {
-                individual.push(task(id as u32));
-            }
-
-            let prefix: Vec<_> = (0..split).map(|id| task(id as u32)).collect();
-            let suffix: Vec<_> = (split..total).map(|id| task(id as u32)).collect();
-            chunked.push_many(&prefix);
-            chunked.push_many(&suffix);
+            push_task_range(&individual, 0..total);
+            push_task_chunks(&chunked, split, total);
 
             let baseline = drain_owner(&individual);
             let variant = drain_owner(&chunked);
@@ -1111,14 +1116,8 @@ mod tests {
             let individual = queue(max_task_id);
             let chunked = queue(max_task_id);
 
-            for id in 0..total {
-                individual.push(task(id as u32));
-            }
-
-            let prefix: Vec<_> = (0..split).map(|id| task(id as u32)).collect();
-            let suffix: Vec<_> = (split..total).map(|id| task(id as u32)).collect();
-            chunked.push_many(&prefix);
-            chunked.push_many(&suffix);
+            push_task_range(&individual, 0..total);
+            push_task_chunks(&chunked, split, total);
 
             let baseline = drain_thief(&individual);
             let variant = drain_thief(&chunked);
@@ -1184,9 +1183,7 @@ mod tests {
             schedule in prop::collection::vec(any::<bool>(), 1..32),
         ) {
             let queue = queue(total as u32);
-            for id in 0..total {
-                queue.push(task(id as u32));
-            }
+            push_task_range(&queue, 0..total);
 
             let stealer = queue.stealer();
             let mut owner_seen = Vec::new();
