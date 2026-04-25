@@ -484,9 +484,7 @@ impl<T: TimeSource> TimerDriver<T> {
         let mut wheel = self.wheel.lock();
         let now = self.clock.now();
         wheel.synchronize(now);
-        wheel
-            .next_deadline()
-            .map(|deadline| if deadline < now { now } else { deadline })
+        wheel.next_deadline().map(|deadline| deadline.max(now))
     }
 
     /// Processes all expired timers, calling their wakers.
