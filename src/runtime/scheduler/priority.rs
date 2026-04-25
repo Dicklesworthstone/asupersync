@@ -1161,7 +1161,7 @@ pub enum SchedulerMode {
 /// To verify determinism, run the same test twice with the same seed and
 /// compare certificates. Divergence at step N means the schedule diverged
 /// at that point.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScheduleCertificate {
     /// Running hash of all schedule decisions.
     hash: u64,
@@ -1239,12 +1239,6 @@ impl ScheduleCertificate {
     #[must_use]
     pub fn divergence_step(&self) -> Option<u64> {
         self.divergence_step
-    }
-}
-
-impl Default for ScheduleCertificate {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
