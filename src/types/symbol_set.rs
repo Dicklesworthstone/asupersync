@@ -440,9 +440,7 @@ impl ConcurrentSymbolSet {
     /// Creates a new concurrent SymbolSet with the default config.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            inner: RwLock::new(SymbolSet::new()),
-        }
+        Self::default()
     }
 
     /// Inserts a symbol into the set.
