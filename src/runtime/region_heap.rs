@@ -201,12 +201,7 @@ impl RegionHeap {
     /// Creates a new empty region heap.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            slots: Vec::new(),
-            free_head: None,
-            len: 0,
-            stats: HeapStats::default(),
-        }
+        Self::default()
     }
 
     /// Creates a new region heap with pre-allocated capacity.
