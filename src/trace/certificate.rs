@@ -59,19 +59,7 @@ impl TraceCertificate {
     /// Creates a new empty certificate.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            event_hash: 0,
-            event_count: 0,
-            spawns: 0,
-            completes: 0,
-            cancel_requests: 0,
-            cancel_acks: 0,
-            obligation_acquires: 0,
-            obligation_releases: 0,
-            schedule_hash: 0,
-            violation_detected: false,
-            first_violation: None,
-        }
+        Self::default()
     }
 
     /// Record an event into the certificate.
