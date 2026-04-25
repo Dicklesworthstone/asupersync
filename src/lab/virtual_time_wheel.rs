@@ -112,7 +112,7 @@ pub struct ExpiredTimer {
 /// - Same tick → same timers expire (deadlines are stored as u64 ticks)
 /// - Expiration order is deterministic (sorted by timer ID within same tick)
 /// - No wall-clock dependencies (uses heap for simplicity and correctness)
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct VirtualTimerWheel {
     /// Min-heap of pending timers, ordered by deadline then timer_id.
     heap: BinaryHeap<VirtualTimer>,
@@ -122,12 +122,6 @@ pub struct VirtualTimerWheel {
     next_timer_id: u64,
     /// Cancelled timer IDs (for lazy cancellation).
     cancelled: std::collections::BTreeSet<u64>,
-}
-
-impl Default for VirtualTimerWheel {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl VirtualTimerWheel {
