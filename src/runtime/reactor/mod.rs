@@ -285,7 +285,7 @@ impl Event {
 /// }
 /// events.clear();
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Events {
     inner: SmallVec<[Event; 16]>,
     capacity: usize,
@@ -341,12 +341,6 @@ impl Events {
     /// Iterates over events.
     pub fn iter(&self) -> std::slice::Iter<'_, Event> {
         self.inner.iter()
-    }
-}
-
-impl Default for Events {
-    fn default() -> Self {
-        Self::with_capacity(0)
     }
 }
 
