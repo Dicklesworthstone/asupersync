@@ -246,9 +246,7 @@ impl RoundRobin {
     /// Create a new round-robin strategy.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            next: AtomicUsize::new(0),
-        }
+        Self::default()
     }
 }
 
