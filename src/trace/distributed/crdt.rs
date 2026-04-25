@@ -42,9 +42,7 @@ impl GCounter {
     /// Creates a new empty counter.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            counts: BTreeMap::new(),
-        }
+        Self::default()
     }
 
     /// Increments the counter for the given replica by `amount`.
@@ -99,10 +97,7 @@ impl PNCounter {
     /// Creates a new counter at zero.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            positive: GCounter::new(),
-            negative: GCounter::new(),
-        }
+        Self::default()
     }
 
     /// Increments the counter for the given replica.
