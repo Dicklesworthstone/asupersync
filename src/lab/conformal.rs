@@ -103,7 +103,7 @@ pub struct ConformityScore {
 }
 
 /// Per-invariant calibration state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct InvariantCalibration {
     /// Accumulated conformity scores (sorted for quantile computation).
     scores: Vec<f64>,
@@ -116,15 +116,6 @@ struct InvariantCalibration {
 }
 
 impl InvariantCalibration {
-    fn new() -> Self {
-        Self {
-            scores: Vec::new(),
-            entity_sum: 0.0,
-            event_sum: 0.0,
-            violation_count: 0,
-        }
-    }
-
     fn n(&self) -> usize {
         self.scores.len()
     }
@@ -175,7 +166,7 @@ pub struct PredictionSet {
 }
 
 /// Empirical coverage tracking for calibration diagnostics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CoverageTracker {
     /// Total predictions made.
     pub total: usize,
@@ -184,13 +175,6 @@ pub struct CoverageTracker {
 }
 
 impl CoverageTracker {
-    fn new() -> Self {
-        Self {
-            total: 0,
-            covered: 0,
-        }
-    }
-
     /// Empirical coverage rate.
     #[must_use]
     pub fn rate(&self) -> f64 {
@@ -347,7 +331,7 @@ impl ConformalCalibrator {
             config,
             calibrations: BTreeMap::new(),
             coverage_trackers: BTreeMap::new(),
-            overall_coverage: CoverageTracker::new(),
+            overall_coverage: CoverageTracker::default(),
             n_calibration: 0,
         }
     }
@@ -379,7 +363,7 @@ impl ConformalCalibrator {
             let cal = self
                 .calibrations
                 .entry(entry.invariant.clone())
-                .or_insert_with(InvariantCalibration::new);
+                .or_default();
             let score = conformity_score(entry, cal);
             cal.scores.push(score);
             cal.entity_sum += count_to_f64(entry.stats.entities_tracked);
@@ -428,7 +412,7 @@ impl ConformalCalibrator {
             let tracker = self
                 .coverage_trackers
                 .entry(entry.invariant.clone())
-                .or_insert_with(CoverageTracker::new);
+                .or_default();
             tracker.total += 1;
             if conforming {
                 tracker.covered += 1;
@@ -618,17 +602,13 @@ pub struct ThresholdCheck {
 }
 
 /// Per-metric calibration state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct MetricCalibration {
     /// Raw observations for direct upper-bound thresholding.
     values: Vec<f64>,
 }
 
 impl MetricCalibration {
-    fn new() -> Self {
-        Self { values: Vec::new() }
-    }
-
     fn n(&self) -> usize {
         self.values.len()
     }
@@ -732,10 +712,7 @@ impl HealthThresholdCalibrator {
             return;
         }
 
-        let cal = self
-            .metrics
-            .entry(metric.to_string())
-            .or_insert_with(MetricCalibration::new);
+        let cal = self.metrics.entry(metric.to_string()).or_default();
 
         cal.values.push(value);
 
@@ -804,7 +781,7 @@ impl HealthThresholdCalibrator {
         let tracker = self
             .coverage_trackers
             .entry(metric.to_string())
-            .or_insert_with(CoverageTracker::new);
+            .or_default();
         tracker.total += 1;
         if result.conforming {
             tracker.covered += 1;
@@ -1127,7 +1104,7 @@ mod tests {
 
     #[test]
     fn conformity_score_clean_is_low() {
-        let cal = InvariantCalibration::new();
+        let cal = InvariantCalibration::default();
         let entry = OracleEntryReport {
             invariant: "test".to_string(),
             passed: true,
@@ -1143,7 +1120,7 @@ mod tests {
 
     #[test]
     fn conformity_score_violation_is_high() {
-        let cal = InvariantCalibration::new();
+        let cal = InvariantCalibration::default();
         let entry = OracleEntryReport {
             invariant: "test".to_string(),
             passed: false,
