@@ -393,6 +393,7 @@ fn render_calibration_gauge(out: &mut String, score: f64) {
 ///
 /// Used by [`level3`] to compute diffs between successive decisions
 /// from the same component.
+#[derive(Default)]
 pub struct DiffContext {
     /// Recent entries keyed by component name.
     recent: BTreeMap<String, EvidenceLedger>,
@@ -444,12 +445,6 @@ impl DiffContext {
         self.recent.insert(entry.component.clone(), entry.clone());
 
         out
-    }
-}
-
-impl Default for DiffContext {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
