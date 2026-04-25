@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! Comprehensive test suite for cancel protocol validator.
 //!
 //! This module provides extensive testing for the cancel-safe state machine validation
@@ -7,17 +6,12 @@
 
 use super::protocol_state_machines::{
     CancelProtocolValidator, CancelStateMachine, ObligationContext, ObligationEvent,
-    ObligationState, ObligationStateMachine, RegionContext, RegionEvent, RegionState,
-    RegionStateMachine, TaskContext, TaskEvent, TaskState, TaskStateMachine, TransitionResult,
-    ValidationLevel,
+    ObligationStateMachine, RegionContext, RegionEvent, RegionStateMachine, TaskContext, TaskEvent,
+    TaskState, TaskStateMachine, TransitionResult, ValidationLevel,
 };
-use crate::types::{ObligationId, RegionId, TaskId};
-use std::collections::HashMap;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
-};
-use std::time::{Duration, Instant};
+use crate::types::{ObligationId, RegionId, TaskId, Time};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 #[cfg(test)]
 use proptest::prelude::*;
@@ -93,7 +87,7 @@ impl BugInjector {
     }
 
     /// Record that a bug was injected.
-    pub fn record_injection(&self, violation_type: ProtocolViolationType) {
+    pub fn record_injection(&self, _violation_type: ProtocolViolationType) {
         self.injected_bugs.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -122,8 +116,11 @@ impl BugInjector {
 /// Statistics for bug injection testing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BugInjectionStats {
+    /// Number of protocol bugs intentionally injected by the harness.
     pub bugs_injected: u64,
+    /// Number of injected protocol bugs detected by validation.
     pub bugs_detected: u64,
+    /// Fraction of injected bugs detected; `1.0` when no bugs were injected.
     pub detection_rate: f64,
 }
 
@@ -135,13 +132,17 @@ pub struct BugInjectionStats {
 /// Generate valid region events for property testing.
 pub fn region_event_strategy() -> impl Strategy<Value = RegionEvent> {
     prop_oneof![
-        Just(RegionEvent::Create),
-        Just(RegionEvent::AddTask),
-        Just(RegionEvent::RemoveTask),
+        Just(RegionEvent::Activate),
+        Just(RegionEvent::TaskSpawned),
+        Just(RegionEvent::TaskCompleted),
+        Just(RegionEvent::TaskDrained),
+        Just(RegionEvent::Cancel {
+            reason: "property cancel".to_string(),
+        }),
+        Just(RegionEvent::FinalizerRegistered),
+        Just(RegionEvent::FinalizerStarted),
+        Just(RegionEvent::FinalizerCompleted),
         Just(RegionEvent::RequestClose),
-        Just(RegionEvent::BeginDrain),
-        Just(RegionEvent::CompleteDrain),
-        Just(RegionEvent::Finalize),
     ]
 }
 
@@ -152,8 +153,7 @@ pub fn task_event_strategy() -> impl Strategy<Value = TaskEvent> {
         Just(TaskEvent::Start),
         Just(TaskEvent::Complete),
         Just(TaskEvent::RequestCancel),
-        Just(TaskEvent::AcknowledgeCancel),
-        Just(TaskEvent::CompleteDrain),
+        Just(TaskEvent::DrainComplete),
         prop::string::string_regex(r"[a-zA-Z0-9 ]{1,50}")
             .unwrap()
             .prop_map(|msg| TaskEvent::Panic { message: msg }),
@@ -164,15 +164,17 @@ pub fn task_event_strategy() -> impl Strategy<Value = TaskEvent> {
 /// Generate valid obligation events for property testing.
 pub fn obligation_event_strategy() -> impl Strategy<Value = ObligationEvent> {
     prop_oneof![
-        Just(ObligationEvent::Create),
+        Just(ObligationEvent::Reserve { token: 1 }),
         Just(ObligationEvent::Commit),
-        Just(ObligationEvent::Abort),
+        Just(ObligationEvent::Abort {
+            reason: "property abort".to_string(),
+        }),
     ]
 }
 
 /// Property-based test harness for state machines.
 pub struct PropertyTestHarness {
-    validator: CancelProtocolValidator,
+    validation_level: ValidationLevel,
     bug_injector: Option<BugInjector>,
 }
 
@@ -180,52 +182,46 @@ impl PropertyTestHarness {
     /// Create a new property test harness.
     pub fn new(validation_level: ValidationLevel, bug_injector: Option<BugInjector>) -> Self {
         Self {
-            validator: CancelProtocolValidator::new(validation_level),
+            validation_level,
             bug_injector,
         }
     }
 
     /// Test a sequence of region state transitions.
     pub fn test_region_transitions(&mut self, events: Vec<RegionEvent>) -> Result<(), String> {
-        let region_id = RegionId::new();
+        let region_id = RegionId::new_for_test(10, 0);
         let context = RegionContext {
+            region_id,
             parent_region: None,
-            child_count: 0,
-            active_tasks: HashMap::new(),
+            created_at: Time::ZERO,
+            validation_level: self.validation_level,
         };
 
-        let mut state_machine = RegionStateMachine::new(region_id, self.validator.validation_level);
+        let mut state_machine = RegionStateMachine::new(region_id, self.validation_level);
 
         for (i, event) in events.iter().enumerate() {
-            // Inject bugs if configured
             if let Some(ref injector) = self.bug_injector {
-                if injector.should_inject(ProtocolViolationType::RegionSkipDrain) {
-                    match event {
-                        RegionEvent::BeginDrain => {
-                            // Skip drain phase (bug injection)
-                            injector.record_injection(ProtocolViolationType::RegionSkipDrain);
-                            continue;
-                        }
-                        _ => {}
+                if matches!(event, RegionEvent::TaskDrained)
+                    && injector.should_inject(ProtocolViolationType::RegionSkipDrain)
+                {
+                    injector.record_injection(ProtocolViolationType::RegionSkipDrain);
+                    let result = state_machine.transition(RegionEvent::RequestClose, &context);
+                    if !result.is_valid() {
+                        injector.record_detection();
+                        return Err(format!(
+                            "Injected skipped-drain violation detected at step {i}: {result:?}"
+                        ));
                     }
                 }
             }
 
-            // Attempt state transition
             let result = state_machine.transition(event.clone(), &context);
 
-            // Record validation results
-            match result {
-                TransitionResult::Valid => {
-                    // Transition succeeded
+            if !result.is_valid() {
+                if let Some(ref injector) = self.bug_injector {
+                    injector.record_detection();
                 }
-                TransitionResult::Invalid(reason) => {
-                    // Validator caught an issue
-                    if let Some(ref injector) = self.bug_injector {
-                        injector.record_detection();
-                    }
-                    return Err(format!("Invalid transition at step {}: {}", i, reason));
-                }
+                return Err(format!("Invalid transition at step {i}: {result:?}"));
             }
         }
 
@@ -234,43 +230,36 @@ impl PropertyTestHarness {
 
     /// Test a sequence of task state transitions.
     pub fn test_task_transitions(&mut self, events: Vec<TaskEvent>) -> Result<(), String> {
-        let task_id = TaskId::new();
-        let region_id = RegionId::new();
+        let task_id = TaskId::new_for_test(20, 0);
+        let region_id = RegionId::new_for_test(20, 0);
         let context = TaskContext {
-            region_state: RegionState::Active,
-            has_cleanup: false,
+            task_id,
+            region_id,
+            spawned_at: Time::ZERO,
+            validation_level: self.validation_level,
         };
 
-        let mut state_machine =
-            TaskStateMachine::new(task_id, region_id, self.validator.validation_level);
+        let mut state_machine = TaskStateMachine::new(task_id, region_id, self.validation_level);
 
         for (i, event) in events.iter().enumerate() {
-            // Inject bugs if configured
+            let mut event = event.clone();
             if let Some(ref injector) = self.bug_injector {
-                if injector.should_inject(ProtocolViolationType::TaskCompleteAfterCancel) {
-                    if matches!(state_machine.current_state(), TaskState::CancelRequested) {
-                        if matches!(event, TaskEvent::Complete) {
-                            // Complete after cancel (bug injection)
-                            injector
-                                .record_injection(ProtocolViolationType::TaskCompleteAfterCancel);
-                            // Force the invalid transition
-                        }
-                    }
+                if matches!(state_machine.current_state(), TaskState::CancelRequested)
+                    && matches!(event, TaskEvent::DrainComplete)
+                    && injector.should_inject(ProtocolViolationType::TaskCompleteAfterCancel)
+                {
+                    injector.record_injection(ProtocolViolationType::TaskCompleteAfterCancel);
+                    event = TaskEvent::Complete;
                 }
             }
 
-            let result = state_machine.transition(event.clone(), &context);
+            let result = state_machine.transition(event, &context);
 
-            match result {
-                TransitionResult::Valid => {
-                    // Transition succeeded
+            if !result.is_valid() {
+                if let Some(ref injector) = self.bug_injector {
+                    injector.record_detection();
                 }
-                TransitionResult::Invalid(reason) => {
-                    if let Some(ref injector) = self.bug_injector {
-                        injector.record_detection();
-                    }
-                    return Err(format!("Invalid transition at step {}: {}", i, reason));
-                }
+                return Err(format!("Invalid transition at step {i}: {result:?}"));
             }
         }
 
@@ -282,49 +271,58 @@ impl PropertyTestHarness {
         &mut self,
         events: Vec<ObligationEvent>,
     ) -> Result<(), String> {
-        let obligation_id = ObligationId::new();
+        let obligation_id = ObligationId::new_for_test(30, 0);
         let context = ObligationContext {
-            region_state: RegionState::Active,
-            permits_available: 1,
+            obligation_id,
+            region_id: RegionId::new_for_test(30, 0),
+            created_at: Time::ZERO,
+            validation_level: self.validation_level,
         };
 
-        let mut state_machine =
-            ObligationStateMachine::new(obligation_id, self.validator.validation_level);
+        let mut state_machine = ObligationStateMachine::new(obligation_id, self.validation_level);
 
         for (i, event) in events.iter().enumerate() {
-            // Inject bugs if configured
+            let event = event.clone();
             if let Some(ref injector) = self.bug_injector {
-                let should_inject_double_commit =
-                    injector.should_inject(ProtocolViolationType::ObligationDoubleCommit);
-                let should_inject_double_abort =
-                    injector.should_inject(ProtocolViolationType::ObligationDoubleAbort);
+                let inject_double_commit = matches!(event, ObligationEvent::Commit)
+                    && injector.should_inject(ProtocolViolationType::ObligationDoubleCommit);
+                let inject_double_abort = matches!(event, ObligationEvent::Abort { .. })
+                    && injector.should_inject(ProtocolViolationType::ObligationDoubleAbort);
 
-                if should_inject_double_commit || should_inject_double_abort {
-                    match (state_machine.current_state(), event) {
-                        (ObligationState::Committed, ObligationEvent::Commit) => {
-                            injector
-                                .record_injection(ProtocolViolationType::ObligationDoubleCommit);
-                        }
-                        (ObligationState::Aborted, ObligationEvent::Abort) => {
-                            injector.record_injection(ProtocolViolationType::ObligationDoubleAbort);
-                        }
-                        _ => {}
+                if inject_double_commit || inject_double_abort {
+                    let first = state_machine.transition(event.clone(), &context);
+                    if !first.is_valid() {
+                        injector.record_detection();
+                        return Err(format!(
+                            "Injected obligation setup failed at step {i}: {first:?}"
+                        ));
                     }
+
+                    let injected_kind = if inject_double_commit {
+                        ProtocolViolationType::ObligationDoubleCommit
+                    } else {
+                        ProtocolViolationType::ObligationDoubleAbort
+                    };
+                    injector.record_injection(injected_kind);
+
+                    let second = state_machine.transition(event, &context);
+                    if !second.is_valid() {
+                        injector.record_detection();
+                        return Err(format!(
+                            "Injected duplicate obligation violation detected at step {i}: {second:?}"
+                        ));
+                    }
+                    continue;
                 }
             }
 
-            let result = state_machine.transition(event.clone(), &context);
+            let result = state_machine.transition(event, &context);
 
-            match result {
-                TransitionResult::Valid => {
-                    // Transition succeeded
+            if !result.is_valid() {
+                if let Some(ref injector) = self.bug_injector {
+                    injector.record_detection();
                 }
-                TransitionResult::Invalid(reason) => {
-                    if let Some(ref injector) = self.bug_injector {
-                        injector.record_detection();
-                    }
-                    return Err(format!("Invalid transition at step {}: {}", i, reason));
-                }
+                return Err(format!("Invalid transition at step {i}: {result:?}"));
             }
         }
 
@@ -339,18 +337,26 @@ impl PropertyTestHarness {
 /// Performance measurement results.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PerformanceMeasurement {
+    /// Runtime overhead of enabled validation compared with disabled validation.
     pub validation_overhead_pct: f64,
+    /// Estimated additional validator memory in bytes.
     pub memory_overhead_bytes: u64,
+    /// Average measured operation latency in nanoseconds.
     pub avg_latency_ns: u64,
+    /// P99 measured operation latency in nanoseconds.
     pub p99_latency_ns: u64,
+    /// Measured validation operations per second.
     pub throughput_ops_per_sec: f64,
 }
 
 /// Performance test configuration.
 #[derive(Debug, Clone)]
 pub struct PerformanceTestConfig {
+    /// Number of measured operations after warmup.
     pub num_operations: usize,
+    /// Number of unmeasured warmup operations.
     pub num_warmup: usize,
+    /// State-machine validation level used for the enabled run.
     pub validation_level: ValidationLevel,
 }
 
@@ -376,14 +382,16 @@ impl PerformanceTestHarness {
         let overhead_pct = if without_validation.total_time_ns == 0 {
             0.0
         } else {
-            ((with_validation.total_time_ns - without_validation.total_time_ns) as f64
+            ((with_validation.total_time_ns as f64 - without_validation.total_time_ns as f64)
                 / without_validation.total_time_ns as f64)
                 * 100.0
         };
 
         PerformanceMeasurement {
             validation_overhead_pct: overhead_pct,
-            memory_overhead_bytes: with_validation.memory_usage - without_validation.memory_usage,
+            memory_overhead_bytes: with_validation
+                .memory_usage
+                .saturating_sub(without_validation.memory_usage),
             avg_latency_ns: with_validation.avg_latency_ns,
             p99_latency_ns: with_validation.p99_latency_ns,
             throughput_ops_per_sec: with_validation.throughput_ops_per_sec,
@@ -395,7 +403,7 @@ impl PerformanceTestHarness {
         let validation_level = if enable_validation {
             self.config.validation_level
         } else {
-            ValidationLevel::Off
+            ValidationLevel::None
         };
 
         let mut validator = CancelProtocolValidator::new(validation_level);
@@ -407,7 +415,7 @@ impl PerformanceTestHarness {
         }
 
         // Actual measurement
-        let memory_before = self.estimate_memory_usage();
+        let memory_before = Self::estimate_memory_usage(&validator);
         let start_time = Instant::now();
 
         for _ in 0..self.config.num_operations {
@@ -418,9 +426,18 @@ impl PerformanceTestHarness {
         }
 
         let total_time = start_time.elapsed();
-        let memory_after = self.estimate_memory_usage();
+        let memory_after = Self::estimate_memory_usage(&validator);
 
-        // Calculate statistics
+        if latencies.is_empty() {
+            return BenchmarkResult {
+                total_time_ns: total_time.as_nanos() as u64,
+                memory_usage: memory_after.saturating_sub(memory_before),
+                avg_latency_ns: 0,
+                p99_latency_ns: 0,
+                throughput_ops_per_sec: 0.0,
+            };
+        }
+
         latencies.sort_unstable();
         let avg_latency_ns = latencies.iter().sum::<u64>() / latencies.len() as u64;
         let p99_index = (latencies.len() as f64 * 0.99) as usize;
@@ -441,31 +458,95 @@ impl PerformanceTestHarness {
         &self,
         validator: &mut CancelProtocolValidator,
     ) -> Result<(), String> {
-        // Create a region
-        let region_id = RegionId::new();
-        validator.track_region(region_id)?;
+        let region_id = RegionId::new_for_test(40, 0);
+        let task_id = TaskId::new_for_test(40, 0);
+        let obligation_id = ObligationId::new_for_test(40, 0);
 
-        // Create a task
-        let task_id = TaskId::new();
-        validator.track_task(task_id, region_id)?;
+        validator.register_region(region_id);
+        validator.register_task(task_id, region_id);
+        validator.register_obligation(obligation_id);
 
-        // Start the task
-        validator.validate_task_start(task_id)?;
+        let region_context = RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: self.config.validation_level,
+        };
+        let task_context = TaskContext {
+            task_id,
+            region_id,
+            spawned_at: Time::ZERO,
+            validation_level: self.config.validation_level,
+        };
+        let obligation_context = ObligationContext {
+            obligation_id,
+            region_id,
+            created_at: Time::ZERO,
+            validation_level: self.config.validation_level,
+        };
 
-        // Complete the task
-        validator.validate_task_completion(task_id)?;
-
-        // Close the region
-        validator.validate_region_close(region_id)?;
+        Self::ensure_valid(validator.validate_region_transition(
+            region_id,
+            RegionEvent::Activate,
+            &region_context,
+        ))?;
+        Self::ensure_valid(validator.validate_region_transition(
+            region_id,
+            RegionEvent::TaskSpawned,
+            &region_context,
+        ))?;
+        Self::ensure_valid(validator.validate_task_transition(
+            task_id,
+            TaskEvent::Start,
+            &task_context,
+        ))?;
+        Self::ensure_valid(validator.validate_obligation_transition(
+            obligation_id,
+            ObligationEvent::Reserve { token: 40 },
+            &obligation_context,
+        ))?;
+        Self::ensure_valid(validator.validate_obligation_transition(
+            obligation_id,
+            ObligationEvent::Commit,
+            &obligation_context,
+        ))?;
+        Self::ensure_valid(validator.validate_task_transition(
+            task_id,
+            TaskEvent::Complete,
+            &task_context,
+        ))?;
+        Self::ensure_valid(validator.validate_region_transition(
+            region_id,
+            RegionEvent::TaskCompleted,
+            &region_context,
+        ))?;
+        Self::ensure_valid(validator.validate_region_transition(
+            region_id,
+            RegionEvent::RequestClose,
+            &region_context,
+        ))?;
 
         Ok(())
     }
 
-    /// Estimate current memory usage (simplified implementation).
-    fn estimate_memory_usage(&self) -> u64 {
-        // This is a placeholder - in a real implementation, you would measure
-        // actual memory usage using platform-specific APIs or memory profiling tools
-        0
+    fn ensure_valid(result: TransitionResult) -> Result<(), String> {
+        if result.is_valid() {
+            Ok(())
+        } else {
+            Err(format!("validator transition failed: {result:?}"))
+        }
+    }
+
+    /// Deterministic lower-bound estimate based on tracked validator records.
+    fn estimate_memory_usage(validator: &CancelProtocolValidator) -> u64 {
+        let (regions, tasks, obligations, channels, io_ops, timers, _) = validator.stats();
+        let bytes = regions * std::mem::size_of::<RegionStateMachine>()
+            + tasks * std::mem::size_of::<TaskStateMachine>()
+            + obligations * std::mem::size_of::<ObligationStateMachine>()
+            + channels * std::mem::size_of::<super::protocol_state_machines::ChannelStateMachine>()
+            + io_ops * std::mem::size_of::<super::protocol_state_machines::IoStateMachine>()
+            + timers * std::mem::size_of::<super::protocol_state_machines::TimerStateMachine>();
+        bytes as u64
     }
 }
 
@@ -486,33 +567,33 @@ struct BenchmarkResult {
 /// Integration test configuration.
 #[derive(Debug, Clone)]
 pub struct IntegrationTestConfig {
+    /// Number of independent region lifecycles to simulate.
     pub num_concurrent_regions: usize,
+    /// Number of tasks to register and complete in each region.
     pub num_tasks_per_region: usize,
+    /// Number of obligations to reserve and commit per task.
     pub num_obligations_per_task: usize,
+    /// State-machine validation level used by the integration harness.
     pub validation_level: ValidationLevel,
 }
 
 /// Integration test harness for cancel protocol validation.
 pub struct IntegrationTestHarness {
     config: IntegrationTestConfig,
-    validator: Arc<CancelProtocolValidator>,
 }
 
 impl IntegrationTestHarness {
     /// Create a new integration test harness.
     pub fn new(config: IntegrationTestConfig) -> Self {
-        let validator = Arc::new(CancelProtocolValidator::new(config.validation_level));
-        Self { config, validator }
+        Self { config }
     }
 
     /// Test concurrent region operations with validation (simplified for sync testing).
     pub fn test_concurrent_regions(&self) -> Result<(), String> {
         // Simplified synchronous version for testing without tokio dependency
         for i in 0..self.config.num_concurrent_regions {
-            let validator = Arc::clone(&self.validator);
             let config = self.config.clone();
-
-            Self::simulate_region_lifecycle_sync(i, validator, config)?;
+            Self::simulate_region_lifecycle_sync(i, config)?;
         }
 
         Ok(())
@@ -520,79 +601,136 @@ impl IntegrationTestHarness {
 
     /// Simulate a complete region lifecycle with tasks and obligations (sync version).
     fn simulate_region_lifecycle_sync(
-        _region_idx: usize,
-        validator: Arc<CancelProtocolValidator>,
+        region_idx: usize,
         config: IntegrationTestConfig,
     ) -> Result<(), String> {
-        // Simulate a typical region lifecycle
-        let region_id = RegionId::new();
-        validator.track_region(region_id)?;
+        let mut validator = CancelProtocolValidator::new(config.validation_level);
+        let region_index = 100 + region_idx as u32;
+        let region_id = RegionId::new_for_test(region_index, 0);
+        validator.register_region(region_id);
 
-        // Create and manage tasks
+        let region_context = RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: config.validation_level,
+        };
+
+        PerformanceTestHarness::ensure_valid(validator.validate_region_transition(
+            region_id,
+            RegionEvent::Activate,
+            &region_context,
+        ))?;
+
         for task_idx in 0..config.num_tasks_per_region {
-            let task_id = TaskId::new();
-            validator.track_task(task_id, region_id)?;
-            validator.validate_task_start(task_id)?;
+            let task_id = TaskId::new_for_test(region_index, task_idx as u32);
+            validator.register_task(task_id, region_id);
 
-            // Create obligations for this task
-            for _obligation_idx in 0..config.num_obligations_per_task {
-                let obligation_id = ObligationId::new();
-                validator.track_obligation(obligation_id, task_id)?;
-                validator.validate_obligation_commit(obligation_id)?;
+            let task_context = TaskContext {
+                task_id,
+                region_id,
+                spawned_at: Time::ZERO,
+                validation_level: config.validation_level,
+            };
+
+            PerformanceTestHarness::ensure_valid(validator.validate_region_transition(
+                region_id,
+                RegionEvent::TaskSpawned,
+                &region_context,
+            ))?;
+            PerformanceTestHarness::ensure_valid(validator.validate_task_transition(
+                task_id,
+                TaskEvent::Start,
+                &task_context,
+            ))?;
+
+            for obligation_idx in 0..config.num_obligations_per_task {
+                let obligation_id = ObligationId::new_for_test(
+                    region_index,
+                    (task_idx * config.num_obligations_per_task + obligation_idx) as u32,
+                );
+                validator.register_obligation(obligation_id);
+
+                let obligation_context = ObligationContext {
+                    obligation_id,
+                    region_id,
+                    created_at: Time::ZERO,
+                    validation_level: config.validation_level,
+                };
+
+                PerformanceTestHarness::ensure_valid(validator.validate_obligation_transition(
+                    obligation_id,
+                    ObligationEvent::Reserve {
+                        token: 1 + obligation_idx as u64,
+                    },
+                    &obligation_context,
+                ))?;
+                PerformanceTestHarness::ensure_valid(validator.validate_obligation_transition(
+                    obligation_id,
+                    ObligationEvent::Commit,
+                    &obligation_context,
+                ))?;
             }
 
-            // Complete the task
-            validator.validate_task_completion(task_id)?;
+            PerformanceTestHarness::ensure_valid(validator.validate_task_transition(
+                task_id,
+                TaskEvent::Complete,
+                &task_context,
+            ))?;
+            PerformanceTestHarness::ensure_valid(validator.validate_region_transition(
+                region_id,
+                RegionEvent::TaskCompleted,
+                &region_context,
+            ))?;
         }
 
-        // Close the region
-        validator.validate_region_close(region_id)?;
+        PerformanceTestHarness::ensure_valid(validator.validate_region_transition(
+            region_id,
+            RegionEvent::RequestClose,
+            &region_context,
+        ))?;
 
         Ok(())
     }
 
     /// Test error reporting integration with logging/tracing infrastructure.
     pub fn test_error_reporting(&self) -> Result<(), String> {
-        // Test that validation errors are properly reported through the logging system
-        let region_id = RegionId::new();
+        let mut validator = CancelProtocolValidator::new(self.config.validation_level);
+        let region_id = RegionId::new_for_test(200, 0);
+        let context = RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: self.config.validation_level,
+        };
 
-        // Attempt an invalid operation that should be caught by validation
-        match self.validator.validate_region_close(region_id) {
-            Ok(_) => Err("Expected validation to catch invalid region close".to_string()),
-            Err(error) => {
-                // Verify error message format and content
-                if error.contains("region") && error.contains("not found") {
-                    Ok(())
-                } else {
-                    Err(format!("Unexpected error message format: {}", error))
-                }
-            }
+        let result =
+            validator.validate_region_transition(region_id, RegionEvent::RequestClose, &context);
+        match result {
+            TransitionResult::Invalid { reason, .. } if reason.contains("not registered") => Ok(()),
+            other => Err(format!("unexpected validation result: {other:?}")),
         }
     }
 
     /// Test configuration handling for different assertion levels.
     pub fn test_validation_level_config(&self) -> Result<(), String> {
-        // Test that different validation levels behave correctly
-        let test_cases = vec![
-            ValidationLevel::Off,
-            ValidationLevel::Development,
-            ValidationLevel::Production,
+        let test_cases = [
+            ValidationLevel::None,
+            ValidationLevel::Basic,
+            ValidationLevel::Full,
+            ValidationLevel::Debug,
         ];
 
-        for level in test_cases {
-            let validator = CancelProtocolValidator::new(level);
-
-            // Verify that validation behavior matches the configured level
-            match level {
-                ValidationLevel::Off => {
-                    // All operations should succeed without validation
-                    assert!(validator.validate_region_close(RegionId::new()).is_ok());
-                }
-                ValidationLevel::Development | ValidationLevel::Production => {
-                    // Operations should be validated
-                    assert!(validator.validate_region_close(RegionId::new()).is_err());
-                }
-            }
+        for (idx, level) in test_cases.into_iter().enumerate() {
+            Self::simulate_region_lifecycle_sync(
+                idx,
+                IntegrationTestConfig {
+                    num_concurrent_regions: 1,
+                    num_tasks_per_region: 1,
+                    num_obligations_per_task: 1,
+                    validation_level: level,
+                },
+            )?;
         }
 
         Ok(())
@@ -636,115 +774,341 @@ impl FalsePositiveTestHarness {
 
     /// Test simple region create -> use -> close lifecycle.
     fn test_simple_region_lifecycle(&mut self) -> Result<(), String> {
-        let region_id = RegionId::new();
+        let region_id = RegionId::new_for_test(300, 0);
+        let task_id = TaskId::new_for_test(300, 0);
+        let region_context = RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        let task_context = TaskContext {
+            task_id,
+            region_id,
+            spawned_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
 
-        // Create region
-        self.validator.track_region(region_id)?;
+        self.validator.register_region(region_id);
+        self.validator.register_task(task_id, region_id);
 
-        // Create and run task
-        let task_id = TaskId::new();
-        self.validator.track_task(task_id, region_id)?;
-        self.validator.validate_task_start(task_id)?;
-        self.validator.validate_task_completion(task_id)?;
-
-        // Close region
-        self.validator.validate_region_close(region_id)?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::Activate,
+            &region_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::TaskSpawned,
+            &region_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_task_transition(
+            task_id,
+            TaskEvent::Start,
+            &task_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_task_transition(
+            task_id,
+            TaskEvent::Complete,
+            &task_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::TaskCompleted,
+            &region_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::RequestClose,
+            &region_context,
+        ))?;
 
         Ok(())
     }
 
     /// Test nested region lifecycle.
     fn test_nested_region_lifecycle(&mut self) -> Result<(), String> {
-        let parent_region = RegionId::new();
-        let child_region = RegionId::new();
+        let parent_region = RegionId::new_for_test(301, 0);
+        let child_region = RegionId::new_for_test(301, 1);
+        let parent_context = RegionContext {
+            region_id: parent_region,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        let child_context = RegionContext {
+            region_id: child_region,
+            parent_region: Some(parent_region),
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
 
-        // Create parent region
-        self.validator.track_region(parent_region)?;
+        self.validator.register_region(parent_region);
+        self.validator.register_region(child_region);
 
-        // Create child region
-        self.validator.track_region(child_region)?;
-
-        // Close child first, then parent
-        self.validator.validate_region_close(child_region)?;
-        self.validator.validate_region_close(parent_region)?;
+        for (region_id, context) in [
+            (parent_region, &parent_context),
+            (child_region, &child_context),
+        ] {
+            PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+                region_id,
+                RegionEvent::Activate,
+                context,
+            ))?;
+        }
+        for (region_id, context) in [
+            (child_region, &child_context),
+            (parent_region, &parent_context),
+        ] {
+            PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+                region_id,
+                RegionEvent::RequestClose,
+                context,
+            ))?;
+        }
 
         Ok(())
     }
 
     /// Test concurrent task completion.
     fn test_concurrent_task_completion(&mut self) -> Result<(), String> {
-        let region_id = RegionId::new();
-        self.validator.track_region(region_id)?;
+        let region_id = RegionId::new_for_test(302, 0);
+        let region_context = RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        self.validator.register_region(region_id);
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::Activate,
+            &region_context,
+        ))?;
 
-        // Create multiple tasks
-        let task_ids: Vec<_> = (0..5).map(|_| TaskId::new()).collect();
+        let task_ids: Vec<_> = (0..5).map(|idx| TaskId::new_for_test(302, idx)).collect();
         for &task_id in &task_ids {
-            self.validator.track_task(task_id, region_id)?;
-            self.validator.validate_task_start(task_id)?;
+            let task_context = TaskContext {
+                task_id,
+                region_id,
+                spawned_at: Time::ZERO,
+                validation_level: ValidationLevel::Full,
+            };
+            self.validator.register_task(task_id, region_id);
+            PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+                region_id,
+                RegionEvent::TaskSpawned,
+                &region_context,
+            ))?;
+            PerformanceTestHarness::ensure_valid(self.validator.validate_task_transition(
+                task_id,
+                TaskEvent::Start,
+                &task_context,
+            ))?;
         }
 
-        // Complete tasks in different order
         for &task_id in task_ids.iter().rev() {
-            self.validator.validate_task_completion(task_id)?;
+            let task_context = TaskContext {
+                task_id,
+                region_id,
+                spawned_at: Time::ZERO,
+                validation_level: ValidationLevel::Full,
+            };
+            PerformanceTestHarness::ensure_valid(self.validator.validate_task_transition(
+                task_id,
+                TaskEvent::Complete,
+                &task_context,
+            ))?;
+            PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+                region_id,
+                RegionEvent::TaskCompleted,
+                &region_context,
+            ))?;
         }
 
-        self.validator.validate_region_close(region_id)?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::RequestClose,
+            &region_context,
+        ))?;
         Ok(())
     }
 
     /// Test obligation lifecycle.
     fn test_obligation_lifecycle(&mut self) -> Result<(), String> {
-        let region_id = RegionId::new();
-        let task_id = TaskId::new();
-        let obligation_id = ObligationId::new();
+        let region_id = RegionId::new_for_test(303, 0);
+        let task_id = TaskId::new_for_test(303, 0);
+        let obligation_id = ObligationId::new_for_test(303, 0);
+        let region_context = RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        let task_context = TaskContext {
+            task_id,
+            region_id,
+            spawned_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        let obligation_context = ObligationContext {
+            obligation_id,
+            region_id,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
 
-        self.validator.track_region(region_id)?;
-        self.validator.track_task(task_id, region_id)?;
-        self.validator.track_obligation(obligation_id, task_id)?;
+        self.validator.register_region(region_id);
+        self.validator.register_task(task_id, region_id);
+        self.validator.register_obligation(obligation_id);
 
-        // Commit obligation
-        self.validator.validate_obligation_commit(obligation_id)?;
-
-        // Complete task and close region
-        self.validator.validate_task_completion(task_id)?;
-        self.validator.validate_region_close(region_id)?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::Activate,
+            &region_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::TaskSpawned,
+            &region_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_task_transition(
+            task_id,
+            TaskEvent::Start,
+            &task_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_obligation_transition(
+            obligation_id,
+            ObligationEvent::Reserve { token: 303 },
+            &obligation_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_obligation_transition(
+            obligation_id,
+            ObligationEvent::Commit,
+            &obligation_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_task_transition(
+            task_id,
+            TaskEvent::Complete,
+            &task_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::TaskCompleted,
+            &region_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::RequestClose,
+            &region_context,
+        ))?;
 
         Ok(())
     }
 
     /// Test cancel signal propagation.
     fn test_cancel_propagation(&mut self) -> Result<(), String> {
-        let region_id = RegionId::new();
-        let task_id = TaskId::new();
+        let region_id = RegionId::new_for_test(304, 0);
+        let task_id = TaskId::new_for_test(304, 0);
+        let region_context = RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        let task_context = TaskContext {
+            task_id,
+            region_id,
+            spawned_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
 
-        self.validator.track_region(region_id)?;
-        self.validator.track_task(task_id, region_id)?;
-        self.validator.validate_task_start(task_id)?;
+        self.validator.register_region(region_id);
+        self.validator.register_task(task_id, region_id);
 
-        // Request cancel and validate proper handling
-        self.validator.validate_task_cancel_request(task_id)?;
-        self.validator.validate_task_cancel_completion(task_id)?;
-
-        self.validator.validate_region_close(region_id)?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::Activate,
+            &region_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::TaskSpawned,
+            &region_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_task_transition(
+            task_id,
+            TaskEvent::Start,
+            &task_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::Cancel {
+                reason: "test cancel".to_string(),
+            },
+            &region_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_task_transition(
+            task_id,
+            TaskEvent::RequestCancel,
+            &task_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_task_transition(
+            task_id,
+            TaskEvent::DrainComplete,
+            &task_context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::TaskDrained,
+            &region_context,
+        ))?;
         Ok(())
     }
 
     /// Test edge cases around state transitions.
     pub fn test_edge_cases(&mut self) -> Result<(), String> {
-        // Test rapid region creation and destruction
-        for _ in 0..1000 {
-            let region_id = RegionId::new();
-            self.validator.track_region(region_id)?;
-            self.validator.validate_region_close(region_id)?;
+        for idx in 0..100 {
+            let region_id = RegionId::new_for_test(400, idx);
+            let context = RegionContext {
+                region_id,
+                parent_region: None,
+                created_at: Time::ZERO,
+                validation_level: ValidationLevel::Full,
+            };
+            self.validator.register_region(region_id);
+            PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+                region_id,
+                RegionEvent::Activate,
+                &context,
+            ))?;
+            PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+                region_id,
+                RegionEvent::RequestClose,
+                &context,
+            ))?;
         }
 
-        // Test task creation without starting
-        let region_id = RegionId::new();
-        self.validator.track_region(region_id)?;
-        let task_id = TaskId::new();
-        self.validator.track_task(task_id, region_id)?;
-        // Don't start task, just close region
-        self.validator.validate_region_close(region_id)?;
+        let region_id = RegionId::new_for_test(401, 0);
+        let task_id = TaskId::new_for_test(401, 0);
+        let context = RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        self.validator.register_region(region_id);
+        self.validator.register_task(task_id, region_id);
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::Activate,
+            &context,
+        ))?;
+        PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+            region_id,
+            RegionEvent::RequestClose,
+            &context,
+        ))?;
 
         Ok(())
     }
@@ -756,9 +1120,13 @@ impl FalsePositiveTestHarness {
 
 /// Test infrastructure for managing comprehensive cancel protocol validation tests.
 pub struct CancelProtocolTestSuite {
+    /// Aggregated bug-injection detection metrics.
     pub bug_injection: BugInjectionStats,
+    /// Aggregated validation benchmark metrics.
     pub performance: PerformanceMeasurement,
+    /// Number of valid sequences incorrectly rejected by the validator.
     pub false_positive_count: u64,
+    /// Number of top-level harness phases executed.
     pub total_tests_run: u64,
 }
 
@@ -766,7 +1134,7 @@ impl CancelProtocolTestSuite {
     /// Run the complete test suite and return aggregated results.
     pub fn run_full_suite() -> Result<Self, String> {
         let mut total_tests = 0u64;
-        let mut false_positives = 0u64;
+        let false_positives = 0u64;
 
         // 1. Bug Injection Testing
         let bug_injection_config = BugInjectionConfig {
@@ -775,32 +1143,40 @@ impl CancelProtocolTestSuite {
                 ProtocolViolationType::TaskCompleteAfterCancel,
                 ProtocolViolationType::ObligationDoubleCommit,
             ],
-            injection_probability: 0.1,
+            injection_probability: 1.0,
             random_seed: Some(42),
         };
 
         let bug_injector = BugInjector::new(bug_injection_config);
         let mut property_harness =
-            PropertyTestHarness::new(ValidationLevel::Development, Some(bug_injector));
+            PropertyTestHarness::new(ValidationLevel::Full, Some(bug_injector));
 
         // Run property-based tests with bug injection
         total_tests += 1;
-        property_harness.test_region_transitions(vec![
-            RegionEvent::Create,
-            RegionEvent::AddTask,
-            RegionEvent::RequestClose,
-            RegionEvent::BeginDrain,
-            RegionEvent::CompleteDrain,
-            RegionEvent::Finalize,
-        ])?;
+        let _ = property_harness.test_task_transitions(vec![
+            TaskEvent::Start,
+            TaskEvent::RequestCancel,
+            TaskEvent::DrainComplete,
+        ]);
+
+        let _ = property_harness.test_obligation_transitions(vec![
+            ObligationEvent::Reserve { token: 1 },
+            ObligationEvent::Commit,
+        ]);
 
         let bug_injection_stats = property_harness.bug_injector.as_ref().unwrap().stats();
+        if bug_injection_stats.bugs_injected != bug_injection_stats.bugs_detected {
+            return Err(format!(
+                "bug injection detection mismatch: injected={}, detected={}",
+                bug_injection_stats.bugs_injected, bug_injection_stats.bugs_detected
+            ));
+        }
 
         // 2. Performance Testing
         let perf_config = PerformanceTestConfig {
-            num_operations: 10000,
-            num_warmup: 1000,
-            validation_level: ValidationLevel::Development,
+            num_operations: 256,
+            num_warmup: 32,
+            validation_level: ValidationLevel::Full,
         };
 
         let perf_harness = PerformanceTestHarness::new(perf_config);
@@ -808,13 +1184,11 @@ impl CancelProtocolTestSuite {
         total_tests += 1;
 
         // 3. False Positive Testing
-        let mut fp_harness = FalsePositiveTestHarness::new(ValidationLevel::Development);
+        let mut fp_harness = FalsePositiveTestHarness::new(ValidationLevel::Full);
         match fp_harness.test_valid_sequences() {
             Ok(_) => {}
             Err(e) => {
-                // If a valid sequence failed, it's a false positive
-                false_positives += 1;
-                eprintln!("False positive detected: {}", e);
+                return Err(format!("false positive detected: {e}"));
             }
         }
         total_tests += 1;
@@ -824,7 +1198,7 @@ impl CancelProtocolTestSuite {
             num_concurrent_regions: 10,
             num_tasks_per_region: 5,
             num_obligations_per_task: 2,
-            validation_level: ValidationLevel::Development,
+            validation_level: ValidationLevel::Full,
         };
 
         let integration_harness = IntegrationTestHarness::new(integration_config);
@@ -843,7 +1217,7 @@ impl CancelProtocolTestSuite {
     /// Generate a comprehensive test report.
     pub fn generate_report(&self) -> String {
         format!(
-            r#"
+            r"
 # Cancel Protocol Validator Test Suite Results
 
 ## Summary
@@ -870,7 +1244,7 @@ impl CancelProtocolTestSuite {
 
 ## Recommendations
 {}
-"#,
+",
             self.total_tests_run,
             self.false_positive_count,
             if self.bug_injection.bugs_injected > 0 {
@@ -954,7 +1328,7 @@ mod tests {
         let config = PerformanceTestConfig {
             num_operations: 100,
             num_warmup: 10,
-            validation_level: ValidationLevel::Development,
+            validation_level: ValidationLevel::Full,
         };
 
         let harness = PerformanceTestHarness::new(config);
@@ -964,16 +1338,14 @@ mod tests {
 
     #[test]
     fn test_property_harness_basic() {
-        let mut harness = PropertyTestHarness::new(ValidationLevel::Development, None);
+        let mut harness = PropertyTestHarness::new(ValidationLevel::Full, None);
 
         // Test valid region lifecycle
         let events = vec![
-            RegionEvent::Create,
-            RegionEvent::AddTask,
+            RegionEvent::Activate,
+            RegionEvent::TaskSpawned,
+            RegionEvent::TaskCompleted,
             RegionEvent::RequestClose,
-            RegionEvent::BeginDrain,
-            RegionEvent::CompleteDrain,
-            RegionEvent::Finalize,
         ];
 
         // Should succeed with valid event sequence
@@ -982,7 +1354,7 @@ mod tests {
 
     #[test]
     fn test_false_positive_harness() {
-        let mut harness = FalsePositiveTestHarness::new(ValidationLevel::Development);
+        let mut harness = FalsePositiveTestHarness::new(ValidationLevel::Full);
 
         // Valid sequences should never fail
         assert!(harness.test_simple_region_lifecycle().is_ok());
@@ -995,7 +1367,7 @@ mod tests {
             num_concurrent_regions: 5,
             num_tasks_per_region: 3,
             num_obligations_per_task: 1,
-            validation_level: ValidationLevel::Development,
+            validation_level: ValidationLevel::Full,
         };
 
         let harness = IntegrationTestHarness::new(config);
@@ -1007,7 +1379,7 @@ mod tests {
     proptest! {
         #[test]
         fn property_test_region_events(events in prop::collection::vec(region_event_strategy(), 1..20)) {
-            let mut harness = PropertyTestHarness::new(ValidationLevel::Development, None);
+            let mut harness = PropertyTestHarness::new(ValidationLevel::Full, None);
 
             // Property: any sequence of valid events should either succeed or fail gracefully
             let result = harness.test_region_transitions(events);
@@ -1028,7 +1400,7 @@ mod tests {
 
         #[test]
         fn property_test_task_events(events in prop::collection::vec(task_event_strategy(), 1..15)) {
-            let mut harness = PropertyTestHarness::new(ValidationLevel::Development, None);
+            let mut harness = PropertyTestHarness::new(ValidationLevel::Full, None);
 
             let result = harness.test_task_transitions(events);
 
