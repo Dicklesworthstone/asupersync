@@ -314,6 +314,12 @@ impl<T> Sender<T> {
         self.shared.capacity
     }
 
+    #[cfg(test)]
+    pub(crate) fn debug_counts(&self) -> (usize, usize) {
+        let inner = self.shared.inner.lock();
+        (inner.queue.len(), inner.reserved)
+    }
+
     /// Sends a value, evicting the oldest queued message if the channel is full.
     ///
     /// Returns `Ok(None)` if the value was sent without eviction,

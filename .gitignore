@@ -297,7 +297,6 @@ pkg/
 pnpm-lock.yaml
 
 # Standalone bug reproduction / one-off test harnesses in src/
-src/channel/mpsc_lost_wakeup_test.rs
 src/test_*.rs
 
 # Root-level scratch .rs files (not matching /test_*.rs pattern)

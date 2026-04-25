@@ -54,6 +54,10 @@ pub mod watch;
 mod deadlock_test;
 
 #[cfg(test)]
+#[path = "mpsc_lost_wakeup_test.rs"]
+mod mpsc_lost_wakeup_test;
+
+#[cfg(test)]
 #[path = "atomicity_test.rs"]
 mod atomicity_test;
 

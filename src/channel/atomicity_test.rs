@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! Two-phase channel atomicity verification framework.
 //!
 //! This module provides comprehensive testing for the atomicity guarantees of
@@ -177,17 +176,9 @@ impl AtomicityOracle {
         if self.config.check_invariants {
             if !snapshot.verify_capacity_invariant() {
                 self.record_violation();
-                eprintln!(
-                    "VIOLATION: Capacity invariant failed: used_slots={} > capacity={}",
-                    snapshot.used_slots, snapshot.capacity
-                );
             }
             if !snapshot.verify_accounting_invariant() {
                 self.record_violation();
-                eprintln!(
-                    "VIOLATION: Accounting invariant failed: used_slots={} != queue_length={} + reserved_count={}",
-                    snapshot.used_slots, snapshot.queue_length, snapshot.reserved_count
-                );
             }
         }
 
@@ -260,7 +251,7 @@ impl CancellationInjector {
     }
 }
 
-/// Mock channel wrapper that exposes internal state for testing.
+/// Channel wrapper that exposes test-only state snapshots for invariant checks.
 pub struct TestableChannel<T> {
     sender: mpsc::Sender<T>,
     receiver: mpsc::Receiver<T>,
@@ -289,17 +280,12 @@ impl<T> TestableChannel<T> {
     }
 
     /// Takes a snapshot of the current channel state.
-    ///
-    /// Note: This is a simplified version that doesn't access internal state
-    /// directly. In a real implementation, we'd need access to the channel
-    /// internals or use test-specific hooks.
     pub fn take_snapshot(&self, now: Time) {
-        // This is a placeholder - in a real implementation we'd need
-        // privileged access to channel internals for true state inspection
+        let (queue_length, reserved_count) = self.sender.debug_counts();
         let snapshot = ChannelSnapshot {
-            queue_length: 0,   // Would need internal access
-            reserved_count: 0, // Would need internal access
-            used_slots: 0,     // Would need internal access
+            queue_length,
+            reserved_count,
+            used_slots: queue_length + reserved_count,
             capacity: self.sender.capacity(),
             timestamp: now,
         };
@@ -435,6 +421,33 @@ mod tests {
         };
 
         assert!(!bad_snapshot.verify_capacity_invariant());
+    }
+
+    #[test]
+    fn test_testable_channel_snapshot_reads_real_mpsc_state() {
+        let oracle = Arc::new(AtomicityOracle::new(AtomicityTestConfig::default()));
+        let channel = TestableChannel::new(3, Arc::clone(&oracle));
+
+        channel
+            .sender()
+            .try_send(10_u32)
+            .expect("queued send should fit");
+        let permit = channel
+            .sender()
+            .try_reserve()
+            .expect("second slot should be reservable");
+
+        channel.take_snapshot(Time::ZERO);
+
+        let snapshots = oracle.snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].queue_length, 1);
+        assert_eq!(snapshots[0].reserved_count, 1);
+        assert_eq!(snapshots[0].used_slots, 2);
+        assert_eq!(snapshots[0].capacity, 3);
+        assert!(oracle.stats().is_invariant_safe());
+
+        permit.abort();
     }
 
     #[test]
