@@ -142,6 +142,16 @@ impl BudgetTestHarness {
             return stats;
         }
 
+        let baseline_effective_limit_exceedances: Vec<u64> = self
+            .workers
+            .iter()
+            .map(|worker| {
+                worker
+                    .preemption_fairness_certificate()
+                    .effective_limit_exceedances
+            })
+            .collect();
+
         for step in 0..max_steps {
             let worker_idx = step % self.workers.len();
             let worker = &mut self.workers[worker_idx];
@@ -152,7 +162,11 @@ impl BudgetTestHarness {
 
                 // Get budget metrics from worker
                 let fairness_cert = worker.preemption_fairness_certificate();
-                stats.record_budget_metrics(worker_idx, &fairness_cert, task_type);
+                stats.record_budget_metrics(
+                    worker_idx,
+                    &fairness_cert,
+                    baseline_effective_limit_exceedances[worker_idx],
+                );
             } else {
                 stats.record_idle(worker_idx, step);
                 if step > max_steps / 2 {
@@ -189,8 +203,11 @@ struct BudgetStats {
     dispatches: Vec<Vec<(TaskType, usize)>>, // per-worker: (task_type, step)
     cancel_streaks: Vec<Vec<usize>>,         // per-worker cancel streak samples
     ready_streaks: Vec<Vec<usize>>,          // per-worker ready streak samples
+    current_cancel_streaks: Vec<usize>,
+    current_ready_streaks: Vec<usize>,
     max_cancel_streak: usize,
     max_ready_streak: usize,
+    max_effective_cancel_limit: usize,
     fairness_violations: Vec<String>,
     total_dispatches_by_type: HashMap<TaskType, usize>,
     idle_workers: Vec<usize>, // steps where workers were idle
@@ -202,8 +219,11 @@ impl BudgetStats {
             dispatches: Vec::new(),
             cancel_streaks: Vec::new(),
             ready_streaks: Vec::new(),
+            current_cancel_streaks: Vec::new(),
+            current_ready_streaks: Vec::new(),
             max_cancel_streak: 0,
             max_ready_streak: 0,
+            max_effective_cancel_limit: 0,
             fairness_violations: Vec::new(),
             total_dispatches_by_type: HashMap::new(),
             idle_workers: Vec::new(),
@@ -214,31 +234,50 @@ impl BudgetStats {
         self.ensure_worker_capacity(worker_id + 1);
         self.dispatches[worker_id].push((task_type, step));
         *self.total_dispatches_by_type.entry(task_type).or_insert(0) += 1;
+
+        match task_type {
+            TaskType::Cancel => {
+                self.current_cancel_streaks[worker_id] =
+                    self.current_cancel_streaks[worker_id].saturating_add(1);
+                self.current_ready_streaks[worker_id] = 0;
+                let cancel_streak = self.current_cancel_streaks[worker_id];
+                self.cancel_streaks[worker_id].push(cancel_streak);
+                self.max_cancel_streak = self.max_cancel_streak.max(cancel_streak);
+            }
+            TaskType::Ready => {
+                self.current_cancel_streaks[worker_id] = 0;
+                self.current_ready_streaks[worker_id] =
+                    self.current_ready_streaks[worker_id].saturating_add(1);
+                let ready_streak = self.current_ready_streaks[worker_id];
+                self.ready_streaks[worker_id].push(ready_streak);
+                self.max_ready_streak = self.max_ready_streak.max(ready_streak);
+            }
+            TaskType::Timed => {
+                self.current_cancel_streaks[worker_id] = 0;
+                self.current_ready_streaks[worker_id] = 0;
+            }
+        }
     }
 
     fn record_budget_metrics(
         &mut self,
         worker_id: usize,
         fairness_cert: &asupersync::runtime::scheduler::three_lane::PreemptionFairnessCertificate,
-        current_task_type: TaskType,
+        baseline_effective_limit_exceedances: u64,
     ) {
         self.ensure_worker_capacity(worker_id + 1);
-
-        // Record current streak values (derived from certificate)
-        if current_task_type == TaskType::Cancel {
-            // Track cancel streak progression
-            let cancel_streak = fairness_cert
-                .observed_max_cancel_streak
-                .min(fairness_cert.effective_limit + 1);
-            self.cancel_streaks[worker_id].push(cancel_streak);
-            self.max_cancel_streak = self.max_cancel_streak.max(cancel_streak);
-        }
+        self.max_effective_cancel_limit = self
+            .max_effective_cancel_limit
+            .max(fairness_cert.effective_limit);
 
         // Check for budget violations
-        if fairness_cert.effective_limit_exceedances > 0 {
+        let new_effective_limit_exceedances = fairness_cert
+            .effective_limit_exceedances
+            .saturating_sub(baseline_effective_limit_exceedances);
+        if new_effective_limit_exceedances > 0 {
             self.fairness_violations.push(format!(
                 "Worker {} exceeded effective limit: {} exceedances",
-                worker_id, fairness_cert.effective_limit_exceedances
+                worker_id, new_effective_limit_exceedances
             ));
         }
     }
@@ -252,6 +291,8 @@ impl BudgetStats {
             self.dispatches.push(Vec::new());
             self.cancel_streaks.push(Vec::new());
             self.ready_streaks.push(Vec::new());
+            self.current_cancel_streaks.push(0);
+            self.current_ready_streaks.push(0);
         }
     }
 
@@ -289,6 +330,11 @@ impl BudgetStats {
         self.max_cancel_streak
     }
 
+    /// Get the maximum runtime-reported effective cancel-streak limit.
+    fn max_observed_effective_limit(&self) -> usize {
+        self.max_effective_cancel_limit
+    }
+
     /// Check for any fairness violations
     fn has_fairness_violations(&self) -> bool {
         !self.fairness_violations.is_empty()
@@ -323,8 +369,11 @@ fn mr_cancel_streak_budget_enforcement() {
 
         let stats = harness.run_budget_simulation(300);
 
-        // MR: Cancel streak must never exceed effective limit
-        let effective_limit = if adaptive { cancel_limit * 2 } else { cancel_limit * 2 }; // Conservative bound for drain phases
+        // MR: Cancel streak must never exceed the runtime's effective limit.
+        // In adaptive mode this can differ from the constructor limit because
+        // the EXP3 policy selects from fixed arms [4, 8, 16, 32, 64].
+        let effective_limit = stats.max_observed_effective_limit();
+        prop_assert!(effective_limit > 0, "No effective cancel-streak limit was observed");
         prop_assert!(stats.max_observed_cancel_streak() <= effective_limit,
             "Cancel streak {} exceeded effective limit {}",
             stats.max_observed_cancel_streak(), effective_limit);
@@ -398,7 +447,9 @@ fn mr_budget_reset_consistency() {
             "Phase 3 fairness violations: {:?}", phase3_stats.fairness_violations);
 
         // MR: Later phases should not show inflated streak counts from earlier phases
-        prop_assert!(phase3_stats.max_observed_cancel_streak() <= cancel_limit * 2,
+        let phase3_effective_limit = phase3_stats.max_observed_effective_limit();
+        prop_assert!(phase3_effective_limit > 0, "No phase 3 effective limit was observed");
+        prop_assert!(phase3_stats.max_observed_cancel_streak() <= phase3_effective_limit,
             "Phase 3 cancel streak {} suggests budget carryover",
             phase3_stats.max_observed_cancel_streak());
     });
@@ -457,10 +508,11 @@ fn mr_adaptive_budget_convergence() {
         prop_assert!(stats.is_cross_lane_balanced(0.25), // More lenient for adaptive
             "Adaptive policy resulted in extreme lane imbalance");
 
-        // MR: Cancel streak should remain bounded even with adaptation
-        let adaptive_bound = base_limit * 3; // Generous bound for adaptive adjustment
+        // MR: Cancel streak should remain bounded by the adaptive runtime limit.
+        let adaptive_bound = stats.max_observed_effective_limit();
+        prop_assert!(adaptive_bound > 0, "No adaptive effective limit was observed");
         prop_assert!(stats.max_observed_cancel_streak() <= adaptive_bound,
-            "Adaptive cancel streak {} exceeded reasonable bound {}",
+            "Adaptive cancel streak {} exceeded effective bound {}",
             stats.max_observed_cancel_streak(), adaptive_bound);
     });
 }

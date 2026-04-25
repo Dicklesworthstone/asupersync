@@ -365,7 +365,9 @@ pub mod generators {
                 let mut timing_events = Vec::new();
 
                 for op_idx in 0..num_ops {
-                    let base_time = op_idx as u64 * 100;
+                    // Leave room for `BeforeReserve` cancellation without
+                    // representing negative virtual time.
+                    let base_time = 10 + op_idx as u64 * 100;
 
                     // Reserve phase
                     timing_events.push(TimingEvent {
@@ -399,6 +401,7 @@ pub mod generators {
                         expected_propagation: vec![],
                     });
                 }
+                timing_events.sort_by_key(|event| event.virtual_time_ms);
 
                 CancelTimingPattern {
                     pattern_id: format!("two-phase-stress-{seed:08x}"),
@@ -644,7 +647,7 @@ pub enum TwoPhaseCancelPoint {
 impl TwoPhaseCancelPoint {
     fn time_offset(&self, base_time: u64) -> Option<u64> {
         match self {
-            Self::BeforeReserve => Some(base_time - 10),
+            Self::BeforeReserve => Some(base_time.saturating_sub(10)),
             Self::DuringReserve => Some(base_time + 20),
             Self::BetweenReserveCommit => Some(base_time + 25),
             Self::DuringCommit => Some(base_time + 60),
@@ -719,7 +722,65 @@ impl ScenarioComponent {
                 trigger_condition: None,
                 expected_propagation: hierarchy.all_child_regions(),
             }],
-            _ => vec![], // Simplified for other components
+            Self::TwoPhasePressure => vec![
+                TimingEvent {
+                    event_type: EventType::ReserveOperation,
+                    virtual_time_ms: base_time,
+                    target_region: hierarchy.root_region,
+                    source: CancelSource::UserRequest,
+                    trigger_condition: None,
+                    expected_propagation: vec![],
+                },
+                TimingEvent {
+                    event_type: EventType::CancelRequest,
+                    virtual_time_ms: base_time + 25,
+                    target_region: hierarchy.root_region,
+                    source: CancelSource::ExternalSignal,
+                    trigger_condition: None,
+                    expected_propagation: vec![hierarchy.root_region],
+                },
+                TimingEvent {
+                    event_type: EventType::CommitOperation,
+                    virtual_time_ms: base_time + 50,
+                    target_region: hierarchy.root_region,
+                    source: CancelSource::UserRequest,
+                    trigger_condition: None,
+                    expected_propagation: vec![],
+                },
+            ],
+            Self::BudgetPressure => vec![TimingEvent {
+                event_type: EventType::BudgetExhaustion,
+                virtual_time_ms: base_time,
+                target_region: hierarchy.root_region,
+                source: CancelSource::BudgetExhaustion,
+                trigger_condition: None,
+                expected_propagation: vec![hierarchy.root_region],
+            }],
+            Self::ConcurrentRacing => {
+                let target = hierarchy
+                    .all_child_regions()
+                    .into_iter()
+                    .next()
+                    .unwrap_or(hierarchy.root_region);
+                vec![
+                    TimingEvent {
+                        event_type: EventType::CancelRequest,
+                        virtual_time_ms: base_time,
+                        target_region: target,
+                        source: CancelSource::SiblingTask,
+                        trigger_condition: Some(TriggerCondition::Probability(0.5)),
+                        expected_propagation: vec![target],
+                    },
+                    TimingEvent {
+                        event_type: EventType::CancelRequest,
+                        virtual_time_ms: base_time + 1,
+                        target_region: hierarchy.root_region,
+                        source: CancelSource::ExternalSignal,
+                        trigger_condition: Some(TriggerCondition::Probability(0.5)),
+                        expected_propagation: vec![hierarchy.root_region],
+                    },
+                ]
+            }
         }
     }
 
@@ -1030,6 +1091,7 @@ pub fn any_cancel_timing_pattern() -> impl Strategy<Value = CancelTimingPattern>
         generators::two_phase_stress(),
         generators::budget_interactions(),
         generators::chaos_testing(),
+        generators::comprehensive_scenario(),
     ]
 }
 
@@ -1054,6 +1116,31 @@ mod tests {
     fn test_comprehensive_pattern_coverage() {
         let families = all_pattern_families();
         assert_eq!(families.len(), 7, "Should have all 7 pattern families");
+    }
+
+    #[test]
+    fn comprehensive_pattern_generation_has_timing_events() {
+        let mut runner = proptest::test_runner::TestRunner::deterministic();
+
+        for _ in 0..16 {
+            let tree = comprehensive_scenario().new_tree(&mut runner).unwrap();
+            let pattern = tree.current();
+
+            assert!(!pattern.timing_events.is_empty());
+            for window in pattern.timing_events.windows(2) {
+                assert!(window[0].virtual_time_ms <= window[1].virtual_time_ms);
+            }
+        }
+    }
+
+    #[test]
+    fn before_reserve_cancel_point_does_not_underflow() {
+        assert_eq!(TwoPhaseCancelPoint::BeforeReserve.time_offset(0), Some(0));
+        assert_eq!(TwoPhaseCancelPoint::BeforeReserve.time_offset(10), Some(0));
+        assert_eq!(
+            TwoPhaseCancelPoint::BeforeReserve.time_offset(100),
+            Some(90)
+        );
     }
 
     proptest! {
