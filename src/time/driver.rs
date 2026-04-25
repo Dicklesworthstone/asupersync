@@ -277,7 +277,7 @@ impl TimeSource for BrowserMonotonicClock {
 /// clock.advance(1_000_000_000); // 1 second
 /// assert_eq!(clock.now(), Time::from_secs(1));
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct VirtualClock {
     /// Current time in nanoseconds.
     now: AtomicU64,
@@ -383,12 +383,6 @@ impl VirtualClock {
     #[inline]
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Acquire)
-    }
-}
-
-impl Default for VirtualClock {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

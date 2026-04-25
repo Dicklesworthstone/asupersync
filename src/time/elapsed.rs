@@ -22,7 +22,7 @@ use core::fmt;
 /// assert_eq!(elapsed.deadline(), Time::from_secs(5));
 /// println!("{elapsed}"); // "deadline has elapsed at Time(5000000000ns)"
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Elapsed {
     /// The deadline that was exceeded.
     deadline: Time,
@@ -58,12 +58,6 @@ impl fmt::Display for Elapsed {
 }
 
 impl std::error::Error for Elapsed {}
-
-impl Default for Elapsed {
-    fn default() -> Self {
-        Self::new(Time::ZERO)
-    }
-}
 
 #[cfg(test)]
 mod tests {
