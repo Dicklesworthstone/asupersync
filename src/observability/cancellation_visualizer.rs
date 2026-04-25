@@ -7,7 +7,7 @@ use crate::observability::cancellation_tracer::{
     CancellationTrace, CancellationTraceStep, EntityType, PropagationAnomaly, TraceId,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 /// Configuration for visualization output.
@@ -276,8 +276,19 @@ impl CancellationVisualizer {
             // Root node
             output.push_str(&format!(
                 "  \"{}\" [label=\"{}\\n{}\" style=filled fillcolor=lightblue];\n",
-                trace.root_entity, trace.root_entity, trace.root_cancel_reason
+                Self::dot_node_id(trace.trace_id, &trace.root_entity),
+                Self::escape_dot_text(&trace.root_entity),
+                Self::escape_dot_text(&trace.root_cancel_reason)
             ));
+
+            for step in &trace.steps {
+                output.push_str(&format!(
+                    "  \"{}\" [label=\"{}\\n{:?}\"];\n",
+                    Self::dot_node_id(trace.trace_id, &step.entity_id),
+                    Self::escape_dot_text(&step.entity_id),
+                    step.entity_type
+                ));
+            }
 
             // Steps as edges
             for step in &trace.steps {
@@ -291,11 +302,12 @@ impl CancellationVisualizer {
                     "black"
                 };
 
-                if let Some(parent) = &step.parent_entity {
+                let parent = step.parent_entity.as_ref().unwrap_or(&trace.root_entity);
+                if parent != &step.entity_id {
                     output.push_str(&format!(
                         "  \"{}\" -> \"{}\" [label=\"{:.1}ms\" color={}];\n",
-                        parent,
-                        step.entity_id,
+                        Self::dot_node_id(trace.trace_id, parent),
+                        Self::dot_node_id(trace.trace_id, &step.entity_id),
                         step.elapsed_since_prev.as_secs_f64() * 1000.0,
                         color
                     ));
@@ -324,8 +336,8 @@ impl CancellationVisualizer {
         let avg_propagation_latency = if propagation_times.is_empty() {
             Duration::ZERO
         } else {
-            let total: u64 = propagation_times.iter().map(|d| d.as_nanos() as u64).sum();
-            Duration::from_nanos(total / propagation_times.len() as u64)
+            let total: u128 = propagation_times.iter().map(Duration::as_nanos).sum();
+            Self::duration_from_avg_nanos(total, propagation_times.len())
         };
 
         let mut sorted_times = propagation_times;
@@ -401,14 +413,16 @@ impl CancellationVisualizer {
                 continue;
             }
 
-            let avg_delay = Duration::from_nanos(
-                delays.iter().map(|d| d.as_nanos() as u64).sum::<u64>() / delays.len() as u64,
-            );
+            let total_delay_nanos: u128 = delays.iter().map(Duration::as_nanos).sum();
+            let avg_delay = Self::duration_from_avg_nanos(total_delay_nanos, delays.len());
 
             // Consider it a bottleneck if average delay is above threshold
             let threshold = Duration::from_millis(10);
             if avg_delay > threshold {
-                let impact_score = avg_delay.as_secs_f64() * delays.len() as f64;
+                let trace_count = traces.len().max(1) as f64;
+                let severity_ratio = avg_delay.as_secs_f64() / threshold.as_secs_f64();
+                let frequency_ratio = delays.len() as f64 / trace_count;
+                let impact_score = (severity_ratio * frequency_ratio).min(1.0);
 
                 bottlenecks.push(BottleneckInfo {
                     entity_id: entity_id.clone(),
@@ -434,23 +448,58 @@ impl CancellationVisualizer {
         &self,
         traces: &[CancellationTrace],
     ) -> HashMap<String, ThroughputStats> {
-        let mut stats = HashMap::new();
+        struct ThroughputAccumulator {
+            samples: usize,
+            total_processing_nanos: u128,
+            completed: usize,
+        }
 
-        // Simple implementation - would need more data for full metrics
+        let mut accumulators: HashMap<String, ThroughputAccumulator> = HashMap::new();
+
         for trace in traces {
             for step in &trace.steps {
-                stats
-                    .entry(step.entity_id.clone())
-                    .or_insert(ThroughputStats {
-                        cancellations_per_second: 1.0, // Placeholder
-                        avg_processing_time: step.elapsed_since_prev,
-                        queue_depth: 0, // Would need queue tracking
-                        success_rate: if step.propagation_completed { 1.0 } else { 0.0 },
-                    });
+                let accumulator =
+                    accumulators
+                        .entry(step.entity_id.clone())
+                        .or_insert(ThroughputAccumulator {
+                            samples: 0,
+                            total_processing_nanos: 0,
+                            completed: 0,
+                        });
+                accumulator.samples += 1;
+                accumulator.total_processing_nanos += step.elapsed_since_prev.as_nanos();
+                if step.propagation_completed {
+                    accumulator.completed += 1;
+                }
             }
         }
 
-        stats
+        accumulators
+            .into_iter()
+            .map(|(entity_id, accumulator)| {
+                let avg_processing_time = Self::duration_from_avg_nanos(
+                    accumulator.total_processing_nanos,
+                    accumulator.samples,
+                );
+                let total_secs = accumulator.total_processing_nanos as f64 / 1_000_000_000.0;
+                let cancellations_per_second = if total_secs > 0.0 {
+                    accumulator.samples as f64 / total_secs
+                } else {
+                    accumulator.samples as f64
+                };
+                let success_rate = accumulator.completed as f64 / accumulator.samples as f64;
+
+                (
+                    entity_id,
+                    ThroughputStats {
+                        cancellations_per_second,
+                        avg_processing_time,
+                        queue_depth: 0,
+                        success_rate,
+                    },
+                )
+            })
+            .collect()
     }
 
     /// Build a tree structure from a trace for visualization.
@@ -466,14 +515,38 @@ impl CancellationVisualizer {
             completed: trace.is_complete,
         };
 
-        // Build child nodes from steps
-        let mut parent_map: HashMap<String, &mut CancellationTreeNode> = HashMap::new();
-        parent_map.insert(root.entity_id.clone(), &mut root);
+        let mut children_by_parent: HashMap<&str, Vec<&CancellationTraceStep>> = HashMap::new();
+        for step in &trace.steps {
+            if step.entity_id == trace.root_entity {
+                root.entity_type = step.entity_type;
+                root.depth = step.depth;
+                root.timing = Some(step.elapsed_since_start);
+                root.propagation_delay = Some(step.elapsed_since_prev);
+                root.completed = step.propagation_completed;
+                root.anomalies = self.anomalies_for_entity(trace, &step.entity_id);
+                continue;
+            }
 
-        // This is a simplified tree building - in practice would need more complex logic
-        for _step in &trace.steps {
-            // Add as child of parent or root
-            // Implementation would be more complex in practice
+            let parent = step.parent_entity.as_deref().unwrap_or(&trace.root_entity);
+            children_by_parent.entry(parent).or_default().push(step);
+        }
+
+        if root.anomalies.is_empty() {
+            root.anomalies = self.anomalies_for_entity(trace, &trace.root_entity);
+        }
+
+        let mut visited = HashSet::new();
+        visited.insert(trace.root_entity.clone());
+        self.add_child_nodes(&mut root, &children_by_parent, trace, &mut visited);
+
+        // Preserve steps whose parent was not recorded in the trace by attaching
+        // them to the root instead of silently dropping diagnostic data.
+        for step in &trace.steps {
+            if step.entity_id != trace.root_entity && visited.insert(step.entity_id.clone()) {
+                let mut child = self.node_from_step(trace, step);
+                self.add_child_nodes(&mut child, &children_by_parent, trace, &mut visited);
+                root.children.push(child);
+            }
         }
 
         root
@@ -585,13 +658,126 @@ impl CancellationVisualizer {
 
     /// Check if a step is associated with a specific anomaly.
     fn step_has_anomaly(&self, step: &CancellationTraceStep, anomaly: &PropagationAnomaly) -> bool {
-        // Simple check - could be more sophisticated
         match anomaly {
-            PropagationAnomaly::SlowPropagation { elapsed, .. } => {
-                step.elapsed_since_prev >= *elapsed
-            }
-            _ => false, // Would need entity tracking for other anomaly types
+            PropagationAnomaly::SlowPropagation {
+                step_id, entity_id, ..
+            } => step.step_id == *step_id && step.entity_id == *entity_id,
+            PropagationAnomaly::StuckCancellation { entity_id, .. }
+            | PropagationAnomaly::ExcessiveDepth { entity_id, .. } => step.entity_id == *entity_id,
+            PropagationAnomaly::IncorrectPropagationOrder {
+                parent_entity,
+                child_entity,
+                ..
+            } => step.entity_id == *parent_entity || step.entity_id == *child_entity,
+            PropagationAnomaly::UnexpectedPropagation {
+                affected_entities, ..
+            } => affected_entities
+                .iter()
+                .any(|entity| entity == &step.entity_id),
         }
+    }
+
+    fn add_child_nodes<'a>(
+        &self,
+        node: &mut CancellationTreeNode,
+        children_by_parent: &HashMap<&'a str, Vec<&'a CancellationTraceStep>>,
+        trace: &CancellationTrace,
+        visited: &mut HashSet<String>,
+    ) {
+        if node.depth >= self.config.max_depth {
+            return;
+        }
+
+        if let Some(children) = children_by_parent.get(node.entity_id.as_str()) {
+            for step in children {
+                if !visited.insert(step.entity_id.clone()) {
+                    continue;
+                }
+
+                let mut child = self.node_from_step(trace, step);
+                self.add_child_nodes(&mut child, children_by_parent, trace, visited);
+                node.children.push(child);
+            }
+        }
+    }
+
+    fn node_from_step(
+        &self,
+        trace: &CancellationTrace,
+        step: &CancellationTraceStep,
+    ) -> CancellationTreeNode {
+        CancellationTreeNode {
+            entity_id: step.entity_id.clone(),
+            entity_type: step.entity_type,
+            depth: step.depth,
+            timing: Some(step.elapsed_since_start),
+            propagation_delay: Some(step.elapsed_since_prev),
+            anomalies: self.anomalies_for_entity(trace, &step.entity_id),
+            children: Vec::new(),
+            completed: step.propagation_completed,
+        }
+    }
+
+    fn anomalies_for_entity(&self, trace: &CancellationTrace, entity_id: &str) -> Vec<String> {
+        trace
+            .anomalies
+            .iter()
+            .filter(|anomaly| Self::anomaly_mentions_entity(anomaly, entity_id))
+            .map(|anomaly| self.format_anomaly(anomaly))
+            .collect()
+    }
+
+    fn anomaly_mentions_entity(anomaly: &PropagationAnomaly, entity_id: &str) -> bool {
+        match anomaly {
+            PropagationAnomaly::SlowPropagation {
+                entity_id: anomaly_entity,
+                ..
+            }
+            | PropagationAnomaly::StuckCancellation {
+                entity_id: anomaly_entity,
+                ..
+            }
+            | PropagationAnomaly::ExcessiveDepth {
+                entity_id: anomaly_entity,
+                ..
+            } => anomaly_entity == entity_id,
+            PropagationAnomaly::IncorrectPropagationOrder {
+                parent_entity,
+                child_entity,
+                ..
+            } => parent_entity == entity_id || child_entity == entity_id,
+            PropagationAnomaly::UnexpectedPropagation {
+                affected_entities, ..
+            } => affected_entities.iter().any(|entity| entity == entity_id),
+        }
+    }
+
+    fn duration_from_avg_nanos(total_nanos: u128, count: usize) -> Duration {
+        if count == 0 {
+            return Duration::ZERO;
+        }
+
+        let avg_nanos = total_nanos / count as u128;
+        Duration::from_nanos(u64::try_from(avg_nanos).unwrap_or(u64::MAX))
+    }
+
+    fn dot_node_id(trace_id: TraceId, entity_id: &str) -> String {
+        Self::escape_dot_text(&format!("trace:{}:{entity_id}", trace_id.as_u64()))
+    }
+
+    fn escape_dot_text(value: &str) -> String {
+        let mut escaped = String::with_capacity(value.len());
+        for ch in value.chars() {
+            match ch {
+                '\\' => escaped.push_str("\\\\"),
+                '"' => escaped.push_str("\\\""),
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                _ => escaped.push(ch),
+            }
+        }
+        escaped
     }
 }
 
@@ -606,6 +792,49 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+
+    fn test_step(
+        step_id: u32,
+        entity_id: &str,
+        entity_type: EntityType,
+        parent_entity: Option<&str>,
+        depth: u32,
+        elapsed_since_prev: Duration,
+        propagation_completed: bool,
+    ) -> CancellationTraceStep {
+        CancellationTraceStep {
+            step_id,
+            entity_id: entity_id.to_string(),
+            entity_type,
+            cancel_reason: "User(test)".to_string(),
+            cancel_kind: "User".to_string(),
+            timestamp: std::time::SystemTime::UNIX_EPOCH + elapsed_since_prev,
+            elapsed_since_start: elapsed_since_prev * (u32::from(step_id) + 1),
+            elapsed_since_prev,
+            depth,
+            parent_entity: parent_entity.map(str::to_string),
+            entity_state: "Cancelling".to_string(),
+            propagation_completed,
+        }
+    }
+
+    fn test_trace(steps: Vec<CancellationTraceStep>) -> CancellationTrace {
+        let max_depth = steps.iter().map(|step| step.depth).max().unwrap_or(0);
+        CancellationTrace {
+            trace_id: TraceId::new(),
+            root_cancel_reason: "User(test)".to_string(),
+            root_cancel_kind: "User".to_string(),
+            root_entity: "root-task".to_string(),
+            root_entity_type: EntityType::Task,
+            start_time: std::time::SystemTime::UNIX_EPOCH,
+            entities_cancelled: steps.len() as u32,
+            steps,
+            is_complete: true,
+            total_propagation_time: Some(Duration::from_millis(50)),
+            max_depth,
+            anomalies: Vec::new(),
+        }
+    }
 
     #[test]
     fn test_visualizer_creation() {
@@ -623,5 +852,155 @@ mod tests {
         let duration = Duration::from_millis(123);
         let formatted = visualizer.format_duration(duration);
         assert!(formatted.contains("123"));
+    }
+
+    #[test]
+    fn trace_tree_includes_nested_propagation_steps() {
+        let visualizer = CancellationVisualizer::default();
+        let trace = test_trace(vec![
+            test_step(
+                0,
+                "region-a",
+                EntityType::Region,
+                Some("root-task"),
+                1,
+                Duration::from_millis(5),
+                true,
+            ),
+            test_step(
+                1,
+                "task-b",
+                EntityType::Task,
+                Some("region-a"),
+                2,
+                Duration::from_millis(7),
+                true,
+            ),
+        ]);
+
+        let tree = visualizer.build_tree(&trace);
+
+        assert_eq!(tree.entity_id, "root-task");
+        assert_eq!(tree.children.len(), 1);
+        assert_eq!(tree.children[0].entity_id, "region-a");
+        assert_eq!(tree.children[0].children.len(), 1);
+        assert_eq!(tree.children[0].children[0].entity_id, "task-b");
+
+        let rendered = visualizer.visualize_trace_tree(&trace);
+        assert!(rendered.contains("region-a"));
+        assert!(rendered.contains("task-b"));
+    }
+
+    #[test]
+    fn trace_tree_preserves_steps_with_missing_parents() {
+        let visualizer = CancellationVisualizer::default();
+        let trace = test_trace(vec![test_step(
+            0,
+            "orphan-region",
+            EntityType::Region,
+            Some("missing-parent"),
+            2,
+            Duration::from_millis(3),
+            false,
+        )]);
+
+        let tree = visualizer.build_tree(&trace);
+
+        assert_eq!(tree.children.len(), 1);
+        assert_eq!(tree.children[0].entity_id, "orphan-region");
+        assert!(!tree.children[0].completed);
+    }
+
+    #[test]
+    fn anomaly_matching_is_entity_and_step_specific() {
+        let visualizer = CancellationVisualizer::default();
+        let non_anomalous = test_step(
+            0,
+            "fast-task",
+            EntityType::Task,
+            Some("root-task"),
+            1,
+            Duration::from_millis(200),
+            true,
+        );
+        let anomalous = test_step(
+            1,
+            "slow-task",
+            EntityType::Task,
+            Some("root-task"),
+            1,
+            Duration::from_millis(100),
+            true,
+        );
+        let anomaly = PropagationAnomaly::SlowPropagation {
+            step_id: 1,
+            entity_id: "slow-task".to_string(),
+            elapsed: Duration::from_millis(100),
+            threshold: Duration::from_millis(10),
+        };
+
+        assert!(!visualizer.step_has_anomaly(&non_anomalous, &anomaly));
+        assert!(visualizer.step_has_anomaly(&anomalous, &anomaly));
+    }
+
+    #[test]
+    fn dashboard_throughput_aggregates_repeated_entities() {
+        let visualizer = CancellationVisualizer::default();
+        let trace = test_trace(vec![
+            test_step(
+                0,
+                "worker",
+                EntityType::Task,
+                Some("root-task"),
+                1,
+                Duration::from_millis(10),
+                true,
+            ),
+            test_step(
+                1,
+                "worker",
+                EntityType::Task,
+                Some("root-task"),
+                1,
+                Duration::from_millis(30),
+                false,
+            ),
+        ]);
+
+        let dashboard = visualizer.generate_dashboard(&[trace]);
+        let stats = dashboard
+            .entity_throughput
+            .get("worker")
+            .expect("worker throughput should be aggregated");
+
+        assert_eq!(stats.avg_processing_time, Duration::from_millis(20));
+        assert_eq!(stats.success_rate, 0.5);
+        assert!(stats.cancellations_per_second > 0.0);
+    }
+
+    #[test]
+    fn dot_graph_namespaces_traces_and_escapes_labels() {
+        let visualizer = CancellationVisualizer::default();
+        let mut trace_a = test_trace(vec![test_step(
+            0,
+            "child\"a",
+            EntityType::Task,
+            Some("root-task"),
+            1,
+            Duration::from_millis(1),
+            true,
+        )]);
+        trace_a.root_entity = "root\"task".to_string();
+        trace_a.root_cancel_reason = "line\nbreak".to_string();
+
+        let mut trace_b = test_trace(Vec::new());
+        trace_b.root_entity = trace_a.root_entity.clone();
+
+        let dot = visualizer.generate_dot_graph(&[trace_a.clone(), trace_b.clone()]);
+
+        assert!(dot.contains(&format!("trace:{}:root\\\"task", trace_a.trace_id.as_u64())));
+        assert!(dot.contains(&format!("trace:{}:root\\\"task", trace_b.trace_id.as_u64())));
+        assert!(dot.contains("child\\\"a"));
+        assert!(dot.contains("line\\nbreak"));
     }
 }
