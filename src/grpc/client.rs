@@ -881,8 +881,9 @@ impl<T: Send> Streaming for ResponseStream<T> {
 type SendHook<T> = Box<dyn FnMut(T) -> Result<(), Status> + Send>;
 type CloseHook = Box<dyn FnMut() -> Result<(), Status> + Send>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 enum RequestSinkCloseState {
+    #[default]
     Open,
     Graceful,
     Cancelled(Status),
@@ -895,22 +896,12 @@ impl RequestSinkCloseState {
     }
 }
 
+#[derive(Default)]
 struct RequestSinkState {
     close_state: RequestSinkCloseState,
     sent_count: usize,
     last_message: Option<Box<dyn Any + Send>>,
     waiter: Option<Waker>,
-}
-
-impl Default for RequestSinkState {
-    fn default() -> Self {
-        Self {
-            close_state: RequestSinkCloseState::Open,
-            sent_count: 0,
-            last_message: None,
-            waiter: None,
-        }
-    }
 }
 
 impl RequestSinkState {
