@@ -56,7 +56,7 @@ mod inner {
     /// Lock-path counters (acquisitions, contentions, wait_ns, max_wait_ns) are
     /// updated during lock(); unlock-path counters (hold_ns, max_hold_ns) are
     /// updated during drop(Guard). Separating them prevents cross-invalidation.
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     #[repr(C, align(64))]
     struct Metrics {
         // ── Cache line 1: updated on lock() ──
@@ -69,20 +69,6 @@ mod inner {
         // ── Cache line 2: updated on drop(Guard) ──
         hold_ns: AtomicU64,
         max_hold_ns: AtomicU64,
-    }
-
-    impl Default for Metrics {
-        fn default() -> Self {
-            Self {
-                acquisitions: AtomicU64::new(0),
-                contentions: AtomicU64::new(0),
-                wait_ns: AtomicU64::new(0),
-                max_wait_ns: AtomicU64::new(0),
-                _pad: [0; 32],
-                hold_ns: AtomicU64::new(0),
-                max_hold_ns: AtomicU64::new(0),
-            }
-        }
     }
 
     impl Metrics {
