@@ -228,9 +228,7 @@ impl WebFrameCodec {
     /// Create a new codec with default max frame size.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            max_frame_size: DEFAULT_MAX_FRAME_SIZE,
-        }
+        Self::with_max_size(DEFAULT_MAX_FRAME_SIZE)
     }
 
     /// Create a codec with a custom max frame size.
