@@ -257,6 +257,7 @@ impl RoutePattern {
 /// let app = Router::new()
 ///     .nest("/api/v1", api);
 /// ```
+#[derive(Default)]
 pub struct Router {
     routes: Vec<(RoutePattern, MethodRouter)>,
     nested: Vec<(String, Self)>,
@@ -268,12 +269,7 @@ impl Router {
     /// Create a new empty router.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            routes: Vec::new(),
-            nested: Vec::new(),
-            fallback: None,
-            extensions: Extensions::new(),
-        }
+        Self::default()
     }
 
     /// Register a route with the given pattern and method router.
@@ -354,12 +350,6 @@ impl Router {
     #[must_use]
     pub fn route_count(&self) -> usize {
         self.routes.len()
-    }
-}
-
-impl Default for Router {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
