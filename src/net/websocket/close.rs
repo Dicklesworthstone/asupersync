@@ -41,7 +41,7 @@ const MAX_CLOSE_PAYLOAD_BYTES: usize = 125;
 /// - No payload (empty)
 /// - 2 bytes: status code only
 /// - 2+ bytes: status code followed by UTF-8 reason text
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CloseReason {
     /// Close status code (if present).
     pub code: Option<CloseCode>,
@@ -236,12 +236,6 @@ impl CloseReason {
             (None, Some(code)) => Some(code as u16),
             (None, None) => None,
         }
-    }
-}
-
-impl Default for CloseReason {
-    fn default() -> Self {
-        Self::empty()
     }
 }
 
