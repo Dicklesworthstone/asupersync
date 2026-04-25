@@ -313,7 +313,7 @@ where
     ///
     /// Returns shutdown statistics upon completion.
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
-        let mut tasks = ConnectionTasks::new();
+        let mut tasks = ConnectionTasks::default();
         let mut shutdown_rx = self.shutdown_signal.subscribe();
         let mut transient_accept_streak: u32 = 0;
         // Accept loop: keep accepting until shutdown
@@ -468,19 +468,13 @@ where
     Ok(handle)
 }
 
+#[derive(Default)]
 struct ConnectionTasks {
     handles: Vec<JoinHandle<()>>,
     push_count: u64,
 }
 
 impl ConnectionTasks {
-    fn new() -> Self {
-        Self {
-            handles: Vec::new(),
-            push_count: 0,
-        }
-    }
-
     fn push(&mut self, handle: JoinHandle<()>) {
         self.handles.push(handle);
         self.push_count = self.push_count.wrapping_add(1);
