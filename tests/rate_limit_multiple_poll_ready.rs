@@ -1,8 +1,8 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Integration test: multiple poll_ready calls do not leak tokens.
+
 use asupersync::service::{RateLimit, Service};
 use asupersync::types::Time;
+use std::future::Future;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -20,22 +20,15 @@ impl Service<i32> for EchoService {
     }
 }
 
-fn noop_waker() -> Waker {
-    Waker::noop().clone()
-}
-
 #[test]
-fn test_multiple_poll_ready_does_not_leak_tokens() {
+fn repeated_poll_ready_reuses_one_reserved_token_until_call() {
     let mut svc = RateLimit::new(EchoService, 2, Duration::from_secs(1));
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(Waker::noop());
 
-    // First poll_ready
     let ready = svc.poll_ready_with_time::<i32>(Time::ZERO, &mut cx);
     assert!(ready.is_ready());
     assert_eq!(svc.available_tokens(), 1);
 
-    // Second poll_ready BEFORE call
     let ready2 = svc.poll_ready_with_time::<i32>(Time::ZERO, &mut cx);
     assert!(ready2.is_ready());
     assert_eq!(
@@ -43,5 +36,24 @@ fn test_multiple_poll_ready_does_not_leak_tokens() {
         1,
         "second poll_ready should not consume another token"
     );
+
+    let mut call = std::pin::pin!(svc.call(7));
+    let result = call.as_mut().poll(&mut cx);
+    assert!(
+        matches!(result, Poll::Ready(Ok(7))),
+        "reserved call should complete successfully, got {result:?}"
+    );
+    assert_eq!(
+        svc.available_tokens(),
+        1,
+        "call should consume the reserved token without touching the bucket again"
+    );
+
+    let ready3 = svc.poll_ready_with_time::<i32>(Time::ZERO, &mut cx);
+    assert!(ready3.is_ready());
+    assert_eq!(
+        svc.available_tokens(),
+        0,
+        "a new poll_ready after call should consume the second token"
+    );
 }
-// touched

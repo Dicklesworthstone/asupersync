@@ -1,13 +1,13 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Regression coverage for rate limiter cancellation accounting.
 
-use asupersync::combinator::rate_limit::*;
+use asupersync::combinator::rate_limit::{
+    RateLimitError, RateLimitPolicy, RateLimiter, WaitStrategy,
+};
 use asupersync::types::Time;
 use std::time::Duration;
 
 #[test]
-fn rate_limit_cancel_leak() {
+fn cancelled_head_waiter_does_not_block_tail_grant() {
     let rl = RateLimiter::new(RateLimitPolicy {
         rate: 1,
         period: Duration::from_secs(10),
@@ -17,20 +17,38 @@ fn rate_limit_cancel_leak() {
     });
 
     let now = Time::from_millis(0);
-    // Exhaust token
     assert!(rl.try_acquire(1, now));
 
-    // Enqueue a waiter
-    let id = rl.enqueue(1, now).unwrap();
+    let cancelled_id = rl.enqueue(1, now).expect("head waiter should enqueue");
+    let live_id = rl.enqueue(1, now).expect("tail waiter should enqueue");
+    assert_ne!(cancelled_id, live_id);
 
-    // Enqueue a second waiter that should be granted after cancellation.
-    let id2 = rl.enqueue(1, now).unwrap();
+    rl.cancel_entry(cancelled_id, now);
+    assert!(
+        matches!(
+            rl.check_entry(cancelled_id, now),
+            Err(RateLimitError::Cancelled)
+        ),
+        "cancelled head waiter must be removed from the queue"
+    );
 
-    // Cancel the first entry.
-    rl.cancel_entry(id, now);
-
-    // If cancelled entries leak in the wait queue, id would still be granted first.
     let later = Time::from_millis(10_000);
-    let granted = rl.process_queue(later);
-    assert_eq!(granted, Some(id2));
+    assert_eq!(
+        rl.process_queue(later),
+        Some(live_id),
+        "cancelled head waiter must not block the next live waiter"
+    );
+    assert!(
+        matches!(rl.check_entry(live_id, later), Ok(true)),
+        "tail waiter should observe the grant exactly once"
+    );
+    assert_eq!(
+        rl.process_queue(later),
+        None,
+        "claimed tail waiter must not be granted twice"
+    );
+    assert!(
+        !rl.try_acquire(1, later),
+        "tail grant must consume the refilled token before new fast-path callers"
+    );
 }

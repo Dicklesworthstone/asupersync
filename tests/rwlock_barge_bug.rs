@@ -1,6 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
-#![allow(missing_docs)]
 //! Regression test for writer fairness (no barging) in `RwLock`.
 
 use asupersync::sync::RwLock;
@@ -17,26 +14,42 @@ where
 }
 
 #[test]
-fn test_rwlock_barge_bug() {
+fn queued_writer_keeps_turn_when_later_writer_arrives() {
     let cx = asupersync::Cx::for_testing();
 
     let lock = RwLock::new(0);
 
-    // W1 acquires
     let w1 = lock.try_write().unwrap();
 
-    // W2 waits
     let mut w2_fut = Box::pin(lock.write(&cx));
     assert!(poll_once(&mut w2_fut).is_pending());
 
-    // W1 drops, waking W2 and popping it from the queue
     drop(w1);
 
-    // W3 comes in before W2 is polled!
     let mut w3_fut = Box::pin(lock.write(&cx));
-    let w3_res = poll_once(&mut w3_fut);
+    assert!(
+        poll_once(&mut w3_fut).is_pending(),
+        "later writer must not barge ahead of the pre-granted writer"
+    );
 
-    // W3 SHOULD be pending because W2 is the next in line!
-    // If w3_res is Ready, W3 barged!
-    assert!(w3_res.is_pending(), "W3 barged and stole the lock from W2!");
+    let Poll::Ready(Ok(w2_guard)) = poll_once(&mut w2_fut) else {
+        panic!("queued writer should acquire before later writer");
+    };
+
+    assert!(
+        poll_once(&mut w3_fut).is_pending(),
+        "later writer must remain queued while earlier writer holds the lock"
+    );
+
+    drop(w2_guard);
+
+    let Poll::Ready(Ok(w3_guard)) = poll_once(&mut w3_fut) else {
+        panic!("later writer should acquire after earlier writer releases");
+    };
+    drop(w3_guard);
+
+    assert!(
+        lock.try_write().is_ok(),
+        "lock should return to writable state after queued writers finish"
+    );
 }
