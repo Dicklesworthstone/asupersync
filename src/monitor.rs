@@ -230,11 +230,7 @@ impl MonitorSet {
     /// Creates an empty monitor set.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            by_ref: BTreeMap::new(),
-            by_monitored: BTreeMap::new(),
-            by_watcher_region: BTreeMap::new(),
-        }
+        Self::default()
     }
 
     /// Establishes a monitor: `watcher` will be notified when `monitored` terminates.
@@ -404,9 +400,7 @@ impl DownBatch {
     /// Creates an empty batch.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Adds a notification to the batch with its completion virtual time.
