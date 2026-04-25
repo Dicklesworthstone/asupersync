@@ -101,7 +101,7 @@ impl CertificateChain {
     /// Create an empty certificate chain.
     #[inline]
     pub fn new() -> Self {
-        Self { certs: Vec::new() }
+        Self::default()
     }
 
     /// Create a certificate chain from a single certificate.
@@ -126,14 +126,12 @@ impl CertificateChain {
 
     /// Load certificate chain from a PEM file.
     pub fn from_pem_file(path: impl AsRef<Path>) -> Result<Self, TlsError> {
-        let certs = Certificate::from_pem_file(path)?;
-        Ok(Self::from(certs))
+        Certificate::from_pem_file(path).map(Self::from)
     }
 
     /// Parse certificate chain from PEM-encoded data.
     pub fn from_pem(pem: &[u8]) -> Result<Self, TlsError> {
-        let certs = Certificate::from_pem(pem)?;
-        Ok(Self::from(certs))
+        Certificate::from_pem(pem).map(Self::from)
     }
 
     /// Convert to rustls certificate chain.
@@ -546,20 +544,21 @@ impl Default for CertificatePinSet {
 }
 
 impl CertificatePinSet {
-    /// Create a new empty pin set.
-    pub fn new() -> Self {
+    fn empty_with_enforcement(enforce: bool) -> Self {
         Self {
             pins: BTreeSet::new(),
-            enforce: true,
+            enforce,
         }
+    }
+
+    /// Create a new empty pin set.
+    pub fn new() -> Self {
+        Self::empty_with_enforcement(true)
     }
 
     /// Create a pin set with enforcement disabled (report-only mode).
     pub fn report_only() -> Self {
-        Self {
-            pins: BTreeSet::new(),
-            enforce: false,
-        }
+        Self::empty_with_enforcement(false)
     }
 
     /// Add a pin to the set.
