@@ -1083,12 +1083,14 @@ fn parse_dns_answer(packet: &[u8], offset: &mut usize) -> Result<Option<DnsAnswe
     }
 
     let ensure_rdata_consumed = |cursor: usize, record_kind: &str| -> Result<(), DnsError> {
-        if cursor > rdata_end {
-            Err(DnsError::Protocol(format!(
+        match cursor.cmp(&rdata_end) {
+            std::cmp::Ordering::Greater => Err(DnsError::Protocol(format!(
                 "{record_kind} record name exceeds DNS RDATA length"
-            )))
-        } else {
-            Ok(())
+            ))),
+            std::cmp::Ordering::Less => Err(DnsError::Protocol(format!(
+                "{record_kind} record contains trailing bytes after DNS name"
+            ))),
+            std::cmp::Ordering::Equal => Ok(()),
         }
     };
 
@@ -2075,6 +2077,59 @@ mod tests {
     }
 
     #[test]
+    fn parse_dns_answer_rejects_cname_rdata_with_trailing_bytes() {
+        init_test("parse_dns_answer_rejects_cname_rdata_with_trailing_bytes");
+
+        let mut packet = vec![0u8; 12];
+        encode_dns_name("example.test", &mut packet).expect("encode owner name");
+        packet.extend_from_slice(&DnsQueryType::Cname.code().to_be_bytes());
+        packet.extend_from_slice(&DnsQueryType::DNS_CLASS_IN.to_be_bytes());
+        packet.extend_from_slice(&60u32.to_be_bytes());
+        packet.extend_from_slice(&3u16.to_be_bytes());
+        packet.push(0);
+        packet.extend_from_slice(&[0xAA, 0xBB]);
+
+        let mut offset = 12usize;
+        let err = parse_dns_answer(&packet, &mut offset).unwrap_err();
+
+        crate::assert_with_log!(
+            matches!(err, DnsError::Protocol(ref msg) if msg.contains("CNAME record contains trailing bytes")),
+            "CNAME parser rejects trailing RDATA bytes",
+            true,
+            format!("{err:?}")
+        );
+
+        crate::test_complete!("parse_dns_answer_rejects_cname_rdata_with_trailing_bytes");
+    }
+
+    #[test]
+    fn parse_dns_answer_rejects_mx_rdata_with_trailing_bytes() {
+        init_test("parse_dns_answer_rejects_mx_rdata_with_trailing_bytes");
+
+        let mut packet = vec![0u8; 12];
+        encode_dns_name("example.test", &mut packet).expect("encode owner name");
+        packet.extend_from_slice(&DnsQueryType::Mx.code().to_be_bytes());
+        packet.extend_from_slice(&DnsQueryType::DNS_CLASS_IN.to_be_bytes());
+        packet.extend_from_slice(&60u32.to_be_bytes());
+        packet.extend_from_slice(&5u16.to_be_bytes());
+        packet.extend_from_slice(&10u16.to_be_bytes());
+        packet.push(0);
+        packet.extend_from_slice(&[0xAA, 0xBB]);
+
+        let mut offset = 12usize;
+        let err = parse_dns_answer(&packet, &mut offset).unwrap_err();
+
+        crate::assert_with_log!(
+            matches!(err, DnsError::Protocol(ref msg) if msg.contains("MX record contains trailing bytes")),
+            "MX parser rejects trailing RDATA bytes",
+            true,
+            format!("{err:?}")
+        );
+
+        crate::test_complete!("parse_dns_answer_rejects_mx_rdata_with_trailing_bytes");
+    }
+
+    #[test]
     fn parse_dns_answer_rejects_srv_rdata_that_overruns_rdlen() {
         init_test("parse_dns_answer_rejects_srv_rdata_that_overruns_rdlen");
 
@@ -2106,6 +2161,35 @@ mod tests {
         );
 
         crate::test_complete!("parse_dns_answer_rejects_srv_rdata_that_overruns_rdlen");
+    }
+
+    #[test]
+    fn parse_dns_answer_rejects_srv_rdata_with_trailing_bytes() {
+        init_test("parse_dns_answer_rejects_srv_rdata_with_trailing_bytes");
+
+        let mut packet = vec![0u8; 12];
+        encode_dns_name("_sip._tcp.example.test", &mut packet).expect("encode owner name");
+        packet.extend_from_slice(&DnsQueryType::Srv.code().to_be_bytes());
+        packet.extend_from_slice(&DnsQueryType::DNS_CLASS_IN.to_be_bytes());
+        packet.extend_from_slice(&60u32.to_be_bytes());
+        packet.extend_from_slice(&9u16.to_be_bytes());
+        packet.extend_from_slice(&10u16.to_be_bytes());
+        packet.extend_from_slice(&20u16.to_be_bytes());
+        packet.extend_from_slice(&443u16.to_be_bytes());
+        packet.push(0);
+        packet.extend_from_slice(&[0xAA, 0xBB]);
+
+        let mut offset = 12usize;
+        let err = parse_dns_answer(&packet, &mut offset).unwrap_err();
+
+        crate::assert_with_log!(
+            matches!(err, DnsError::Protocol(ref msg) if msg.contains("SRV record contains trailing bytes")),
+            "SRV parser rejects trailing RDATA bytes",
+            true,
+            format!("{err:?}")
+        );
+
+        crate::test_complete!("parse_dns_answer_rejects_srv_rdata_with_trailing_bytes");
     }
 
     #[test]
