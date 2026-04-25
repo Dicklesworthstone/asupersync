@@ -78,7 +78,7 @@ use crate::util::Arena;
 /// | remove    | O(log n)   | 0           |
 /// | peek      | O(1)       | 0           |
 /// | contains  | O(1)       | 0           |
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct IntrusivePriorityHeap {
     /// Compact array of TaskIds forming the heap structure.
     heap: Vec<TaskId>,
@@ -86,20 +86,11 @@ pub struct IntrusivePriorityHeap {
     next_generation: u64,
 }
 
-impl Default for IntrusivePriorityHeap {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl IntrusivePriorityHeap {
     /// Creates a new empty intrusive priority heap.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            heap: Vec::new(),
-            next_generation: 0,
-        }
+        Self::default()
     }
 
     /// Creates a new heap with pre-allocated capacity.
