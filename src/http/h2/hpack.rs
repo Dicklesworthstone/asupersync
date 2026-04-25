@@ -156,11 +156,7 @@ impl DynamicTable {
     /// Create a new dynamic table with default max size.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            entries: VecDeque::new(),
-            size: 0,
-            max_size: DEFAULT_MAX_TABLE_SIZE,
-        }
+        Self::with_max_size(DEFAULT_MAX_TABLE_SIZE)
     }
 
     /// Create a dynamic table with specified max size.
@@ -294,12 +290,7 @@ impl Encoder {
     /// Create a new encoder with default settings.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            dynamic_table: DynamicTable::new(),
-            use_huffman: true,
-            min_size_update: None,
-            pending_size_update: None,
-        }
+        Self::with_max_size(DEFAULT_MAX_TABLE_SIZE)
     }
 
     /// Create an encoder with specified max table size.
@@ -462,11 +453,7 @@ impl Decoder {
     /// Create a new decoder with default settings.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            dynamic_table: DynamicTable::new(),
-            max_header_list_size: 16384,
-            allowed_table_size: 4096, // HTTP/2 default
-        }
+        Self::with_max_size(DEFAULT_MAX_TABLE_SIZE)
     }
 
     /// Create a decoder with specified max table size.
