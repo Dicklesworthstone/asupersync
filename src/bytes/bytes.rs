@@ -31,7 +31,7 @@ use std::sync::Arc;
 /// let hello = b.slice(0..5);
 /// assert_eq!(&hello[..], b"hello");
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Bytes {
     /// The backing storage.
     data: BytesInner,
@@ -41,13 +41,14 @@ pub struct Bytes {
     len: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 enum BytesInner {
     /// Static data (no allocation, 'static lifetime).
     Static(&'static [u8]),
     /// Heap-allocated, reference-counted data.
     Shared(Arc<Vec<u8>>),
     /// Empty bytes (no allocation).
+    #[default]
     Empty,
 }
 
@@ -273,13 +274,6 @@ impl Bytes {
             BytesInner::Static(s) => &s[self.start..self.start + self.len],
             BytesInner::Shared(arc) => &arc[self.start..self.start + self.len],
         }
-    }
-}
-
-impl Default for Bytes {
-    #[inline]
-    fn default() -> Self {
-        Self::new()
     }
 }
 

@@ -29,7 +29,7 @@ use std::ops::{Deref, DerefMut, RangeBounds};
 /// let frozen = buf.freeze();
 /// assert_eq!(&frozen[..], b"hello world");
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct BytesMut {
     /// The backing storage.
     data: Vec<u8>,
@@ -313,13 +313,6 @@ impl BytesMut {
             self.capacity()
         );
         self.data.resize(len, 0);
-    }
-}
-
-impl Default for BytesMut {
-    #[inline]
-    fn default() -> Self {
-        Self::new()
     }
 }
 
