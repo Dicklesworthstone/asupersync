@@ -172,11 +172,12 @@ impl From<ProcessError> for io::Error {
 /// Standard I/O configuration for child processes.
 ///
 /// Configures how the child's stdin, stdout, and stderr are handled.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum Stdio {
     /// Inherit from the parent process.
     ///
     /// The child will share the same stdin/stdout/stderr as the parent.
+    #[default]
     Inherit,
 
     /// Create a pipe to/from the child process.
@@ -218,13 +219,6 @@ impl Stdio {
             Self::Pipe => std_process::Stdio::piped(),
             Self::Null => std_process::Stdio::null(),
         }
-    }
-}
-
-impl Default for Stdio {
-    /// Default is `Inherit` to match typical command-line tool behavior.
-    fn default() -> Self {
-        Self::Inherit
     }
 }
 
