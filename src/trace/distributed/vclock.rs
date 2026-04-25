@@ -78,6 +78,7 @@ impl LamportTime {
 }
 
 /// Lamport logical clock (single counter).
+#[derive(Default)]
 pub struct LamportClock {
     counter: AtomicU64,
 }
@@ -86,9 +87,7 @@ impl LamportClock {
     /// Creates a new Lamport clock starting at zero.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            counter: AtomicU64::new(0),
-        }
+        Self::default()
     }
 
     /// Creates a Lamport clock starting at the given value.
@@ -144,12 +143,6 @@ impl LamportClock {
                 Err(actual) => current = actual,
             }
         }
-    }
-}
-
-impl Default for LamportClock {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
