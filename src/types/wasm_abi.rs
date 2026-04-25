@@ -925,7 +925,7 @@ pub enum WasmHandleError {
 /// This type is `!Sync` — boundary calls are serialized through the
 /// WASM event loop (single-threaded by spec). If multi-threaded WASM
 /// is added later, wrap in the runtime's `ContendedMutex`.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct WasmHandleTable {
     /// Slot storage. `None` means the slot is free.
     slots: Vec<Option<WasmHandleEntry>>,
@@ -937,22 +937,11 @@ pub struct WasmHandleTable {
     live_count: usize,
 }
 
-impl Default for WasmHandleTable {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl WasmHandleTable {
     /// Creates an empty handle table.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            slots: Vec::new(),
-            generations: Vec::new(),
-            free_list: Vec::new(),
-            live_count: 0,
-        }
+        Self::default()
     }
 
     /// Creates a table with pre-allocated capacity.
