@@ -578,9 +578,7 @@ impl TraceMigrator {
     /// Creates a new migrator with no registered migrations.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            migrations: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Registers a migration.
