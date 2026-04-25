@@ -229,9 +229,7 @@ impl SettingsBuilder {
     /// Create a new settings builder with default values.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            settings: Settings::default(),
-        }
+        Self::default()
     }
 
     /// Create a builder for client settings.
