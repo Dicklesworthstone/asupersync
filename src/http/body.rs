@@ -121,10 +121,7 @@ impl HeaderMap {
     /// Creates a new empty header map.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            headers: Vec::new(),
-            positions: DetHashMap::default(),
-        }
+        Self::default()
     }
 
     /// Creates a new header map with the given capacity.
