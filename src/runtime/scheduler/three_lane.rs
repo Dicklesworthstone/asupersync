@@ -2747,27 +2747,74 @@ impl ThreeLaneWorker {
     ///
     /// Returns `None` when no work is available across any lane or steal target.
     ///
-    /// # Lock reduction optimisation
+    /// # Dispatch phases (br-asupersync-uzt6xo)
     ///
-    /// The previous implementation called `try_cancel_work`, `try_timed_work`,
-    /// and `try_ready_work` sequentially.  Each method checks its global queue
-    /// (lock-free or separate mutex) then falls through to the local
-    /// `PriorityScheduler` lock, acquiring it up to **3 times per call** when
-    /// global queues are empty.
+    /// The previous documentation listed five phases but the implementation
+    /// has grown to seven discrete sections (a Phase 0 timer pre-step, the
+    /// original five priority phases, and a Phase 3b local-ready fall-through
+    /// that runs only when the fast ready paths in Phase 3 returned nothing).
+    /// The doc below now enumerates all seven in execution order, with a
+    /// short rationale for why each exists separately.
     ///
-    /// This version splits the work into phases:
+    /// **Phase 0 — Timer maintenance**
+    /// Process expired timers via the timer-driver handle. This fires wakers
+    /// which inject newly-ready tasks into the queues consulted below;
+    /// running it FIRST keeps just-expired timer waiters from waiting an
+    /// extra dispatch slot. Cheap (no-op when no timer driver is wired).
     ///
-    /// 1. **Global queues** (lock-free / own mutex) — suggestion-ordered.
-    /// 2. **Fast ready paths** (`local_ready`, `fast_queue`, global ready) —
-    ///    no `PriorityScheduler` lock.
-    /// 3. **Single local lock** — cancel, timed, ready checked in suggestion
-    ///    order under one acquisition.
-    /// 4. **Steal** from other workers.
-    /// 5. **Fallback cancel** (streak-limit path).
+    /// **Phase 1 — Highest-priority global queue (suggestion-ordered)**
+    /// Single global-queue probe at the top priority dictated by the
+    /// governor's `SchedulingSuggestion`: timed-first under
+    /// `MeetDeadlines`, otherwise cancel-first. The hot path for
+    /// dispatch — most workers exit here when queues are non-empty.
+    /// Subject to the cancel-streak fairness bound documented at the
+    /// top of this module.
     ///
-    /// Phases 1–2 cover the hot path (most dispatches come from global or fast
-    /// queues).  Phase 3 replaces 3 lock acquisitions with 1 for the local
-    /// PriorityScheduler fallback.
+    /// **Phase 2 — Interleaved local + global priority lanes**
+    /// Acquire the local `PriorityScheduler` lock once and check the
+    /// remaining cancel/timed lanes in strict suggestion order. The
+    /// invariant the prior 5-phase doc claimed (one lock acquisition for
+    /// all three lanes) lives here. Drops the lock as soon as a task
+    /// is dispatched OR all lanes are empty.
+    ///
+    /// **Phase 3 — Fast ready paths (no PriorityScheduler lock)**
+    /// Lock-free `local_ready` deque pop, then `fast_queue` atomic pop,
+    /// then global ready-queue pop. These three queues are checked
+    /// without re-acquiring the local lock — ready dispatch should not
+    /// pay the priority-scheduler-lock cost when the fast paths can
+    /// satisfy it.
+    ///
+    /// **Phase 3b — Local ready lane (PriorityScheduler-locked)**
+    /// When all fast ready paths are empty, fall back to the local
+    /// `PriorityScheduler::pop_ready_only_with_hint` which DOES acquire
+    /// the lock. Split out from Phase 3 because it has a different
+    /// contention profile (mutating, not lock-free) and observability
+    /// path (no priority-inversion check is recorded here — the local
+    /// path's priorities are already canonical).
+    ///
+    /// **Phase 4 — Steal from other workers**
+    /// `try_steal` walks peer workers' deques. Last resort before
+    /// considering the fallback-cancel path; preserves the work-stealing
+    /// invariant that idle workers help busy ones before parking.
+    ///
+    /// **Phase 5 — Fallback cancel (streak-limit-deferred path)**
+    /// When `cancel_streak` hit the fairness limit AND no other lane had
+    /// work, allow one more cancel dispatch (global + local). The
+    /// fairness mechanism prefers blocking cancels over starving
+    /// readers; this phase re-admits cancel work only when no fairer
+    /// option exists, then resets `cancel_streak = 1` so the next call
+    /// re-evaluates after at most `cancel_streak_limit − 1` more cancel
+    /// dispatches.
+    ///
+    /// # Lock-reduction provenance
+    ///
+    /// Phases 1–2 collapse the previous 3-lock-acquisition path
+    /// (`try_cancel_work` → `try_timed_work` → `try_ready_work`) into a
+    /// single Phase-2 acquisition for the local fallback. Phases 3 and
+    /// 3b together replace the older third sequential probe — fast
+    /// paths dispatch most ready work without ever taking the local
+    /// lock; only when the fast paths are empty does the lock cost
+    /// reappear at Phase 3b.
     #[allow(clippy::too_many_lines)]
     pub fn next_task(&mut self) -> Option<TaskId> {
         // PHASE 0: Process expired timers (fires wakers, which may inject tasks).
