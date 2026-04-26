@@ -2721,7 +2721,8 @@ mod tests {
         let registry = crate::cx::NameRegistry::new();
         let registry_handle = RegistryHandle::new(Arc::new(registry));
         let parent_registry_arc = registry_handle.as_arc();
-        let parent_io_cap: Arc<dyn crate::io::IoCap> = Arc::new(crate::io::LabIoCap::new());
+        let parent_io_cap: Arc<dyn crate::io::IoCap> =
+            Arc::new(crate::io::LabIoCap::new_for_tests());
         let parent_pressure = Arc::new(SystemPressure::new());
         parent_pressure.set_headroom(0.25);
         let auth_key = AuthKey::from_seed(7);

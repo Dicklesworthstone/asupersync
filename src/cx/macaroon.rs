@@ -520,7 +520,7 @@ impl MacaroonKeyRing {
 /// Macaroons support decentralized capability attenuation: any holder
 /// can add caveats (restrictions) without the root key, but only the
 /// issuer (who knows the root key) can verify the token.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MacaroonToken {
     /// The capability identifier (e.g., "spawn:region_42").
     identifier: String,
@@ -1872,6 +1872,7 @@ mod tests {
             location: token.location().to_string(),
             caveats: vec![token.caveats()[0].clone()], // Removed second caveat
             signature: *token.signature(),
+            bound: false,
         };
 
         assert!(!tampered.verify_signature(&key));
@@ -2405,8 +2406,11 @@ mod tests {
         let key_b = AuthKey::from_seed(7791);
         let key_c = AuthKey::from_seed(7792);
 
-        let token = MacaroonToken::mint(&root_key, "cap", "svc")
-            .add_third_party_caveat("a-loc", "discharge_a", &key_a);
+        let token = MacaroonToken::mint(&root_key, "cap", "svc").add_third_party_caveat(
+            "a-loc",
+            "discharge_a",
+            &key_a,
+        );
 
         let discharge_a = MacaroonToken::mint(&key_a, "discharge_a", "a-loc")
             .add_third_party_caveat("b-loc", "discharge_b", &key_b);
@@ -3185,13 +3189,19 @@ mod tests {
     fn _00ze7h_first_bind_marks_token_as_bound() {
         let root_key = test_root_key();
         let caveat_key = AuthKey::from_seed(900);
-        let token = MacaroonToken::mint(&root_key, "cap", "loc")
-            .add_third_party_caveat("tp", "check", &caveat_key);
+        let token = MacaroonToken::mint(&root_key, "cap", "loc").add_third_party_caveat(
+            "tp",
+            "check",
+            &caveat_key,
+        );
         let discharge = MacaroonToken::mint(&caveat_key, "check", "tp");
 
         assert!(!discharge.is_bound());
         let bound = token.bind_for_request(&discharge).unwrap();
-        assert!(bound.is_bound(), "bind_for_request output must be marked bound");
+        assert!(
+            bound.is_bound(),
+            "bind_for_request output must be marked bound"
+        );
     }
 
     #[test]
@@ -3201,8 +3211,11 @@ mod tests {
         // not silently produce a doubly-bound (unverifiable) token.
         let root_key = test_root_key();
         let caveat_key = AuthKey::from_seed(901);
-        let token = MacaroonToken::mint(&root_key, "cap", "loc")
-            .add_third_party_caveat("tp", "check", &caveat_key);
+        let token = MacaroonToken::mint(&root_key, "cap", "loc").add_third_party_caveat(
+            "tp",
+            "check",
+            &caveat_key,
+        );
         let discharge = MacaroonToken::mint(&caveat_key, "check", "tp");
 
         let bound_once = token.bind_for_request(&discharge).unwrap();
@@ -3233,8 +3246,11 @@ mod tests {
         // alone. This test pins the documented behavior.
         let root_key = test_root_key();
         let caveat_key = AuthKey::from_seed(902);
-        let token = MacaroonToken::mint(&root_key, "cap", "loc")
-            .add_third_party_caveat("tp", "check", &caveat_key);
+        let token = MacaroonToken::mint(&root_key, "cap", "loc").add_third_party_caveat(
+            "tp",
+            "check",
+            &caveat_key,
+        );
         let discharge = MacaroonToken::mint(&caveat_key, "check", "tp");
         let bound = token.bind_for_request(&discharge).unwrap();
         assert!(bound.is_bound());

@@ -102,5 +102,5 @@ pub use cap::{
     TimeSourceKind, TransportIoCap,
 };
 pub use lines::Lines;
-pub use read_line::{ReadLine, read_line};
+pub use read_line::{LineReader, ReadLine, ReadLineCancelSafe, read_line};
 pub use std::io::SeekFrom;

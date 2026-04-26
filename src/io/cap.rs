@@ -442,14 +442,26 @@ fn parse_browser_transport_url(url: &str) -> Option<(String, String, String)> {
         return None;
     }
     let authority = &rest[..authority_end];
-    let origin = format!("{scheme}://{authority}");
 
+    // br-asupersync-qz046d: strip userinfo from the *authority* before
+    // composing the origin. RFC 6454 defines a web origin as the tuple
+    // (scheme, host, port) — userinfo is explicitly excluded. Pre-fix
+    // we built `origin = format!("{scheme}://{authority}")` which kept
+    // any `user:pass@` prefix in the origin string, splitting the
+    // origin/host views: the loopback exemption matched on `host` (=
+    // userinfo-stripped) while the allowed_origins allowlist matched
+    // verbatim against `origin` (= userinfo-included). An attacker
+    // who could craft connection URLs with bogus userinfo could
+    // exercise the loopback exemption for an origin that the explicit
+    // allowlist would have rejected, and could pollute logs/metrics
+    // that record the origin verbatim.
     let host_authority = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
     if host_authority.is_empty() {
         return None;
     }
+    let origin = format!("{scheme}://{host_authority}");
 
     let host = if let Some(rest) = host_authority.strip_prefix('[') {
         let closing = rest.find(']')?;
@@ -1769,8 +1781,18 @@ pub struct LabIoCap {
 
 impl LabIoCap {
     /// Creates a new lab I/O capability.
+    ///
+    /// br-asupersync-plm0gr: this constructor is restricted to crate-
+    /// internal use plus the `test-internals` feature so production code
+    /// cannot mint a `LabIoCap` ex nihilo. Pre-fix this was `pub fn new`,
+    /// which violated the no-ambient-authority invariant: any code with a
+    /// reachable path to `LabIoCap::new_for_tests()` could conjure an IO-effect
+    /// capability without consuming a parent grant. Mirror the pattern in
+    /// `cx::Cx::new()` which is gated behind the same feature flag for
+    /// the same reason.
+    #[cfg(any(test, feature = "test-internals"))]
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new_for_tests() -> Self {
         Self::default()
     }
 
@@ -2229,7 +2251,7 @@ mod tests {
 
     #[test]
     fn lab_io_cap_is_not_real() {
-        let cap = LabIoCap::new();
+        let cap = LabIoCap::new_for_tests();
         assert!(!cap.is_real_io());
         assert_eq!(cap.name(), "lab");
         assert_eq!(cap.capabilities(), IoCapabilities::LAB);
@@ -2260,7 +2282,7 @@ mod tests {
 
     #[test]
     fn lab_io_cap_stats_track_activity() {
-        let cap = LabIoCap::new();
+        let cap = LabIoCap::new_for_tests();
         assert_eq!(cap.stats(), IoStats::default());
         cap.record_submit();
         cap.record_submit();
@@ -2903,5 +2925,42 @@ mod tests {
                 HostApiSurface::MessageChannel
             ))
         );
+    }
+
+    // ====================================================================
+    // br-asupersync-qz046d: parse_browser_transport_url userinfo stripping
+    // ====================================================================
+
+    #[test]
+    fn qz046d_origin_strips_userinfo_when_present() {
+        let with = parse_browser_transport_url("ws://attacker:ignored@localhost:8080/path")
+            .expect("parse with userinfo");
+        let without =
+            parse_browser_transport_url("ws://localhost:8080/path").expect("parse without");
+        // Both URLs target the same web origin per RFC 6454; the
+        // returned tuple's `origin` field must be identical so the
+        // allowlist check and the loopback-exemption check agree.
+        assert_eq!(with.0, without.0, "scheme");
+        assert_eq!(with.1, without.1, "origin must NOT include userinfo");
+        assert_eq!(with.2, without.2, "host");
+    }
+
+    #[test]
+    fn qz046d_origin_strips_userinfo_with_at_in_password() {
+        // Edge case: the password legitimately contains an `@` (URL-
+        // encoded or not). rsplit_once('@') treats the LAST `@` as
+        // the userinfo/host separator, so the resulting origin still
+        // canonicalises correctly.
+        let parsed =
+            parse_browser_transport_url("wss://u:p%40ss@host.example:443/").expect("parse ok");
+        assert_eq!(parsed.0, "wss");
+        assert_eq!(parsed.1, "wss://host.example:443");
+        assert_eq!(parsed.2, "host.example");
+    }
+
+    #[test]
+    fn qz046d_origin_unchanged_when_no_userinfo() {
+        let parsed = parse_browser_transport_url("https://example.com:443/").expect("parse ok");
+        assert_eq!(parsed.1, "https://example.com:443");
     }
 }

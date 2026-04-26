@@ -1433,7 +1433,7 @@ mod tests {
         let registry = crate::cx::NameRegistry::new();
         let registry_handle = RegistryHandle::new(Arc::new(registry));
         let registry_arc = registry_handle.as_arc();
-        let io_cap: Arc<dyn crate::io::IoCap> = Arc::new(crate::io::LabIoCap::new());
+        let io_cap: Arc<dyn crate::io::IoCap> = Arc::new(crate::io::LabIoCap::new_for_tests());
         let pressure = Arc::new(SystemPressure::with_headroom(0.25));
         let macaroon_token =
             MacaroonToken::mint(&AuthKey::from_seed(7), "scope:actor", "actor/tests");

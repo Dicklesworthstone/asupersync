@@ -3112,7 +3112,7 @@ impl Cx<cap::All> {
             Budget::INFINITE,
             None,
             None,
-            Some(Arc::new(crate::io::LabIoCap::new())),
+            Some(Arc::new(crate::io::LabIoCap::new_for_tests())),
             None,
         )
     }
@@ -3213,11 +3213,7 @@ mod tests {
 
     impl Drop for CurrentCxDtorProbe {
         fn drop(&mut self) {
-            let state = if Cx::current().is_some() {
-                1
-            } else {
-                2
-            };
+            let state = if Cx::current().is_some() { 1 } else { 2 };
             CURRENT_CX_DTOR_STATE.store(state as u8, Ordering::SeqCst);
         }
     }
@@ -3279,12 +3275,8 @@ mod tests {
         // Reference strong counts BEFORE installation as ambient.
         let _guard = Cx::set_current(Some(cx.clone()));
         // Capture strong counts of the installed-frame's inner Arcs.
-        let frame_inner_strong_before = Arc::strong_count(
-            &Cx::current()
-                .expect("current should resolve")
-                .inner
-                .clone(),
-        );
+        let frame_inner_strong_before =
+            Arc::strong_count(&Cx::current().expect("current should resolve").inner.clone());
         // current() itself bumped the count by +1 above (we cloned to read);
         // hold a 2nd reference to keep the count stable across with_current.
         let cx_pin = Cx::current().expect("current");
@@ -4839,18 +4831,25 @@ mod tests {
                 full_cx.restrict::<cap::CapSet<true, true, true, false, true>>();
             let _l2 = l2_cx.set_current_restricted(); // no IO
             assert!(!Cx::current().unwrap().runtime_mask.has(cap::CapMask::IO));
-            assert!(Cx::current().unwrap().runtime_mask.has(cap::CapMask::REMOTE));
+            assert!(
+                Cx::current()
+                    .unwrap()
+                    .runtime_mask
+                    .has(cap::CapMask::REMOTE)
+            );
             {
                 let l3_cx: Cx<cap::None> = full_cx.restrict::<cap::None>();
                 let _l3 = l3_cx.set_current_restricted(); // none
-                assert_eq!(
-                    Cx::current().unwrap().runtime_mask,
-                    cap::CapMask::none()
-                );
+                assert_eq!(Cx::current().unwrap().runtime_mask, cap::CapMask::none());
             }
             // l3 dropped — back to no-IO mask
             assert!(!Cx::current().unwrap().runtime_mask.has(cap::CapMask::IO));
-            assert!(Cx::current().unwrap().runtime_mask.has(cap::CapMask::REMOTE));
+            assert!(
+                Cx::current()
+                    .unwrap()
+                    .runtime_mask
+                    .has(cap::CapMask::REMOTE)
+            );
         }
         // l2 dropped — back to ALL
         assert_eq!(Cx::current().unwrap().runtime_mask, cap::CapMask::all());

@@ -146,13 +146,8 @@ where
                 // pulled from `reader` but not yet pushed to `writer` are
                 // silently dropped on cancel.
                 if this.pos < this.cap {
-                    let drained = drain_on_cancel(
-                        &mut *this.writer,
-                        &this.buf,
-                        &mut this.pos,
-                        this.cap,
-                        cx,
-                    );
+                    let drained =
+                        drain_on_cancel(&mut *this.writer, &this.buf, &mut this.pos, this.cap, cx);
                     this.total += drained;
                 }
                 this.completed = true;
@@ -494,13 +489,8 @@ where
                 // prefix on cancel. Progress callback fires for the drained
                 // bytes so the caller's progress accounting matches `total`.
                 if this.pos < this.cap {
-                    let drained = drain_on_cancel(
-                        &mut *this.writer,
-                        &this.buf,
-                        &mut this.pos,
-                        this.cap,
-                        cx,
-                    );
+                    let drained =
+                        drain_on_cancel(&mut *this.writer, &this.buf, &mut this.pos, this.cap, cx);
                     if drained > 0 {
                         this.total += drained;
                         (this.on_progress)(this.total);

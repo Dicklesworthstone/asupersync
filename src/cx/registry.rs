@@ -130,12 +130,7 @@ impl NameLease {
     /// [`NamePermit::new`] which is correctly private for the same
     /// reason.)
     #[must_use]
-    fn new(
-        name: impl Into<String>,
-        holder: TaskId,
-        region: RegionId,
-        acquired_at: Time,
-    ) -> Self {
+    fn new(name: impl Into<String>, holder: TaskId, region: RegionId, acquired_at: Time) -> Self {
         let name = name.into();
         let token = ObligationToken::reserve(format!("name_lease:{name}"));
         Self {
@@ -3052,7 +3047,8 @@ mod tests {
             .reserve("svc", tid(2), rid(0), Time::from_secs(2))
             .expect("reserve after cleanup");
         let mut lease = reg.commit_permit(replacement).expect("commit replacement");
-        reg.unregister("svc", tid(2)).expect("unregister replacement");
+        reg.unregister("svc", tid(2))
+            .expect("unregister replacement");
         lease.release().expect("release replacement");
 
         crate::test_complete!("commit_permit_rejects_aborted_permit_without_mutating_registry");
@@ -4020,13 +4016,11 @@ mod tests {
 
         // Wrong caller: tid(99) attempts to drop tid(1)'s lease.
         let err = reg.unregister("svc", tid(99)).unwrap_err();
-        assert_eq!(
-            err,
-            NameLeaseError::PermissionDenied {
-                name: "svc".into()
-            }
+        assert_eq!(err, NameLeaseError::PermissionDenied { name: "svc".into() });
+        assert!(
+            reg.is_registered("svc"),
+            "rejected unregister must be a no-op"
         );
-        assert!(reg.is_registered("svc"), "rejected unregister must be a no-op");
         assert_eq!(reg.whereis("svc"), Some(tid(1)));
 
         // Correct caller succeeds.
@@ -4060,12 +4054,7 @@ mod tests {
         let err = reg
             .unregister_and_grant("svc", tid(99), Time::from_secs(5))
             .unwrap_err();
-        assert_eq!(
-            err,
-            NameLeaseError::PermissionDenied {
-                name: "svc".into()
-            }
-        );
+        assert_eq!(err, NameLeaseError::PermissionDenied { name: "svc".into() });
         assert!(reg.is_registered("svc"));
         assert_eq!(reg.waiter_count(), 1, "waiter must not be granted");
         assert!(reg.take_granted().is_empty());
