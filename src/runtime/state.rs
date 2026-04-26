@@ -37,7 +37,7 @@ use crate::time::TimerDriverHandle;
 use crate::trace::distributed::{LogicalClockMode, LogicalTime};
 use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::{TraceBufferHandle, TraceEvent};
-use crate::tracing_compat::{debug, debug_span, trace, trace_span};
+use crate::tracing_compat::{debug, debug_span, error, trace, trace_span};
 use crate::types::policy::PolicyAction;
 use crate::types::task_context::{CxInner, MAX_MASK_DEPTH};
 use crate::types::{
@@ -2267,11 +2267,46 @@ impl RuntimeState {
             let region_reason = if rid == region_id {
                 reason.clone()
             } else if let Some(parent_id) = node.parent {
-                // Look up parent's reason from the map (guaranteed to exist since we process by depth)
-                let parent_reason = region_reasons
-                    .get(&parent_id)
-                    .cloned()
-                    .unwrap_or_else(|| reason.clone());
+                // Look up parent's reason from the map. Regions are
+                // processed depth-ascending, so the parent's reason MUST
+                // be in the map by the time we reach this child.
+                //
+                // br-asupersync-tnk8ny: If it's absent, that signals an
+                // invariant break in the traversal — the previous
+                // implementation silently fell back to `reason.clone()`
+                // (the ROOT target's reason), which papered over the
+                // bookkeeping bug AND poisoned the cause chain by
+                // stamping the root reason as if it were the immediate
+                // parent's. Now we log the violation as `error!` and
+                // synthesize a self-rooted ParentCancelled placeholder
+                // (no `with_cause_limited` chain) so cause-chain
+                // consumers see "depth>0 region with empty parent cause"
+                // — a clear signal that something is wrong, instead of
+                // a misleading "looks like the root" chain.
+                let parent_reason = match region_reasons.get(&parent_id) {
+                    Some(r) => r.clone(),
+                    None => {
+                        error!(
+                            target_region = ?rid,
+                            parent_region = ?parent_id,
+                            depth = node.depth,
+                            "INVARIANT VIOLATION: parent region's cancel reason missing \
+                             from chain map; regions must be processed depth-ascending — \
+                             this indicates either an out-of-order traversal or a parent \
+                             that was skipped (br-tnk8ny)"
+                        );
+                        // Self-rooted placeholder: ParentCancelled stamped
+                        // at the missing parent's region so post-mortem
+                        // inspection can find the chain break. Do NOT
+                        // chain the root target reason here — that would
+                        // restore the very bug we're fixing.
+                        CancelReason::with_origin(
+                            CancelKind::ParentCancelled,
+                            parent_id,
+                            now,
+                        )
+                    }
+                };
 
                 CancelReason::parent_cancelled()
                     .with_region(parent_id)
