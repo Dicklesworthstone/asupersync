@@ -7,6 +7,34 @@ use crate::util::det_hash::DetHasher;
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 
+/// Errors returned by fallible HashRing constructors.
+///
+/// br-asupersync-un962v.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsistentHashError {
+    /// `HashRing::try_new` was called with `vnodes_per_node == 0`. A
+    /// ring with zero virtual nodes silently blackholes routing —
+    /// every key returns `None` from `node_for_key`. The fallible
+    /// constructor rejects this configuration up front so a misset
+    /// config does not produce a healthy-looking ring with no
+    /// reachable replicas.
+    ZeroVnodes,
+}
+
+impl std::fmt::Display for ConsistentHashError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroVnodes => write!(
+                f,
+                "consistent-hash ring requires vnodes_per_node >= 1 \
+                 (zero-vnode rings silently blackhole all routing; br-asupersync-un962v)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConsistentHashError {}
+
 /// A consistent hash ring with virtual nodes.
 ///
 /// br-asupersync-rnybb1: vnode placement is salted with a per-ring
@@ -51,14 +79,43 @@ impl HashRing {
     /// requires byte-for-byte ring reproducibility should pass a
     /// fixed seed (e.g., `0`) — the security gate is only meaningful
     /// when keys are attacker-influenced.
+    ///
+    /// br-asupersync-un962v: `vnodes_per_node` is clamped to `>= 1`
+    /// to avoid silently constructing a blackhole ring. A ring with
+    /// zero virtual nodes accepts `add_node` calls but every key
+    /// lookup returns `None` — a config-validation gap that any
+    /// caller treating `node_count > 0` as healthy would silently
+    /// route into. Callers that want to surface zero-vnode errors
+    /// should use [`Self::try_new`] instead of clamping silently.
     #[must_use]
     pub fn new(vnodes_per_node: usize, seed: u64) -> Self {
         Self {
-            vnodes_per_node,
+            // br-asupersync-un962v: clamp to at least 1 vnode so the
+            // resulting ring is never a blackhole. Mirrors the
+            // niczb3 worker_count clamp pattern in three_lane.rs.
+            vnodes_per_node: vnodes_per_node.max(1),
             nodes: BTreeSet::new(),
             ring: Vec::new(),
             seed,
         }
+    }
+
+    /// br-asupersync-un962v: fallible constructor that rejects
+    /// zero-vnode configurations up front with
+    /// [`ConsistentHashError::ZeroVnodes`]. Use this from
+    /// configuration-validation paths that want to surface
+    /// misconfigured rings instead of accepting a silently-clamped
+    /// fallback.
+    pub fn try_new(vnodes_per_node: usize, seed: u64) -> Result<Self, ConsistentHashError> {
+        if vnodes_per_node == 0 {
+            return Err(ConsistentHashError::ZeroVnodes);
+        }
+        Ok(Self {
+            vnodes_per_node,
+            nodes: BTreeSet::new(),
+            ring: Vec::new(),
+            seed,
+        })
     }
 
     /// Construct a HashRing seeded from OS entropy. Equivalent to
@@ -460,5 +517,45 @@ mod tests {
 
         let nodes: Vec<&str> = ring.nodes().collect();
         assert_eq!(nodes, vec!["node-a", "node-m", "node-z"]);
+    }
+
+    // ================================================================
+    // br-asupersync-un962v — zero-vnode rejection
+    // ================================================================
+
+    /// `try_new(0, _)` rejects zero-vnode rings up front with
+    /// `ConsistentHashError::ZeroVnodes`. Use this from
+    /// configuration-validation paths where misconfigured rings must
+    /// be surfaced rather than silently clamped.
+    #[test]
+    fn try_new_rejects_zero_vnodes() {
+        match HashRing::try_new(0, 0) {
+            Err(ConsistentHashError::ZeroVnodes) => {}
+            other => panic!("expected ZeroVnodes error, got {other:?}"),
+        }
+    }
+
+    /// `try_new(N, _)` for N > 0 succeeds.
+    #[test]
+    fn try_new_accepts_nonzero_vnodes() {
+        let ring = HashRing::try_new(8, 42).expect("non-zero vnodes accepted");
+        assert_eq!(ring.seed(), 42);
+        // No nodes registered yet → ring is empty.
+        assert!(ring.is_empty());
+    }
+
+    /// The infallible `new(0, _)` clamps to vnodes_per_node = 1
+    /// (silent fallback) so existing callers do not break when a
+    /// config typo lands. Callers that want to surface the typo
+    /// should use `try_new` instead.
+    #[test]
+    fn new_clamps_zero_vnodes_to_one() {
+        let mut ring = HashRing::new(0, 0);
+        ring.add_node("node-a");
+        // Pre-fix this would have left vnode_count == 0 (silent
+        // blackhole). With the clamp the ring has 1 vnode for the
+        // single registered node and lookups succeed.
+        assert!(ring.vnode_count() >= 1);
+        assert!(ring.node_for_key(&"key").is_some());
     }
 }

@@ -286,6 +286,20 @@ pub struct LoadBalancer {
 
     /// Random seed.
     random_seed: AtomicU64,
+
+    /// br-asupersync-5ypgzi: per-router salt used to seed the
+    /// HashRing in the HashBased strategy. Sourced from
+    /// `OsEntropy::next_u64()` at LoadBalancer construction so an
+    /// attacker who can choose ObjectId values cannot pre-compute
+    /// colliding keys without knowing this specific router's salt.
+    /// Two routers built independently see different salts → the
+    /// same ObjectId routes to different endpoints across them,
+    /// preventing cross-deployment attacks.
+    ///
+    /// Within a single router instance the salt is stable, so
+    /// routing remains sticky for the same ObjectId across
+    /// dispatches (which is the point of HashBased routing).
+    hash_ring_salt: u64,
 }
 
 impl LoadBalancer {
@@ -437,14 +451,35 @@ impl LoadBalancer {
         }
     }
 
-    /// Creates a new load balancer.
+    /// Creates a new load balancer with a randomly-seeded HashRing
+    /// salt sourced from OS entropy (br-asupersync-5ypgzi). Use
+    /// [`Self::with_seed`] in tests / lab runs where deterministic
+    /// routing is required.
     #[must_use]
     pub fn new(strategy: LoadBalanceStrategy) -> Self {
+        use crate::util::EntropySource;
+        Self::with_seed(strategy, crate::util::OsEntropy.next_u64())
+    }
+
+    /// Creates a new load balancer with an explicit HashRing salt.
+    /// Use this in tests / lab runs to obtain deterministic routing;
+    /// production code should call [`Self::new`] which seeds from
+    /// OsEntropy. (br-asupersync-5ypgzi)
+    #[must_use]
+    pub fn with_seed(strategy: LoadBalanceStrategy, hash_ring_salt: u64) -> Self {
         Self {
             strategy,
             rr_counter: AtomicU64::new(0),
             random_seed: AtomicU64::new(0),
+            hash_ring_salt,
         }
+    }
+
+    /// Returns the per-router HashRing salt. Exposed for diagnostics
+    /// and replay-stability assertions.
+    #[must_use]
+    pub fn hash_ring_salt(&self) -> u64 {
+        self.hash_ring_salt
     }
 
     /// Selects an endpoint based on the routing strategy.
@@ -577,13 +612,29 @@ impl LoadBalancer {
                         // VirtualNode count is O(N * vnodes_per)),
                         // so per-call construction is O(N) which is
                         // dwarfed by the typical select() work for
-                        // any realistic endpoint count. Seed=0 because
-                        // the keyspace (EndpointId u64) is internal,
-                        // not attacker-influenced; the security
-                        // surface that motivates random seeds in
-                        // distributed::consistent_hash does not
-                        // apply to in-process router selection.
-                        let mut ring = crate::distributed::HashRing::new(64, 0);
+                        // any realistic endpoint count.
+                        //
+                        // br-asupersync-5ypgzi: the previous comment
+                        // here claimed "seed=0 because the keyspace
+                        // (EndpointId u64) is internal" — but the
+                        // KEY actually hashed below is
+                        // `oid.as_u128().to_string()` (the ObjectId),
+                        // which IS attacker-influenced. With a fixed
+                        // seed an attacker can offline-search for
+                        // ObjectIds that all hash to the same vnode
+                        // and pin the load to one endpoint —
+                        // exactly the load-pinning DoS that the
+                        // rnybb1 fix closed for other HashRing
+                        // callers. The fix here is to use the per-
+                        // router `hash_ring_salt` (sourced from
+                        // OsEntropy at LoadBalancer construction),
+                        // matching the rnybb1 pattern. Within one
+                        // router the salt is stable so stickiness
+                        // is preserved; across routers the salt
+                        // differs so cross-deployment pre-compute
+                        // attacks fail.
+                        let mut ring =
+                            crate::distributed::HashRing::new(64, self.hash_ring_salt);
                         for ep in &healthy {
                             ring.add_node(ep.id.0.to_string());
                         }
@@ -1078,13 +1129,35 @@ impl RoutingTable {
     /// holds Endpoint Arcs that are obligations to dispatch, and
     /// without a removal path those obligations leak.
     ///
-    /// Callers must invoke this when an endpoint goes permanently
-    /// offline (deregistration event from the membership layer,
-    /// k8s pod-deleted webhook, etc.). Callers should also drop any
-    /// routing entries that referenced the endpoint via
-    /// [`Self::remove_route`] (out of scope for this fix; pair work).
+    /// Callers invoke this when an endpoint goes permanently offline
+    /// (deregistration event from the membership layer, k8s
+    /// pod-deleted webhook, etc.). Removal is authoritative: the
+    /// endpoint is scrubbed from the side index, every keyed route,
+    /// and the default route. Empty routes are pruned so object-route
+    /// lookups can fall back to the default route again instead of
+    /// getting stuck on an empty stale entry.
     pub fn remove_endpoint(&self, id: EndpointId) -> Option<Arc<Endpoint>> {
-        self.endpoints.write().remove(&id)
+        let removed = self.endpoints.write().remove(&id)?;
+
+        {
+            let mut routes = self.routes.write();
+            routes.retain(|_, entry| {
+                entry.endpoints.retain(|endpoint| endpoint.id != id);
+                !entry.endpoints.is_empty()
+            });
+        }
+
+        {
+            let mut default = self.default_route.write();
+            if let Some(entry) = default.as_mut() {
+                entry.endpoints.retain(|endpoint| endpoint.id != id);
+                if entry.endpoints.is_empty() {
+                    *default = None;
+                }
+            }
+        }
+
+        Some(removed)
     }
 
     /// Gets an endpoint by ID.
@@ -2740,6 +2813,69 @@ mod tests {
         assert!(found.is_some()); // Default route
     }
 
+    #[test]
+    fn test_remove_endpoint_scrubs_routes_and_restores_default_fallback() {
+        let table = Arc::new(RoutingTable::new());
+        let specific = table.register_endpoint(test_endpoint(1));
+        let fallback = table.register_endpoint(test_endpoint(2));
+
+        let object_id = ObjectId::new_for_test(42);
+        table.add_route(
+            RouteKey::Object(object_id),
+            RoutingEntry::new(vec![specific.clone()], Time::ZERO),
+        );
+        table.add_route(
+            RouteKey::Default,
+            RoutingEntry::new(vec![fallback.clone()], Time::ZERO),
+        );
+
+        let router = SymbolRouter::new(table.clone());
+        let symbol = Symbol::new_for_test(42, 0, 0, &[1, 2, 3]);
+
+        let initial = router.route(&symbol).expect("initial specific route");
+        assert_eq!(initial.endpoint.id, specific.id);
+
+        let removed = table
+            .remove_endpoint(specific.id)
+            .expect("specific endpoint removed");
+        assert_eq!(removed.id, specific.id);
+        assert!(table.get_endpoint(specific.id).is_none());
+
+        let routed = router.route(&symbol).expect("fallback route after removal");
+        assert_eq!(routed.endpoint.id, fallback.id);
+
+        assert!(
+            table
+                .lookup_without_default(&RouteKey::Object(object_id))
+                .is_none(),
+            "endpoint removal must prune now-empty keyed routes so default fallback can apply"
+        );
+    }
+
+    #[test]
+    fn test_remove_endpoint_drops_empty_default_route() {
+        let table = Arc::new(RoutingTable::new());
+        let endpoint = table.register_endpoint(test_endpoint(7));
+        table.add_route(
+            RouteKey::Default,
+            RoutingEntry::new(vec![endpoint.clone()], Time::ZERO),
+        );
+
+        let removed = table
+            .remove_endpoint(endpoint.id)
+            .expect("default endpoint removed");
+        assert_eq!(removed.id, endpoint.id);
+        assert!(table.lookup(&RouteKey::Default).is_none());
+        assert!(table.dispatchable_endpoints().is_empty());
+
+        let router = SymbolRouter::new(table);
+        let symbol = Symbol::new_for_test(1, 0, 0, &[9]);
+        assert!(matches!(
+            router.route(&symbol),
+            Err(RoutingError::NoRoute { .. })
+        ));
+    }
+
     // Test 8: Routing entry TTL
     #[test]
     fn test_routing_entry_ttl() {
@@ -3562,5 +3698,35 @@ mod tests {
             "routing_table_state_scrubbed",
             routing_table_snapshot(&table)
         );
+    }
+
+    // ================================================================
+    // br-asupersync-5ypgzi — per-router HashRing salt
+    // ================================================================
+
+    /// Two LoadBalancer instances built via `LoadBalancer::new` (which
+    /// sources the salt from OsEntropy) MUST observe different salts
+    /// with overwhelming probability. The 64-bit OS-entropy seed
+    /// makes a collision astronomically unlikely; if this test
+    /// flakes, the OsEntropy plumbing has regressed.
+    #[test]
+    fn load_balancer_new_seeds_distinct_hash_ring_salts() {
+        let lb1 = LoadBalancer::new(LoadBalanceStrategy::HashBased);
+        let lb2 = LoadBalancer::new(LoadBalanceStrategy::HashBased);
+        assert_ne!(
+            lb1.hash_ring_salt(),
+            lb2.hash_ring_salt(),
+            "two LoadBalancer instances built via ::new must use different salts"
+        );
+    }
+
+    /// `LoadBalancer::with_seed` produces deterministic salts —
+    /// useful for tests / lab runs.
+    #[test]
+    fn load_balancer_with_seed_is_deterministic() {
+        let lb1 = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 12345);
+        let lb2 = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 12345);
+        assert_eq!(lb1.hash_ring_salt(), lb2.hash_ring_salt());
+        assert_eq!(lb1.hash_ring_salt(), 12345);
     }
 }
