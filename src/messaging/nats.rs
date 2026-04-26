@@ -266,6 +266,11 @@ pub struct ServerInfo {
     pub tls_required: bool,
     /// Whether TLS is available.
     pub tls_available: bool,
+    /// Whether the server supports the v1 NATS message-headers extension
+    /// (HPUB / HMSG / HSUB). Negotiated at connect time; if false, the
+    /// client MUST NOT emit HPUB frames or `Nats-Msg-Id`-style dedup
+    /// headers on JetStream publishes (br-asupersync-byc2d1).
+    pub headers: bool,
     /// Connected URL.
     pub connect_urls: Vec<String>,
 }
@@ -296,6 +301,9 @@ impl ServerInfo {
         }
         if let Some(v) = extract_json_bool(json, "tls_available") {
             info.tls_available = v;
+        }
+        if let Some(v) = extract_json_bool(json, "headers") {
+            info.headers = v;
         }
 
         info
@@ -336,6 +344,49 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
             c => out.push(c),
         }
     }
+}
+
+/// Encode a NATS v1 message-header block per
+/// `https://docs.nats.io/reference/reference-protocols/nats-protocol#hpub`:
+///
+/// ```text
+/// NATS/1.0\r\n<Key1>: <Value1>\r\n...<KeyN>: <ValueN>\r\n\r\n
+/// ```
+///
+/// The trailing blank line (`\r\n\r\n`) is mandatory — it's the
+/// header/payload separator the broker uses to split the HPUB body.
+///
+/// Header keys must be ASCII and contain no `:` `\r` `\n`. Values may
+/// be arbitrary bytes but MUST NOT contain `\r` or `\n` (NATS does not
+/// support multi-line header values).
+fn encode_nats_headers(headers: &[(&str, &[u8])]) -> Result<Vec<u8>, NatsError> {
+    let mut estimated = b"NATS/1.0\r\n\r\n".len();
+    for (k, v) in headers {
+        estimated = estimated.saturating_add(k.len() + v.len() + 4);
+    }
+    let mut out = Vec::with_capacity(estimated);
+    out.extend_from_slice(b"NATS/1.0\r\n");
+    for (k, v) in headers {
+        if k.is_empty()
+            || k.bytes()
+                .any(|b| b == b':' || b == b'\r' || b == b'\n' || !b.is_ascii())
+        {
+            return Err(NatsError::Protocol(format!(
+                "invalid NATS header key: {k:?}"
+            )));
+        }
+        if v.iter().any(|&b| b == b'\r' || b == b'\n') {
+            return Err(NatsError::Protocol(format!(
+                "invalid NATS header value (contains CR/LF) for key {k:?}"
+            )));
+        }
+        out.extend_from_slice(k.as_bytes());
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(v);
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"\r\n");
+    Ok(out)
 }
 
 /// Escape a string for safe embedding in JSON values.
@@ -716,6 +767,15 @@ impl NatsClient {
         connect.push_str(",\"lang\":\"rust\"");
         connect.push_str(",\"version\":\"0.1.0\"");
         connect.push_str(",\"protocol\":1");
+        // Advertise that we accept the NATS v1 message-headers extension
+        // (HPUB / HMSG). The server's actual capability is reflected in
+        // ServerInfo.headers, which we honour in
+        // publish_request_with_headers (br-asupersync-byc2d1).
+        connect.push_str(",\"headers\":true");
+        // Required by the spec when headers:true is advertised so the
+        // server can deliver "no responders" status frames via HMSG
+        // rather than silently dropping them.
+        connect.push_str(",\"no_responders\":true");
 
         if let Some(ref name) = self.config.name {
             connect.push_str(",\"name\":\"");
@@ -1016,6 +1076,23 @@ impl NatsClient {
     }
 
     /// Publish a message to a subject.
+    ///
+    /// # At-most-once contract (br-asupersync-d49g0h)
+    ///
+    /// The previous order ran `handle_pending_messages` AFTER the PUB had
+    /// already been flushed to the wire. If that read step erroreed (e.g.
+    /// the server had emitted a `-ERR` between writes, or the inbox parser
+    /// hit a transport failure), the function returned `Err(...)` even
+    /// though the broker had definitively accepted the message. Callers
+    /// would retry, producing duplicates on the broker — a silent NATS
+    /// at-most-once violation.
+    ///
+    /// The fix: drain pending server messages BEFORE the wire write. If
+    /// draining errors, no PUB has been sent yet so it's safe to surface
+    /// the error to the caller. Once `flush().await?` returns `Ok`, the
+    /// publish is definitive and the function commits to returning `Ok(())`
+    /// — it does NOT perform any further wire reads that could fail and
+    /// confuse the retry-vs-already-committed boundary.
     pub async fn publish(
         &mut self,
         cx: &Cx,
@@ -1037,6 +1114,12 @@ impl NatsClient {
             )));
         }
 
+        // Drain pending server messages (PING → PONG, MSG → dispatch,
+        // -ERR → typed error) BEFORE writing the PUB. Any error here
+        // pre-dates the wire write, so failing the publish is safe — the
+        // broker has not seen this PUB yet.
+        self.handle_pending_messages(cx).await?;
+
         // Mark disconnected before the multi-part write so that if this
         // future is dropped mid-write, the connection is not reused in a
         // desynchronized state (partial PUB command on the wire).
@@ -1048,11 +1131,10 @@ impl NatsClient {
         self.stream.write_all(b"\r\n").await?;
         self.stream.flush().await?;
 
+        // PUB is now definitively on the wire. Commit to Ok — any post-flush
+        // wire-read error must NOT roll the publish back via Err, or callers
+        // will retry and the broker will see the message twice.
         self.connected = true;
-
-        // Handle any pending server messages (like PING)
-        self.handle_pending_messages(cx).await?;
-
         Ok(())
     }
 
@@ -1093,6 +1175,196 @@ impl NatsClient {
 
         self.connected = true;
         Ok(())
+    }
+
+    /// Publish a message with NATS v1 headers and a reply-to subject.
+    ///
+    /// Wire format (per https://docs.nats.io/reference/reference-protocols/nats-protocol#hpub):
+    ///
+    /// ```text
+    /// HPUB <subject> [reply-to] <header-bytes> <total-bytes>\r\n
+    /// NATS/1.0\r\n<Key1>: <Value1>\r\n...<KeyN>: <ValueN>\r\n\r\n
+    /// <payload>\r\n
+    /// ```
+    ///
+    /// `header-bytes` is the length of the header block (`NATS/1.0\r\n…\r\n\r\n`),
+    /// `total-bytes` is `header-bytes + payload.len()`.
+    ///
+    /// Refuses to send if the server did not advertise `headers:true` in
+    /// its INFO frame at connect time — older brokers will treat HPUB as
+    /// a syntax error and close the connection.
+    ///
+    /// Used by JetStream `publish_with_id` to set `Nats-Msg-Id` for
+    /// server-side dedup (br-asupersync-byc2d1).
+    pub async fn publish_request_with_headers(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        reply_to: &str,
+        headers: &[(&str, &[u8])],
+        payload: &[u8],
+    ) -> Result<(), NatsError> {
+        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+
+        if !self.connected {
+            return Err(NatsError::NotConnected);
+        }
+        validate_nats_token(subject, "subject")?;
+        validate_nats_token(reply_to, "reply-to subject")?;
+        let server_supports_headers = self
+            .state
+            .server_info
+            .lock()
+            .as_ref()
+            .map(|info| info.headers)
+            .unwrap_or(false);
+        if !server_supports_headers {
+            return Err(NatsError::Protocol(
+                "server did not advertise headers:true in INFO; HPUB is not allowed"
+                    .to_string(),
+            ));
+        }
+
+        let header_block = encode_nats_headers(headers)?;
+        let header_len = header_block.len();
+        let total_len = header_len.saturating_add(payload.len());
+        if total_len > self.config.max_payload {
+            return Err(NatsError::Protocol(format!(
+                "headers+payload too large: {total_len} > {}",
+                self.config.max_payload
+            )));
+        }
+
+        // Mark disconnected before the multi-part write so that if this
+        // future is dropped mid-write, the connection is not reused in a
+        // desynchronized state (partial HPUB command on the wire).
+        self.connected = false;
+
+        let cmd = format!("HPUB {subject} {reply_to} {header_len} {total_len}\r\n");
+        self.stream.write_all(cmd.as_bytes()).await?;
+        self.stream.write_all(&header_block).await?;
+        self.stream.write_all(payload).await?;
+        self.stream.write_all(b"\r\n").await?;
+        self.stream.flush().await?;
+
+        self.connected = true;
+        Ok(())
+    }
+
+    /// Request/reply pattern with NATS v1 headers.
+    ///
+    /// Equivalent to [`request`](Self::request) but emits the request via
+    /// HPUB carrying the given headers (e.g. `Nats-Msg-Id` for JetStream
+    /// dedup). The reply path is identical: a unique inbox subject is
+    /// subscribed before publishing and the first matching message is
+    /// returned. Fails if the server does not support headers.
+    pub async fn request_with_headers(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        headers: &[(&str, &[u8])],
+        payload: &[u8],
+    ) -> Result<Message, NatsError> {
+        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+
+        if !self.connected {
+            return Err(NatsError::NotConnected);
+        }
+        validate_nats_token(subject, "subject")?;
+
+        let inbox = format!(
+            "_INBOX.{}.{}",
+            self.next_sid.load(Ordering::Relaxed),
+            random_suffix(cx)
+        );
+
+        let mut sub = self.subscribe(cx, &inbox).await?;
+
+        if let Err(err) = self
+            .publish_request_with_headers(cx, subject, &inbox, headers, payload)
+            .await
+        {
+            self.cleanup_request_subscription(
+                cx,
+                sub.sid(),
+                "publish_request_with_headers_failed",
+            )
+            .await;
+            return Err(err);
+        }
+
+        // Wait for response with timeout. Mirror of the loop in `request`;
+        // a future refactor (br-asupersync-byc2d1 follow-up) should fold
+        // both into a private await_request_reply helper.
+        let deadline = timeout_now(cx) + self.config.request_timeout;
+
+        loop {
+            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+
+            let mut processed_any = false;
+            loop {
+                let message = match self.try_parse_message() {
+                    Ok(message) => message,
+                    Err(err) => {
+                        self.cleanup_request_subscription(cx, sub.sid(), "parse_failed")
+                            .await;
+                        return Err(err);
+                    }
+                };
+
+                match message {
+                    Some(NatsMessage::Ping) => {
+                        if let Err(err) = self.send_server_pong().await {
+                            self.cleanup_request_subscription(
+                                cx,
+                                sub.sid(),
+                                "server_ping_write_failed",
+                            )
+                            .await;
+                            return Err(err);
+                        }
+                        processed_any = true;
+                    }
+                    Some(NatsMessage::Msg(m)) => {
+                        if m.sid == sub.sid() {
+                            self.unsubscribe(cx, sub.sid()).await?;
+                            return Ok(m);
+                        }
+                        self.dispatch_message(m);
+                        processed_any = true;
+                    }
+                    Some(NatsMessage::Err(e)) => {
+                        self.cleanup_request_subscription(cx, sub.sid(), "server_error")
+                            .await;
+                        return Err(NatsError::Server(e));
+                    }
+                    Some(_) => {
+                        processed_any = true;
+                    }
+                    None => {
+                        if processed_any {
+                            break;
+                        }
+
+                        if let Err(err) = self.read_more_until(cx, deadline).await {
+                            self.cleanup_request_subscription(
+                                cx,
+                                sub.sid(),
+                                REQUEST_TIMEOUT_MESSAGE,
+                            )
+                            .await;
+                            return Err(err);
+                        }
+                        processed_any = true;
+                    }
+                }
+            }
+
+            if let Some(msg) = sub.try_next() {
+                self.unsubscribe(cx, sub.sid()).await?;
+                return Ok(msg);
+            }
+        }
     }
 
     /// Request/reply pattern: publish and wait for a single response.
